@@ -25,7 +25,7 @@ pub(super) fn config_dir() -> PathBuf {
 /// Layered onto an empty registry so the keys come back normalised; a table
 /// the registry refuses names nothing, which is what the manifest and config
 /// routes already report about it.
-pub(super) fn row_checks(rows: &toml::Table) -> Vec<(String, String)> {
+fn row_checks(rows: &toml::Table) -> Vec<(String, String)> {
     leviath_core::mime::MimeRegistry::empty()
         .layered(rows, "rows")
         .map(|reg| {

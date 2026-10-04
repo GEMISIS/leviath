@@ -32,16 +32,17 @@ fn validate(content) {
 }
 ```
 
-Point your blueprint at it:
+Point your blueprint at it, in the `output` of the stage that answers:
 
 ```toml
-[stages.present.output]
-format = "a2ui"
-validator = "validators/a2ui.rhai"
+[[graph.stages]]
+name = "present"
+output = { format = "a2ui", validator = { file = "validators/a2ui.rhai" } }
 ```
 
-The path is relative to the blueprint directory, so the validator travels with the agent that needs
-it.
+The path is relative to the directory holding the blueprint's `agent.toml`, so the validator
+travels with the blueprint that needs it. A graph sent whole in a spawn request has no directory,
+so it writes the script itself as `validator = { inline = "..." }`.
 
 ## The contract
 
@@ -69,17 +70,15 @@ something that is neither `()` nor a string.
 
 By default the submission is **rejected**, and the script's own error goes back to the agent as the
 reason. A throw is often the check working: a validator that calls `parse_json` on malformed output
-throws, and "malformed JSON" is something the agent can fix on its next try. The alternative, and
-the old behaviour, was to accept the answer unchecked, which shipped exactly the submissions the
-validator existed to catch.
+throws, and "malformed JSON" is something the agent can fix on its next try. The alternative is to
+accept the answer unchecked, which ships exactly the submissions the validator exists to catch.
 
 If you would rather end the run with an unchecked answer than risk ending it with none, say so:
 
 ```toml
-[stages.present.output]
-format = "a2ui"
-validator = "validators/a2ui.rhai"
-on_validator_error = "accept"
+[[graph.stages]]
+name = "present"
+output = { format = "a2ui", validator = { file = "validators/a2ui.rhai" }, on_validator_error = "accept" }
 ```
 
 With `accept`, a validator that cannot run records the submission as if no validator were declared.
@@ -87,8 +86,8 @@ Choose it when any answer beats no answer, and be aware of what you are trading.
 a genuine script bug reads as "this answer is wrong" on every retry. The agent can burn its whole
 budget against a check that can never pass.
 
-The setting works at both levels, `[agent.output]`
-and `[stages.<name>.output]`, and the stage's value wins. Anything other than `reject` or `accept`
+The setting works at both levels, the blueprint's `[graph.output]` and a stage's `output`, and the
+stage's value wins. Anything other than `reject` or `accept`
 refuses to load.
 
 The setting governs validators only. A declared JSON `schema` that fails to compile keeps its old
@@ -101,7 +100,7 @@ In both modes the run flags the script:
 |---|---|
 | `lev ps` | `complete (broken script)` on the run's status |
 | `lev dash` | `⚠ 1 broken script` in the run's detail header |
-| `meta.json`, the API | `flags.broken_scripts`, naming each script |
+| The run's state, the API | `flags.broken_scripts`, naming each script |
 
 Named rather than counted, because the useful question is which one. It is recorded once per
 script however many times the stage submits, since a validator that throws throws every time.
@@ -118,9 +117,10 @@ Only when the format it was written for is the one in effect.
 
 A validator describes one format. If a caller overrides the format at launch, your validator is
 retired along with any JSON Schema, because neither describes what is now being produced. The
-caller can bring a JSON Schema of their own (`--output-schema`, or `output_schema` on the API). A
-replacement validator is the one check no request can supply, so a reshaped run keeps only whatever
-schema came with it.
+caller can bring checks of their own in the request's `output`: a JSON Schema (`--output-schema`
+on the CLI, `output.schema` in a [spawn request](/docs/starting-a-run)), or a validator written
+inline as `output.validator = { inline = "..." }`. A reshaped run keeps only the checks that came
+with the request.
 
 ```mermaid
 flowchart TB
@@ -139,10 +139,10 @@ flowchart TB
 
 ## Failing early
 
-A validator is compiled when the agent spawns, not when it is first used. A missing file, a syntax
+A validator is compiled when the run spawns, not when it is first used. A missing file, a syntax
 error, or a `validate` with the wrong number of parameters stops the run before any tokens are spent.
 
 This is deliberate. The only other time the script gets read is at the end of the run. That is the
-worst possible moment to learn the agent cannot hand back its work.
+worst possible moment to learn the run cannot hand back its work.
 
 `lev validate <path>` compiles them too, so you can check without starting anything.

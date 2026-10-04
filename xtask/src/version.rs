@@ -502,6 +502,74 @@ fn unpublishable_but_needed(
     needed
 }
 
+/// Whether the release deletes `line` from the manifest at `manifest_path`
+/// before publishing it: `prod` runs a `sed -i` on that manifest with an
+/// `-e '/^<pattern>/d'` whose pattern matches the line.
+///
+/// A pin to an opted-out crate is what the release needs only while the line
+/// is still there when `cargo publish` reads the manifest. `leviath-cli` pins
+/// its optional converter crate so its manifest names no wildcard, and the
+/// prod workflow deletes that line (with the feature naming it) before
+/// publishing.
+fn release_strips(prod: &str, manifest_path: &str, line: &str) -> bool {
+    sed_commands(prod)
+        .iter()
+        .filter(|command| command.split_whitespace().any(|word| word == manifest_path))
+        .any(|command| deletions(command).any(|pattern| sed_deletes(pattern, line)))
+}
+
+/// Every `sed -i` command in `prod`, its continuation lines joined on.
+fn sed_commands(prod: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut lines = prod.lines();
+    while let Some(line) = lines.next() {
+        if !line.contains("sed -i") {
+            continue;
+        }
+        let mut command = line.to_owned();
+        let mut last = line;
+        while last.trim_end().ends_with('\\') {
+            let Some(next) = lines.next() else { break };
+            command.push('\n');
+            command.push_str(next);
+            last = next;
+        }
+        commands.push(command);
+    }
+    commands
+}
+
+/// The patterns of a sed command's `-e '/^<pattern>/d'` deletions.
+fn deletions(command: &str) -> impl Iterator<Item = &str> {
+    command
+        .split("'/^")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("/d'").map(|(pattern, _)| pattern))
+}
+
+/// Whether sed's `^<pattern>` matches `line`, for the patterns the prod
+/// workflow writes: literal text, with at most one `[a-z]*`.
+fn sed_deletes(pattern: &str, line: &str) -> bool {
+    match pattern.split_once("[a-z]*") {
+        Some((head, tail)) => line.strip_prefix(head).is_some_and(|rest| {
+            rest.trim_start_matches(|c: char| c.is_ascii_lowercase())
+                .starts_with(tail)
+        }),
+        None => line.starts_with(pattern),
+    }
+}
+
+/// The line of `manifest` that declares the dependency `dep`, or nothing.
+fn dependency_line<'a>(manifest: &'a str, dep: &str) -> &'a str {
+    manifest
+        .lines()
+        .find(|line| {
+            line.strip_prefix(dep)
+                .is_some_and(|rest| rest.starts_with(" = "))
+        })
+        .unwrap_or_default()
+}
+
 /// The crate names in `prod`'s publish loop, in the order it publishes them.
 ///
 /// The loop is a shell `for c in a b \ c; do`, so this reads the words
@@ -673,6 +741,14 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
                     .into_iter()
                     .map(|(dep, _)| (CLI_MANIFEST.to_owned(), dep)),
             );
+            pins.retain(|(path, dep)| {
+                let text = if path == CLI_MANIFEST {
+                    &cli_manifest
+                } else {
+                    &manifest
+                };
+                !release_strips(&prod, path, dependency_line(text, dep))
+            });
             let needed = unpublishable_but_needed(&opted_out, &prod, &pins);
             anyhow::ensure!(
                 needed.is_empty(),
@@ -1304,6 +1380,52 @@ members = [
             &[("Cargo.toml".to_owned(), "leviath-alloc".to_owned())],
         );
         assert!(needed.is_empty(), "{needed:?}");
+    }
+
+    /// A pin the release deletes before publishing is not one it needs: the
+    /// `sed -i` on that manifest, continuation lines and all, deletes a line
+    /// its `[a-z]*` or literal pattern matches. A pattern in a sed on another
+    /// manifest, or one that does not match, deletes nothing.
+    #[test]
+    fn a_pin_the_release_deletes_is_not_needed() {
+        let prod = "          if [ x ]; then\n\
+            sed -i -e 's/, \"legacy-runs\"//' -e '/^legacy-runs = /d' \\\n\
+                   -e '/^leviath-legacy-[a-z]* = /d' crates/leviath-cli/Cargo.toml\n\
+            sed -i -e '/^leviath-core = /d' Cargo.toml\n\
+          fi";
+        let line =
+            "leviath-legacy-runs = { path = \"../leviath-legacy-runs\", version = \"0.6.4\" }";
+        assert!(release_strips(prod, CLI_MANIFEST, line));
+        assert!(
+            !release_strips(prod, "Cargo.toml", line),
+            "another manifest"
+        );
+        assert!(release_strips(
+            prod,
+            "Cargo.toml",
+            "leviath-core = { path }"
+        ));
+        assert!(!release_strips(
+            prod,
+            CLI_MANIFEST,
+            "leviath-core = { path }"
+        ));
+        assert!(!release_strips(
+            prod,
+            CLI_MANIFEST,
+            "leviath-legacy-runs-2 = x"
+        ));
+        assert!(
+            !release_strips("sed -i \\", CLI_MANIFEST, line),
+            "a cut-off command"
+        );
+
+        let manifest = "[dependencies]\nleviath-legacy = 1\nleviath-legacy-runs = 2\n";
+        assert_eq!(
+            dependency_line(manifest, "leviath-legacy-runs"),
+            "leviath-legacy-runs = 2"
+        );
+        assert_eq!(dependency_line(manifest, "leviath-core"), "");
     }
 
     /// The loop's words come back in order with the line continuations

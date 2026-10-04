@@ -15,6 +15,7 @@
 //! resume, a delivered message) is applied immediately.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bevy_ecs::entity::Entity;
@@ -44,8 +45,12 @@ pub struct WorldHost {
     world: PipelineWorld,
     by_run_id: HashMap<String, AgentId>,
     interactions: InteractionHub,
-    spawner: Option<Spawner>,
-    spawn_preprocessor: Option<SpawnPreprocessor>,
+    starter: Option<Arc<dyn RunStarter>>,
+    /// Runs whose start finished off the world, waiting to be placed in it.
+    started_tx: UnboundedSender<starts::Started>,
+    started_rx: UnboundedReceiver<starts::Started>,
+    /// Starts sent off the world and not yet placed.
+    starting: usize,
     reloader: Option<Reloader>,
     force_terminator: Option<ForceTerminator>,
     reaper: Option<Reaper>,
@@ -64,7 +69,7 @@ pub struct WorldHost {
     subagent_tx: UnboundedSender<SubAgentOp>,
     subagent_rx: UnboundedReceiver<SubAgentOp>,
     /// How often [`Self::serve`] re-drives the world even though nothing woke
-    /// it. See [`Self::set_redrive_interval`].
+    /// it: 30 seconds, which tests shorten.
     redrive: Duration,
     /// Consecutive re-drives that found the lanes full and nothing moved. See
     /// [`Self::observe_redrive`].
@@ -82,17 +87,22 @@ pub struct WorldHost {
     /// each paired with the unix second it was unloaded. See
     /// [`Self::record_finished`].
     finished: VecDeque<(i64, RunListEntry)>,
-    /// Paused runs the host has paged out of the world, by run id, each holding
-    /// its last listing row. A parked run's full state is on disk; `Resume`,
-    /// `Message` and `Cancel` all page it back through
-    /// [`Self::resolve_or_reload`], and [`Self::list`] keeps reporting it so an
-    /// operator's `lev ps` view does not change just because the daemon stopped
-    /// spending memory on a run nobody is driving.
+    /// Runs the host holds out of the world, by run id, each with its listing
+    /// row: paused runs it paged out, and runs that cannot be brought back on
+    /// this machine as it stands (see [`Self::hold`]). A parked run's full
+    /// state is on disk; `Resume`, `Message` and `Cancel` all page it back
+    /// in (see `host::paging`), and [`Self::list`] keeps reporting
+    /// it so an operator's `lev ps` view does not change just because the
+    /// daemon stopped spending memory on a run nobody is driving.
     parked: HashMap<String, RunListEntry>,
-    /// Runs held back from a restart until the model lists they need are
-    /// read, each with the providers it waits on. Listed through `parked`.
-    /// See [`Self::hold_for_catalog`].
-    held_for_catalog: HashMap<String, Vec<String>>,
+    /// Ops waiting on a run being paged in off the loop, by the run.
+    paging: HashMap<String, Vec<paging::Deferred>>,
+    /// How each page-in just placed went, for the ops it held while they
+    /// are handled.
+    paged: HashMap<String, Result<AgentId, NotPlaced>>,
+    /// Page-ins that finished off the loop, waiting to be placed.
+    paged_tx: UnboundedSender<paging::Paged>,
+    paged_rx: UnboundedReceiver<paging::Paged>,
 }
 
 /// Consecutive healthy re-drives (no dead cycles, empty tool queue) before the
@@ -169,12 +179,16 @@ impl WorldHost {
             .world_mut()
             .insert_resource(WorldEventSink(events.clone()));
         let (subagent_tx, subagent_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (paged_tx, paged_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             world,
             by_run_id: HashMap::new(),
             interactions,
-            spawner: None,
-            spawn_preprocessor: None,
+            starter: None,
+            started_tx,
+            started_rx,
+            starting: 0,
             reloader: None,
             force_terminator: None,
             reaper: None,
@@ -185,7 +199,10 @@ impl WorldHost {
             settings: HostSettings::default(),
             emitted_interactions: HashSet::new(),
             parked: HashMap::new(),
-            held_for_catalog: HashMap::new(),
+            paging: HashMap::new(),
+            paged: HashMap::new(),
+            paged_tx,
+            paged_rx,
             subagent_tx,
             subagent_rx,
             redrive: DEFAULT_REDRIVE_INTERVAL,
@@ -209,9 +226,12 @@ impl WorldHost {
 // impl may live in any module of the defining crate, so each file below carries
 // its own `impl WorldHost` block rather than a trait or a free function.
 mod emit;
+mod paging;
+pub use paging::{PageJob, PlacePage};
 mod health;
-mod held;
+mod history;
 mod listing;
+mod starts;
 mod subagents;
 
 impl WorldHost {
@@ -345,16 +365,10 @@ impl WorldHost {
         self.settings.set_spend_notify_usd(thresholds);
     }
 
-    /// Install the spawner used to service `Spawn` control ops. Without one, a
-    /// `Spawn` op replies with an error.
-    pub fn set_spawner(&mut self, spawner: Spawner) {
-        self.spawner = Some(spawner);
-    }
-
-    /// Install the async hook awaited before each top-level `Spawn` (see
-    /// `SpawnPreprocessor`).
-    pub fn set_spawn_preprocessor(&mut self, pp: SpawnPreprocessor) {
-        self.spawn_preprocessor = Some(pp);
+    /// Install what starts this host's runs. Without one, every `Spawn` and
+    /// `ValidateSpawn` is refused.
+    pub fn set_starter(&mut self, starter: Arc<dyn RunStarter>) {
+        self.starter = Some(starter);
     }
 
     /// Install the reloader used to page an unloaded run back in on demand.
@@ -408,20 +422,82 @@ impl WorldHost {
         self.resumer = resumer;
     }
 
-    /// Resolve a run id to a live entity, paging it in from disk if it has been
-    /// unloaded (and a reloader is installed). Returns `None` if the run is
-    /// neither live nor resumable from disk. Newly-reloaded runs are registered.
-    fn resolve_or_reload(&mut self, run_id: &str) -> Option<AgentId> {
+    /// Resolve a run id to a live entity, or say why it is not in the world.
+    /// An op that names an unloaded run has had it paged in before it is
+    /// handled (see `host::paging`), so a run that is still not here is one
+    /// the page-in did not place, for the reason it found.
+    fn resolve_or_reload(&mut self, run_id: &str) -> Result<AgentId, NotPlaced> {
         if let Some(entity) = self.live_entity(run_id) {
-            return Some(entity);
+            return Ok(entity);
         }
-        let entity = (self.reloader.as_mut()?)(&mut self.world, run_id)?;
-        self.by_run_id.insert(run_id.to_string(), entity);
-        // Live again: its listing row comes off the entity, not the parked map,
-        // and a run held for a model list is no longer waiting on it.
-        self.parked.remove(run_id);
-        self.held_for_catalog.remove(run_id);
-        Some(entity)
+        self.paged
+            .get(run_id)
+            .cloned()
+            .unwrap_or(Err(NotPlaced::Missing))
+    }
+
+    /// Keep a run the daemon could not bring back on this machine in the
+    /// listing, by `entry`, until it is brought back or cancelled. Its state
+    /// stays on disk as it was, so an op that names it tries again.
+    pub fn hold(&mut self, entry: RunListEntry) {
+        self.parked.insert(entry.run_id.clone(), entry);
+    }
+
+    /// The status of the run `agent_id` in the world, when it is in it.
+    fn status_in_world(&self, agent_id: &str) -> Option<AgentStatus> {
+        self.world
+            .world()
+            .iter_entities()
+            .filter_map(|e| e.get::<AgentState>())
+            .find(|s| s.agent_id == agent_id)
+            .map(|s| s.status.clone())
+    }
+
+    /// Why a message to `agent_id`, a run with `status` (`None` for no such
+    /// run), would never be read, when it would not. A message is only said
+    /// to be delivered when a run will read it.
+    fn undeliverable(agent_id: &str, status: Option<&AgentStatus>) -> Option<String> {
+        match status {
+            None => Some(format!(
+                "no run '{agent_id}' is here to read a message; `lev ps --all` lists the runs"
+            )),
+            Some(AgentStatus::Complete) => Some(format!(
+                "run '{agent_id}' has finished, so it reads no more messages; start a new run instead"
+            )),
+            Some(AgentStatus::Error { .. }) => Some(format!(
+                "run '{agent_id}' has failed, so it reads no more messages; start a new run instead"
+            )),
+            Some(AgentStatus::Cancelled) => Some(format!(
+                "run '{agent_id}' was cancelled; `lev resume {agent_id}` first, then send the message"
+            )),
+            Some(_) => None,
+        }
+    }
+
+    /// Why a message to a run held out of the world is not delivered: what
+    /// has to change on this machine first.
+    fn held_refusal(agent_id: &str, entry: &RunListEntry) -> String {
+        format!(
+            "run '{agent_id}' cannot go on on this machine as it stands, so it reads no messages yet: {}",
+            Self::held_remedy(entry)
+        )
+    }
+
+    /// Why a held run did not resume: this machine still cannot take it
+    /// back, and what to put back first.
+    pub(super) fn held_resume_refusal(run_id: &str, entry: &RunListEntry) -> String {
+        format!(
+            "run '{run_id}' cannot go on on this machine as it stands, so it stays paused: {}",
+            Self::held_remedy(entry)
+        )
+    }
+
+    /// What a held run's listing row says to put back.
+    fn held_remedy(entry: &RunListEntry) -> &str {
+        match &entry.wait_reason {
+            Some(WaitReason::NeedsSetup { remedy, .. }) => remedy.as_str(),
+            _ => "",
+        }
     }
 
     /// A clone of the interaction hub, for building per-agent backends.
@@ -451,54 +527,31 @@ impl WorldHost {
             .map(|_| agent)
     }
 
-    /// Apply one control op and reply on its channel. A dropped reply receiver is
+    /// Apply one control op and reply on its channel, once the run it names
+    /// is in the world (see `host::paging`). A dropped reply receiver is
     /// harmless (the requester went away).
     pub fn handle(&mut self, op: ControlOp) {
+        self.page_first(paging::Deferred::Control(op));
+    }
+
+    /// Apply one control op whose run, if it names one, has been paged in.
+    fn handle_now(&mut self, op: ControlOp) {
         match op {
-            ControlOp::Spawn { args, reply } => {
-                let result = match self.spawner.as_mut() {
-                    // Spawning runs outside the pipeline schedule, so it isn't
-                    // covered by `run_isolated`'s panic guard: a panic while
-                    // parsing a blueprint or building a sandbox would otherwise
-                    // unwind the whole serve task and take the daemon with it.
-                    // As with `run_isolated`, the world may be left holding a
-                    // partially-built entity - the run just never registers.
-                    Some(spawner) => {
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            spawner(&mut self.world, &args)
-                        })) {
-                            Ok(Ok(entity)) => {
-                                // Spawned into this world, so it is ours.
-                                let agent = self.world.own_agent(entity);
-                                self.by_run_id.insert(args.run_id.clone(), agent);
-                                Ok(args.run_id.clone())
-                            }
-                            Ok(Err(e)) => Err(e),
-                            Err(_) => Err("agent spawn panicked".to_string()),
-                        }
-                    }
-                    None => Err("this daemon cannot spawn agents".to_string()),
-                };
-                // A failed spawn must leave a trace daemon-side: the error goes
-                // back over the socket to a client that may have already exited,
-                // and nothing is written to disk, so without this log line the
-                // failure is invisible.
-                if let Err(error) = &result {
-                    tracing::error!(
-                        run_id = %args.run_id,
-                        blueprint = %args.blueprint_path,
-                        workdir = %args.workdir,
-                        error = %error,
-                        "agent spawn failed"
-                    );
-                }
-                let _ = reply.send(result);
+            ControlOp::Spawn { request, reply } => {
+                self.start(*request, crate::spec::env::Caller::TopLevel, None, reply);
+            }
+            ControlOp::ValidateSpawn { request, reply } => {
+                self.validate(*request, crate::spec::env::Caller::TopLevel, reply);
+            }
+            ControlOp::Inspect { run_id, reply } => {
+                let _ = reply.send(self.inspect(&run_id).map(Box::new));
             }
             ControlOp::Result { run_id, reply } => {
                 // Live entities only. An unloaded run's answer is on disk in
-                // `meta.json`, which is what `lev result` reads; keeping a copy
-                // of every finished run's answer in memory would defeat the
-                // point of bounding the finished buffer.
+                // its `final_output` sidecar, which is what `lev result`
+                // reads; keeping a copy of every finished run's answer in
+                // memory would defeat the point of bounding the finished
+                // buffer.
                 let output = self
                     .live_entity(&run_id)
                     .and_then(|agent| {
@@ -551,8 +604,7 @@ impl WorldHost {
                 let _ = reply.send(ok);
             }
             ControlOp::Resume { run_id, reply } => {
-                let ok = self.resume_tree(&run_id);
-                let _ = reply.send(ok);
+                let _ = reply.send(self.resume_tree(&run_id));
             }
             ControlOp::Cancel { run_id, reply } => {
                 // Cancel is unconditional: it either takes effect in the world
@@ -561,11 +613,7 @@ impl WorldHost {
                 // `false` only when there is genuinely no such run anywhere -
                 // otherwise a run whose blueprint had moved stayed `running` on
                 // disk forever with no way to get rid of it.
-                let ok = self.cancel_tree(&run_id)
-                    || self
-                        .force_terminator
-                        .as_mut()
-                        .is_some_and(|terminate| terminate(&run_id));
+                let ok = self.cancel_tree(&run_id) || self.force_cancel(&run_id);
                 let _ = reply.send(ok);
             }
             ControlOp::List { reply } => {
@@ -593,11 +641,25 @@ impl WorldHost {
                     return;
                 }
                 // Page the target in if it was unloaded, so delivery finds it.
-                self.resolve_or_reload(&agent_id);
+                // A run that has stopped stays stopped: it is not loaded back
+                // for a message it would never read.
+                let status = match self.resolve_or_reload(&agent_id) {
+                    Err(NotPlaced::Stopped(status)) => Some(status),
+                    Err(NotPlaced::Held(entry)) => {
+                        let _ = reply.send(Err(Self::held_refusal(&agent_id, &entry)));
+                        return;
+                    }
+                    Ok(_) | Err(NotPlaced::Missing) => self.status_in_world(&agent_id),
+                };
+                if let Some(why) = Self::undeliverable(&agent_id, status.as_ref()) {
+                    let _ = reply.send(Err(why));
+                    return;
+                }
                 let ok = self
                     .world
                     .send_message(AgentMessage {
                         agent_id,
+                        from: crate::components::FROM_PERSON.to_string(),
                         content,
                         target_region,
                         parts,
@@ -649,7 +711,9 @@ impl WorldHost {
 
     /// Run the host: drive the world to quiescence, then park until an async
     /// result wakes it, a control op arrives, or shutdown is signalled. Returns
-    /// when shutdown fires or the control channel closes - and before returning,
+    /// when shutdown fires, or once the control channel has closed and every
+    /// run it asked for has been placed or refused (so each of their replies
+    /// is sent) - and before returning,
     /// **flushes all queued persistence to disk** (`Self::flush_and_stop`) so a
     /// clean daemon shutdown never loses a dirty agent's final snapshot.
     pub async fn serve(&mut self, mut control_rx: UnboundedReceiver<ControlOp>) {
@@ -661,10 +725,11 @@ impl WorldHost {
         let mut redrive =
             tokio::time::interval_at(tokio::time::Instant::now() + self.redrive, self.redrive);
         redrive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut closed = false;
         'serve: loop {
-            // Before the drive, so a run whose model list arrived since the
-            // last pass is in the world for it.
-            self.retry_held();
+            if closed && self.starting == 0 && self.paging.is_empty() {
+                break 'serve;
+            }
             self.world.run_to_fixed_point();
             self.emit_events();
             tokio::select! {
@@ -679,41 +744,20 @@ impl WorldHost {
                     self.observe_redrive();
                     self.housekeep();
                 }
-                op = control_rx.recv() => {
+                op = control_rx.recv(), if !closed => {
                     match op {
-                        // Await the spawn preprocessor (e.g. lazy MCP connect) before
-                        // the sync spawner runs, so the pool is warm. The returned
-                        // future is `'static`, so no borrow of `self`/`op` outlives it.
-                        Some(op) => {
-                            let pre = match &op {
-                                ControlOp::Spawn { args, .. } => {
-                                    self.spawn_preprocessor.as_ref().map(|pp| pp(args))
-                                }
-                                _ => None,
-                            };
-                            if let Some(fut) = pre {
-                                fut.await;
-                            }
-                            self.handle(op);
-                        }
-                        None => break 'serve, // all control senders dropped
+                        Some(op) => self.handle(op),
+                        // All control senders dropped: finish the starts in
+                        // flight, then stop.
+                        None => closed = true,
                     }
                 }
+                // The host holds a `started_tx`, so this only yields `Some`.
+                Some(started) = self.started_rx.recv() => self.place(started),
                 // The host holds a `subagent_tx`, so this only yields `Some`.
-                Some(sub) = self.subagent_rx.recv() => {
-                    // Warm a spawning sub-agent's MCP servers first, same as a
-                    // top-level Spawn (both run in this async loop).
-                    let pre = match &sub {
-                        SubAgentOp::Spawn { args, .. } => {
-                            self.spawn_preprocessor.as_ref().map(|pp| pp(args))
-                        }
-                        _ => None,
-                    };
-                    if let Some(fut) = pre {
-                        fut.await;
-                    }
-                    self.handle_subagent(sub);
-                }
+                Some(sub) = self.subagent_rx.recv() => self.handle_subagent(sub),
+                // And a `paged_tx`.
+                Some(paged) = self.paged_rx.recv() => self.landed_page(paged),
             }
         }
         // Shutting down: drain the persistence lane before the world is dropped.
@@ -724,3 +768,7 @@ impl WorldHost {
 #[cfg(test)]
 #[path = "../host_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../host_resume_tests.rs"]
+mod resume_tests;

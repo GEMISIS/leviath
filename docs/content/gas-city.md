@@ -84,7 +84,7 @@ neither flag can lift a `deny` in your config. See [Security](/docs/security).
 ## Choosing which agent runs
 
 `--agent coder` pins one blueprint for every session on that provider. Drop the flag and Leviath
-looks for an `agent.leviath` in the session's working directory instead, which is usually the rig
+looks for an `agent.toml` in the session's working directory instead, which is usually the rig
 Gas City is running in. That is the better default when different rigs want different agents.
 
 Declare one provider per agent when you want a Gas City agent per Leviath blueprint:

@@ -8,7 +8,7 @@ order: 9
 
 # Custom context regions
 
-A [context region](/docs/context) normally picks one of seven built-in behaviours: keep everything,
+A [context region](/docs/context) normally picks one of the built-in kinds: keep everything,
 keep the newest, summarize, drop it all, and so on. Sometimes none of those is what you want. Maybe
 entries should be scored and the weakest dropped, or the region should render as a table rather than
 a list.
@@ -35,16 +35,16 @@ Only `render` is required.
 ## Declaring one
 
 ```toml
-[context.regions.brain]
-kind       = "custom"
-script     = "context_hooks/brain.rhai"   # required, relative to the agent dir
-pinned     = false                        # optional, default false
-budget     = "40%"                        # budgets work exactly as on built-ins
-min_tokens = 10000
+[[graph.layout.regions]]
+name   = "brain"
+# code is required; pinned is optional, default false.
+kind   = { kind = "custom", code = { file = "context_hooks/brain.rhai" }, pinned = false }
+budget = { percent = "40%", min = 10000 }   # budgets work exactly as on built-ins
 ```
 
-`script` resolves relative to the directory holding `agent.leviath`, so it travels with the agent
-through `lev add` and through bundles.
+`code = { file = "..." }` resolves relative to the directory holding the blueprint's `agent.toml`,
+so it travels with the blueprint through `lev add` and through bundles. A graph sent whole in a
+spawn request has no directory, so it carries the script itself as `code = { inline = "..." }`.
 
 `pinned` decides how the region behaves under budget pressure:
 
@@ -56,7 +56,7 @@ through `lev add` and through bundles.
 Percentage budgets are worked out at spawn against the stage model's window, and your script sees
 the resulting absolute number in `ctx.region.budget`, not the percentage.
 
-Per-stage layouts (`[stages.<name>.context.regions.<region>]`) can declare custom regions too.
+A stage's own `layout` (`[[graph.stages.layout.regions]]`) can declare custom regions too.
 
 The script is read and compile-checked **once, at spawn**. A missing or broken file, or one without
 `fn render(ctx)`, is a hard spawn error that `lev validate` also reports. Editing the script takes
@@ -228,8 +228,8 @@ The point of the escape hatch is that you could write the built-ins yourself, an
   typed messages. Exact, and the reason typed message emission exists.
 - **compacting**: approximable with deterministic condensing in `on_overflow`. The LLM
   summarization lane is not script-accessible.
-- **hashmap**: close. Keyed writes plus last-wins rendering give the model the same upserted view,
-  and `on_write` can normalize keys on the way in. The difference is in the store. A real `hashmap`
+- **keyed**: close. Keyed writes plus last-wins rendering give the model the same upserted view,
+  and `on_write` can normalize keys on the way in. The difference is in the store. A real `keyed`
   region replaces the old entry and frees its tokens immediately. A custom region only shadows it
   at render time, until eviction or an explicit release catches up.
 
@@ -242,7 +242,7 @@ parses and defines `render`.
 ## Known limits
 
 - Stage-instruction injection targets the first `pinned` region, never a custom one, and
-  `[context.file_tracking]` requires a `hashmap` region.
+  `[graph.file_tracking]` requires a `keyed` region.
 - The per-render cache hint is fixed by `pinned` (always, versus until-changed). `render`
   cannot override it per call.
 - Reordering or reshaping content between inferences can cost you provider prompt-cache hits. The

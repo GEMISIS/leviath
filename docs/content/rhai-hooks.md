@@ -12,18 +12,22 @@ A [custom region](/docs/rhai-regions) owns one region. A [script tool](/docs/rha
 tool. Stage hooks are the third shape: they let you step into the agent's own lifecycle and see, or
 change, what it is about to do.
 
-Seven points, declared per stage:
+Seven points, declared per stage in the stage's `hooks` table:
 
 ```toml
-[stages.implement.hooks]
-on_stage_enter   = "hooks/seed.rhai"
-before_inference = "hooks/cost_gate.rhai"
-on_tool_call     = "hooks/guard.rhai"
-on_completion    = "hooks/notify.rhai"
+[[graph.stages]]
+name = "implement"
+
+[graph.stages.hooks]
+on_stage_enter   = { file = "hooks/seed.rhai" }
+before_inference = { file = "hooks/cost_gate.rhai" }
+on_tool_call     = { file = "hooks/guard.rhai" }
+on_completion    = { file = "hooks/notify.rhai" }
 ```
 
-Each field names a `.rhai` file beside the agent. The file must define a function of the same
-name, taking one argument:
+Each field names a `.rhai` file beside the blueprint, relative to the directory holding its
+`agent.toml`. A graph sent whole in a spawn request has no directory, so it writes the script itself
+as `{ inline = "..." }`. The script must define a function of the same name, taking one argument:
 
 ```rhai
 fn on_stage_enter(ctx) {
@@ -65,6 +69,11 @@ The three region hooks see each region's text under `regions`. Under `parts`, th
 `tokens`, keyed by region name. A region holding none is absent from `parts`. A hook can refuse to
 start a stage whose `storyboard` is empty, or note in `regions` that six frames arrived.
 
+`on_completion` and `on_error` belong to the run rather than to a stage, so they fire once whichever
+stage the run ends in. The stage it ends in runs its own. When that stage declares none, the first
+stage in the graph that does is used, so a hook on the stage that submits the answer still runs
+after the run has moved on from it.
+
 A **cancelled** run fires neither terminal hook. It was stopped from outside, and a hook narrating
 that would report your own decision back to you.
 
@@ -104,7 +113,7 @@ the run. Treating a broken gate as permission is how a gate quietly stops gating
 ## Errors are caught at spawn
 
 A hook script that cannot be read, does not compile, takes the wrong number of arguments, or does not
-define the function it was named for fails `lev run` before the agent starts. A hook that never runs
+define the function it was named for fails `lev run` before the run starts. A hook that never runs
 looks exactly like one that ran and allowed everything, and you would not be there to notice.
 
 ## The sandbox

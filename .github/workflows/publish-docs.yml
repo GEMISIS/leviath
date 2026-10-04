@@ -105,7 +105,7 @@ jobs:
             echo "no search index at docs-out/pagefind/pagefind.js"; exit 1;
           }
 
-      # The machine-readable half: JSON Schemas for agent.leviath and
+      # The machine-readable half: JSON Schemas for agent.toml and
       # config.toml, the OpenAPI spec and GraphQL schema for `lev serve`, and
       # the commented example
       # config that Configuration links beside the schema. llms.txt links these

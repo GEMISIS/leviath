@@ -143,12 +143,8 @@ impl Dashboard {
                 for (i, opt) in options.iter().enumerate() {
                     let sel = i == self.choice_selected;
                     let prefix = if sel { " > " } else { "   " };
-                    let label = match &kind {
-                        Some(InteractionKind::Confirm) => {
-                            format!("{}{}) {}", prefix, if i == 0 { "y" } else { "n" }, opt)
-                        }
-                        _ => format!("{}[{}] {}", prefix, i + 1, opt),
-                    };
+                    // Numbered from 1, as `lev interactions` lists them.
+                    let label = format!("{}[{}] {}", prefix, i + 1, opt);
                     let style = if sel {
                         Style::default().fg(C_WARN).add_modifier(Modifier::BOLD)
                     } else {
@@ -158,7 +154,10 @@ impl Dashboard {
                 }
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    " [↑↓] select  [Enter] confirm  [Esc] cancel",
+                    format!(
+                        " [↑↓] or [1-{}] select  [Enter] confirm  [Esc] cancel",
+                        options.len()
+                    ),
                     Style::default().fg(C_DIM),
                 )));
                 (" Response ", lines)
@@ -176,12 +175,7 @@ impl Dashboard {
                 if !options.is_empty() {
                     lines.push(Line::from(""));
                     for (i, opt) in options.iter().enumerate() {
-                        let label = match &kind {
-                            Some(InteractionKind::Confirm) => {
-                                format!("   {}) {}", if i == 0 { "y" } else { "n" }, opt)
-                            }
-                            _ => format!("   [{}] {}", i + 1, opt),
-                        };
+                        let label = format!("   [{}] {}", i + 1, opt);
                         lines.push(Line::from(Span::styled(
                             label,
                             Style::default().fg(C_MUTED),

@@ -26,8 +26,14 @@
 //! So while a TUI holds the terminal, log lines are buffered instead of
 //! written, and flushed to stderr when it lets go. Nothing is lost, and
 //! nothing lands on the screen while somebody is looking at it.
+//!
+//! A line redrawn in place on stderr (a starting daemon's progress, see
+//! `daemon::startup_view`) shares the terminal with the log the same way:
+//! it is written through [`StatusWriter`], and a log line written while it
+//! is drawn clears it, takes its place, and draws it again below. Colour
+//! codes go only to a terminal, and never when `NO_COLOR` is set.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -70,6 +76,61 @@ const PARKED_CAP: usize = 1024 * 1024;
 
 /// Bytes dropped from [`PARKED`] since the last release, reported on release.
 static PARKED_DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// What a line redrawn in place shows on the terminal's last line now:
+/// whatever [`StatusWriter`] wrote after its last line break. Empty when no
+/// such line is drawn. Its lock is what keeps a log line and a redraw from
+/// landing inside each other.
+static STATUS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+/// Erase the terminal line the cursor is on and go back to its start.
+const CLEAR_LINE: &[u8] = b"\r\x1b[2K";
+
+/// What is left on the cursor's line after `buf` follows `status` there:
+/// the text after the last line break, from the last line erase on.
+fn note_status(status: &mut Vec<u8>, buf: &[u8]) {
+    match buf.iter().rposition(|b| *b == b'\n') {
+        Some(at) => *status = buf[at + 1..].to_vec(),
+        None => status.extend_from_slice(buf),
+    }
+    let erased = status
+        .windows(CLEAR_LINE.len())
+        .rposition(|w| w == CLEAR_LINE)
+        .map_or(0, |at| at + CLEAR_LINE.len());
+    status.drain(..erased);
+}
+
+/// Where a line redrawn in place on stderr is written: straight to stderr,
+/// remembering what it leaves on the cursor's line, so a log line written
+/// meanwhile clears it first and draws it again after.
+pub struct StatusWriter;
+
+impl Write for StatusWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut status = leviath_core::sync::lock(&STATUS);
+        note_status(&mut status, buf);
+        std::io::stderr().write_all(buf).map(|()| buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::stderr().flush()
+    }
+}
+
+/// Write the log line `buf` to `out` beneath what `status` has drawn on the
+/// cursor's line: that is cleared, the line written, and it is drawn again.
+fn write_under_status(out: &mut dyn Write, status: &[u8], buf: &[u8]) -> std::io::Result<()> {
+    if status.is_empty() {
+        return out.write_all(buf);
+    }
+    out.write_all(&[CLEAR_LINE, buf, status].concat())
+}
+
+/// Whether stderr's log lines carry colour codes: only on a terminal, and
+/// not when `NO_COLOR` is set to anything (<https://no-color.org>).
+fn colour(terminal: bool, no_color: Option<std::ffi::OsString>) -> bool {
+    terminal && no_color.is_none_or(|v| v.is_empty())
+}
 
 /// Append `buf` to `parked`, keeping at most `cap` bytes by discarding the
 /// oldest, and return how many bytes were discarded.
@@ -118,7 +179,8 @@ impl Write for TerminalAwareWriter {
         if !STDERR_MIRROR.load(Ordering::Relaxed) {
             return Ok(buf.len());
         }
-        std::io::stderr().write(buf)
+        let status = leviath_core::sync::lock(&STATUS);
+        write_under_status(&mut std::io::stderr(), &status, buf).map(|()| buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -255,6 +317,10 @@ pub fn init(verbose: bool) {
         .with(otel_layer)
         .with(
             tracing_subscriber::fmt::layer()
+                .with_ansi(colour(
+                    std::io::stderr().is_terminal(),
+                    std::env::var_os("NO_COLOR"),
+                ))
                 .with_writer(writer)
                 .with_filter(EnvFilter::new(level)),
         )
@@ -453,6 +519,47 @@ mod tests {
         assert!(set_log_file_cap(1));
         assert!(daemon_writer().write(b"x").is_err());
         let _ = std::fs::remove_file(dir.path());
+    }
+
+    /// A redrawn line is remembered as what is left on the cursor's line, and
+    /// a log line written while it is drawn clears it and draws it again.
+    #[test]
+    fn a_log_line_lands_above_a_line_drawn_in_place() {
+        let mut status = Vec::new();
+        note_status(&mut status, b"\r\x1b[2Kstarting [##--] 1/4");
+        assert_eq!(status, b"starting [##--] 1/4");
+        note_status(&mut status, b"\r\x1b[2Kstarting [####] 4/4");
+        assert_eq!(status, b"starting [####] 4/4");
+        note_status(&mut status, b" more");
+        assert_eq!(status, b"starting [####] 4/4 more");
+        note_status(&mut status, b"\r\x1b[2Kleviath: done\n");
+        assert!(status.is_empty(), "a finished line leaves nothing drawn");
+
+        let mut out = Vec::new();
+        write_under_status(&mut out, b"", b"INFO a\n").expect("written");
+        assert_eq!(out, b"INFO a\n");
+        let mut out = Vec::new();
+        write_under_status(&mut out, b"bar 1/4", b"INFO a\n").expect("written");
+        assert_eq!(out, b"\r\x1b[2KINFO a\nbar 1/4");
+
+        // Through the real writers, as a daemon in the foreground does it.
+        StatusWriter
+            .write_all(b"\r\x1b[2Kbar 2/4")
+            .expect("stderr accepts a write");
+        StatusWriter.flush().expect("stderr accepts a flush");
+        assert_eq!(*leviath_core::sync::lock(&STATUS), b"bar 2/4");
+        StatusWriter.write_all(b"\r\x1b[2K").expect("cleared");
+        assert!(leviath_core::sync::lock(&STATUS).is_empty());
+    }
+
+    /// Colour goes to a terminal only, and `NO_COLOR` set to anything turns
+    /// it off; set empty, it is as if unset.
+    #[test]
+    fn colour_only_on_a_terminal_without_no_color() {
+        assert!(colour(true, None));
+        assert!(colour(true, Some("".into())));
+        assert!(!colour(true, Some("1".into())));
+        assert!(!colour(false, None));
     }
 
     /// The cap is a ring: dropping comes off the front of what is parked

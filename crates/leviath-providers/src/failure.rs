@@ -304,6 +304,37 @@ pub fn error_chain_display(e: &dyn std::error::Error) -> String {
 }
 
 impl ProviderError {
+    /// A provider's non-2xx answer: `status` and the body it sent (`named`,
+    /// as the caller words it), as `Unavailable` when `reason` says the
+    /// provider cannot be used at all and as an ordinary API error otherwise.
+    ///
+    /// Only the ordinary error is labelled with a [`FailureKind`] and its
+    /// remedy. An unavailable provider's message leads with that reason's own
+    /// remedy, and a rejected key labelled a bad request as well would tell
+    /// the reader to look for a parameter the provider does not accept.
+    pub fn from_http(
+        status: reqwest::StatusCode,
+        named: &str,
+        reason: Option<crate::provider::UnavailableReason>,
+    ) -> Self {
+        match reason {
+            Some(reason) => ProviderError::Unavailable {
+                reason,
+                detail: format!("HTTP {status}: {named}"),
+            },
+            None => {
+                let kind = FailureKind::from_status(status.as_u16());
+                ProviderError::ApiError(format!(
+                    "[{}] HTTP {}: {} - {}",
+                    kind.label(),
+                    status,
+                    named,
+                    kind.remedy()
+                ))
+            }
+        }
+    }
+
     /// A transport failure, with what `reqwest` knew about it kept.
     ///
     /// As a bare `RequestFailed(e.to_string())` these are indistinguishable:

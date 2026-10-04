@@ -157,7 +157,7 @@ The other credential flags are `--openai-key`, `--google-key`, `--openrouter-key
 First `cd` into the directory you want the agent working in. That directory becomes the run's
 **workdir**: its file tools are confined to it, and its output lands there.
 
-Then pick one of the seven [pre-built agents](/docs/agent-catalog) and give it a task:
+Then pick one of the eleven [pre-built agents](/docs/agent-catalog) and give it a task:
 
 ```bash
 lev run coder --task "Build a CLI that converts CSV to JSON"
@@ -171,7 +171,12 @@ Leave `--task` off and your editor opens on a template, which is easier than
 fighting shell quoting for anything longer than a sentence. It also takes a
 file: `lev run coder --task ./brief.md`.
 
-`lev run` returns as soon as the work is accepted, not when it is done. The agent runs in the
+Some blueprints take more than a task. Each extra value is a typed **input**, given with
+`--input name=value` or the short form `--<name> value`:
+`lev run coder --task "..." --constraints "No new dependencies"`.
+[Starting a run](/docs/starting-a-run#inputs) covers every input type.
+
+`lev run` returns as soon as the work is accepted, not when it is done. The run goes on in the
 background and keeps going after you close the terminal, so the next section is how you check on
 it. Real tasks take minutes.
 
@@ -227,23 +232,23 @@ list is under [`lev update`](/docs/cli#lev-update).
 ## Create your own
 
 ```bash
-lev create my-agent        # scaffolds an agent directory
+lev create my-agent        # scaffolds a blueprint directory
 cd my-agent
 lev run . --task "Your task here"
 ```
 
-This writes an `agent.leviath` file you can customize: the stages, the model for each phase, and
-the context regions. [Build your first agent](/docs/first-agent) walks through writing one from
+This writes an `agent.toml` file you can customize: the stages, the model for each phase, the
+inputs a run takes, and the regions of a run's memory. [Build your first agent](/docs/first-agent) walks through writing one from
 scratch, a stage at a time, and is the natural next thing to read.
 
 ## Where to go next
 
-- The [Agent catalog](/docs/agent-catalog) tours the seven pre-built agents and what each is for.
+- The [Agent catalog](/docs/agent-catalog) tours the eleven pre-built agents and what each is for.
 - [Build your first agent](/docs/first-agent) writes one from an empty directory, explaining each
   piece as it goes.
 - [Overview](/docs/overview) explains what Leviath is doing underneath: stages, context regions,
   and the shared world your agents run in.
-- [Agent blueprints](/docs/agents) covers what goes in an `agent.leviath` file, for building your
+- [Agent blueprints](/docs/agents) covers what goes in an `agent.toml` file, for building your
   own.
 - [Troubleshooting](/docs/troubleshooting) has the common snags, and `lev doctor` diagnoses most of
   them for you.

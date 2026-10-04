@@ -340,20 +340,34 @@ jobs:
           # agent-client (which tests against tools) has to follow tools.
           # The version check in CI refuses a list that breaks this.
           for c in leviath-alloc leviath-core leviath-net leviath-sys \
-                   leviath-mcp leviath-package leviath-scripting \
+                   leviath-mcp leviath-scripting \
                    leviath-telemetry leviath-providers leviath-tools \
-                   leviath-agent-client leviath-runtime \
-                   leviath leviath-graphql-derive leviath-cli; do
+                   leviath-agent-client leviath-runtime leviath-blueprint \
+                   leviath-package leviath leviath-graphql-derive leviath-cli; do
             if curl -fsS -A "leviath-ci (github.com/GEMISIS/leviath)" \
                  "https://crates.io/api/v1/crates/$c/$VERSION" >/dev/null 2>&1; then
               echo "$c@$VERSION already on crates.io, skipping"
               continue
             fi
+            # The CLI's converter for run directories in the older layout is
+            # a workspace crate that is not published, behind the CLI's
+            # default `legacy-runs` feature. crates.io takes no dependency it
+            # cannot resolve, optional or not, so the published CLI is built
+            # without it: its manifest loses the feature and the dependency
+            # here, and the package is made from that edited copy. A daemon
+            # built from it reports an older run directory instead of
+            # converting it; the release binaries carry the converter.
+            dirty=""
+            if [ "$c" = leviath-cli ]; then
+              sed -i -e 's/, "legacy-runs"//' -e '/^legacy-runs = /d' \
+                     -e '/^leviath-legacy-[a-z]* = /d' crates/leviath-cli/Cargo.toml
+              dirty="--allow-dirty"
+            fi
             # Retry with a delay: crates.io rate-limits bursts of publishes,
             # and the sparse index takes a moment to serve a just-published
             # dependency to the next crate's verify build.
             tries=0
-            until cargo publish -p "$c"; do
+            until cargo publish -p "$c" $dirty; do
               tries=$((tries + 1))
               if [ "$tries" -ge 15 ]; then
                 echo "::error::giving up on $c after $tries attempts"

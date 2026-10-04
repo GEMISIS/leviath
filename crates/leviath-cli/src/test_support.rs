@@ -21,23 +21,40 @@ impl serde::Serialize for PoisonSerialize {
     }
 }
 
-/// Write an `agent.leviath` manifest into `dir` and return its path.
+/// Write an `agent.toml` blueprint into `dir` and return its path.
 ///
-/// Consolidates the `std::fs::write(dir.join("agent.leviath"), ...).unwrap()`
+/// Consolidates the `std::fs::write(dir.join("agent.toml"), ...).unwrap()`
 /// idiom repeated across the CLI command test modules. `contents` accepts
-/// anything byte-like (`&str`, `String`, byte slices) so both manifest text
+/// anything byte-like (`&str`, `String`, byte slices) so both blueprint text
 /// and deliberately-malformed byte payloads route through the same helper.
 pub(crate) fn write_test_agent(
     dir: impl AsRef<std::path::Path>,
     contents: impl AsRef<[u8]>,
 ) -> std::path::PathBuf {
-    let path = dir.as_ref().join("agent.leviath");
+    let path = dir.as_ref().join(leviath_blueprint::FILE_NAME);
     std::fs::write(&path, contents).unwrap();
     path
 }
 
+/// The smallest blueprint that runs: one stage, one region the task lands
+/// in. `name` names it.
+#[cfg(test)]
+pub(crate) fn tiny_blueprint(name: &str) -> String {
+    format!(
+        r#"[blueprint]
+name = "{name}"
+version = "1.0.0"
+
+[graph]
+stages = [{{ name = "main", system_prompt = "work" }}]
+layout = {{ total_budget_tokens = 1000, regions = [{{ name = "task", kind = "pinned", budget = 1000 }}] }}
+inputs = [{{ name = "task", type = "text", required = true, binds = [{{ region = "task" }}] }}]
+"#
+    )
+}
+
 /// A self-contained, coder-shaped blueprint for daemon spawn/recovery/setup
-/// tests. Deliberately does NOT read the shipped `agents/coder/agent.leviath`:
+/// tests. Deliberately does NOT read the shipped `agents/coder/agent.toml`:
 /// those tests exercise spawn/reload *logic*, not the shipped blueprint, so they
 /// must stay isolated from blueprint edits. Budgets are absolute (window-
 /// independent) so a fake small-context test model can't starve the region the
@@ -46,98 +63,56 @@ pub(crate) fn write_test_agent(
 /// is refused at spawn.
 #[cfg(test)]
 pub(crate) fn inline_coder_manifest() -> String {
-    r#"[agent]
+    r#"[blueprint]
 name = "coder"
 version = "0.0.0"
 description = "Inline test blueprint (coder-shaped); self-contained."
-entry_stage = "analyze"
 
-[tool_permissions]
-read_file = "allow"
-list_dir = "allow"
-write_file = "ask"
-bash = "ask"
+[graph]
+entry = "analyze"
+tool_permissions = { read_file = "allow", list_dir = "allow", write_file = "ask", bash = "ask" }
+inputs = [{ name = "task", type = { kind = "text", multiline = true }, binds = [{ region = "task" }] }]
 
-[stages.analyze]
-mode = "autonomous"
-model = { provider = "anthropic", model = "m" }
+[graph.layout]
+total_budget_tokens = 50000
+regions = [
+    { name = "system", kind = "pinned", budget = 8000 },
+    { name = "task", kind = "pinned", budget = 2000 },
+    { name = "codebase", kind = "temporary", budget = 20000 },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 40 }, budget = 20000 },
+]
+
+[[graph.stages]]
+name = "analyze"
 description = "Understand the task"
-available_tools = ["read_file", "list_dir"]
+model = { models = [{ provider = "anthropic", model = "m" }] }
+tools = ["read_file", "list_dir"]
 system_prompt = "Analyze the task and outline a short plan."
-[stages.analyze.transitions.implement]
-transform = "direct"
 
-[stages.implement]
-mode = "autonomous"
-model = { provider = "anthropic", model = "m" }
+[[graph.edges]]
+name = "implement"
+from = "analyze"
+to = "implement"
+
+[[graph.stages]]
+name = "implement"
 description = "Write the code"
-available_tools = ["write_file", "read_file", "list_dir", "bash"]
+model = { models = [{ provider = "anthropic", model = "m" }] }
+tools = ["write_file", "read_file", "list_dir", "bash"]
 system_prompt = "Implement the plan."
-[stages.implement.transitions.review]
-transform = "compact"
 
-[stages.review]
-mode = "autonomous"
-model = { provider = "anthropic", model = "m" }
+[[graph.edges]]
+name = "review"
+from = "implement"
+to = "review"
+carry = { compact = {} }
+
+[[graph.stages]]
+name = "review"
 description = "Review the code"
-available_tools = ["read_file", "list_dir"]
-allow_complete = true
+model = { models = [{ provider = "anthropic", model = "m" }] }
+tools = ["read_file", "list_dir"]
 system_prompt = "Review the implementation."
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 8000 }
-task = { kind = "pinned", max_tokens = 2000 }
-codebase = { kind = "temporary", max_tokens = 20000 }
-conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
-"#
-    .to_string()
-}
-
-/// A self-contained blueprint whose stage 0 (`plan`) is an `interactive_points`
-/// stage with a `plan_approval` interaction point - for recovery tests that
-/// resume a run parked at an interaction point. Self-contained for the same
-/// isolation reason as [`inline_coder_manifest`].
-#[cfg(test)]
-pub(crate) fn inline_interactive_manifest() -> String {
-    r#"[agent]
-name = "planning-agent"
-version = "0.0.0"
-description = "Inline test blueprint (interactive plan); self-contained."
-entry_stage = "plan"
-
-[tool_permissions]
-read_file = "allow"
-
-[stages.plan]
-mode = "interactive_points"
-model = { provider = "anthropic", model = "m" }
-description = "Plan"
-available_tools = ["read_file", "ask_user_text", "edit_document"]
-allow_complete = true
-system_prompt = "Produce a plan and ask for approval."
-[stages.plan.transitions.implement]
-hint = "approved"
-
-[[stages.plan.interaction_points]]
-name = "plan_approval"
-prompt = "Approve the plan?"
-required = true
-style = "multiple_choice"
-options = ["Approve", "Abort"]
-document_region = "plan"
-abort_options = ["Abort"]
-
-[stages.implement]
-mode = "autonomous"
-model = { provider = "anthropic", model = "m" }
-description = "Implement"
-available_tools = ["write_file"]
-system_prompt = "Implement the approved plan."
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 8000 }
-plan = { kind = "pinned", max_tokens = 6000 }
-conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
 "#
     .to_string()
 }
@@ -284,6 +259,18 @@ pub(crate) fn same_code_daemon(pid: u32) -> leviath_runtime::control_socket::Dae
         pid,
         ..leviath_runtime::control_socket::DaemonIdentity::this_process(TEST_BUILD)
     }
+}
+
+/// The control-socket line a daemon answers a refused spawn with: one issue
+/// carrying `message`.
+pub(crate) fn rejected_reply(message: &str) -> &'static str {
+    use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpecPath};
+    let issues = SpawnIssue::new(SpecPath::root(), IssueCode::Invalid, message).into();
+    let line = serde_json::to_string(
+        &leviath_runtime::control_socket::ControlResponse::Rejected { issues },
+    )
+    .expect("a response serializes");
+    Box::leak(line.into_boxed_str())
 }
 
 #[cfg(test)]

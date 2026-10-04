@@ -31,6 +31,7 @@ leviath-tools = { workspace = true }
 leviath-mcp = { workspace = true }
 leviath-scripting = { workspace = true }
 leviath-telemetry = { workspace = true }
+leviath-blueprint = { workspace = true }
 leviath-package = { workspace = true }
 leviath-agent-client = { workspace = true }
 

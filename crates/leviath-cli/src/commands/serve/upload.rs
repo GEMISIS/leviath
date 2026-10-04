@@ -416,6 +416,44 @@ mod tests {
             form(cut_file, 1024).await.unwrap_err().0,
             StatusCode::PAYLOAD_TOO_LARGE
         );
+        // A request that is not JSON, a field that is neither the request nor
+        // a part, an empty part, a named part over the ceiling, and no request
+        // at all.
+        let refused = [
+            (
+                b"--b\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{\r\n--b--\r\n"
+                    .to_vec(),
+                1024,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                b"--b\r\nContent-Disposition: form-data; name=\"other\"\r\n\r\nx\r\n--b--\r\n"
+                    .to_vec(),
+                1024,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                b"--b\r\nContent-Disposition: form-data; name=\"part\"; filename=\"e\"\r\n\r\n\r\n--b--\r\n"
+                    .to_vec(),
+                1024,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                b"--b\r\nContent-Disposition: form-data; name=\"part\"; filename=\"big\"\r\n\r\nxyz\r\n--b--\r\n"
+                    .to_vec(),
+                2,
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                b"--b\r\nContent-Disposition: form-data; name=\"part\"; filename=\"a\"\r\n\r\nxyz\r\n--b--\r\n"
+                    .to_vec(),
+                1024,
+                StatusCode::BAD_REQUEST,
+            ),
+        ];
+        for (body, max, status) in refused {
+            assert_eq!(form(body, max).await.unwrap_err().0, status);
+        }
     }
 
     #[tokio::test]

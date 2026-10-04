@@ -3,40 +3,39 @@
 //!
 //! Pure helpers: turning a `session/new`'s working directory (and an optional
 //! `--agent` name) into a resolved blueprint, and a resolved blueprint plus a
-//! `session/prompt`'s task into the [`SpawnArgs`] the shared-world daemon
-//! consumes.
+//! `session/prompt`'s text into the [`SpawnRequest`] the shared-world daemon
+//! consumes, with the text as the blueprint's `task` input.
 
 use std::path::PathBuf;
 
-use leviath_runtime::host::SpawnArgs;
+use leviath_runtime::spec::request::SpawnRequest;
 
 use super::AgentClientArgs;
-use crate::commands::run::manifest::find_manifest;
-use crate::runstate::new_run_id;
+use crate::commands::run::locate::find_blueprint;
 
-/// A blueprint resolved for a session: its manifest file and the agent name
-/// derived from the manifest's directory (matching `lev run`'s convention).
+/// A blueprint resolved for a session: its `agent.toml` and the agent name
+/// derived from the file's directory (matching `lev run`'s convention).
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ResolvedBlueprint {
-    /// Absolute path to the `agent.leviath` manifest.
+    /// Absolute path to the blueprint's `agent.toml`.
     pub(super) manifest_path: PathBuf,
-    /// The agent's name - its manifest directory's file name.
+    /// The agent's name - its blueprint directory's file name.
     pub(super) agent_name: String,
 }
 
 /// Resolve the blueprint a session should run.
 ///
-/// When `--agent <name>` was given it wins, resolved through [`find_manifest`]
+/// When `--agent <name>` was given it wins, resolved through [`find_blueprint`]
 /// (which searches an explicit path, a directory, an installed agent by name,
 /// then the process cwd). Otherwise the session's own `cwd` is searched for an
-/// `agent.leviath`. A resolution failure is returned so the caller can answer
+/// `agent.toml`. A resolution failure is returned so the caller can answer
 /// `session/new` with a JSON-RPC error rather than spawning nothing.
 pub(super) fn resolve_blueprint(
     agent: Option<&str>,
     cwd: &str,
 ) -> anyhow::Result<ResolvedBlueprint> {
     let reference = agent.unwrap_or(cwd);
-    let manifest_path = find_manifest(reference)?;
+    let manifest_path = find_blueprint(reference)?;
     let agent_name = manifest_path
         .parent()
         .and_then(|p| p.file_name())
@@ -53,54 +52,40 @@ pub(super) fn resolve_blueprint(
 ///
 /// `cwd` becomes the tool-execution working directory; `--yolo` / `--allow` /
 /// `--max-depth` from the CLI flow through to the daemon's tool-policy
-/// resolution. The model is left `None` so the blueprint's own per-stage model
-/// selection stands. This is a top-level run, so `parent_run_id` is `None`.
-pub(super) fn spawn_args(
+/// resolution. The model is left unset so the blueprint's own per-stage model
+/// selection stands. The prompt's text is the `task` input and nothing else:
+/// a host that wants to fill other inputs sends a whole request with
+/// `_leviath/spawn`.
+pub(super) fn spawn_request(
     blueprint: &ResolvedBlueprint,
     task: &str,
     cwd: &str,
     args: &AgentClientArgs,
-    regions: std::collections::HashMap<String, String>,
     parts: Vec<leviath_core::mime::InboundPart>,
-) -> SpawnArgs {
-    SpawnArgs {
-        run_id: new_run_id(&blueprint.agent_name),
-        blueprint_path: blueprint.manifest_path.to_string_lossy().to_string(),
+) -> Result<SpawnRequest, String> {
+    crate::daemon::requests::TaskLaunch {
+        blueprint: blueprint.manifest_path.to_string_lossy().into_owned(),
         task: task.to_string(),
-        regions,
-        model: None,
-        workdir: cwd.to_string(),
-        metadata: Default::default(),
-        callback_url: None,
-        callback_secret: None,
-        yolo: args.yolo.is_some(),
-        yolo_profile: args.yolo.clone().filter(|name| !name.is_empty()),
-        no_seed_commands: args.no_seed_commands,
+        parts,
+        workdir: Some(cwd.to_string()),
+        unattended: args.yolo.is_some(),
+        profile: args.yolo.clone().filter(|name| !name.is_empty()),
         allow: args.allow.clone(),
         max_depth: args.max_depth,
-        parent_run_id: None,
-        worker_stage: None,
+        no_seed_commands: args.no_seed_commands,
         // A host that wants a particular shape says so when it starts the
-        // server; ACP itself carries no field for it.
+        // server; the protocol itself carries no field for it.
         output: match (&args.output_format, &args.output_instructions) {
             (None, None) => None,
             (format, instructions) => Some(leviath_core::output::OutputSpec {
                 format: format.clone(),
                 instructions: instructions.clone(),
-                example: None,
-                schema: None,
-                validator: None,
-                on_validator_error: None,
-                overwrite_artifacts: None,
-                artifacts: Vec::new(),
+                ..Default::default()
             }),
         },
-        parts,
-        // The protocol carries no field for it, and an editor session is the
-        // last place to start writing prompts to disk unasked. A machine-wide
-        // `[observability] capture_model_input` still applies.
-        capture_model_input: false,
+        ..Default::default()
     }
+    .into_request()
 }
 
 #[cfg(test)]
@@ -110,16 +95,17 @@ mod tests {
     fn write_blueprint(dir: &std::path::Path, name: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
-            dir.join("agent.leviath"),
+            dir.join("agent.toml"),
             format!(
                 r#"
-[agent]
+[blueprint]
 name = "{name}"
 version = "1.0.0"
 description = "test blueprint"
 
-[stages.plan]
-system_prompt = "Plan the work"
+[graph]
+stages = [{{ name = "plan", system_prompt = "Plan the work" }}]
+layout = {{ total_budget_tokens = 1000, regions = [{{ name = "task", kind = "pinned", budget = 1000 }}] }}
 "#
             ),
         )
@@ -132,8 +118,8 @@ system_prompt = "Plan the work"
         let dir = root.path().join("coder");
         write_blueprint(&dir, "coder");
         let resolved = resolve_blueprint(None, &dir.to_string_lossy()).unwrap();
-        assert_eq!(resolved.manifest_path, dir.join("agent.leviath"));
-        // The agent name is the manifest directory's file name.
+        assert_eq!(resolved.manifest_path, dir.join("agent.toml"));
+        // The agent name is the blueprint directory's file name.
         assert_eq!(resolved.agent_name, "coder");
     }
 
@@ -149,7 +135,7 @@ system_prompt = "Plan the work"
             &empty.path().to_string_lossy(),
         )
         .unwrap();
-        assert_eq!(resolved.manifest_path, agent_dir.join("agent.leviath"));
+        assert_eq!(resolved.manifest_path, agent_dir.join("agent.toml"));
         assert_eq!(resolved.agent_name, "reviewer");
     }
 
@@ -160,7 +146,7 @@ system_prompt = "Plan the work"
     }
 
     #[test]
-    fn spawn_args_carry_cli_overrides_and_leave_model_default() {
+    fn a_spawn_request_carries_cli_overrides_and_leaves_the_model_alone() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("coder");
         write_blueprint(&dir, "coder");
@@ -174,33 +160,38 @@ system_prompt = "Plan the work"
             output_format: None,
             output_instructions: None,
         };
-        let regions =
-            std::collections::HashMap::from([("criteria".to_string(), "be safe".to_string())]);
-        let spawn = spawn_args(
+        let work = root.path().join("work");
+        let spawn = spawn_request(
             &resolved,
             "do the thing",
-            "/work",
+            &work.to_string_lossy(),
             &args,
-            regions,
             Vec::new(),
+        )
+        .unwrap();
+        // The blueprint is named by its directory, which the daemon reads it
+        // and the files beside it from.
+        let source = serde_json::to_value(&spawn.source).unwrap();
+        assert!(
+            source["blueprint_file"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("coder")),
+            "{source}"
         );
+        use leviath_runtime::spec::inputs::RawInput;
         assert_eq!(
-            spawn.blueprint_path,
-            resolved.manifest_path.to_string_lossy()
+            spawn.inputs.get("task"),
+            Some(&RawInput::Text("do the thing".to_string()))
         );
-        assert_eq!(spawn.task, "do the thing");
-        assert_eq!(
-            spawn.regions.get("criteria").map(String::as_str),
-            Some("be safe")
-        );
-        assert_eq!(spawn.workdir, "/work");
+        assert_eq!(spawn.inputs.len(), 1, "the task is the only input");
+        assert_eq!(spawn.workdir, Some(work));
         assert!(spawn.model.is_none());
-        assert!(spawn.yolo);
-        assert_eq!(spawn.allow, vec!["bash".to_string()]);
-        assert_eq!(spawn.max_depth, Some(2));
-        assert!(spawn.parent_run_id.is_none());
-        // The run id is derived from the agent name.
-        assert!(spawn.run_id.starts_with(&resolved.agent_name));
+        assert_eq!(
+            spawn.launch.unattended,
+            leviath_runtime::spec::launch::Unattended::All
+        );
+        assert_eq!(spawn.launch.allow[0].as_str(), "bash");
+        assert_eq!(spawn.launch.max_depth, Some(2));
         // Nothing asked for a shape, so the blueprint's own stands.
         assert!(spawn.output.is_none());
     }
@@ -208,7 +199,7 @@ system_prompt = "Plan the work"
     /// ACP carries no field for an output shape, so a host that wants one says
     /// so when it starts the server. The label is passed through untouched.
     #[test]
-    fn spawn_args_carry_a_requested_output_shape() {
+    fn a_spawn_request_carries_a_requested_output_shape() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("coder");
         write_blueprint(&dir, "coder");
@@ -222,14 +213,7 @@ system_prompt = "Plan the work"
             output_format: Some("a2ui".to_string()),
             output_instructions: Some("One card per finding.".to_string()),
         };
-        let spawn = spawn_args(
-            &resolved,
-            "do the thing",
-            "/work",
-            &args,
-            std::collections::HashMap::new(),
-            Vec::new(),
-        );
+        let spawn = spawn_request(&resolved, "do the thing", "/work", &args, Vec::new()).unwrap();
         let spec = spawn.output.expect("the host asked for a shape");
         assert_eq!(spec.format.as_deref(), Some("a2ui"));
         assert_eq!(spec.instructions.as_deref(), Some("One card per finding."));
@@ -241,7 +225,7 @@ system_prompt = "Plan the work"
     /// `--yolo=<name>` on the ACP server names a profile; the bare flag names
     /// none.
     #[test]
-    fn spawn_args_carry_a_yolo_profile() {
+    fn a_spawn_request_carries_a_yolo_profile() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("coder");
         write_blueprint(&dir, "coder");
@@ -255,26 +239,13 @@ system_prompt = "Plan the work"
             output_format: None,
             output_instructions: None,
         };
-        let spawn = spawn_args(
-            &resolved,
-            "t",
-            "/work",
-            &args,
-            Default::default(),
-            Vec::new(),
+        use leviath_runtime::spec::launch::Unattended;
+        let spawn = spawn_request(&resolved, "t", "/work", &args, Vec::new()).unwrap();
+        assert!(
+            matches!(&spawn.launch.unattended, Unattended::Profile(p) if p.as_str() == "careful")
         );
-        assert!(spawn.yolo);
-        assert_eq!(spawn.yolo_profile.as_deref(), Some("careful"));
         args.yolo = Some(String::new());
-        let spawn = spawn_args(
-            &resolved,
-            "t",
-            "/work",
-            &args,
-            Default::default(),
-            Vec::new(),
-        );
-        assert!(spawn.yolo);
-        assert!(spawn.yolo_profile.is_none());
+        let spawn = spawn_request(&resolved, "t", "/work", &args, Vec::new()).unwrap();
+        assert_eq!(spawn.launch.unattended, Unattended::All);
     }
 }

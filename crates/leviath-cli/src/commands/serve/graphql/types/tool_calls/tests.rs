@@ -290,9 +290,16 @@ fn sample_value(property: &serde_json::Value) -> serde_json::Value {
                     .unwrap_or_default(),
             )
         }
-        // A `oneOf` branch, which `submit_output`'s artifacts use: the string
-        // branch is the one a bare path takes.
-        _ => serde_json::Value::String("sample".to_string()),
+        // A `oneOf`, which `submit_output`'s artifacts and `spawn_agent`'s
+        // source use: a value of its first branch.
+        _ => match property
+            .get("oneOf")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|branches| branches.first())
+        {
+            Some(first) => sample_value(first),
+            None => serde_json::Value::String("sample".to_string()),
+        },
     }
 }
 
@@ -448,4 +455,133 @@ fn an_artifact_in_neither_shape_leaves_the_call_untyped() {
         untyped.raw_arguments.0["artifacts"][0]["file"],
         serde_json::json!("out/report.md")
     );
+}
+
+/// A root that hands out the child-run calls, so their fields are read the way
+/// a client reads them.
+struct ChildCalls;
+
+#[async_graphql::Object]
+impl ChildCalls {
+    /// One `spawn_agent` call per shape `source` takes, and one `fan_out`.
+    async fn calls(&self) -> Vec<ToolCall> {
+        vec![
+            tool_call(
+                "spawn_agent",
+                None,
+                r#"{"source":{"blueprint":"coder"},"inputs":{"task":"fix it"},
+                    "wait":true,"max_child_depth":1,"allow":["shell"],
+                    "output":{"format":"json"},"parts":["a.png"]}"#,
+            ),
+            tool_call(
+                "spawn_agent",
+                None,
+                r#"{"source":{"blueprint":{"name":"coder","digest":"abc"}}}"#,
+            ),
+            tool_call("spawn_agent", None, r#"{"source":{"graph":{"stages":[]}}}"#),
+            tool_call(
+                "fan_out",
+                None,
+                r#"{"items":[{"id":"a","inputs":{"path":"x.rs"}},{"id":"b"}]}"#,
+            ),
+        ]
+    }
+}
+
+/// A child-run call keeps the shape its source was written in, and its inputs
+/// as the model wrote them.
+#[tokio::test]
+async fn a_child_run_call_keeps_its_source_and_inputs() {
+    let schema = Schema::build(ChildCalls, EmptyMutation, EmptySubscription)
+        .register_output_type::<ToolCall>()
+        .finish();
+    let answer = schema
+        .execute(
+            "{ calls {
+                ... on SpawnAgentCallOutput { args {
+                    source {
+                        __typename
+                        ... on SpawnAgentBlueprintSourceOutput { name digest }
+                        ... on SpawnAgentGraphSourceOutput { graph }
+                    }
+                    inputs wait maxChildDepth allow parts
+                    output { format instructions example schema }
+                } }
+                ... on FanOutCallOutput { args { agent maxWorkers items { id inputs } } }
+            } }",
+        )
+        .await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    let json = serde_json::to_value(&answer.data).expect("data serializes");
+    let calls = &json["calls"];
+    assert_eq!(calls[0]["args"]["source"]["name"], "coder");
+    assert_eq!(
+        calls[0]["args"]["source"]["digest"],
+        serde_json::Value::Null
+    );
+    assert_eq!(calls[0]["args"]["inputs"]["task"], "fix it");
+    assert_eq!(calls[0]["args"]["output"]["format"], "json");
+    assert_eq!(calls[1]["args"]["source"]["digest"], "abc");
+    assert_eq!(
+        calls[2]["args"]["source"]["__typename"],
+        "SpawnAgentGraphSourceOutput"
+    );
+    assert_eq!(
+        calls[2]["args"]["source"]["graph"],
+        serde_json::json!({ "stages": [] })
+    );
+    assert_eq!(calls[3]["args"]["items"][0]["inputs"]["path"], "x.rs");
+    assert_eq!(
+        calls[3]["args"]["items"][1]["inputs"],
+        serde_json::Value::Null
+    );
+    assert_eq!(calls[0]["args"]["parts"][0], "a.png");
+    assert_eq!(calls[0]["args"]["allow"][0], "shell");
+}
+
+/// The three reading tools carry what they were asked.
+#[test]
+fn the_reading_tools_carry_what_they_were_asked() {
+    let ToolCall::SpawnSchema(schema) = tool_call("spawn_schema", None, r#"{"part":"RunGraph"}"#)
+    else {
+        panic!("a spawn_schema call");
+    };
+    assert_eq!(schema.args.part.as_deref(), Some("RunGraph"));
+    let ToolCall::DescribeBlueprint(describe) = tool_call(
+        "describe_blueprint",
+        None,
+        r#"{"blueprint":{"name":"coder","digest":"abc"}}"#,
+    ) else {
+        panic!("a describe_blueprint call");
+    };
+    assert_eq!(describe.args.blueprint.digest.as_deref(), Some("abc"));
+    for (view, want) in [
+        ("summary", super::args_rest::RunHistoryView::Summary),
+        ("state", super::args_rest::RunHistoryView::State),
+        ("transitions", super::args_rest::RunHistoryView::Transitions),
+    ] {
+        let ToolCall::RunHistory(history) = tool_call(
+            "run_history",
+            None,
+            &format!(r#"{{"run_id":"r1","view":"{view}","at":2}}"#),
+        ) else {
+            panic!("a run_history call");
+        };
+        assert_eq!(history.args.view, Some(want));
+        assert_eq!(history.args.at, Some(2));
+    }
+    assert!(matches!(
+        tool_call("validate_spawn", None, r#"{"source":{"graph":{}}}"#),
+        ToolCall::ValidateSpawn(_)
+    ));
+}
+
+/// A source in neither shape leaves the call untyped rather than guessed at.
+#[test]
+fn a_source_in_neither_shape_leaves_the_call_untyped() {
+    let call = tool_call("spawn_agent", None, r#"{"source":{"name":"coder"}}"#);
+    let ToolCall::Untyped(untyped) = call else {
+        panic!("a source names a blueprint or carries a graph");
+    };
+    assert_eq!(untyped.reason, UntypedCallReason::ArgumentsDidNotMatch);
 }

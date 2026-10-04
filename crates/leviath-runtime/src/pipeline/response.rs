@@ -153,6 +153,15 @@ type InferenceQuery = (
     Option<&'static mut crate::pipeline::PromptCalibration>,
 );
 
+/// The provider circuit breaker, as the collect system reads and feeds it.
+#[derive(bevy_ecs::system::SystemParam)]
+pub(crate) struct Breaker<'w> {
+    /// Which providers' circuits are open, and their failure counts.
+    circuits: Option<ResMut<'w, ProviderCircuits>>,
+    /// When a circuit opens and how long it stays open.
+    policy: Option<Res<'w, CircuitPolicy>>,
+}
+
 /// Inference-collect system: drain completed inferences and apply them. A
 /// success is stored on the agent (bumping its iteration) and the agent advances
 /// to `ProcessResponse`; an error marks the agent `Error`. An outcome for an
@@ -161,16 +170,20 @@ type InferenceQuery = (
 pub(crate) fn collect_inference(
     mut results: ResMut<InferenceResults>,
     mut agents: Query<InferenceQuery, With<AwaitingInference>>,
-    mut circuits: Option<ResMut<ProviderCircuits>>,
-    policy: Option<Res<CircuitPolicy>>,
-    persist: Option<Res<crate::pipeline::persist::PersistenceStage>>,
+    mut calls: crate::inference_call::CallParams,
+    breaker: Breaker,
+    persist: Option<Res<crate::pipeline::JournalSender>>,
     mime: crate::blob_store::MimeParams,
     mut commands: Commands,
 ) {
+    let Breaker {
+        mut circuits,
+        policy,
+    } = breaker;
     crate::tick_scope::clear();
     let policy = policy.map(|p| *p).unwrap_or_default();
     let now = chrono::Utc::now().timestamp();
-    while let Ok(outcome) = results.0.try_recv() {
+    while let Ok(mut outcome) = results.0.try_recv() {
         let Ok((
             mut state,
             md,
@@ -195,7 +208,13 @@ pub(crate) fn collect_inference(
             commands
                 .entity(outcome.entity)
                 .remove::<AwaitingInference>()
-                .remove::<InFlightWork>();
+                .remove::<InFlightWork>()
+                .remove::<crate::inference_call::InferenceCall>();
+            continue;
+        }
+        // A failed trip the call will make again: the agent keeps waiting,
+        // and `fire_due_calls` sends the next trip when its backoff is over.
+        if calls.settle(&mut outcome, &mut commands) != crate::inference_call::Next::Done {
             continue;
         }
         // The user paused the run while this inference was in flight. Pause is
@@ -293,7 +312,7 @@ pub(crate) fn collect_inference(
                     persist.as_deref(),
                     md,
                     &crate::inference_usage::CallUsage {
-                        kind: leviath_core::run_archive::InferenceKind::Stage,
+                        kind: crate::runfile::record::InferenceKind::Stage,
                         stage: &state.current_stage,
                         iteration: state.iteration,
                         provider: &called_provider,
@@ -447,7 +466,7 @@ pub(crate) fn collect_inference(
                     tracing::warn!(
                         from_provider = %called_provider,
                         from_model = %called_model,
-                        to_provider = %next.provider,
+                        to_provider = %next.provider_or_empty(),
                         to_model = %next.model,
                         error = %err,
                         "provider unusable; failing over to the next configured model"
@@ -458,7 +477,8 @@ pub(crate) fn collect_inference(
                             format!(
                                 "[failover] {called_provider}/{called_model} is unusable \
                                  ({err}); retrying on {}/{}",
-                                next.provider, next.model
+                                next.provider_or_empty(),
+                                next.model
                             ),
                         ));
                     }
@@ -471,15 +491,15 @@ pub(crate) fn collect_inference(
                     //
                     // Keyed on the agent id, which is the run id, so it lands in
                     // the same journal as the attempts it sits between. A world
-                    // with no lane writes nothing, exactly as the attempts do.
+                    // with no journal writes nothing, exactly as the attempts do.
                     if let Some(persist) = persist.as_deref() {
-                        let record = leviath_core::run_archive::FailoverRecord {
+                        let record = crate::runfile::record::FailoverRecord {
                             stage: state.current_stage.clone(),
                             iteration: state.iteration,
                             from_provider: called_provider.clone(),
                             from_model: called_model.clone(),
-                            to_provider: next.provider.clone(),
-                            to_model: next.model.clone(),
+                            to_provider: next.provider_or_empty().to_string(),
+                            to_model: next.model.to_string(),
                             reason: err
                                 .unavailable_reason()
                                 .map(leviath_providers::UnavailableReason::label)
@@ -488,19 +508,16 @@ pub(crate) fn collect_inference(
                             kind: crate::inference_bridge::failure_label(&err),
                             at: now,
                         };
-                        let _ = persist.0.send(PersistMsg::Append {
-                            run_id: state.agent_id.clone(),
-                            record: Box::new(
-                                leviath_core::run_archive::RunRecord::InferenceFailover(record),
-                            ),
-                            ack: None,
-                        });
+                        persist.record(
+                            &state.agent_id,
+                            crate::runfile::record::RunRecord::InferenceFailover(record),
+                        );
                     }
                     let si = inference
                         .as_deref_mut()
                         .expect("the failover branch only runs with a StageInference");
-                    si.provider_name = next.provider;
-                    si.model = next.model;
+                    si.provider_name = next.provider_or_empty().to_string();
+                    si.model = next.model.to_string();
                     // Back to ready, not errored: the next tick dispatches it
                     // against the new provider and takes that model's permit.
                     // The iteration is deliberately not bumped - the agent has
@@ -752,9 +769,9 @@ pub(crate) enum StageOutcome {
 /// One [`StageRecord`](leviath_core::run_meta::StageRecord) per blueprint stage,
 /// seeded at spawn (names + `Pending`) and reconciled by `dispatch_persistence`
 /// (status + timestamps), with per-stage tokens accrued by `collect_inference`.
-/// Serialized to `stages.json` so the dashboard / serve API can show every
-/// stage's real name and status - not just the active one (whose name is the only
-/// one carried in `meta.json`).
+/// Recorded in the run file, so `lev stages`, the dashboard and the API can show
+/// every stage's real name and status, not just the active one (whose name is
+/// the only one the run's summary carries).
 #[derive(Component, Debug, Clone)]
 pub struct StageLedger(pub Vec<leviath_core::run_meta::StageRecord>);
 
@@ -878,27 +895,10 @@ pub(crate) fn edited_path(call: &crate::components::ToolCall) -> Option<&str> {
 /// a hot-reloaded config applies from the next run rather than mutating live
 /// ones (same snapshot semantics as the batch-tool-hint global). Absent on
 /// worlds that spawn agents without going through the seeded spawn (tests,
-/// embedders); [`leviath_core::resolve_nudge`] then falls through to the
-/// built-in defaults.
+/// embedders); [`NudgeDef::resolve`](crate::spec::graph::NudgeDef::resolve)
+/// then falls through to the built-in defaults.
 #[derive(Component, Debug, Clone, Default)]
-pub(crate) struct GlobalNudge(pub leviath_core::NudgeConfig);
-
-/// Whether this stage's deliverable *is* its text response.
-///
-/// A stage with interaction points presents what it writes for the user to
-/// approve, revise or edit - the text is the work product, not a model stalling
-/// before it starts. Nudging one is worse than wasteful: the nudge says "use
-/// your tools to complete the task", and a stage built to produce a document
-/// usually has no tool that could. A planning stage told to complete the task
-/// went looking for a way to write the file, found none, and asked the user to
-/// grant it a write tool or create the file by hand - instead of ending the
-/// stage and presenting the plan it had already finished writing.
-pub(crate) fn stage_output_is_reviewed(bp: &AgentBlueprint, cursor: &StageCursor) -> bool {
-    matches!(
-        bp.0.stages.get(cursor.index).map(|s| &s.mode),
-        Some(leviath_core::blueprint::StageMode::InteractivePoints { points }) if !points.is_empty()
-    )
-}
+pub(crate) struct GlobalNudge(pub crate::spec::graph::NudgeDef);
 
 /// What `handle_empty_response` selects.
 ///
@@ -910,7 +910,7 @@ type EmptyResponseQuery = (
     &'static mut ContextWindow,
     &'static crate::components::InferenceResult,
     &'static mut StageProgress,
-    &'static AgentBlueprint,
+    &'static crate::insert::RunSpecC,
     &'static StageCursor,
     Option<&'static GlobalNudge>,
 );
@@ -925,31 +925,30 @@ type EmptyResponseQuery = (
 ///
 /// The nudge is programmable per stage (`[stages.<name>.nudge]`), per agent
 /// (`[agent.nudge]`), and globally (config `[nudge]`), each field cascading
-/// independently through [`leviath_core::resolve_nudge`]. With nothing
+/// independently through [`NudgeDef::resolve`](crate::spec::graph::NudgeDef::resolve). With nothing
 /// configured, a stage whose output is reviewed is never nudged - see
-/// `stage_output_is_reviewed` - but an explicit `enabled` at any level speaks
-/// for itself. The text supports `{stage}` and `{regions}` placeholders.
+/// [`stage_nudge`](super::spec_view::stage_nudge) - but an explicit `enabled`
+/// at any level speaks for itself. The text supports `{stage}` and `{regions}`
+/// placeholders.
 pub(crate) fn handle_empty_response(
     mut agents: Query<EmptyResponseQuery, With<ReadyForTransition>>,
     mime: crate::blob_store::MimeParams,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, mut window, infer, mut progress, bp, cursor, global) in agents.iter_mut() {
+    for (entity, state, mut window, infer, mut progress, spec, cursor, global) in agents.iter_mut()
+    {
         crate::tick_scope::enter(entity);
-        let stage = bp.0.stages.get(cursor.index);
+        let graph = &spec.0.graph;
+        let stage = graph.stages.get(cursor.index);
         // Where a long reply is stored, when the world has a store and this
         // run is known by id.
         let (sources, _) = mime.hydration_inputs(entity);
         let sink = state.and_then(|state| {
             crate::context_setup::PartSink::over(&sources, &state.agent_id, &mime)
         });
-        let nudge = leviath_core::resolve_nudge(
-            global.map(|g| &g.0),
-            bp.0.nudge.as_ref(),
-            stage.and_then(|s| s.nudge.as_ref()),
-            stage_output_is_reviewed(bp, cursor),
-        );
+        let nudge = super::spec_view::stage_nudge(graph, stage, global.map(|g| &g.0));
+
         // A reply the output cap cut off is not the stage's answer, however
         // many tool calls came before it. Keep what arrived so the model can
         // see it, say what happened, and go again with the cap raised (see
@@ -1047,8 +1046,8 @@ pub(crate) fn handle_empty_response(
             );
             let stage_name = stage.map(|s| s.name.as_str()).unwrap_or("");
             let regions = stage
-                .and_then(|s| s.context_layout.as_ref())
-                .unwrap_or(&bp.0.context_layout)
+                .and_then(|s| s.layout.as_ref())
+                .unwrap_or(&graph.layout)
                 .regions
                 .iter()
                 .filter(|r| r.required)
@@ -1080,7 +1079,7 @@ pub(crate) const MAX_NO_IMAGE_NUDGES: usize = 3;
 /// manifest already validated as mime patterns. Image first, then video, then
 /// audio, when a stage names more than one.
 pub(crate) fn stage_expected_media(
-    stage: Option<&leviath_core::blueprint::Stage>,
+    stage: Option<&crate::spec::graph::StageDef>,
 ) -> Option<&'static str> {
     let stage = stage?;
     let format = stage.output.as_ref().and_then(|o| o.format.as_deref());
@@ -1137,7 +1136,7 @@ fn store_reply(
     window: &mut ContextWindow,
     infer: &crate::components::InferenceResult,
     reasoning: Option<String>,
-    stage: Option<&leviath_core::blueprint::Stage>,
+    stage: Option<&crate::spec::graph::StageDef>,
     sink: Option<&crate::context_setup::PartSink<'_>>,
 ) {
     // The stage may send some produced parts to regions of their own

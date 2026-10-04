@@ -1,6 +1,5 @@
 //! Shared types: ServerEvent, AppState, request/response structs, error types.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -122,19 +121,16 @@ pub(super) struct ServeLimits {
 }
 
 impl ServeLimits {
-    /// Check a requested agent workdir against `--workdir-root`.
-    ///
-    /// Uses the same symlink-aware containment the file tools use, so a symlink
-    /// under the root cannot be used to point an agent outside it.
     /// Check a requested completion webhook against the same SSRF policy every
     /// model-supplied URL goes through.
     ///
-    /// The URL arrives in a `POST /api/agents` body, is persisted, and is POSTed
+    /// The URL arrives in a `POST /api/runs` body, is persisted, and is POSTed
     /// to when the run finishes - from inside the trust boundary, and with
-    /// retries. Unchecked, `"callback_url": "http://169.254.169.254/…"` made the
-    /// daemon a repeatable request primitive against the cloud metadata service
-    /// and anything else on the local network, on behalf of a caller that
-    /// `--workdir-root` and `--no-remote-yolo` exist to keep at arm's length.
+    /// retries. Unchecked, a callback at `http://169.254.169.254/…` would make
+    /// the daemon a repeatable request primitive against the cloud metadata
+    /// service and anything else on the local network, on behalf of a caller
+    /// that `--workdir-root` and `--no-remote-yolo` exist to keep at arm's
+    /// length.
     ///
     /// `allow_local_network` mirrors the config setting: an operator who
     /// deliberately points webhooks at a service on the same host can, and
@@ -142,39 +138,15 @@ impl ServeLimits {
     pub(super) fn check_callback_url(&self, url: &str) -> Result<(), String> {
         let parsed = url
             .parse::<url::Url>()
-            .map_err(|e| format!("callback_url is not a URL: {e}"))?;
+            .map_err(|e| format!("the callback URL is not a URL: {e}"))?;
         leviath_net::check_url(&parsed, self.allow_local_network)
-            .map_err(|e| format!("callback_url is not allowed: {e}"))
+            .map_err(|e| format!("the callback URL is not allowed: {e}"))
     }
 
-    /// Check the approval waivers a spawn request asked for against
-    /// `--no-remote-yolo`.
+    /// Check a requested agent workdir against `--workdir-root`.
     ///
-    /// `yolo` and `allow` are the same lever. `{"allow": ["*"]}` is read by
-    /// `resolve_policy` through the same wildcard entry `--yolo` writes, so
-    /// guarding only the `yolo` field left the operator's refusal bypassable by
-    /// spelling it the other way. Any `allow` is refused rather than just the
-    /// wildcard: `{"allow": ["shell"]}` is not meaningfully weaker on a server
-    /// somebody deliberately hardened, and "allow is yolo" is a rule an
-    /// operator can hold in their head. A per-agent grant belongs in the
-    /// operator's own config, under `[agent_tool_permissions.<agent>]`.
-    pub(super) fn check_launch_overrides(
-        &self,
-        yolo: bool,
-        allow: &[String],
-    ) -> Result<(), String> {
-        if !self.no_remote_yolo {
-            return Ok(());
-        }
-        match (yolo, allow.is_empty()) {
-            (false, true) => Ok(()),
-            _ => Err(
-                "this server refuses `yolo` and `allow` on spawn requests (--no-remote-yolo)"
-                    .to_string(),
-            ),
-        }
-    }
-
+    /// Uses the same symlink-aware containment the file tools use, so a symlink
+    /// under the root cannot be used to point an agent outside it.
     pub(super) fn check_workdir(&self, workdir: &std::path::Path) -> Result<(), String> {
         let Some(root) = &self.workdir_root else {
             return Ok(());
@@ -214,7 +186,7 @@ pub(super) fn err(code: axum::http::StatusCode, message: String) -> ApiError {
 /// without bound are paginated; bounded catalogs stay bare arrays.** Runs
 /// accumulate forever and are never pruned, so they are paged; `/api/models`
 /// and `/api/mcp/servers` are sized by what the user configured, and
-/// `/api/agents/tree` is a tree, where `next_cursor` would not mean anything.
+/// `/api/runs/tree` is a tree, where `next_cursor` would not mean anything.
 #[derive(Debug, Serialize)]
 pub(super) struct Page<T> {
     /// This page's items, in the requested order.
@@ -296,7 +268,7 @@ pub(super) struct Highlight {
     /// The matching text with a little either side, elided at any cut end.
     pub(super) snippet: String,
     /// Which stage the match came from, for the sources that have one. A client
-    /// can pass it straight to `GET /api/agents/{id}/logs?stage=`.
+    /// can pass it straight to `GET /api/runs/{id}/logs?stage=`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) stage: Option<usize>,
 }
@@ -313,7 +285,7 @@ pub(super) struct BlueprintInfo {
     /// slower and a failure path that cannot happen, since a row only exists
     /// when its manifest parsed.
     #[serde(skip)]
-    pub(super) parsed: Arc<leviath_core::Blueprint>,
+    pub(super) parsed: Arc<super::core::blueprints::ParsedBlueprint>,
     pub(super) name: String,
     pub(super) version: String,
     pub(super) description: String,
@@ -336,9 +308,8 @@ pub(super) struct BlueprintInfo {
 
 /// One context region of a blueprint, as the API reports it.
 ///
-/// The console showed a blueprint's stages and nothing about its memory, so a
-/// person editing an agent could see what it *does* and not what it *keeps* -
-/// which is the half that decides whether it can do the job on a small window.
+/// Beside a blueprint's stages, what it *keeps*: the half that decides whether
+/// it can do the job on a small window.
 #[derive(Debug, Serialize)]
 pub(super) struct RegionInfo {
     /// The region's name - the one an agent passes to `context_write`.
@@ -381,9 +352,8 @@ pub(super) struct FanOutInfo {
     /// The stage that reconciles the workers' results, when there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) merge_stage: Option<String>,
-    /// How many workers run at once. `null` is unlimited (`max_workers = 0` in
-    /// the manifest); a stage that names no cap gets the default, and that
-    /// default is what appears here.
+    /// How many workers run at once. `null` is no cap: the stage leaves
+    /// `max_workers` out, and every item starts at once.
     pub(super) max_workers: Option<usize>,
     /// How many work items the split may produce at all. `null` is unlimited
     /// (`max_items = 0`, or no key).
@@ -458,68 +428,7 @@ impl ValidateResponse {
     }
 }
 
-// ─── Agent types ────────────────────────────────────────────────────────────
-
-#[derive(Default, Serialize, Deserialize)]
-pub(super) struct SpawnAgentReq {
-    pub(super) blueprint: String,
-    pub(super) task: String,
-    pub(super) model: Option<String>,
-    /// Override the blueprint's max sub-agent tree depth.
-    pub(super) max_depth: Option<usize>,
-    /// Approve every tool call for this run.
-    #[serde(default)]
-    pub(super) yolo: bool,
-    /// Run under a named profile from `yolo.toml` (the `--yolo=<name>` of
-    /// the CLI). Implies `yolo`.
-    #[serde(default)]
-    pub(super) yolo_profile: Option<String>,
-    /// Tools to allow outright for this run.
-    #[serde(default)]
-    pub(super) allow: Vec<String>,
-    /// Refuse this run's `seed = { command = ... }` regions, which would
-    /// otherwise execute at spawn before any approval prompt.
-    #[serde(default)]
-    pub(super) no_seed_commands: bool,
-    /// Write this run's exact requests into its journal, once per provider
-    /// attempt, whatever the machine's `[observability] capture_model_input`
-    /// says. A captured request is the whole prompt, and there is no size cap.
-    #[serde(default)]
-    pub(super) capture_model_input: bool,
-    pub(super) workdir: Option<String>,
-    /// Literal seed content for named caller-input regions, keyed by region name.
-    #[serde(default)]
-    pub(super) regions: HashMap<String, String>,
-    #[serde(default)]
-    pub(super) metadata: HashMap<String, String>,
-    pub(super) callback_url: Option<String>,
-    /// Optional shared secret; when set, completion webhooks carry an
-    /// `X-Leviath-Signature: sha256=<hex>` HMAC of the body keyed on this secret.
-    pub(super) callback_secret: Option<String>,
-    /// Ask for the run's final output in a particular shape, overriding what the
-    /// blueprint declares. Any label works - `markdown`, `xml`, `a2ui`, a mime
-    /// type, your own - because nothing converts between shapes: the label and
-    /// instructions are handed to the model, which produces the bytes.
-    pub(super) output_format: Option<String>,
-    /// Extra guidance about that shape. This is how an unusual format gets
-    /// explained to the model.
-    pub(super) output_instructions: Option<String>,
-    /// A JSON Schema the final output must satisfy. The only thing that ever
-    /// inspects the answer's contents, and only because you asked: a submission
-    /// that fails is refused back to the agent to correct.
-    ///
-    /// An `output_format` that differs from the blueprint's retires any Rhai
-    /// validator and JSON schema the blueprint declared, since a check written
-    /// for one shape says nothing about another; the response's `warnings`
-    /// names what was retired. Supply this field when the new shape should
-    /// still be checked.
-    pub(super) output_schema: Option<serde_json::Value>,
-    /// Files already inside the working directory to attach as typed parts.
-    /// A `multipart/form-data` body carries files instead; a `@path` token
-    /// inside `task` or a region's text attaches that file too.
-    #[serde(default)]
-    pub(super) parts: Vec<super::upload::PartRef>,
-}
+// ─── Run types ──────────────────────────────────────────────────────────────
 
 /// A run's final output as the API serves it.
 ///
@@ -537,7 +446,7 @@ pub(crate) struct FinalOutputResp {
     /// Whether the answer hit the size cap and was cut short.
     pub truncated: bool,
     /// Files the run produced, typed and hashed. Fetch one with
-    /// `GET /api/agents/{id}/artifacts/{name}`, which reads the store by
+    /// `GET /api/runs/{id}/artifacts/{name}`, which reads the store by
     /// hash and then the workdir, the way the runtime does.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactResp>,
@@ -556,21 +465,47 @@ impl From<leviath_core::output::FinalOutput> for FinalOutputResp {
     }
 }
 
+/// Response of `POST /api/runs`: the run that started.
 #[derive(Serialize, Debug)]
-pub(super) struct SpawnAgentResp {
-    pub(super) agent_id: String,
+pub(super) struct SpawnedResp {
+    /// The new run's id, minted by the daemon.
     pub(super) run_id: String,
-    /// Things the caller should know about how this run will differ from what
-    /// its blueprint declares: today, the Rhai validator or JSON schema that a
-    /// differing `output_format` retired. Omitted when there is nothing to
-    /// say, so existing clients see the exact response they always did.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(super) warnings: Vec<String>,
+    /// What may keep the run from ever finishing: stages it can reach and
+    /// never leave. The run started anyway. Empty for most runs.
+    pub(super) warnings: Vec<IssueResp>,
 }
 
-#[derive(Deserialize)]
-pub(super) struct ListAgentsQuery {
-    pub(super) status: Option<String>,
+/// One problem with a spawn request, as the API serves it: the issue itself,
+/// with its path also written out the way a person reads it.
+#[derive(Serialize, Debug)]
+pub(super) struct IssueResp {
+    /// The path, written out: `stages.plan.model`, `inputs.items[2]`.
+    pub(super) at: String,
+    /// The issue.
+    #[serde(flatten)]
+    pub(super) issue: leviath_runtime::spec::issues::SpawnIssue,
+}
+
+/// Response of a refused spawn or dry run: every problem at once.
+#[derive(Serialize, Debug)]
+pub(super) struct IssuesResp {
+    /// The problems, in the order they were found.
+    pub(super) issues: Vec<IssueResp>,
+}
+
+impl From<leviath_runtime::spec::issues::SpawnIssues> for IssuesResp {
+    fn from(issues: leviath_runtime::spec::issues::SpawnIssues) -> Self {
+        Self {
+            issues: issues
+                .0
+                .into_iter()
+                .map(|issue| IssueResp {
+                    at: issue.path.to_string(),
+                    issue,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Does `filter` name this run's status?
@@ -595,7 +530,7 @@ pub(super) fn status_matches(status: &crate::runstate::RunStatus, filter: &str) 
 }
 
 #[derive(Serialize)]
-pub(super) struct AgentResultResp {
+pub(super) struct RunResultResp {
     pub(super) run_id: String,
     pub(super) status: String,
     /// The tail of the last stage's log. Kept as-is: it predates
@@ -610,11 +545,11 @@ pub(super) struct AgentResultResp {
     pub(super) completion_tokens: usize,
 }
 
-/// Query for `GET /api/agents/{id}/logs`.
+/// Query for `GET /api/runs/{id}/logs`.
 #[derive(Deserialize, Default)]
 pub(super) struct LogsQuery {
-    /// How many **bytes** from the end to return (default 32 KiB). Bytes, not
-    /// lines - the OpenAPI description said lines and was wrong.
+    /// How many **bytes** from the end to return (default 32 KiB). Bytes,
+    /// not lines.
     pub(super) tail: Option<u64>,
     /// Which stage: a numeric index, or `all` for every stage joined oldest
     /// first. Absent means the stage the run is on now.
@@ -655,7 +590,7 @@ impl LogsQuery {
     }
 }
 
-/// Query for `GET /api/agents/{id}/context/history`.
+/// Query for `GET /api/runs/{id}/context/history`.
 #[derive(Deserialize, Default)]
 pub(super) struct HistoryQuery {
     /// How many points to return. Capped lower than the run listing's, because
@@ -668,7 +603,7 @@ pub(super) struct HistoryQuery {
     pub(super) order: Option<String>,
 }
 
-/// Query for `GET /api/agents/{id}/files`.
+/// Query for `GET /api/runs/{id}/files`.
 ///
 /// With `path`, reads that file. Without, lists - the same idiom `GET
 /// /api/fs/dirs` uses for the folder picker.
@@ -698,13 +633,11 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
-/// Response of `GET /api/agents/{id}/files`: either one file's contents, or a
+/// Response of `GET /api/runs/{id}/files`: either one file's contents, or a
 /// listing.
 ///
 /// Untagged, with the listing carrying a literal `kind` field, so a client
 /// discriminates on a value rather than by trying parses until one fits.
-/// `FileContentResp` is unchanged and still serializes exactly as before, so
-/// existing readers of `?path=<file>` see no difference at all.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub(super) enum FileOrListing {
@@ -714,9 +647,9 @@ pub(super) enum FileOrListing {
     Listing(Box<RunFileListing>),
 }
 
-/// Response of `GET /api/agents/{id}/stages`: the run's per-stage ledger.
+/// Response of `GET /api/runs/{id}/stages`: the run's per-stage ledger.
 ///
-/// Everything here is already on disk in `stages.json` and already read by
+/// Everything here is already in the run's file and already read by
 /// `lev stages`. Without this route a client over HTTP has to reconstruct the
 /// interesting part by diffing `context/history` snapshots, which is expensive
 /// and cannot see a stage that ran and wrote nothing.
@@ -742,7 +675,7 @@ pub(super) struct RunStagesResp {
     pub(super) stages: Vec<leviath_core::run_meta::StageRecord>,
 }
 
-/// Response of `GET /api/agents/{id}/files` with no file named.
+/// Response of `GET /api/runs/{id}/files` with no file named.
 #[derive(Debug, Serialize)]
 pub(super) struct RunFileListing {
     /// Always `"listing"`. What a client checks to tell the two shapes apart.
@@ -793,7 +726,7 @@ pub(super) struct RunFileEntry {
     pub(super) mime_type: String,
 }
 
-/// Response of `GET /api/agents/{id}/files`: one file the run wrote, as text.
+/// Response of `GET /api/runs/{id}/files`: one file the run wrote, as text.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct FileContentResp {
     /// The resolved absolute path that was read.
@@ -958,6 +891,11 @@ pub(super) struct TreeStatusNode {
 #[derive(Deserialize)]
 pub(super) struct SubmitInteractionReq {
     pub(super) request_id: String,
+    /// The word of one of the request's `answer_options`: `allow`, `deny`,
+    /// `yes`, a choice's own word. Stands alone, or beside `feedback` on a
+    /// deny.
+    #[serde(default)]
+    pub(super) option: Option<String>,
     pub(super) value: Option<String>,
     pub(super) choice_index: Option<usize>,
     pub(super) approved: Option<bool>,
@@ -1177,6 +1115,30 @@ mod tests {
         assert_eq!(parsed.override_model.as_deref(), Some("claude-sonnet-5"));
         assert!(parsed.has_anthropic_key);
         assert!(!parsed.has_openai_key);
+    }
+
+    #[test]
+    fn a_webhook_and_a_workdir_are_held_to_the_servers_limits() {
+        let open = ServeLimits::default();
+        assert!(open.check_callback_url("https://example.com/hook").is_ok());
+        assert!(
+            open.check_callback_url("not a url")
+                .unwrap_err()
+                .contains("not a URL")
+        );
+        assert!(
+            open.check_callback_url("http://169.254.169.254/x")
+                .unwrap_err()
+                .contains("not allowed")
+        );
+        assert!(open.check_workdir(std::path::Path::new("/")).is_ok());
+        let root = tempfile::tempdir().unwrap();
+        let rooted = ServeLimits {
+            workdir_root: Some(root.path().to_path_buf()),
+            ..ServeLimits::default()
+        };
+        assert!(rooted.check_workdir(root.path()).is_ok());
+        assert!(rooted.check_workdir(std::path::Path::new("/")).is_err());
     }
 
     #[test]

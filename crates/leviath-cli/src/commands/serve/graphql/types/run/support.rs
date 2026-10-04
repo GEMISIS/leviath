@@ -288,7 +288,9 @@ impl Paged for ContextSnapshotPoint {
 }
 
 /// One replayed point as the object a client reads.
-pub(crate) fn snapshot_point(point: leviath_core::run_archive::RunPoint) -> ContextSnapshotPoint {
+pub(crate) fn snapshot_point(
+    point: leviath_runtime::runfile::history::RunPoint,
+) -> ContextSnapshotPoint {
     ContextSnapshotPoint {
         at: Timestamp(point.at),
         stage: point.meta.current_stage.clone(),

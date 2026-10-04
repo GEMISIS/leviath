@@ -37,8 +37,32 @@ pub(crate) mod transition;
 /// Saturating rather than wrapping: these are manifest numbers, so a value near
 /// `i32::MAX` is a typo, and the largest representable number reads as one
 /// where a negative would read as a different setting.
-pub(crate) fn count(value: usize) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
+pub(crate) fn count(value: impl TryInto<i32>) -> i32 {
+    value.try_into().unwrap_or(i32::MAX)
+}
+
+/// What a piece of code is served as: the path of a file beside the
+/// blueprint, or the code itself when the blueprint writes it inline.
+pub(crate) fn code_text(code: &leviath_runtime::spec::graph::CodeRef) -> String {
+    match code {
+        leviath_runtime::spec::graph::CodeRef::File(path) => path.clone(),
+        leviath_runtime::spec::graph::CodeRef::Inline(text) => text.clone(),
+    }
+}
+
+/// Checked names, as the text they were written with.
+pub(crate) fn texts<T: std::fmt::Display>(names: &[T]) -> Vec<String> {
+    names.iter().map(ToString::to_string).collect()
+}
+
+/// The blueprint in an `agent.toml`'s text, read without checking that its
+/// graph holds together, so a test can ask about a name that dangles.
+#[cfg(test)]
+pub(crate) fn parsed(
+    text: &str,
+) -> std::sync::Arc<crate::commands::serve::core::blueprints::ParsedBlueprint> {
+    let file = leviath_blueprint::BlueprintFile::parse(text).expect("the blueprint parses");
+    std::sync::Arc::new(crate::commands::serve::core::blueprints::ParsedBlueprint::of_file(&file))
 }
 
 #[cfg(test)]

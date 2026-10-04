@@ -1,17 +1,17 @@
-//! Cached run history: the archived context points and the stage-visit
+//! Cached run history: the recorded context points and the stage-visit
 //! timeline derived from them.
 //!
 //! The `,`/`.` history keys would otherwise re-read and re-replay the entire
-//! `run.lvr` archive on every keypress; the stage explorer needs the same
-//! data plus real visit counts (stages.json holds one record per stage,
-//! rewritten in place, so revisits are invisible there). This module loads
-//! the archive once per run (through an injectable loader, so tests count
-//! reads), derives the visit timeline, and refreshes only when the archive
+//! run file on every keypress; the stage explorer needs the same data plus
+//! real visit counts (the stage ledger holds one record per stage, so a
+//! revisit is not a row of its own there). This module loads
+//! the run file once per run (through an injectable loader, so tests count
+//! reads), derives the visit timeline, and refreshes only when the run file
 //! has changed, checked on a tick-based TTL while something is looking at it.
 
-use leviath_core::run_archive::RunPoint;
+use leviath_runtime::runfile::history::RunPoint;
 
-/// One contiguous stay in a stage, derived from the archived points.
+/// One contiguous stay in a stage, derived from the recorded points.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StageVisit {
     pub(super) stage: String,
@@ -27,20 +27,63 @@ pub(super) struct StageVisit {
     pub(super) first_point: usize,
 }
 
-/// The cached archive of one run.
+/// The cached history of one run.
 #[derive(Debug, Clone, Default)]
 pub(super) struct RunHistoryCache {
     pub(super) run_id: String,
     pub(super) points: Vec<RunPoint>,
     pub(super) visits: Vec<StageVisit>,
-    /// Tick the archive was last found unchanged (or loaded), for the TTL.
+    /// Tick the run file was last found unchanged (or loaded), for the TTL.
     pub(super) checked_at_tick: u64,
-    /// The archive's stat when the points were read, so a reload happens only
-    /// when it has grown: a finished run's archive is read once.
+    /// The run file's stat when the points were read, so a reload happens only
+    /// when it has grown: a finished run's file is read once.
     pub(super) stamp: Option<crate::runstate::FileStamp>,
+    /// Each edge the run took, `(from, to)`, from its run file's transition
+    /// records. `None` when nothing recorded them.
+    pub(super) transitions: Option<Vec<(String, String)>>,
 }
 
-/// Look at the archive no more often than this many ticks (~1s at the 100ms
+impl RunHistoryCache {
+    /// The edges the run took, in order: as its run file recorded them, or
+    /// when none are recorded, read off its visits, where each
+    /// move from one stage to the next stands for the edge between them.
+    pub(super) fn taken(&self) -> Vec<(String, String)> {
+        match &self.transitions {
+            Some(taken) => taken.clone(),
+            None => self
+                .visits
+                .windows(2)
+                .map(|pair| (pair[0].stage.clone(), pair[1].stage.clone()))
+                .collect(),
+        }
+    }
+}
+
+impl super::state::Dashboard {
+    /// The window of the stage the detail view has selected, when the run
+    /// has left it: the last point of the run's history taken in that stage.
+    /// `None` for the stage the run is in (its window is the live one), and
+    /// for a run whose history is not loaded.
+    pub(super) fn selected_stage_context(
+        &self,
+        agent: &super::types::DashboardAgent,
+    ) -> Option<leviath_core::run_meta::ContextSnapshot> {
+        let stage = agent.stages.get(self.selected_stage)?;
+        if stage.name == agent.stage {
+            return None;
+        }
+        self.history
+            .as_ref()
+            .filter(|h| h.run_id == agent.id)?
+            .points
+            .iter()
+            .rev()
+            .find(|p| p.meta.current_stage == stage.name)
+            .map(|p| p.context.clone())
+    }
+}
+
+/// Look at the run file no more often than this many ticks (~1s at the 100ms
 /// tick rate), and read it again only if it changed.
 pub(super) const HISTORY_TTL_TICKS: u64 = 10;
 
@@ -129,7 +172,7 @@ mod tests {
             point("plan", 2, 20),
             point("implement", 1, 30),
             point("review", 1, 40),
-            point("implement", 1, 50), // the revisit stages.json cannot show
+            point("implement", 1, 50), // the revisit the stage ledger has no row for
             point("implement", 2, 60),
         ];
         let visits = derive_visits(&points);

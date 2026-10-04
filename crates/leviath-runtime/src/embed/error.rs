@@ -1,4 +1,7 @@
 //! Errors from building or driving an embedded world.
+//!
+//! A request for a run that cannot run is not one of these: it comes back as
+//! [`SpawnIssues`](crate::spec::issues::SpawnIssues), every problem at once.
 
 /// Why an [`AgentWorld`](super::AgentWorld) could not be built or a request to
 /// it could not be served.
@@ -13,10 +16,6 @@ pub enum EmbedError {
     /// (or be given a handle via
     /// [`runtime`](super::AgentWorldBuilder::runtime)).
     NoRuntime,
-    /// The blueprint could not be loaded, parsed, or validated.
-    Blueprint(String),
-    /// The spawn was rejected (bad workdir, unresolvable seeds, and so on).
-    Spawn(String),
     /// A configured provider's outbound HTTPS client could not be built, so
     /// that provider could never reach its API. In practice the machine's root
     /// certificate store could not be read; it is unrelated to any TLS
@@ -36,8 +35,6 @@ impl std::fmt::Display for EmbedError {
             EmbedError::NoRuntime => {
                 write!(f, "no tokio runtime: build inside one or pass a handle")
             }
-            EmbedError::Blueprint(msg) => write!(f, "blueprint error: {msg}"),
-            EmbedError::Spawn(msg) => write!(f, "spawn error: {msg}"),
             EmbedError::ProviderClient(msg) => {
                 write!(f, "provider HTTPS client error: {msg}")
             }
@@ -57,11 +54,6 @@ mod tests {
         let cases = [
             (EmbedError::NoProviders, "no providers"),
             (EmbedError::NoRuntime, "no tokio runtime"),
-            (
-                EmbedError::Blueprint("bad".to_string()),
-                "blueprint error: bad",
-            ),
-            (EmbedError::Spawn("nope".to_string()), "spawn error: nope"),
             (
                 EmbedError::ProviderClient("no roots".to_string()),
                 "provider HTTPS client error: no roots",

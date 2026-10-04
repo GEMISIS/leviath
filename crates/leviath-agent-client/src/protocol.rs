@@ -90,6 +90,26 @@ impl JsonRpcMessage {
 
     /// An error response to the request identified by `id`.
     pub fn error_response(id: serde_json::Value, code: i32, message: impl Into<String>) -> Self {
+        Self::error_with(id, code, message.into(), None)
+    }
+
+    /// An error response that carries structured detail in the error's
+    /// `data` member, for a caller that reads more than the message.
+    pub fn error_response_with_data(
+        id: serde_json::Value,
+        code: i32,
+        message: impl Into<String>,
+        data: &impl Serialize,
+    ) -> Self {
+        Self::error_with(id, code, message.into(), serde_json::to_value(data).ok())
+    }
+
+    fn error_with(
+        id: serde_json::Value,
+        code: i32,
+        message: String,
+        data: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             id: Some(id),
@@ -98,7 +118,8 @@ impl JsonRpcMessage {
             result: None,
             error: Some(JsonRpcError {
                 code,
-                message: message.into(),
+                message,
+                data,
             }),
         }
     }
@@ -146,6 +167,9 @@ pub struct JsonRpcError {
     pub code: i32,
     /// A human-readable description.
     pub message: String,
+    /// Structured detail about the error, when there is any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 // ─── Content ─────────────────────────────────────────────────────────────────
@@ -282,6 +306,11 @@ pub struct AgentCapabilities {
     pub load_session: bool,
     /// Which prompt content kinds the agent accepts.
     pub prompt_capabilities: PromptCapabilities,
+    /// What this agent offers beyond the spec. The protocol reserves `_meta`
+    /// on capability objects for this; Leviath lists its extension methods
+    /// here (see [`crate::extensions::capability_meta`]).
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 /// Prompt content kinds an agent accepts.
@@ -579,6 +608,22 @@ mod tests {
     }
 
     #[test]
+    fn an_error_response_can_carry_data() {
+        let msg = JsonRpcMessage::error_response_with_data(
+            serde_json::json!(1),
+            error_codes::INVALID_PARAMS,
+            "bad",
+            &serde_json::json!([{"path": "x"}]),
+        );
+        assert_eq!(
+            json(&msg),
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad","data":[{"path":"x"}]}}"#
+        );
+        let back: JsonRpcMessage = serde_json::from_str(&json(&msg)).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
     fn notification_has_no_id() {
         let msg = JsonRpcMessage::notification(
             "session/update",
@@ -699,6 +744,7 @@ mod tests {
                     audio: false,
                     embedded_context: true,
                 },
+                meta: None,
             },
             agent_info: AgentInfo {
                 name: "leviath".to_string(),

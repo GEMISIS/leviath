@@ -1,0 +1,72 @@
+[blueprint]
+name = "text-to-image-to-model"
+version = "0.3.0"
+description = "Turn a text description into a reference image, then a 3D model"
+
+# A two-step pipeline: an image model draws a clean reference from the task, then
+# Meshy turns that image into a 3D model. Needs an image-capable provider for the
+# draw step (OpenRouter's image model by default) and MESHY_API_KEY for the
+# build. No text model is needed: the build stage hands the mesh back itself.
+
+[graph]
+entry = "draw"
+
+# The description of what to make, as the task text. It steers both the drawing
+# and the texturing.
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+
+[graph.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "task", kind = "pinned", budget = "10%" },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 8 }, budget = { percent = "10%", max = 4000 } },
+    # The drawn reference image (a window of one: the latest draw is what builds).
+    { name = "image", kind = { kind = "sliding_window", max_items = 1 }, budget = "30%", accepts = ["image/*"] },
+    # The built mesh - what the run hands back.
+    { name = "model", kind = { kind = "sliding_window", max_items = 1 }, budget = "15%", accepts = ["model/*"] },
+    # The preview render Meshy returns beside the mesh.
+    { name = "model_preview", kind = "clearable", budget = "20%", accepts = ["image/*"] },
+]
+
+# ── 1. Draw a clean reference image from the description ──────────────────────
+[[graph.stages]]
+name = "draw"
+description = "Draw one clean reference image of the described subject"
+model = { models = [{ provider = "openrouter", model = "google/gemini-2.5-flash-image" }], allow_user_default = false }
+max_iterations = 6
+output = { format = "image/*" }
+output_routing = { "image/*" = "image" }
+system_prompt = """
+Draw a single clean reference image of the subject the task describes: a clear,
+well-lit three-quarter view on a plain neutral background, smooth surfaces and
+readable colors, the whole subject in frame. No text, no collage, no multiple
+panels - one picture a 3D model can be built from."""
+
+[[graph.edges]]
+name = "build"
+from = "draw"
+to = "build"
+hint = "Once one clean reference image is in the image region."
+gate = { require_region_updated = "image", message = "Draw the reference image first, then it can be built into a model.", max_attempts = 4 }
+
+# ── 2. Build a 3D model from the drawn image and hand it back ─────────────────
+[[graph.stages]]
+name = "build"
+description = "Meshy turns the drawn image into a textured 3D model and hands it back"
+model = { models = [{ provider = "meshy", model = "image-to-3d" }], allow_user_default = false, request_timeout_secs = 900, params = { extra = { should_remesh = true, target_polycount = 20000, enable_pbr = true, texture_resolution = "2k" } } }
+mode = "output"
+tools = ["submit_output"]
+max_iterations = 3
+require_output = true
+# Only the drawn image reaches Meshy; hide the preview and model regions so no
+# stale render is fed back in. The produced mesh still routes into the model
+# region below - routing writes there whether or not the stage shows it.
+reset = ["conversation"]
+hide = ["model_preview", "model"]
+# The built mesh becomes the run's `model` artifact, handed back with no
+# submit_output call.
+output_routing = { "model/*" = "model", "image/*" = "model_preview" }
+output = { artifacts = [{ name = "model", mime_type = "model/gltf-binary", required = true }] }

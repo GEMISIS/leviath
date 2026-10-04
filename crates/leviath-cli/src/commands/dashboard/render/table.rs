@@ -1689,8 +1689,8 @@ mod tests {
         assert!(buf.contains("PAUSED"), "{buf}");
     }
 
-    /// A run whose `meta.json` predates the field renders exactly as it did
-    /// before, rather than claiming a reason nobody recorded.
+    /// A run whose record has no wait reason renders as a bare status, rather
+    /// than claiming a reason nobody recorded.
     #[test]
     fn a_waiting_row_without_a_reason_reads_as_it_always_did() {
         let backend = TestBackend::new(120, 40);

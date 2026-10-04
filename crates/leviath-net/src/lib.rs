@@ -5,7 +5,7 @@
 //! description pasted from an issue. Handing such a URL straight to an HTTP
 //! client turns the agent into a confused deputy sitting *inside* the user's
 //! network: `http://169.254.169.254/latest/meta-data/iam/security-credentials/`
-//! returns cloud credentials, `http://127.0.0.1:3000/api/agents` is the user's
+//! returns cloud credentials, `http://127.0.0.1:3000/api/runs` is the user's
 //! own Leviath API, and `http://192.168.1.1/` is their router.
 //!
 //! [`check_url`] is the gate. It runs before the request and again on every

@@ -10,28 +10,47 @@
 //!
 //! [`AgentWorld`] is the front door for running agents inside your own
 //! application - no `lev` CLI, daemon, or config file. Build a world from
-//! plain values, spawn an agent, and drive the event stream:
+//! plain values, ask for a run, and drive the event stream. A run is asked
+//! for with the same typed request every front door takes; here it carries a
+//! whole graph rather than naming a blueprint:
 //!
 //! ```no_run
-//! use leviath_runtime::{AgentWorld, BlueprintSource, ProviderCreds, SpawnSpec, WorldEvent};
+//! use leviath_runtime::spec::graph::RunGraph;
+//! use leviath_runtime::spec::inputs::RawInput;
+//! use leviath_runtime::spec::request::{SpawnRequest, SpawnSource};
+//! use leviath_runtime::{AgentWorld, ProviderCreds, WorldEvent};
 //!
 //! # async fn embed() -> Result<(), Box<dyn std::error::Error>> {
+//! let graph: RunGraph = toml::from_str(
+//!     r#"
+//!     [[stages]]
+//!     name = "main"
+//!     system_prompt = "Do the task."
+//!     model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }] }
+//!
+//!     [layout]
+//!     total_budget_tokens = 100000
+//!     regions = [{ name = "task", kind = "pinned", budget = 4000 }]
+//!
+//!     [[inputs]]
+//!     name = "task"
+//!     type = "text"
+//!     required = true
+//!     binds = [{ region = "task" }]
+//!     "#,
+//! )?;
 //! let world = AgentWorld::builder()
 //!     .provider(ProviderCreds {
-//!         name: "anthropic".to_string(),
 //!         api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
 //!         ..ProviderCreds::simple("anthropic")
 //!     })
+//!     .workdir(std::env::current_dir()?)
 //!     .build()?;
 //!
+//! let request = SpawnRequest::new(SpawnSource::Raw(Box::new(graph)))
+//!     .input("task", RawInput::Text("Build a CSV parser".into()));
 //! let mut events = world.events();
-//! let run = world
-//!     .spawn(SpawnSpec::new(
-//!         BlueprintSource::Path("coder.leviath".into()),
-//!         "Build a CSV parser",
-//!         std::env::current_dir()?,
-//!     ))
-//!     .await?;
+//! let run = world.spawn(request).await?;
 //!
 //! while let Some(event) = events.next().await {
 //!     match event {
@@ -62,6 +81,8 @@
 
 // Public because [`tool_bridge::ToolJob`] carries a `CancelToken`, so anything
 // handing work to the tool lane needs to name the type.
+pub(crate) mod approval_prompt;
+pub mod bind;
 pub mod blob_store;
 pub mod cancel;
 pub(crate) mod compaction_bridge;
@@ -78,8 +99,10 @@ pub mod fanout;
 pub(crate) mod gate_prompt;
 pub mod host;
 pub(crate) mod inference_bridge;
+pub(crate) mod inference_call;
 pub mod inference_pool;
 pub(crate) mod inference_usage;
+pub mod insert;
 pub mod interaction_hub;
 pub mod interaction_points;
 pub(crate) mod lane_supervisor;
@@ -93,16 +116,23 @@ pub mod provider_creds;
 pub mod provider_files;
 pub(crate) mod providers;
 pub(crate) mod repetition;
+pub mod resolve;
 pub mod restore;
+pub mod runfile;
 pub(crate) mod runtime_info_tool;
 pub mod script_provider;
+pub mod spec;
 pub(crate) mod stage_seeds;
+pub mod state;
 pub mod taint;
 pub mod telemetry;
+#[cfg(test)]
+pub(crate) mod test_graph;
 pub(crate) mod tick_scope;
 pub mod title;
 pub(crate) mod title_bridge;
 pub mod tool_bridge;
+mod tool_guard;
 pub mod world;
 // test_support.rs gates itself with an inner `#![cfg(test)]` attribute, so no
 // `#[cfg(test)]` is needed here (adding one would trigger clippy's
@@ -110,12 +140,9 @@ pub mod world;
 mod test_support;
 
 pub use components::{AgentState, AgentStatus, ContextWindow, ParentRef, SubAgentChildren};
-pub use embed::{
-    AgentWorld, AgentWorldBuilder, BasicToolService, BlueprintSource, EmbedError, EventStream,
-    RunId, SpawnSpec,
-};
+pub use embed::{AgentWorld, AgentWorldBuilder, BasicToolService, EmbedError, EventStream, RunId};
 pub use fanout::{FanOutSpawner, FanOutSpawnerRes};
-pub use host::{ControlOp, SpawnArgs, WorldEvent, WorldHost};
+pub use host::{ControlOp, PreparedRun, RunStarter, WorldEvent, WorldHost};
 pub use inference_bridge::{
     CAPACITY_BASE_DELAY_SECS, CAPACITY_MAX_DELAY_SECS, DEFAULT_RETRY_ATTEMPTS,
     DEFAULT_RETRY_BASE_DELAY_MS, MAX_TOTAL_BACKOFF_SECS, REACHED_BASE_DELAY_SECS, RetryPolicy,

@@ -1,22 +1,28 @@
 //! Reading the runs directory, off the draw loop.
 //!
-//! Everything the run list knows comes from disk: every run's `meta.json` and
-//! `stages.json`, the blueprint each one was started from, and the context
-//! window of the run on screen. With thousands of runs, asking the disk those
-//! questions on the draw loop would put every stat, parse and manifest read
-//! between one frame and the next, and between a key and its answer.
+//! Everything the run list knows comes from disk: every run's record, and
+//! for the run on screen its stage ledger, the graph it runs and its context
+//! window. With thousands of runs, asking the disk those questions on the
+//! draw loop would put every stat and parse between one frame and the next,
+//! and between a key and its answer.
+//!
+//! The records come from the run index, a stat apiece. The rest of a run is in
+//! its run file, which only the run on screen has read: the list draws from
+//! records alone, and only the detail view, the explorer and the band draw a
+//! ledger or a graph, all of them for the run on screen.
 //!
 //! [`RunLoader`] does the reading and returns a [`RunSnapshot`]. The dashboard
 //! runs one on a thread of its own ([`spawn_run_feed`]) and picks up the newest
 //! snapshot each tick without waiting for it. Tests call
 //! [`RunLoader::collect`] directly, which reads the same files the same way.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use leviath_core::run_meta::StageRecord;
+use leviath_runtime::spec::graph::RunGraph;
 use tokio::sync::watch;
 
 use crate::runstate::{self, ContextSnapshot, RunMeta, StatCache};
@@ -27,14 +33,29 @@ use crate::tui::flowgraph::StageGraph;
 #[derive(Debug, Clone)]
 pub(crate) struct RunEntry {
     pub(crate) meta: Arc<RunMeta>,
-    /// The run's stage ledger; empty until it has one, and in the first,
-    /// list-only snapshot.
+    /// The run's stage ledger; empty until it has one, and until the run has
+    /// been on screen.
     pub(crate) stages: Arc<Vec<StageRecord>>,
-    /// Whether `stages` was read, rather than skipped for a list-only pass.
-    stages_read: bool,
-    /// The graph of the blueprint the run was started from, or `None` when
-    /// its manifest cannot be read.
+    /// Whether `stages` and `graph` were read, which they are once the run is
+    /// on screen.
+    detail_read: bool,
+    /// The graph the run runs, read off its run file's spec, or `None` while
+    /// the run has no run file this build reads, and until the run has been
+    /// on screen.
     pub(crate) graph: Option<Arc<StageGraph>>,
+}
+
+#[cfg(test)]
+impl RunEntry {
+    /// A run as a list-only pass reads it, from its record alone.
+    pub(crate) fn listed(meta: RunMeta) -> Self {
+        Self {
+            meta: Arc::new(meta),
+            stages: Arc::default(),
+            detail_read: false,
+            graph: None,
+        }
+    }
 }
 
 /// Everything read from the runs directory in one pass.
@@ -50,28 +71,32 @@ pub(crate) struct RunSnapshot {
 }
 
 /// The reader behind a [`RunSnapshot`], with its caches. Each file is parsed
-/// again only when its stat changes, and a blueprint's graph is built once per
-/// manifest version however many runs were started from it: a fan-out of fifty
-/// workers is fifty runs and one blueprint.
+/// again only when its stat changes. A run's graph is read once, since a run's
+/// spec never changes, and drawn once however many runs share it: a fan-out
+/// of fifty workers is fifty runs and one graph.
 #[derive(Default)]
 pub(crate) struct RunLoader {
     listing: runstate::RunDirListing,
     metas: StatCache<RunMeta>,
     stages: StatCache<Vec<StageRecord>>,
     contexts: StatCache<ContextSnapshot>,
-    graphs: StatCache<StageGraph>,
-    /// Last round's runs, by the address of their `meta.json` record. The
-    /// meta cache hands back the same record until the file changes, so a
+    /// Each run's drawn graph, by run id.
+    run_graphs: HashMap<String, Arc<StageGraph>>,
+    /// Every distinct graph read so far and its drawing, so runs of one graph
+    /// share one.
+    drawn: Vec<(RunGraph, Arc<StageGraph>)>,
+    /// Last round's runs, by the address of their run record. The meta cache
+    /// hands back the same record until the run file changes, so a
     /// finished run found here is unchanged since last round, and so are its
     /// stage ledger and graph: they are reused without asking the disk.
     last: HashMap<usize, RunEntry>,
 }
 
 impl RunLoader {
-    /// Read the runs directory. `showing` is the run whose context window is
-    /// worth reading, the one the detail view draws; `with_stages` is false
-    /// only for the first snapshot, so the list can appear before every stage
-    /// ledger has been parsed.
+    /// Read the runs directory. `showing` is the run whose ledger, graph and
+    /// context window are worth reading, the one the detail view draws;
+    /// `with_stages` is false only for the first snapshot, so the list can
+    /// appear before any run file has been read.
     pub(crate) fn collect(&mut self, showing: Option<&str>, with_stages: bool) -> RunSnapshot {
         let taken_at = std::time::Instant::now();
         let metas = runstate::list_runs_cached(&mut self.metas, &mut self.listing);
@@ -80,41 +105,39 @@ impl RunLoader {
             let live_dirs = self.listing.dir_set();
             self.stages.retain_under(&live_dirs);
             self.contexts.retain_under(&live_dirs);
+            let ids: HashSet<&str> = metas.iter().map(|m| m.run_id.as_str()).collect();
+            self.run_graphs.retain(|id, _| ids.contains(id.as_str()));
         }
-        let mut graphs: HashMap<&str, Option<Arc<StageGraph>>> = HashMap::new();
         let mut runs = Vec::with_capacity(metas.len());
         let mut last = HashMap::with_capacity(metas.len());
         for meta in &metas {
             let key = Arc::as_ptr(meta) as usize;
+            let detail = with_stages && showing == Some(meta.run_id.as_str());
             // A finished run whose record is the one read last round. Its
-            // ledger is final too, unless last round skipped the ledgers.
+            // ledger and graph are final too, once they have been read.
             if let Some(known) = self.last.remove(&key)
                 && !runstate::settle_window(meta).is_zero()
-                && (known.stages_read || !with_stages)
+                && (known.detail_read || !detail)
             {
                 runs.push(known.clone());
                 last.insert(key, known);
                 continue;
             }
-            let stages = if with_stages {
-                runstate::read_stages_index_settled(
-                    &meta.run_id,
-                    &mut self.stages,
-                    runstate::settle_window(meta),
-                )
-            } else {
-                Arc::default()
+            let (stages, graph) = match detail {
+                true => (
+                    runstate::read_stages_index_settled(
+                        &meta.run_id,
+                        &mut self.stages,
+                        runstate::settle_window(meta),
+                    ),
+                    self.graph_of(&meta.run_id),
+                ),
+                false => (Arc::default(), None),
             };
-            let graph = graphs
-                .entry(meta.agent_path.as_str())
-                .or_insert_with(|| {
-                    super::graph::load_stage_graph_cached(&meta.agent_path, &mut self.graphs)
-                })
-                .clone();
             let entry = RunEntry {
                 meta: meta.clone(),
                 stages,
-                stages_read: with_stages,
+                detail_read: detail,
                 graph,
             };
             runs.push(entry.clone());
@@ -131,6 +154,27 @@ impl RunLoader {
             runs,
             context,
         }
+    }
+
+    /// The drawn graph of `run_id`, read off the front of its run file the
+    /// first time and kept after. A run with no readable run file yet is
+    /// asked again next round.
+    fn graph_of(&mut self, run_id: &str) -> Option<Arc<StageGraph>> {
+        if let Some(known) = self.run_graphs.get(run_id) {
+            return Some(known.clone());
+        }
+        let spec = runstate::run_file::spec_in(&runstate::run_dir(run_id)).ok()?;
+        let graph = &spec.graph;
+        let drawn = match self.drawn.iter().find(|(seen, _)| seen == graph) {
+            Some((_, drawn)) => drawn.clone(),
+            None => {
+                let drawn = Arc::new(StageGraph::from_graph(graph));
+                self.drawn.push((graph.clone(), drawn.clone()));
+                drawn
+            }
+        };
+        self.run_graphs.insert(run_id.to_string(), drawn.clone());
+        Some(drawn)
     }
 }
 
@@ -199,7 +243,7 @@ fn run_feed_loop(
 ) {
     let mut on_screen: Option<String> = None;
     // The list first, then the rest: every column of the run list comes from
-    // `meta.json`, so the list can be drawn before the stage ledgers are read.
+    // the run's record, so the list can be drawn before the stage ledgers are read.
     let mut with_stages = false;
     loop {
         let snapshot = loader.collect(on_screen.as_deref(), with_stages);
@@ -265,39 +309,26 @@ mod tests {
             stage_name: "main".to_string(),
             total_tokens: 1,
             max_tokens: 10,
-            regions: vec![],
+            regions: vec![crate::test_fixtures::fixtures::region("task")],
         }
     }
 
-    /// A manifest file the graph loader can parse, from a bundled agent.
-    fn write_manifest(dir: &std::path::Path) -> String {
-        let manifest = crate::bundled::BUNDLED_AGENTS[0]
-            .files
-            .iter()
-            .find(|(path, _)| *path == leviath_core::files::MANIFEST_FILENAME)
-            .map(|(_, content)| *content)
-            .unwrap();
-        let path = dir.join(leviath_core::files::MANIFEST_FILENAME);
-        std::fs::write(&path, manifest).unwrap();
-        path.to_string_lossy().into_owned()
-    }
-
-    /// One pass reads every run, newest first; the list-only pass leaves the
-    /// ledgers out; the run on screen, and only that one, brings its context
-    /// window; and runs of one blueprint share one graph.
+    /// One pass reads every run, newest first, from its record; and the run
+    /// on screen, and only that one, brings its ledger, its graph and its
+    /// context window. The list-only pass reads no run file at all.
     #[test]
     fn collect_reads_the_runs_directory() {
-        let blueprint = tempfile::tempdir().unwrap();
-        let agent_path = write_manifest(blueprint.path());
+        let agent_path = "/p";
         with_isolated_runs_dir("run-loader-collect", |_| {
-            create_run(&run("older", &agent_path, RunStatus::Complete, 10)).unwrap();
-            create_run(&run("newer", &agent_path, RunStatus::Running, 20)).unwrap();
+            create_run(&run("older", agent_path, RunStatus::Complete, 10)).unwrap();
+            create_run(&run("newer", agent_path, RunStatus::Running, 20)).unwrap();
             create_run(&run("lost", "/no/such/blueprint", RunStatus::Complete, 5)).unwrap();
             for id in ["older", "newer"] {
                 runstate::write_stages_index(id, &[StageRecord::new("main".to_string(), 0)])
                     .unwrap();
             }
             runstate::write_context_snapshot("newer", &context()).unwrap();
+            runstate::write_context_snapshot("older", &context()).unwrap();
 
             let mut loader = RunLoader::default();
             let list_only = loader.collect(Some("newer"), false);
@@ -309,23 +340,100 @@ mod tests {
             assert_eq!(ids, ["newer", "older", "lost"]);
             assert!(list_only.runs.iter().all(|r| r.stages.is_empty()));
             assert_eq!(list_only.context.as_ref().unwrap().0, "newer");
-            let (a, b) = (&list_only.runs[0].graph, &list_only.runs[1].graph);
-            assert!(Arc::ptr_eq(a.as_ref().unwrap(), b.as_ref().unwrap()));
-            assert!(list_only.runs[2].graph.is_none(), "an unreadable blueprint");
+            // The list is drawn from the run index alone: no run file is
+            // opened for a graph before the rows are on screen.
+            assert!(list_only.runs.iter().all(|r| r.graph.is_none()));
 
-            // The full pass reads the ledgers, the settled run's included,
-            // which the list-only pass had skipped.
+            // The full pass reads the ledger and the graph of the run on
+            // screen, a settled one included, and of no other.
             let full = loader.collect(Some("older"), true);
-            assert!(full.runs.iter().take(2).all(|r| r.stages.len() == 1));
-            assert!(full.context.is_none(), "`older` has no context file");
+            let read: Vec<(&str, usize, bool)> = full
+                .runs
+                .iter()
+                .map(|r| (r.meta.run_id.as_str(), r.stages.len(), r.graph.is_some()))
+                .collect();
+            assert_eq!(
+                read,
+                [("newer", 0, false), ("older", 1, true), ("lost", 0, false)]
+            );
+            assert_eq!(full.context.as_ref().unwrap().0, "older");
+            // Moving on keeps what was read for a finished run.
+            let moved = loader.collect(Some("newer"), true);
+            assert_eq!(moved.runs[0].stages.len(), 1);
+            assert_eq!(moved.runs[1].stages.len(), 1);
 
             // A run the directory does not hold brings no context either.
             assert!(loader.collect(Some("gone"), true).context.is_none());
+            // Nor a graph: one whose file went between the listing and the
+            // read is asked for again next round.
+            assert!(loader.graph_of("gone").is_none());
         });
     }
 
+    /// A run's graph is read off its run file's spec, once, and runs of the
+    /// same graph share one drawing; a run of another graph has its own.
+    #[tokio::test]
+    async fn runs_of_one_graph_share_one_drawing_read_off_their_run_files() {
+        use leviath_runtime::runfile::{CheckpointPolicy, RunFileWriter};
+        crate::runstate::with_isolated_runs_dir_async("run-loader-graphs", |_| async move {
+            let agent = tempfile::tempdir().unwrap();
+            let manifest = crate::test_support::write_test_agent(
+                agent.path(),
+                crate::test_support::inline_coder_manifest(),
+            );
+            let mut registry = leviath_runtime::ProviderRegistry::new();
+            registry.register(
+                "anthropic".to_string(),
+                Arc::new(crate::test_support::FakeProvider::new().context_window(100_000)),
+            );
+            let first = crate::daemon::starter::testing::run_on_disk(
+                crate::config::Config::default(),
+                registry,
+                &runstate::runs_dir(),
+                &manifest,
+            );
+            // The same spec again, as a run of its own.
+            let reader = runstate::run_file::open_in(&runstate::run_dir(&first)).unwrap();
+            let mut spec = reader.spec().clone();
+            spec.run_id = leviath_runtime::spec::names::RunId::new("twin").unwrap();
+            let twin = runstate::run_dir("twin");
+            std::fs::create_dir_all(&twin).unwrap();
+            RunFileWriter::create(
+                &runstate::run_file::path_in(&twin),
+                &spec,
+                &leviath_runtime::spec::env::CodeFiles::new(),
+                &reader.state_at(0).unwrap(),
+                CheckpointPolicy::default(),
+            )
+            .unwrap();
+            create_run(&run("lost", "/p", RunStatus::Complete, 1)).unwrap();
+
+            let mut loader = RunLoader::default();
+            let graph_of = |snap: &RunSnapshot, id: &str| {
+                snap.runs
+                    .iter()
+                    .find(|r| r.meta.run_id == id)
+                    .unwrap()
+                    .graph
+                    .clone()
+            };
+            let mut shown = |id: &str| graph_of(&loader.collect(Some(id), true), id);
+            let one = shown(&first).expect("read off the run file");
+            assert!(Arc::ptr_eq(&one, &shown("twin").unwrap()));
+            assert!(!Arc::ptr_eq(&one, &shown("lost").unwrap()));
+            assert!(one.node("analyze").is_some());
+            // The next pass hands back the drawing it kept.
+            assert!(Arc::ptr_eq(&one, &shown(&first).unwrap()));
+            // A run whose file is not there (yet) has no drawing, and is
+            // asked again next round.
+            assert!(loader.graph_of("no-such-run").is_none());
+        })
+        .await;
+    }
+
     /// A finished run whose record has not changed is handed back as it was,
-    /// ledger and all, without asking the disk; a live run is read again.
+    /// ledger and all, without asking the disk; the live run on screen is
+    /// read again.
     #[test]
     fn collect_reuses_a_settled_run_and_rereads_a_live_one() {
         with_isolated_runs_dir("run-loader-reuse", |_| {
@@ -340,14 +448,14 @@ mod tests {
                 runstate::write_stages_index(id, &one).unwrap();
             }
             let mut loader = RunLoader::default();
-            let first = loader.collect(None, true);
+            let first = loader.collect(Some("done"), true);
 
             // Both ledgers change on disk. The finished run's record did not,
             // so its ledger is not looked at; the live one's is.
             for id in ["done", "live"] {
                 runstate::write_stages_index(id, &two).unwrap();
             }
-            let second = loader.collect(None, true);
+            let second = loader.collect(Some("live"), true);
             let by_id = |snap: &RunSnapshot, id: &str| {
                 snap.runs
                     .iter()

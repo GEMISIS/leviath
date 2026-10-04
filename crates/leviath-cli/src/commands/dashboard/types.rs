@@ -3,7 +3,9 @@
 use clap::Args;
 
 use super::theme::{C_ACTIVE, C_DIM, C_ERROR, C_SUCCESS, C_WARN};
-use super::theme::{GLYPH_ACTIVE, GLYPH_COMPLETE, GLYPH_ERROR, GLYPH_PENDING, GLYPH_WAITING};
+use super::theme::{
+    GLYPH_ACTIVE, GLYPH_CANCELLED, GLYPH_COMPLETE, GLYPH_ERROR, GLYPH_PENDING, GLYPH_WAITING,
+};
 use crate::tui::flowgraph::FlowView;
 
 use crate::runstate::{self, StageRecord};
@@ -21,7 +23,7 @@ pub(super) enum StageContentMode {
     Output,
     Logs,
     Context,
-    /// The run's submitted answer, exactly as `GET /api/agents/{id}/result`
+    /// The run's submitted answer, exactly as `GET /api/runs/{id}/result`
     /// serves it. Offered only while the selected run has one.
     FinalOutput,
 }
@@ -281,7 +283,7 @@ impl std::fmt::Display for AgentDisplayStatus {
             Self::CompleteInteractive => write!(f, "{}COMPLETE", GLYPH_COMPLETE),
             Self::Error(msg) => write!(f, "{}ERROR: {}", GLYPH_ERROR, msg),
             Self::Paused => write!(f, "{}PAUSED", GLYPH_PENDING),
-            Self::Cancelled => write!(f, "⊘CANCEL"),
+            Self::Cancelled => write!(f, "{}CANCEL", GLYPH_CANCELLED),
             Self::Stale => write!(f, "{}STALE", GLYPH_ERROR),
         }
     }
@@ -321,7 +323,7 @@ impl AgentDisplayStatus {
 pub(crate) struct DashboardAgent {
     /// The run id, which is also what every action against this row quotes.
     pub id: String,
-    /// The blueprint's name, as the manifest declares it.
+    /// The blueprint's name, as its `agent.toml` declares it.
     pub blueprint_name: String,
     /// The stage the run is in, by name.
     pub stage: String,
@@ -344,29 +346,28 @@ pub(crate) struct DashboardAgent {
     /// Shown because the run does not otherwise look any different: a broken
     /// output validator is skipped rather than fatal, so the run completes,
     /// reports success, and the only trace is a line in the daemon log. Empty
-    /// on a healthy run and on one written before the field existed.
+    /// on a healthy run.
     pub broken_scripts: Vec<String>,
     /// The question a waiting run is asking, in one line, for the list row.
     pub waiting_prompt: Option<String>,
-    /// Why a waiting run is parked, when `meta.json` says.
+    /// Why a waiting run is parked, when the run's record says.
     ///
     /// WAITING on its own reads as "go and answer it", which is wrong for a
     /// parent whose fan-out workers are still churning. `None` on a run that
-    /// is not parked, and on one written by a build from before the field
-    /// existed, which is why the row falls back to the bare status rather
-    /// than assuming.
+    /// is not parked, and on one whose record does not say, which is why the
+    /// row falls back to the bare status rather than assuming.
     pub wait_reason: Option<leviath_core::run_meta::WaitReason>,
     /// Full structured interaction request (populated for WaitingInput agents)
     pub pending_request: Option<interaction::InteractionRequest>,
     /// The request_id we most recently submitted a response for, used to suppress
     /// re-showing the same prompt before the worker has consumed the response.
     pub last_answered_request_id: Option<String>,
-    /// Live context window snapshot from context.json (background workers only)
+    /// Live context window snapshot from the run file (background workers only)
     /// Shared, not owned: the live snapshot comes out of the sync tick's
     /// stat-gated cache, and cloning a full context window per tick is the
     /// churn that cache exists to remove.
     pub context_snapshot: Option<std::sync::Arc<runstate::ContextSnapshot>>,
-    /// Per-stage records from stages.json, shared with the loader's cache.
+    /// Per-stage records from the run's stage ledger, shared with the loader's cache.
     pub stages: std::sync::Arc<Vec<StageRecord>>,
     /// Working directory the agent ran in
     pub workdir: String,
@@ -396,8 +397,8 @@ pub(crate) struct DashboardAgent {
     /// stage tabs render. Capped at the run's `updated_at` when nothing is
     /// driving the run, so an abandoned run's stage does not tick forever.
     pub clock_now: i64,
-    /// The blueprint's stage graph, loaded once when the run first appears.
-    /// `None` when the manifest could not be read: the run still shows, the
+    /// The run's stage graph, read off its run file when the run first
+    /// appears. `None` when it could not be read: the run still shows, the
     /// graph surfaces say why they are empty. Shared, not owned: the detail
     /// view clones the whole agent every frame.
     pub(super) graph: Option<std::sync::Arc<crate::tui::flowgraph::StageGraph>>,
@@ -570,7 +571,7 @@ pub(super) struct NewRunAgent {
     /// Where it came from: `installed`, `configured`, `local`, or `bundled`.
     pub(super) source: String,
     pub(super) description: String,
-    /// What gets handed to `lev run`'s resolver: the manifest's directory for a
+    /// What gets handed to `lev run`'s resolver: the blueprint's directory for a
     /// discovered agent, the bare name for a bundled one (which resolves only
     /// once `lev setup` has installed it - and says so if it has not).
     pub(super) path: String,
@@ -594,8 +595,8 @@ pub(super) struct NewRunContext {
 ///
 /// Resolving a blueprint reads and parses files and the spawn itself is a
 /// socket round trip, so neither happens on the draw loop.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct SpawnCommand {
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct NewRunCommand {
     /// The agent path or name to resolve.
     pub(super) agent_path: String,
     /// The task text as typed.
@@ -607,15 +608,15 @@ pub(super) struct SpawnCommand {
     /// The yolo profile it does that under, when one was picked.
     pub(super) yolo_profile: Option<String>,
     /// The files the task named with `@path`, read from the workdir, and
-    /// the files the Inputs pane's slots named, each in its region.
+    /// the files the Inputs pane's slots named.
     pub(super) parts: Vec<leviath_core::mime::InboundPart>,
-    /// Text the Inputs pane's slots seed regions with, by caller key: what
-    /// `--<key> text` sends on the command line.
-    pub(super) regions: std::collections::HashMap<String, String>,
+    /// The Inputs pane's values, each read by its input's declared type:
+    /// what `--input name=value` sends on the command line.
+    pub(super) values: std::collections::BTreeMap<String, leviath_runtime::spec::inputs::RawInput>,
 }
 
-/// The result of a [`SpawnCommand`], drained each tick and shown as a toast.
-#[derive(Debug, PartialEq, Eq)]
+/// The result of a [`NewRunCommand`], drained each tick and shown as a toast.
+#[derive(Debug, Default, PartialEq)]
 pub(super) struct SpawnOutcome {
     /// Human-readable result to toast.
     pub(super) message: String,
@@ -623,6 +624,20 @@ pub(super) struct SpawnOutcome {
     pub(super) ok: bool,
     /// The id the daemon gave it, so the dashboard can open its page.
     pub(super) run_id: Option<String>,
+    /// A run the daemon refused for something wrong with its inputs: the
+    /// new-run screen opens again on it, each problem beside its input.
+    pub(super) refused: Option<RefusedRun>,
+}
+
+/// A run the daemon refused, as the new-run screen shows it again.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct RefusedRun {
+    /// The agent path or name the run named.
+    pub(super) agent_path: String,
+    /// The task as typed, so it is not lost.
+    pub(super) task: String,
+    /// Every problem the daemon found.
+    pub(super) issues: leviath_runtime::spec::issues::SpawnIssues,
 }
 
 /// Toast notification shown as an overlay.

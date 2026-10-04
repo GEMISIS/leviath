@@ -737,6 +737,16 @@ impl MarkdownEdit {
         }
     }
 
+    /// Where the button for `action` landed in the last frame, if it was
+    /// drawn: what a click is matched against, so a test presses exactly it.
+    #[cfg(test)]
+    pub(crate) fn button(&self, action: MdAction) -> Option<Rect> {
+        self.slots
+            .iter()
+            .find(|(_, slot)| *slot == Slot::Format(action))
+            .map(|(rect, _)| *rect)
+    }
+
     /// The cell at `(column, row)`, in absolute screen coordinates.
     fn slot_at(&self, column: u16, row: u16) -> Option<Slot> {
         self.slots

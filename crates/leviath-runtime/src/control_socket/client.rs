@@ -14,7 +14,8 @@ use super::{
     AUTH_REQUIRED, ClientStream, ControlId, ControlRequest, ControlResponse, ControlToken,
     DaemonIdentity, INVALID_REQUEST, SHUTTING_DOWN, connect,
 };
-use crate::host::{SpawnArgs, WorldEvent};
+use crate::host::WorldEvent;
+use crate::spec::request::SpawnRequest;
 
 /// How long a control request waits for the daemon before giving up, when
 /// `LEVIATH_CONTROL_TIMEOUT_SECS` is unset.
@@ -23,11 +24,12 @@ use crate::host::{SpawnArgs, WorldEvent};
 /// wedged one is reported rather than waited on indefinitely.
 pub const DEFAULT_CONTROL_TIMEOUT_SECS: u64 = 30;
 
-/// Floor on the deadline for a `Spawn`, which does more work than the other ops:
-/// the daemon connects the blueprint's MCP servers before spawning, and each of
-/// those has its own 30s connect timeout, so a blueprint declaring several
-/// servers can legitimately outlast the ordinary deadline. Without this floor a
-/// slow-but-succeeding spawn would be reported to the user as a timeout.
+/// Floor on the deadline for a `Spawn` or a `ValidateSpawn`, which do more work
+/// than the other ops: the daemon connects the graph's MCP servers and runs its
+/// seeds before answering, and each server has its own 30s connect timeout, so
+/// a graph declaring several servers can legitimately outlast the ordinary
+/// deadline. Without this floor a slow-but-succeeding spawn would be reported
+/// to the user as a timeout.
 pub const SPAWN_CONTROL_TIMEOUT_SECS: u64 = 300;
 
 /// The deadline for one control request. `LEVIATH_CONTROL_TIMEOUT_SECS`
@@ -45,17 +47,35 @@ pub(crate) fn request_timeout() -> std::time::Duration {
 }
 
 /// The deadline for `req`: [`request_timeout`], raised to at least
-/// [`SPAWN_CONTROL_TIMEOUT_SECS`] for a `Spawn`. An explicitly disabled deadline
-/// (`0`) stays disabled.
+/// [`SPAWN_CONTROL_TIMEOUT_SECS`] for a `Spawn` or a `ValidateSpawn`. An
+/// explicitly disabled deadline (`0`) stays disabled.
 pub(super) fn timeout_for(req: &ControlRequest) -> std::time::Duration {
     let base = request_timeout();
     match req {
-        ControlRequest::Spawn { .. } if base != std::time::Duration::MAX => {
+        ControlRequest::Spawn { .. } | ControlRequest::ValidateSpawn { .. }
+            if base != std::time::Duration::MAX =>
+        {
             base.max(std::time::Duration::from_secs(SPAWN_CONTROL_TIMEOUT_SECS))
         }
         _ => base,
     }
 }
+
+/// How long a request waits before asking a starting daemon again.
+const STARTUP_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// What a client tells its [`StartupWatch`] while a daemon starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupEvent<'a> {
+    /// The daemon is still starting, and this is what it is doing.
+    Progress(&'a super::StartupProgress),
+    /// The daemon it was waiting on is ready.
+    Ready,
+}
+
+/// Who a client tells, while a request waits on a starting daemon, what the
+/// daemon is doing.
+pub type StartupWatch = std::sync::Arc<dyn Fn(StartupEvent<'_>) + Send + Sync>;
 
 /// How long a long-lived client keeps trying to reach a daemon that has just
 /// stopped answering before it reports the daemon unreachable. Opted into with
@@ -231,6 +251,9 @@ fn pipe_busy(_: &std::io::Error) -> bool {
 /// on a different build is reported as such.
 #[derive(Clone)]
 pub struct ControlClient {
+    /// Who is told while the daemon is still starting. `None` waits it out
+    /// in silence.
+    watch: Option<StartupWatch>,
     id: ControlId,
     /// Shared across clones - see [`Link`].
     link: std::sync::Arc<std::sync::Mutex<Link>>,
@@ -259,6 +282,7 @@ impl ControlClient {
             token_dir: None,
             grace: std::time::Duration::ZERO,
             own: DaemonIdentity::this_process(DaemonIdentity::unknown_build()),
+            watch: None,
         }
     }
 
@@ -313,6 +337,7 @@ impl ControlClient {
             token_dir: Some(dir.to_path_buf()),
             grace: std::time::Duration::ZERO,
             own: DaemonIdentity::this_process(DaemonIdentity::unknown_build()),
+            watch: None,
         }
     }
 
@@ -454,7 +479,56 @@ impl ControlClient {
     /// with the remedy in the message; that is the one failure a restart of
     /// the daemon does not fix, because the process that needs restarting is
     /// this one.
+    ///
+    /// A daemon that is still starting answers with what it is doing instead
+    /// (see [`StartupProgress`](super::StartupProgress)), having done nothing
+    /// with the request. That is shown to the [`StartupWatch`] and the request
+    /// sent again until the daemon is ready, however long that takes: a
+    /// daemon that answers is not one that stopped answering.
     pub async fn request(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
+        let mut waited = false;
+        loop {
+            match self.request_once(req).await? {
+                ControlResponse::Starting { progress } => {
+                    waited = true;
+                    self.tell(StartupEvent::Progress(&progress));
+                    tokio::time::sleep(STARTUP_POLL).await;
+                }
+                response => {
+                    if waited {
+                        self.tell(StartupEvent::Ready);
+                    }
+                    return Ok(response);
+                }
+            }
+        }
+    }
+
+    /// Wait until the daemon is ready, telling the [`StartupWatch`] how its
+    /// start-up goes. Asks the status of no run, which a ready daemon answers
+    /// at once.
+    pub async fn wait_until_started(&self) -> std::io::Result<()> {
+        self.request(&ControlRequest::Status {
+            run_id: String::new(),
+        })
+        .await
+        .map(drop)
+    }
+
+    /// Tell whoever watches how the daemon's start-up goes.
+    fn tell(&self, event: StartupEvent<'_>) {
+        self.watch.iter().for_each(|watch| watch(event));
+    }
+
+    /// Show a starting daemon's progress to `watch` while a request waits on
+    /// it.
+    pub fn with_startup_watch(mut self, watch: StartupWatch) -> Self {
+        self.watch = Some(watch);
+        self
+    }
+
+    /// One send of `req`, under its deadline.
+    async fn request_once(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
         // The daemon services control ops from a single loop, so one op that
         // takes a long time (or a wedged world) delays every other client. With
         // no deadline, `lev cancel` and the dashboard simply hung - no output, no
@@ -637,10 +711,26 @@ impl ControlClient {
         }
     }
 
-    /// Spawn a new agent.
-    pub async fn spawn(&self, args: SpawnArgs) -> std::io::Result<ControlResponse> {
+    /// Start a run.
+    pub async fn spawn(&self, request: SpawnRequest) -> std::io::Result<ControlResponse> {
         self.request(&ControlRequest::Spawn {
-            args: Box::new(args),
+            request: Box::new(request),
+        })
+        .await
+    }
+
+    /// Resolve a run without starting it.
+    pub async fn validate_spawn(&self, request: SpawnRequest) -> std::io::Result<ControlResponse> {
+        self.request(&ControlRequest::ValidateSpawn {
+            request: Box::new(request),
+        })
+        .await
+    }
+
+    /// Read a run's state.
+    pub async fn inspect(&self, run_id: &str) -> std::io::Result<ControlResponse> {
+        self.request(&ControlRequest::Inspect {
+            run_id: run_id.to_string(),
         })
         .await
     }

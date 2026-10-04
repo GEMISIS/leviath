@@ -17,8 +17,8 @@ with a `name: StringFilter` field carrying the same doc comment, the quantifier
 input `RegionListInput` with `some` / `every` / `none`, and the trait impls that
 hand every decision to a runtime module the caller points the macro at.
 
-A resolver that shapes its answer for the client — a page of a list rather than
-the list — says what a filter on it is really about:
+Some resolvers shape their answer for the client, such as a page of a list
+rather than the list. Such a resolver says what a filter on it is really about:
 
 ```rust
 #[filter(io, with = "run_relations::stages_of", ty = "Vec<StageRecord>")]

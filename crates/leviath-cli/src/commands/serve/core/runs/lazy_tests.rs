@@ -293,6 +293,35 @@ async fn a_search_of_the_record_is_settled_without_a_file() {
     );
 }
 
+/// Put a needle in `run_id`'s window, as of its last step.
+fn needle_in_window(run_id: &str) {
+    crate::runstate::write_context_snapshot(
+        run_id,
+        &leviath_core::run_meta::ContextSnapshot {
+            stage_name: "work".to_string(),
+            total_tokens: 1,
+            max_tokens: 100,
+            regions: vec![leviath_core::run_meta::RegionSnapshot {
+                name: "notes".to_string(),
+                kind: "pinned".to_string(),
+                current_tokens: 1,
+                max_tokens: 100,
+                entries: vec![leviath_core::run_meta::RegionEntrySnapshot {
+                    content: "the needle is in this run's window".to_string().into(),
+                    tokens: 1,
+                    kind: leviath_core::region::EntryKind::Text,
+                    metadata: None,
+                    key: None,
+                    taint: Default::default(),
+                    reasoning: None,
+                }],
+                description: None,
+            }],
+        },
+    )
+    .expect("wrote a context window");
+}
+
 /// A search that only a file can answer is just another confirmation, so it
 /// has no scan budget to run out of.
 #[tokio::test]
@@ -301,11 +330,7 @@ async fn a_file_backed_search_settles_at_step_four() {
         for at in 0..3 {
             create_run(&meta(&format!("run-{at:03}"), "agent", at)).expect("created");
         }
-        std::fs::write(
-            crate::runstate::run_dir("run-001").join(leviath_core::files::CONTEXT_FILE),
-            "the needle is in this run's window",
-        )
-        .expect("wrote a context window");
+        needle_in_window("run-001");
 
         let mut searching = spec();
         searching.limit = 10;
@@ -325,11 +350,7 @@ async fn a_record_only_predicate_beside_a_file_backed_search() {
     with_isolated_runs_dir_async("runs-lazy-mixed", |_dir| async move {
         create_run(&meta("run-000", "agent", 0)).expect("created");
         create_run(&meta("run-001", "agent", 1)).expect("created");
-        std::fs::write(
-            crate::runstate::run_dir("run-001").join(leviath_core::files::CONTEXT_FILE),
-            "the needle is in this run's window",
-        )
-        .expect("wrote a context window");
+        needle_in_window("run-001");
 
         let mut mixed = spec();
         mixed.limit = 10;

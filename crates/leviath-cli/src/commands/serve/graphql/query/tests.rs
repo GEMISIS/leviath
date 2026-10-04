@@ -133,8 +133,8 @@ fn ids_of(data: &async_graphql::Value, field: &str) -> Vec<String> {
 #[tokio::test]
 async fn a_blueprint_reference_the_schema_cannot_read_is_refused() {
     for query in [
-        r#"{ validateBlueprint(manifest: "[agent]", as: { content: "[agent]" }) { valid } }"#,
-        r#"{ validateBlueprint(manifest: "[agent]", as: {}) { valid } }"#,
+        r#"{ validateBlueprint(manifest: "[blueprint]", as: { content: "[blueprint]" }) { valid } }"#,
+        r#"{ validateBlueprint(manifest: "[blueprint]", as: {}) { valid } }"#,
     ] {
         let answer = run_query(query).await;
         let error = answer.errors.first().expect("a refusal");
@@ -152,17 +152,13 @@ async fn a_stale_blueprint_pin_is_refused_wherever_a_reference_is_read() {
     let agents = tempfile::tempdir().expect("a temp agents dir");
     let dir = agents.path().join("drifted");
     std::fs::create_dir_all(&dir).expect("the agent directory");
-    std::fs::write(
-        dir.join(leviath_core::files::MANIFEST_FILENAME),
-        manifest_text("drifted", "1.0.0"),
-    )
-    .expect("the manifest is written");
+    crate::test_support::write_test_agent(&dir, manifest_text("drifted", "1.0.0"));
     let stale = "0".repeat(64);
 
     crate::commands::serve::blueprints::TEST_AGENTS_DIR
         .scope(agents.path().to_path_buf(), async move {
             for query in [format!(
-                r#"{{ validateBlueprint(manifest: "[agent]",
+                r#"{{ validateBlueprint(manifest: "[blueprint]",
                          as: {{ name: "drifted", digest: "{stale}" }}) {{ valid }} }}"#
             )] {
                 let answer = run_query(&query).await;
@@ -187,7 +183,7 @@ async fn a_stale_blueprint_pin_is_refused_wherever_a_reference_is_read() {
 async fn validating_a_blueprint_with_no_text_is_refused() {
     for query in [
         r#"query { validateBlueprint(as: { name: "coder" }) { valid } }"#,
-        r#"query { validateBlueprint(manifest: "[agent]", digest: "abc") { valid } }"#,
+        r#"query { validateBlueprint(manifest: "[blueprint]", digest: "abc") { valid } }"#,
     ] {
         let answer = run_query(query).await;
         let error = answer.errors.first().expect("a refusal");
@@ -228,7 +224,7 @@ async fn a_query_reads_runs_newest_first_and_pages() {
         assert!(json["runs"]["cursor"].is_string(), "another page follows");
         assert_eq!(json["runs"]["highlights"].as_array().map(Vec::len), Some(0));
         assert!(json["serverTime"].as_i64().unwrap_or_default() > 0);
-        assert_eq!(json["runs"]["results"][0]["status"], "STARTING");
+        assert_eq!(json["runs"]["results"][0]["status"], "RUNNING");
         assert_eq!(json["runs"]["results"][0]["blueprintName"], "test-agent");
     })
     .await;
@@ -409,15 +405,10 @@ async fn a_filter_reaches_the_listing_and_pages_under_it() {
 
 /// A run with a stage ledger, which is the file a `stages` filter has to read.
 fn with_ledger(id: &str, started_at: i64) {
-    create_run(&meta_at(id, started_at)).expect("run written");
-    crate::runstate::write_stages_index(
-        id,
-        &[leviath_core::run_meta::StageRecord::new(
-            "build".to_string(),
-            0,
-        )],
-    )
-    .expect("the ledger");
+    use crate::commands::serve::graphql::types::journal_fixture::{ledger, started_at as start};
+    start(id, Some(started_at), |state| {
+        state.ledger = ledger(&["build"])
+    });
 }
 
 /// Every run that has opened one of its own files to answer a field, in the
@@ -522,7 +513,8 @@ async fn every_run_sort_key_orders_the_listing() {
         for (field, leader) in [
             ("STARTED_AT", "untitled"),
             ("UPDATED_AT", "alpha"),
-            ("LAST_PROGRESS_AT", "beta"),
+            // A run file says a run last moved when its last step was taken.
+            ("LAST_PROGRESS_AT", "alpha"),
         ] {
             let answer = run_query(&format!(
                 "{{ runs(orderBy: [{{ field: {field}, direction: DESC }}]) \
@@ -562,7 +554,7 @@ async fn a_record_only_filter_opens_no_file() {
         }
         let mark = read_mark();
         let answer = run_query(
-            r#"{ runs(filter: { status: { in: [STARTING] } }) { results { id } total } }"#,
+            r#"{ runs(filter: { status: { in: [RUNNING] } }) { results { id } total } }"#,
         )
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -950,116 +942,82 @@ async fn a_parent_filter_pages_one_runs_children() {
     .await;
 }
 
-/// A run answers for the blueprint it executed, from its own snapshot.
-///
-/// The installed file is edited in between, and the run still answers with what
-/// it ran: that is the whole reason the snapshot exists.
+/// A run answers for the blueprint it executed, from its own file: the graph
+/// it was resolved to, whatever is installed under that name now.
 #[tokio::test]
 async fn a_run_answers_with_the_blueprint_it_executed() {
     crate::runstate::with_isolated_runs_dir_async("graphql-run-blueprint", |_d| async move {
-        let installed = tempfile::tempdir().expect("a temp dir");
-        let path = installed.path().join("agent.leviath");
-        std::fs::write(&path, "[agent]\nname = \"coder\"\nversion = \"9.9.9\"\n")
-            .expect("installed written");
-
-        let mut meta = meta_at("coder-1788924523-abc123", 100);
-        meta.agent_path = path.to_string_lossy().into_owned();
-        let ran = "[agent]\nname = \"coder\"\nversion = \"1.0.0\"\n";
-        meta.blueprint_digest = Some(crate::commands::serve::core::blueprints::digest_of(ran));
-        create_run(&meta).expect("run written");
-        std::fs::write(
-            crate::commands::serve::core::blueprints::run_dir(&meta.run_id)
-                .join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE),
-            ran,
-        )
-        .expect("snapshot written");
+        let run_id = crate::commands::serve::core::run_file::tests::recorded();
+        let spec = crate::commands::serve::core::inspect::spec(&run_id).expect("the spec reads");
 
         let answer = run_query(
-            "{ runs { results { blueprintDigest blueprint { name version source digest } } } }",
+            "{ runs { results { blueprintDigest blueprint { name version source digest \
+               stages { name } } } } }",
         )
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
         let json = serde_json::to_value(&answer.data).expect("data serializes");
         let node = &json["runs"]["results"][0];
-        assert_eq!(
-            node["blueprint"]["version"], "1.0.0",
-            "what ran, not what is installed"
-        );
+        assert_eq!(node["blueprint"]["name"], "coder");
+        assert_eq!(node["blueprint"]["version"], "0.0.0");
         assert_eq!(node["blueprint"]["source"], "SNAPSHOT");
-        assert_eq!(node["blueprint"]["digest"], node["blueprintDigest"]);
-    })
-    .await;
-}
-
-/// A run from before snapshots existed falls back to the installed blueprint,
-/// and says so. Its digest is null, because what it executed is unknown.
-#[tokio::test]
-async fn a_run_without_a_snapshot_reads_the_installed_blueprint() {
-    crate::runstate::with_isolated_runs_dir_async("graphql-run-installed", |_d| async move {
-        let installed = tempfile::tempdir().expect("a temp dir");
-        let path = installed.path().join("agent.leviath");
-        std::fs::write(&path, "[agent]\nname = \"coder\"\nversion = \"9.9.9\"\n")
-            .expect("installed written");
-        let mut meta = meta_at("coder-1788924523-old000", 100);
-        meta.agent_path = path.to_string_lossy().into_owned();
-        create_run(&meta).expect("run written");
-
-        let answer =
-            run_query("{ runs { results { blueprintDigest blueprint { version source } } } }")
-                .await;
-        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
-        let json = serde_json::to_value(&answer.data).expect("data serializes");
-        let node = &json["runs"]["results"][0];
-        assert_eq!(node["blueprint"]["version"], "9.9.9");
-        assert_eq!(node["blueprint"]["source"], "INSTALLED");
-        assert!(node["blueprintDigest"].is_null(), "unknown, not the same");
-    })
-    .await;
-}
-
-/// A run whose blueprint is gone nulls that one field and says why, leaving the
-/// rest of the page intact. One unreadable file must not cost a client the
-/// forty-nine runs beside it.
-#[tokio::test]
-async fn an_unreadable_blueprint_nulls_one_field_and_keeps_the_page() {
-    crate::runstate::with_isolated_runs_dir_async("graphql-run-noblueprint", |_d| async move {
-        let mut gone = meta_at("coder-1788924523-gone00", 200);
-        gone.agent_path = "/nowhere/agent.leviath".to_string();
-        create_run(&gone).expect("run written");
-        create_run(&meta_at("coder-1788924523-fine00", 100)).expect("run written");
-
-        let answer = run_query("{ runs { results { id blueprint { name } } } }").await;
-        let json = serde_json::to_value(&answer.data).expect("data serializes");
-        let results = json["runs"]["results"].as_array().expect("results");
-        assert_eq!(results.len(), 2, "both runs are still on the page");
-        assert!(results[0]["blueprint"].is_null(), "the field is null");
-        assert_eq!(results[0]["id"], "coder-1788924523-gone00");
-        // The runs resolve side by side, so which unreadable blueprint is
-        // reported first is not fixed. Both are named, and each carries the
-        // code a client branches on.
-        assert!(
-            answer.errors.iter().all(|error| error
-                .extensions
-                .as_ref()
-                .and_then(|e| e.get("code"))
-                .map(ToString::to_string)
-                == Some("\"NOT_FOUND\"".to_string())),
-            "{:?}",
-            answer.errors
+        assert_eq!(
+            node["blueprint"]["digest"].as_str().map(str::len),
+            Some(64),
+            "a digest of the graph the run executed"
         );
-        assert!(
-            answer
-                .errors
-                .iter()
-                .any(|error| error.message.contains("agent.leviath")),
-            "{:?}",
-            answer.errors
-        );
+        let stages: Vec<&str> = spec.graph.stages.iter().map(|s| s.name.as_str()).collect();
+        let served: Vec<&str> = node["blueprint"]["stages"]
+            .as_array()
+            .expect("stages")
+            .iter()
+            .map(|s| s["name"].as_str().expect("a name"))
+            .collect();
+        assert_eq!(served, stages, "the run file's own graph");
     })
     .await;
 }
 
-/// A catalogue of blueprints, each with whatever the manifest declares.
+/// The run's graph is what it reports, so a run whose graph differs (its
+/// inputs changed a stage) reports the difference and a different digest.
+#[tokio::test]
+async fn a_run_reports_the_graph_in_its_file() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-run-graph", |_d| async move {
+        use leviath_runtime::runfile::{CheckpointPolicy, RunFileReader, RunFileWriter};
+
+        let run_id = crate::commands::serve::core::run_file::tests::recorded();
+        let ask = || async {
+            let answer =
+                run_query("{ runs { results { blueprint { digest description } } } }").await;
+            assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            serde_json::to_value(&answer.data).expect("data serializes")["runs"]["results"][0]
+                ["blueprint"]
+                .clone()
+        };
+        let before = ask().await;
+
+        let path = crate::commands::serve::core::run_file::path(&run_id);
+        let reader = RunFileReader::open(&path).expect("the run file reads");
+        let mut spec = reader.spec().clone();
+        spec.graph.description = Some("as the run was resolved".to_string());
+        let start = reader.state_at(0).expect("the first state");
+        RunFileWriter::create(
+            &path,
+            &spec,
+            &leviath_runtime::spec::env::CodeFiles::new(),
+            &start,
+            CheckpointPolicy::default(),
+        )
+        .expect("the run file is rewritten");
+
+        let after = ask().await;
+        assert_eq!(after["description"], "as the run was resolved");
+        assert_ne!(after["digest"], before["digest"]);
+    })
+    .await;
+}
+
+/// A catalogue of blueprints, each with whatever its `agent.toml` declares.
 ///
 /// Written to a temp directory and pointed at with `state_with_agent_paths`,
 /// never with an empty list: that reads the real `~/.leviath/agents` and makes
@@ -1069,8 +1027,7 @@ async fn catalogue(manifests: &[(&str, &str)]) -> Schema<Query, EmptyMutation, E
     for (name, body) in manifests {
         let dir = agents.path().join(name);
         std::fs::create_dir_all(&dir).expect("agent dir");
-        std::fs::write(dir.join(leviath_core::files::MANIFEST_FILENAME), body)
-            .expect("manifest written");
+        crate::test_support::write_test_agent(&dir, body);
     }
     let state =
         crate::commands::serve::testutil::state_with_agent_paths(vec![agents.path().to_path_buf()]);
@@ -1079,9 +1036,19 @@ async fn catalogue(manifests: &[(&str, &str)]) -> Schema<Query, EmptyMutation, E
         .finish()
 }
 
-/// One manifest naming nothing but the agent.
+/// A blueprint at `version` whose graph is `graph`: the lines of its
+/// `[graph]` table.
+fn with_graph(name: &str, version: &str, graph: &str) -> String {
+    format!("[blueprint]\nname = \"{name}\"\nversion = \"{version}\"\n\n[graph]\n{graph}\n")
+}
+
+/// A blueprint with one stage and an empty layout.
 fn plain(name: &str, version: &str) -> String {
-    format!("[agent]\nname = \"{name}\"\nversion = \"{version}\"\n")
+    with_graph(
+        name,
+        version,
+        "stages = [{ name = \"only\" }]\nlayout = { total_budget_tokens = 1000, regions = [] }",
+    )
 }
 
 /// Run one query and refuse to read an answer that failed.
@@ -1154,9 +1121,14 @@ async fn the_mirror_replaces_every_filter_shortcut() {
 #[tokio::test]
 async fn the_mirror_composes_and_asks_about_absence() {
     crate::commands::serve::testutil::with_home(|_home| async move {
-        let alpha = "[agent]\nname = \"alpha\"\nversion = \"1.0.0\"\nentry_stage = \"plan\"\n\n                     [[stages]]\nname = \"plan\"\n";
+        let alpha = with_graph(
+            "alpha",
+            "1.0.0",
+            "entry = \"plan\"\nstages = [{ name = \"plan\" }]\n\
+             layout = { total_budget_tokens = 1000, regions = [] }",
+        );
         let beta = plain("beta", "2.0.0");
-        let schema = catalogue(&[("alpha", alpha), ("beta", &beta)]).await;
+        let schema = catalogue(&[("alpha", &alpha), ("beta", &beta)]).await;
 
         let json = answer(
             &schema,
@@ -1189,11 +1161,20 @@ async fn the_mirror_composes_and_asks_about_absence() {
 #[tokio::test]
 async fn a_nested_filter_reaches_through_a_list_relation() {
     crate::commands::serve::testutil::with_home(|_home| async move {
-        let pinned = "[agent]\nname = \"pinned\"\n\n\
-                      [context.regions.brief]\nkind = \"pinned\"\nmax_tokens = 100\n";
-        let sliding = "[agent]\nname = \"sliding\"\n\n\
-                       [context.regions.log]\nkind = \"sliding_window\"\nmax_tokens = 100\n";
-        let schema = catalogue(&[("pinned", pinned), ("sliding", sliding)]).await;
+        let pinned = with_graph(
+            "pinned",
+            "1.0.0",
+            "stages = [{ name = \"only\" }]\nlayout = { total_budget_tokens = 1000, \
+             regions = [{ name = \"brief\", kind = \"pinned\", budget = 100 }] }",
+        );
+        let sliding = with_graph(
+            "sliding",
+            "1.0.0",
+            "stages = [{ name = \"only\" }]\nlayout = { total_budget_tokens = 1000, \
+             regions = [{ name = \"log\", kind = { kind = \"sliding_window\", max_items = 10 }, \
+             budget = 100 }] }",
+        );
+        let schema = catalogue(&[("pinned", &pinned), ("sliding", &sliding)]).await;
 
         let json = answer(
             &schema,
@@ -1685,11 +1666,7 @@ async fn a_script_that_cannot_be_offered_is_reported() {
         // An agent whose own `tools/` holds a script that will not compile.
         let agent = home.join(".leviath").join("agents").join("coder");
         std::fs::create_dir_all(agent.join("tools")).expect("the agent's tools dir");
-        std::fs::write(
-            agent.join(leviath_core::files::MANIFEST_FILENAME),
-            "[agent]\nname = \"coder\"\n",
-        )
-        .expect("manifest written");
+        crate::test_support::write_test_agent(&agent, plain("coder", "1.0.0"));
         std::fs::write(
             agent.join("tools").join("broken.rhai"),
             "fn main( { this does not compile",
@@ -1732,11 +1709,7 @@ async fn a_tool_scope_refuses_an_unsafe_agent_name() {
         // blueprint the listing hands back and whose scope has to be refused.
         let dir = home.join(".leviath").join("agents").join("sneaky");
         std::fs::create_dir_all(&dir).expect("the agent directory");
-        std::fs::write(
-            dir.join(leviath_core::files::MANIFEST_FILENAME),
-            manifest_text("../etc", "1.0.0"),
-        )
-        .expect("a manifest");
+        crate::test_support::write_test_agent(&dir, manifest_text("../etc", "1.0.0"));
 
         let answer =
             run_query(r#"{ blueprint(name: "../etc") { tools { results { name } } } }"#).await;
@@ -1763,8 +1736,8 @@ async fn a_tool_scope_refuses_an_unsafe_agent_name() {
 #[tokio::test]
 async fn a_run_carries_the_answer_it_submitted() {
     crate::runstate::with_isolated_runs_dir_async("graphql-final-output", |_d| async move {
-        // The descriptor in `meta.json` says an answer exists; the bytes live
-        // in the sidecar beside it, which is how the daemon stores it.
+        // The descriptor in the run's record says an answer exists; the bytes
+        // live in the sidecar beside the run file, which is how the daemon stores it.
         let mut meta = meta_at("coder-1788924523-out000", 100);
         meta.final_output = Some(leviath_core::FinalOutputDescriptor {
             format: Some("markdown".to_string()),
@@ -1775,11 +1748,8 @@ async fn a_run_carries_the_answer_it_submitted() {
             artifacts: Vec::new(),
         });
         create_run(&meta).expect("run written");
-        crate::runstate::write_final_output(
-            &crate::commands::serve::core::blueprints::run_dir(&meta.run_id),
-            "the answer",
-        )
-        .expect("output written");
+        crate::runstate::write_final_output(&crate::runstate::run_dir(&meta.run_id), "the answer")
+            .expect("output written");
 
         let answer = run_query(
             "{ runs { results { finalOutput { content format stage submittedAt truncated } } } }",
@@ -1798,7 +1768,7 @@ async fn a_run_carries_the_answer_it_submitted() {
 }
 
 /// A run that has submitted nothing says so with nulls, and its detail fields
-/// are empty rather than absent.
+/// are empty rather than absent. One that never held a window has none.
 #[tokio::test]
 async fn a_run_with_nothing_recorded_reads_as_empty() {
     crate::runstate::with_isolated_runs_dir_async("graphql-empty-detail", |_d| async move {
@@ -1815,7 +1785,7 @@ async fn a_run_with_nothing_recorded_reads_as_empty() {
         let json = serde_json::to_value(&answer.data).expect("data serializes");
         let node = &json["runs"]["results"][0];
         assert!(node["finalOutput"].is_null(), "nothing submitted");
-        assert!(node["context"].is_null(), "no window written yet");
+        assert!(node["context"].is_null(), "no window");
         assert!(node["waitReason"].is_null(), "not parked");
         assert_eq!(node["stages"]["results"].as_array().map(Vec::len), Some(0));
         assert_eq!(node["stages"]["total"], 0, "an empty page counts as none");
@@ -1835,25 +1805,23 @@ async fn a_run_with_nothing_recorded_reads_as_empty() {
 #[tokio::test]
 async fn a_run_carries_its_context_window() {
     crate::runstate::with_isolated_runs_dir_async("graphql-run-window", |_d| async move {
-        let meta = meta_at("coder-1788924523-win000", 100);
-        create_run(&meta).expect("run written");
-        crate::runstate::write_context_snapshot(
-            &meta.run_id,
-            &leviath_core::run_meta::ContextSnapshot {
-                stage_name: "build".to_string(),
-                total_tokens: 42,
-                max_tokens: 8_000,
-                regions: vec![leviath_core::run_meta::RegionSnapshot {
-                    name: "plan".to_string(),
-                    kind: "pinned".to_string(),
-                    current_tokens: 42,
+        crate::commands::serve::graphql::types::journal_fixture::started_at(
+            "coder-1788924523-win000",
+            Some(100),
+            |state| {
+                use leviath_runtime::spec::names::{RegionName, StageName};
+                state.cursor.stage = StageName::new("build").expect("a stage");
+                state.context.max_tokens = 8_000;
+                state.context.regions = vec![leviath_runtime::state::RegionState {
+                    name: RegionName::new("plan").expect("a region"),
                     max_tokens: 2_000,
-                    description: None,
+                    current_tokens: 42,
+                    needs_message_compaction: false,
+                    taint: None,
                     entries: Vec::new(),
-                }],
+                }];
             },
-        )
-        .expect("window written");
+        );
 
         let answer = run_query(
             "{ runs { results { context { totalTokens maxTokens stageName
@@ -1866,39 +1834,6 @@ async fn a_run_carries_its_context_window() {
         assert_eq!(window["totalTokens"], 42);
         assert_eq!(window["stageName"], "build");
         assert_eq!(window["regions"][0]["name"], "plan");
-    })
-    .await;
-}
-
-/// A run whose blueprint snapshot will not parse reports that, rather than
-/// answering with a blueprint it had to invent.
-#[tokio::test]
-async fn a_snapshot_that_will_not_parse_is_reported() {
-    crate::runstate::with_isolated_runs_dir_async("graphql-bad-snapshot", |_d| async move {
-        let meta = meta_at("coder-1788924523-bad000", 100);
-        create_run(&meta).expect("run written");
-        std::fs::write(
-            crate::commands::serve::core::blueprints::run_dir(&meta.run_id)
-                .join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE),
-            "this is not a manifest",
-        )
-        .expect("snapshot written");
-
-        let answer = run_query("{ runs { results { blueprint { name } } } }").await;
-        let error = answer.errors.first().expect("a refusal");
-        assert!(
-            error.message.contains("will not parse"),
-            "{}",
-            error.message
-        );
-        assert_eq!(
-            error
-                .extensions
-                .as_ref()
-                .and_then(|e| e.get("code"))
-                .map(ToString::to_string),
-            Some("\"INTERNAL\"".to_string())
-        );
     })
     .await;
 }
@@ -3452,13 +3387,7 @@ mod the_awkward_shapes {
         crate::commands::serve::testutil::with_home(|home| async move {
             let agent = home.join(".leviath").join("agents").join("coder");
             std::fs::create_dir_all(agent.join("tools")).expect("the agent's tools directory");
-            std::fs::write(
-                agent.join("agent.leviath"),
-                "[agent]\nname = \"coder\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\
-                 \n[context.regions.work]\nkind = \"temporary\"\nmax_tokens = 100\n\
-                 \n[stages.only]\nmode = \"autonomous\"\n",
-            )
-            .expect("a manifest");
+            crate::test_support::write_test_agent(&agent, plain("coder", "1.0.0"));
             std::fs::write(
                 agent.join("tools").join("summarize.rhai"),
                 "// @tool summarize\n// @description sums up\n\"ok\"",
@@ -3586,11 +3515,7 @@ async fn scripts_of_an_unsafe_blueprint_name_are_refused() {
     crate::commands::serve::testutil::with_home(|home| async move {
         let dir = home.join(".leviath").join("agents").join("sneaky");
         std::fs::create_dir_all(&dir).expect("the agent directory");
-        std::fs::write(
-            dir.join(leviath_core::files::MANIFEST_FILENAME),
-            manifest_text("../../etc", "1.0.0"),
-        )
-        .expect("a manifest");
+        crate::test_support::write_test_agent(&dir, manifest_text("../../etc", "1.0.0"));
 
         let answer =
             run_query(r#"{ blueprint(name: "../../etc") { scripts { results { name } } } }"#).await;
@@ -3705,12 +3630,9 @@ async fn the_config_lists_where_blueprints_are_looked_for() {
     assert_eq!(paths, vec!["/srv/agents", "/opt/more-agents"]);
 }
 
-/// A manifest for the checks to look at.
+/// A blueprint for the checks to look at.
 fn manifest_text(name: &str, version: &str) -> String {
-    format!(
-        "[agent]\nname = \"{name}\"\nversion = \"{version}\"\ndescription = \"d\"\n\n\
-         [stages.only]\nmode = \"autonomous\"\n"
-    )
+    plain(name, version)
 }
 
 // ─── The four pure checks ─────────────────────────────────────────────────────
@@ -3878,7 +3800,7 @@ async fn a_yolo_profile_decides_about_one_call() {
 async fn a_blueprint_that_will_not_parse_is_reported_not_written() {
     crate::commands::serve::testutil::with_home(|_home| async move {
         let report = run_query(
-            r#"query { validateBlueprint(manifest: "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\nentry_stage = \"nope\"\n\n[stages.only]\nmode = \"autonomous\"\n")
+            r#"query { validateBlueprint(manifest: "[blueprint]\nname = \"x\"\nversion = \"1.0.0\"\n\n[graph]\nentry = \"nope\"\nstages = [{ name = \"only\" }]\nlayout = { total_budget_tokens = 1000, regions = [] }\n")
                  { valid errors warnings } }"#,
         )
         .await;
@@ -3902,7 +3824,7 @@ async fn a_blueprint_that_will_not_parse_is_reported_not_written() {
 async fn validating_against_an_agent_refuses_a_name_that_could_escape() {
     crate::commands::serve::testutil::with_home(|_home| async move {
         let answer = run_query(
-            r#"query { validateBlueprint(manifest: "[agent]\nname = \"x\"\n",
+            r#"query { validateBlueprint(manifest: "[blueprint]\nname = \"x\"\n",
                  as: { name: "../elsewhere" }) { valid } }"#,
         )
         .await;
@@ -4510,11 +4432,7 @@ async fn a_blueprints_scripts_carry_its_own_directory() {
     crate::commands::serve::testutil::with_home(|home| async move {
         let agent = home.join(".leviath").join("agents").join("coder");
         std::fs::create_dir_all(agent.join("tools")).expect("the agent's tools directory");
-        std::fs::write(
-            agent.join(leviath_core::files::MANIFEST_FILENAME),
-            manifest_text("coder", "1.0.0"),
-        )
-        .expect("a manifest");
+        crate::test_support::write_test_agent(&agent, manifest_text("coder", "1.0.0"));
         std::fs::write(
             agent.join("tools").join("summarize.rhai"),
             "// @tool summarize\n// @description sums up\n\"ok\"",
@@ -4597,12 +4515,24 @@ async fn the_open_interactions_are_the_approval_inbox() {
         });
         let answer = run_query_with_daemon(
             control,
-            "{ openInteractions(first: 10) { total results { id stageName toolName } } }",
+            "{ openInteractions(first: 10) { total results { id stageName toolName \
+             answerOptions { id label number answer } } } }",
         )
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
         let json = serde_json::to_value(&answer.data).expect("data serializes");
         assert_eq!(json["openInteractions"]["total"], 2);
+        // Each option under the word that answers with it and the number the
+        // listing shows it under.
+        assert_eq!(
+            json["openInteractions"]["results"][0]["answerOptions"][3],
+            serde_json::json!({
+                "id": "deny",
+                "label": "Deny",
+                "number": 4,
+                "answer": "lev respond ask-1 deny",
+            })
+        );
         assert_eq!(json["openInteractions"]["results"][0]["id"], "ask-1");
         assert_eq!(json["openInteractions"]["results"][0]["toolName"], "shell");
 
@@ -4636,6 +4566,91 @@ async fn the_open_interactions_are_the_approval_inbox() {
         assert_eq!(
             json["openInteractions"]["results"][0]["run"]["id"],
             "parked"
+        );
+    })
+    .await;
+}
+
+/// A question a held run asked is not in the approval inbox, whose every
+/// entry a client reads as one it can answer: it is in `heldInteractions`,
+/// saying what to put back, and nothing else is.
+#[tokio::test]
+async fn a_held_runs_question_is_listed_as_held_and_not_as_open() {
+    use crate::commands::serve::core::held::{listing, seed_held};
+    use crate::commands::serve::testutil::busy_daemon;
+    use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
+
+    crate::runstate::with_isolated_runs_dir_async("graphql-held-list", |_d| async move {
+        let mut live = seed_held("live-1", "live-1-ask-1");
+        live.wait_reason = Some(leviath_core::run_meta::WaitReason::UserPrompt);
+        let mut plain = seed_held("plain-1", "plain-1-ask-1");
+        plain.wait_reason = Some(leviath_core::run_meta::WaitReason::NeedsSetup {
+            blocker: leviath_core::run_meta::SetupBlocker::ProviderMissing,
+            remedy: "configure 'openai' again".to_string(),
+        });
+        let path = crate::runstate::run_file::path_in(&crate::runstate::run_dir("plain-1"));
+        let mut writer = leviath_runtime::runfile::RunFileWriter::open(
+            &path,
+            leviath_runtime::runfile::CheckpointPolicy::default(),
+        )
+        .expect("the run file opens");
+        let mut next = writer.state().clone();
+        next.interactions[0].options.clear();
+        let at = writer.state().seq as i64 + 1;
+        writer.record(next, at, Vec::new()).expect("the step lands");
+        let reply = listing(vec![seed_held("held-1", "held-1-ask-1"), live, plain]);
+        let daemon = move || {
+            let reply = reply.clone();
+            busy_daemon(move |req| match req {
+                ControlRequest::List => reply.clone(),
+                _ => ControlResponse::Interactions {
+                    interactions: Vec::new(),
+                },
+            })
+        };
+
+        let (control, _socket, _srv) = daemon();
+        let open = run_query_with_daemon(control, "{ openInteractions { total } }").await;
+        assert!(open.errors.is_empty(), "{:?}", open.errors);
+        let json = serde_json::to_value(&open.data).expect("data serializes");
+        assert_eq!(json["openInteractions"]["total"], 0);
+
+        let (control, _socket, _srv) = daemon();
+        let held = run_query_with_daemon(
+            control,
+            "{ heldInteractions(first: 10) { total results { id kind prompt options \
+             stageName isRequired held answerOptions { id } run { id } } } }",
+        )
+        .await;
+        assert!(held.errors.is_empty(), "{:?}", held.errors);
+        let json = serde_json::to_value(&held.data).expect("data serializes");
+        let listed = &json["heldInteractions"];
+        assert_eq!(listed["total"], 2);
+        let first = &listed["results"][0];
+        assert_eq!(first["id"], "held-1-ask-1");
+        assert_eq!(first["kind"], "MULTIPLE_CHOICE");
+        assert_eq!(first["options"], serde_json::json!(["red"]));
+        assert_eq!(first["stageName"], "ask");
+        assert_eq!(first["isRequired"], true);
+        assert_eq!(first["run"]["id"], "held-1");
+        assert_eq!(first["answerOptions"], serde_json::json!([]));
+        let why = first["held"].as_str().expect("held says why");
+        assert!(why.contains("run 'held-1'"), "{why}");
+        assert!(why.contains("configure 'openai' again"), "{why}");
+        assert!(why.contains("new id"), "{why}");
+        assert_eq!(listed["results"][1]["kind"], "FREE_TEXT");
+
+        // A page over the cap is refused like every listing's.
+        let (control, _socket, _srv) = daemon();
+        let oversized =
+            run_query_with_daemon(control, "{ heldInteractions(first: 100000) { total } }").await;
+        assert!(
+            oversized
+                .errors
+                .first()
+                .is_some_and(|error| error.message.contains("page cap")),
+            "{:?}",
+            oversized.errors
         );
     })
     .await;

@@ -651,9 +651,18 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph-tabs", AgentDisplayStatus::Active);
         agent.graph = Some(std::sync::Arc::new(
-            crate::tui::flowgraph::StageGraph::from_blueprint(
-                &leviath_core::manifest::parse_manifest("[agent]\nname = \"g\"\n[stages.main]\n")
-                    .unwrap(),
+            crate::tui::flowgraph::model::toml_graph(
+                r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[[graph.stages]]
+name = "main"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
             ),
         ));
         dash.agents.push(agent);
@@ -799,11 +808,24 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-exp", AgentDisplayStatus::Active);
-        let graph = std::sync::Arc::new(crate::tui::flowgraph::StageGraph::from_blueprint(
-            &leviath_core::manifest::parse_manifest(
-                "[agent]\nname = \"g\"\n[stages.a]\n[stages.a.transitions.b]\n[stages.b]\n",
-            )
-            .unwrap(),
+        let graph = std::sync::Arc::new(crate::tui::flowgraph::model::toml_graph(
+            r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[graph]
+edges = [{ name = "b", from = "a", to = "b" }]
+
+[[graph.stages]]
+name = "a"
+
+[[graph.stages]]
+name = "b"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
         ));
         agent.graph = Some(graph.clone());
         dash.agents.push(agent);

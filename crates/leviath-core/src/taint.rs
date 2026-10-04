@@ -13,7 +13,9 @@ use std::fmt;
 ///
 /// Ordered from least to most sensitive. When compared, higher sensitivity
 /// levels are "greater than" lower ones.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub enum TaintLevel {
     /// Freely shareable. Web search results, public documentation, open-source code.
     Public,
@@ -301,7 +303,7 @@ impl Default for SecurityConfig {
 /// stage → agent → global (default off when nothing is set).
 ///
 /// **A blueprint can only turn taint tracking on, never off.** The stage and
-/// agent configs come from `agent.leviath`, so if a manifest could set
+/// agent configs come from `agent.toml`, so if a manifest could set
 /// `taint_tracking = false` over a user's global `true`, installing an agent
 /// would be enough to disable the machine's data-flow enforcement. A manifest
 /// that wants tracking when the user has it off is still honored - that
@@ -528,7 +530,7 @@ pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
         }
         // `submit_output` records the answer the caller gets back, and the
         // caller is not always on this machine: `lev serve` hands it to any
-        // reader of `GET /api/agents/{id}/result`, and the dashboard shows
+        // reader of `GET /api/runs/{id}/result`, and the dashboard shows
         // it. It is the run's one deliberate channel out, so it takes the
         // shape `shell` has, outbound with Public clearance, and a Private
         // region in a submitted answer raises the leak prompt (or the
@@ -587,11 +589,13 @@ pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
         }
         // `fan_out` is many `spawn_agent`s at once.
         "spawn_agent" | "check_agent" | "wait_for_agent" | "send_to_agent" | "kill_agent"
-        | "fan_out" => ToolClassification::new(
-            TaintLevel::Internal,
-            ToolDirection::Internal,
-            TaintLevel::Public,
-        ),
+        | "spawn_schema" | "describe_blueprint" | "validate_spawn" | "run_history" | "fan_out" => {
+            ToolClassification::new(
+                TaintLevel::Internal,
+                ToolDirection::Internal,
+                TaintLevel::Public,
+            )
+        }
         _ => return None,
     };
     Some(classification)
@@ -1082,6 +1086,10 @@ mod tests {
             "wait_for_agent",
             "send_to_agent",
             "kill_agent",
+            "spawn_schema",
+            "describe_blueprint",
+            "validate_spawn",
+            "run_history",
         ] {
             let tc = builtin_tool_classification(name);
             assert_eq!(tc.direction, ToolDirection::Internal);
@@ -1223,7 +1231,7 @@ mod tests {
     fn resolve_taint_enabled_agent_may_opt_in_but_not_out() {
         // Global off, agent opts in - honored, that only tightens.
         assert!(resolve_taint_enabled(false, Some(&sec(true)), None));
-        // Global on, agent tries to opt out - refused. `agent.leviath` is a
+        // Global on, agent tries to opt out - refused. `agent.toml` is a
         // downloaded file; letting it disable the machine's data-flow
         // enforcement made taint tracking opt-out-by-installing-an-agent.
         assert!(resolve_taint_enabled(true, Some(&sec(false)), None));
@@ -1256,6 +1264,14 @@ mod tests {
         // Stage override beats agent and global (both directions).
         assert!(!resolve_batch_tool_hint(true, Some(true), Some(false)));
         assert!(resolve_batch_tool_hint(false, Some(false), Some(true)));
+    }
+
+    /// The shell hint cascades exactly as the batch hint does.
+    #[test]
+    fn resolve_shell_hint_cascade() {
+        assert!(resolve_shell_hint(true, None, None));
+        assert!(!resolve_shell_hint(true, Some(false), None));
+        assert!(resolve_shell_hint(false, Some(false), Some(true)));
     }
 
     #[test]

@@ -35,7 +35,43 @@ fn entry(run_id: &str, status: AgentStatus) -> RunListEntry {
         empty_output: false,
         read_paths: None,
         has_final_output: false,
+        may_never_finish: Vec::new(),
     }
+}
+
+/// A run whose graph has no way out says so in its row, ahead of any note
+/// about its result, and again under the table with each warning in full.
+#[test]
+fn a_run_that_may_never_finish_is_marked_in_its_row_and_under_the_table() {
+    let mut e = entry("loopy", AgentStatus::Active);
+    e.may_never_finish = vec!["graph.edges: may never finish: it loops".to_string()];
+    e.empty_output = true;
+    assert_eq!(status_cell(&e), "active (may never finish)");
+    let out = format_runs(
+        &[e.clone(), entry("calm", AgentStatus::Active)],
+        &[],
+        &healthy_daemon(),
+        0,
+    );
+    assert!(
+        out.contains(
+            "!!! may never finish (stop one with lev cancel <run>):\n  loopy: graph.edges: may \
+             never finish: it loops"
+        ),
+        "{out}"
+    );
+    let calm = format_runs(
+        &[entry("calm", AgentStatus::Active)],
+        &[],
+        &healthy_daemon(),
+        0,
+    );
+    assert!(!calm.contains("may never finish"), "{calm}");
+    // Once it has stopped, the warning is behind it.
+    e.status = AgentStatus::Cancelled;
+    assert_eq!(status_cell(&e), "cancelled (no output)");
+    let stopped = format_runs(&[e], &[], &healthy_daemon(), 0);
+    assert!(!stopped.contains("may never finish"), "{stopped}");
 }
 
 #[test]
@@ -137,7 +173,7 @@ fn status_cell_marks_a_run_whose_fan_out_handed_out_nothing() {
     assert_eq!(status_cell(&e), "complete (no output)");
 }
 
-/// The offline table says it too, from `meta.json`. Two formatters, and the
+/// The offline table says it too, from the run's record. Two formatters, and the
 /// live one is the one a person watching a run actually reads - so a fix to one
 /// that misses the other is a fix nobody sees.
 #[test]
@@ -148,7 +184,7 @@ fn offline_status_cell_marks_a_broken_script() {
     assert_eq!(offline_status_cell(run), "complete (broken script)");
 }
 
-/// The offline table says the same thing, from `meta.json` rather than the live
+/// The offline table says the same thing, from the run's record rather than the live
 /// listing - the two surfaces answering differently is the drift this pair of
 /// cells exists to prevent.
 #[test]

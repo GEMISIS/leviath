@@ -39,11 +39,11 @@ impl Dashboard {
         ctx_area: Rect,
         agent: &DashboardAgent,
     ) {
-        // When browsing archived history, show that point; else the live window.
+        // When browsing recorded history, show that point; else the live window.
         let snap_opt = self
             .browsed_context_point()
             .map(|p| p.context.clone())
-            .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
+            .or_else(|| self.selected_stage_context(agent))
             .or_else(|| agent.context_snapshot.as_deref().cloned());
 
         // The card title shows the browsed history position - which point, of
@@ -201,10 +201,10 @@ impl Dashboard {
 
         // The run's submitted answer, read through the same function the
         // HTTP API serves it from, so the Final view and
-        // `GET /api/agents/{id}/result` cannot show different text. Read once
+        // `GET /api/runs/{id}/result` cannot show different text. Read once
         // per frame: it decides whether the `[f] final` chip is offered and
         // what that view shows.
-        let final_output = runstate::read_final_output(&agent.id);
+        let final_output = self.final_output_of(&agent.id);
         // The Final view of a run without an answer (the selection moved to
         // another run) falls back to Output rather than sitting on an empty
         // pane whose chip is no longer on offer.
@@ -458,26 +458,27 @@ impl Dashboard {
 
         // Bottom-left file path hint
         let file_path_hint = {
-            // The stage file each view reads; the Final view reads none, and
-            // the Output view's fallback to the run's answer reads a run file
-            // instead of its stage's.
-            let stage_file = match self.stage_content_mode {
-                StageContentMode::Output => Some("output.log"),
-                StageContentMode::Logs => Some("logs.log"),
-                StageContentMode::Context => Some(leviath_core::files::CONTEXT_FILE),
-                StageContentMode::FinalOutput => None,
+            // The file each view reads: a stage's log (where the run writes
+            // it, before it has written any), the run's file for its window,
+            // or the run's answer for the Final view and the Output view's
+            // fallback to it. An answer the run file does not name yet is
+            // shown as the run file, which is where it will be named.
+            let run_dir = runstate::run_dir(&agent.id);
+            let run_file = runstate::run_file::path_in(&run_dir);
+            use leviath_runtime::state::StageFile;
+            let path = match (self.stage_content_mode, showing_final_output) {
+                (_, true) | (StageContentMode::FinalOutput, _) => {
+                    runstate::final_output_path(&run_dir).unwrap_or(run_file)
+                }
+                (StageContentMode::Output, false) => {
+                    runstate::stage_file_path(&run_dir, self.selected_stage, StageFile::Output)
+                }
+                (StageContentMode::Logs, false) => {
+                    runstate::stage_file_path(&run_dir, self.selected_stage, StageFile::Logs)
+                }
+                (StageContentMode::Context, false) => run_file,
             };
-            let raw = match stage_file.filter(|_| !showing_final_output) {
-                Some(file_name) => runstate::stage_dir(&agent.id, self.selected_stage)
-                    .join(file_name)
-                    .to_string_lossy()
-                    .to_string(),
-                // The run's final answer lives in the `final_output` sidecar
-                // beside `meta.json`, not in any stage's directory.
-                None => runstate::final_output_path(&runstate::run_dir(&agent.id))
-                    .to_string_lossy()
-                    .to_string(),
-            };
+            let raw = path.to_string_lossy().to_string();
             // Display-only `~` abbreviation of the OS home directory;
             // deliberately NOT the LEVIATH_HOME-aware resolver (see the
             // header's workdir line for the same choice).
@@ -596,12 +597,12 @@ impl Dashboard {
         agent: &DashboardAgent,
         render_width: u16,
     ) -> (Vec<Line<'static>>, Vec<usize>) {
-        // When browsing the run's archived context history, show that point's
+        // When browsing the run's recorded context history, show that point's
         // window; otherwise the live current window for the selected stage.
         let snap_opt = self
             .browsed_context_point()
             .map(|p| p.context.clone())
-            .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
+            .or_else(|| self.selected_stage_context(agent))
             .or_else(|| agent.context_snapshot.as_deref().cloned());
         if let Some(snap) = snap_opt {
             let mut lines: Vec<Line> = Vec::new();
@@ -609,8 +610,12 @@ impl Dashboard {
             // ── Graph transition details ──
             // A linear blueprint's chain is a graph too, but "Transitions:
             // -> next" on every stage would be noise; this block is for the
-            // ones that branch.
-            if let Some(graph) = agent.graph.as_ref().filter(|g| g.is_branching) {
+            // ones that branch, and for a lone stage, which ends the run.
+            if let Some(graph) = agent
+                .graph
+                .as_ref()
+                .filter(|g| g.is_branching || g.nodes.len() == 1)
+            {
                 let sel_name = agent
                     .stages
                     .get(self.selected_stage)
@@ -720,7 +725,7 @@ impl Dashboard {
                 ),
             ]));
 
-            // Detect old runs
+            // A window that counted tokens but kept no entry content.
             let has_tokens = snap.regions.iter().any(|r| r.current_tokens > 0);
             let has_entries = snap.regions.iter().any(|r| !r.entries.is_empty());
             if has_tokens && !has_entries {
@@ -775,10 +780,10 @@ impl Dashboard {
     /// answer only stands in for that stage's otherwise empty Output pane -
     /// every other stage keeps its honest empty state.
     fn final_output_for_selected_stage(&self, agent: &DashboardAgent) -> Option<String> {
-        let final_output = crate::runstate::read_final_output(&agent.id)?;
+        let final_output = self.final_output_of(&agent.id)?;
         let selected_name = agent.stages.get(self.selected_stage)?.name.as_str();
         if final_output.stage == selected_name {
-            Some(final_output.content)
+            Some(final_output.content.clone())
         } else {
             None
         }
@@ -1384,7 +1389,7 @@ mod tests {
     }
 
     /// Seed a run whose answer arrived through `submit_output`: the
-    /// `final_output` descriptor in `meta.json` plus the sidecar beside it,
+    /// `final_output` descriptor in the run's record plus the sidecar file,
     /// submitted by `stage`, with no `output.log` anywhere. Returns an agent
     /// pointed at that run.
     fn setup_run_state_agent_with_final_output(
@@ -1945,9 +1950,7 @@ mod tests {
     /// A parsed blueprint's stage graph, the way `sync_from_run_state` loads it.
     fn graph_from(toml: &str) -> Option<std::sync::Arc<crate::tui::flowgraph::StageGraph>> {
         Some(std::sync::Arc::new(
-            crate::tui::flowgraph::StageGraph::from_blueprint(
-                &leviath_core::manifest::parse_manifest(toml).expect("fixture parses"),
-            ),
+            crate::tui::flowgraph::model::toml_graph(toml),
         ))
     }
 
@@ -1957,13 +1960,25 @@ mod tests {
         let mut agent = make_test_agent("run-graph", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         agent.graph = graph_from(
-            r#"
-[agent]
+            r#"[blueprint]
 name = "g"
-[stages.main]
-[stages.main.transitions.implement]
+version = "0.1.0"
+
+[[graph.stages]]
+name = "main"
+
+[[graph.stages]]
+name = "implement"
+
+[[graph.edges]]
+name = "implement"
+from = "main"
+to = "implement"
 hint = "after plan"
-[stages.implement]
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
         );
         agent.stages = vec![crate::runstate::StageRecord {
@@ -1991,12 +2006,22 @@ hint = "after plan"
         let mut agent = make_test_agent("run-graph-fallback", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         agent.graph = graph_from(
-            r#"
-[agent]
+            r#"[blueprint]
 name = "g"
-[stages.main]
-[stages.main.transitions.implement]
-[stages.implement]
+version = "0.1.0"
+
+[graph]
+edges = [{ name = "implement", from = "main", to = "implement" }]
+
+[[graph.stages]]
+name = "main"
+
+[[graph.stages]]
+name = "implement"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
         );
         agent.stages = vec![].into(); // no stage records at all -> .get(0) is None
@@ -2014,8 +2039,23 @@ name = "g"
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph-visited", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        agent.graph =
-            graph_from("[agent]\nname = \"g\"\n[stages.main]\n[stages.main.transitions]\n");
+        // A stage that may go round again: a branch, so the block is drawn.
+        agent.graph = graph_from(
+            r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[graph]
+edges = [{ name = "again", from = "main", to = "main", when = "llm_choice" }]
+
+[[graph.stages]]
+name = "main"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
+        );
         // Two records named "main" -> visited count 2, exercising the plural "s".
         let rec = crate::runstate::StageRecord {
             status: crate::runstate::StageRunStatus::Active,
@@ -2039,13 +2079,25 @@ name = "g"
         let mut agent = make_test_agent("run-graph-cond", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         agent.graph = graph_from(
-            r#"
-[agent]
+            r#"[blueprint]
 name = "g"
-[stages.main]
-[stages.main.transitions.error_recovery]
-condition = "error"
-[stages.error_recovery]
+version = "0.1.0"
+
+[[graph.stages]]
+name = "main"
+
+[[graph.stages]]
+name = "error_recovery"
+
+[[graph.edges]]
+name = "error_recovery"
+from = "main"
+to = "error_recovery"
+when = "error"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
         );
         agent.stages = vec![crate::runstate::StageRecord {
@@ -2143,13 +2195,24 @@ condition = "error"
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         // "plan" has an edge to "implement", which is the selected stage.
         agent.graph = graph_from(
-            r#"
-[agent]
+            r#"[blueprint]
 name = "g"
-[stages.plan]
-[stages.plan.transitions.implement]
-transform = "clear"
-[stages.implement]
+version = "0.1.0"
+
+[graph]
+edges = [
+    { name = "implement", from = "plan", to = "implement", carry = "clear" },
+]
+
+[[graph.stages]]
+name = "plan"
+
+[[graph.stages]]
+name = "implement"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
         );
         agent.stages = vec![crate::runstate::StageRecord {
@@ -2179,9 +2242,27 @@ transform = "clear"
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-terminal", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        // "plan" has no outgoing edges (terminal)
-        agent.graph =
-            graph_from("[agent]\nname = \"g\"\n[stages.plan]\n[stages.plan.transitions]\n");
+        // "plan" has no outgoing edges (terminal); the edge into it from
+        // "start" is a branch, so the block is drawn.
+        agent.graph = graph_from(
+            r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[graph]
+edges = [{ name = "plan", from = "start", to = "plan" }]
+
+[[graph.stages]]
+name = "start"
+
+[[graph.stages]]
+name = "plan"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
+        );
         agent.stages = vec![crate::runstate::StageRecord {
             status: crate::runstate::StageRunStatus::Complete,
             entered: true,
@@ -2201,13 +2282,67 @@ transform = "clear"
     }
 
     #[test]
+    fn build_context_lines_shows_the_transition_block_for_a_single_stage() {
+        // One stage and no edges: the block says where the run is and that
+        // the stage ends it, as it does for any stage with no way out.
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-one", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
+        agent.graph = graph_from(
+            r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[[graph.stages]]
+name = "engine"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
+        );
+        agent.stages = vec![crate::runstate::StageRecord {
+            status: crate::runstate::StageRunStatus::Complete,
+            entered: true,
+            ..crate::runstate::StageRecord::new("engine".to_string(), 0)
+        }]
+        .into();
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("Stage: engine"), "{text}");
+        assert!(text.contains("Visited 1 time"), "{text}");
+        assert!(text.contains("terminal"), "{text}");
+    }
+
+    #[test]
     fn build_context_lines_skips_the_transition_block_for_a_linear_blueprint() {
         // A linear blueprint's chain is a graph too, but the block is for
         // ones that branch: no "Stage:" header here.
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-noedge", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        agent.graph = graph_from("[agent]\nname = \"g\"\n[stages.main]\n[stages.next]\n");
+        agent.graph = graph_from(
+            r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[graph]
+edges = [{ name = "next", from = "main", to = "next" }]
+
+[[graph.stages]]
+name = "main"
+
+[[graph.stages]]
+name = "next"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
+        );
         agent.stages = vec![crate::runstate::StageRecord {
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
@@ -2683,7 +2818,7 @@ transform = "clear"
     fn seed_history(
         dash: &mut crate::commands::dashboard::state::Dashboard,
         run_id: &str,
-        points: Vec<leviath_core::run_archive::RunPoint>,
+        points: Vec<leviath_runtime::runfile::history::RunPoint>,
     ) {
         dash.history = Some(crate::commands::dashboard::history::RunHistoryCache {
             run_id: run_id.to_string(),
@@ -2691,14 +2826,15 @@ transform = "clear"
             points,
             checked_at_tick: u64::MAX, // never considered stale by the TTL
             stamp: None,
+            transitions: None,
         });
     }
 
     /// A one-point context history for the browsing render tests.
     fn one_point_history(
         context: runstate::ContextSnapshot,
-    ) -> Vec<leviath_core::run_archive::RunPoint> {
-        vec![leviath_core::run_archive::RunPoint {
+    ) -> Vec<leviath_runtime::runfile::history::RunPoint> {
+        vec![leviath_runtime::runfile::history::RunPoint {
             meta: leviath_core::run_meta::RunMeta::new(
                 "r".to_string(),
                 "a".to_string(),
@@ -2995,6 +3131,15 @@ transform = "clear"
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("Logs"), "{buf}");
+        // A stage that has logged nothing yet shows where its log will be,
+        // in the separators of the platform it runs on throughout (the
+        // footer may cut the file name off on a long temp path).
+        let sep = std::path::MAIN_SEPARATOR;
+        assert!(
+            buf.contains(&format!("run-logs-fph{sep}stages{sep}0{sep}")),
+            "{buf}"
+        );
+        assert!(!buf.contains("run.lvr"), "{buf}");
     }
 
     // ─── render_content_pane: search with no matches shows 0 matches ──────

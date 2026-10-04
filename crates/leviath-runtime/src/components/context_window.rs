@@ -19,10 +19,13 @@ mod journal;
 /// Typed parts as provider content blocks: stand-ins, mime blocks, and the
 /// lifted message a system region's stored parts ride in.
 mod mime;
+/// The window as a run's state records it, and back.
+mod state;
 /// Every path that puts something into a region, and the cause it states.
 mod writes;
 
 pub(crate) use journal::{ContextJournal, ContextTxn, Pushed};
+pub(crate) use state::part as part_from_state;
 pub(crate) use writes::TypedWrite;
 
 /// Result of an eviction attempt, including tokens freed and regions needing LLM compaction.
@@ -46,7 +49,7 @@ pub(crate) struct InferenceConfig {
     /// The stage's output cap (`parameters.max_output_tokens`), resolved
     /// against the model and the window when each request is built. `None`
     /// caps at the model's `max_output_tokens` capability.
-    pub max_output_tokens: Option<leviath_core::blueprint::OutputCap>,
+    pub max_output_tokens: Option<crate::spec::graph::OutputCap>,
     /// Extra provider parameters from `[stages.<name>.model.parameters]` beyond
     /// `temperature`/`max_output_tokens` (e.g. `top_p`, `stop`, `seed`,
     /// `frequency_penalty`). Passed through to the provider request so models can
@@ -80,7 +83,7 @@ pub(crate) struct InferenceConfig {
 #[derive(Component, Debug, Clone)]
 pub(crate) struct ToolResultRoutingComponent {
     /// The routing configuration.
-    pub routing: leviath_core::ToolResultRouting,
+    pub routing: crate::spec::graph::ToolRoutingDef,
 }
 
 /// Result of assembling a context window into system blocks and conversation messages.

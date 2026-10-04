@@ -29,8 +29,22 @@ use crate::components::ContextWindow;
 /// The produced parts are read only from the regions the stage's
 /// `output_routing` names, never the whole window: an input mesh in some other
 /// region must not be mistaken for the animated one this stage made.
+#[cfg(test)]
 pub(crate) fn try_emit(
-    stage: &leviath_core::blueprint::Stage,
+    stage: &crate::spec::graph::StageDef,
+    spec: Option<&OutputSpec>,
+    now: i64,
+    window: &mut ContextWindow,
+) -> Option<FinalOutput> {
+    let targets: Vec<&str> = stage.output_routing.values().map(|r| r.as_str()).collect();
+    try_emit_for(stage.name.as_str(), &targets, spec, now, window)
+}
+
+/// The automatic answer for the stage named `stage`, whose output routing
+/// sends parts to the regions `targets`.
+pub(crate) fn try_emit_for(
+    stage: &str,
+    targets: &[&str],
     spec: Option<&OutputSpec>,
     now: i64,
     window: &mut ContextWindow,
@@ -39,17 +53,16 @@ pub(crate) fn try_emit(
     if specs.is_empty() {
         return None;
     }
-    let targets: Vec<&str> = stage.output_routing.values().map(String::as_str).collect();
     if targets.is_empty() {
         return None;
     }
-    let produced = window.stored_parts_in(&targets);
+    let produced = window.stored_parts_in(targets);
     let records = match_artifacts(specs, &produced)?;
     let content = describe(&records);
     let output = FinalOutput::new(
         content.as_str(),
         spec.and_then(|s| s.format.clone()),
-        stage.name.clone(),
+        stage.to_string(),
         now,
     )
     .with_artifacts(records);
@@ -106,7 +119,7 @@ fn describe(records: &[Artifact]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::blueprint::{ModelConfig, Stage};
+    use crate::spec::graph::StageDef;
     use leviath_core::mime::{Blob, MimeRegistry, MimeType};
     use leviath_core::region::{Region, RegionKind};
 
@@ -126,15 +139,16 @@ mod tests {
         }
     }
 
-    fn stage_routing(rules: &[(&str, &str)]) -> Stage {
-        let mut stage = Stage::new(
-            "build".to_string(),
-            ModelConfig::new("meshy".to_string(), "image-to-3d".to_string()),
-        );
+    fn stage_routing(rules: &[(&str, &str)]) -> StageDef {
+        let mut stage = StageDef {
+            model: crate::test_graph::model("meshy", "image-to-3d"),
+            ..crate::test_graph::stage("build")
+        };
         for (pattern, region) in rules {
-            stage
-                .output_routing
-                .insert((*pattern).to_string(), (*region).to_string());
+            stage.output_routing.insert(
+                (*pattern).to_string(),
+                crate::test_graph::region_name(region),
+            );
         }
         stage
     }
@@ -268,9 +282,10 @@ mod tests {
     #[test]
     fn two_declared_artifacts_take_two_distinct_parts() {
         let mut stage = stage_routing(&[("model/*", "model")]);
-        stage
-            .output_routing
-            .insert("image/*".to_string(), "preview".to_string());
+        stage.output_routing.insert(
+            "image/*".to_string(),
+            crate::test_graph::region_name("preview"),
+        );
         let spec = spec_with(vec![
             artifact_spec("model", "model/gltf-binary", true),
             artifact_spec("preview", "image/*", true),

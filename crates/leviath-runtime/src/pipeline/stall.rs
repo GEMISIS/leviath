@@ -61,11 +61,11 @@ impl StallReason {
                  `[providers] fallback_order`"
             ),
             // `PoolFull` never reaches the watchdog (see `needs_a_person`), so
-            // the missing-provider wording covers the remaining case.
+            // the missing-provider wording covers the remaining case. The
+            // pause adds the way back.
             _ => format!(
                 "provider '{provider}' is not configured, so this run has no way to \
-                 go on; add it to config.toml (or run `lev setup`), then \
-                 `lev resume` this run"
+                 go on; add it to config.toml (or run `lev setup`)"
             ),
         }
     }
@@ -353,7 +353,7 @@ pub(crate) fn fail_stalled_dispatch(
         // Every run parks, unattended included. Failing an unattended one on
         // the reasoning that a scheduler watches for a terminal status and
         // would wait for ever undersells harnesses: `paused` is visible in
-        // `meta.json` and `lev ps --json`, and one that can top up an account
+        // `lev ps --json` and the API, and one that can top up an account
         // and `lev resume` gets its work back. One that cannot is no worse
         // off - it cancels the run, a decision it can make in a second, where
         // a failed run's work is gone for good.
@@ -485,6 +485,13 @@ mod tests {
             .get::<PausedForSetup>(e)
             .expect("a parked run says what to do");
         assert!(marker.remedy.contains(remedy), "{}", marker.remedy);
+        // The way back is named once.
+        assert_eq!(
+            marker.remedy.matches("`lev resume` this run").count(),
+            1,
+            "{}",
+            marker.remedy
+        );
         // The retry stays staged, so a resume re-dispatches rather than
         // rebuilding anything.
         assert!(world.get::<ReadyToInfer>(e).is_some());

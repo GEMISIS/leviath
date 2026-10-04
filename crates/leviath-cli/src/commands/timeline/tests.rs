@@ -1,6 +1,5 @@
 use super::*;
-use leviath_core::run_archive::{RUN_ARCHIVE_VERSION, write_archive_start, write_record};
-use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus};
+use leviath_core::run_meta::{RunMeta, RunStatus};
 
 fn meta(run_id: &str, started: i64, ended: i64) -> RunMeta {
     let mut m = RunMeta::new(
@@ -19,106 +18,55 @@ fn meta(run_id: &str, started: i64, ended: i64) -> RunMeta {
 }
 
 fn usage(
-    kind: InferenceKind,
+    kind: CallKind,
     stage: &str,
     iteration: usize,
     model: &str,
     out: usize,
     at: i64,
-) -> RunRecord {
-    RunRecord::InferenceUsage {
+) -> Moment {
+    Moment::Call {
         kind,
         stage: stage.to_string(),
         iteration,
-        provider: "openrouter".to_string(),
         model: model.to_string(),
         prompt_tokens: 1_000,
         completion_tokens: out,
         cached_tokens: 100,
-        cache_write_tokens: 0,
-        cost_usd: None,
-        cost_reported_by_provider: None,
         at,
     }
 }
 
-fn status(status: RunStatus, at: i64) -> RunRecord {
-    RunRecord::StatusChanged { status, at }
+fn status(status: RunStatus, at: i64) -> Moment {
+    Moment::Status { status, at }
 }
 
-fn tool_done(at: i64) -> RunRecord {
-    RunRecord::ToolCallDone {
-        execution_id: String::new(),
-        outcome: None,
-        iteration: 1,
-        call_id: "c1".to_string(),
-        result: "ok".to_string().into(),
-        at,
-    }
+fn tool_done(at: i64) -> Moment {
+    Moment::ToolDone { at }
 }
 
-/// The journal of a run that searched, spawned children, waited, then wrote a
+/// The steps of a run that searched, spawned children, waited, then wrote a
 /// report five times at the same size: every span kind the reducer knows.
-fn journal() -> Vec<RunRecord> {
+fn journal() -> Vec<Moment> {
     vec![
-        // Ignored kinds cover the catch-all arm.
-        RunRecord::ContextCheckpoint {
-            snapshot: ContextSnapshot {
-                stage_name: "gather".to_string(),
-                total_tokens: 0,
-                max_tokens: 1_000,
-                regions: vec![],
-            },
-            at: 1_000,
-        },
         usage(
-            InferenceKind::Title,
+            CallKind::Title,
             "",
             0,
             "anthropic/claude-sonnet-5",
             30,
             1_003,
         ),
-        usage(
-            InferenceKind::Stage,
-            "gather",
-            1,
-            "x-ai/grok-4.6",
-            600,
-            1_010,
-        ),
-        RunRecord::ToolBatch {
-            calls: vec![],
-            at: 1_010,
-            stage_index: 0,
-            iteration: 1,
-            visit_id: String::new(),
-            requested_by: String::new(),
-            response: String::new(),
-        },
+        usage(CallKind::Stage, "gather", 1, "x-ai/grok-4.6", 600, 1_010),
         tool_done(1_012),
-        usage(
-            InferenceKind::Stage,
-            "gather",
-            2,
-            "x-ai/grok-4.6",
-            500,
-            1_030,
-        ),
-        usage(
-            InferenceKind::Routing,
-            "gather",
-            2,
-            "x-ai/grok-4.6",
-            3,
-            1_040,
-        ),
+        usage(CallKind::Stage, "gather", 2, "x-ai/grok-4.6", 500, 1_030),
+        usage(CallKind::Routing, "gather", 2, "x-ai/grok-4.6", 3, 1_040),
         // A status change that is not "waiting" while not waiting: nothing to close.
         status(RunStatus::Running, 1_040),
         status(RunStatus::WaitingInput, 1_045),
         // A child's title call journaled while parked is not this run's time.
         usage(
-            InferenceKind::Title,
+            CallKind::Title,
             "",
             0,
             "anthropic/claude-sonnet-5",
@@ -127,7 +75,7 @@ fn journal() -> Vec<RunRecord> {
         ),
         status(RunStatus::Running, 1_345),
         usage(
-            InferenceKind::Stage,
+            CallKind::Stage,
             "polish",
             3,
             "google/gemini-3.1-pro-preview",
@@ -135,7 +83,7 @@ fn journal() -> Vec<RunRecord> {
             1_545,
         ),
         usage(
-            InferenceKind::Stage,
+            CallKind::Stage,
             "polish",
             4,
             "google/gemini-3.1-pro-preview",
@@ -143,7 +91,7 @@ fn journal() -> Vec<RunRecord> {
             1_745,
         ),
         usage(
-            InferenceKind::Stage,
+            CallKind::Stage,
             "polish",
             5,
             "google/gemini-3.1-pro-preview",
@@ -152,7 +100,7 @@ fn journal() -> Vec<RunRecord> {
         ),
         // Large but a different stage: the run of repeats ends here.
         usage(
-            InferenceKind::Stage,
+            CallKind::Stage,
             "summary",
             6,
             "anthropic/claude-sonnet-5",
@@ -161,7 +109,7 @@ fn journal() -> Vec<RunRecord> {
         ),
         // Small and consecutive: ordinary, never a warning.
         usage(
-            InferenceKind::Stage,
+            CallKind::Stage,
             "summary",
             7,
             "anthropic/claude-sonnet-5",
@@ -169,7 +117,7 @@ fn journal() -> Vec<RunRecord> {
             2_050,
         ),
         usage(
-            InferenceKind::Stage,
+            CallKind::Stage,
             "summary",
             8,
             "anthropic/claude-sonnet-5",
@@ -214,6 +162,39 @@ fn five_replies_at_the_cap_are_named_as_one_warning() {
     assert!(t.warnings[0].contains("(600s)"));
 }
 
+/// A tool that finishes while the run is parked was in flight when the wait
+/// began: an approval it asked for, children it started. Its time runs up to
+/// the wait and the wait is waiting, never both, so the split adds up to the
+/// wall clock. Seen on a real run cancelled at its approval prompt: tools 82
+/// and waiting 74 of a wall of 82.
+#[test]
+fn a_tool_that_ends_while_parked_is_not_counted_twice() {
+    let moments = [
+        tool_done(1_001),
+        tool_done(1_005),
+        status(RunStatus::WaitingInput, 1_008),
+        tool_done(1_082),
+        status(RunStatus::Cancelled, 1_082),
+    ];
+    let t = analyze(&meta("r", 1_000, 1_082), &moments).totals;
+    assert_eq!((t.tools, t.waiting, t.other), (8, 74, 0));
+    assert_eq!(t.inference + t.tools + t.waiting + t.other, t.wall);
+}
+
+/// A run said to be waiting twice over is waiting from the first time: the
+/// second says nothing new, and starting the wait again would drop the time
+/// between them from every total.
+#[test]
+fn waiting_said_twice_keeps_the_first_start() {
+    let moments = [
+        status(RunStatus::WaitingInput, 1_010),
+        status(RunStatus::WaitingInput, 1_050),
+        status(RunStatus::Running, 1_100),
+    ];
+    let t = analyze(&meta("r", 1_000, 1_100), &moments).totals;
+    assert_eq!((t.waiting, t.other), (90, 10));
+}
+
 #[test]
 fn a_run_with_no_records_is_all_other_time() {
     let t = analyze(&meta("r", 1_000, 1_100), &[]);
@@ -231,7 +212,7 @@ fn a_run_with_no_records_is_all_other_time() {
 #[test]
 fn a_clock_that_went_backwards_never_makes_a_negative_total() {
     let records = [
-        usage(InferenceKind::Stage, "gather", 1, "m", 10, 900),
+        usage(CallKind::Stage, "gather", 1, "m", 10, 900),
         tool_done(890),
     ];
     let t = analyze(&meta("r", 1_000, 950), &records);
@@ -301,8 +282,8 @@ fn the_report_prints_in_every_shape() {
     print_tree(&[t]);
 }
 
-/// A run tree on disk in an isolated runs dir: a root with a journal, one
-/// child with a journal, one child with a meta but no journal.
+/// A run tree on disk in an isolated runs dir: a root with its steps, one
+/// child with its steps, and one child whose run file will not read.
 async fn with_tree<R, Fut>(unique: &str, f: impl FnOnce(String) -> Fut) -> R
 where
     Fut: std::future::Future<Output = R>,
@@ -320,7 +301,7 @@ where
         write_journal(
             "child-1",
             &[usage(
-                InferenceKind::Stage,
+                CallKind::Stage,
                 "gather",
                 1,
                 "anthropic/claude-sonnet-5",
@@ -332,19 +313,84 @@ where
         let mut torn = meta("child-torn", 1_045, 1_345);
         torn.depth = 1;
         crate::runstate::create_run(&torn).expect("torn child");
+        let path = crate::runstate::run_file::path_in(&crate::runstate::run_dir("child-torn"));
+        let mut bytes = std::fs::read(&path).expect("the run file");
+        bytes.extend(
+            leviath_runtime::runfile::codec::encode(
+                leviath_runtime::runfile::codec::FrameKind::Delta,
+                &9u64,
+            )
+            .expect("a frame"),
+        );
+        std::fs::write(&path, bytes).expect("torn");
 
         f("root-1".to_string()).await
     })
     .await
 }
 
-fn write_journal(run_id: &str, records: &[RunRecord]) {
-    let mut bytes = Vec::new();
-    write_archive_start(&mut bytes, RUN_ARCHIVE_VERSION).expect("preamble");
-    for r in records {
-        write_record(&mut bytes, r).expect("record");
+/// Record `moments` as steps of `run_id`'s file, one step each.
+fn write_journal(run_id: &str, moments: &[Moment]) {
+    use leviath_runtime::spec::names::{ModelId, ModelRef, ProviderName};
+    use leviath_runtime::state::{RunEvent, RunStatus as State, Spend, ToolResultState};
+    let dir = crate::runstate::run_dir(run_id);
+    for (i, moment) in moments.iter().enumerate() {
+        let (events, status) = match moment {
+            Moment::Status { status, .. } => (
+                Vec::new(),
+                Some(match status {
+                    RunStatus::WaitingInput => State::Waiting,
+                    RunStatus::Complete => State::Complete,
+                    _ => State::Active,
+                }),
+            ),
+            Moment::Call {
+                kind,
+                stage,
+                iteration,
+                model,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                ..
+            } => (
+                vec![RunEvent::Inference {
+                    attempt: String::new(),
+                    model: ModelRef {
+                        provider: ProviderName::new("openrouter").ok(),
+                        model: ModelId::new(model).expect("a model"),
+                    },
+                    spend: Spend {
+                        prompt_tokens: *prompt_tokens as u64,
+                        completion_tokens: *completion_tokens as u64,
+                        cached_tokens: *cached_tokens as u64,
+                        ..Spend::default()
+                    },
+                    finish_reason: None,
+                    kind: *kind,
+                    stage: leviath_runtime::spec::names::StageName::new(stage).ok(),
+                    iteration: *iteration as u32,
+                }],
+                None,
+            ),
+            Moment::ToolDone { .. } => (
+                vec![RunEvent::ToolFinished {
+                    call_id: "c1".to_string(),
+                    result: ToolResultState {
+                        text: "ok".to_string(),
+                        is_error: false,
+                    },
+                    millis: 0,
+                }],
+                None,
+            ),
+        };
+        crate::runstate::run_file::tests::step_with(&dir, 1_000 + i as i64, events, |s| {
+            if let Some(status) = status {
+                s.status = status;
+            }
+        });
     }
-    std::fs::write(crate::runstate::run_dir(run_id).join("run.lvr"), bytes).expect("journal");
 }
 
 #[tokio::test]
@@ -377,8 +423,8 @@ async fn the_tree_includes_children_and_skips_one_with_no_journal() {
         let root = load(&run_id).expect("root loads");
         assert_eq!(root.children.len(), 2);
         assert!(load("child-1").is_ok());
-        let err = load("child-torn").expect_err("no journal");
-        assert!(err.to_string().contains("no readable journal"), "{err}");
+        let err = load("child-torn").expect_err("a run file that will not read");
+        assert!(err.to_string().contains("no readable"), "{err}");
         execute(TimelineArgs {
             run_id,
             json: true,
@@ -387,6 +433,91 @@ async fn the_tree_includes_children_and_skips_one_with_no_journal() {
         })
         .await
         .expect("json tree");
+    })
+    .await;
+}
+
+/// A run's file is read the same way: each model call in the stage it was
+/// made in, each tool result, and the time spent waiting.
+#[tokio::test]
+async fn a_run_file_reads_as_a_timeline() {
+    use crate::runstate::run_file::tests::{recorded, step_with};
+    use leviath_runtime::spec::names::ModelRef;
+    use leviath_runtime::state::{RunEvent, RunStatus as State, Spend};
+    crate::runstate::with_isolated_runs_dir_async("timeline-run-file", |_d| async {
+        let dir = recorded(&crate::runstate::runs_dir());
+        let run_id = dir.file_name().unwrap().to_string_lossy().into_owned();
+        // Each call says what kind it was and where it was made, so a title
+        // call is a row of its own and a call is placed by its own record,
+        // not by the step that happened to carry it.
+        let call = |completion_tokens, kind, stage: Option<&str>, iteration| RunEvent::Inference {
+            attempt: "a".to_string(),
+            model: ModelRef::parse("anthropic/claude-sonnet-5").unwrap(),
+            spend: Spend {
+                prompt_tokens: 100,
+                completion_tokens,
+                ..Spend::default()
+            },
+            finish_reason: None,
+            kind,
+            stage: stage.map(|s| leviath_runtime::spec::names::StageName::new(s).unwrap()),
+            iteration,
+        };
+        step_with(
+            &dir,
+            100,
+            vec![call(10, CallKind::Stage, Some("analyze"), 1)],
+            |s| s.status = State::Active,
+        );
+        step_with(&dir, 105, vec![call(3, CallKind::Title, None, 0)], |_| {});
+        step_with(
+            &dir,
+            110,
+            vec![call(20, CallKind::Stage, Some("analyze"), 2)],
+            |s| s.cursor.iteration = 1,
+        );
+        let done = RunEvent::ToolFinished {
+            call_id: "c1".to_string(),
+            result: leviath_runtime::state::ToolResultState {
+                text: "ok".to_string(),
+                is_error: false,
+            },
+            millis: 5,
+        };
+        step_with(&dir, 115, vec![done], |_| {});
+        step_with(&dir, 120, vec![RunEvent::Log("parked".into())], |s| {
+            s.status = State::Waiting
+        });
+        step_with(&dir, 150, Vec::new(), |s| s.status = State::Active);
+        let timeline = load(&run_id).expect("the run file reads");
+        assert_eq!(timeline.calls.len(), 3);
+        assert_eq!(timeline.calls[0].stage, "analyze");
+        assert_eq!(timeline.calls[0].iteration, 1);
+        assert_eq!(timeline.calls[1].kind, "title");
+        assert_eq!(timeline.calls[1].stage, "");
+        assert_eq!(timeline.calls[2].iteration, 2);
+        assert_eq!(timeline.calls[2].completion_tokens, 20);
+        assert_eq!(timeline.calls[0].model, "claude-sonnet-5");
+        let rows: Vec<(&str, usize)> = timeline
+            .stages
+            .iter()
+            .map(|s| (s.name.as_str(), s.calls))
+            .collect();
+        assert_eq!(rows, vec![("analyze", 2), ("(title)", 1)]);
+        assert_eq!(timeline.totals.waiting, 30);
+        assert_eq!(timeline.totals.tools, 5);
+
+        // A step that will not decode leaves nothing to show.
+        let mut bytes = std::fs::read(dir.join(leviath_core::files::RUN_FILE)).unwrap();
+        bytes.extend(
+            leviath_runtime::runfile::codec::encode(
+                leviath_runtime::runfile::codec::FrameKind::Delta,
+                &9u64,
+            )
+            .unwrap(),
+        );
+        std::fs::write(dir.join(leviath_core::files::RUN_FILE), bytes).unwrap();
+        assert!(load(&run_id).is_err());
     })
     .await;
 }
@@ -401,5 +532,5 @@ async fn a_run_with_no_meta_is_an_error_rather_than_an_empty_table() {
     })
     .await
     .expect_err("a missing run is worth saying");
-    assert!(err.to_string().contains("no readable meta.json"), "{err}");
+    assert!(err.to_string().contains("no readable record"), "{err}");
 }

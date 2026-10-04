@@ -32,8 +32,9 @@ lev run coder --task "Add pagination to the /users endpoint"
 ```
 
 `lev run` hands the agent to a background daemon that keeps runs going after
-your terminal closes. `lev create my-agent` scaffolds a blueprint of your own:
-models per stage, context regions and budgets, tools, and the workflow graph.
+your terminal closes. `lev create my-agent` scaffolds a blueprint of your own,
+an `agent.toml` holding the inputs it takes, models per stage, context regions
+and budgets, tools, and the workflow graph. `lev validate my-agent` checks it.
 
 Full documentation is at [leviath.dev](https://leviath.dev).
 

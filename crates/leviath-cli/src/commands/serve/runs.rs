@@ -1,16 +1,10 @@
 //! `GET /api/runs` - the paginated, searchable run listing.
 //!
-//! Supersedes `GET /api/agents`, which returns every run ever recorded as one
-//! unbounded array and accepts only a status filter. That route stays exactly as
-//! it is, deprecated: it is the older spelling (the console says "runs"
-//! everywhere), and it gets a replacement at a new path rather than a changed
-//! response shape, so nothing that calls it today breaks.
-//!
-//! What this adds over that: keyset pagination, sorting, server-side search with
-//! highlights, batch fetch by id, and field projection.
+//! Keyset pagination, sorting, server-side search with highlights, batch fetch
+//! by id, and field projection, over every run on this machine.
 //!
 //! Every listing here starts from the shared run index (`run_index`), which
-//! parses a `meta.json` only when its stat changes, so a page of fifty costs a
+//! reads a run file only when its stat changes, so a page of fifty costs a
 //! stat per live run rather than a parse of every run on the machine.
 //! Pagination bounds what crosses the wire and what the browser holds. The
 //! guard that bounds the filesystem-reading half of search is
@@ -317,7 +311,7 @@ pub(super) async fn list_runs(
 /// The single place a `RunMeta` becomes JSON on any route. `redacted()` is what
 /// strips the webhook signing secret, and a redaction that has to be remembered
 /// per handler is the one that gets forgotten; the same goes for the spans,
-/// which are what keeps `/api/runs` and `/api/agents` describing the same run
+/// which are what keeps `/api/runs` and `/api/runs/{id}` describing the same run
 /// with the same keys.
 pub(super) fn run_json(meta: &RunMeta, now: i64) -> serde_json::Value {
     let mut value = serde_json::to_value(meta.redacted()).unwrap_or(serde_json::Value::Null);
@@ -390,7 +384,7 @@ pub(super) struct DeleteRunsQuery {
 
 /// `DELETE /api/runs/{id}`: remove a finished run's record from disk.
 ///
-/// Separate from `DELETE /api/agents/{id}`, which cancels. The two verbs mean
+/// Separate from `POST /api/runs/{id}/cancel`, which cancels. The two verbs mean
 /// genuinely different things - one stops the work, the other forgets it
 /// happened - and answering 204 to both would leave a client unable to say
 /// which it got.

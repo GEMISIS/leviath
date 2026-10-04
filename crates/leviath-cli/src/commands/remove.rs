@@ -26,7 +26,7 @@ fn remove_agent(installer: &leviath_package::AgentInstaller, name: &str) -> anyh
 ///
 /// The `uninstall` closure is a trait object so its failure arm can be
 /// exercised on every platform: a genuinely installed agent (which
-/// `get_installed` requires - an `agent.leviath` under the agent dir) is an
+/// `get_installed` requires - an `agent.toml` under the agent dir) is an
 /// ordinary removable directory, so `remove_dir_all` only fails on it via a
 /// Unix-only `chmod` on the parent. Production always passes the real
 /// `installer.uninstall`.
@@ -80,9 +80,9 @@ mod tests {
     fn install_test_agent(installer: &leviath_package::AgentInstaller, name: &str) {
         let project_dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            project_dir.path().join("agent.leviath"),
+            project_dir.path().join("agent.toml"),
             format!(
-                "[agent]\nname = \"{name}\"\nversion = \"1.0.0\"\ndescription = \"test agent\"\n"
+                "[blueprint]\nname = \"{name}\"\nversion = \"1.0.0\"\ndescription = \"test agent\"\n"
             ),
         )
         .unwrap();

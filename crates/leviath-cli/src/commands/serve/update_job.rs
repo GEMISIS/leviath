@@ -445,7 +445,7 @@ impl UpdateJobs {
         let plan = plan(&UpdateArgs::default(), &env);
         let installed = self.binary_step(id, req, &plan, &env, events);
         self.agents_step(id, req, &plan, &env, events, installed);
-        self.keys_step(id, req, &plan, events, installed);
+        self.keys_step(id, req, events, installed);
         self.migrations_step(id, req, &plan, &env, events, installed);
         self.finish(id, matches!(installed, Binary::Installed), events);
     }
@@ -572,19 +572,15 @@ impl UpdateJobs {
         self.step(id, step, status, said.join("; "), events);
     }
 
-    /// The config migrations the plan found.
     /// Renamed keys in blueprints the reader wrote.
     ///
-    /// The step before this one replaces the *bundled* blueprints wholesale, so
-    /// those arrive spelled the way the binary that shipped them spells things.
-    /// This is for the ones nobody else owns. Both spellings parse, so a
-    /// failure here leaves a blueprint that still runs, which is why one file
-    /// that will not write does not fail the step.
+    /// An `agent.toml` refuses a key it does not know, so a blueprint never
+    /// carries an old spelling to respell: the step is kept so a client that
+    /// lists the steps sees the same four, and it always skips, saying why.
     fn keys_step(
         &self,
         id: &str,
         req: ApplyRequest,
-        plan: &UpdatePlan,
         events: &broadcast::Sender<Stamped>,
         binary: Binary,
     ) {
@@ -592,38 +588,8 @@ impl UpdateJobs {
         let Some(()) = self.reached(id, step, req.keys, binary, events) else {
             return;
         };
-        if plan.rewrites.is_empty() {
-            let detail = "every blueprint uses the current key names".to_string();
-            self.step(id, step, StepStatus::Skipped, detail, events);
-            return;
-        }
-        self.step(
-            id,
-            step,
-            StepStatus::Running,
-            format!("rewriting {} blueprint(s)", plan.rewrites.len()),
-            events,
-        );
-        let mut written = Vec::new();
-        let mut failed = Vec::new();
-        for rewrite in &plan.rewrites {
-            match std::fs::write(&rewrite.path, &rewrite.rewritten) {
-                Ok(()) => written.push(rewrite.name.clone()),
-                Err(e) => failed.push(format!("{}: {e}", rewrite.name)),
-            }
-        }
-        let mut said = Vec::new();
-        if !written.is_empty() {
-            said.push(format!("rewrote {}", written.join(", ")));
-        }
-        if !failed.is_empty() {
-            said.push(format!("could not rewrite {}", failed.join(", ")));
-        }
-        let status = match failed.is_empty() {
-            true => StepStatus::Done,
-            false => StepStatus::Failed,
-        };
-        self.step(id, step, status, said.join("; "), events);
+        let detail = "every blueprint uses the current key names".to_string();
+        self.step(id, step, StepStatus::Skipped, detail, events);
     }
 
     fn migrations_step(

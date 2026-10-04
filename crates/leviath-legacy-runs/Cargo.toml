@@ -1,0 +1,38 @@
+[package]
+name = "leviath-legacy-runs"
+description = "Converts a run directory in the old many-file layout into a single run file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# Temporary: it carries old runs and blueprints over and is deleted before
+# 1.0, so it is never published.
+publish = false
+
+[dependencies]
+# `migrate` writes an `agent.toml`.
+leviath-blueprint = { workspace = true }
+leviath-core = { workspace = true }
+# The old manifest is read as a run graph of the runtime's.
+leviath-runtime = { workspace = true }
+# The run file is written owner-only, like every run file.
+leviath-sys = { workspace = true }
+# A converted stage's `submit_output` is described as a new run's is.
+leviath-tools = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

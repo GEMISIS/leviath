@@ -1,19 +1,21 @@
 ---
 title: Agent blueprints
-description: The agent.leviath blueprint format: the TOML defining an agent's stages, models, tools, and context layout.
+description: What an agent.toml blueprint holds and why: stages, models, tools, regions, inputs, seeds, and the checks to run first.
 group: Concepts
 group_order: 2
 order: 5
 ---
 
-# Agent blueprints (`agent.leviath`)
+# Agent blueprints (`agent.toml`)
 
-A **blueprint** is a multi-stage [workflow graph](/docs/stages): a directory holding an
-`agent.leviath` TOML file and the blueprint's own tools and scripts. Each `lev run` of it is a run.
-The [agent catalog](/docs/agent-catalog) has seven complete ones worth stealing from.
+A **blueprint** is a multi-stage [workflow graph](/docs/stages) you write once and run many times.
+It is a directory holding an `agent.toml` file and the blueprint's own tools and scripts. Each
+`lev run` of it is a **run**: one execution, with its own id and its own memory. The
+[agent catalog](/docs/agent-catalog) has eleven complete blueprints worth stealing from.
 
 New to this? [Build your first agent](/docs/first-agent) walks through writing one stage by
-stage; this page is the reference for every field it uses.
+stage. This page explains what each part of a blueprint is for. The
+[blueprint format](/docs/blueprint-format) lists every key.
 
 Start from a scaffold rather than a blank file:
 
@@ -23,39 +25,92 @@ cd my-agent
 lev run . --task "Your task here"
 ```
 
-A blueprint needs very little to run: a name, an entry stage, and one stage with a prompt.
-Everything else on this page is opt-in from there. A fuller one looks like this
-(machine-checkable against the published
-[blueprint schema](https://leviath.dev/docs/stable/blueprint.schema.json)):
+A blueprint needs very little to run: a name, a version, a layout, and one stage with a prompt.
+Everything else on this page is opt-in from there. A fuller one looks like this:
 
 ```toml
-[agent]
+[blueprint]
 name = "coder"
 version = "0.2.0"
 description = "Analyze, implement, and review with graph-based recovery"
-entry_stage = "analyze"
 
-[tool_permissions]           # global defaults; per-stage overrides allowed
+[graph]
+entry = "analyze"
+
+[graph.tool_permissions]          # defaults for every stage; a stage may override them
 read_file  = "allow"
 write_file = "ask"
 bash       = "ask"
 
-[stages.analyze]
-mode = "autonomous"
-model = { models = ["claude-sonnet-5", "gpt-5.4-mini"] }
-available_tools = ["read_file", "list_dir"]
-required_tools = []                # human-in-the-loop tools kept in an unattended run
-max_iterations = 15
-system_prompt = """Understand the task and produce a short implementation plan."""
+[[graph.inputs]]                  # what each run is given: here, the task
+name = "task"
+type = { kind = "text", multiline = true }
+required = true
+binds = [{ region = "task" }]
 
-[stages.analyze.transitions.implement]
+[graph.layout]                    # the run's memory, as named regions
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = "2%"
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 30 }
+budget = "40%"
+
+[[graph.stages]]
+name = "analyze"
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }] }
+tools = ["read_file", "list_dir"]
+required_tools = []               # human-in-the-loop tools kept in an unattended run
+max_iterations = 15
+system_prompt = "Understand the task and produce a short implementation plan."
+
+[[graph.stages]]
+name = "implement"
+model = { models = [{ model = "gpt-5.5" }, { model = "claude-opus-5" }] }
+tools = ["read_file", "write_file", "bash"]
+max_iterations = 40
+system_prompt = "Carry out the plan. Run the tests after each change."
+
+[[graph.edges]]
+name = "implement"
+from = "analyze"
+to = "implement"
 hint = "Plan ready, begin implementation"
 ```
 
+The file has two tables. `[blueprint]` names and versions it. `[graph]` is the run graph itself:
+stages, the edges between them, the layout of the run's memory, and the inputs a run takes. A
+[raw spawn request](/docs/starting-a-run#blueprint-or-raw-graph) carries the same graph, so what
+you learn here applies there too.
+
+`lev blueprint migrate <dir>` converts an `agent.leviath` manifest into this form. See
+[migrating from agent.leviath](/docs/blueprint-format#migrating-from-agentleviath).
+
+## Inputs: what each run is given
+
+A blueprint is written once, and each run needs its own task, its own diff, its own deadline.
+Those per-run values are **inputs**. You declare each one in `[[graph.inputs]]` with a type, and
+bind it to the place it goes, usually a region:
+
+```bash
+lev run coder --task "Add a --json flag to lev ps" --input constraints="No new dependencies"
+```
+
+By convention every blueprint declares a plain `text` input named `task`, usually bound to a
+region of the same name. That is why `--task` works everywhere. Any other input is `--input name=value`, or the short
+form `--<name> value`. A run that leaves out a required input, gives one the wrong type, or names
+one the blueprint does not declare is refused before it starts, with every problem listed at once.
+[Starting a run](/docs/starting-a-run#inputs) covers the types and where an input can go.
+
 ## The run loop
 
-Within a stage, an agent runs a tight loop (infer, act on tool calls, repeat) until the model
-signals it's done or a [transition](/docs/stages) fires:
+Within a stage, a run goes round a tight loop (infer, act on tool calls, repeat) until the model
+signals it's done or an [edge](/docs/stages) fires:
 
 ```mermaid
 flowchart LR
@@ -80,20 +135,25 @@ stateDiagram-v2
   Running --> WaitingInput: prompt, or holding for children
   WaitingInput --> Running: answered, or children done
   Running --> Paused: lev pause
+  WaitingInput --> Paused: lev pause, on a prompt
   Paused --> Running: lev resume
   Running --> Complete
   Running --> CompleteInteractive: done, still accepting messages
   Running --> Error: unrecoverable error
   Running --> Cancelled: lev cancel
+  Cancelled --> Running: lev resume
   Complete --> [*]
   CompleteInteractive --> [*]
   Error --> [*]
-  Cancelled --> [*]
 ```
 
 These are the exact `RunStatus` values the [dashboard](/docs/dashboard) and [API](/docs/api)
-report. `CompleteInteractive` means every required stage finished but the agent is still
+report. `CompleteInteractive` means every required stage finished but the run is still
 accepting [messages](/docs/interaction).
+
+`Cancelled` is not the end of a run. A cancelled run stops where it is and keeps everything it
+had, and `lev resume` brings it back to carry on from there. `Complete`, `CompleteInteractive`
+and `Error` are where a run ends.
 
 `WaitingInput` covers two very different situations: a run stopped on a prompt somebody has
 to answer, and a run parked while its own [sub-agents](/docs/sub-agents) or
@@ -104,26 +164,34 @@ run is stuck.
 ## Stages and models
 
 Each stage gets its own **model** (an ordered list of models, best first: the first one a configured
-provider serves wins), tools, iteration cap, and context layout. Transitions form a
-[graph](/docs/stages): linear by default, or branch on conditions like `error` and `stuck`.
+provider serves wins), tools, iteration cap, and context layout. Edges (`[[graph.edges]]`) form a
+[graph](/docs/stages): each names the stage it leaves and the stage it reaches, and can fire on
+conditions like `error` and `stuck`.
 
 ```toml
-[stages.analyze.model]
+[[graph.stages]]
+name = "analyze"
+system_prompt = "Understand the task."
+
+[graph.stages.model]
 allow_user_default = true          # let the host's override_model and fallback_model apply;
                                    # false keeps this list exactly as written
-models = ["claude-sonnet-5", "gpt-5.4-mini"]
-                                   # name models, not routes: whichever provider
-                                   # the user configured is asked which it serves.
+models = [
+    { model = "claude-sonnet-5" }, # name models, not routes: whichever provider
+    { model = "gpt-5.4-mini" },    # the user configured is asked which it serves.
                                    # Pin one only for a model a single route can
                                    # reach: { provider = "ollama", model = "..." }
+]
 request_timeout_secs = 120         # per-stage inference wall-clock cap
 
-[stages.analyze.model.parameters]  # free-form, passed through to the provider
+[graph.stages.model.params]
 temperature = 0.2
-max_output_tokens = "40%"          # see below; everything else goes to the provider as written
+max_output_tokens = "40%"          # see below
+extra = { reasoning_effort = "high" }   # passed to the provider as written
 ```
 
-`max_output_tokens` is the one parameter Leviath reads itself: it is the most one reply may
+`temperature` and `max_output_tokens` are the two settings Leviath knows. Anything else goes in
+`extra` and reaches the provider untouched. `max_output_tokens` is the most one reply may
 contain. Three forms:
 
 | Form | Meaning |
@@ -132,8 +200,7 @@ contain. Three forms:
 | `max_output_tokens = "40%"` | that share of the model's context window |
 | `max_output_tokens = "100% of claims"` | that share of the `claims` region's budget, for a stage whose reply fills a region |
 
-The table form `{ percent = 100, of = "claims" }` is the same as the last one. A relative cap is
-resolved when each request is built, against whichever model the stage landed on, and is never
+A relative cap is resolved when each request is built, against whichever model the stage landed on, and is never
 more than that model's own maximum. A cap the loader cannot read fails the load, because a limit
 that silently becomes "no limit" is the kind of typo that only shows up as a bill.
 
@@ -150,21 +217,21 @@ the stage ends with an error. It takes the stage's `error` edge when there is on
 when there is not. Replies that are not cut off, however many tool calls they make, start the count
 again.
 
-Model selection is per stage, and only per stage. Two mistakes here are quiet ones. A top-level
-`[model]` block parses and is read by nothing, and a stage naming no model takes the host default
-without saying so. `lev validate` reports both. See
+Model selection is per stage, and only per stage. A top-level `[model]` table is refused as an
+unknown key. A stage naming no model takes the host default without saying so, and
+`lev validate` warns about it. See
 [every stage should name its own model](/docs/stages#every-stage-should-name-its-own-model).
 
 ### Which tools a stage gets
 
-`available_tools` lists what the stage may call, by name or by kind. `@builtin`, `@subagent`,
+A stage's `tools` lists what it may call, by name or by kind. `@builtin`, `@subagent`,
 `@scripts`, `@mcp` and `@all` each grant every tool of that kind, so `["@builtin", "@scripts"]`
 is every built-in and every Rhai tool with nothing to keep in step. See
 [tool groups](/docs/tools#tool-groups) for what each reaches and what none of them grant.
 
 `required_tools` is the exception to the unattended cut. A [`--yolo`](/docs/glossary) run drops
 every tool that waits on a person, and this is where a stage names the ones it wants kept anyway.
-Every entry must also appear in `available_tools`, by name or through a group that reaches it;
+Every entry must also appear in `tools`, by name or through a group that reaches it;
 `lev validate` checks the group case against the tools this install has.
 
 Naming a tool here also settles the `blocking-tool-in-autonomous-stage` lint for it, since listing
@@ -177,7 +244,7 @@ An MCP tool is always named `<server>__<tool>`: the server it came from, two und
 the tool the server calls it:
 
 ```toml
-available_tools = ["read_file", "tracker__create_issue"]
+tools = ["read_file", "tracker__create_issue"]
 ```
 
 The server is part of the name whether or not anything would have collided. Two servers that both
@@ -194,41 +261,59 @@ To grant a server's whole set instead of naming its tools one at a time, see
 
 ## Context regions
 
-`[context.regions]` defines the memory layout. There are nine region kinds (the default is
-`temporary`); see [Structured context](/docs/context) for what each one does. Budgets come in
-three forms:
+A **region** is a named part of a run's memory. `[graph.layout]` lists the regions every stage
+sees, in the order the model reads them. Each one has a `name`, a `kind` and a `budget`. There
+are nine region kinds; see [Structured context](/docs/context) for what each one does. Budgets
+come in three forms:
 
 ```toml
-[context.regions.codebase]
-kind = "compacting"
-budget = "35%"             # ceiling as a share of the model's context window
-max_tokens = 60000         # absolute guard-rail the percentage never exceeds
-min_tokens = 4000          # absolute floor on small context windows
+[graph.layout]
+total_budget_tokens = 0    # matters only when every budget is a fixed number
 
-[context.regions.task]
+[[graph.layout.regions]]
+name = "codebase"
+kind = "compacting"
+budget = { percent = "35%", min = 4000, max = 60000 }
+                           # a share of the model's context window, held between
+                           # an absolute floor and an absolute ceiling
+
+[[graph.layout.regions]]
+name = "notes"
+kind = "clearable"
+budget = "10%"             # a share of the window with no clamp
+
+[[graph.layout.regions]]
+name = "task"
 kind = "pinned"
-max_tokens = 2000          # bare max_tokens alone = fixed absolute budget
+budget = 2000              # a bare number is a fixed budget in tokens
 ```
 
 Percentages are **ceilings, not allocations**. They may sum past 100%, because regions rarely all
-fill at once. With a percentage, `max_tokens` caps and `min_tokens` floors the resolved value;
-without one, `max_tokens` is the fixed budget. Compacting regions also take
-`threshold_tokens`, the fill level that triggers compaction.
+fill at once. In the table form, `max` caps and `min` floors the resolved value. A compacting
+region also takes `compact_at`, the share of its budget that triggers compaction, or
+`kind = { kind = "compacting", threshold_tokens = 8000 }` for a fixed fill level. The
+[blueprint format](/docs/blueprint-format#layout-and-regions) lists every region key.
 
 ### Say how much a region moves
 
 ```toml
-[context.regions.task]
+[[graph.layout.regions]]
+name = "task"
 kind = "pinned"
-volatility = "stable"      # seeded once, never written again
+budget = 2000
+volatility = "stable"      # filled once at spawn, never written again
 
-[context.regions.findings]
+[[graph.layout.regions]]
+name = "findings"
 kind = "pinned"
-volatility = "grows"       # the agent appends to it
+budget = "10%"
+volatility = "grows"       # the run appends to it
 
-[context.regions.plan]
+[[graph.layout.regions]]
+name = "plan"
 kind = "pinned"
-volatility = "rewritten"   # revised in place each time - the default
+budget = "5%"
+volatility = "rewritten"   # revised in place each time; the default
 ```
 
 Providers cache the prompt by prefix, so a region that changes invalidates the cache for every
@@ -244,13 +329,19 @@ can only improve matters. A region that claims `stable` and then keeps changing 
 log, because a wrong declaration is worse than none. It puts churn at the front of the prompt,
 where it costs the most. See [what caching costs](/docs/context#what-caching-costs).
 
-A stage can override the whole layout for itself alone with `[stages.<name>.context.regions]`. The
-per-stage layout applies when the stage is entered, and uses the same syntax:
+A stage can replace the whole layout for itself alone with its own `layout`. The per-stage layout
+applies when the stage is entered, and uses the same keys:
 
 ```toml
-[stages.plan.context.regions.constraints]
-kind = "pinned"
-budget = "10%"
+[[graph.stages]]
+name = "plan"
+system_prompt = "Plan."
+
+[graph.stages.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "constraints", kind = "pinned", budget = "10%" },
+]
 ```
 
 **A region the stage leaves out is hidden, not destroyed.** It keeps its contents and is left out
@@ -266,8 +357,10 @@ Re-declaring a layout is the heavy form. When a stage only needs to leave one or
 name them instead:
 
 ```toml
-[stages.polish.context]
-hide = ["sources"]        # everything else is carried exactly as the global layout says
+[[graph.stages]]
+name = "polish"
+system_prompt = "Polish."
+hide = ["sources"]        # everything else is carried exactly as the graph's layout says
 ```
 
 `hide` is the right tool for the common case: a region of raw material (fetched pages, tool
@@ -275,35 +368,40 @@ output) that an early stage fills and a late stage never reads. Left in, it is r
 call of every later stage; a report-polishing stage in the bundled deep-researcher was carrying
 125,000 tokens of sources it had no instruction to look at. A name that matches no region fails
 the load, and the always-visible regions above cannot be hidden. The hidden set is decided afresh
-by each stage: a stage that declares neither `regions` nor `hide` carries everything.
+by each stage: a stage that declares neither its own `layout` nor `hide` carries everything.
 
 ## Seed commands
 
-A region can be seeded before the run starts:
+A region can be filled before the run starts. An input bound to the region fills it from the
+caller. A `seed` fills it from somewhere the blueprint names: files, a glob, literal text, a
+script, a list of tool calls, or a shell command:
 
 ```toml
-[context.regions.codebase]
+[[graph.layout.regions]]
+name = "codebase"
 kind = "compacting"
+budget = { percent = "35%", min = 4000, max = 60000 }
 seed = { command = "git ls-files" }
 ```
 
-Seeds run at spawn **before any approval prompt**, confined to the workdir and routed through the
+Command seeds run at spawn **before any approval prompt**, confined to the workdir and routed through the
 entry stage's sandbox, time- and size-capped.
 
 > [!WARNING]
 > A seed command runs a shell command before you approve anything, so it must be covered by
 > [`[safe_commands]`](/docs/interaction#what-runs-without-asking) to run at all. `lev validate`
 > prints every seed a blueprint will run; review them for third-party blueprints. Refuse with
-> `--no-seed-commands` or `[security] allow_seed_commands = false`.
+> `--no-seed-commands`, `launch.seed_commands` in a [spawn request](/docs/starting-a-run#launch-policy),
+> or `[security] allow_seed_commands = false`.
 
 ## Read paths
 
-An agent that needs to *read* beyond its workdir, for run archives, design docs, or sibling
-directories, declares them:
+A blueprint whose runs need to *read* beyond their workdir, for run archives, design docs, or
+sibling directories, declares the paths:
 
 ```toml
-[read_paths]
-allow = ["~/.leviath/runs", "../shared-docs", "glob:~/design-docs/**"]
+[graph]
+read_paths = ["~/.leviath/runs", "../shared-docs", "glob:~/design-docs/**"]
 ```
 
 The declarations do nothing on their own: the user's config must grant them, they are
@@ -311,77 +409,71 @@ read-only, and every access is checked against the symlink-resolved real path. R
 `lev validate` to see which of them the config on this machine actually grants. See
 [Security](/docs/security) for the grant stanzas and the full matching rules.
 
-## Mime types the agent brings
+## Mime types the blueprint brings
 
-An agent whose tools make or take a format nothing else knows can describe it itself:
+A blueprint whose tools make or take a format nothing else knows can describe it itself:
 
 ```toml
-[mime_types."application/x-acme-scene"]
+[graph.mime_types."application/x-acme-scene"]
 family = "model"
 extensions = ["scene"]
 magic = "41434D45"
-check = "checks/scene.rhai"      # relative to this directory; refuses bytes that are not a scene
+check = { file = "checks/scene.rhai" }   # relative to this directory; refuses bytes that are not a scene
 ```
 
 The rows are the same shape as the operator's
-[`mime_types.toml`](/docs/configuration#mime_typestoml) and layer over it for this agent's
-runs only, so a blueprint travels with the types it needs and never changes what another agent
-sees. They are checked when the manifest is parsed, so a misspelled field fails `lev validate`
-and the spawn. A `check` script is compiled beside the agent's other scripts with the same
+[`mime_types.toml`](/docs/configuration#mime_typestoml) and layer over it for this blueprint's
+runs only, so a blueprint travels with the types it needs and never changes what another run
+sees. They are checked when the blueprint is read, so a misspelled field fails `lev validate`
+and the spawn. A `check` script is compiled beside the blueprint's other scripts with the same
 fence: it has to live inside the blueprint's directory. [Mime](/docs/mime#the-registry) has
 every field and [Rhai mime checks](/docs/rhai-mime-checks) the script.
 
 ## Dependencies
 
-An agent can say what has to be in place on the machine before it runs, as a top-level
-`[[dependencies]]` array. This is a declaration, never a grant: Leviath shows the operator what is
-missing and how to fix it, and a run whose required dependency is unmet fails to spawn before any
-model is billed. `lev deps check <agent>` reports the same findings, and `lev deps install <agent>`
-sets them up after asking.
+A blueprint can say what has to be in place on the machine before it runs, as a
+`[[graph.dependencies]]` array. This is a declaration, never a grant: Leviath shows the operator
+what is missing and how to fix it, and a run whose required dependency is unmet fails to spawn
+before any model is billed. `lev deps check <agent>` reports the same findings, and
+`lev deps install <agent>` sets them up after asking.
 
-Each entry has a `name`, a `kind`, an optional `required` (true by default), a human `remedy`
-shown when it is missing, and an optional `description`. The kind chooses what must be present:
+Each entry has a `name`, a `needs`, an optional `required` (true by default), a human `remedy`
+shown when it is missing, an optional `description`, and an optional `install`. `needs` chooses
+what must be present:
 
 ```toml
 # An MCP server that must be configured, plus the secret it needs.
-[[dependencies]]
+[[graph.dependencies]]
 name = "meshy"
-kind = "mcp_server"
-server = "meshy"
-env = ["MESHY_API_KEY"]
+needs = { mcp_server = { server = "meshy", env = ["MESHY_API_KEY"] } }
 remedy = "Run: lev deps install my-agent, then set MESHY_API_KEY"
 
 # What lev deps install writes into the user's config for that server. Secrets
 # are never stored here: they are named in env above and prompted for.
-[dependencies.install.server]
+[graph.dependencies.install.server]
 transport = "http"
 url = "https://www.meshy.ai/mcp"
-[dependencies.install.server.headers]
-Authorization = "Bearer ${MESHY_API_KEY}"
+headers = { Authorization = "Bearer ${MESHY_API_KEY}" }
 
 # A program that must be on PATH, with how to install it.
-[[dependencies]]
+[[graph.dependencies]]
 name = "blender"
-kind = "binary"
-command = "blender"
-[dependencies.install]
-command = "brew install blender"          # or per-OS:
-[dependencies.install.commands]
-linux = "apt-get install -y blender"
+needs = { binary = "blender" }
+
+[graph.dependencies.install]
+command = "brew install blender"                       # or per-OS:
+commands = { linux = "apt-get install -y blender" }
 
 # An environment variable that must be set and non-empty.
-[[dependencies]]
+[[graph.dependencies]]
 name = "token"
-kind = "env"
-var = "ACME_TOKEN"
+needs = { env = "ACME_TOKEN" }
 
 # A condition a Rhai script decides.
-[[dependencies]]
+[[graph.dependencies]]
 name = "acme-setup"
-kind = "script"
-check = "deps/check.rhai"                  # returns () when satisfied, else a remedy string
-[dependencies.install]
-script = "deps/install.rhai"               # optional; runs only via lev deps install
+needs = { check = { file = "deps/check.rhai" } }       # returns () when satisfied, else a remedy string
+install = { script = { file = "deps/install.rhai" } }   # optional; runs only via lev deps install
 ```
 
 A `check` script runs on a hardened engine with three read-only probes and nothing else:
@@ -390,7 +482,7 @@ place, or a string remedy when it is not. An `install` script gets one host func
 and runs only when the user asks for it with `lev deps install`. Checking never changes the machine;
 only install does, and only after a confirmation.
 
-The bundled `sprite-to-3d` agent declares the Meshy dependency above: it turns a sprite sheet or
+The bundled `sprite-to-3d` blueprint declares the Meshy dependency above: it turns a sprite sheet or
 character image into a rigged, game-ready model, and a run refuses to start until Meshy is set up.
 Set it up with `lev deps install sprite-to-3d`, then run it with `lev run sprite-to-3d`.
 
@@ -411,8 +503,8 @@ bounded number of times before finishing.
 
 ## How the coding agent verifies its work
 
-The bundled `coder` agent decides what "done" means before it starts, rather than judging it at
-the end. Its entry stage is `discover`: before planning anything, the agent classifies the
+A run of the bundled `coder` blueprint decides what "done" means before it starts, rather than
+judging it at the end. Its entry stage is `discover`: before planning anything, the run classifies the
 project's testing story and writes a `workflow` region ending in three literal lines that later
 stages execute verbatim:
 
@@ -430,32 +522,32 @@ back through discovery instead of guessing. Projects with no tests at all are ha
 the plan must include *building* verification (a smoke test to write and run), stated plainly
 rather than invented.
 
-## Tracking files the agent touches
+## Tracking files a run touches
 
-`[context.file_tracking]` keeps a running list of what the agent has read and written, in its own
-region, so a later stage knows what has already been looked at.
+`[graph.file_tracking]` keeps a running list of what the run has read and written, in a region
+you name, so a later stage knows what has already been looked at.
 
 ```toml
-[context.file_tracking]
-region          = "files"    # default "files"
+[graph.file_tracking]
+region          = "files"    # the region the list is kept in
 track_reads     = true       # default true
 track_writes    = true       # default true
 max_file_tokens = 4000       # cap on how much of one file is tracked
 ```
 
-## Catching an agent going in circles
+## Catching a run going in circles
 
-`[repetition_detection]` watches for an agent making the same call over and over, or reading without
-ever writing. When it sees one, it writes a `[System]` note into the agent's conversation telling it
-what it is doing and to try something else.
+`[graph.repetition]` watches for a run making the same call over and over, or reading without
+ever writing. When it sees one, it writes a `[System]` note into the run's conversation telling
+the model what it is doing and to try something else.
 
 It nudges, it does not intervene. The run keeps going either way, the stage does not fail, and no
-transition fires. If you want a loop like this to actually route somewhere, use a `stuck` edge in
-[stages](/docs/stages#stuck-detection). The two work well together: the nudge gives the agent a
+edge fires. If you want a loop like this to actually route somewhere, use a `stuck` edge in
+[stages](/docs/stages#stuck-detection). The two work well together: the nudge gives the model a
 chance to correct itself, and the edge catches it if it does not.
 
 ```toml
-[repetition_detection]
+[graph.repetition]
 enabled             = true   # default
 max_repeat_calls    = 3      # default; identical tool call, back to back
 max_readonly_streak = 10     # default; read-only calls with no modification in between
@@ -464,22 +556,23 @@ max_readonly_streak = 10     # default; read-only calls with no modification in 
 ## Who does the summarizing
 
 A [`compacting` region](/docs/context) summarizes rather than evicting, and something has to write
-that summary. By default it is Sonnet on Anthropic, whatever the stage itself runs on, because a
-summary is cheap work that does not need the stage's model:
+that summary. By default it is `claude-sonnet-4-6` on Anthropic, whatever the stage itself runs on,
+because a summary is cheap work that does not need the stage's model. `[graph.compaction]`
+replaces that default, and then names all three of `model`, `max_summary_tokens` and
+`temperature`:
 
 ```toml
-[compaction]
-provider           = "anthropic"          # default
-model              = "claude-sonnet-4-6"  # default
-max_summary_tokens = 2000                 # default
-temperature        = 0.2                  # default
-system_prompt      = "..."                # optional; replaces the built-in summarizer prompt
+[graph.compaction]
+model              = { provider = "openai", model = "gpt-5.4-mini" }
+max_summary_tokens = 2000
+temperature        = 0.2
+system_prompt      = "..."   # optional; replaces the built-in summarizer prompt
 ```
 
 Point it at a provider you have configured if you do not use Anthropic. A run whose compaction
-provider is not registered loses compaction rather than failing, so an unset `[compaction]` on an
-OpenAI-only machine quietly stops summarizing. `lev doctor` reports which providers are
-registered.
+provider is not registered loses compaction rather than failing, so a blueprint with no
+`[graph.compaction]` on an OpenAI-only machine quietly stops summarizing. `lev doctor` reports
+which providers are registered.
 
 ## Discovering tools mid-run
 
@@ -487,23 +580,23 @@ By default a stage advertises a fixed tool set resolved at spawn, and a tool tha
 invisible to it. `tool_rescan` says when a run looks again:
 
 ```toml
-[agent]
+[graph]
 tool_rescan = "after_writes"   # at_spawn | after_writes | before_dispatch
 ```
 
 | Value | When it looks | What that catches |
 |---|---|---|
-| `at_spawn` | Once, at spawn | The default. An agent cannot grow its own capabilities mid-run |
-| `after_writes` | Before the next turn, when the agent writes a script | A tool this agent installed, from its next turn on |
-| `before_dispatch` | Also at the directories, before each batch | A tool that arrived without this agent writing it |
+| `at_spawn` | Once, at spawn | The default. A run cannot grow its own capabilities |
+| `after_writes` | Before the next turn, when the run writes a script | A tool this run installed, from its next turn on |
+| `before_dispatch` | Also at the directories, before each batch | A tool that arrived without this run writing it |
 
 Anything but `at_spawn` puts the run's own `tools/` directory in the scan set. The directory is the
 workdir's, so anything else running there sees the same tools and a sub-agent inherits it.
 
 The difference between the last two is what they notice. `after_writes` is told about a tool when
-the agent writes one with `write_file` or `edit_file`, or installs one. A tool that arrives any
-other way sets nothing, and stays invisible for the rest of the run: one written by a shell command,
-one written by a script tool, one dropped in by a sub-agent or fan-out worker sharing the workdir,
+the run writes one with `write_file` or `edit_file`, or installs one. A tool that arrives any
+other way sets nothing, and stays invisible for the rest of the run. That covers one written by a
+shell command or a script tool, one dropped in by a sub-agent or fan-out worker sharing the workdir,
 or one a person adds while the run is going. `before_dispatch` looks at the directories rather than
 waiting to be told, so it sees those, and sees a tool that was edited or removed too. The cost is
 one `stat` per scanned directory per batch, and a re-scan only when something changed.
@@ -512,57 +605,61 @@ Neither value makes a tool callable in the batch that creates it. Every call in 
 before any of them runs, so a batch that writes a script and calls it has the call refused either
 way.
 
-`dynamic_tools = true` is the older spelling of `after_writes` and still reads as it.
-
 ## Handing context to a sub-agent
 
-`[[transforms]]` maps one blueprint's regions onto another's when a parent spawns a child, so the
-child starts with the parent's findings under its own region names.
+`[[graph.transforms]]` maps one blueprint's regions onto another's when a parent run spawns a
+child run, so the child starts with the parent's findings under its own region names.
 
 ```toml
-[[transforms]]
-from_blueprint = "researcher"
-to_blueprint   = "reviewer"
-
-[[transforms.mappings]]
-from_region = "findings"
-to_region   = "source_material"
-transform   = "direct"        # direct | summarize | extract
-
-[[transforms.mappings]]
-from_region = "conversation"
-to_region   = "brief"
-transform   = "summarize"
+[[graph.transforms]]
+from = "researcher"
+to   = "reviewer"
+mappings = [
+    { from = "findings", to = "source_material" },                     # transform = "direct", the default
+    { from = "conversation", to = "brief", transform = "summarize" },
+    { from = "notes", to = "facts", transform = { extract = ["claim", "source"] } },
+]
 ```
 
-`extract` additionally takes `fields` to pull named pieces out. See
-[Sub-agents](/docs/sub-agents).
+`direct` copies the region as it is, `summarize` condenses it, and `extract` pulls the named fields
+out of JSON content. See [Sub-agents](/docs/sub-agents).
 
 ## Counts are never negative
 
-Every count a blueprint carries (`max_iterations`, `max_items`, `max_tokens`, `max_child_depth`,
-`request_timeout_secs`, a gate's `max_attempts`, a `stuck_after_*` threshold, and the rest) must
-be zero or more. A negative value fails the load, and the error names the key and the value:
+Every count a blueprint carries (`max_iterations`, `max_items`, a fixed `budget`,
+`max_child_depth`, `request_timeout_secs`, a gate's `max_attempts`, a `stuck` threshold, and the
+rest) is a whole number, zero or more. A negative value fails the read, and the error points at
+it:
 
 ```text
-region 'notes': max_items must not be negative (got -1)
+kind = { kind = "sliding_window", max_items = -1 }
+                                              ^^
+invalid value: integer `-1`, expected u32
 ```
 
-Earlier versions read `-1` as the largest possible number, so a cap written as a typo loaded as
-no cap at all. Zero keeps whatever meaning the key gives it (`max_iterations = 0` is unlimited,
-a gate's `max_attempts = 0` never holds, a `stuck_after_*` of zero is unset).
+Zero keeps whatever meaning the key gives it (`max_iterations = 0` is unlimited, a gate's
+`max_attempts = 0` never holds, a `stuck` threshold of zero is unset).
 
 ## Validate before you run
 
 ```bash
 lev validate .                    # check the graph, and what the blueprint leaves unsaid
 lev validate . --deny-warnings    # for CI: warnings fail too
+lev run . --task "..." --check    # resolve one run the whole way without starting it
 lev test .                        # run the blueprint's tests/ cases (real API calls)
 lev test . --dry-run              # parse and report them without calling a provider
 ```
 
+`lev validate <dir>` reads the blueprint the way a spawn would and lists every problem at once,
+each with its path, such as `graph.stages.polish.hide`. It reports a stage, region or input that
+names something undeclared, and a setting out of range.
+
 Beyond the graph, `lev validate` reports the fields whose absence quietly changes what a run does.
-That covers a stage with no model block, a tool name that matches nothing, and an autonomous stage
+That covers a stage with no model, a tool name that matches nothing, and an autonomous stage
 offering a tool that waits for a person. Errors exit non-zero, warnings do not, notes never can. The
-[CLI reference](/docs/cli#lev-validate-path) lists every check. The daemon logs the same findings
-when a run spawns, so a blueprint nobody validated still says what is wrong with it.
+[CLI reference](/docs/cli#lev-validate-path) lists every check. The dashboard's blueprint editor
+reports the same findings as you edit.
+
+`lev run --check` goes one step further. It takes the blueprint together with this run's inputs
+and this machine's providers, and reports which model each stage would get, or every problem it
+found. See [check before you start](/docs/starting-a-run#check-before-you-start).

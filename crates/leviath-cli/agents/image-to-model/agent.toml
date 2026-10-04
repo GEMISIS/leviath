@@ -1,0 +1,64 @@
+[blueprint]
+name = "image-to-model"
+version = "0.3.0"
+description = "Turn one character or object image into a textured 3D model with Meshy"
+
+# Meshy is a first-class provider: set MESHY_API_KEY (or `lev setup` and choose
+# Meshy) and this agent runs - no text model needed. Attach the picture with
+# `--attach <file>:image`, and give a short palette or material note as the task
+# to steer the texturing.
+#
+# This is a pure "picture in, mesh out" pipeline: one Meshy stage does the whole
+# job. Because it declares its output as an artifact and routes the built mesh
+# into the model region, the run hands that mesh back as its answer directly -
+# no second stage and no text provider to write a closing sentence.
+
+[graph]
+entry = "build"
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+
+[graph.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "task", kind = "pinned", budget = "10%" },
+    # The single input picture, attached by the caller.
+    { name = "image", kind = "pinned", budget = "40%", accepts = ["image/*"] },
+    # A one-turn conversation region so the produced turn has somewhere to land.
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 8 }, budget = { percent = "10%", max = 4000 } },
+    # The built mesh, held as a reference plus a stand-in (not inlined bytes). This
+    # is what the run hands back: the build stage declares it as the `model`
+    # artifact and routes the produced mesh here.
+    { name = "model", kind = { kind = "sliding_window", max_items = 1 }, budget = "15%", accepts = ["model/*"] },
+    # The preview render Meshy returns beside the mesh, for a look at the result.
+    { name = "model_preview", kind = "clearable", budget = "20%", accepts = ["image/*"] },
+]
+
+[[graph.stages]]
+name = "build"
+description = "Meshy turns the attached image into a textured 3D model and hands it back"
+mode = "output"
+tools = ["submit_output"]
+# A provider stage: one deterministic submit, poll, download. No tool loop.
+max_iterations = 3
+require_output = true
+# The image region is the input; hide the preview region so nothing but the
+# input picture reaches Meshy as an image.
+hide = ["model_preview"]
+# The built mesh becomes the run's `model` artifact; the preview goes to its own
+# region for a look. Routing the mesh here is what lets the run hand it back
+# with no submit_output call.
+output_routing = { "model/*" = "model", "image/*" = "model_preview" }
+
+[graph.stages.model]
+models = [{ provider = "meshy", model = "image-to-3d" }]
+allow_user_default = false
+# A Meshy job runs for minutes; give the provider room to poll to completion.
+request_timeout_secs = 900
+params = { extra = { should_remesh = true, target_polycount = 20000, enable_pbr = true, texture_resolution = "2k" } }
+
+[graph.stages.output]
+artifacts = [{ name = "model", mime_type = "model/gltf-binary", required = true }]

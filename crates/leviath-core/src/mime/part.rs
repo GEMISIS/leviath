@@ -6,7 +6,7 @@ use super::registry::MimeRegistry;
 use super::{MimeType, text_plain};
 
 /// How a stored part should reach a model, overriding the registry's default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Delivery {
     /// As the provider's native block for its family, when the model takes it.
@@ -40,7 +40,9 @@ impl Delivery {
 pub struct BlobRef {
     /// Lowercase hex SHA-256 of the bytes; the store's key.
     pub sha256: String,
-    /// The type the bytes were stored as.
+    /// The type the bytes were stored as. Some runs recorded it as
+    /// `media_type`.
+    #[serde(alias = "media_type")]
     pub mime_type: MimeType,
     /// Size in bytes.
     pub size: u64,
@@ -152,7 +154,8 @@ pub enum PartBody {
 /// difference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Part {
-    /// The part's type.
+    /// The part's type. Some runs recorded it as `media_type`.
+    #[serde(alias = "media_type")]
     pub mime_type: MimeType,
     /// Its bytes, inline or by reference.
     pub body: PartBody,
@@ -339,6 +342,17 @@ mod tests {
         assert_eq!(json, r#"{"mime_type":"text/plain","body":"hello"}"#);
         let back: Part = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
+    }
+
+    /// Some runs recorded a part's type, and a stored part's, as
+    /// `media_type`; they read as the same part.
+    #[test]
+    fn a_part_recorded_with_media_type_reads() {
+        let json = r#"{"media_type":"image/png","body":{"sha256":"ab","media_type":"image/png","size":3,"tokens":9,"stand_in":"[image/png] a.png"},"name":"a.png"}"#;
+        let p: Part = serde_json::from_str(json).unwrap();
+        assert_eq!(p.mime_type.as_str(), "image/png");
+        assert_eq!(p.blob().unwrap().mime_type.as_str(), "image/png");
+        assert!(serde_json::to_string(&p).unwrap().contains("\"mime_type\""));
     }
 
     #[test]

@@ -1,19 +1,18 @@
-//! What is wrong with a manifest, the way `lev validate` and the daemon's
-//! `POST /api/blueprints/validate` would say it: parse, then
-//! `Blueprint::validate`, then the lint, with lint errors blocking a save
-//! and warnings and notes shown.
+//! What is wrong with an `agent.toml`, the way `lev validate` would say it:
+//! read the file, check that its graph holds together, then lint it, with
+//! lint errors blocking a save and warnings and notes shown.
 
 use std::path::Path;
 
-use leviath_core::ValidationError;
-use leviath_core::manifest::parse_manifest;
+use leviath_blueprint::BlueprintFile;
+use leviath_runtime::spec::issues::{PathSeg, SpawnIssue, SpecPath};
 
-use crate::lint::{LintEnv, LintSeverity, lint_manifest};
+use crate::lint::{LintEnv, LintSeverity, lint_blueprint};
 
 /// How much a problem matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Severity {
-    /// The manifest will not run, or will not save.
+    /// The blueprint will not run, or will not save.
     Error,
     /// A decision left to a default the author may not know about.
     Warning,
@@ -38,7 +37,7 @@ pub(crate) struct Problem {
     /// How much it matters.
     pub severity: Severity,
     /// A stable slug: a lint code, or `parse` / `validate` for the two
-    /// stages before the lint.
+    /// passes before the lint.
     pub code: &'static str,
     /// The stage it belongs to, when the message names one.
     pub stage: Option<String>,
@@ -48,7 +47,7 @@ pub(crate) struct Problem {
     pub fix: Option<String>,
 }
 
-/// Everything wrong with a manifest, most serious first.
+/// Everything wrong with a blueprint, most serious first.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Problems {
     /// In the order found: errors, then warnings, then notes.
@@ -70,7 +69,7 @@ impl Problems {
         self.items.iter().filter(|p| p.severity == severity).count()
     }
 
-    /// Whether the manifest may be saved: no errors.
+    /// Whether the blueprint may be saved: no errors.
     pub(crate) fn is_saveable(&self) -> bool {
         self.error_count() == 0
     }
@@ -89,42 +88,39 @@ impl Problems {
     }
 }
 
-/// Check a manifest as the runtime would. `dir` is the blueprint's directory
-/// (for the tools its scripts define); a blueprint not yet saved anywhere
-/// can pass any directory.
+/// Check an `agent.toml` as the runtime would. `dir` is the blueprint's
+/// directory (for the tools its scripts define); a blueprint not yet saved
+/// anywhere can pass any directory.
 pub(crate) fn check(text: &str, dir: &Path) -> Problems {
-    let bp = match parse_manifest(text) {
-        Ok(bp) => bp,
-        Err(e) => {
+    let file = match BlueprintFile::parse(text) {
+        Ok(file) => file,
+        Err(message) => {
             return Problems {
                 items: vec![Problem {
                     severity: Severity::Error,
                     code: "parse",
                     stage: None,
-                    message: e.to_string(),
+                    message,
                     fix: None,
                 }],
             };
         }
     };
-    if let Err(e) = bp.validate() {
-        let stage = match &e {
-            ValidationError::Stage { stage, .. }
-            | ValidationError::Transition { from: stage, .. } => Some(stage.clone()),
-            _ => None,
-        };
-        return Problems {
-            items: vec![Problem {
+    if let Err(issues) = file.graph.validate(&SpecPath::root().field("graph")) {
+        let items = issues
+            .iter()
+            .map(|issue| Problem {
                 severity: Severity::Error,
                 code: "validate",
-                stage,
-                message: e.to_string(),
+                stage: stage_of(&file, issue),
+                message: issue.to_string(),
                 fix: None,
-            }],
-        };
+            })
+            .collect();
+        return Problems { items };
     }
     let env = LintEnv::offline(dir);
-    let mut items: Vec<Problem> = lint_manifest(text, &bp, &env)
+    let mut items: Vec<Problem> = lint_blueprint(&file, &env)
         .into_iter()
         .map(|f| Problem {
             severity: match f.severity {
@@ -146,4 +142,19 @@ pub(crate) fn check(text: &str, dir: &Path) -> Problems {
         Severity::Note => 2,
     });
     Problems { items }
+}
+
+/// The stage an issue is about: the stage at `graph.stages.<name>` (or
+/// `graph.stages[i]`), or the stage the edge at `graph.edges[i]` leaves.
+fn stage_of(file: &BlueprintFile, issue: &SpawnIssue) -> Option<String> {
+    let [_, PathSeg::Field(list), at, ..] = issue.path.0.as_slice() else {
+        return None;
+    };
+    let graph = &file.graph;
+    match (list.as_str(), at) {
+        ("stages", PathSeg::Key(name)) => Some(name.clone()),
+        ("stages", PathSeg::Index(i)) => graph.stages.get(*i).map(|s| s.name.to_string()),
+        ("edges", PathSeg::Index(i)) => graph.edges.get(*i).map(|e| e.from.to_string()),
+        _ => None,
+    }
 }

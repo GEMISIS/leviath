@@ -43,9 +43,9 @@ use args_files::{
     ReadFilesArgs, ShellArgs, WhichCommandArgs, WriteFileArgs,
 };
 use args_rest::{
-    AskUserChoiceArgs, AskUserConfirmArgs, AskUserTextArgs, CheckAgentArgs, EditDocumentArgs,
-    FanOutArgs, KillAgentArgs, PresentForReviewArgs, SendToAgentArgs, SpawnAgentArgs,
-    SubmitOutputArgs, WaitForAgentArgs,
+    AskUserChoiceArgs, AskUserConfirmArgs, AskUserTextArgs, CheckAgentArgs, DescribeBlueprintArgs,
+    EditDocumentArgs, FanOutArgs, KillAgentArgs, PresentForReviewArgs, RunHistoryArgs,
+    SendToAgentArgs, SpawnAgentArgs, SpawnSchemaArgs, SubmitOutputArgs, WaitForAgentArgs,
 };
 
 /// Why a call came back untyped.
@@ -239,6 +239,10 @@ tool_calls! {
         "One `wait_for_agent` call.", WaitForAgent, WaitForAgentCall, WaitForAgentArgs, "wait_for_agent";
         "One `send_to_agent` call.", SendToAgent, SendToAgentCall, SendToAgentArgs, "send_to_agent";
         "One `kill_agent` call.", KillAgent, KillAgentCall, KillAgentArgs, "kill_agent";
+        "One `spawn_schema` call.", SpawnSchema, SpawnSchemaCall, SpawnSchemaArgs, "spawn_schema";
+        "One `describe_blueprint` call.", DescribeBlueprint, DescribeBlueprintCall, DescribeBlueprintArgs, "describe_blueprint";
+        "One `validate_spawn` call: a spawn checked and not started.", ValidateSpawn, ValidateSpawnCall, SpawnAgentArgs, "validate_spawn";
+        "One `run_history` call.", RunHistory, RunHistoryCall, RunHistoryArgs, "run_history";
     }
     without_arguments {
         "One `current_time` call, which takes nothing.", CurrentTime, CurrentTimeCall, "current_time";

@@ -175,8 +175,8 @@ fn an_empty_home_says_so_and_a_broken_manifest_declines_the_preview() {
     let _ = std::fs::remove_dir_all(root.join("agents"));
     std::fs::create_dir_all(root.join("agents").join("broken")).unwrap();
     std::fs::write(
-        root.join("agents").join("broken").join("agent.leviath"),
-        "[agent]\nname = \"broken\"\n[stages.a]\nmode = \"weird\"\n",
+        root.join("agents").join("broken").join("agent.toml"),
+        "[blueprint]\nname = \"broken\"\nversion = \"0\"\n[graph]\nlayout = { total_budget_tokens = 0, regions = [] }\n[[graph.stages]]\nname = \"a\"\nmode = \"weird\"\n",
     )
     .unwrap();
     dash.handle_key(key(KeyCode::Char('a')));
@@ -209,7 +209,7 @@ fn an_empty_home_says_so_and_a_broken_manifest_declines_the_preview() {
         description: String::new(),
         source: catalog::Source::Installed,
         dir: None,
-        manifest: Some("[agent]\nname = \"odd\"\n[stages.a]\nmode = \"weird\"\n".into()),
+        manifest: Some("[blueprint]\nname = \"odd\"\nversion = \"0\"\n[graph]\nlayout = { total_budget_tokens = 0, regions = [] }\n[[graph.stages]]\nname = \"a\"\nmode = \"weird\"\n[[graph.stages]]\nname = \"b\"\n".into()),
         stages: vec![],
         bundled: false,
         differs_from_bundled: false,
@@ -245,10 +245,10 @@ fn an_empty_home_says_so_and_a_broken_manifest_declines_the_preview() {
 fn delete_and_reset_ask_first_and_launch_goes_to_the_new_run_screen() {
     let (mut dash, root) = dashboard("actions");
     // Edit the installed coder so it differs from the bundle.
-    let manifest = root.join("agents").join("coder").join("agent.leviath");
+    let manifest = root.join("agents").join("coder").join("agent.toml");
     let edited = std::fs::read_to_string(&manifest)
         .unwrap()
-        .replace("entry_stage = \"discover\"", "entry_stage = \"plan\"");
+        .replace("entry = \"discover\"", "entry = \"plan\"");
     std::fs::write(&manifest, edited).unwrap();
     dash.handle_key(key(KeyCode::Char('a')));
     let screen = text(&mut dash);
@@ -269,7 +269,7 @@ fn delete_and_reset_ask_first_and_launch_goes_to_the_new_run_screen() {
     assert!(
         std::fs::read_to_string(&manifest)
             .unwrap()
-            .contains("entry_stage = \"discover\"")
+            .contains("entry = \"discover\"")
     );
     assert!(
         dash.toasts
@@ -439,7 +439,7 @@ fn the_chooser_starts_simple_or_clones_and_checks_the_name() {
     assert!(
         root.join("agents")
             .join("my-coder")
-            .join("agent.leviath")
+            .join("agent.toml")
             .exists()
     );
     let editor = dash.agents().editor.as_ref().unwrap();
@@ -1072,7 +1072,7 @@ fn the_inspector_edits_every_kind_of_field() {
         type_str(dash, kind);
         dash.handle_key(key(KeyCode::Enter));
     };
-    set_kind(&mut dash, "worker_stage");
+    set_kind(&mut dash, "stage");
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::WorkerRef);
     dash.handle_key(key(KeyCode::Enter));
     assert!(dash.agents().editor.as_ref().unwrap().picker.is_some());
@@ -1085,7 +1085,7 @@ fn the_inspector_edits_every_kind_of_field() {
             "finish".to_string()
         ))
     );
-    set_kind(&mut dash, "worker_agent");
+    set_kind(&mut dash, "blueprint");
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::WorkerRef);
     dash.handle_key(key(KeyCode::Enter));
     type_str(&mut dash, "coder");
@@ -1097,7 +1097,7 @@ fn the_inspector_edits_every_kind_of_field() {
             "coder".to_string()
         ))
     );
-    set_kind(&mut dash, "worker_query");
+    set_kind(&mut dash, "query");
     dash.agents().editor.as_mut().unwrap().cursor = at(FieldId::WorkerRef);
     dash.handle_key(key(KeyCode::Enter));
     assert!(dash.agents().editor.as_ref().unwrap().picker.is_none());
@@ -1427,9 +1427,9 @@ fn saving_checks_first_and_writes_the_file_and_the_layout() {
         .select_stage("work");
     dash.handle_key(ctrl('s'));
     let text_on_disk =
-        std::fs::read_to_string(root.join("agents").join("own").join("agent.leviath")).unwrap();
+        std::fs::read_to_string(root.join("agents").join("own").join("agent.toml")).unwrap();
     assert!(
-        text_on_disk.contains("available_tools = [\"read_file\"]"),
+        text_on_disk.contains("tools = [\"read_file\"]"),
         "{text_on_disk}"
     );
     assert!(root.join("dash").join("graph-layouts.json").exists());
@@ -1437,11 +1437,8 @@ fn saving_checks_first_and_writes_the_file_and_the_layout() {
     assert!(!editor.dirty);
     assert!(dash.toasts.iter().any(|t| t.message == "Saved own"));
     // A save into a directory that cannot be written says so.
-    dash.agents().editor.as_mut().unwrap().dir = root
-        .join("agents")
-        .join("own")
-        .join("agent.leviath")
-        .join("x");
+    dash.agents().editor.as_mut().unwrap().dir =
+        root.join("agents").join("own").join("agent.toml").join("x");
     dash.handle_key(ctrl('s'));
     assert!(
         dash.agents()
@@ -1717,7 +1714,7 @@ fn opening_targets_and_edge_cases_of_the_editor() {
     assert!(
         dash.toasts
             .iter()
-            .any(|t| t.message.contains("Cannot edit that manifest"))
+            .any(|t| t.message.contains("Cannot edit that agent"))
     );
     // An existing agent with no directory saves under the agents dir.
     dash.open_editor(
@@ -1766,7 +1763,17 @@ fn the_corners_of_the_editor() {
     catalog::write_agent(
         &root.join("agents"),
         "solo",
-        "[agent]\nname = \"solo\"\n[stages.only]\nmode = \"autonomous\"\n",
+        r#"[blueprint]
+name = "solo"
+version = "0.1.0"
+
+[graph]
+layout = { total_budget_tokens = 0, regions = [] }
+
+[[graph.stages]]
+name = "only"
+mode = "autonomous"
+"#,
     )
     .unwrap();
     // A clone template whose manifest will not parse is a toast.
@@ -2148,7 +2155,7 @@ fn r_renames_an_installed_agent_directory_manifest_and_arrangement() {
     type_str(&mut dash, "mine");
     dash.handle_key(key(KeyCode::Enter));
     assert!(!agents.join("own").exists());
-    let manifest = std::fs::read_to_string(agents.join("mine").join("agent.leviath")).unwrap();
+    let manifest = std::fs::read_to_string(agents.join("mine").join("agent.toml")).unwrap();
     assert!(manifest.contains("name = \"mine\""), "{manifest}");
     assert_eq!(
         dash.agents()
@@ -2189,7 +2196,7 @@ fn r_renames_an_installed_agent_directory_manifest_and_arrangement() {
     );
     // Nor an agent that lives elsewhere (the working directory's own).
     std::fs::write(
-        root.join("work").join("agent.leviath"),
+        root.join("work").join("agent.toml"),
         templates::empty_blueprint("here").unwrap(),
     )
     .unwrap();

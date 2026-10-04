@@ -6,11 +6,6 @@
 
 use super::*;
 
-/// Build one agent's [`AgentToolState`] from the shared executors + config.
-///
-/// `stage_perms_by_index` holds every stage's `[tool_permissions]` (in stage
-/// order); the entry stage's map seeds `stage_perms`, and the pipeline's
-/// `sync_stage` swaps in the right one as the agent changes stage.
 /// Everything [`build_tool_state`] assembles an agent's tool state from.
 ///
 /// A struct rather than twenty-one positional parameters, and the reason is
@@ -18,82 +13,79 @@ use super::*;
 /// `agent_name` - are all `&str`. Transposing any two of those compiles
 /// silently and produces a run whose approvals are keyed to the wrong name.
 /// Nothing else in this file would catch that.
-pub(super) struct ToolStateParts<'a> {
+pub(crate) struct ToolStateParts<'a> {
     /// The run's write budget, already spent on by the seeds.
-    pub(super) writes: Arc<crate::daemon::tool_service::WriteBudget>,
+    pub(crate) writes: Arc<crate::daemon::tool_service::WriteBudget>,
     /// The built-in tools, over this agent's workdir.
-    pub(super) builtins: Arc<leviath_tools::BuiltinTools>,
+    pub(crate) builtins: Arc<leviath_tools::BuiltinTools>,
     /// Their names, for deciding what is a builtin at dispatch.
-    pub(super) builtin_names: HashSet<String>,
+    pub(crate) builtin_names: HashSet<String>,
     /// MCP connections shared across agents.
-    pub(super) mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
+    pub(crate) mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
     /// The resolved daemon configuration.
-    pub(super) config: &'a Config,
+    pub(crate) config: &'a Config,
     /// Where this agent's prompts are parked.
-    pub(super) hub: &'a InteractionHub,
+    pub(crate) hub: &'a InteractionHub,
     /// This run's id, which grants are recorded against.
-    pub(super) run_id: &'a str,
+    pub(crate) run_id: &'a str,
     /// The stage the agent enters at.
-    pub(super) entry_stage: &'a str,
+    pub(crate) entry_stage: &'a str,
     /// That stage's index in the blueprint.
-    pub(super) entry_index: usize,
+    pub(crate) entry_index: usize,
     /// Per-stage tool policies, indexed by stage.
-    pub(super) stage_perms_by_index: Vec<HashMap<String, String>>,
+    pub(crate) stage_perms_by_index: Vec<HashMap<String, String>>,
     /// Per-stage required tools, indexed by stage.
-    pub(super) stage_required_by_index: Vec<HashSet<String>>,
+    pub(crate) stage_required_by_index: Vec<HashSet<String>>,
     /// Per-stage `tool_accepts`, by canonical tool name, indexed by stage.
-    pub(super) stage_tool_accepts_by_index: Vec<HashMap<String, Vec<String>>>,
+    pub(crate) stage_tool_accepts_by_index: Vec<HashMap<String, Vec<String>>>,
     /// Agent-wide tool policies from the blueprint.
-    pub(super) agent_perms: HashMap<String, String>,
+    pub(crate) agent_perms: HashMap<String, String>,
     /// The blueprint's name, for policy lookup and messages.
-    pub(super) agent_name: &'a str,
+    pub(crate) agent_name: &'a str,
     /// `--allow` / `--yolo` overrides for this launch.
-    pub(super) launch_overrides: HashMap<String, crate::config::ToolPolicy>,
+    pub(crate) launch_overrides: HashMap<String, crate::config::ToolPolicy>,
     /// Handle for the sub-agent tools, when this agent may spawn.
-    pub(super) subagent: Option<SubAgentHandle>,
+    pub(crate) subagent: Option<SubAgentHandle>,
     /// The sandbox shell calls run in, when one is configured.
-    pub(super) sandbox: Option<Arc<crate::daemon::sandbox_manager::SandboxManager>>,
+    pub(crate) sandbox: Option<Arc<crate::daemon::sandbox_manager::SandboxManager>>,
     /// Rhai tools discovered for this agent.
-    pub(super) script_tools: leviath_scripting::ScriptToolSet,
+    pub(crate) script_tools: leviath_scripting::ScriptToolSet,
     /// Their names, kept apart so a rescan can diff against them.
-    pub(super) script_tool_names: HashSet<String>,
+    pub(crate) script_tool_names: HashSet<String>,
     /// The host those scripts call back into.
-    pub(super) script_host: Arc<dyn leviath_scripting::ScriptHost>,
+    pub(crate) script_host: Arc<dyn leviath_scripting::ScriptHost>,
     /// The parts handle that host reads, which the runtime's offers fill.
-    pub(super) offered_parts: Arc<std::sync::Mutex<Vec<leviath_core::mime::Part>>>,
+    pub(crate) offered_parts: Arc<std::sync::Mutex<Vec<leviath_core::mime::Part>>>,
     /// Re-resolution context, for a blueprint that rescans mid-run.
-    pub(super) dynamic: Option<Arc<crate::daemon::tool_service::DynamicToolCtx>>,
+    pub(crate) dynamic: Option<Arc<crate::daemon::tool_service::DynamicToolCtx>>,
     /// Whether this run answers its own prompts: `--yolo` under a profile
     /// whose `questions` are `auto`.
-    pub(super) unattended: bool,
+    pub(crate) unattended: bool,
     /// The yolo profile this run decides tool calls under, if it is a yolo
     /// run at all.
-    pub(super) yolo: Option<Arc<crate::yolo::YoloProfile>>,
+    pub(crate) yolo: Option<Arc<crate::yolo::YoloProfile>>,
     /// The profile's name when `--yolo=<name>` named one, so a resume can read
     /// it again. `None` for an attended run and for the bare flag.
-    pub(super) yolo_profile: Option<String>,
+    pub(crate) yolo_profile: Option<String>,
     /// The files this run may not change, shared with the seeds that ran
     /// before the tool lane existed.
-    pub(super) protected: Vec<crate::tools::ProtectedPath>,
-    /// `[safe_commands]` the blueprint declares, if the user opted in.
-    pub(super) blueprint_safe: Option<&'a leviath_core::blueprint::SafeCommandsConfig>,
-    /// `[read_paths]` the blueprint declares, if any.
-    pub(super) blueprint_read_paths: Option<&'a leviath_core::blueprint::ReadPathsConfig>,
+    pub(crate) protected: Vec<crate::tools::ProtectedPath>,
+    /// The graph's `safe_commands`, when it declares any; they count only if the user opted in.
+    pub(crate) blueprint_safe: Option<&'a leviath_runtime::spec::graph::SafeCommandsDef>,
+    /// The graph's `read_paths`, empty when it declares none.
+    pub(crate) blueprint_read_paths: &'a [String],
     /// The run's workdir, which read-path entries compile relative to.
-    pub(super) workdir: std::path::PathBuf,
+    pub(crate) workdir: std::path::PathBuf,
 }
 
-pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState> {
-    let entry_perms = parts
-        .stage_perms_by_index
-        .get(parts.entry_index)
-        .cloned()
-        .unwrap_or_default();
-    let entry_required = parts
-        .stage_required_by_index
-        .get(parts.entry_index)
-        .cloned()
-        .unwrap_or_default();
+/// Build one agent's [`AgentToolState`] from the shared executors + config.
+///
+/// `stage_perms_by_index` holds every stage's `[tool_permissions]` (in stage
+/// order); a call is judged by the map of the stage the world says the run is
+/// in. The entry stage's `tool_accepts` seeds the limits a batch runs under,
+/// and the pipeline's `sync_stage` swaps in the right ones as the agent
+/// changes stage.
+pub(crate) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState> {
     let entry_limits = parts
         .stage_tool_accepts_by_index
         .get(parts.entry_index)
@@ -114,12 +106,7 @@ pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
                 .into_keys()
                 .collect(),
         ),
-        run_allows: Arc::new(Mutex::new(HashSet::new())),
-        stage_allows: Arc::new(StdMutex::new(HashSet::new())),
-        stage_allows_index: Arc::new(StdMutex::new(None)),
-        stage_perms: Arc::new(StdMutex::new(entry_perms)),
         stage_perms_by_index: Arc::new(parts.stage_perms_by_index),
-        stage_required: Arc::new(StdMutex::new(entry_required)),
         stage_required_by_index: Arc::new(parts.stage_required_by_index),
         stage_tool_accepts: Arc::new(StdMutex::new(entry_limits)),
         stage_tool_accepts_by_index: Arc::new(parts.stage_tool_accepts_by_index),
@@ -151,7 +138,7 @@ pub(super) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         config_source: Arc::new(crate::daemon::tool_service::ConfigSource {
             agent_name: parts.agent_name.to_string(),
             blueprint_safe: parts.blueprint_safe.cloned(),
-            blueprint_read_paths: parts.blueprint_read_paths.cloned(),
+            blueprint_read_paths: parts.blueprint_read_paths.to_vec(),
             workdir: parts.workdir,
             yolo_profile: parts.yolo_profile,
         }),

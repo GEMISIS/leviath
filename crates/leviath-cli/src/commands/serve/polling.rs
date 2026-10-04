@@ -26,7 +26,7 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
     // forever. The shared factory supplies a connect+total timeout floor and
     // caps redirects.
     // `checked_client`, not `client`: the webhook URL comes from a request body,
-    // and it was checked once at `POST /api/agents` and then never again. A
+    // and it was checked once at `POST /api/runs` and then never again. A
     // caller registered a public endpoint that answered `307 Location:
     // http://169.254.169.254/…`, and since 307 preserves the method *and* the
     // body, that was a repeatable POST primitive against the internal network -
@@ -284,7 +284,7 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             result: runstate::read_meta(&run_id).ok().and_then(|m| m.error),
             // Taken from the event rather than re-read from disk: the event
             // fires the moment the run goes terminal, and the persist tick that
-            // writes `meta.json` has not necessarily run yet.
+            // writes the run file has not necessarily run yet.
             final_output: final_output.map(Into::into),
         },
         WorldEvent::Log {
@@ -302,12 +302,16 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             from,
             to,
             iteration,
+            edge,
+            reason,
         } => ServerEvent::StageTransition {
             agent_id,
             run_id,
             from,
             to,
             iteration,
+            edge,
+            reason,
         },
         WorldEvent::ToolCallStarted {
             run_id,
@@ -408,7 +412,7 @@ fn completion_payload(
         // run's *error*. The answer is `final_output`, below.
         "result": meta.error,
         // Taken from the event, not from `meta`: the webhook fires the moment
-        // the run goes terminal, and the persist tick that writes `meta.json`
+        // the run goes terminal, and the persist tick that writes the run file
         // has not necessarily run yet - reading it here would race and deliver
         // a finished run with no answer.
         "final_output": final_output,
@@ -688,7 +692,9 @@ mod tests {
                 agent_id: "a".into(),
                 from: "plan".into(),
                 to: "implement".into(),
-                iteration: 1
+                iteration: 1,
+                edge: None,
+                reason: None,
             }),
             "stage_transition"
         );
@@ -830,9 +836,13 @@ mod tests {
             from: "plan".into(),
             to: "implement".into(),
             iteration: 2,
+            edge: Some("build_it".into()),
+            reason: Some(leviath_runtime::state::TransitionReason::ModelChoice),
         }))
         .unwrap();
         assert_eq!(json["type"], "stage_transition");
+        assert_eq!(json["edge"], "build_it");
+        assert_eq!(json["reason"], "ModelChoice");
         assert_eq!(json["run_id"], "run-9");
         assert_eq!(json["agent_id"], "a");
         assert_eq!(json["from"], "plan");
@@ -969,6 +979,7 @@ mod tests {
                     1,
                 );
                 meta.callback_url = Some("http://127.0.0.1:0/hook".into());
+                meta.status = leviath_core::run_meta::RunStatus::Error;
                 meta.error = Some("boom".into());
                 create_run(&meta).unwrap();
 
@@ -1193,7 +1204,8 @@ mod tests {
                 );
                 meta.callback_url = Some(url);
                 meta.callback_secret = Some("topsecret".into());
-                meta.flags.empty_output = true;
+                // A finished run that wrote nothing and handed nothing back.
+                meta.status = leviath_core::run_meta::RunStatus::Complete;
                 create_run(&meta).unwrap();
 
                 fire_completion_webhook(
@@ -1519,7 +1531,7 @@ mod tests {
     }
 
     /// The answer rides the payload, so a receiver learns what the run
-    /// concluded without a second round trip to `/api/agents/{id}/result`.
+    /// concluded without a second round trip to `/api/runs/{id}/result`.
     #[test]
     fn the_completion_payload_carries_the_agents_answer() {
         let answer = leviath_core::output::FinalOutput::new(

@@ -66,7 +66,11 @@ pub(crate) fn ancestor_ids(run: &Run, cx: &MatchCx<'_>) -> Vec<String> {
 pub(crate) async fn stage_records(run_id: &str) -> Vec<StageRecord> {
     counted(run_id);
     let owned = run_id.to_string();
-    let records = blocking(move || crate::runstate::read_stages_index(&owned)).await;
+    // A run with no run file, or one that will not read, has no ledger to
+    // show: the fields that read the file itself report why.
+    let records =
+        blocking(move || crate::commands::serve::core::inspect::stages(&owned).unwrap_or_default())
+            .await;
     records.iter().map(StageRecord::from).collect()
 }
 

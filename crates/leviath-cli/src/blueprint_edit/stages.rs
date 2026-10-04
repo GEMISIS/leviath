@@ -1,13 +1,15 @@
-//! Mutators for `[agent]` and the `[stages.<name>]` tables.
+//! Mutators for `[blueprint]`, the graph's entry, and the stages.
 
-use toml_edit::{Array, InlineTable, Item, Value};
+use leviath_runtime::spec::graph::stage::looks_like_a_path;
+use toml_edit::{Array, InlineTable, Item, TableLike, Value};
 
-use super::doc::{ManifestDoc, StageModeView, WorkerKind};
+use super::doc::{ManifestDoc, StageModeView, WorkerKind, fan_out_table};
+use super::order::{self, Spot};
 use super::tables::{
-    as_table, child_mut, ensure_child, get_str, new_table, rename_key, set_bool, set_int,
-    set_or_remove_str, set_str, set_strings,
+    get_str, inline_item, insert_table, list_tables_mut, remove_table, retain_tables, set_bool,
+    set_or_remove_int, set_or_remove_str, set_str, set_strings, set_value, sub_mut,
 };
-use super::{EditError, order, require_name};
+use super::{EditError, require_name};
 
 /// The free-text keys of a stage the editor writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,12 +32,10 @@ impl StageText {
     }
 }
 
-/// One fan-out key of a stage. `None` deletes the key.
+/// One setting of a fan-out stage. `None` deletes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FanOutField {
-    /// Which of `worker_agent`/`worker_stage`/`worker_query` is written, and
-    /// its value; the other two are removed, because the runtime wants
-    /// exactly one.
+    /// What the workers run, and its value: replaces the whole `worker`.
     Worker(Option<(WorkerKind, String)>),
     /// `merge_stage`.
     MergeStage(Option<String>),
@@ -47,50 +47,27 @@ pub(crate) enum FanOutField {
     OnWorkerFailure(Option<String>),
 }
 
-const FAN_OUT_KEYS: [&str; 9] = [
-    "worker_agent",
-    "worker_stage",
-    "worker_query",
-    "merge_stage",
-    "max_workers",
-    "max_items",
-    "on_worker_failure",
-    "split_prompt",
-    "results_region",
-];
+/// The input slots that name a stage: `{ stage_model = "plan" }` and the
+/// like.
+const STAGE_SLOTS: [&str; 3] = ["stage_model", "stage_max_iterations", "fan_out_max_workers"];
 
 impl ManifestDoc {
-    /// Set `[agent].name`.
+    /// Set `[blueprint] name`.
     pub(crate) fn set_agent_name(&mut self, name: &str) -> Result<(), EditError> {
         require_name(name)?;
-        let agent = self
-            .doc_mut()
-            .get_mut("agent")
-            .and_then(Item::as_table_like_mut)
-            .expect("parse() checked [agent] is a table");
-        set_str(agent, "name", name);
+        set_str(self.meta_mut(), "name", name);
         Ok(())
     }
 
-    /// Set `[agent].description`; empty deletes it.
+    /// Set `[blueprint] description`; empty deletes it.
     pub(crate) fn set_description(&mut self, text: &str) {
-        let agent = self
-            .doc_mut()
-            .get_mut("agent")
-            .and_then(Item::as_table_like_mut)
-            .expect("parse() checked [agent] is a table");
-        set_or_remove_str(agent, "description", text);
+        set_or_remove_str(self.meta_mut(), "description", text);
     }
 
-    /// Point `[agent].entry_stage` at `stage`, which must exist.
+    /// Point `[graph] entry` at `stage`, which must exist.
     pub(crate) fn set_entry_stage(&mut self, stage: &str) -> Result<(), EditError> {
         self.require_stage(stage)?;
-        let agent = self
-            .doc_mut()
-            .get_mut("agent")
-            .and_then(Item::as_table_like_mut)
-            .expect("parse() checked [agent] is a table");
-        set_str(agent, "entry_stage", stage);
+        set_str(self.graph_mut(), "entry", stage);
         Ok(())
     }
 
@@ -106,143 +83,163 @@ impl ManifestDoc {
     }
 
     /// Add a stage after `after` (or at the end): autonomous, twenty tries,
-    /// nowhere to go yet.
+    /// nowhere to go yet. In a file of `[[graph.stages]]` tables it is
+    /// written after the anchor and the edges that follow it, before the
+    /// next stage.
     pub(crate) fn add_stage(&mut self, name: &str, after: Option<&str>) -> Result<(), EditError> {
         require_name(name)?;
-        if self.stages_key_taken(name) {
+        if self.has_stage(name) {
             return Err(EditError::Taken(name.to_string()));
         }
-        // Without an anchor the new stage goes after the last one; a table
-        // with no position of its own would otherwise be written wherever the
-        // writer last was, which after a reorder is not the end.
-        let after = match after {
+        let at = match after {
             Some(a) => {
-                self.require_stage(a)?;
-                a.to_string()
+                self.stage_index(a)
+                    .ok_or_else(|| EditError::NoSuchStage(a.to_string()))?
+                    + 1
             }
-            None => self
-                .stage_names()
-                .last()
-                .cloned()
-                .expect("parse() checked a stage exists"),
+            None => self.stage_names().len(),
         };
-        let stages = self
-            .doc_mut()
-            .get_mut("stages")
-            .expect("parse() checked a stage exists");
-        let inline = stages.is_inline_table();
-        let mut stage = new_table(inline);
-        {
-            let table = stage.as_table_like_mut().expect("just built a table");
-            set_str(table, "mode", "autonomous");
-            set_int(table, "max_iterations", 20);
-            table.insert("transitions", new_table(inline));
-        }
-        stages
-            .as_table_like_mut()
-            .expect("parse() checked [stages] is a table")
-            .insert(name, stage);
-        order::place_stage_after(self.doc_mut(), name, &after);
+        let mut stage = InlineTable::new();
+        stage.insert("name", Value::from(name));
+        stage.insert("mode", Value::from("autonomous"));
+        stage.insert("max_iterations", Value::from(20));
+        insert_table(self.stages_list_mut(), at, stage).expect("the stages are a list");
+        order::move_block(
+            self.doc_mut(),
+            &order::element("stages", at),
+            Spot::Before(&order::element("stages", at + 1)),
+        );
         Ok(())
     }
 
-    /// Rename a stage, rewriting every path into it, `entry_stage`, and any
-    /// `worker_stage`/`merge_stage` naming it.
+    /// Rename a stage, rewriting every edge into and out of it (and the name
+    /// of an edge named after it), the entry, any fan-out naming it as worker
+    /// or merge stage, and any input bound to it.
     pub(crate) fn rename_stage(&mut self, from: &str, to: &str) -> Result<(), EditError> {
         if from == to {
             return Ok(());
         }
         require_name(to)?;
         self.require_stage(from)?;
-        if self.stages_key_taken(to) {
+        if self.has_stage(to) {
             return Err(EditError::Taken(to.to_string()));
         }
-        let names = self.stage_names();
-        let stages = self
-            .doc_mut()
-            .get_mut("stages")
-            .and_then(Item::as_table_like_mut)
-            .expect("parse() checked [stages] is a table");
-        rename_key(stages, from, to);
-        for name in &names {
-            let stage = self
-                .stage_item_mut(if name == from { to } else { name })
-                .expect("every listed stage exists");
-            if let Some(transitions) = child_mut(stage, "transitions") {
-                rename_key(
-                    transitions.as_table_like_mut().expect("child_mut checked"),
-                    from,
-                    to,
-                );
-            }
-            let table = stage.as_table_like_mut().expect("a stage is a table");
-            for key in ["worker_stage", "merge_stage"] {
-                if get_str(table, key) == Some(from) {
-                    set_str(table, key, to);
+        let stage = self.stage_table_mut(from).expect("checked just above");
+        set_str(stage, "name", to);
+        let taken: Vec<(String, String)> = self
+            .edge_tables()
+            .iter()
+            .filter_map(|e| {
+                Some((
+                    get_str(*e, "from")?.to_string(),
+                    get_str(*e, "name")?.to_string(),
+                ))
+            })
+            .collect();
+        for edge in super::doc::edge_tables_mut(self) {
+            let leaves =
+                get_str(&*edge, "from").map(|f| if f == from { to } else { f }.to_string());
+            if get_str(&*edge, "to") == Some(from) {
+                set_str(edge, "to", to);
+                let free = !taken
+                    .iter()
+                    .any(|(f, n)| Some(f) == leaves.as_ref() && n == to);
+                if get_str(&*edge, "name") == Some(from) && free {
+                    set_str(edge, "name", to);
                 }
             }
-        }
-        let agent = self
-            .doc_mut()
-            .get_mut("agent")
-            .and_then(Item::as_table_like_mut)
-            .expect("parse() checked [agent] is a table");
-        if get_str(agent, "entry_stage") == Some(from) {
-            set_str(agent, "entry_stage", to);
-        }
-        Ok(())
-    }
-
-    /// Delete a stage and every path into it. Refuses the last stage; deleting
-    /// the entry stage points the entry at the first stage left.
-    pub(crate) fn delete_stage(&mut self, name: &str) -> Result<(), EditError> {
-        self.require_stage(name)?;
-        let remaining: Vec<String> = self
-            .stage_names()
-            .into_iter()
-            .filter(|n| n != name)
-            .collect();
-        let Some(first) = remaining.first().cloned() else {
-            return Err(EditError::LastStage);
-        };
-        self.doc_mut()
-            .get_mut("stages")
-            .and_then(Item::as_table_like_mut)
-            .expect("parse() checked [stages] is a table")
-            .remove(name);
-        for other in &remaining {
-            let stage = self.stage_item_mut(other).expect("listed stage exists");
-            if let Some(transitions) = child_mut(stage, "transitions") {
-                transitions
-                    .as_table_like_mut()
-                    .expect("child_mut checked")
-                    .remove(name);
+            if get_str(&*edge, "from") == Some(from) {
+                set_str(edge, "from", to);
             }
         }
-        let agent = self
-            .doc_mut()
-            .get_mut("agent")
-            .and_then(Item::as_table_like_mut)
-            .expect("parse() checked [agent] is a table");
-        if get_str(agent, "entry_stage") == Some(name) {
-            set_str(agent, "entry_stage", &first);
+        if get_str(self.graph(), "entry") == Some(from) {
+            set_str(self.graph_mut(), "entry", to);
+        }
+        for stage in list_tables_mut(self.stages_list_mut()) {
+            let Some(fan_out) = sub_mut(stage, "mode").and_then(|m| sub_mut(m, "fan_out")) else {
+                continue;
+            };
+            if get_str(&*fan_out, "merge_stage") == Some(from) {
+                set_str(fan_out, "merge_stage", to);
+            }
+            if let Some(worker) = sub_mut(fan_out, "worker")
+                && get_str(&*worker, "stage") == Some(from)
+            {
+                set_str(worker, "stage", to);
+            }
+        }
+        self.each_binding(&mut |bind| {
+            for slot in STAGE_SLOTS {
+                if bind.get(slot).and_then(Value::as_str) == Some(from) {
+                    bind.insert(slot, Value::from(to));
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Delete a stage and every edge into or out of it. Refuses the last
+    /// stage; deleting the entry stage points the entry at the first stage
+    /// left.
+    pub(crate) fn delete_stage(&mut self, name: &str) -> Result<(), EditError> {
+        let index = self
+            .stage_index(name)
+            .ok_or_else(|| EditError::NoSuchStage(name.to_string()))?;
+        let names = self.stage_names();
+        let Some(first) = names.iter().find(|n| *n != name).cloned() else {
+            return Err(EditError::LastStage);
+        };
+        remove_table(self.stages_list_mut(), index);
+        if let Some(edges) = self.graph_mut().get_mut("edges") {
+            retain_tables(edges, &|e| {
+                get_str(e, "from") != Some(name) && get_str(e, "to") != Some(name)
+            });
+        }
+        if get_str(self.graph(), "entry") == Some(name) {
+            set_str(self.graph_mut(), "entry", &first);
         }
         Ok(())
     }
 
-    /// Set a stage's `mode`. Leaving `fan_out` deletes the fan-out keys.
+    /// Set a stage's `mode`. A fan-out needs a worker to read at all, so it
+    /// starts with the first other stage as its worker (itself when it is
+    /// the only one); interaction points start as `{ interactive_points = []
+    /// }`. Picking the mode a stage already has keeps its settings, and
+    /// picking another drops them.
     pub(crate) fn set_stage_mode(
         &mut self,
         name: &str,
         mode: &StageModeView,
     ) -> Result<(), EditError> {
+        let current = self.stage(name).map(|s| s.mode);
+        let worker = self
+            .stage_names()
+            .into_iter()
+            .find(|s| s != name)
+            .unwrap_or_else(|| name.to_string());
         let stage = self.stage_table_mut(name)?;
-        set_str(stage, "mode", mode.as_str());
-        if *mode != StageModeView::FanOut {
-            for key in FAN_OUT_KEYS {
-                stage.remove(key);
-            }
+        if current.as_ref() == Some(mode) {
+            return Ok(());
         }
+        let value = match mode {
+            StageModeView::FanOut => {
+                let mut fan_out = InlineTable::new();
+                fan_out.insert(
+                    "worker",
+                    Value::InlineTable(worker_table(WorkerKind::Stage, &worker)),
+                );
+                let mut t = InlineTable::new();
+                t.insert("fan_out", Value::InlineTable(fan_out));
+                Value::InlineTable(t)
+            }
+            StageModeView::InteractivePoints => {
+                let mut t = InlineTable::new();
+                t.insert("interactive_points", Value::Array(Array::new()));
+                Value::InlineTable(t)
+            }
+            other => Value::from(other.as_str()),
+        };
+        set_value(stage, "mode", value);
         Ok(())
     }
 
@@ -265,12 +262,7 @@ impl ManifestDoc {
         value: Option<u64>,
     ) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
-        match value {
-            Some(n) => set_int(stage, "max_iterations", clamp_i64(n.max(1))),
-            None => {
-                stage.remove("max_iterations");
-            }
-        }
+        set_or_remove_int(stage, "max_iterations", value.map(|n| n.max(1)));
         Ok(())
     }
 
@@ -281,12 +273,7 @@ impl ManifestDoc {
         value: Option<u64>,
     ) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
-        match value {
-            Some(n) => set_int(stage, "max_revisits", clamp_i64(n)),
-            None => {
-                stage.remove("max_revisits");
-            }
-        }
+        set_or_remove_int(stage, "max_revisits", value);
         Ok(())
     }
 
@@ -306,9 +293,10 @@ impl ManifestDoc {
         Ok(())
     }
 
-    /// Set a stage's model chain (`provider/model` each) as
-    /// `model = { models = [...] }`, keeping any other key of an existing
-    /// `model` table. An empty chain deletes `model`.
+    /// Set a stage's model chain (`provider/model` each, or a bare model name
+    /// that leaves the provider open) as `model = { models = [...] }`,
+    /// keeping any other key of an existing `model` table. An empty chain
+    /// deletes `model`.
     pub(crate) fn set_models(&mut self, name: &str, chain: &[String]) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
         if chain.is_empty() {
@@ -317,136 +305,143 @@ impl ManifestDoc {
         }
         let mut models = Array::new();
         for entry in chain {
-            // No route in the string means the author is naming a model and
-            // leaving the provider to the machine, which the bare-string form
-            // says directly. Writing `provider = ""` would say the same thing
-            // in a shape nobody would type by hand.
-            let Some((provider, model)) = entry.split_once('/') else {
-                models.push(Value::from(entry.as_str()));
-                continue;
-            };
             let mut t = InlineTable::new();
-            t.insert("provider", Value::from(provider));
-            t.insert("model", Value::from(model));
+            if let Some((provider, model)) = entry.split_once('/') {
+                t.insert("provider", Value::from(provider));
+                t.insert("model", Value::from(model));
+            } else {
+                t.insert("model", Value::from(entry.as_str()));
+            }
             models.push(Value::InlineTable(t));
         }
         let keeps_table = stage
             .get("model")
             .is_some_and(|m| m.as_table_like().is_some());
         if !keeps_table {
-            stage.insert("model", Item::Value(Value::InlineTable(InlineTable::new())));
+            stage.insert("model", inline_item(InlineTable::new()));
         }
-        let model = stage
-            .get_mut("model")
-            .and_then(Item::as_table_like_mut)
-            .expect("a table now");
+        let model = sub_mut(stage, "model").expect("a table now");
         model.insert("models", Item::Value(Value::Array(models)));
         Ok(())
     }
 
-    /// Set `available_tools`; an empty list deletes it.
+    /// Set `tools`; an empty list deletes it.
     pub(crate) fn set_tools(&mut self, name: &str, tools: &[String]) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
-        if tools.is_empty() {
-            stage.remove("available_tools");
-        } else {
-            set_strings(stage, "available_tools", tools);
-        }
+        set_or_remove_list(stage, "tools", tools);
         Ok(())
     }
 
-    /// Set `available_connectors`, the MCP servers whose whole tool set the
-    /// stage may use; an empty list deletes it.
+    /// Set `connectors`, the MCP servers whose whole tool set the stage may
+    /// use; an empty list deletes it.
     pub(crate) fn set_connectors(
         &mut self,
         name: &str,
         servers: &[String],
     ) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
-        if servers.is_empty() {
-            stage.remove("available_connectors");
-        } else {
-            set_strings(stage, "available_connectors", servers);
-        }
+        set_or_remove_list(stage, "connectors", servers);
         Ok(())
     }
 
-    /// Set one fan-out key of a stage.
+    /// Set one fan-out setting of a stage whose mode is a fan-out.
     pub(crate) fn set_fan_out(&mut self, name: &str, field: FanOutField) -> Result<(), EditError> {
         let stage = self.stage_table_mut(name)?;
+        if fan_out_table(&*stage).is_none() {
+            return Err(EditError::OutOfRange(format!(
+                "\"{name}\" does not fan out; make it a fan-out stage first"
+            )));
+        }
+        let fan_out = sub_mut(stage, "mode")
+            .and_then(|m| sub_mut(m, "fan_out"))
+            .expect("checked just above");
         match field {
-            FanOutField::Worker(worker) => {
-                for kind in [WorkerKind::Agent, WorkerKind::Stage, WorkerKind::Query] {
-                    stage.remove(kind.key());
-                }
-                if let Some((kind, value)) = worker {
-                    set_str(stage, kind.key(), &value);
-                }
+            FanOutField::Worker(None) => {
+                fan_out.remove("worker");
+            }
+            FanOutField::Worker(Some((kind, value))) => {
+                set_value(
+                    fan_out,
+                    "worker",
+                    Value::InlineTable(worker_table(kind, &value)),
+                );
             }
             FanOutField::MergeStage(v) => {
-                set_or_remove_str(stage, "merge_stage", v.as_deref().unwrap_or(""))
+                set_or_remove_str(fan_out, "merge_stage", v.as_deref().unwrap_or(""))
             }
-            FanOutField::MaxWorkers(v) => set_or_remove_int(stage, "max_workers", v),
-            FanOutField::MaxItems(v) => set_or_remove_int(stage, "max_items", v),
+            FanOutField::MaxWorkers(v) => set_or_remove_int(fan_out, "max_workers", v),
+            FanOutField::MaxItems(v) => set_or_remove_int(fan_out, "max_items", v),
             FanOutField::OnWorkerFailure(v) => {
-                set_or_remove_str(stage, "on_worker_failure", v.as_deref().unwrap_or(""))
+                set_or_remove_str(fan_out, "on_worker_failure", v.as_deref().unwrap_or(""))
             }
         }
         Ok(())
-    }
-
-    /// The stage's table, mutably, or [`EditError::NoSuchStage`].
-    pub(super) fn stage_table_mut(
-        &mut self,
-        name: &str,
-    ) -> Result<&mut dyn toml_edit::TableLike, EditError> {
-        let item = self
-            .stage_item_mut(name)
-            .ok_or_else(|| EditError::NoSuchStage(name.to_string()))?;
-        Ok(item.as_table_like_mut().expect("stage_item_mut checked"))
-    }
-
-    /// The stage's `transitions` table, created when missing. The stage must
-    /// exist (callers check).
-    pub(super) fn transitions_mut(&mut self, name: &str) -> Result<&mut Item, EditError> {
-        let item = self
-            .stage_item_mut(name)
-            .expect("callers check the stage exists");
-        ensure_child(item, "transitions")
     }
 
     pub(super) fn require_stage(&self, name: &str) -> Result<(), EditError> {
-        if self.has_stage(name) {
-            Ok(())
-        } else {
-            Err(EditError::NoSuchStage(name.to_string()))
+        match self.has_stage(name) {
+            true => Ok(()),
+            false => Err(EditError::NoSuchStage(name.to_string())),
         }
     }
 
-    /// Whether the agent's `[stages]` holds `name` as any kind of value (a
-    /// non-table entry still takes the key).
-    pub(super) fn stages_key_taken(&self, name: &str) -> bool {
-        self.doc()
-            .get("stages")
-            .and_then(as_table)
-            .is_some_and(|t| t.contains_key(name))
+    /// The edge tables, in file order.
+    pub(super) fn edge_tables(&self) -> Vec<&dyn TableLike> {
+        self.graph_list("edges")
+            .map(super::tables::list_tables)
+            .unwrap_or_default()
     }
-}
 
-pub(super) fn set_or_remove_int(
-    table: &mut dyn toml_edit::TableLike,
-    key: &str,
-    value: Option<u64>,
-) {
-    match value {
-        Some(n) => set_int(table, key, clamp_i64(n)),
-        None => {
-            table.remove(key);
+    /// Run `f` over every inline-table entry of every input's `binds`.
+    pub(super) fn each_binding(&mut self, f: &mut dyn FnMut(&mut InlineTable)) {
+        let Some(inputs) = self.graph_mut().get_mut("inputs") else {
+            return;
+        };
+        for input in list_tables_mut(inputs) {
+            let Some(binds) = input.get_mut("binds").and_then(Item::as_array_mut) else {
+                continue;
+            };
+            for bind in binds.iter_mut().filter_map(Value::as_inline_table_mut) {
+                f(bind);
+            }
         }
     }
 }
 
-/// TOML integers are signed 64-bit; anything bigger is written as the top.
-pub(super) fn clamp_i64(n: u64) -> i64 {
-    n.min(i64::MAX as u64) as i64
+/// A `worker` table for what the editor's worker field holds: a stage, a
+/// query, or a blueprint by name (`name` or `name@digest`) or, when the text
+/// is a path, by directory.
+fn worker_table(kind: WorkerKind, value: &str) -> InlineTable {
+    let mut worker = InlineTable::new();
+    match kind {
+        WorkerKind::Stage | WorkerKind::Query => {
+            worker.insert(kind.key(), Value::from(value));
+        }
+        WorkerKind::Agent if looks_like_a_path(value) => {
+            worker.insert("blueprint_file", Value::from(value));
+        }
+        WorkerKind::Agent => {
+            let mut blueprint = InlineTable::new();
+            match value.rsplit_once('@') {
+                Some((name, digest)) => {
+                    blueprint.insert("name", Value::from(name));
+                    blueprint.insert("digest", Value::from(digest));
+                }
+                None => {
+                    blueprint.insert("name", Value::from(value));
+                }
+            }
+            worker.insert(kind.key(), Value::InlineTable(blueprint));
+        }
+    }
+    worker
+}
+
+/// Write a list of strings, or remove the key when it is empty.
+pub(super) fn set_or_remove_list(table: &mut dyn TableLike, key: &str, values: &[String]) {
+    if values.is_empty() {
+        table.remove(key);
+    } else {
+        set_strings(table, key, values);
+    }
 }

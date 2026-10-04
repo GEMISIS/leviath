@@ -29,8 +29,12 @@ sha2 = { workspace = true }
 # A part's bytes on the control socket and in a JSON request
 # (`leviath_core::mime::inbound`), which are text transports.
 base64 = { workspace = true }
+# The run graph reuses a few enums from here, and it exports a JSON Schema.
+schemars = { workspace = true }
 
 [dev-dependencies]
+# `JsonDoc` is checked against the binary codec the run file uses.
+postcard = { workspace = true }
 # The always-on tracing subscriber, so log-macro bodies run under test.
 # Shared rather than copied: three copies of it had already drifted apart.
 leviath-testkit = { workspace = true }

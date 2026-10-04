@@ -53,66 +53,102 @@ The point is the last column. In a flat message list, all five of those compete 
 and the loser is whatever happens to be oldest. Here, a file dump can fill `codebase` completely and
 `task` is still exactly where it was.
 
+In a blueprint's `agent.toml`, each region is one `[[graph.layout.regions]]` entry with a `name`, a
+`kind` and a `budget`. The task arrives as an [input](/docs/starting-a-run#where-an-input-goes)
+bound to the `task` region:
+
 ```toml
-[context.regions]
-task         = { kind = "pinned", budget = "12%", seed = "task_input" }
-codebase     = { kind = "compacting", budget = "20%" }
-conversation = { kind = "sliding_window", budget = "33%", max_items = 20 }
-history      = { kind = "compact_history", budget = "15%", source_region = "codebase" }
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = "12%"
+
+[[graph.layout.regions]]
+name = "codebase"
+kind = "compacting"
+budget = "20%"
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 20 }
+budget = "33%"
+
+[[graph.layout.regions]]
+name = "history"
+kind = { kind = "compact_history", source = "codebase" }
+budget = "15%"
 ```
+
+`total_budget_tokens` is required. It only matters when every budget is a fixed number, so a layout
+written in percentages sets it to `0`.
 
 ## The nine region kinds
 
 | Kind | Behavior |
 |---|---|
-| `temporary` | The **default** when `kind` is omitted; recent entries, trimmed first under budget pressure. |
+| `temporary` | Recent entries, trimmed first under budget pressure. |
 | `pinned` | Never evicted (architecture, the task). |
 | `sliding_window` | Keeps the most recent entries; the conversation lives here. |
 | `compacting` | Summarizes instead of evicting: file reads and tool results. |
-| `compact_history` | Carries summaries from earlier stages forward, so a later stage skips the raw content. `source_region` names what it summarizes. |
+| `compact_history` | Carries summaries from earlier stages forward, so a later stage skips the raw content. `source` names what it summarizes. |
 | `clearable` | Wiped in one shot when space is needed (scratch). |
-| `hashmap` | Keyed entries (alias `hash_map`); a write to a key replaces it. |
+| `keyed` | Keyed entries; a write to a key replaces it. |
 | `checklist` | A task list whose entries carry state. Written through `todo_add` / `todo_done` / `todo_note`, never evicted, and rendered open-items-first. |
 | `custom` | Behavior defined by a Rhai script (see [Rhai regions](/docs/rhai-regions)). |
 
 A `custom` region gets keyed writes too: entries written under one key render last-wins, like
-`hashmap`, though the shadowed entries keep holding budget until something evicts them. [Rhai
+`keyed`, though the shadowed entries keep holding budget until something evicts them. [Rhai
 regions](/docs/rhai-regions#keyed-writes-render-as-an-upsert) has the details.
 
-An unrecognized `kind` is a hard parse error, not a silently ignored region. So is an
-unrecognized `strategy`: `strategy = "per-item"` with a hyphen is refused, rather than leaving the
-region to evict one entry at a time as if the line had not been written.
+Every region names its `kind`. An unrecognized one is a hard parse error that lists the nine, not
+a silently ignored region. So is an unrecognized `eviction`: `eviction = "per-item"` with a hyphen
+is refused, rather than leaving the region to evict one entry at a time as if the line had not been
+written.
 
 ### Per-kind keys
 
-Most kinds take extra keys that only make sense for them:
+A kind that takes settings is written as a table, `kind = { kind = "...", ... }`:
 
 ```toml
-[context.regions.conversation]
-kind      = "sliding_window"
-max_items = 20                 # default 10
-strategy  = "per_item"         # per_item (default) | bulk | compact
-overflow  = 10                 # with strategy = "bulk": how many to drop at once
-compact_count = 10             # with strategy = "compact": how many to fold into a summary
+[[graph.layout.regions]]
+name = "conversation"
+# max_items is required. eviction: "per_item" (the default), { bulk = 10 } lets
+# the window run 10 over its cap and then drops back to it, { compact = 10 }
+# folds the oldest 10 into a summary.
+kind = { kind = "sliding_window", max_items = 20, eviction = { bulk = 10 } }
+budget = "33%"
 
-[context.regions.codebase]
-kind             = "compacting"
-budget           = "20%"
-compact_at       = "80%"       # compact once this full, see below
-threshold_tokens = 30000       # a hard token ceiling, applied as well as compact_at
+[[graph.layout.regions]]
+name = "codebase"
+# threshold_tokens is a hard token ceiling, applied as well as compact_at.
+kind = { kind = "compacting", threshold_tokens = 30000 }
+budget = "20%"
+compact_at = 0.8               # compact once this full, see below
 
-[context.regions.history]
-kind          = "compact_history"
-source_region = "codebase"     # which region's summaries roll forward
+[[graph.layout.regions]]
+name = "history"
+kind = { kind = "compact_history", source = "codebase" }   # whose summaries roll forward
+budget = "5%"
 
-[context.regions.findings]
-kind        = "hashmap"
-max_entries = 50               # a write to an existing key replaces it
+[[graph.layout.regions]]
+name = "findings"
+kind = { kind = "keyed", max_entries = 50 }   # a write to an existing key replaces it
+budget = "10%"
 
-[context.regions.brain]
-kind       = "custom"
-script     = "context_hooks/brain.rhai"   # relative to the agent directory
-pinned     = false             # true behaves like a pinned region: never evicted
+[[graph.layout.regions]]
+name = "brain"
+# The file is relative to the blueprint's directory. pinned = true behaves
+# like a pinned region: never evicted.
+kind = { kind = "custom", code = { file = "context_hooks/brain.rhai" }, pinned = false }
+budget = "5%"
 ```
 
 ### Tracking work with a checklist
@@ -122,8 +158,10 @@ give is *state*: "compute the fee table" and "~~compute the fee table~~ done" ar
 strings, so nothing can count what is left and no gate can ask.
 
 ```toml
-[context.regions]
-todos = { kind = "checklist", budget = "3%" }
+[[graph.layout.regions]]
+name = "todos"
+kind = "checklist"
+budget = "3%"
 ```
 
 The agent writes to it through tools rather than free text, so the state cannot drift from what the
@@ -144,9 +182,11 @@ that matches nothing is an error the model can read rather than a silent no-op.
 The gate is the part that makes any of this enforceable:
 
 ```toml
-[stages.implement.transitions.review]
-gate = { require_no_open_items = "todos",
-         message = "Finish or explicitly drop the open items first." }
+[[graph.edges]]
+name = "review"
+from = "implement"
+to = "review"
+gate = { require_no_open_items = "todos", message = "Finish or explicitly drop the open items first." }
 ```
 
 The nudge names the items that are still open. It shares the same `max_attempts` budget as every
@@ -158,12 +198,13 @@ and pass on the first attempt, which looks exactly like a stage that finished it
 
 | Key | Default | Meaning |
 |---|---|---|
-| `budget` | unset | A share of the model's context window, written as `"35%"` |
-| `max_tokens` | `5000` | A token ceiling. See below for how it interacts with `budget` |
-| `min_tokens` | unset | A floor for a percentage budget, so the region stays usable on a small model |
+| `name` | required | The region's name, unique in its layout |
+| `kind` | required | One of the nine kinds above |
+| `budget` | required | Tokens (`4000`), a share of the window (`"35%"`), or a clamped share. See below |
+| `compact_at` | 80% | For a compacting region, the fraction of its budget at which it compacts, as `0.8` |
 | `seed` | unset | What the region starts with. See below |
 | `required` | `false` | The stage re-runs rather than moving on while this region is empty |
-| `summarizable` | `true` | Set false to keep an edge `transform = "compact"` from paraphrasing this region. See [transforms](/docs/stages#carrying-context-across-an-edge) |
+| `summarizable` | `true` | Set false to keep an edge's `carry = { compact = {} }` from paraphrasing this region. See [carrying context](/docs/stages#carrying-context-across-an-edge) |
 | `description` | unset | One line on what the region is for. See below |
 | `describe_in_prompt` | `false` | Also show the `description` to the model, above the region's contents. See [what the model sees](#what-the-model-sees) |
 | `volatility` | `"rewritten"` | How much the region's contents move between requests. See [what caching costs](#what-caching-costs) |
@@ -179,104 +220,159 @@ not cover is refused with that list.
 
 **Resolved budget** is the phrase used for the number a region actually gets, once the percentage
 has been worked out against the model in front of it. A `budget = "20%"` region on a 200k-token
-model resolves to 40,000 tokens. `compact_at = "80%"` then means 80% of *that*, so 32,000.
+model resolves to 40,000 tokens. `compact_at = 0.8` then means 80% of *that*, so 32,000.
 
-`max_tokens` behaves differently depending on whether `budget` is set. On its own it is a plain
-ceiling. Alongside `budget`, it caps the resolved percentage, so the region gets whichever is
-smaller.
+`budget` takes three forms:
 
-That last part is worth dwelling on, because it is easy to write a cap that quietly cancels the
-percentage. `budget = "30%", max_tokens = 40000` is 30% only below a 133k window. Above that it is
-a flat 40,000 however large the model. Every bundled agent shipped that way until a 1M-context run
-held its findings to 40k while its own blueprint asked for 314k. If you mean the percentage, write
-the percentage on its own. Reach for `max_tokens` when a region genuinely must not grow, and
-`min_tokens` when a small one must not shrink on a narrow window. Check what the pair resolves to at
-the largest model you expect to run.
+```toml
+budget = 4000                                        # a fixed token count
+budget = "10%"                                       # a share of the window
+budget = { percent = "10%", min = 500, max = 8000 }  # a share, clamped
+```
 
-A malformed `budget` or `compact_at` string is a hard error at load, so `lev validate` catches it
-instead of a run failing later.
+The clamp is worth dwelling on, because it is easy to write a cap that quietly cancels the
+percentage. `budget = { percent = "30%", max = 40000 }` is 30% only below a 133k window. Above that
+it is a flat 40,000 however large the model. A 1M-context run held its findings to 40k that way
+while its own blueprint asked for 314k. If you mean the percentage, write the percentage on its
+own. Reach for `max` when a region genuinely must not grow, and `min` when a small one must not
+shrink on a narrow window. Check what the pair resolves to at the largest model you expect to run.
+
+A malformed `budget` is a hard error at load, so `lev validate` catches it instead of a run failing
+later.
 
 ### Seeding a region
 
-`seed` fills a region before the first inference:
+A region starts empty unless something fills it before the first inference. Two things can.
+
+**Values that change from run to run arrive as inputs.** The task, a diff, a focus area: whatever
+the caller supplies is a typed input the blueprint declares in `[[graph.inputs]]` and binds to a
+region. `lev run --task` fills the input named `task`, and `--input standards=...` (or the short
+form `--standards ...`) fills `standards`. [Where an input
+goes](/docs/starting-a-run#where-an-input-goes) covers binding, templates and attached files:
 
 ```toml
-[context.regions]
-task      = { kind = "pinned", seed = "task_input" }
-standards = { kind = "pinned", seed = "input" }
-readme    = { kind = "pinned", seed = { files = ["README.md"] } }
-layout    = { kind = "temporary", seed = { glob = "src/**/*.rs" } }
-rules     = { kind = "pinned", seed = { literal = "Never edit generated files." } }
-env       = { kind = "pinned", seed = { command = "git log --oneline -20" } }
-clock     = { kind = "pinned", seed = { tool = "current_time" } }
-machine   = { kind = "pinned", seed = { tools = ["current_time", "system_info"] } }
-computed  = { kind = "temporary", seed = { rhai = "blueprint:seeds/plan.rhai" } }
-inherited = { kind = "pinned", seed = { caller = "brief" } }
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+required = true
+binds = [{ region = "task" }]
+
+[[graph.inputs]]
+name = "standards"
+type = "text"
+binds = [{ region = "standards" }]
+```
+
+A parent run passes values to a child the same way, as the child's inputs. By convention a
+blueprint names its main input `task` and binds it to a region named `task`. A blueprint that
+declares no `task` input refuses a task outright rather than running without it.
+
+**Everything the blueprint fills by itself is a `seed`** on the region:
+
+```toml
+[[graph.layout.regions]]
+name = "readme"
+kind = "pinned"
+budget = "5%"
+seed = { files = ["README.md"] }
+
+[[graph.layout.regions]]
+name = "layout"
+kind = "temporary"
+budget = "10%"
+seed = { glob = "src/**/*.rs" }
+
+[[graph.layout.regions]]
+name = "rules"
+kind = "pinned"
+budget = "1%"
+seed = { literal = "Never edit generated files." }
+
+[[graph.layout.regions]]
+name = "env"
+kind = "pinned"
+budget = "2%"
+seed = { command = "git log --oneline -20" }
+
+[[graph.layout.regions]]
+name = "machine"
+kind = "pinned"
+budget = "1%"
+seed = { tools = { calls = [{ tool = "current_time", args = {} }, { tool = "system_info", args = {} }] } }
+
+[[graph.layout.regions]]
+name = "computed"
+kind = "temporary"
+budget = "5%"
+seed = { code = { file = "seeds/plan.rhai" } }
 ```
 
 | Form | Fills from |
 |---|---|
-| `"task_input"` | The caller's `task` key, which is what `lev run --task` sets |
-| `"input"` | A caller key named after this region, so `--<region>` on the CLI reaches it |
-| `"<any-other-string>"` | The caller key of that name |
 | `{ files = [...] }` | The contents of those files |
 | `{ glob = "..." }` | Every file matching the pattern |
 | `{ literal = "..." }` | Fixed text |
 | `{ command = "..." }` | The stdout of a shell command |
-| `{ rhai = "..." }` | The return value of a Rhai script |
-| `{ caller = "..." }` | A named value passed by a parent agent |
+| `{ code = { file = "..." } }` | The return value of a Rhai script beside the blueprint |
+| `{ tools = { calls = [...] } }` | The results of tool calls. See [seeding from tools](#seeding-from-tools) |
 
-A region literally named `task` gets `seed = "task_input"` implicitly, so older blueprints keep
-working.
-
-A `seed` that matches none of the forms above is ignored and the region starts empty. `lev validate`
-reports that as `region-seed-not-understood`, which is worth reading before wondering why a region
-came out blank. The table keys are exactly the ones in the left column, so `{ caller_input = "..." }`
-is a typo for `{ caller = "..." }` and seeds nothing. A blueprint that seeds no region from the
-task refuses a task outright rather than running without it.
+A region takes one seed, and inputs bound to it land beside whatever the seed wrote. The table keys
+are exactly the ones in the left column. Anything else, such as `{ caller_input = "..." }`, is a
+parse error naming the six forms, so `lev validate` catches it instead of a region coming out
+blank.
 
 > [!WARNING]
 > A `command` seed runs at spawn, before the first inference and therefore before any tool-approval
 > prompt. Because there is nobody to ask in the moment, it must also be covered by
-> [`[safe_commands]`](/docs/interaction#what-runs-without-asking), or it does not run at all.
+> [`[graph.safe_commands]`](/docs/interaction#what-runs-without-asking), or it does not run at all.
 > `lev validate` prints every command seed in a blueprint, `lev run --no-seed-commands` refuses
 > them for one run, and `[security] allow_seed_commands = false` refuses them machine-wide. Seeds
 > run once: a daemon restart does not replay them.
 
 #### Where a seed path resolves
 
-`files`, `glob` and `rhai` seeds resolve against the run's working directory and may not leave it.
-A path that does is refused at spawn, before anything is read.
+`files` and `glob` seeds resolve against the run's working directory and may not leave it. A path
+that does is refused at spawn, before anything is read.
 
 The rule is the one `read_file` follows, for the same reason: the *blueprint* chose this path, not
 you. Seeded contents land in a region the model reads on its first turn, so a path that escaped
 would put whatever it named in front of the model without anything having asked you.
 
-To read outside on purpose, declare it under `[read_paths]` and grant it in your config. That is
-already the mechanism for "this agent is meant to read there and I agreed", and seeding answers to
-it rather than having a second one of its own. A glob is checked per match, since `../*.toml` cannot
-be judged before it is expanded.
+To read outside on purpose, list it in the blueprint's `read_paths` (under `[graph]`) and grant it
+in your config. That is already the mechanism for "this blueprint is meant to read there and I
+agreed", and seeding answers to it rather than having a second one of its own. A glob is checked per
+match, since `../*.toml` cannot be judged before it is expanded.
 
 A blueprint can also seed from files it ships itself. The `blueprint:` prefix resolves the rest of
 the path against the blueprint's own directory instead of the working directory, so bundled
-material travels with the agent:
+material travels with the blueprint:
 
 ```toml
-guidelines = { kind = "pinned", seed = { files = ["blueprint:config/style.md"] } }
-rubric     = { kind = "pinned", seed = { glob  = "blueprint:rubrics/*.md" } }
-plan       = { kind = "temporary", seed = { rhai = "blueprint:seeds/plan.rhai" } }
+[[graph.layout.regions]]
+name = "guidelines"
+kind = "pinned"
+budget = "3%"
+seed = { files = ["blueprint:config/style.md"] }
+
+[[graph.layout.regions]]
+name = "rubric"
+kind = "pinned"
+budget = "3%"
+seed = { glob = "blueprint:rubrics/*.md" }
 ```
 
-A prefixed path may never leave the blueprint's directory, and `[read_paths]` does not apply to it.
-A grant widens what an agent may read on your machine, not what a package pretends to ship, so
+A prefixed path may never leave the blueprint's directory, and `read_paths` does not apply to it.
+A grant widens what a run may read on your machine, not what a package pretends to ship, so
 `blueprint:../secrets.txt` is refused however the config is set. This is the same containment a
 script gets, because the claim is the same: these are the blueprint's own files, and a blueprint's
 own files live beside it.
 
-Scripts proper are stricter still and have no `[read_paths]` escape at all: a stage hook, a
-custom-region script and an output validator must all live inside the blueprint's own directory. A
-script is code the agent ships, and there is no such thing as loading your logic from somewhere
-else on purpose.
+Scripts proper are stricter still and have no `read_paths` escape at all. Every `{ file = "..." }`
+a blueprint names, whether a `code` seed, a stage hook, a custom-region script or an output
+validator, resolves against the blueprint's own directory and must stay inside it. A script is code
+the blueprint ships, and there is no such thing as loading your logic from somewhere else on
+purpose. A graph sent whole in a request has no directory, so it carries its code inline as
+`{ inline = "..." }` instead.
 
 ### Seeding from tools
 
@@ -285,10 +381,15 @@ agent's first inference already knows what the tools would have told it. Several
 region, in order, each under a heading naming the tool:
 
 ```toml
-environment = { kind = "pinned", budget = "1%", volatility = "stable", seed = { tools = [
-  "current_time",
-  "system_info",
-  "locale_info",
+[[graph.layout.regions]]
+name = "environment"
+kind = "pinned"
+budget = "1%"
+volatility = "stable"
+seed = { tools = { calls = [
+  { tool = "current_time", args = {} },
+  { tool = "system_info", args = {} },
+  { tool = "locale_info", args = {} },
 ] } }
 ```
 
@@ -301,13 +402,17 @@ environment = { kind = "pinned", budget = "1%", volatility = "stable", seed = { 
 ```
 
 Any tool the agent could call works, spelled as the agent would spell it: a built-in, an
-[MCP server's](/docs/mcp) `<server>__<tool>`, or a [Rhai script tool](/docs/rhai-tools). A call that
-takes arguments uses the table form, and the two spellings mix in one list:
+[MCP server's](/docs/mcp) `<server>__<tool>`, or a [Rhai script tool](/docs/rhai-tools). Each call
+names its `tool` and its `args`, written as the model would write them; `{}` for none:
 
 ```toml
-toolchain = { kind = "pinned", seed = { tools = [
-  { name = "which_command", args = { command = "git" } },
-  "locale_info",
+[[graph.layout.regions]]
+name = "toolchain"
+kind = "pinned"
+budget = "1%"
+seed = { tools = { calls = [
+  { tool = "which_command", args = { command = "git" } },
+  { tool = "locale_info", args = {} },
 ] } }
 ```
 
@@ -317,7 +422,7 @@ answer costs it no turn.
 
 > [!IMPORTANT]
 > Unlike a `command` seed there is no separate kill switch, because a tool seed reaches nothing
-> new. Every call resolves against the same `[tool_permissions]` the tool lane applies mid-run, so a
+> new. Every call resolves against the same `tool_permissions` the tool lane applies mid-run, so a
 > seed can call exactly what the agent could call and nothing more, and a `deny` counts here too.
 >
 > A tool set to `ask` is **refused**, not prompted: a seed runs before the first inference, so there
@@ -333,7 +438,7 @@ Seeds resolve once, at spawn, like every other kind. `refresh = "each_stage"` re
 whenever a stage is entered:
 
 ```toml
-environment = { kind = "pinned", seed = { tools = ["current_time"], refresh = "each_stage" } }
+seed = { tools = { calls = [{ tool = "current_time", args = {} }], refresh = "each_stage" } }
 ```
 
 Use it where the answer moves. A run that spends an hour in one stage and then enters another
@@ -347,7 +452,8 @@ actually change. A call that fails leaves the region as it was rather than blank
 previous value is stale, and stale beats absent. `lev validate` marks a refreshing seed
 "on every stage entry".
 
-Seeds do not re-run when a run is reloaded from a snapshot, whatever their `refresh` setting.
+Seeds do not re-run when a run is resumed from its [run file](/docs/run-file#resuming-a-run), whatever
+their `refresh` setting.
 
 ## What the model sees
 
@@ -374,9 +480,12 @@ and the model never sees it. Add `describe_in_prompt` to spend the tokens and
 put it in front of the model too:
 
 ```toml
-[context.regions]
-sources_index = { kind = "pinned", budget = "4%", describe_in_prompt = true,
-                  description = "One bibliography line per source actually used." }
+[[graph.layout.regions]]
+name = "sources_index"
+kind = "pinned"
+budget = "4%"
+description = "One bibliography line per source actually used."
+describe_in_prompt = true
 ```
 
 which renders as:
@@ -412,7 +521,7 @@ Whether the model gets the bytes is decided when the request is built, not
 when the entry is written. A model whose input types cover the part gets it as
 that provider's native block. A part whose bytes are text reaches any model as
 text. Anything else is the stand-in alone, which still names the part so the
-model can hand it to a tool. The journal and `context.json` carry references,
+model can hand it to a tool. The entry itself carries a reference to the part,
 never the bytes.
 
 ## What caching costs
@@ -425,10 +534,23 @@ That makes the ordering of the prompt worth money, and the ordering is decided b
 region declares:
 
 ```toml
-[context.regions]
-task    = { kind = "pinned", volatility = "stable" }      # set once at spawn
-sources = { kind = "pinned", volatility = "grows" }       # appended to as the run goes
-scratch = { kind = "hashmap", volatility = "rewritten" }  # rebuilt each turn
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = "2%"
+volatility = "stable"      # set once at spawn
+
+[[graph.layout.regions]]
+name = "sources"
+kind = "pinned"
+budget = "30%"
+volatility = "grows"       # appended to as the run goes
+
+[[graph.layout.regions]]
+name = "scratch"
+kind = "keyed"
+budget = "5%"
+volatility = "rewritten"   # rebuilt each turn
 ```
 
 | value | means | gets |
@@ -484,9 +606,9 @@ Caching is also per model, so a stage that switches model starts cold whatever t
 like. The benefit concentrates inside a stage rather than across a model change, and no layout
 avoids that.
 
-A stage can still override the layout, volatility included, with
-`[stages.<name>.context.regions]`. See [per-stage layouts](/docs/agents#context-regions). That is
-for a stage whose memory is genuinely shaped differently, not for this.
+A stage can still replace the layout, volatility included, with a `layout` of its own
+(`[graph.stages.layout]`). See [layout and regions](/docs/blueprint-format#layout-and-regions). That
+is for a stage whose memory is genuinely shaped differently, not for this.
 
 ## Where a stage's own instructions live
 
@@ -499,8 +621,10 @@ that region sits in the cacheable prefix.
 Name a region for it and all three go away:
 
 ```toml
-[context.regions]
-stage_instructions = { kind = "pinned", budget = "3%" }
+[[graph.layout.regions]]
+name = "stage_instructions"
+kind = "pinned"
+budget = "3%"
 ```
 
 The runtime writes the entering stage's prompt there, replacing the previous stage's. It is always
@@ -520,7 +644,7 @@ The 65 is the whole problem in one number: two tokens of task and sixty-three of
 instructions, under a heading that says `task`.
 
 A blueprint that declares no such region keeps the old behaviour exactly, so this costs nothing to
-ignore. The region is never hidden by a stage that omits it from its own `[context.regions]`: it
+ignore. The region is never hidden by a stage's `hide` list or its own `layout`: it
 holds the instructions of the stage being entered, so hiding it would drop that stage's prompt.
 
 ### What a stage change still costs
@@ -600,8 +724,11 @@ decides what was least important.
 `admission = "reject"` hands that decision back:
 
 ```toml
-[context.regions]
-sources = { kind = "temporary", budget = "30%", admission = "reject" }
+[[graph.layout.regions]]
+name = "sources"
+kind = "temporary"
+budget = "30%"
+admission = "reject"
 ```
 
 Now a write that does not fit fails, and the agent is told the region is full and to release
@@ -620,25 +747,27 @@ Tool output is **routed** to a region, so exploration lands in a persistent code
 than scratch:
 
 ```toml
-[stages.analyze.tool_routing]
+[[graph.stages]]
+name = "analyze"
+# ...
+
+[graph.stages.tool_routing]
 default_region = "scratch"
 keep_results = true               # false sends every result to `scratch` instead
 max_result_tokens = 4000          # ceiling for any tool without one of its own
-[stages.analyze.tool_routing.overrides]
-read_file = "codebase"
+tool_regions = { read_file = "codebase" }
 # A stage that both greps and reads files needs two numbers, not one: a cap
 # sized for the file read lets every grep through untouched, and one sized for
 # the grep truncates every file.
-[stages.analyze.tool_routing.max_result_tokens_per_tool]
-read_file = 20000
+tool_max_result_tokens = { read_file = 20000 }
 ```
 
-Both tables are keyed by tool name, and an alias matches the tool it aliases. Writing `bash` covers
+Both maps are keyed by tool name, and an alias matches the tool it aliases. Writing `bash` covers
 the `shell` the model actually calls.
 
-A stage may only route into a region it can see. Routing a result into a region the stage left out
-of its own `[context.regions]` writes it where that stage cannot read it back, so `lev validate`
-refuses the blueprint and says which region to add. The four the runtime always carries are always
+A stage may only route into a region it can see. A region the stage hides, or leaves out of its own
+`layout`, is somewhere it cannot read a result back. `lev validate` refuses such a blueprint and
+says which region to add. The four the runtime always carries are always
 valid targets: `conversation`, `tool_results`, `final_output` and `stage_instructions`.
 
 ### What the model is told about a routed result
@@ -659,19 +788,19 @@ The pointer also says what actually happened rather than what was meant. A regio
 the result whole reports the truncation or the refusal, instead of promising a full result that is
 not there.
 
-An override entry can also carry both answers at once, which is usually what you mean when a tool
-needs its own region *and* its own ceiling:
+The two maps are independent, which is usually what you mean when a tool needs its own region *and*
+its own ceiling:
 
 ```toml
-[stages.analyze.tool_routing.overrides]
-read_file = { region = "codebase", max_result_tokens = 20000 }
-grep = "scratch"                     # route it, no cap
+[graph.stages.tool_routing]
+default_region = "scratch"
+tool_regions = { read_file = "codebase", grep = "scratch" }   # grep: routed, no cap
+tool_max_result_tokens = { read_file = 20000, list_dir = 500 } # list_dir: capped, not moved
 ```
 
-Either key on its own is fine: `{ region = "codebase" }` routes without capping, and
-`{ max_result_tokens = 500 }` caps without moving the result out of `default_region`. A value that
-is neither a region name nor one of these tables is an error rather than a line that is quietly
-skipped.
+A tool in `tool_regions` alone routes without capping, and a tool in `tool_max_result_tokens` alone
+caps without moving the result out of `default_region`. A key outside these is an error rather than
+a line that is quietly skipped.
 
 `read_file` also has a hard byte cap of its own, independent of any of this, and says so in the
 result when it applies. Without one, a large file went into its region whole and was either
@@ -687,13 +816,21 @@ conversation, riding the assistant turn like its text. `output_routing` sends th
 transcript:
 
 ```toml
-[context.regions]
-artwork      = { kind = "pinned", accepts = ["image/*"], max_stored = 4 }
-conversation = { kind = "sliding_window", budget = "50%" }
+[[graph.layout.regions]]
+name = "artwork"
+kind = "pinned"
+budget = "10%"
+accepts = ["image/*"]
 
-[stages.draw.output_routing]
-"image/*"         = "artwork"
-"application/pdf" = "handouts"
+[[graph.layout.regions]]
+name = "handouts"
+kind = "pinned"
+budget = "10%"
+accepts = ["application/pdf"]
+
+[[graph.stages]]
+name = "draw"
+output_routing = { "image/*" = "artwork", "application/pdf" = "handouts" }
 ```
 
 Each key is a mime pattern (`image/png`, `image/*`, `*/*`) and each value a region. A reply that
@@ -719,7 +856,8 @@ receiving stage not inheriting the producing stage's transcript. `conversation` 
 because the model's own turns live there. A stage can still **empty** a region as it is entered:
 
 ```toml
-[stages.describe.context]
+[[graph.stages]]
+name = "describe"
 reset = ["conversation"]
 ```
 
@@ -766,9 +904,9 @@ token counts would need rewriting every time.
 > Percentages are ceilings, and they may add up to more than 100%. That is deliberate: regions
 > rarely fill at the same time, so reserving exact shares would waste most of the window. A ceiling
 > also costs nothing until it is reached, because a region is charged for what is stored in it, not
-> for its budget. That is why raising one is cheap and capping one is not. Use `max_tokens` and
-> `threshold_tokens` when you need a limit that really is hard, and remember they override the
-> percentage rather than sitting beside it.
+> for its budget. That is why raising one is cheap and capping one is not. Use a fixed `budget`, a
+> `max` on a percentage, or `threshold_tokens` when you need a limit that really is hard, and
+> remember a `max` overrides the percentage rather than sitting beside it.
 
 ## Regions on a provider with no cache breakpoints
 

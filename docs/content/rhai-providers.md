@@ -43,19 +43,19 @@ Four things about the lifecycle:
 Put the file at `~/.leviath/providers/groq.rhai`, then point a stage at it from the blueprint:
 
 ```toml
-# agent.leviath
-[stages.plan.model]
-provider = "groq"                       # the filename stem
-model    = "llama-3.3-70b-versatile"    # passed through as request.model
+# agent.toml
+[[graph.stages]]
+name = "plan"
+# provider is the filename stem; model is passed through as request.model.
+model = { models = [{ provider = "groq", model = "llama-3.3-70b-versatile" }] }
 ```
 
-Model selection is per stage. Every stage that should use this provider needs its own
-`[stages.<name>.model]` block.
+Model selection is per stage. Every stage that should use this provider names it in its own
+`model`.
 
 > [!WARNING]
-> A top-level `[model]` block is not read by anything. It parses without complaint and then has no
-> effect, so the stage quietly runs on your default provider instead. `lev validate` catches this
-> and reports it as `agent-model-block-ignored`.
+> There is no blueprint-wide model. A `model` key under `[graph]` is refused as an unknown key, and a
+> stage with no `model` runs on your default provider.
 
 A config table is optional. It only supplies overrides that reach the script's `initialize`:
 

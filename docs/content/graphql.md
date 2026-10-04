@@ -142,7 +142,7 @@ shows up much later as missing data.
 | `first` cap | Listings |
 |---|---|
 | `500` | `models`, `providers`, `tools` |
-| `200` | `runs`, `blueprints`, `scripts`, `mcpServers`, `mimeRows`, `yoloProfiles`, `updateJobs`, `openInteractions`, and every listing on a run except the two below |
+| `200` | `runs`, `blueprints`, `scripts`, `mcpServers`, `mimeRows`, `yoloProfiles`, `updateJobs`, `openInteractions`, `heldInteractions`, and every listing on a run except the two below |
 | `1000` | `files` on a run, where a row is a name and a size |
 | `100` | `contextHistory` on a run, where a point carries a whole context window |
 
@@ -348,7 +348,7 @@ Only fields that hold still are sortable, which is why `RunOrderField` names `TI
 that moves under a cursor makes a page skip or repeat.
 
 Each listing declares its own keys, so `BlueprintOrderField` is `NAME` and `VERSION`, and a
-journal-backed listing such as `executions` orders by `JOURNAL_POSITION`. Leave `orderBy` out and
+listing read from the run file, such as `executions`, orders by `JOURNAL_POSITION`. Leave `orderBy` out and
 each listing uses the one that suits it.
 
 ## Looking one thing up
@@ -489,7 +489,7 @@ fifty workers spent a great deal is not a cheap run.
 ### What a run did
 
 A context window says what a model is looking at now. It does not say what the run tried.
-`executions` reads the run's journal instead, so it holds the attempts the window no longer shows:
+`executions` reads the run file instead, so it holds the attempts the window no longer shows:
 a call a gate refused, one that failed and was reissued, one a restart cut off.
 
 ```graphql
@@ -524,9 +524,9 @@ way only the result text describes. `endedAt` tells the first apart from the oth
 `INDETERMINATE` is its own answer: a daemon that died between dispatch and completion left a call
 nobody saw the end of, and the resume that carried the run on records that.
 
-`journalPosition` is where the record that dispatched the attempt sits in the journal, as a byte
-offset. It only climbs within a run and it never changes, so it orders executions and names one for
-as long as the run exists.
+`journalPosition` is the step in the run file that dispatched the attempt, the same number
+`deltas` uses. It only climbs within a run and it never changes, so it orders executions. Calls
+dispatched together in one batch share a step.
 
 Every tool takes exactly one argument shape, so each tool has its own type and a mismatched pair
 cannot be built. `rawArguments` is on every call, typed or not. The typed view is a convenience
@@ -578,7 +578,7 @@ tools are the ones that show up, along with anything that wrote a part into a re
 none of them. `bytes` is the whole result's size and `truncated` says whether `text` is only its
 head. `parts` names the stored parts the result carried.
 
-Each of these is null or empty where the journal did not record the connection, and never a guess.
+Each of these is null or empty where the run file did not record the connection, and never a guess.
 `visit` is also null past the ledger's per-stage cap of the earliest 128 stays, where the stay is
 real and its detail is not kept.
 
@@ -616,7 +616,7 @@ Every field on `settlement` but `outcome` is null unless `outcome` is `ANSWERED`
 under the same id, which is a fault in the server rather than anything about the call.
 
 `scope` is the one field worth a note against REST. This spells the widest grant `RUN`, where the
-REST journal and answer routes write `session`. `ONCE` and `STAGE` spell the same on both sides.
+REST answer route writes `session`. `ONCE` and `STAGE` spell the same on both sides.
 A grant is keyed on what was approved, not on the tool alone: for a shell call that is the program
 and its first literal argument, so `RUN` on `touch a.txt` does not cover `touch b.txt`, and the
 second one asks again.
@@ -628,7 +628,7 @@ plainly did something dangerous means exactly that.
 
 `usage` and `cost` are per call that worked. A call refused three times and answered on the fourth
 is billed once, so the time the run spent being refused is in neither of them. `inferences` is that
-half, read from the same journal: one entry per trip to a provider, in the order the run made them.
+half, read from the same run file: one entry per trip to a provider, in the order the run made them.
 
 ```graphql
 {
@@ -651,7 +651,7 @@ half, read from the same journal: one entry per trip to a provider, in the order
 answered: `finishReason` is how the provider said the answer ended (`complete`, `token_limit`,
 `tool_call`, `stop`, or `unknown`), and `stoppedFor` is the provider's own words for an `unknown`
 one, such as a content filter Leviath has no name for. Both are null on a failed attempt and in a
-journal written before they were recorded. The four fields after them are null unless it failed.
+run recorded before they were. The four fields after them are null unless it failed.
 `transient` and `capacity` are how the failure was judged at the time rather than now, because what
 counts as transient is a policy that moves between releases. `retry` says what the loop did next.
 `SAME_MODEL` is the same provider again after a wait, and the next entry's `backoffMs` says how
@@ -697,7 +697,7 @@ which of the four states a record is in before you read anything else from it.
 `RETAINED` means `request` is there. `NOT_CAPTURED` means no body was ever taken, which is every
 run nobody asked to capture. `REDACTED` means a body was taken and then scrubbed, and `EXPIRED`
 means it was taken and then aged out. The last two are a different fact from `NOT_CAPTURED`:
-something existed and is gone. `modelInput` itself is null for an attempt whose journal recorded
+something existed and is gone. `modelInput` itself is null for an attempt whose run file recorded
 none.
 
 Everything beside `request` is recorded whether capture is on or off, because it costs nothing and
@@ -722,7 +722,7 @@ are then reordered by cache tier. A mapping would have to be inferred after the 
 inferred one is not evidence.
 
 Turn capture on for a machine with `[observability] capture_model_input`, or for one run with
-`captureModelInput` on `spawnRun`. Read the warning in
+`launch.captureModelInput` on `spawnRun`. Read the warning in
 [Observability](/docs/observability#capturing-what-went-to-the-model) first. A captured request
 holds whatever the run's context held, including file contents a tool read and anything somebody
 pasted, and there is no size cap.
@@ -730,7 +730,7 @@ pasted, and there is no size cap.
 ### Why a region changed
 
 `contextHistory` serves snapshots of the window. `contextChanges` serves the changes that moved it.
-Both read the same journal, and neither answers for the other. A region that lost its plan looks
+Both read the same run file, and neither answers for the other. A region that lost its plan looks
 identical in a snapshot, whether a compaction took it, a transform cleared it, or the model deleted
 it.
 
@@ -767,7 +767,7 @@ The per-region digests are what tell you whether to go and read it: `digestBefor
 `digestAfter` means that region ended the transaction holding what it started with. `tokenDelta` is
 negative where a region shrank, and `entriesRemoved` counts any eviction the change triggered.
 
-An empty list means the journal holds no change records. A write whose path cannot name its cause
+An empty list means the run file holds no change records. A write whose path cannot name its cause
 records nothing rather than borrowing the nearest neighbour, so a gap here reads as a gap.
 
 ### A window, now or by name
@@ -849,15 +849,59 @@ minutes, and it opens byte routes only. The signing key is random per server pro
 written down, so a restart invalidates every link it handed out. Links are relative, so they keep
 whatever host, scheme and port you reached the server on.
 
+### The run file: spec, state, steps and graph
+
+Every run keeps one [run file](/docs/run-file). Four fields read it directly, and they answer the
+same questions `lev run show` and the REST `spec`, `state`, `deltas` and `graph` routes do.
+
+```graphql
+{
+  run(id: "coder-1788924523-abc123") {
+    spec {
+      origin { kind blueprintName version digest }
+      inputs { name value { __typename ... on TextValueOutput { text } } }
+      launch { unattended profile allow maxDepth seedCommands captureModelInput }
+      stages { stage provider model contextWindow }
+      createdAt
+    }
+    now: state { seq status cursor { stage visit iteration } title }
+    start: state(at: 0) { seq status cursor { stage } }
+    deltas(from: 1, to: 20) {
+      seq at
+      changes { __typename ... on StatusChangeOutput { status error } }
+      events { __typename ... on InferenceStepOutput { model finishReason } }
+    }
+    graph {
+      nodes { stage visits current }
+      edges { from to name condition taken }
+    }
+  }
+}
+```
+
+`spec` is the run as it was resolved at spawn: where its graph came from, the checked inputs, the
+launch policy, and the graph itself as JSON with the input slots applied. Nothing in it is looked up
+again, and a resume binds to it.
+
+`state` is the whole run after one step, and `state(at: 0)` is the state it started in. Leave `at`
+out for now: the daemon's own view while it holds the run, and the file's last step otherwise.
+`deltas` is the steps between two numbers, at most 200 per call. Each step lists the parts of the
+state it changed and the events that happened during it, such as a model call, a tool call or an
+answered question.
+
+`graph` is the run's stages and edges, with how many times it entered each stage and took each
+edge. All four are null, or empty for `deltas`, for a run with no run file. See
+[Inspecting a run](/docs/inspecting-a-run#over-graphql) for what each part means.
+
 ## Blueprints and the manifest
 
 Two different questions, and the schema keeps them apart. `blueprints` lists what is installed on
-the machine now. `blueprint` on a run is the manifest that run executed, read from the run's own
-copy.
+the machine now. `spec` on a run is the graph that run executed, read from its own run file.
 
-The whole manifest is readable, one field at a time. That covers a stage's model block, its tool
-routing, its checkpoints, its output shape, its hooks and its fan-out. It covers the edges out of a
-stage too, with their conditions and gates.
+The whole `agent.toml` is readable, one field at a time. That covers a stage's model block, its
+tool routing, its checkpoints, its output shape, its hooks and its fan-out. It covers the edges out
+of a stage too, with their conditions and gates. A stage's `transitions` are the `[[graph.edges]]`
+that leave it, and its `availableTools` is its `tools` list.
 
 ```graphql
 {
@@ -881,23 +925,24 @@ stage too, with their conditions and gates.
   }
   run(id: "coder-1788924523-abc123") {
     blueprintDigest
-    blueprint { id name version source digest }
+    spec { origin { kind blueprintName version digest } graph }
   }
 }
 ```
 
-A run copies its manifest into its own directory at spawn and records that copy's digest. So
-editing or deleting the installed blueprint never changes what a finished run says it ran, and a
-daemon restart resumes a run on the manifest it started with. Only the manifest is frozen. Scripts
-it names, such as hooks and validators, are still read from the installed blueprint's directory.
+A run writes its resolved graph, and the code that graph names, into its run file at spawn, with
+the digest of the blueprint it came from. So editing or deleting the installed blueprint never
+changes what a finished run says it ran. A daemon restart resumes a run on the graph and the code
+it started with.
 
-`source` says which file a blueprint came from, `SNAPSHOT` or `INSTALLED`. A run recorded before
-snapshots existed has no copy, so it reads `INSTALLED` and its `blueprintDigest` is null. What it
-executed is unknown, which is not the same as "unchanged".
+Compare `blueprintDigest` with the installed blueprint's `digest` to tell whether a run executed
+what is installed now. A run started from a raw graph has no blueprint: its `spec.origin.kind` is
+`RAW` and its digest is null. A run from an earlier release whose blueprint was gone when it was
+converted is `RECORDED`: its graph is what the run recorded, its digest is null, and it never
+resumes.
 
 The id is `<name>@<digest prefix>`, not the bare name. Two revisions of one name are two different
-objects, so a client that caches by type and id cannot merge a run's frozen copy with whatever is
-installed now.
+objects, so a client that caches by type and id never merges two revisions into one.
 
 Two rules run through the manifest, because it is a document rather than a database.
 
@@ -942,9 +987,9 @@ same four fields and a type of their own would say nothing a client could act on
 `skipped` names scripts that were found and could not be offered, with the reason, because a tool
 an author believes exists and silently is not there is the failure worth reporting.
 
-A tool stays a name inside a manifest. `available_tools` may name an MCP server's tool, a group
-token such as `@builtin`, and any tool this machine does not have, so the inventory describes what
-is here rather than what was written.
+A tool stays a name inside a blueprint. A stage's `tools` may name an MCP server's tool, a group
+token such as `@builtin`, or a tool this machine does not have. So the inventory describes what is
+here rather than what was written.
 
 ## Mutations
 
@@ -972,44 +1017,102 @@ mutation {
 `checkMachine` is the one field with no `request`, because it has nothing to say: the checks are
 the checks.
 
-`spawnRun` is the widest request, and every part of it is optional but the blueprint and the task.
+`spawnRun` is the widest request. It takes the same spawn request the CLI, REST and the embed API
+take, described in [Starting a run](/docs/starting-a-run). Only `source` is required: an
+installed blueprint, or a whole graph written as JSON.
 
 ```graphql
-mutation Spawn($task: String!) {
+mutation Spawn($since: String!) {
   spawnRun(request: {
-    blueprint: { name: "coder", digest: "3f9a1c0d8e77" }
-    task: $task
-    workdir: "/work"
+    source: { blueprint: { name: "release-notes", digest: "9c1e4b7a0d2f8e6c3b5a1d9f7e2c4b6a8d0f1e3c5b7a9d2f4e6c8b0a1d3f5e7c" } }
+    inputs: [
+      { name: "since", value: { text: $since } }
+      { name: "audience", value: { text: "developers" } }
+      { name: "max_items", value: { int: 15 } }
+    ]
+    workdir: "/work/app"
     model: "claude-sonnet-5"
-    maxDepth: 3
-    yolo: { profileName: "careful" }
-    captureModelInput: true
-    regions: [{ region: { name: "brief" }, text: "ship the parser fix" }]
-    metadata: [{ key: "ticket", value: "LEV-412" }]
-    attachments: [{ path: "spec.pdf", deliver: NATIVE, caption: "the spec" }]
-    callback: { url: "https://example.invalid/hooks/leviath", secret: "shared-secret" }
+    launch: { maxDepth: 2, unattended: { profile: "careful" }, captureModelInput: true }
+    attachments: [{ content: { path: "CHANGELOG.md" }, region: { name: "notes" }, caption: "the changelog so far" }]
+    delivery: {
+      callback: { url: "https://example.com/hooks/leviath", secret: "shared-secret" }
+      metadata: [{ key: "ticket", value: "LEV-412" }]
+    }
     output: { format: "markdown", instructions: "one page, no preamble" }
   }) {
-    run { id status task }
-    warnings
+    ... on SpawnedOutput { runId warnings { path message } run { status } }
+    ... on SpawnRejectedOutput { issues { path code message expected got hint known } }
   }
 }
 ```
 
-The blueprint argument is a `BlueprintRef` rather than a name, so it can carry the revision you
-mean. Add the `digest` you read off `BlueprintOutput.digest` and the spawn is refused with
-`CONFLICT` if something else is installed under that name. Send the name alone and the spawn takes
-whatever is there.
+The answer is a union. `SpawnedOutput` carries the new run's id, and `warnings`: stages the run
+can reach and never leave, each with the code `MAY_NEVER_FINISH`. The run started anyway.
+`SpawnRejectedOutput` carries
+every problem with the request at once, each at its own path, so one retry can fix them all. A
+refused request is an answer, not a GraphQL error. An issue's `path` names the runtime's request
+field in snake case, such as `inputs.max_items` or `launch.max_depth`.
 
-`yolo` is `@oneOf`: exactly one of `everything` and `profileName`. `callback` puts the secret
-inside the object that carries the URL, so a secret with nowhere to go cannot be written.
-`attachments` name files inside the working directory, and `deliver` says whether each goes to the
-model natively, as text, or as a stand-in.
+`BlueprintOutput.inputs` lists what a blueprint takes, with each input's type, default and the
+places its value goes. Read it to build a form.
 
-`warnings` names checks the blueprint declared that this request's own output shape retires. Three
-refusals here are the server's rather than the daemon's, and each answers `FORBIDDEN`: a workdir
-outside `--workdir-root`, an unattended run on a `--no-remote-yolo` server, and a callback URL the
-outbound policy will not allow.
+```graphql
+{
+  blueprint(name: "release-notes") {
+    digest
+    inputs {
+      name required description
+      type { __typename ... on ChoiceInputTypeOutput { options } ... on IntInputTypeOutput { min max } }
+      default { __typename ... on ChoiceValueOutput { choice } ... on IntValueOutput { integer } }
+      binds { kind region template stage }
+    }
+  }
+}
+```
+
+A value is `@oneOf`, and the input's declared type decides how it is read. `text` for a `choice`
+input is the option, and `text` for a `model` input is a model name. A `record` value is a list of
+named entries, and a `list` value is a list of values. Pin `digest` from `BlueprintOutput.digest`
+and a spawn of any other revision is refused.
+
+`source: { graph: ... }` runs a graph you wrote instead of an installed blueprint. It is the JSON
+form of a blueprint's `[graph]` table, so its keys are the snake-case ones an `agent.toml` uses.
+Any key the reader does not know comes back as an issue. See
+[blueprint or raw graph](/docs/starting-a-run#blueprint-or-raw-graph).
+
+This server's own refusals are issues too: a workdir outside `--workdir-root`, an unattended run
+or an `allow` list on a `--no-remote-yolo` server, and a callback URL the outbound policy will not
+allow. On a `--no-remote-seed-commands` server, region seeds that run a shell command never run.
+`attachments` name files inside the working directory or carry `base64` bytes. An attachment goes
+to the `file` input that names it, or straight into the `region` you give it.
+
+### Checking a request first
+
+`validateSpawn` takes exactly the request `spawnRun` takes and starts nothing. It sits under
+`mutation` beside `spawnRun`, and it writes nothing. A request it passes is the request `spawnRun`
+would start.
+
+```graphql
+mutation Check($since: String!) {
+  validateSpawn(request: {
+    source: { blueprint: { name: "release-notes" } }
+    inputs: [{ name: "since", value: { text: $since } }]
+  }) {
+    __typename
+    ... on SpawnSummaryOutput {
+      title entryStage workdir
+      stages { stage provider model tools }
+      inputs { name value { __typename ... on TextValueOutput { text } ... on IntValueOutput { integer } } }
+    }
+    ... on SpawnRejectedOutput { issues { path code message known } }
+  }
+}
+```
+
+A good request answers with a `SpawnSummaryOutput`: the stage it would start in, each stage with
+the model and tools it would use, and every input with its default filled in. A bad one answers with the same
+`SpawnRejectedOutput` a refused spawn does. See
+[check before you start](/docs/starting-a-run#check-before-you-start).
 
 ### Acting on many runs at once
 
@@ -1059,6 +1162,7 @@ The daemon holds these in memory, so it is one read rather than a walk of the ru
   openInteractions(first: 50, orderBy: [{ field: SEQUENCE, direction: ASC }]) {
     results {
       id kind prompt body options isRequired
+      answerOptions { id label number }
       run { id title status }
       toolCall {
         __typename
@@ -1071,13 +1175,19 @@ The daemon holds these in memory, so it is one read rather than a walk of the ru
 }
 ```
 
-The answer is `@oneOf`, so exactly one variant goes in, and which one the request's `kind` decides.
+`answerOptions` lists every option the way `lev interactions` and the dashboard number them. Each
+`id` is the word that answers with it: `allow`, `allow-stage`, `allow-run`, `deny` and
+`deny-feedback` on a tool approval, `yes` and `no` on a confirm, and on a multiple choice a word
+made from the option's own label, so it stays put when the options are reordered.
+
+The answer is `@oneOf`, so exactly one variant goes in. `option` takes one of those words for any
+request that lists options, and the rest are for one kind each.
 
 ```graphql
 mutation {
   answerInteraction(request: {
     interactionId: "coder-1788924523-abc123-approve-1"
-    answer: { deny: { feedback: "read the file instead" } }
+    answer: { option: { id: "deny", feedback: "read the file instead" } }
   }) {
     interactionId
     outcome
@@ -1087,6 +1197,7 @@ mutation {
 
 | Variant | For a request of kind |
 |---|---|
+| `option` | Any kind with `answerOptions`, by `id`, with `feedback` on a deny |
 | `choice` | `MULTIPLE_CHOICE`, zero-based |
 | `text` | `FREE_TEXT` or `EDIT_TEXT` |
 | `approve` | `CONFIRM` or `TOOL_APPROVAL`, with a `scope` |
@@ -1094,34 +1205,56 @@ mutation {
 
 `feedback` is what the model reads instead of the call, which is why it sits on the denial rather
 than beside an approval. The first answer wins, and a second one comes back `ALREADY_SETTLED`
-rather than as an error, because two people clicking one prompt is ordinary.
+rather than as an error, because two people clicking one prompt is ordinary. An id that no run on
+this machine asked, such as a typo, is an error coded `NOT_FOUND`.
+
+A run the daemon holds off the machine, because its provider was taken out of the config say, keeps
+the question it was waiting on, and nothing can answer it until the run is back. It is not in
+`openInteractions`, whose every entry a client can answer. `heldInteractions` lists it instead,
+with the same fields, and `held` says what to put back:
+
+```graphql
+{
+  heldInteractions {
+    results { id prompt options held run { id } }
+    total
+  }
+}
+```
+
+`answerInteraction` on a held question fails with the code `RUN_HELD`, and the message is the same
+reason. Once the run is back it asks again under a new id, which `openInteractions` lists as usual.
+`held` is null on every question that is not held.
 
 ### Blueprint writes
 
 ```graphql
-mutation {
+mutation Edit($manifest: String!) {
   updateBlueprint(request: {
-    blueprint: { name: "coder", digest: "3f9a1c0d8e77" }
-    manifest: "[agent]\nname = \"coder\"\nentry_stage = \"analyze\"\n"
+    blueprint: { name: "coder", digest: "3f9a1c0d8e77b2a4c6d8e0f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b1" }
+    manifest: $manifest
   }) {
     blueprint { id name version digest }
   }
 }
 ```
 
+`manifest` is the whole `agent.toml` text, as [Blueprint format](/docs/blueprint-format) describes
+it.
+
 A name that is already installed is a `CONFLICT` on `createBlueprint`, because replacing somebody's
 blueprint is what an edit is for. The `digest` on the reference pins the revision being replaced,
 so two clients editing one blueprint cannot silently overwrite each other. `deleteBlueprint`
 answers with `deletedId` and leaves every run that used it intact, because each run holds its own
-snapshot.
+graph in its run file.
 
 The checks are queries rather than mutations. `validateBlueprint`, `validateScript` and
 `validateProviderKey` take text and give a verdict, writing nothing and dialling nothing. A form
 usually calls one just before a write, which is where it sits on the screen, not what it does.
 
 ```graphql
-{
-  validateBlueprint(manifest: "[agent]\nname = \"coder\"\n", as: { name: "coder" }) {
+query Check($manifest: String!) {
+  validateBlueprint(manifest: $manifest, as: { name: "coder" }) {
     valid errors warnings
   }
   validateScript(kind: TOOL, content: "fn run(args) { args.text }") { valid error }
@@ -1494,7 +1627,10 @@ before any resolver ran included: those are `BAD_USER_INPUT`.
 | `FORBIDDEN` | This server is configured to refuse it, such as a workdir outside `--workdir-root` | `403` |
 | `NOT_FOUND` | Nothing by that name, or nothing in the state the act needs | `404` |
 | `CONFLICT` | It exists and its state refuses the change | `409` |
+| `RUN_HELD` | The question was asked by a run the daemon holds off the machine. Put back what the message names | `409` |
 | `PAYLOAD_TOO_LARGE` | An attachment is over this server's `max_upload_bytes` | `413` |
+| `UNSUPPORTED_MEDIA_TYPE` | A text read of a file that is not text. Fetch it whole instead | `415` |
+| `RANGE_NOT_SATISFIABLE` | The window is not in the thing, such as `state(at:)` past a run's last step | `416` |
 | `UNPROCESSABLE` | Well formed, and something on disk will not answer, such as a `yolo.toml` a profile you never touched has broken | `422` |
 | `UPSTREAM` | Something this server depends on answered badly. Retrying may well work | `502` |
 | `DAEMON_INCOMPATIBLE` | The daemon was updated under a running server. Restart `lev serve` | `502` |
@@ -1503,6 +1639,28 @@ before any resolver ran included: those are `BAD_USER_INPUT`.
 
 `extensions.httpStatus` carries that same number, so a client that already knows the REST
 vocabulary needs no second table.
+
+The same situation answers the same way on both surfaces:
+
+| Situation | GraphQL | REST |
+|---|---|---|
+| Pause, resume or cancel a run that does not exist | `NOT_FOUND` | `404` |
+| Pause, resume or cancel a run that has finished | `CONFLICT` | `409` |
+| Message a run that does not exist | `NOT_FOUND` | `404` |
+| Message a run that finished, failed or was cancelled | `CONFLICT` | `409` |
+| Message a run the daemon holds off the machine | `RUN_HELD` | `409` |
+| Message with no text and no files | `BAD_USER_INPUT` | `400` |
+| Answer an id no run on this machine asked | `NOT_FOUND` | `404` |
+| Answer a question already answered or expired | outcome `ALREADY_SETTLED` | `404` |
+| Answer a question a held run asked | `RUN_HELD` | `409` |
+| Answer that does not fit the question, such as text for a choice | `BAD_USER_INPUT` | `400` |
+| Spawn a run that cannot start, such as an unknown blueprint | `SpawnRejectedOutput` with `issues` | `422` with `issues` |
+| Read a run that does not exist | `run` is `null` | `404` |
+| Read a step past a run's last | `RANGE_NOT_SATISFIABLE` | `416` |
+| The daemon is not running | `DAEMON_UNAVAILABLE` | `503` |
+
+Two rows differ in shape and not in meaning. A second answer to one question is an outcome rather
+than an error, and a lookup by id answers `null` for a miss, as GraphQL lookups do.
 
 Nothing inside a result is a failure. A bulk sweep reports what it did not touch under `skipped`, a
 run that ended by itself while the sweep was reaching it reports itself as `ALREADY_FINISHED`, and

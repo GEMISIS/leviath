@@ -201,7 +201,7 @@ fn build_seed_command(
 /// (or fails the spawn, when the region is `required`).
 ///
 /// This runs on a freshly spawned OS thread with its own current-thread runtime
-/// rather than reusing the ambient one. `resolve_seeds` is a synchronous
+/// rather than reusing the ambient one. A seed runs from a synchronous
 /// function called from an async context, so `Handle::current().block_on(...)` -
 /// the trick `RealScriptIo::run_shell` uses from its `spawn_blocking` thread -
 /// would panic here. A dedicated thread has no ambient runtime, and going

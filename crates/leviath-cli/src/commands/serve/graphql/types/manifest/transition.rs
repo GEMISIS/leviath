@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_graphql::{Enum, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
-use leviath_core::Blueprint as CoreBlueprint;
+use crate::commands::serve::core::blueprints::ParsedBlueprint;
 
 use super::super::blueprint::Region;
 use super::count;
@@ -32,9 +32,9 @@ pub(crate) enum TransitionCondition {
     DeadEnd,
 }
 
-impl From<&leviath_core::blueprint::TransitionCondition> for TransitionCondition {
-    fn from(condition: &leviath_core::blueprint::TransitionCondition) -> Self {
-        use leviath_core::blueprint::TransitionCondition as Core;
+impl From<&leviath_runtime::spec::graph::EdgeCondition> for TransitionCondition {
+    fn from(condition: &leviath_runtime::spec::graph::EdgeCondition) -> Self {
+        use leviath_runtime::spec::graph::EdgeCondition as Core;
         match condition {
             Core::Always => Self::Always,
             Core::LlmChoice => Self::LlmChoice,
@@ -62,9 +62,9 @@ pub(crate) enum TransitionTransform {
     Custom,
 }
 
-impl From<&leviath_core::blueprint::EdgeTransform> for TransitionTransform {
-    fn from(transform: &leviath_core::blueprint::EdgeTransform) -> Self {
-        use leviath_core::blueprint::EdgeTransform as Core;
+impl From<&leviath_runtime::spec::graph::EdgeCarry> for TransitionTransform {
+    fn from(transform: &leviath_runtime::spec::graph::EdgeCarry) -> Self {
+        use leviath_runtime::spec::graph::EdgeCarry as Core;
         match transform {
             Core::Direct => Self::Direct,
             Core::Clear => Self::Clear,
@@ -88,7 +88,7 @@ pub(crate) struct TransformRegions {
 /// The resolver state behind the `TransformConfig` type.
 pub(crate) struct TransformConfig {
     /// The blueprint the region names resolve in.
-    blueprint: Arc<CoreBlueprint>,
+    blueprint: Arc<ParsedBlueprint>,
     /// The names the edge wrote.
     named: TransformRegions,
     /// A prompt for the summarizer on this edge.
@@ -153,7 +153,7 @@ impl TransformConfig {
 /// The resolver state behind the `RegionEntryRequirement` type.
 pub(crate) struct RegionEntryRequirement {
     /// The blueprint the region name resolves in.
-    blueprint: Arc<CoreBlueprint>,
+    blueprint: Arc<ParsedBlueprint>,
     /// The name the gate wrote.
     region: String,
     /// The fewest entries that satisfy the gate.
@@ -203,8 +203,8 @@ pub(crate) struct StuckThresholds {
     pub(crate) after_tool_calls: Option<i32>,
 }
 
-impl From<&leviath_core::blueprint::StuckConfig> for StuckThresholds {
-    fn from(stuck: &leviath_core::blueprint::StuckConfig) -> Self {
+impl From<&leviath_runtime::spec::graph::StuckDef> for StuckThresholds {
+    fn from(stuck: &leviath_runtime::spec::graph::StuckDef) -> Self {
         Self {
             after_iterations: stuck.after_iterations.map(count),
             after_minutes: stuck.after_minutes.map(count),
@@ -217,9 +217,9 @@ impl From<&leviath_core::blueprint::StuckConfig> for StuckThresholds {
 /// The resolver state behind the `TransitionGate` type.
 pub(crate) struct TransitionGate {
     /// The blueprint the region names resolve in.
-    blueprint: Arc<CoreBlueprint>,
+    blueprint: Arc<ParsedBlueprint>,
     /// The gate as the edge wrote it.
-    gate: leviath_core::blueprint::TransitionGate,
+    gate: leviath_runtime::spec::graph::GateDef,
 }
 
 /// What a stage must have done before an edge may be taken.
@@ -244,13 +244,13 @@ impl TransitionGate {
     /// in this blueprint declares. `regionName` tells those apart: it is null
     /// only in the first case.
     async fn region(&self) -> Option<Region> {
-        refs::region(&self.blueprint, self.gate.region.as_deref()?)
+        refs::region(&self.blueprint, self.gate.region.as_ref()?.as_str())
     }
 
     /// The region name the gate wrote for its `requireModifications`
     /// alternative, verbatim. Null when it names none.
     async fn region_name(&self) -> Option<&str> {
-        self.gate.region.as_deref()
+        self.gate.region.as_ref().map(|name| name.as_str())
     }
 
     /// Tools counted as modifying, beyond `write_file` and `edit_file`. For an
@@ -258,8 +258,8 @@ impl TransitionGate {
     ///
     /// Names rather than `Tool`s, because an MCP server's tool is exactly what
     /// this list is for and an inventory does not describe one.
-    async fn tools(&self) -> &[String] {
-        &self.gate.tools
+    async fn tools(&self) -> Vec<String> {
+        super::texts(&self.gate.tools)
     }
 
     /// Regions that must all hold something. Conjunctive, unlike `region`.
@@ -273,8 +273,8 @@ impl TransitionGate {
 
     /// Every name the gate wrote in `requireRegions`, verbatim and in order,
     /// declared or not.
-    async fn require_region_names(&self) -> &[String] {
-        &self.gate.require_regions
+    async fn require_region_names(&self) -> Vec<String> {
+        super::texts(&self.gate.require_regions)
     }
 
     /// A region that must have changed during this stage, not merely be
@@ -286,14 +286,17 @@ impl TransitionGate {
     async fn require_region_updated(&self) -> Option<Region> {
         refs::region(
             &self.blueprint,
-            self.gate.require_region_updated.as_deref()?,
+            self.gate.require_region_updated.as_ref()?.as_str(),
         )
     }
 
     /// The name the gate wrote for `requireRegionUpdated`, verbatim. Null when
     /// it asks for none.
     async fn require_region_updated_name(&self) -> Option<&str> {
-        self.gate.require_region_updated.as_deref()
+        self.gate
+            .require_region_updated
+            .as_ref()
+            .map(|name| name.as_str())
     }
 
     /// A checklist region that must have no open items left.
@@ -301,13 +304,19 @@ impl TransitionGate {
     /// Null when the gate asks for none, and also when it names one no layout
     /// declares. `requireNoOpenItemsName` tells those apart.
     async fn require_no_open_items(&self) -> Option<Region> {
-        refs::region(&self.blueprint, self.gate.require_no_open_items.as_deref()?)
+        refs::region(
+            &self.blueprint,
+            self.gate.require_no_open_items.as_ref()?.as_str(),
+        )
     }
 
     /// The name the gate wrote for `requireNoOpenItems`, verbatim. Null when it
     /// asks for none.
     async fn require_no_open_items_name(&self) -> Option<&str> {
-        self.gate.require_no_open_items.as_deref()
+        self.gate
+            .require_no_open_items
+            .as_ref()
+            .map(|name| name.as_str())
     }
 
     /// A region that must hold at least so many entries.
@@ -317,7 +326,7 @@ impl TransitionGate {
             .as_ref()
             .map(|needed| RegionEntryRequirement {
                 blueprint: Arc::clone(&self.blueprint),
-                region: needed.region.clone(),
+                region: needed.region.to_string(),
                 at_least: count(needed.at_least),
             })
     }
@@ -338,11 +347,11 @@ impl TransitionGate {
 /// The resolver state behind the `TransitionEdge` type.
 pub(crate) struct TransitionEdge {
     /// The blueprint the target stage resolves in.
-    blueprint: Arc<CoreBlueprint>,
-    /// The stage name this edge leads to, as the manifest keyed it.
+    blueprint: Arc<ParsedBlueprint>,
+    /// The stage name this edge leads to, as the blueprint wrote it.
     pub(crate) target: String,
-    /// The edge as the manifest wrote it.
-    edge: leviath_core::blueprint::TransitionEdge,
+    /// The edge as the blueprint wrote it.
+    edge: leviath_runtime::spec::graph::EdgeDef,
 }
 
 /// One outgoing edge of a stage.
@@ -361,7 +370,7 @@ impl TransitionEdge {
         refs::stage(&self.blueprint, &self.target)
     }
 
-    /// The stage name this edge was keyed by, verbatim.
+    /// The stage name this edge leads to, verbatim.
     async fn target_name(&self) -> &str {
         &self.target
     }
@@ -373,36 +382,36 @@ impl TransitionEdge {
 
     /// When this edge may be taken.
     async fn condition(&self) -> TransitionCondition {
-        TransitionCondition::from(&self.edge.condition)
+        TransitionCondition::from(&self.edge.when)
     }
 
     /// What happens to the context on the way through.
     async fn transform(&self) -> TransitionTransform {
-        TransitionTransform::from(&self.edge.transform)
+        TransitionTransform::from(&self.edge.carry)
     }
 
     /// The transform in detail: a `COMPACT` edge's prompt, or a `CUSTOM` edge's
     /// per-region lists. Null for `DIRECT` and `CLEAR`.
     async fn transform_config(&self) -> Option<TransformConfig> {
-        use leviath_core::blueprint::EdgeTransform;
-        let (named, compact_prompt) = match &self.edge.transform {
-            EdgeTransform::Custom {
+        use leviath_runtime::spec::graph::EdgeCarry;
+        let (named, compact_prompt) = match &self.edge.carry {
+            EdgeCarry::Custom {
                 carry,
                 compact,
                 clear,
                 compact_prompt,
             } => (
                 TransformRegions {
-                    carry: carry.clone(),
-                    compact: compact.clone(),
-                    clear: clear.clone(),
+                    carry: super::texts(carry),
+                    compact: super::texts(compact),
+                    clear: super::texts(clear),
                 },
                 compact_prompt.clone(),
             ),
             // A compact edge takes the whole context, so it has no lists to
             // report: only what it asks the summarizer for.
-            EdgeTransform::Compact { prompt } => (TransformRegions::default(), prompt.clone()),
-            EdgeTransform::Direct | EdgeTransform::Clear => return None,
+            EdgeCarry::Compact { prompt } => (TransformRegions::default(), prompt.clone()),
+            EdgeCarry::Direct | EdgeCarry::Clear => return None,
         };
         Some(TransformConfig {
             blueprint: Arc::clone(&self.blueprint),
@@ -429,18 +438,13 @@ impl TransitionEdge {
 
 impl TransitionEdge {
     /// Describe one edge of a stage.
-    ///
-    /// The manifest keys these by target and the parser fills the edge's own
-    /// copy from that key, so the map key is passed in as the authority: an
-    /// older record can carry an empty one.
     pub(crate) fn of(
-        blueprint: &Arc<CoreBlueprint>,
-        target: &str,
-        edge: &leviath_core::blueprint::TransitionEdge,
+        blueprint: &Arc<ParsedBlueprint>,
+        edge: &leviath_runtime::spec::graph::EdgeDef,
     ) -> Self {
         Self {
             blueprint: Arc::clone(blueprint),
-            target: target.to_string(),
+            target: edge.to.to_string(),
             edge: edge.clone(),
         }
     }
@@ -496,25 +500,25 @@ pub(crate) struct ContextTransform {
     pub(crate) mappings: Vec<RegionMapping>,
 }
 
-impl From<&leviath_core::blueprint::ContextTransform> for ContextTransform {
-    fn from(transform: &leviath_core::blueprint::ContextTransform) -> Self {
-        use leviath_core::blueprint::ContentTransform as Content;
+impl From<&leviath_runtime::spec::graph::ContextTransformDef> for ContextTransform {
+    fn from(transform: &leviath_runtime::spec::graph::ContextTransformDef) -> Self {
+        use leviath_runtime::spec::graph::ContentTransform as Content;
         Self {
-            from_blueprint: transform.from_blueprint.clone(),
-            to_blueprint: transform.to_blueprint.clone(),
+            from_blueprint: transform.from.to_string(),
+            to_blueprint: transform.to.to_string(),
             mappings: transform
                 .mappings
                 .iter()
                 .map(|mapping| RegionMapping {
-                    from_region: mapping.from_region.clone(),
-                    to_region: mapping.to_region.clone(),
-                    transform: mapping.transform.as_ref().map(|content| match content {
+                    from_region: mapping.from.to_string(),
+                    to_region: mapping.to.to_string(),
+                    transform: Some(match &mapping.transform {
                         Content::Direct => MappingTransform::Direct,
                         Content::Summarize => MappingTransform::Summarize,
-                        Content::Extract { .. } => MappingTransform::Extract,
+                        Content::Extract(_) => MappingTransform::Extract,
                     }),
                     fields: match &mapping.transform {
-                        Some(Content::Extract { fields }) => fields.clone(),
+                        Content::Extract(fields) => fields.clone(),
                         _ => Vec::new(),
                     },
                 })

@@ -1,12 +1,12 @@
 //! `lev context <run-id>` - show a run's context-window history.
 //!
-//! Replays the run's portable archive (`run.lvr`) into the sequence of context
+//! Replays the run file (`run.lvr`) into the sequence of context
 //! windows over time (one per recorded checkpoint/step) and prints them, so you
 //! can inspect what the agent's memory looked like at each stage and point -
 //! for debugging or auditing. Read-only; sources everything from disk.
 
 use clap::Args;
-use leviath_core::run_archive::RunPoint;
+use leviath_runtime::runfile::history::RunPoint;
 
 /// Arguments for `lev context`.
 #[derive(Args, Debug)]
@@ -22,78 +22,96 @@ pub struct ContextArgs {
 }
 
 /// Execute `lev context`.
+///
+/// The summary is printed from a walk that hands over one point at a time,
+/// so the run's window, which every point holds whole, is held once rather
+/// than once per step: on a long run that is hundreds of copies.
 pub(crate) async fn execute(args: ContextArgs) -> anyhow::Result<()> {
-    let history = crate::runstate::context_history(&args.run_id);
-    if history.is_empty() {
+    let out = match args.json {
+        true => {
+            let history = crate::runstate::context_history(&args.run_id);
+            (!history.is_empty()).then(|| render_json(&history))
+        }
+        false => {
+            let mut body = String::new();
+            let mut count = 0;
+            let found = crate::runstate::each_context_point(&args.run_id, |point| {
+                count += 1;
+                body.push_str(&point_text(count, &point, args.full));
+            });
+            found.then(|| format!("{}{body}", header(&args.run_id, count)))
+        }
+    };
+    let Some(out) = out else {
         anyhow::bail!(
-            "no context history for run '{}' (no readable run.lvr archive)",
+            "no context history for run '{}' (no readable run file)",
             args.run_id
         );
-    }
-    let out = render(&args.run_id, &history, args.json, args.full);
+    };
     print!("{out}");
     Ok(())
 }
 
-/// Render the history to a string (pure, so it's directly testable).
-fn render(run_id: &str, history: &[RunPoint], json: bool, full: bool) -> String {
-    if json {
-        // RunPoint is Serialize; a plain array is the machine-readable form.
-        return format!(
-            "{}\n",
-            serde_json::to_string_pretty(history).expect("RunPoint history always serializes")
-        );
-    }
-    let mut out = String::new();
-    out.push_str(&format!(
-        "Context history for run '{run_id}' ({} point{}):\n\n",
-        history.len(),
-        if history.len() == 1 { "" } else { "s" }
-    ));
-    for (i, point) in history.iter().enumerate() {
+/// The history as JSON: a plain array of points, the machine-readable form.
+fn render_json(history: &[RunPoint]) -> String {
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(history).expect("RunPoint history always serializes")
+    )
+}
+
+/// The line above the summary, naming the run and how many points it has.
+fn header(run_id: &str, points: usize) -> String {
+    format!(
+        "Context history for run '{run_id}' ({points} point{}):\n\n",
+        if points == 1 { "" } else { "s" }
+    )
+}
+
+/// The summary of the `number`th point, with each entry's parts when `full`.
+fn point_text(number: usize, point: &RunPoint, full: bool) -> String {
+    let mut out = format!(
+        "[{}] {}  stage={}  iter={}  status={}  tokens={}/{}\n",
+        number,
+        format_time(point.at),
+        point.context.stage_name,
+        point.meta.iteration,
+        point.meta.status,
+        point.context.total_tokens,
+        point.context.max_tokens,
+    );
+    for region in &point.context.regions {
+        let stored: usize = region
+            .entries
+            .iter()
+            .map(|e| e.content.stored_count())
+            .sum();
+        let stored_note = match stored {
+            0 => String::new(),
+            1 => ", 1 stored part".to_string(),
+            n => format!(", {n} stored parts"),
+        };
         out.push_str(&format!(
-            "[{}] {}  stage={}  iter={}  status={}  tokens={}/{}\n",
-            i + 1,
-            format_time(point.at),
-            point.context.stage_name,
-            point.meta.iteration,
-            point.meta.status,
-            point.context.total_tokens,
-            point.context.max_tokens,
+            "      region {} ({}) - {} tok, {} entr{}{stored_note}\n",
+            region.name,
+            region.kind,
+            region.current_tokens,
+            region.entries.len(),
+            if region.entries.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
         ));
-        for region in &point.context.regions {
-            let stored: usize = region
-                .entries
-                .iter()
-                .map(|e| e.content.stored_count())
-                .sum();
-            let stored_note = match stored {
-                0 => String::new(),
-                1 => ", 1 stored part".to_string(),
-                n => format!(", {n} stored parts"),
-            };
-            out.push_str(&format!(
-                "      region {} ({}) - {} tok, {} entr{}{stored_note}\n",
-                region.name,
-                region.kind,
-                region.current_tokens,
-                region.entries.len(),
-                if region.entries.len() == 1 {
-                    "y"
-                } else {
-                    "ies"
-                },
-            ));
-            if full {
-                for entry in &region.entries {
-                    for part in entry.content.parts() {
-                        out.push_str(&part_lines(part));
-                    }
+        if full {
+            for entry in &region.entries {
+                for part in entry.content.parts() {
+                    out.push_str(&part_lines(part));
                 }
             }
         }
-        out.push('\n');
     }
+    out.push('\n');
     out
 }
 
@@ -198,6 +216,21 @@ mod tests {
                 }],
             },
             at: 0,
+        }
+    }
+
+    /// The whole printout for `history`, as `execute` prints it.
+    fn render(run_id: &str, history: &[RunPoint], json: bool, full: bool) -> String {
+        match json {
+            true => render_json(history),
+            false => {
+                let points: String = history
+                    .iter()
+                    .enumerate()
+                    .map(|(i, point)| point_text(i + 1, point, full))
+                    .collect();
+                format!("{}{points}", header(run_id, history.len()))
+            }
         }
     }
 
@@ -312,38 +345,8 @@ mod tests {
     #[test]
     fn execute_prints_history_for_a_run_with_an_archive() {
         crate::runstate::with_isolated_runs_dir("context-execute-ok", |_d| {
-            use leviath_core::run_archive::{self, RunIdentity, RunRecord};
             let run_id = "ctx-exec-run";
-            std::fs::create_dir_all(crate::runstate::run_dir(run_id)).unwrap();
-            let mut buf = Vec::new();
-            run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
-            run_archive::write_record(
-                &mut buf,
-                &RunRecord::Header {
-                    identity: RunIdentity {
-                        run_id: run_id.to_string(),
-                        machine_id: "m".to_string(),
-                        world_id: "w".to_string(),
-                        created_at: 0,
-                    },
-                    meta: Box::new(fixtures::run_meta(run_id)),
-                },
-            )
-            .unwrap();
-            run_archive::write_record(
-                &mut buf,
-                &RunRecord::ContextCheckpoint {
-                    snapshot: ContextSnapshot {
-                        stage_name: "plan".to_string(),
-                        total_tokens: 1,
-                        max_tokens: 100,
-                        regions: vec![],
-                    },
-                    at: 1,
-                },
-            )
-            .unwrap();
-            std::fs::write(crate::runstate::run_dir(run_id).join("run.lvr"), &buf).unwrap();
+            crate::runstate::create_run(&fixtures::run_meta(run_id)).unwrap();
 
             // Present archive → the success path (render + print) runs and returns Ok.
             let args = ContextArgs {
@@ -353,13 +356,40 @@ mod tests {
             };
             let rt = tokio::runtime::Runtime::new().unwrap();
             assert!(rt.block_on(execute(args)).is_ok());
-            // Missing archive → the error path.
-            let missing = ContextArgs {
-                run_id: "no-archive-run".to_string(),
+            // The summary too, printed a point at a time.
+            let summary = ContextArgs {
+                run_id: run_id.to_string(),
                 json: false,
-                full: false,
+                full: true,
             };
-            assert!(rt.block_on(execute(missing)).is_err());
+            assert!(rt.block_on(execute(summary)).is_ok());
+            // Missing archive → the error path, in either form.
+            for json in [false, true] {
+                let missing = ContextArgs {
+                    run_id: "no-archive-run".to_string(),
+                    json,
+                    full: false,
+                };
+                assert!(rt.block_on(execute(missing)).is_err());
+            }
+        });
+    }
+
+    /// The points handed over one at a time are the history read whole, in
+    /// the same order, so the summary printed from them is the same summary.
+    #[test]
+    fn the_points_handed_over_are_the_history() {
+        crate::runstate::with_isolated_runs_dir("context-each-point", |_d| {
+            let run_id = "ctx-each-run";
+            crate::runstate::create_run(&fixtures::run_meta(run_id)).unwrap();
+            let mut handed = Vec::new();
+            assert!(crate::runstate::each_context_point(run_id, |point| {
+                handed.push(point)
+            }));
+            let whole = crate::runstate::context_history(run_id);
+            assert!(!whole.is_empty());
+            assert_eq!(handed, whole);
+            assert!(!crate::runstate::each_context_point("no-such-run", drop));
         });
     }
 }

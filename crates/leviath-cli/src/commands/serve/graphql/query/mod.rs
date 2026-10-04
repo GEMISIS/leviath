@@ -558,6 +558,31 @@ impl Query {
         runs::open_interactions(ctx, filter, order_by, first, after).await
     }
 
+    /// Every question asked by a run the daemon holds off this machine: its
+    /// provider was taken away, say.
+    ///
+    /// None of these can be answered yet, which is why they are not in
+    /// `openInteractions`. Each says what to put back in `held`; answering
+    /// one is refused with `RUN_HELD`, and once its run is back the question
+    /// reopens under a new id and is listed in `openInteractions`.
+    #[graphql(complexity = "weight(first, child_complexity)")]
+    async fn held_interactions(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which held questions to include. Omitted means all of them.")]
+        filter: Option<super::types::interaction::InteractionFilter>,
+        #[graphql(desc = "Sort key and direction. Omitted means the order they were read.")]
+        order_by: Option<Vec<super::types::interaction::InteractionOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<super::types::interaction::Interaction>> {
+        runs::held_interactions(ctx, filter, order_by, first, after).await
+    }
+
     /// Keyset-paged run listing.
     ///
     /// The filter mirrors `RunOutput` itself: a field of the run is a field of

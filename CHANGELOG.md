@@ -15,11 +15,109 @@ same list.
 
 ### Changed
 
+- **Breaking.** Every run starts from one typed spawn request and is
+  recorded in one run file. A `SpawnRequest` names a blueprint and gives it
+  typed inputs, or carries a whole run graph of its own; `lev run`, REST,
+  GraphQL, ACP (`_leviath/spawn`), the embed API and the `spawn_agent` and
+  `fan_out` tools all build one. Every problem with a request comes back at
+  once, each with its path (`inputs.items[2].id`), what was expected, what
+  arrived and a hint. `lev run --check`, `POST /api/runs/validate` and
+  `_leviath/validate_spawn` run the same checks without starting anything.
+  A graph that may never finish runs with a warning on every surface.
+- **Breaking.** Blueprints are `agent.toml` files. A graph declares typed
+  inputs (`[[graph.inputs]]`: text, bool, int, float, choice, list, record,
+  file, path, model, blueprint, duration, url) and the regions each one
+  fills; `lev run` takes them as `--input name=value` or `--name value`.
+  `lev blueprint migrate` converts an `agent.leviath`, leaving out, with a
+  note, any key 0.6.4 accepted but never read. `lev validate`, `lev add`,
+  `lev pack` and `lev run` handed an `agent.leviath` say how to convert it.
+  All 11 bundled blueprints are rewritten. Unknown keys and unknown inputs
+  are errors everywhere except the compatibility routes. A fan-out's
+  `max_workers = 0` is refused, and leaving it out means no cap (it was 30).
+- **Breaking, REST.** Per-run routes move to `/api/runs/{id}/...`, and
+  `POST /api/runs` takes a `SpawnRequest`. The 0.6.4 `/api/agents` routes
+  stay, marked deprecated, for older Lair builds; their stages route keeps
+  0.6.4's status words. New: `POST /api/runs/validate`,
+  `GET /api/schema/spawn-request`, `GET /api/blueprints/{name}/inputs`, and
+  `/api/runs/{id}/spec`, `/state`, `/deltas` and `/graph`.
+- **Breaking, GraphQL.** `spawnRun(request: SpawnRunRequest!)` takes a
+  `source`, typed `inputs`, `launch` and `delivery`, and answers the union
+  `SpawnRunResult`. `SpawnRunRequest` loses `blueprint`, `task`, `maxDepth`,
+  `yolo`, `allowTools`, `skipSeedCommands`, `captureModelInput`, `regions`,
+  `metadata` and `callback`; `OutputRequestWrite`, `RegionSeedWrite` and
+  `YoloWrite` are gone, and `output` and `attachments` take
+  `OutputShapeWrite` and `SpawnAttachmentWrite`. `RegionKind.HASHMAP` is
+  `KEYED`. `SpawnAgentArgsOutput` loses `blueprint`, `task`, `seedContext`,
+  `outputFormat` and `outputInstructions`, `FanOutItemOutput.context` is
+  gone, and `FanOutOutput.maxWorkers` may be null. New: `Run.spec`,
+  `Run.state(at:)`, `Run.deltas`, `Run.graph`, `BlueprintOutput.inputs`,
+  `InteractionOutput.answerOptions` and `held`, and the `StageStatus`
+  values `PAUSED` and `CANCELLED`.
+- **Breaking, library and wire.** The control socket's spawn op, the embed
+  `SpawnSpec`, the `spawn_agent` and `fan_out` arguments and ACP region
+  markers take the new request.
+- A run is one file, `run.lvr`: its spec, every change to its state as a
+  typed step (model calls, tool calls, questions, context changes,
+  transitions), checkpoints of its state and the code it ran. The JSON files
+  beside it are gone; blobs, the final answer, stage logs and taint audits
+  stay as files the run file names. `lev run show` reads a run's file, and
+  the `run_history` tool lets an agent read its own.
+- A run and its stages agree on status: the stage a run stops or is held in
+  reads as the run does (`cancelled`, `paused`, `active` again on resume, a
+  held run `paused`), and a stage a finished run never reached reads
+  `skipped`.
+- A run whose machine changed since it started (its providers, an MCP
+  server's tools, the code it ran) is held, saying why, and resumes once the
+  machine is put back. Tool grants and the write budget survive a restart.
+- `lev respond <id> <answer>` takes what the question shows: `allow`,
+  `allow-stage`, `allow-run`, `deny`, `yes`, `no`, an option's label or its
+  number (options are numbered from 1 everywhere they are listed), or the
+  text. The flags stay as aliases, and the API takes each option's id.
+  `lev respond` with no id says that `lev interactions` lists them.
+- The first start of the daemon on a home an earlier release wrote backs up
+  what it changes under `~/.leviath/backups/<version>-<time>/`, never
+  deleted, then upgrades the installed `agent.leviath` blueprints and
+  converts the old runs, with a progress bar and a summary for whoever is
+  waiting. A dropped key is warned about in the summary, `lev list` and
+  `lev validate`. A blueprint that cannot be upgraded is named once, then
+  only by `lev list`, with the reason. The backup's `README.txt` and
+  [the daemon docs](https://leviath.dev/docs/daemon) say how to go back.
+- Run one version of `lev` and its daemon at a time, and run
+  `lev daemon restart` after upgrading. Each release reads the home its own
+  way, and a `lev` of 0.6.4 or earlier talking to this daemon shows an empty
+  `lev ps`, no open questions and runs it cannot read; it also replaces any
+  daemon of another build when it starts a run. A `lev` of this release says
+  on every command that talks to the daemon, and in `lev daemon status`,
+  when the daemon is another build, which one is newer, and what to do, and
+  replaces only an older daemon. With no daemon running, `lev run` of an
+  installed `agent.leviath` starts the daemon, which upgrades it, and runs it.
+- `lev validate --json` gives each input a `type` and the `regions` it
+  fills, beside 0.6.4's `key`, `region` (the first of them) and `required`,
+  and gains `may_never_finish`. `lev stages --json` gains `computed_calls`
+  and `reported_calls`.
+- A blueprint named like a `lev run` subcommand (`show`, `help`) runs with
+  an option first, `lev run --task "..." show`, and `lev add` prints that
+  form for it.
 - **Breaking.** `lev respond` only answers. It takes a `REQUEST_ID` and
   exactly one of a `VALUE`, `--choice`, `--approve` or `--deny`, and refuses
   otherwise. It used to answer with an empty string when no value was given,
   which a run reads as nobody answering: a checkpoint approved, a review was
   "acknowledged". Bare `lev respond` no longer lists; `lev interactions` does.
+- **Breaking.** A message to a run that has finished is refused: `lev msg`
+  exits 1 and says the run reads no more messages, so start a new run.
+  0.6.4 printed "message delivered" and exited 0, though nothing would ever
+  read the message. `POST /api/runs/{id}/message` answers that refusal 409,
+  one to a run held off the machine 409, and one to no run at all 404 as
+  0.6.4 did; GraphQL's `sendMessage` answers `CONFLICT`, `RUN_HELD` and
+  `NOT_FOUND`.
+- GraphQL's `answerInteraction` on an id no run on this machine asked is an
+  error coded `NOT_FOUND`, the miss REST answers 404 to. 0.6.4 answered it
+  `ALREADY_SETTLED`, which said somebody had answered it. A question that was
+  answered or expired is still `ALREADY_SETTLED`. `sendMessage` with
+  attachments to a run with no record is `NOT_FOUND` rather than `INTERNAL`.
+- `GET /api/update` (and `lev update --check --json`) keeps `renamed_keys`,
+  now always empty: an `agent.toml` refuses a key it does not know, so a
+  blueprint has no old spellings to rewrite.
 - New `lev interactions [REQUEST_ID] [--json]` lists the questions runs are
   waiting on, or shows one in full with the line that answers it, and never
   answers anything. `lev ps` points at it.
@@ -41,6 +139,20 @@ same list.
 
 ### Fixed
 
+- `lev timeline` counted a tool that finished while its run was parked (an
+  approval prompt, children it started) as tool time for the whole wait, and
+  the wait as waiting too, so the parts added up to more than the wall clock:
+  one real run showed an hour of tools and an hour of waiting in an hour.
+  The tool's time now ends where the wait began. A run said to be waiting
+  twice over is waiting from the first time. A converted run whose old
+  journal kept no status history shows its waits too, read off the status
+  each of its steps recorded; 0.6.4 counted that time as "other".
+- A task handed to a blueprint that takes no input at all was refused with
+  "give it its inputs with --input", which it has none of. It now says how to
+  declare a task input, as 0.6.4 said how to add a task region.
+- `docs/schema/openapi.json` named schemas and responses it did not define
+  (`AgentResultResp`, `Error`, `BadRequest`, `BadGateway`), which a generated
+  client refuses. Every `$ref` now resolves, and a test holds it so.
 - A question waiting on a person (`ask_user_*`, `present_for_review`,
   `edit_document`) was lost when the daemon restarted: recovery gave the call
   an `[error] interrupted` result meant for tools with side effects, and a

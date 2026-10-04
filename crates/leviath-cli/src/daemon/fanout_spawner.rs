@@ -1,244 +1,108 @@
-//! The daemon-side [`FanOutSpawner`]: resolves a fan-out worker's blueprint
-//! (self-at-worker-stage / a named agent / a capability query) and starts it in
-//! the shared world, seeded with its work item.
+//! The daemon-side [`FanOutSpawner`]: prepares a fan-out worker from the
+//! request the runtime hands it, for the shared world to place.
 //!
-//! The runtime's fan-out systems only *start and track* workers; *finding* the
-//! blueprint is CLI policy, so it lives here - mirroring how [`build_agent`]
-//! resolves any spawn. For `worker_stage` the worker runs the parent's own
-//! blueprint entered at that stage (via [`leviath_runtime::pipeline::force_transition`]);
-//! for `worker_agent` / `worker_query` it runs a separate installed blueprint.
+//! The runtime's fan-out systems only *start and track* workers. A worker is
+//! started the way every run is, through the [`DaemonStarter`]: resolved,
+//! recorded and bound as a [`Caller::Worker`] of its parent, then placed. The
+//! resolving, recording and binding happen in the future
+//! [`FanOutSpawner::prepare_worker`] returns, which the world runs off its
+//! tick; placing is an insert the world does when it lands. The machine is
+//! not warmed for a worker first: the parent's start already warmed what its
+//! fan-outs use, and any MCP server a worker declares that is not connected
+//! yet is connected in the background for the workers after it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use leviath_core::blueprint::FanOutConfig;
-use leviath_providers::Tool;
-use leviath_runtime::fanout::FanOutSpawner;
-use leviath_runtime::host::SubAgentOp;
-use leviath_runtime::interaction_hub::InteractionHub;
-use leviath_runtime::persistence::RunMetadata;
-use leviath_runtime::pipeline::{AgentBlueprint, force_transition};
-use tokio::sync::Mutex;
-use tokio::sync::mpsc::UnboundedSender;
+use leviath_runtime::fanout::{FanOutSpawner, PlaceWorker, WorkerPrep};
+use leviath_runtime::spec::env::Caller;
+use leviath_runtime::spec::inputs::InputDecl;
+use leviath_runtime::spec::names::BlueprintRef;
+use leviath_runtime::spec::request::{SpawnRequest, SpawnSource};
 
-use crate::daemon::client::{never_interactive, resolve_spawn_args};
-use crate::daemon::spawn::{SpawnDeps, build_agent};
-use crate::daemon::tool_service::CliToolService;
+use crate::daemon::starter::DaemonStarter;
 
-/// Everything [`build_agent`] needs, captured so a fan-out worker can be spawned
-/// from inside a world-system (which has no access to the daemon's context).
+/// What the fan-out systems start workers with.
 #[derive(Clone)]
 pub(crate) struct DaemonFanOutSpawner {
-    /// Spawn-time config, read fresh per worker so a `config.toml` edit reaches
-    /// fan-out workers too (shared with the daemon's main spawner).
-    pub config: Arc<crate::daemon::config_reload::ConfigReloader>,
-    /// The daemon-wide MCP executor, for servers configured globally.
-    pub shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
-    /// The global `[[mcp_servers]]` as a live set. Read per worker rather than
-    /// captured, so a server added to `config.toml` after this daemon started
-    /// reaches a fan-out worker as it reaches any other run.
-    pub mcp_global: Arc<crate::daemon::mcp_reload::McpReload>,
-    /// Shared MCP pool for per-agent `[[mcp_servers]]` - a fan-out worker
-    /// advertises its blueprint's already-connected servers and lazily warms any
-    /// uncached ones for subsequent workers of the same type.
-    pub mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
-    /// Where a worker's prompts go. Shared with the daemon, so a fan-out
-    /// worker's question reaches the same place as any other run's.
-    pub hub: InteractionHub,
-    /// Where a worker's own sub-agent spawns are sent.
-    pub subagent_tx: UnboundedSender<SubAgentOp>,
-    /// The tool dispatcher every worker's calls go through.
-    pub tool_service: Arc<CliToolService>,
-    /// `~/.leviath/agents`, for resolving `worker_query`. `None` when there is no
-    /// home directory.
+    /// What starts every run.
+    pub starter: Arc<DaemonStarter>,
+    /// `~/.leviath/agents`, for resolving a worker query. `None` when there
+    /// is no home directory.
     pub agents_dir: Option<PathBuf>,
-    /// The clock, injected so a test can stamp a worker deterministically.
-    pub now_secs: fn() -> i64,
-}
-
-impl DaemonFanOutSpawner {
-    /// A fan-out worker's advertised MCP defs: the global servers' defs plus its
-    /// blueprint's already-cached servers. Any uncached server is warmed on a
-    /// detached task (via the current runtime handle - `spawn_worker` runs inside
-    /// the daemon's tick, on the runtime) so a subsequent worker of the same type
-    /// advertises it. Returns just the global defs when the manifest is unreadable
-    /// or declares no servers.
-    fn worker_mcp_defs(
-        &self,
-        blueprint_path: &str,
-    ) -> (Vec<Tool>, leviath_runtime::pipeline::ToolOwners) {
-        let (mut defs, mut owners) = self.mcp_global.current();
-        let Ok(toml) = std::fs::read_to_string(blueprint_path) else {
-            return (defs, owners);
-        };
-        let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(&toml);
-        if servers.is_empty() {
-            return (defs, owners);
-        }
-        defs.extend(self.mcp_pool.cached_defs_for(&servers));
-        owners.extend(self.mcp_pool.cached_owners_for(&servers));
-        // Warm any not-yet-connected servers for the next worker of this type, on
-        // a detached task (we run inside the tick, on the runtime).
-        tokio::runtime::Handle::current().spawn(self.mcp_pool.clone().ensure_all(servers));
-        (defs, owners)
-    }
 }
 
 impl FanOutSpawner for DaemonFanOutSpawner {
-    fn spawn_worker(
-        &self,
-        world: &mut World,
-        parent: Entity,
-        config: &FanOutConfig,
-        item_id: &str,
-        item_context: &serde_json::Value,
-    ) -> Result<Entity, String> {
-        // The parent supplies the worker's workdir, run id (parentage), and (for
-        // `worker_stage`) its blueprint path.
-        // `unattended` rides along: a worker of an unattended parent is a worker
-        // nobody is watching either, and one that stops on an approval prompt
-        // parks the parent behind it for good.
-        // The requested output shape rides along too: a caller who asked the
-        // parent for a2ui wants its workers' contributions in the same shape,
-        // and the worker's answer is what the merge stage reads.
-        // So does the run's `--model` override, which the docs call absolute
-        // ("overrides everything"). Stopping it at the run boundary would send
-        // the large majority of a thirty-worker fan-out's spend to whatever the
-        // worker blueprint lists, silently, against an instruction the operator
-        // typed for this run.
-        let (parent_path, workdir, parent_run_id, unattended, output_request, model_override) =
-            world
-                .get::<RunMetadata>(parent)
-                .map(|md| {
-                    (
-                        md.agent_path.clone(),
-                        md.workdir.clone(),
-                        md.run_id.clone(),
-                        // The profile travels with the bit: a worker of a
-                        // `careful` parent is `careful`, not bare `--yolo`.
-                        (md.unattended, md.yolo_profile.clone()),
-                        md.output_request.clone(),
-                        md.model_override.clone(),
-                    )
-                })
-                .ok_or_else(|| "fan-out parent has no run metadata".to_string())?;
-        let (unattended, yolo_profile) = unattended;
-
-        let (resolve_path, entry_stage) =
-            resolve_worker_source(config, &parent_path, self.agents_dir.as_deref())?;
-
-        let task = format_worker_task(item_id, item_context);
-        let mut args = resolve_spawn_args(crate::daemon::client::LaunchRequest {
-            path: &resolve_path,
-            task: Some(&task),
-            stdin_is_terminal: &never_interactive,
-            model: model_override,
-            workdir: &workdir,
-            yolo: unattended,
-            yolo_profile,
-            allow: Vec::new(),
-            max_depth: None,
-            // Fan-out workers get their split of the parent task via `task`.
-            regions: std::collections::HashMap::new(),
-            // Workers share the parent's workdir and are splits of a task the
-            // parent already scoped, so re-running a repo-scan command seed once
-            // per worker would be pure waste (and up to `max_workers` copies of
-            // the same output).
-            no_seed_commands: true,
-            output_request,
-            parts: Vec::new(),
-        })
-        .map_err(|e| format!("resolve worker blueprint: {e}"))?;
-        // Nest the worker under its fan-out parent in the run tree.
-        args.parent_run_id = Some(parent_run_id);
-        // A worker of this blueprint is not a caller: the seed resolver reads
-        // this to leave the parent's required inputs empty rather than refuse.
-        args.worker_stage = entry_stage.clone();
-
-        // Per-agent MCP: advertise the worker blueprint's servers that
-        // are already connected in the shared pool (a `worker_stage` worker shares
-        // the parent's - already warmed by the parent's preprocessor; the first
-        // `worker_agent`/`worker_query` worker warms them here for its siblings).
-        let (mcp_defs, mcp_owners) = self.worker_mcp_defs(&args.blueprint_path);
-        // The worker holds its blueprint's per-agent servers open like any
-        // other run; the reap hook releases the lease when the worker ends.
-        self.mcp_pool
-            .lease_blueprint(&args.blueprint_path, &args.run_id);
-
-        let config = self.config.current();
-        let child = build_agent(
-            world,
-            SpawnDeps {
-                tool_service: self.tool_service.as_ref(),
-                config: &config,
-                shared_mcp: self.shared_mcp.clone(),
-                mcp_tool_defs: &mcp_defs,
-                mcp_tool_owners: &mcp_owners,
-                hub: &self.hub,
-                now_secs: (self.now_secs)(),
-                subagent_tx: self.subagent_tx.clone(),
-            },
-            &args,
-        )?;
-
-        // `worker_stage` runs the same blueprint entered at that stage rather than
-        // its default entry stage.
-        if let Some(stage) = entry_stage {
-            match world
-                .get::<AgentBlueprint>(child)
-                .and_then(|bp| bp.0.stages.iter().position(|s| s.name == stage))
-            {
-                Some(idx) => force_transition(
-                    world,
-                    leviath_runtime::world::AgentId::in_world(world, child),
-                    idx,
-                ),
-                None => return Err(format!("worker stage '{stage}' not found in blueprint")),
+    fn prepare_worker(&self, request: SpawnRequest, caller: Caller) -> WorkerPrep {
+        let starter = self.starter.clone();
+        Box::pin(async move {
+            let config = starter.config.current();
+            let env = starter.env_for(&request, config);
+            // A server the worker's graph declares that is not connected yet is
+            // connected for the next worker of the same kind.
+            if let Some(graph) = starter.graph_of(&request) {
+                let servers = crate::daemon::starter::mcp_configs(&graph);
+                let uncached: Vec<_> = servers
+                    .into_iter()
+                    .filter(|s| {
+                        starter
+                            .mcp_pool
+                            .cached_defs_for(std::slice::from_ref(s))
+                            .is_empty()
+                    })
+                    .collect();
+                if !uncached.is_empty() {
+                    tokio::spawn(starter.mcp_pool.clone().ensure_all(uncached));
+                }
             }
-        }
-        Ok(child)
+            let prepared = starter
+                .start_with(env, request, caller)
+                .await
+                .map_err(|issues| issues.to_string())?;
+            let place: PlaceWorker = Box::new(move |world: &mut World| {
+                leviath_runtime::insert::insert(
+                    world,
+                    prepared.spec,
+                    prepared.bindings,
+                    &prepared.state,
+                )
+            });
+            Ok(place)
+        })
+    }
+
+    fn find_worker(&self, query: &str) -> Result<BlueprintRef, String> {
+        find_installed(self.agents_dir.as_deref(), query)
+    }
+
+    fn worker_inputs(&self, source: &SpawnSource) -> Option<Vec<InputDecl>> {
+        self.starter
+            .graph_of(&SpawnRequest::new(source.clone()))
+            .map(|graph| graph.inputs)
     }
 }
 
-/// Resolve a fan-out config's worker source to `(path_to_resolve, entry_stage)`.
-/// `path_to_resolve` is fed to [`resolve_spawn_args`] (which resolves a file,
-/// directory, or installed-agent name); `entry_stage` is `Some` only for
-/// `worker_stage` (self-as-worker).
-pub(crate) fn resolve_worker_source(
-    config: &FanOutConfig,
-    parent_path: &str,
+/// The installed blueprint [`discover_worker`] finds for `query`, by name.
+pub(crate) fn find_installed(
     agents_dir: Option<&Path>,
-) -> Result<(String, Option<String>), String> {
-    if let Some(stage) = &config.worker_stage {
-        return Ok((parent_path.to_string(), Some(stage.clone())));
-    }
-    if let Some(agent) = &config.worker_agent {
-        return Ok((agent.clone(), None));
-    }
-    if let Some(query) = &config.worker_query {
-        let path = discover_worker(agents_dir, query)?;
-        return Ok((path.to_string_lossy().to_string(), None));
-    }
-    Err("fan-out config has no worker source".to_string())
+    query: &str,
+) -> Result<BlueprintRef, String> {
+    let path = discover_worker(agents_dir, query)?;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    BlueprintRef::parse(&name).map_err(|e| e.to_string())
 }
 
-/// The task text seeded into a worker: its id plus the compact JSON context.
-fn format_worker_task(item_id: &str, item_context: &serde_json::Value) -> String {
-    format!("Work item id: {item_id}\nContext: {item_context}")
-}
-
-/// Find an installed agent whose directory name or manifest description contains
+/// Find an installed agent whose directory name or blueprint description contains
 /// `query` (case-insensitive). Returns the agent's directory.
-fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<PathBuf, String> {
+pub(crate) fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<PathBuf, String> {
     let dir = agents_dir.ok_or_else(|| "no agents directory to search for a worker".to_string())?;
     let needle = query.to_lowercase();
     let entries =
         std::fs::read_dir(dir).map_err(|e| format!("read agents dir '{}': {e}", dir.display()))?;
     for entry in entries.flatten() {
         let path = entry.path();
-        let manifest = path.join(leviath_core::files::MANIFEST_FILENAME);
+        let manifest = path.join(leviath_blueprint::FILE_NAME);
         if !manifest.is_file() {
             continue;
         }
@@ -248,8 +112,9 @@ fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<PathBuf, St
             .is_some_and(|n| n.to_lowercase().contains(&needle));
         let desc_matches = std::fs::read_to_string(&manifest)
             .ok()
-            .and_then(|c| leviath_core::manifest::parse_manifest(&c).ok())
-            .is_some_and(|bp| bp.description.to_lowercase().contains(&needle));
+            .and_then(|c| leviath_blueprint::BlueprintMeta::read(&c).ok())
+            .and_then(|meta| meta.description)
+            .is_some_and(|d| d.to_lowercase().contains(&needle));
         if name_matches || desc_matches {
             return Ok(path);
         }
@@ -261,66 +126,282 @@ fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<PathBuf, St
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::daemon::starter::testing::{TestLaunch, request_for, starter};
+    use crate::daemon::tool_service::CliToolService;
     use crate::test_support::{FakeProvider, fixtures};
+    use bevy_ecs::entity::Entity;
+    use leviath_runtime::components::AgentStatus;
+    use leviath_runtime::inference_pool::InferencePoolConfig;
+    use leviath_runtime::insert::RunSpecC;
+    use leviath_runtime::persistence::RunMetadata;
+    use leviath_runtime::pipeline::StageCursor;
+    use leviath_runtime::spec::inputs::RawInput;
+    use leviath_runtime::spec::launch::LaunchRequest;
+    use leviath_runtime::spec::request::SpawnSource;
+    use leviath_runtime::world::PipelineWorld;
+    use std::collections::HashMap;
+    use tokio::runtime::Handle;
 
-    fn cfg(stage: Option<&str>, agent: Option<&str>, query: Option<&str>) -> FanOutConfig {
-        FanOutConfig {
-            worker_agent: agent.map(String::from),
-            worker_stage: stage.map(String::from),
-            worker_query: query.map(String::from),
-            max_workers: 4,
-            split_prompt: "split".to_string(),
-            ..fixtures::fanout_config()
+    /// Fails every inference; the window is wide enough for the budgets
+    /// the manifests here declare.
+    fn fake_provider() -> FakeProvider {
+        FakeProvider::new().context_window(100_000)
+    }
+
+    /// A two-stage blueprint whose second stage opts in as a fan-out worker.
+    fn two_stage_manifest() -> String {
+        r#"[blueprint]
+name = "host"
+version = "0.1.0"
+description = "d"
+
+[graph]
+entry = "first"
+edges = [{ name = "next", from = "first", to = "second" }]
+
+[[graph.stages]]
+name = "first"
+system_prompt = "first"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[[graph.stages]]
+name = "second"
+system_prompt = "second"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+allow_as_worker = true
+
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 2000 }]
+total_budget_tokens = 2000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+"#
+        .to_string()
+    }
+
+    /// A spawner whose runs are kept under `runs_dir`, registering tools
+    /// with `tool_service` and calling the fake `anthropic` provider.
+    fn spawner_with(tool_service: Arc<CliToolService>, runs_dir: &Path) -> DaemonFanOutSpawner {
+        let mut started = starter(Config::default(), registry(), runs_dir);
+        started.tool_service = tool_service;
+        started.agents_dir = None;
+        DaemonFanOutSpawner {
+            starter: Arc::new(started),
+            agents_dir: None,
         }
     }
 
+    /// The providers every run here calls.
+    fn registry() -> leviath_runtime::ProviderRegistry {
+        let mut registry = leviath_runtime::ProviderRegistry::new();
+        registry.register("anthropic".to_string(), Arc::new(fake_provider()));
+        registry
+    }
+
+    /// What a fan-out hands its spawner for a worker of `parent`: a worker
+    /// entering `stage` of the parent's own blueprint, or one running
+    /// `agent`, with the parent's model, workdir and unattended setting.
+    fn worker_of(
+        world: &PipelineWorld,
+        parent: Entity,
+        stage: Option<&str>,
+        agent: Option<&str>,
+    ) -> (SpawnRequest, Caller) {
+        let spec = world
+            .world()
+            .get::<RunSpecC>(parent)
+            .expect("the parent has a run spec")
+            .0
+            .clone();
+        let source = agent.map_or_else(
+            || spec.same_graph_source(),
+            |agent| {
+                SpawnSource::BlueprintFile(
+                    leviath_runtime::spec::names::BlueprintPath::new(agent).unwrap(),
+                )
+            },
+        );
+        let request = SpawnRequest {
+            model: spec.requested_model.clone(),
+            output: spec.requested_output.clone(),
+            workdir: Some(spec.placement.workdir.clone()),
+            launch: LaunchRequest {
+                unattended: spec.launch.unattended.clone(),
+                seed_commands: false,
+                ..LaunchRequest::default()
+            },
+            ..SpawnRequest::new(source)
+        }
+        .input("task", RawInput::Text("item-1".into()));
+        let caller = Caller::Worker {
+            parent: spec.run_id.clone(),
+            policy: spec.launch.clone(),
+            depth: 0,
+            stage: stage.map(|s| leviath_runtime::spec::names::StageName::new(s).unwrap()),
+        };
+        (request, caller)
+    }
+
+    /// A world holding a live parent started from `launch`, the spawner
+    /// that started it, and the parent. Runs are kept beside the manifest.
+    fn world_with(launch: TestLaunch) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
+        let cli = Arc::new(CliToolService::new());
+        let mut world = PipelineWorld::new(
+            registry(),
+            cli.clone(),
+            InferencePoolConfig::new(),
+            1,
+            None,
+            Handle::current(),
+        );
+        let runs_dir = Path::new(&launch.blueprint_path)
+            .parent()
+            .expect("the manifest is in a directory")
+            .join("runs");
+        let spawner = spawner_with(cli, &runs_dir);
+        let request = request_for(&launch).expect("the parent's request reads");
+        let env = spawner
+            .starter
+            .env_for(&request, Arc::new(Config::default()));
+        let prepared = crate::daemon::block_on::block_on(spawner.starter.start_with(
+            env,
+            request,
+            Caller::TopLevel,
+        ))
+        .expect("the parent starts");
+        let parent = leviath_runtime::insert::insert(
+            world.world_mut(),
+            prepared.spec,
+            prepared.bindings,
+            &prepared.state,
+        );
+        (world, spawner, parent)
+    }
+
+    /// The parent's launch: `manifest_path` given a task.
+    fn launch(manifest_path: &str) -> TestLaunch {
+        TestLaunch {
+            blueprint_path: manifest_path.to_string(),
+            task: "parent task".to_string(),
+            ..TestLaunch::default()
+        }
+    }
+
+    /// [`world_with`] for a plain parent of `manifest_path`.
+    fn world_with_parent(manifest_path: &str) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
+        world_with(launch(manifest_path))
+    }
+
+    /// The two-stage manifest written into `dir`, as a path.
+    fn two_stage_in(dir: &Path) -> String {
+        crate::daemon::starter::testing::manifest_in(dir, &two_stage_manifest())
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Start a worker of `parent` and hand back the entity it was placed as.
+    fn spawn(
+        world: &mut PipelineWorld,
+        spawner: &DaemonFanOutSpawner,
+        parent: Entity,
+        stage: Option<&str>,
+        agent: Option<&str>,
+    ) -> Result<Entity, String> {
+        let (request, caller) = worker_of(world, parent, stage, agent);
+        let place = crate::daemon::block_on::block_on(spawner.prepare_worker(request, caller))?;
+        Ok(place(world.world_mut()))
+    }
+
+    /// A worker blueprint's inputs are read so a fan-out's items are checked
+    /// against them before any worker starts; one that does not load has none.
     #[test]
-    fn format_worker_task_includes_id_and_context() {
-        let t = format_worker_task("t1", &serde_json::json!({"file": "a.rs"}));
-        assert!(t.contains("Work item id: t1"));
-        assert!(t.contains("a.rs"));
+    fn a_worker_blueprints_inputs_are_read_for_its_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let spawner = spawner_with(Arc::new(CliToolService::new()), dir.path());
+        two_stage_in(dir.path());
+        let path =
+            leviath_runtime::spec::names::BlueprintPath::new(dir.path().to_string_lossy()).unwrap();
+        let inputs = spawner
+            .worker_inputs(&SpawnSource::BlueprintFile(path))
+            .expect("the blueprint loads");
+        assert_eq!(inputs[0].name.as_str(), "task");
+        let gone = SpawnSource::Blueprint(BlueprintRef::parse("gone").unwrap());
+        assert!(spawner.worker_inputs(&gone).is_none());
     }
 
     #[test]
-    fn resolve_worker_source_picks_the_configured_source() {
-        // worker_stage → parent path + entry stage.
-        assert_eq!(
-            resolve_worker_source(&cfg(Some("w"), None, None), "/p/agent.leviath", None).unwrap(),
-            ("/p/agent.leviath".to_string(), Some("w".to_string()))
-        );
-        // worker_agent → the agent name, no entry stage.
-        assert_eq!(
-            resolve_worker_source(&cfg(None, Some("fixer"), None), "/p", None).unwrap(),
-            ("fixer".to_string(), None)
-        );
-    }
-
-    #[test]
-    fn resolve_worker_source_worker_query_discovers_an_agent() {
+    fn find_worker_discovers_an_agent_by_query() {
         let dir = tempfile::tempdir().unwrap();
         let agent = dir.path().join("test-fixer");
         std::fs::create_dir_all(&agent).unwrap();
         std::fs::write(
-            agent.join("agent.leviath"),
-            "[agent]\nname = \"test-fixer\"\nversion = \"0.1.0\"\ndescription = \"fixes tests\"\n\n[stages.main]\nmodel = { provider = \"anthropic\", model = \"claude-sonnet-4-6\" }\n",
+            agent.join("agent.toml"),
+            r#"[blueprint]
+name = "test-fixer"
+version = "0.1.0"
+description = "fixes tests"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
         )
         .unwrap();
-        let (path, entry) =
-            resolve_worker_source(&cfg(None, None, Some("fixer")), "/p", Some(dir.path())).unwrap();
-        assert!(path.contains("test-fixer"));
-        assert_eq!(entry, None);
+        let mut spawner = spawner_with(Arc::new(CliToolService::new()), dir.path());
+        spawner.agents_dir = Some(dir.path().to_path_buf());
+        let found = spawner.find_worker("fixer").unwrap();
+        assert!(found.name.as_str().contains("test-fixer"));
 
-        // A worker_query with no match propagates discover_worker's error.
+        // A query with no match propagates discover_worker's error.
         let empty = tempfile::tempdir().unwrap();
-        assert!(
-            resolve_worker_source(&cfg(None, None, Some("zzz")), "/p", Some(empty.path())).is_err()
-        );
-    }
+        spawner.agents_dir = Some(empty.path().to_path_buf());
+        assert!(spawner.find_worker("zzz").is_err());
+        // A path that does not read as a blueprint reference is refused.
+        let odd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(odd.path().join("x@fixer")).unwrap();
+        std::fs::write(
+            odd.path().join("x@fixer").join("agent.toml"),
+            r#"[blueprint]
+name = "x"
+version = "0.1.0"
 
-    #[test]
-    fn resolve_worker_source_errors_without_a_source() {
-        let empty = cfg(None, None, None);
-        assert!(resolve_worker_source(&empty, "/p", None).is_err());
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
+        )
+        .unwrap();
+        spawner.agents_dir = Some(odd.path().to_path_buf());
+        assert!(spawner.find_worker("fixer").is_err());
     }
 
     #[test]
@@ -330,8 +411,29 @@ mod tests {
         let a = dir.path().join("alpha");
         std::fs::create_dir_all(&a).unwrap();
         std::fs::write(
-            a.join("agent.leviath"),
-            "[agent]\nname = \"alpha\"\nversion = \"0.1.0\"\ndescription = \"a widget wrangler\"\n\n[stages.main]\nmodel = { provider = \"anthropic\", model = \"claude-sonnet-4-6\" }\n",
+            a.join("agent.toml"),
+            r#"[blueprint]
+name = "alpha"
+version = "0.1.0"
+description = "a widget wrangler"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
         )
         .unwrap();
         // A directory without a manifest is skipped.
@@ -354,226 +456,38 @@ mod tests {
         // No agents dir.
         assert!(discover_worker(None, "x").is_err());
         // Unreadable dir (path is a file).
-        let file = dir.path().join("alpha").join("agent.leviath");
+        let file = dir.path().join("alpha").join("agent.toml");
         assert!(discover_worker(Some(&file), "x").is_err());
-    }
-
-    // ── spawn_worker (integration over build_agent) ───────────────────────────
-
-    use leviath_runtime::components::AgentStatus;
-    use leviath_runtime::host::SpawnArgs;
-    use leviath_runtime::inference_pool::InferencePoolConfig;
-    use leviath_runtime::pipeline::StageCursor;
-    use leviath_runtime::world::PipelineWorld;
-    use std::collections::HashMap;
-    use tokio::runtime::Handle;
-
-    /// Fails every inference; the window is wide enough for the budgets
-    /// the manifests here declare.
-    fn fake_provider() -> FakeProvider {
-        FakeProvider::new().context_window(100_000)
-    }
-
-    /// A two-stage blueprint whose second stage opts in as a fan-out worker.
-    fn two_stage_manifest() -> String {
-        "[agent]\nname = \"host\"\nversion = \"0.1.0\"\ndescription = \"d\"\nentry_stage = \"first\"\n\n\
-         [stages.first]\nmodel = { provider = \"anthropic\", model = \"m\" }\nsystem_prompt = \"first\"\n\n\
-         [stages.second]\nmodel = { provider = \"anthropic\", model = \"m\" }\nallow_as_worker = true\nsystem_prompt = \"second\"\n\n\
-         [context.regions]\ntask = { kind = \"pinned\", max_tokens = 2000 }\n"
-            .to_string()
-    }
-
-    /// A live global-MCP handle over `defs`, standing in for the servers
-    /// `config.toml` declares.
-    fn global_mcp(defs: Vec<Tool>) -> Arc<crate::daemon::mcp_reload::McpReload> {
-        let owners = defs
-            .iter()
-            .map(|t| (t.name.clone(), "global".to_string()))
-            .collect();
-        crate::daemon::mcp_reload::McpReload::new(
-            &Config::default(),
-            crate::daemon::mcp_pool::McpPool::for_daemon(
-                Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-                &[],
-            ),
-            defs,
-            owners,
-        )
-    }
-
-    fn spawner_with(tool_service: Arc<CliToolService>) -> DaemonFanOutSpawner {
-        let shared_mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-        DaemonFanOutSpawner {
-            config: Arc::new(crate::daemon::config_reload::ConfigReloader::fixed(
-                Config::default(),
-            )),
-            shared_mcp: shared_mcp.clone(),
-            mcp_global: global_mcp(vec![]),
-            mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(shared_mcp, &[]),
-            hub: InteractionHub::new(),
-            subagent_tx: tokio::sync::mpsc::unbounded_channel().0,
-            tool_service,
-            agents_dir: None,
-            now_secs: || 100,
-        }
-    }
-
-    #[tokio::test]
-    async fn worker_mcp_defs_advertises_cached_servers_and_falls_back_to_global() {
-        let mut spawner = spawner_with(Arc::new(CliToolService::new()));
-        spawner.mcp_global = global_mcp(vec![Tool {
-            name: "global_tool".to_string(),
-            description: String::new(),
-            parameters: serde_json::json!({}),
-        }]);
-        // A worker blueprint declaring an MCP server.
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(
-            &manifest,
-            "[agent]\nname = \"w\"\n\n[[mcp_servers]]\nname = \"srv\"\ncommand = \"python3\"\nargs = [\"pass\"]\n",
-        )
-        .unwrap();
-        // Seed the pool so the server's tool is already advertised (and the
-        // detached warm task hits the cache - no real connection).
-        let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(
-            &std::fs::read_to_string(&manifest).unwrap(),
-        );
-        spawner.mcp_pool.seed(
-            &servers[0],
-            vec![Tool {
-                name: "srv_tool".to_string(),
-                description: String::new(),
-                parameters: serde_json::json!({}),
-            }],
-        );
-        let defs = spawner.worker_mcp_defs(&manifest.to_string_lossy());
-        let names: Vec<&str> = defs.0.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["global_tool", "srv_tool"]);
-        // An unreadable manifest → just the global defs (read-error arm).
-        let only_global = spawner.worker_mcp_defs("/no/such/agent.leviath");
-        assert_eq!(only_global.0.len(), 1);
-        assert_eq!(only_global.0[0].name, "global_tool");
-        // A manifest with no [[mcp_servers]] → just the global defs.
-        let empty = dir.path().join("empty.leviath");
-        std::fs::write(&empty, "[agent]\nname = \"e\"\n").unwrap();
-        assert_eq!(spawner.worker_mcp_defs(&empty.to_string_lossy()).0.len(), 1);
-    }
-
-    /// Build a world with a live parent agent (from `manifest`) and return the
-    /// world, the spawner, and the parent entity.
-    fn world_with_parent(manifest_path: &str) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
-        world_with_parent_yolo(manifest_path, false)
-    }
-
-    fn world_with_parent_yolo(
-        manifest_path: &str,
-        yolo: bool,
-    ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
-        world_with_parent_args(manifest_path, yolo, None, HashMap::new())
-    }
-
-    /// [`world_with_parent`], with the caller's named regions, for a parent
-    /// whose blueprint requires one.
-    fn world_with_parent_regions(
-        manifest_path: &str,
-        regions: HashMap<String, String>,
-    ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
-        world_with_parent_args(manifest_path, false, None, regions)
-    }
-
-    /// [`world_with_parent_yolo`], with the run's `--model` override too.
-    fn world_with_parent_model(
-        manifest_path: &str,
-        model: &str,
-    ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
-        world_with_parent_args(
-            manifest_path,
-            false,
-            Some(model.to_string()),
-            HashMap::new(),
-        )
-    }
-
-    fn world_with_parent_args(
-        manifest_path: &str,
-        yolo: bool,
-        model: Option<String>,
-        regions: HashMap<String, String>,
-    ) -> (PipelineWorld, DaemonFanOutSpawner, Entity) {
-        let cli = Arc::new(CliToolService::new());
-        let mut registry = leviath_runtime::ProviderRegistry::new();
-        registry.register("anthropic".to_string(), Arc::new(fake_provider()));
-        let mut world = PipelineWorld::new(
-            registry,
-            cli.clone(),
-            InferencePoolConfig::new(),
-            1,
-            None,
-            Handle::current(),
-        );
-        let spawner = spawner_with(cli.clone());
-        let args = SpawnArgs {
-            run_id: "parent".to_string(),
-            blueprint_path: manifest_path.to_string(),
-            task: "parent task".to_string(),
-            regions,
-            model,
-            workdir: std::env::temp_dir().to_string_lossy().to_string(),
-            metadata: HashMap::new(),
-            callback_url: None,
-            callback_secret: None,
-            yolo,
-            yolo_profile: None,
-            no_seed_commands: false,
-            allow: Vec::new(),
-            max_depth: None,
-            parent_run_id: None,
-            worker_stage: None,
-            output: None,
-            parts: Vec::new(),
-            capture_model_input: false,
-        };
-        let (global_defs, global_owners) = spawner.mcp_global.current();
-        let parent = build_agent(
-            world.world_mut(),
-            SpawnDeps {
-                tool_service: cli.as_ref(),
-                config: &spawner.config.current(),
-                shared_mcp: spawner.shared_mcp.clone(),
-                mcp_tool_defs: &global_defs,
-                mcp_tool_owners: &global_owners,
-                hub: &spawner.hub,
-                now_secs: 100,
-                subagent_tx: spawner.subagent_tx.clone(),
-            },
-            &args,
-        )
-        .expect("parent spawns");
-        (world, spawner, parent)
     }
 
     #[tokio::test]
     async fn spawn_worker_worker_stage_enters_the_worker_stage() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(&manifest, two_stage_manifest()).unwrap();
-        let (mut world, spawner, parent) = world_with_parent(&manifest.to_string_lossy());
+        let (mut world, spawner, parent) = world_with_parent(&two_stage_in(dir.path()));
 
-        let child = spawner
-            .spawn_worker(
-                world.world_mut(),
-                parent,
-                &cfg(Some("second"), None, None),
-                "item-1",
-                &serde_json::json!({"k": "v"}),
-            )
-            .expect("worker spawns");
+        let child =
+            spawn(&mut world, &spawner, parent, Some("second"), None).expect("worker spawns");
         // The worker entered the `second` stage (index 1).
         assert_eq!(world.world().get::<StageCursor>(child).unwrap().index, 1);
         assert_eq!(
             world.agent_status(world.own_agent(child)),
             Some(AgentStatus::Active)
+        );
+        // It was recorded like every run, in its own run file.
+        let id = world
+            .world()
+            .get::<RunSpecC>(child)
+            .unwrap()
+            .0
+            .run_id
+            .clone();
+        assert!(
+            spawner
+                .starter
+                .runs_dir
+                .join(id.as_str())
+                .join(leviath_core::files::RUN_FILE)
+                .is_file()
         );
     }
 
@@ -584,29 +498,26 @@ mod tests {
     #[tokio::test]
     async fn spawn_worker_is_not_held_to_the_parents_required_caller_inputs() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        let requiring = two_stage_manifest().replace(
-            "[context.regions]\n",
-            "[context.regions]\ndiff = { kind = \"pinned\", max_tokens = 2000, seed = \"diff\", required = true }\n",
-        );
+        let requiring = two_stage_manifest()
+            .replace(
+                "regions = [",
+                "regions = [{ name = \"diff\", kind = \"pinned\", budget = 2000, required = true }, ",
+            )
+            .replace(
+                "[[graph.inputs]]\n",
+                "[[graph.inputs]]\nname = \"diff\"\ntype = \"text\"\nrequired = true\nbinds = [{ region = \"diff\" }]\n\n[[graph.inputs]]\n",
+            );
         assert!(
-            requiring.contains("seed = \"diff\""),
+            requiring.contains("name = \"diff\""),
             "fixture gained the region"
         );
-        std::fs::write(&manifest, requiring).unwrap();
-        let (mut world, spawner, parent) = world_with_parent_regions(
-            &manifest.to_string_lossy(),
-            HashMap::from([("diff".to_string(), "- a\n+ b".to_string())]),
-        );
+        let manifest = crate::daemon::starter::testing::manifest_in(dir.path(), &requiring);
+        let (mut world, spawner, parent) = world_with(TestLaunch {
+            regions: HashMap::from([("diff".to_string(), "- a\n+ b".to_string())]),
+            ..launch(&manifest.to_string_lossy())
+        });
 
-        let child = spawner
-            .spawn_worker(
-                world.world_mut(),
-                parent,
-                &cfg(Some("second"), None, None),
-                "item-1",
-                &serde_json::json!({"code": "- a\n+ b"}),
-            )
+        let child = spawn(&mut world, &spawner, parent, Some("second"), None)
             .expect("a worker is spawned without the parent's --diff");
         assert_eq!(world.world().get::<StageCursor>(child).unwrap().index, 1);
     }
@@ -618,20 +529,13 @@ mod tests {
     async fn spawn_worker_inherits_the_parents_unattended_setting() {
         for unattended in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let manifest = dir.path().join("agent.leviath");
-            std::fs::write(&manifest, two_stage_manifest()).unwrap();
-            let (mut world, spawner, parent) =
-                world_with_parent_yolo(&manifest.to_string_lossy(), unattended);
+            let (mut world, spawner, parent) = world_with(TestLaunch {
+                yolo: unattended,
+                ..launch(&two_stage_in(dir.path()))
+            });
 
-            let child = spawner
-                .spawn_worker(
-                    world.world_mut(),
-                    parent,
-                    &cfg(Some("second"), None, None),
-                    "item-1",
-                    &serde_json::json!({"k": "v"}),
-                )
-                .expect("worker spawns");
+            let child =
+                spawn(&mut world, &spawner, parent, Some("second"), None).expect("worker spawns");
 
             assert_eq!(
                 world
@@ -654,21 +558,14 @@ mod tests {
     #[tokio::test]
     async fn spawn_worker_inherits_the_parents_model_override() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(&manifest, two_stage_manifest()).unwrap();
         // The blueprint says `anthropic/m` at every stage; the run says `m2`.
-        let (mut world, spawner, parent) =
-            world_with_parent_model(&manifest.to_string_lossy(), "anthropic/m2");
+        let (mut world, spawner, parent) = world_with(TestLaunch {
+            model: Some("anthropic/m2".to_string()),
+            ..launch(&two_stage_in(dir.path()))
+        });
 
-        let child = spawner
-            .spawn_worker(
-                world.world_mut(),
-                parent,
-                &cfg(Some("second"), None, None),
-                "item-1",
-                &serde_json::json!({"k": "v"}),
-            )
-            .expect("worker spawns");
+        let child =
+            spawn(&mut world, &spawner, parent, Some("second"), None).expect("worker spawns");
 
         let inference = world
             .world()
@@ -691,23 +588,14 @@ mod tests {
     }
 
     /// No override on the run leaves every worker resolving against its own
-    /// blueprint, exactly as before.
+    /// blueprint.
     #[tokio::test]
     async fn spawn_worker_without_an_override_uses_the_blueprints_model() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(&manifest, two_stage_manifest()).unwrap();
-        let (mut world, spawner, parent) = world_with_parent(&manifest.to_string_lossy());
+        let (mut world, spawner, parent) = world_with_parent(&two_stage_in(dir.path()));
 
-        let child = spawner
-            .spawn_worker(
-                world.world_mut(),
-                parent,
-                &cfg(Some("second"), None, None),
-                "item-1",
-                &serde_json::json!({}),
-            )
-            .expect("worker spawns");
+        let child =
+            spawn(&mut world, &spawner, parent, Some("second"), None).expect("worker spawns");
 
         let inference = world
             .world()
@@ -727,117 +615,130 @@ mod tests {
     #[tokio::test]
     async fn spawn_worker_worker_agent_uses_a_separate_blueprint() {
         let dir = tempfile::tempdir().unwrap();
-        let parent_m = dir.path().join("agent.leviath");
-        std::fs::write(&parent_m, two_stage_manifest()).unwrap();
-        let (mut world, spawner, parent) = world_with_parent(&parent_m.to_string_lossy());
+        let (mut world, spawner, parent) = world_with_parent(&two_stage_in(dir.path()));
 
-        // worker_agent given as a directory containing agent.leviath.
+        // The worker named by a directory holding an agent.toml.
         let worker_dir = dir.path().join("worker");
         std::fs::create_dir_all(&worker_dir).unwrap();
-        std::fs::write(worker_dir.join("agent.leviath"), two_stage_manifest()).unwrap();
-        let child = spawner
-            .spawn_worker(
-                world.world_mut(),
-                parent,
-                &cfg(None, Some(&worker_dir.to_string_lossy()), None),
-                "item-1",
-                &serde_json::json!({}),
-            )
-            .expect("worker spawns");
+        two_stage_in(&worker_dir);
+        let child = spawn(
+            &mut world,
+            &spawner,
+            parent,
+            None,
+            Some(&worker_dir.to_string_lossy()),
+        )
+        .expect("worker spawns");
         // A separate blueprint enters at its own entry stage (index 0).
         assert_eq!(world.world().get::<StageCursor>(child).unwrap().index, 0);
     }
 
     #[tokio::test]
-    async fn spawn_worker_errors_without_parent_metadata() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(&manifest, two_stage_manifest()).unwrap();
-        let (mut world, spawner, _parent) = world_with_parent(&manifest.to_string_lossy());
-        // A bare entity with no RunMetadata.
-        let bare = world.world_mut().spawn_empty().id();
-        let err = spawner
-            .spawn_worker(
-                world.world_mut(),
-                bare,
-                &cfg(Some("second"), None, None),
-                "i",
-                &serde_json::json!({}),
-            )
-            .unwrap_err();
-        assert!(err.contains("no run metadata"));
-    }
-
-    #[tokio::test]
     async fn spawn_worker_errors_when_worker_stage_is_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(&manifest, two_stage_manifest()).unwrap();
-        let (mut world, spawner, parent) = world_with_parent(&manifest.to_string_lossy());
-        let err = spawner
-            .spawn_worker(
-                world.world_mut(),
-                parent,
-                &cfg(Some("ghost"), None, None),
-                "i",
-                &serde_json::json!({}),
-            )
-            .unwrap_err();
-        assert!(err.contains("ghost"));
+        let (mut world, spawner, parent) = world_with_parent(&two_stage_in(dir.path()));
+        let err = spawn(&mut world, &spawner, parent, Some("ghost"), None).unwrap_err();
+        assert!(err.contains("ghost"), "{err}");
     }
 
     #[tokio::test]
-    async fn spawn_worker_propagates_a_build_error() {
+    async fn spawn_worker_propagates_an_invalid_worker_blueprint() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(&manifest, two_stage_manifest()).unwrap();
-        let (mut world, spawner, parent) = world_with_parent(&manifest.to_string_lossy());
+        let (mut world, spawner, parent) = world_with_parent(&two_stage_in(dir.path()));
 
-        // A worker blueprint that parses but fails validation (transition to a
-        // stage that doesn't exist) - resolve succeeds, build_agent errors.
+        // A worker blueprint that parses but fails validation: a transition
+        // to a stage that does not exist.
         let bad_dir = dir.path().join("bad");
         std::fs::create_dir_all(&bad_dir).unwrap();
-        std::fs::write(
-            bad_dir.join("agent.leviath"),
-            // The `task` region is not incidental: a fan-out hands each worker
-            // its item as the task, and a worker with nowhere to put one is
-            // refused before validation ever runs - which would make this test
-            // pass on the wrong error.
-            "[agent]\nname = \"bad\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-             [stages.only]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
-             [stages.only.transitions.nowhere]\n\n\
-             [context.regions]\ntask = { kind = \"pinned\", max_tokens = 500 }\n",
+        crate::daemon::starter::testing::manifest_in(
+            &bad_dir,
+            r#"[blueprint]
+name = "bad"
+version = "0.1.0"
+description = "d"
+
+[graph]
+edges = [{ name = "nowhere", from = "only", to = "nowhere" }]
+
+[[graph.stages]]
+name = "only"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 500 }]
+total_budget_tokens = 500
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+"#,
+        );
+        let err = spawn(
+            &mut world,
+            &spawner,
+            parent,
+            None,
+            Some(&bad_dir.to_string_lossy()),
         )
-        .unwrap();
-        let err = spawner
-            .spawn_worker(
-                world.world_mut(),
-                parent,
-                &cfg(None, Some(&bad_dir.to_string_lossy()), None),
-                "i",
-                &serde_json::json!({}),
-            )
-            .unwrap_err();
-        assert!(err.contains("invalid blueprint"));
+        .unwrap_err();
+        assert!(err.contains("nowhere"), "{err}");
     }
 
     #[tokio::test]
-    async fn spawn_worker_propagates_a_worker_source_error() {
+    async fn spawn_worker_propagates_a_missing_worker_blueprint() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(&manifest, two_stage_manifest()).unwrap();
-        let (mut world, spawner, parent) = world_with_parent(&manifest.to_string_lossy());
-        // A config with no worker source ⇒ resolve_worker_source errors.
-        let err = spawner
-            .spawn_worker(
-                world.world_mut(),
+        let (mut world, spawner, parent) = world_with_parent(&two_stage_in(dir.path()));
+        let missing = dir.path().join("no-such-agent");
+        assert!(
+            spawn(
+                &mut world,
+                &spawner,
                 parent,
-                &cfg(None, None, None),
-                "i",
-                &serde_json::json!({}),
+                None,
+                Some(&missing.to_string_lossy())
             )
-            .unwrap_err();
-        assert!(err.contains("no worker source"));
+            .is_err()
+        );
+    }
+
+    /// A worker whose blueprint declares an MCP server gets the server's
+    /// tools when the pool already has them, and starts without them while
+    /// the pool connects to one it has not seen, for the workers after it.
+    #[tokio::test]
+    async fn a_workers_mcp_servers_are_connected_for_the_workers_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut world, spawner, parent) = world_with_parent(&two_stage_in(dir.path()));
+        let worker_dir = dir.path().join("worker");
+        std::fs::create_dir_all(&worker_dir).unwrap();
+        crate::daemon::starter::testing::manifest_in(
+            &worker_dir,
+            &two_stage_manifest().replace(
+                "[graph]\n",
+                "[graph]\nmcp_servers = [{ name = \"srv\", command = \"/no/such/mcp-server\" }]\n",
+            ),
+        );
+        let agent = worker_dir.to_string_lossy().into_owned();
+
+        // Not connected yet: the worker starts, and a connection is begun.
+        spawn(&mut world, &spawner, parent, None, Some(&agent)).expect("worker spawns");
+
+        // Connected: the worker is started with the server's tools.
+        let (request, _) = worker_of(&world, parent, None, Some(&agent));
+        let graph = spawner
+            .starter
+            .graph_of(&request)
+            .expect("the worker's graph");
+        let servers = crate::daemon::starter::mcp_configs(&graph);
+        spawner.starter.mcp_pool.seed(
+            &servers[0],
+            vec![leviath_providers::Tool {
+                name: "srv__look".to_string(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            }],
+        );
+        spawn(&mut world, &spawner, parent, None, Some(&agent)).expect("worker spawns");
     }
 
     #[tokio::test]
@@ -857,34 +758,15 @@ mod tests {
         assert!(p.infer(&fixtures::inference_request()).await.is_err());
     }
 
-    #[tokio::test]
-    async fn spawn_worker_propagates_a_resolve_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(&manifest, two_stage_manifest()).unwrap();
-        let (mut world, spawner, parent) = world_with_parent(&manifest.to_string_lossy());
-        // worker_agent pointing at a nonexistent blueprint.
-        let err = spawner
-            .spawn_worker(
-                world.world_mut(),
-                parent,
-                &cfg(None, Some("/no/such/agent/xyz"), None),
-                "i",
-                &serde_json::json!({}),
-            )
-            .unwrap_err();
-        assert!(err.contains("resolve worker blueprint"));
-    }
-
     #[test]
     fn discover_worker_skips_agents_with_unparsable_manifests() {
         let dir = tempfile::tempdir().unwrap();
         let bad = dir.path().join("broken");
         std::fs::create_dir_all(&bad).unwrap();
-        std::fs::write(bad.join("agent.leviath"), "this is not valid toml : : :").unwrap();
-        // Name doesn't match and the manifest won't parse → skipped → miss.
+        std::fs::write(bad.join("agent.toml"), "this is not valid toml : : :").unwrap();
+        // Name doesn't match and the file won't parse → skipped → miss.
         assert!(discover_worker(Some(dir.path()), "zzz").is_err());
-        // But the directory name still matches even when the manifest is broken.
+        // But the directory name still matches even when the file is broken.
         assert!(
             discover_worker(Some(dir.path()), "broken")
                 .unwrap()
@@ -900,25 +782,14 @@ mod tests {
         crate::config::with_isolated_config_path_async("fanout_yolo_profile", |home| async move {
             std::fs::write(home.join("yolo.toml"), "[careful]\ndefault = \"ask\"\n").unwrap();
             let dir = tempfile::tempdir().unwrap();
-            let manifest = dir.path().join("agent.leviath");
-            std::fs::write(&manifest, two_stage_manifest()).unwrap();
-            let (mut world, spawner, parent) =
-                world_with_parent_yolo(&manifest.to_string_lossy(), true);
-            world
-                .world_mut()
-                .get_mut::<RunMetadata>(parent)
-                .expect("parent metadata")
-                .yolo_profile = Some("careful".to_string());
+            let (mut world, spawner, parent) = world_with(TestLaunch {
+                yolo: true,
+                yolo_profile: Some("careful".to_string()),
+                ..launch(&two_stage_in(dir.path()))
+            });
 
-            let child = spawner
-                .spawn_worker(
-                    world.world_mut(),
-                    parent,
-                    &cfg(Some("second"), None, None),
-                    "item-1",
-                    &serde_json::json!({"k": "v"}),
-                )
-                .expect("worker spawns");
+            let child =
+                spawn(&mut world, &spawner, parent, Some("second"), None).expect("worker spawns");
             let md = world
                 .world()
                 .get::<RunMetadata>(child)

@@ -14,12 +14,38 @@ use crate::commands::serve::graphql::scalars::BigInt;
 use crate::commands::serve::testutil::state_with_agent_paths;
 use crate::runstate::{RunMeta, create_run};
 
+/// Give the run `run_id` a file whose graph is two stages: `review`, which
+/// takes no messages, then `build`, which does.
+fn review_then_build(run_id: &str) {
+    use crate::commands::serve::core::run_file;
+    use leviath_runtime::runfile::{CheckpointPolicy, RunFileReader, RunFileWriter};
+
+    let recorded = run_file::tests::recorded();
+    let reader = RunFileReader::open(&run_file::path(&recorded)).expect("a recorded run");
+    let mut spec = reader.spec().clone();
+    let text = "[blueprint]\nname = \"coder\"\nversion = \"1.0.0\"\n\n[graph]\n\
+                stages = [{ name = \"review\", accepts_messages = false }, { name = \"build\" }]\n\
+                layout = { total_budget_tokens = 1000, \
+                regions = [{ name = \"work\", kind = \"temporary\", budget = 100 }] }\n";
+    spec.graph = leviath_blueprint::BlueprintFile::parse(text)
+        .expect("the blueprint parses")
+        .run_graph();
+    RunFileWriter::create(
+        &run_file::path(run_id),
+        &spec,
+        &leviath_runtime::spec::env::CodeFiles::new(),
+        &reader.state_at(0).expect("the first state"),
+        CheckpointPolicy::default(),
+    )
+    .expect("the run file is written");
+}
+
 /// A run whose working directory is the given one.
 fn meta_in(workdir: &std::path::Path) -> RunMeta {
     let mut meta = RunMeta::new(
         "reader".to_string(),
         "coder".to_string(),
-        "/agents/coder/agent.leviath".to_string(),
+        "/agents/coder/agent.toml".to_string(),
         "read the files".to_string(),
         None,
         workdir.to_string_lossy().into_owned(),
@@ -51,47 +77,10 @@ async fn data(meta: RunMeta, query: &str) -> serde_json::Value {
     serde_json::to_value(&answer.data).expect("data serializes")
 }
 
-/// A journal with one context point per token total, so the history has
+/// A run file with one context point per token total, so the history has
 /// something to page over.
 fn write_journal(meta: &RunMeta, totals: &[usize]) {
-    use leviath_core::run_archive::{self, RunIdentity, RunRecord};
-
-    let mut buf = Vec::new();
-    run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION)
-        .expect("a preamble");
-    run_archive::write_record(
-        &mut buf,
-        &RunRecord::Header {
-            identity: RunIdentity {
-                run_id: meta.run_id.clone(),
-                machine_id: "m".to_string(),
-                world_id: "w".to_string(),
-                created_at: 0,
-            },
-            meta: Box::new(meta.clone()),
-        },
-    )
-    .expect("a header");
-    for (i, total) in totals.iter().enumerate() {
-        run_archive::write_record(
-            &mut buf,
-            &RunRecord::ContextCheckpoint {
-                snapshot: crate::runstate::ContextSnapshot {
-                    stage_name: "review".to_string(),
-                    total_tokens: *total,
-                    max_tokens: 1000,
-                    regions: Vec::new(),
-                },
-                at: 1 + i as i64,
-            },
-        )
-        .expect("a point");
-    }
-    std::fs::write(
-        crate::runstate::run_dir(&meta.run_id).join(leviath_core::files::ARCHIVE_FILE),
-        &buf,
-    )
-    .expect("the journal");
+    super::journal_fixture::windows(&meta.run_id, "review", totals);
 }
 
 /// A root handing out one run.
@@ -606,9 +595,8 @@ async fn a_context_history_filter_past_the_depth_limit_is_refused() {
     );
 }
 
-/// A run with no journal has no history, and says so with an empty page
-/// rather than an error - the same as every other listing on a run that
-/// recorded nothing.
+/// A run that never held a window has no point of history, as a release
+/// whose run kept no journal showed none.
 #[tokio::test]
 async fn a_run_with_no_journal_has_no_history() {
     crate::runstate::with_isolated_runs_dir_async("graphql-history-none", |_dir| async move {
@@ -669,10 +657,7 @@ async fn the_byte_links_carry_their_own_permission() {
     )
     .await;
     let blob = json["run"]["blob"].as_str().expect("a link");
-    assert!(
-        blob.starts_with("/api/agents/reader/blobs/abc123?"),
-        "{blob}"
-    );
+    assert!(blob.starts_with("/api/runs/reader/blobs/abc123?"), "{blob}");
     assert!(blob.contains("exp=") && blob.contains("sig="), "{blob}");
     assert!(!blob.contains("download"), "inline by default: {blob}");
 
@@ -688,7 +673,7 @@ async fn the_byte_links_carry_their_own_permission() {
 
     let artifact = json["run"]["artifact"].as_str().expect("a link");
     assert!(
-        artifact.starts_with("/api/agents/reader/artifacts/report.md?"),
+        artifact.starts_with("/api/runs/reader/artifacts/report.md?"),
         "{artifact}"
     );
 }
@@ -701,17 +686,9 @@ async fn whether_messages_reach_the_run_comes_from_its_stage() {
         let mut meta = meta_in(workdir.path());
         meta.current_stage = "review".to_string();
         crate::runstate::create_run(&meta).expect("run written");
-        // The run's own snapshot, which is what this reads: the installed file
+        // The run's own file, which is what this reads: the installed file
         // may say something else by now.
-        std::fs::write(
-            crate::runstate::run_dir(&meta.run_id)
-                .join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE),
-            "[agent]\nname = \"coder\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\
-             \n[context.regions.work]\nkind = \"temporary\"\nmax_tokens = 100\n\
-             \n[stages.review]\nmode = \"autonomous\"\naccepts_messages = false\n\
-             \n[stages.build]\nmode = \"autonomous\"\n",
-        )
-        .expect("a snapshot");
+        review_then_build(&meta.run_id);
 
         let json = data(meta.clone(), "{ run { acceptsMessages } }").await;
         assert_eq!(
@@ -739,6 +716,7 @@ async fn an_unreadable_blueprint_leaves_it_unknown() {
         let workdir = tempfile::tempdir().expect("a workdir");
         let meta = meta_in(workdir.path());
         crate::runstate::create_run(&meta).expect("run written");
+        crate::commands::serve::core::run_file::tests::garbage(&meta.run_id, b"not a run file");
         let json = data(meta, "{ run { acceptsMessages } }").await;
         assert!(json["run"]["acceptsMessages"].is_null());
     })
@@ -1003,13 +981,18 @@ async fn a_stage_record_carries_its_region_peaks() {
         let workdir = tempfile::tempdir().expect("a workdir");
         let meta = meta_in(workdir.path());
         crate::runstate::create_run(&meta).expect("run written");
-        let mut record = leviath_core::run_meta::StageRecord::new("review".to_string(), 0);
-        record.region_tokens = std::collections::BTreeMap::from([("plan".to_string(), 120usize)]);
-        record.visits = vec![leviath_core::run_meta::StageVisitRecord::opened_at(
-            100,
-            "v-one".to_string(),
-        )];
-        crate::runstate::write_stages_index(&meta.run_id, &[record]).expect("the ledger");
+        super::journal_fixture::journal_with(
+            &meta.run_id,
+            |state| {
+                let mut record = super::journal_fixture::stay("v-one", 100);
+                record.stage =
+                    leviath_runtime::spec::names::StageName::new("review").expect("a stage");
+                record.region_tokens =
+                    std::collections::BTreeMap::from([("plan".to_string(), 120)]);
+                state.ledger = vec![record];
+            },
+            &[],
+        );
 
         let json = data(
             meta,
@@ -1037,14 +1020,11 @@ async fn stages_are_filtered_ordered_and_paged_with_a_cursor() {
         let workdir = tempfile::tempdir().expect("a workdir");
         let meta = meta_in(workdir.path());
         crate::runstate::create_run(&meta).expect("run written");
-        crate::runstate::write_stages_index(
+        super::journal_fixture::journal_with(
             &meta.run_id,
-            &[
-                leviath_core::run_meta::StageRecord::new("plan".to_string(), 0),
-                leviath_core::run_meta::StageRecord::new("build".to_string(), 1),
-            ],
-        )
-        .expect("the ledger");
+            |state| state.ledger = super::journal_fixture::ledger(&["plan", "build"]),
+            &[],
+        );
 
         // Declared order by default.
         let json = data(meta.clone(), "{ run { stages(first: 1) { total cursor results { name } } } }").await;
@@ -1382,15 +1362,7 @@ async fn a_run_yet_to_enter_a_stage_answers_from_its_entry_stage() {
         let mut meta = meta_in(workdir.path());
         meta.current_stage = String::new();
         crate::runstate::create_run(&meta).expect("run written");
-        std::fs::write(
-            crate::runstate::run_dir(&meta.run_id)
-                .join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE),
-            "[agent]\nname = \"coder\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\
-             \n[context.regions.work]\nkind = \"temporary\"\nmax_tokens = 100\n\
-             \n[stages.review]\nmode = \"autonomous\"\naccepts_messages = false\n\
-             \n[stages.build]\nmode = \"autonomous\"\n",
-        )
-        .expect("a snapshot");
+        review_then_build(&meta.run_id);
 
         let json = data(meta, "{ run { acceptsMessages } }").await;
         assert_eq!(

@@ -117,7 +117,7 @@ const MIN_OUTPUT_TOKENS: usize = 1;
 /// two is a measurement: the prompt is [`leviath_core::estimate_tokens`], bytes
 /// over four, while the provider counts with its own tokenizer and counts the
 /// tool schemas and its own message framing besides.
-/// [`PromptCalibration`](crate::pipeline::PromptCalibration) corrects that from
+/// [`crate::pipeline::PromptCalibration`] corrects that from
 /// what earlier calls were charged, but it can only correct by what it has
 /// already seen, and a stage's first call carries schemas nothing has measured
 /// yet. Asking for every token the estimate says is left means any remaining
@@ -236,7 +236,7 @@ pub(crate) fn tool_catalog_version(tools: &[Tool]) -> String {
 /// "unchanged" cannot disagree.
 pub(crate) fn source_context_digest(window: &ContextWindow, stage_name: &str) -> String {
     let snapshot = crate::persistence::build_context_snapshot(window, stage_name);
-    leviath_core::run_archive::digest_context(&snapshot).fingerprint()
+    crate::runfile::record::context_fingerprint(&snapshot)
 }
 
 /// The parameters a built request really carries, after every override and
@@ -491,7 +491,7 @@ pub(crate) fn fold_system_into_user(
     }
 }
 
-/// Build the [`RetryPolicy`] for a job from the operator's `[limits]` retry
+/// Build the [`RetryPolicy`](crate::inference_bridge::RetryPolicy) for a job from the operator's `[limits]` retry
 /// schedule, applying a stage's per-stage inference wall-clock cap when
 /// configured.
 ///
@@ -580,6 +580,7 @@ type InferenceQuery = (
     Option<&'static SystemBlockHashes>,
     Option<&'static crate::pipeline::PromptCalibration>,
     Option<&'static CaptureModelInput>,
+    Option<&'static crate::inference_call::RemoteJobs>,
 );
 
 /// The system prefix the last request sent, as a digest.
@@ -608,10 +609,10 @@ pub(crate) struct DispatchTuning<'w, 's> {
     pub policy: Option<Res<'w, CircuitPolicy>>,
     /// The retry schedule.
     pub retry: Option<Res<'w, InferenceRetryTuning>>,
-    /// The journal lane, so each attempt the job makes is recorded where the
-    /// rest of the run is. Absent in an in-memory world, which then records
+    /// The world's journal, so each attempt the job makes is recorded where
+    /// the rest of the run is. Absent in an in-memory world, which then records
     /// nothing rather than failing to dispatch.
-    pub persist: Option<Res<'w, PersistenceStage>>,
+    pub persist: Option<Res<'w, super::JournalSender>>,
     /// The mime store, registry and limits.
     pub mime: crate::blob_store::MimeParams<'w, 's>,
 }
@@ -669,6 +670,7 @@ pub(crate) fn dispatch_inference(
             block_prefix,
             calibration,
             capture,
+            remote_jobs,
         )| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
                 if state.status != AgentStatus::Active {
@@ -840,8 +842,10 @@ pub(crate) fn dispatch_inference(
                     stage: state.current_stage.clone(),
                     provider: si.provider_name.clone(),
                     model: si.model.clone(),
-                    lane: lane.0.clone(),
-                    digest: leviath_core::run_archive::RequestDigest {
+                    // The world records each attempt as it settles the trip,
+                    // so the handle is a system's, which does not wake it.
+                    lane: lane.clone(),
+                    digest: crate::runfile::record::RequestDigest {
                         system_hash,
                         messages: request.messages.len(),
                         tools: request.tools.len(),
@@ -870,42 +874,28 @@ pub(crate) fn dispatch_inference(
                     stream,
                     hydration,
                     journal,
+                    jobs: remote_jobs.map(|j| j.0.clone()),
                 };
-                let cancel = crate::cancel::CancelToken::new();
-                // Supervised: this agent is about to become `AwaitingInference`,
-                // which the driver reads as "busy". A job that died without
-                // reporting would leave it waiting on a completion that can no
-                // longer come, so the supervisor reports one in its place.
-                let lost_outcomes = stage.outcomes.clone();
-                let lost_wake = stage.wake.clone();
-                crate::lane_supervisor::spawn_supervised(
-                    &stage.runtime,
-                    "inference",
-                    run_inference_job(
-                        job,
-                        stage.outcomes.clone(),
-                        stage.wake.clone(),
-                        retry_policy_for(config, retry_tuning),
-                        cancel.clone(),
-                    ),
-                    move |message| {
-                        let _ = lost_outcomes.send(InferenceOutcome {
-                            entity,
-                            result: Err(leviath_providers::ProviderError::Other(message)),
-                            attempt_id: String::new(),
-                            // The job never got to measure itself.
-                            latency: std::time::Duration::ZERO,
-                            // ...and never reached a provider, so it billed
-                            // nothing and needs no rates.
-                            pricing: None,
-                        });
-                        lost_wake.notify_one();
-                    },
+                // A job the call submits wakes the world, so the run's file
+                // records it at once rather than when the call ends.
+                if let Some(jobs) = &job.jobs {
+                    jobs.wake_with(stage.wake.clone());
+                }
+                // The call is held on the agent, permit and all, and its first
+                // trip goes out now. Whether a failed trip is tried again is
+                // decided by the collect system, and the next trip is sent by
+                // `fire_due_calls` when its backoff is over.
+                let (call, cancel) = crate::inference_call::start_call(
+                    &stage,
+                    job,
+                    retry_policy_for(config, retry_tuning),
+                    crate::inference_call::CallLane::Stage,
                 );
                 par_commands.command_scope(|mut commands| {
                     track_in_flight(&mut commands, entity, in_flight, cancel);
                     commands
                         .entity(entity)
+                        .insert(call)
                         .remove::<ReadyToInfer>()
                         // Dispatched: whatever it was waiting for, it isn't
                         // waiting any more.

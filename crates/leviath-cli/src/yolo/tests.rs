@@ -594,7 +594,7 @@ fn groups_globs_and_spellings_match() {
 
 #[test]
 fn tool_kinds_classify_and_map_to_groups() {
-    use leviath_core::blueprint::ToolGroup;
+    use leviath_runtime::spec::graph::ToolGroup;
     assert_eq!(
         ToolKind::classify("spawn_agent", true, false),
         ToolKind::Subagent

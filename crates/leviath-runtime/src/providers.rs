@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 /// Registry of inference providers, keyed by provider name (e.g. `"anthropic"`).
 ///
-/// The pipeline resolves each agent's stage `ModelConfig` to a concrete
+/// The pipeline resolves each stage's `ModelChoice` to a concrete
 /// provider through this registry. Native providers are registered eagerly;
 /// script providers are resolved lazily - and hot-reloaded - via
 /// an optional [`ScriptProviderLayer`].

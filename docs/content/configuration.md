@@ -53,14 +53,14 @@ load_dotenv          = false         # read ./.env from the directory lev runs i
 | `agent_paths` | array of paths | `[]` | Searched in addition to `~/.leviath/agents` |
 | `openrouter_api_key` | string | unset | Falls back to `OPENROUTER_API_KEY` |
 | `ollama_base_url` | string | unset | Falls back to `OLLAMA_HOST`, then `http://localhost:11434` |
-| `request_timeout_secs` | integer | unset | Unset means the 15 minute ceiling. A stage's `[stages.<name>.model] request_timeout_secs` wins for that stage |
+| `request_timeout_secs` | integer | unset | Unset means the 15 minute ceiling. A stage's `model.request_timeout_secs` wins for that stage |
 | `taint_tracking` | bool | `false` | Turns on [taint tracking](/docs/security) for every agent. With it off, an agent can still opt in itself |
 | `batch_tool_hint` | bool | `true` | Adds a short hint telling the model it may batch independent tool calls |
 | `shell_hint` | bool | `true` | Adds a short hint describing the shell a stage will get. Only says anything on Windows today |
 | `update_check` | bool | `true` | Lets this copy ask whether a newer release exists on its own channel, at most once an hour |
 | `load_dotenv` | bool | `false` | Reads a `.env` file from the directory `lev` runs in |
 
-All three of those cascade: a stage setting beats an agent setting, which beats this file.
+All three of those cascade: a stage setting beats a blueprint setting, which beats this file.
 
 `override_model` and `fallback_model` both take a bare model id on `default_provider`, not
 `provider/model`. A leading `<default_provider>/` is dropped and named at load, so
@@ -97,11 +97,12 @@ shell_hint = false
 ```
 
 ```toml
-# a blueprint: back on for this one agent, off for one stage of it
-[agent]
+# agent.toml: back on for this blueprint, off for one stage of it
+[graph]
 shell_hint = true
 
-[stages.plan]
+[[graph.stages]]
+name = "plan"
 shell_hint = false
 ```
 
@@ -349,8 +350,8 @@ notify_spend_usd = [5, 25, 100]
 
 Each is reported once per run, the first time that run's total passes it, over the event stream and
 in the dashboard. The event carries the running total and the stage that was running when it
-crossed, which is the stage doing the spending; the full per-stage breakdown is in the run's
-`stages.json`.
+crossed, which is the stage doing the spending; `lev stages <run>` prints the full per-stage
+breakdown.
 
 This is reporting, not a ceiling. It does not stop a run, because stopping one mid-stage throws away
 work and that is a different decision from wanting to know what is happening. To bound the spend
@@ -497,9 +498,9 @@ credential_store           = "file"   # file | keychain
 | `allow_seed_commands` | `true` | Whether a blueprint's `seed = { command = "..." }` regions may run at all. See below |
 | `allow_local_network` | `false` | Whether agent fetches may reach loopback, private, and link-local addresses. See below |
 | `allow_env_vars` | `[]` | Credential-shaped variable names a Rhai script may read through `env_var()`. Exact and case-insensitive, no wildcards |
-| `allow_blueprint_read_paths` | `false` | Honors every blueprint's `[read_paths]` as written. Prefer a per-agent grant for anything you did not author |
-| `allow_blueprint_safe_commands` | `false` | Honors every blueprint's `[safe_commands]` as written. Off, an installed agent cannot pre-approve its own shell |
-| `allow_blueprint_permissions` | `false` | Honors every blueprint's `[tool_permissions]`, even above the built-in default. See below |
+| `allow_blueprint_read_paths` | `false` | Honors every blueprint's `read_paths` as written. Prefer a per-agent grant for anything you did not author |
+| `allow_blueprint_safe_commands` | `false` | Honors every blueprint's `[graph.safe_commands]` as written. Off, an installed agent cannot pre-approve its own shell |
+| `allow_blueprint_permissions` | `false` | Honors every blueprint's `tool_permissions`, even above the built-in default. See below |
 | `lock_permission_files` | `true` | Refuses any tool call that would write the files that decide what agents may do. See below |
 | `shell_env` | `"filtered"` | Which of the daemon's environment variables a shell command inherits. See below |
 | `shell_env_withhold` | `[]` | The names `shell_env = "custom"` withholds. Ignored under every other mode |
@@ -566,13 +567,13 @@ Per-agent read grants, the itemized counterpart of `allow_blueprint_read_paths`.
 allow = ["~/.leviath/runs", "glob:~/design-docs/**"]
 ```
 
-An agent's declarations mean nothing until one of these grants lands, so `lev validate <agent>`
+An agent's declarations mean nothing until one of these grants lands, so `lev validate <path>`
 checks each declared entry against this file and prints the block above, filled in, for whatever it
 does not find. `lev list` and `lev ps` carry the same counts.
 
 ## Tool permissions
 
-`[tool_permissions]` sets a machine-wide ceiling. A blueprint's own `[tool_permissions]` may
+`[tool_permissions]` sets a machine-wide ceiling. A blueprint's own `tool_permissions` may
 tighten it but never loosen it. For a tool you have not listed here there is no ceiling to clamp
 against, so a blueprint may raise it no higher than the built-in default. The exceptions are
 `web_search` and `web_fetch`, which read-only research agents pre-approve. To go further, name the
@@ -644,7 +645,7 @@ shell    = ["cargo test", "rg"]
 
 [agent_safe_commands.coder]
 shell           = ["./gradlew", "env:GRADLE_OPTS"]
-allow_blueprint = true          # honour this agent's own [safe_commands]
+allow_blueprint = true          # honour this blueprint's own [graph.safe_commands]
 ```
 
 | Key | Default | Notes |
@@ -652,7 +653,7 @@ allow_blueprint = true          # honour this agent's own [safe_commands]
 | `defaults` | `true` | The shipped read-only verb list. See below |
 | `tools` | `[]` | Tools that never prompt whatever their arguments. Built-in names, or MCP names as advertised (`server__tool`) |
 | `shell` | `[]` | A program, optionally with the subcommand that narrows it. Also `env:NAME`, below |
-| `allow_blueprint` | `false` | Per-agent only. Honour that agent's own `[safe_commands]` block |
+| `allow_blueprint` | `false` | Per-agent only. Honour that blueprint's own `[graph.safe_commands]` table |
 
 An entry on the `defaults` list has to clear one bar: under any flag, it must not be able to write a
 file, run another program, or open a connection. That is why `find`, `sed`, `awk`, `sort`, `xargs`,
@@ -741,8 +742,8 @@ covers `read_file_bytes`, and `http_get` covers `http_get_bytes`. See
 
 ## `[sandbox]`
 
-The machine-wide default sandbox for tool execution. An agent's or stage's own `[sandbox]`
-overrides it, and the two resolve to the **stronger** of the pair, so an installed agent can tighten
+The machine-wide default sandbox for tool execution. A blueprint's `[graph.sandbox]` or a stage's
+`sandbox` overrides it, and the two resolve to the **stronger** of the pair, so an installed agent can tighten
 its sandbox but never turn one off.
 
 ```toml
@@ -1216,8 +1217,8 @@ max     = 3
 text    = "You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory."
 ```
 
-All three keys are optional and each is overridden independently by an agent's `[agent.nudge]` or a
-stage's `[stages.<name>.nudge]`. `text` supports `{stage}` and `{regions}` placeholders. Defaults
+All three keys are optional and each is overridden independently by a blueprint's `[graph.nudge]` or
+a stage's `nudge = { ... }`. `text` supports `{stage}` and `{regions}` placeholders. Defaults
 are on, `max = 3`, and a built-in message. See [Nudging](/docs/stages#nudging).
 
 ## `[title]`
@@ -1333,7 +1334,7 @@ Everything persistent sits under the data root, `<home>/.leviath`, which `LEVIAT
 | `yolo.toml` | The named profiles behind `lev run --yolo=<name>`. See [below](#yolotoml) |
 | `mime_types.toml` | Your rows in the mime registry: what a type is. See [below](#mime_typestoml) |
 | `mcp-auth.json` | MCP OAuth tokens, created `0600` |
-| `runs/` | One directory per run: `meta.json`, `context.json`, `stages.json`, the `run.lvr` journal, per-stage logs |
+| `runs/` | One directory per run: its [run file](/docs/run-file) `run.lvr` and per-stage logs |
 | `agents/` | Blueprints installed by `lev add` |
 | `providers/` | Drop-in [Rhai provider](/docs/rhai-providers) scripts |
 | `tools/` | Drop-in [Rhai tool](/docs/rhai-tools) scripts, offered to every agent |
@@ -1343,46 +1344,21 @@ The daemon's control socket, its token, its pid file, and a build marker live he
 
 ### What a run directory holds
 
-Four things, with different jobs:
+One file holds the run, and names the plain files it keeps beside it:
 
-| File | What it is | Rewritten or appended |
-|---|---|---|
-| `meta.json` | The run's current status, model, token totals, wait reason | Rewritten whole |
-| `context.json` | The context window as it stands right now | Rewritten whole |
-| `stages.json` | Per-stage names and status | Rewritten whole |
-| `run.lvr` | The journal: every step, in order | Append-only |
+| Path | What it is |
+|---|---|
+| `run.lvr` | The [run file](/docs/run-file): the run's spec, its code, every step, and state checkpoints. Appended to |
+| `final_output` | The answer the run handed back |
+| `stages/<n>/output.log` | What the model wrote in stage `n`, as plain text |
+| `stages/<n>/logs.log` | Operational events and tool activity for stage `n` |
+| `stages/<n>/taint_audit.json` | The taint gate's decisions in stage `n` |
+| `blobs/` | The files the run holds as parts, one per digest. `run.lvr` names them and holds no copy |
 
-The first three answer "what is true now" and are cheap to read. `run.lvr` answers "how did it get
-here", and is what [`lev context`](/docs/cli) replays and what a daemon restart folds to recover a
-run.
-
-### The `run.lvr` format
-
-A four-byte magic (`LVR1`), a two-byte format version, then a sequence of records. Each record is
-an eight-byte big-endian length followed by that many bytes of JSON.
-
-```
-LVR1 | u16 version | [ u64 length | JSON payload ] ...
-```
-
-Folding the records in order reconstructs the run. Most are a `Progress` record carrying a diff
-against the previous context, anchored by a full `ContextCheckpoint` whenever the writer has no
-previous state to diff against.
-
-**Adding a record kind is not a breaking change.** Frames carry their length, so a reader that
-meets a record kind it does not know steps over it and keeps going. That is what lets a newer
-Leviath write records an older one can still read around, and it is why the version below does not
-move when a kind is added.
-
-**The version marks a change to the framing**, meaning the preamble, the length prefix, or the
-payload encoding. It does not mark a change to the record set. A build refuses an archive whose
-version is higher than it
-understands, rather than reading it: at that point it cannot find the record boundaries, so it
-would not fail cleanly, it would produce nonsense. An older version reads normally.
-
-**A torn tail is tolerated.** A crash mid-append leaves a partial final frame, and readers stop
-there and keep everything before it. An interrupted run still recovers to its last intact
-point.
+`run.lvr` is what [`lev context`](/docs/cli) replays, what `lev run show` prints, and what a daemon
+restart reads to resume the run. A run directory from an older Leviath is converted when it is
+first loaded, and its old files move to `legacy/`. See
+[runs from older versions](/docs/run-file#runs-from-older-versions).
 
 <a id="mime_typestoml"></a>
 

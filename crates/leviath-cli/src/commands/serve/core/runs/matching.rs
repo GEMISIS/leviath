@@ -1,6 +1,12 @@
 //! The search half of `GET /api/runs`: which runs match `?q=`, and the
 //! highlights that say where. Split out of `runs.rs` for size.
 
+use std::ops::ControlFlow;
+
+use leviath_runtime::state::context::RegionChange;
+use leviath_runtime::state::{Change, RunEvent, StateDelta};
+
+use super::super::run_file;
 use super::*;
 
 /// Phase one of search: keep the runs that could match, bounding how many of
@@ -30,9 +36,8 @@ pub(crate) fn apply_search(runs: Vec<Arc<RunMeta>>, spec: &RunSpec) -> (Vec<Arc<
 
 /// Does this run match, according to the requested sources? Sources are OR-ed.
 ///
-/// Nothing here parses. The cheap sources read already-parsed metadata; the
-/// deep ones substring-scan raw file bytes. Parsing is phase two's job, and it
-/// only happens for the items actually being returned.
+/// The cheap sources read already-parsed metadata. The deep ones read the
+/// run's file and its stage logs, which is what [`MAX_SEARCH_SCAN`] bounds.
 pub(crate) fn matches_query(meta: &RunMeta, q: &str, sources: &[Source]) -> bool {
     sources.iter().any(|source| match source {
         Source::Meta => meta_fields(meta)
@@ -43,14 +48,8 @@ pub(crate) fn matches_query(meta: &RunMeta, q: &str, sources: &[Source]) -> bool
             .modified_files
             .iter()
             .any(|path| search::find_ignore_ascii_case(path, q).is_some()),
-        Source::Context => scan_file(
-            &runstate::run_dir(&meta.run_id).join(leviath_core::files::CONTEXT_FILE),
-            q,
-        ),
-        Source::Journal => scan_file(
-            &runstate::run_dir(&meta.run_id).join(leviath_core::files::ARCHIVE_FILE),
-            q,
-        ),
+        Source::Context => context_highlight(meta, q).is_some(),
+        Source::Journal => journal_highlights(meta, q).is_some(),
         Source::Logs => stage_indices(&meta.run_id).iter().any(|idx| {
             let output = runstate::tail_stage_output(&meta.run_id, *idx, SEARCH_LOG_TAIL_BYTES);
             let operational = runstate::tail_stage_log(&meta.run_id, *idx, SEARCH_LOG_TAIL_BYTES);
@@ -60,21 +59,13 @@ pub(crate) fn matches_query(meta: &RunMeta, q: &str, sources: &[Source]) -> bool
     })
 }
 
-/// The stage indices a run recorded, from `stages.json` - the index of record,
+/// The stage indices a run recorded, from its ledger - the index of record,
 /// rather than a `read_dir` of the directory its bytes happened to land in.
 pub(crate) fn stage_indices(run_id: &str) -> Vec<usize> {
     runstate::read_stages_index(run_id)
         .iter()
         .map(|stage| stage.index)
         .collect()
-}
-
-/// Substring-scan a whole file's bytes without parsing it.
-pub(crate) fn scan_file(path: &std::path::Path, q: &str) -> bool {
-    match std::fs::read(path) {
-        Ok(bytes) => search::contains_ignore_ascii_case(&bytes, q.as_bytes()).is_some(),
-        Err(_) => false,
-    }
 }
 
 /// The searchable `(name, text)` pairs already present in a `RunMeta`.
@@ -153,11 +144,8 @@ pub(crate) fn highlights_for(meta: &RunMeta, q: &str, sources: &[Source]) -> Vec
     out
 }
 
-/// Where in the run's context window the match is, named by region.
-///
-/// Parses `context.json` once. Never replays the journal: that deep-copies a
-/// whole context window per recorded point, which is the cost this design
-/// exists to avoid.
+/// Where in the run's context window the match is, named by region: the
+/// window as of the run's last step.
 pub(crate) fn context_highlight(meta: &RunMeta, q: &str) -> Option<Highlight> {
     let snapshot = runstate::read_context_snapshot(&meta.run_id)?;
     snapshot.regions.iter().find_map(|region| {
@@ -201,143 +189,76 @@ pub(crate) fn logs_highlights(meta: &RunMeta, q: &str) -> Vec<Highlight> {
         .collect()
 }
 
-/// Where in the run's history the match is: a tool call, or the context as it
-/// stood at some earlier point.
+/// Where in the run's history the match is: a tool call or its result, a
+/// question and its answer, a message, or text that entered the context at
+/// some step.
 ///
-/// Both halves matter. Live-testing this against real journals turned up runs
-/// that matched on `q_in=journal` and came back with **no highlight at all** -
-/// a result with no explanation, which is precisely what search-on-the-server
-/// was supposed to fix. The text was in the journal's context records, and only
-/// tool batches were being looked at.
-///
-/// Reads entry *content* and tool calls, and deliberately never the `meta` field
-/// of `Header`/`Progress`/`Checkpoint`. Those carry a whole `RunMeta` including
-/// the webhook signing secret, and a snippet cut from those bytes would put it
-/// in the response. That exclusion is structural - the code never reaches for
-/// the field - rather than a filter applied afterwards.
-///
-/// One residual case is left, and documented rather than papered over: the phase
-/// one filter scans the journal's raw bytes, which *do* include those repeated
-/// metadata blocks. A query matching only there (a workdir path, say) yields a
-/// run with no highlight. The same text is searchable, with a highlight, through
-/// `q_in=meta`.
+/// Reads the run file's steps, the typed record of everything that happened,
+/// and never the webhook's signing secret: the spec that holds it is not a
+/// step, so no snippet can be cut from it.
 pub(crate) fn journal_highlights(meta: &RunMeta, q: &str) -> Option<Highlight> {
-    use leviath_core::run_archive::{RegionDelta, RunRecord};
-
-    /// The first entry in a region whose content matches, named by region.
-    fn in_entries(
-        region_name: &str,
-        entries: &[leviath_core::run_meta::RegionEntrySnapshot],
-        q: &str,
-    ) -> Option<Highlight> {
-        entries.iter().find_map(|entry| {
-            search::find_ignore_ascii_case(&entry.content, q).map(|at| Highlight {
-                field: format!("journal.context.{region_name}"),
-                snippet: search::snippet(&entry.content, at),
-                stage: None,
-            })
-        })
-    }
-
-    /// The first match in one record, or `None` if it carries no matching text.
-    fn in_record(record: &RunRecord, q: &str) -> Option<Highlight> {
-        match record {
-            RunRecord::ToolBatch {
-                calls, stage_index, ..
-            } => calls.iter().find_map(|call| {
-                [
-                    call.arguments.as_str(),
-                    call.result.as_deref().unwrap_or(&call.name),
-                ]
-                .into_iter()
-                .find_map(|text| {
-                    search::find_ignore_ascii_case(text, q).map(|at| Highlight {
-                        field: format!("journal.tool.{}", call.name),
-                        snippet: search::snippet(text, at),
-                        stage: Some(*stage_index),
-                    })
-                })
-            }),
-            RunRecord::ContextCheckpoint { snapshot, .. } => snapshot
-                .regions
-                .iter()
-                .find_map(|region| in_entries(&region.name, &region.entries, q)),
-            RunRecord::ContextDiff { delta, .. } | RunRecord::Progress { delta, .. } => {
-                delta.regions.iter().find_map(|region| match region {
-                    RegionDelta::Set(snapshot) => in_entries(&snapshot.name, &snapshot.entries, q),
-                    RegionDelta::Append { name, entries, .. } => in_entries(name, entries, q),
-                    // Carry no text of their own.
-                    RegionDelta::Clear { .. } | RegionDelta::Remove { .. } => None,
-                })
-            }
-            RunRecord::Checkpoint { context, .. } => context
-                .regions
-                .iter()
-                .find_map(|region| in_entries(&region.name, &region.entries, q)),
-            // A question and the words somebody answered it with. Searchable
-            // because "which run asked me about that" is a question people
-            // actually have, and the prompt is where the tool's own arguments
-            // were shown to them.
-            RunRecord::Interaction {
-                prompt,
-                settlement,
-                tool,
-                ..
-            } => {
-                let answered = match settlement {
-                    leviath_core::interaction::Settlement::Answered { text, feedback, .. } => {
-                        [text.as_deref(), feedback.as_deref()]
-                    }
-                    _ => [None, None],
-                };
-                [Some(prompt.as_str())]
-                    .into_iter()
-                    .chain(answered)
-                    .flatten()
-                    .find_map(|text| {
-                        search::find_ignore_ascii_case(text, q).map(|at| Highlight {
-                            field: match tool {
-                                Some(name) => format!("journal.asked.{name}"),
-                                None => "journal.asked".to_string(),
-                            },
-                            snippet: search::snippet(text, at),
-                            stage: None,
-                        })
-                    })
-            }
-            // Carry no searchable content of their own - only the metadata this
-            // function must not cut a snippet from. An attempt and a failover
-            // are here on purpose: every string they hold is a provider name, a
-            // model name or a classification label, and all three are already
-            // searchable as run metadata, where one hit means the run rather
-            // than one moment in it.
-            RunRecord::Header { .. }
-            | RunRecord::OwnershipChanged { .. }
-            | RunRecord::StatusChanged { .. }
-            | RunRecord::Inference { .. }
-            | RunRecord::InferenceAttempt(_)
-            | RunRecord::InferenceFailover(_)
-            | RunRecord::InferenceUsage { .. }
-            | RunRecord::ToolCallDone { .. }
-            | RunRecord::ContextChange { .. }
-            | RunRecord::ContextTransaction { .. }
-            // An artifact's name and path are on the run's answer, which is
-            // already searchable as run metadata.
-            | RunRecord::ArtifactsProduced { .. }
-            | RunRecord::Message { .. } => None,
-        }
-    }
-
-    // Streamed, stopping at the first matching record: parsing the whole
-    // journal per returned item multiplied the history endpoint's biggest
-    // allocation by the page size.
+    let reader = run_file::open(&meta.run_id).ok()??;
+    let stages = &reader.spec().graph.stages;
     let mut found = None;
-    runstate::visit_run_records(&meta.run_id, &mut |record| match in_record(record, q) {
-        Some(hit) => {
-            found = Some(hit);
-            std::ops::ControlFlow::Break(())
+    let walked = run_file::walk(&meta.run_id, &reader, &mut |step| {
+        let stage = stages.iter().position(|s| s.name == step.cursor.stage);
+        found = in_step(step.delta, stage, q);
+        match found {
+            Some(_) => ControlFlow::Break(()),
+            None => ControlFlow::Continue(()),
         }
-        None => std::ops::ControlFlow::Continue(()),
-    })?;
-    found
+    });
+    walked.ok().and(found)
+}
+
+/// The first match in one step: its events, then the text its context
+/// changes brought in. `stage` is the position of the stage it happened in.
+fn in_step(delta: &StateDelta, stage: Option<usize>, q: &str) -> Option<Highlight> {
+    let hit = |field: String, text: &str, stage: Option<usize>| {
+        search::find_ignore_ascii_case(text, q).map(|at| Highlight {
+            field,
+            snippet: search::snippet(text, at),
+            stage,
+        })
+    };
+    let in_event = |event: &RunEvent| match event {
+        RunEvent::ToolStarted(call) => hit(
+            format!("journal.tool.{}", call.name),
+            &call.args.value().to_string(),
+            stage,
+        ),
+        RunEvent::ToolFinished { result, .. } => {
+            hit("journal.tool_result".to_string(), &result.text, stage)
+        }
+        // A question and the words somebody answered it with. Searchable
+        // because "which run asked me about that" is a question people
+        // actually have, and the prompt is where a tool's own arguments were
+        // shown to them.
+        RunEvent::Settled(settled) => hit(
+            match &settled.tool {
+                Some(name) => format!("journal.asked.{name}"),
+                None => "journal.asked".to_string(),
+            },
+            &settled.prompt,
+            None,
+        ),
+        RunEvent::Answered { answer, .. } => hit("journal.answered".to_string(), answer, None),
+        RunEvent::Message(message) => hit("journal.message".to_string(), &message.text, None),
+        _ => None,
+    };
+    let in_change = |change: &Change| match change {
+        Change::Context(diff) => diff.regions.iter().find_map(|(name, _, entries)| {
+            let (RegionChange::Append(entries) | RegionChange::Replace(entries)) =
+                entries.as_ref()?;
+            entries
+                .iter()
+                .find_map(|entry| hit(format!("journal.context.{name}"), &entry.text, None))
+        }),
+        _ => None,
+    };
+    delta
+        .events
+        .iter()
+        .find_map(in_event)
+        .or_else(|| delta.changes.iter().find_map(in_change))
 }

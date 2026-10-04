@@ -8,7 +8,7 @@ The SVGs in `docs/assets/agents/` are generated from the blueprints in
 python3 docs/assets/agents/src/generate.py --render
 ```
 
-This regenerates every `.mmd` from `crates/leviath-cli/agents/<name>/agent.leviath` and renders
+This regenerates every `.mmd` from `crates/leviath-cli/agents/<name>/agent.toml` and renders
 `<name>.svg` (light) and `<name>-dark.svg` per agent via mermaid-cli (through
 `npx`, downloaded on first use), themed by `theme-light.json` /
 `theme-dark.json`. The README embeds both variants with

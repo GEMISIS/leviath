@@ -10,16 +10,42 @@ use super::*;
 use crate::fanout::FanOutWaiting;
 
 impl WorldHost {
-    /// Service one [`SubAgentOp`] from a tool lane, replying on its oneshot.
+    /// Service one [`SubAgentOp`] from a tool lane, replying on its oneshot
+    /// once the run it names is in the world (see `host::paging`).
     pub(super) fn handle_subagent(&mut self, op: SubAgentOp) {
+        self.page_first(super::paging::Deferred::Sub(op));
+    }
+
+    /// Service one sub-agent op whose run, if it names one, has been paged in.
+    pub(super) fn handle_subagent_now(&mut self, op: SubAgentOp) {
         match op {
             SubAgentOp::Spawn {
-                args,
+                request,
                 parent_run_id,
-                max_depth,
+                reply,
+            } => match self.child_caller(&parent_run_id) {
+                Ok(caller) => self.start(*request, caller, Some(parent_run_id), reply),
+                Err(issues) => {
+                    let _ = reply.send(Err(issues));
+                }
+            },
+            SubAgentOp::Validate {
+                request,
+                parent_run_id,
+                reply,
+            } => match self.child_caller(&parent_run_id) {
+                Ok(caller) => self.validate(*request, caller, reply),
+                Err(issues) => {
+                    let _ = reply.send(Err(issues));
+                }
+            },
+            SubAgentOp::History {
+                run_id,
+                caller_run_id,
+                at,
                 reply,
             } => {
-                let _ = reply.send(self.spawn_child(*args, &parent_run_id, max_depth));
+                self.history(run_id, caller_run_id, at, reply);
             }
             SubAgentOp::Check { run_id, reply } => {
                 let report = self.live_entity(&run_id).and_then(|agent| {
@@ -46,11 +72,12 @@ impl WorldHost {
                     return;
                 }
                 // Page the target in if it was unloaded, so delivery finds it.
-                self.resolve_or_reload(&run_id);
+                let _ = self.resolve_or_reload(&run_id);
                 let ok = self
                     .world
                     .send_message(AgentMessage {
                         agent_id: run_id,
+                        from: caller_run_id,
                         content,
                         target_region,
                         // A sub-agent's `send_message` carries text only.
@@ -70,73 +97,81 @@ impl WorldHost {
         }
     }
 
-    /// Spawn a child agent under `parent_run_id`, linking `ParentRef` /
-    /// `SubAgentChildren` and registering its run id. `Err` if the parent is not
-    /// live, the depth limit is reached, or the spawner rejects it.
-    pub(super) fn spawn_child(
-        &mut self,
-        mut args: SpawnArgs,
+    /// Who a child of `parent_run_id` is started for: that run, with the
+    /// policy it was trusted with and where it sits in its tree. A parent the
+    /// world does not hold, or one placed without a spec, cannot start one.
+    fn child_caller(
+        &self,
         parent_run_id: &str,
-        max_depth: usize,
-    ) -> Result<String, String> {
-        // Record the parentage so the child's run metadata nests it in the tree.
-        args.parent_run_id = Some(parent_run_id.to_string());
+    ) -> Result<crate::spec::env::Caller, crate::spec::issues::SpawnIssues> {
         let parent = self
             .live_entity(parent_run_id)
-            .ok_or_else(|| format!("parent run '{parent_run_id}' is not live"))?
-            // Same world as the child about to be spawned into it, so the raw
-            // entity is what the ECS links want.
+            .ok_or_else(|| host_refusal(format!("parent run '{parent_run_id}' is not live")))?
             .entity();
-        let parent_depth = self
-            .world
-            .world()
+        let world = self.world.world();
+        let spec = world
+            .get::<crate::insert::RunSpecC>(parent)
+            .ok_or_else(|| {
+                host_refusal(format!(
+                    "parent run '{parent_run_id}' has no run spec to start a child from"
+                ))
+            })?
+            .0
+            .clone();
+        let depth = world
             .get::<ParentRef>(parent)
-            .map_or(0, |p| p.depth);
-        let child_depth = parent_depth + 1;
-        if child_depth > max_depth {
-            return Err(format!(
-                "sub-agent depth limit ({max_depth}) reached; not spawning deeper"
-            ));
-        }
-        let run_id = args.run_id.clone();
-        let child = match self.spawner.as_mut() {
-            Some(spawner) => spawner(&mut self.world, &args)?,
-            None => return Err("this daemon cannot spawn agents".to_string()),
+            .map_or(usize::from(spec.placement.depth), |p| p.depth);
+        Ok(crate::spec::env::Caller::Child {
+            parent: spec.run_id.clone(),
+            policy: spec.launch.clone(),
+            depth: u8::try_from(depth).unwrap_or(u8::MAX),
+        })
+    }
+
+    /// Link a placed child to the run that started it: `ParentRef` on the
+    /// child, the child on the parent's `SubAgentChildren` and its persisted
+    /// list of children, and the parent's context carried into the child by
+    /// any context transform its graph declares. A parent that went away
+    /// while the child was starting leaves the child standing on its own.
+    pub(super) fn link_child(&mut self, parent_run_id: &str, child: Entity) {
+        let Some(parent) = self.live_entity(parent_run_id).map(|a| a.entity()) else {
+            tracing::warn!(parent = %parent_run_id, "a child run's parent went away while it started");
+            return;
         };
         let world = self.world.world_mut();
+        let depth = world.get::<ParentRef>(parent).map_or(0, |p| p.depth) + 1;
+        let max_child_depth = world
+            .get::<crate::insert::RunSpecC>(parent)
+            .map_or(0, |s| usize::from(s.0.launch.max_depth));
         world.entity_mut(child).insert(ParentRef {
             parent_entity: parent,
             parent_agent_id: parent_run_id.to_string(),
-            depth: child_depth,
+            depth,
         });
         match world.get_mut::<SubAgentChildren>(parent) {
             Some(mut kids) => kids.children.push(child),
             None => {
                 world.entity_mut(parent).insert(SubAgentChildren {
                     children: vec![child],
-                    max_child_depth: max_depth,
+                    max_child_depth,
                 });
             }
         }
-        // Record the child's run-id on the parent's serializable state so the
-        // tree is persisted (and restart can rebuild `SubAgentChildren`). A
-        // spawning parent always carries `AgentState`.
+        let child_id = world
+            .get::<AgentState>(child)
+            .map(|s| s.agent_id.clone())
+            .unwrap_or_default();
+        // Recorded on the parent's serializable state too, so the tree is in
+        // the parent's run file and a restart can rebuild `SubAgentChildren`.
         world
-            .get_mut::<crate::components::AgentState>(parent)
-            .expect("a spawning parent always has AgentState")
-            .spawned_children_ids
-            .push(run_id.clone());
-        // Seed the child's context from the parent per any declared blueprint
-        // context transform (planner→coder region mapping, etc.).
+            .get_mut::<AgentState>(parent)
+            .into_iter()
+            .for_each(|mut state| state.spawned_children_ids.push(child_id.clone()));
         crate::context_transform::apply_context_transforms(
             world,
             crate::world::AgentId::in_world(world, parent),
             crate::world::AgentId::in_world(world, child),
         );
-        // The spawner ran against this world, so the child is ours.
-        let child_agent = self.world.own_agent(child);
-        self.by_run_id.insert(run_id.clone(), child_agent);
-        Ok(run_id)
     }
 
     /// Cancel a run and every descendant, paging the root in from disk first if it
@@ -168,7 +203,7 @@ impl WorldHost {
         }
         // Both ends as entities: the host already maps run ids to them, and
         // comparing entities avoids re-reading an id component per node.
-        let (Some(target), Some(root)) = (
+        let (Ok(target), Ok(root)) = (
             self.resolve_or_reload(run_id),
             self.resolve_or_reload(ancestor),
         ) else {
@@ -215,7 +250,7 @@ impl WorldHost {
     /// Reports whether anything took, which is what tells a caller a
     /// still-running tree apart from one that was already finished.
     pub(super) fn pause_tree(&mut self, run_id: &str) -> bool {
-        let Some(root) = self.resolve_or_reload(run_id) else {
+        let Ok(root) = self.resolve_or_reload(run_id) else {
             return false;
         };
         let mut acted = false;
@@ -234,14 +269,22 @@ impl WorldHost {
     /// a fan-out parent is `Waiting`, which `PipelineWorld::resume` refuses, so
     /// resuming the tree through the parent would otherwise report failure and
     /// leave every paused child paused with nothing left to resume them.
-    pub(super) fn resume_tree(&mut self, run_id: &str) -> bool {
+    pub(super) fn resume_tree(&mut self, run_id: &str) -> Result<bool, String> {
         // Whether this run had to come back from disk. Paging in a stopped run
         // restores it ready to work, so the `resume` calls below find nothing
         // paused and all report false - while the run is, in fact, going again.
-        // Loading it back is the act of resuming it, so it counts as one.
-        let was_unloaded = self.live_entity(run_id).is_none();
-        let Some(root) = self.resolve_or_reload(run_id) else {
-            return false;
+        // Loading it back is the act of resuming it, so it counts as one. The
+        // page-in ran just before this op (see `host::paging`), and how it went
+        // is kept while the op is handled.
+        let was_unloaded = self.paged.get(run_id).is_some_and(Result::is_ok);
+        let root = match self.resolve_or_reload(run_id) {
+            Ok(root) => root,
+            // Still held: the bind was tried again and still fails, so say
+            // what to put back.
+            Err(NotPlaced::Held(entry)) => {
+                return Err(Self::held_resume_refusal(run_id, &entry));
+            }
+            Err(_) => return Ok(false),
         };
         let mut acted = was_unloaded;
         for e in self.subtree(root.entity()) {
@@ -254,11 +297,11 @@ impl WorldHost {
             // its parent, and the pause stopped all of them.
             self.on_resumed(e);
         }
-        acted
+        Ok(acted)
     }
 
     pub(super) fn cancel_tree(&mut self, run_id: &str) -> bool {
-        let Some(root) = self.resolve_or_reload(run_id) else {
+        let Ok(root) = self.resolve_or_reload(run_id) else {
             return false;
         };
         let mut cancelled = false;
@@ -276,6 +319,22 @@ impl WorldHost {
             }
         }
         cancelled
+    }
+
+    /// Cancel a run the world cannot hold, on its file. A run held out of
+    /// the world for this machine moves from the held rows to the finished
+    /// ones, cancelled.
+    pub(super) fn force_cancel(&mut self, run_id: &str) -> bool {
+        let forced = self
+            .force_terminator
+            .as_mut()
+            .is_some_and(|terminate| terminate(run_id));
+        if forced && let Some(mut entry) = self.parked.remove(run_id) {
+            entry.status = AgentStatus::Cancelled;
+            entry.wait_reason = None;
+            self.record_finished(entry, chrono::Utc::now().timestamp());
+        }
+        forced
     }
 
     /// A sender for [`SubAgentOp`]s. The daemon hands a clone to each agent's tool

@@ -1,24 +1,25 @@
-//! Mutators for what a stage takes and hands back as mime: the
-//! `[stages.<name>.input]` lists, the `[stages.<name>.output]` format and
-//! `[[artifacts]]` declarations, and the `[stages.<name>.tool_accepts]`
-//! table that says what each tool may be handed. What a region takes
-//! (`accepts`) is a region key like any other and lives in `regions.rs`.
+//! Mutators for what a stage takes and hands back as mime: its
+//! `input_accepts` and `input_as_text` lists, its `output` format and
+//! `artifacts`, and its `tool_accepts` table that says what each tool may be
+//! handed. What a region takes (`accepts`) is a region setting like any
+//! other and lives in `regions.rs`.
 
-use toml_edit::{Array, ArrayOfTables, InlineTable, Item, Table, TableLike, Value};
+use toml_edit::{Array, InlineTable, Item, TableLike, Value};
 
 use super::doc::ManifestDoc;
 use super::tables::{
-    child, child_mut, ensure_parent, get_bool, get_str, get_strings, remove_and_report_empty,
-    set_bool, set_or_remove_str, set_str, set_strings,
+    ensure_sub, get_bool, get_str, get_strings, list_tables, list_tables_mut, push_table,
+    remove_and_report_empty, remove_table, set_bool, set_or_remove_str, set_str, set_strings, sub,
+    sub_mut,
 };
 use super::{EditError, require_name};
 
-/// One `[[stages.<name>.output.artifacts]]` entry as the editor shows it.
+/// One `output.artifacts` entry as the editor shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ArtifactView {
     /// `name`: what the submission calls the file.
     pub name: String,
-    /// `type`: the mime type it must be, or a pattern (`video/*`).
+    /// `mime_type`: the type it must be, or a pattern (`video/*`).
     pub mime_type: String,
     /// `required = true`.
     pub required: bool,
@@ -26,32 +27,32 @@ pub(crate) struct ArtifactView {
     pub description: String,
 }
 
-/// Which `[stages.<name>.input]` list.
+/// Which of a stage's input lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputList {
-    /// `accepts`: what the stage takes as parts, when its regions do not
-    /// already say.
+    /// `input_accepts`: what the stage takes as parts, when its regions do
+    /// not already say.
     Accepts,
-    /// `as_text`: types whose parts reach the model as text whatever it
-    /// takes.
+    /// `input_as_text`: types whose parts reach the model as text whatever
+    /// it takes.
     AsText,
 }
 
 impl InputList {
     fn key(self) -> &'static str {
         match self {
-            InputList::Accepts => "accepts",
-            InputList::AsText => "as_text",
+            InputList::Accepts => "input_accepts",
+            InputList::AsText => "input_as_text",
         }
     }
 }
 
-/// One key of an artifact declaration.
+/// One setting of an artifact declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ArtifactField {
     /// `name`; refused when another artifact of the stage has it.
     Name(String),
-    /// `type`; never emptied, a declaration always has one.
+    /// `mime_type`; never emptied, a declaration always has one.
     Type(String),
     /// `required = true`; off deletes the key.
     Required(bool),
@@ -76,19 +77,11 @@ pub(crate) fn split_list(text: &str) -> Vec<String> {
     out
 }
 
-/// `[stages.<name>.output] format`, or empty.
-pub(super) fn output_format_of(stage: &Item) -> String {
-    child(stage, "output")
-        .and_then(|output| get_str(output, "format"))
-        .unwrap_or_default()
-        .to_string()
-}
-
-/// `[stages.<name>.tool_accepts]`: each tool and what it may be handed, in
+/// A stage's `tool_accepts`: each tool and what it may be handed, in
 /// document order. An entry that is not a list of strings is left out (and
 /// left alone).
-pub(super) fn tool_limits_of(stage: &Item) -> Vec<(String, Vec<String>)> {
-    child(stage, "tool_accepts")
+pub(super) fn tool_limits_of(stage: &dyn TableLike) -> Vec<(String, Vec<String>)> {
+    sub(stage, "tool_accepts")
         .map(|limits| {
             limits
                 .iter()
@@ -99,121 +92,30 @@ pub(super) fn tool_limits_of(stage: &Item) -> Vec<(String, Vec<String>)> {
         .unwrap_or_default()
 }
 
-/// The keys of the manifest's own `[mime_types]` rows, as written.
+/// The patterns of the graph's own `mime_types` rows, as written.
 pub(crate) fn mime_type_keys(doc: &ManifestDoc) -> Vec<String> {
-    doc.doc()
-        .get("mime_types")
-        .and_then(Item::as_table_like)
+    sub(doc.graph(), "mime_types")
         .map(|rows| rows.iter().map(|(key, _)| key.to_string()).collect())
-        .unwrap_or_default()
-}
-
-/// The `[stages.<name>.input]` list `which`, or empty.
-pub(super) fn input_list(stage: &Item, which: InputList) -> Vec<String> {
-    child(stage, "input")
-        .map(|input| get_strings(input, which.key()))
         .unwrap_or_default()
 }
 
 /// The artifacts a stage declares, in order. Both shapes of list are read:
 /// `[[...artifacts]]` tables and an inline `artifacts = [{ ... }]`.
-pub(super) fn artifacts_of(stage: &Item) -> Vec<ArtifactView> {
-    child(stage, "output")
+pub(super) fn artifacts_of(stage: &dyn TableLike) -> Vec<ArtifactView> {
+    sub(stage, "output")
         .and_then(|output| output.get("artifacts"))
-        .map(|list| {
-            artifact_tables(list)
-                .into_iter()
-                .map(artifact_view)
-                .collect()
-        })
+        .map(|list| list_tables(list).into_iter().map(artifact_view).collect())
         .unwrap_or_default()
-}
-
-/// The tables of an artifact list, whichever shape it has; nothing for a
-/// value that is not a list of tables.
-fn artifact_tables(list: &Item) -> Vec<&dyn TableLike> {
-    if let Some(tables) = list.as_array_of_tables() {
-        return tables.iter().map(|t| t as &dyn TableLike).collect();
-    }
-    list.as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_inline_table)
-                .map(|t| t as &dyn TableLike)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// [`artifact_tables`], mutably.
-fn artifact_tables_mut(list: &mut Item) -> Vec<&mut dyn TableLike> {
-    match list {
-        Item::ArrayOfTables(tables) => tables.iter_mut().map(|t| t as &mut dyn TableLike).collect(),
-        Item::Value(Value::Array(array)) => array
-            .iter_mut()
-            .filter_map(Value::as_inline_table_mut)
-            .map(|t| t as &mut dyn TableLike)
-            .collect(),
-        _ => Vec::new(),
-    }
 }
 
 fn artifact_view(table: &dyn TableLike) -> ArtifactView {
     ArtifactView {
         name: get_str(table, "name").unwrap_or_default().to_string(),
-        mime_type: get_str(table, "type").unwrap_or_default().to_string(),
+        mime_type: get_str(table, "mime_type").unwrap_or_default().to_string(),
         required: get_bool(table, "required") == Some(true),
         description: get_str(table, "description")
             .unwrap_or_default()
             .to_string(),
-    }
-}
-
-/// Append a `{ name, type = "*/*" }` entry to a list, in the list's shape.
-fn push_artifact(list: &mut Item, name: &str) -> Result<(), EditError> {
-    if let Some(tables) = list.as_array_of_tables_mut() {
-        let mut table = Table::new();
-        table.insert("name", Item::Value(Value::from(name)));
-        table.insert("type", Item::Value(Value::from(NEW_ARTIFACT_TYPE)));
-        tables.push(table);
-        return Ok(());
-    }
-    let Some(array) = list.as_array_mut() else {
-        return Err(EditError::NotATable("artifacts".to_string()));
-    };
-    let mut table = InlineTable::new();
-    table.insert("name", Value::from(name));
-    table.insert("type", Value::from(NEW_ARTIFACT_TYPE));
-    array.push(Value::InlineTable(table));
-    Ok(())
-}
-
-/// Drop the `index`th table of a list; `false` when there is none. An
-/// inline list is counted by its tables, the way it is read, so a stray
-/// value in it neither shifts the count nor gets removed in a table's
-/// place.
-fn remove_artifact(list: &mut Item, index: usize) -> bool {
-    match list {
-        Item::ArrayOfTables(tables) if index < tables.len() => {
-            tables.remove(index);
-            true
-        }
-        Item::Value(Value::Array(array)) => {
-            let raw = array
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| v.is_inline_table())
-                .map(|(i, _)| i)
-                .nth(index);
-            match raw {
-                Some(i) => {
-                    array.remove(i);
-                    true
-                }
-                None => false,
-            }
-        }
-        _ => false,
     }
 }
 
@@ -224,69 +126,37 @@ fn no_artifact(index: usize) -> EditError {
 impl ManifestDoc {
     /// The artifacts a stage declares; empty for a stage that is not there.
     pub(crate) fn artifacts(&self, stage: &str) -> Vec<ArtifactView> {
-        self.stage_item(stage).map(artifacts_of).unwrap_or_default()
+        self.stage_table(stage)
+            .map(artifacts_of)
+            .unwrap_or_default()
     }
 
-    /// Write one `[stages.<name>.input]` list. An empty list deletes the
-    /// key, and the `input` table with it when nothing else is left there.
+    /// Write one of a stage's input lists. An empty list deletes the key.
     pub(crate) fn set_stage_input(
         &mut self,
         stage: &str,
         which: InputList,
         values: &[String],
     ) -> Result<(), EditError> {
-        let stage_item = self
-            .stage_item_mut(stage)
-            .ok_or_else(|| EditError::NoSuchStage(stage.to_string()))?;
-        if values.is_empty() {
-            if let Some(input) = child_mut(stage_item, "input")
-                && remove_and_report_empty(
-                    input.as_table_like_mut().expect("child_mut checked"),
-                    which.key(),
-                )
-            {
-                stage_item
-                    .as_table_like_mut()
-                    .expect("a stage is a table")
-                    .remove("input");
-            }
-            return Ok(());
-        }
-        let input = ensure_parent(stage_item, "input")?;
-        set_strings(
-            input.as_table_like_mut().expect("ensure_parent checked"),
-            which.key(),
-            values,
-        );
+        let table = self.stage_table_mut(stage)?;
+        super::stages::set_or_remove_list(table, which.key(), values);
         Ok(())
     }
 
-    /// Set `[stages.<name>.output] format`; empty deletes it, and the
-    /// `output` table with it when nothing else is left there.
+    /// Set a stage's `output.format`; empty deletes it, and the `output`
+    /// table with it when nothing else is left there.
     pub(crate) fn set_output_format(&mut self, stage: &str, format: &str) -> Result<(), EditError> {
-        let stage_item = self
-            .stage_item_mut(stage)
-            .ok_or_else(|| EditError::NoSuchStage(stage.to_string()))?;
+        let table = self.stage_table_mut(stage)?;
         if format.is_empty() {
-            if let Some(output) = child_mut(stage_item, "output")
-                && remove_and_report_empty(
-                    output.as_table_like_mut().expect("child_mut checked"),
-                    "format",
-                )
+            if let Some(output) = sub_mut(table, "output")
+                && remove_and_report_empty(output, "format")
             {
-                stage_item
-                    .as_table_like_mut()
-                    .expect("a stage is a table")
-                    .remove("output");
+                table.remove("output");
             }
             return Ok(());
         }
-        let output = ensure_parent(stage_item, "output")?;
-        set_str(
-            output.as_table_like_mut().expect("ensure_parent checked"),
-            "format",
-            format,
-        );
+        let output = ensure_sub(table, "output")?;
+        set_str(output, "format", format);
         Ok(())
     }
 
@@ -300,29 +170,17 @@ impl ManifestDoc {
         types: &[String],
     ) -> Result<(), EditError> {
         require_name(tool)?;
-        let stage_item = self
-            .stage_item_mut(stage)
-            .ok_or_else(|| EditError::NoSuchStage(stage.to_string()))?;
+        let table = self.stage_table_mut(stage)?;
         if types.is_empty() {
-            if let Some(limits) = child_mut(stage_item, "tool_accepts")
-                && remove_and_report_empty(
-                    limits.as_table_like_mut().expect("child_mut checked"),
-                    tool,
-                )
+            if let Some(limits) = sub_mut(table, "tool_accepts")
+                && remove_and_report_empty(limits, tool)
             {
-                stage_item
-                    .as_table_like_mut()
-                    .expect("a stage is a table")
-                    .remove("tool_accepts");
+                table.remove("tool_accepts");
             }
             return Ok(());
         }
-        let limits = ensure_parent(stage_item, "tool_accepts")?;
-        set_strings(
-            limits.as_table_like_mut().expect("ensure_parent checked"),
-            tool,
-            types,
-        );
+        let limits = ensure_sub(table, "tool_accepts")?;
+        set_strings(limits, tool, types);
         Ok(())
     }
 
@@ -334,28 +192,21 @@ impl ManifestDoc {
         if self.artifacts(stage).iter().any(|a| a.name == name) {
             return Err(EditError::Taken(name.to_string()));
         }
-        let stage_item = self
-            .stage_item_mut(stage)
-            .ok_or_else(|| EditError::NoSuchStage(stage.to_string()))?;
-        let output = ensure_parent(stage_item, "output")?;
-        let inline = output.is_inline_table();
-        let table = output.as_table_like_mut().expect("ensure_parent checked");
-        if let Some(list) = table.get_mut("artifacts") {
-            return push_artifact(list, name);
+        let table = self.stage_table_mut(stage)?;
+        let output = ensure_sub(table, "output")?;
+        if !output.contains_key("artifacts") {
+            output.insert("artifacts", Item::Value(Value::Array(Array::new())));
         }
-        // A fresh list in the parent's shape: `[[stages.x.output.artifacts]]`
-        // under a headed stage, `artifacts = [{ ... }]` under an inline one.
-        let mut list = if inline {
-            Item::Value(Value::Array(Array::new()))
-        } else {
-            Item::ArrayOfTables(ArrayOfTables::new())
-        };
-        push_artifact(&mut list, name).expect("a fresh list is a list");
-        table.insert("artifacts", list);
-        Ok(())
+        let list = output
+            .get_mut("artifacts")
+            .expect("present or inserted just above");
+        let mut entry = InlineTable::new();
+        entry.insert("name", Value::from(name));
+        entry.insert("mime_type", Value::from(NEW_ARTIFACT_TYPE));
+        push_table(list, entry)
     }
 
-    /// Change one key of the stage's `index`th artifact.
+    /// Change one setting of the stage's `index`th artifact.
     pub(crate) fn set_artifact(
         &mut self,
         stage: &str,
@@ -382,7 +233,7 @@ impl ManifestDoc {
                         "an artifact needs a type, or a pattern such as image/*".to_string(),
                     ));
                 }
-                set_str(table, "type", &mime_type);
+                set_str(table, "mime_type", &mime_type);
             }
             ArtifactField::Required(on) => {
                 if on {
@@ -399,24 +250,18 @@ impl ManifestDoc {
     /// Drop the stage's `index`th artifact, and the emptied list and
     /// `output` table with it.
     pub(crate) fn delete_artifact(&mut self, stage: &str, index: usize) -> Result<(), EditError> {
-        let stage_item = self
-            .stage_item_mut(stage)
-            .ok_or_else(|| EditError::NoSuchStage(stage.to_string()))?;
-        let Some(output) = child_mut(stage_item, "output") else {
+        let table = self.stage_table_mut(stage)?;
+        let Some(output) = sub_mut(table, "output") else {
             return Err(no_artifact(index));
         };
-        let table = output.as_table_like_mut().expect("child_mut checked");
-        let Some(list) = table.get_mut("artifacts") else {
+        let Some(list) = output.get_mut("artifacts") else {
             return Err(no_artifact(index));
         };
-        if !remove_artifact(list, index) {
+        if !remove_table(list, index) {
             return Err(no_artifact(index));
         }
-        if artifact_tables(list).is_empty() && remove_and_report_empty(table, "artifacts") {
-            stage_item
-                .as_table_like_mut()
-                .expect("a stage is a table")
-                .remove("output");
+        if list_tables(list).is_empty() && remove_and_report_empty(output, "artifacts") {
+            table.remove("output");
         }
         Ok(())
     }
@@ -427,17 +272,10 @@ impl ManifestDoc {
         stage: &str,
         index: usize,
     ) -> Result<&mut dyn TableLike, EditError> {
-        let stage_item = self
-            .stage_item_mut(stage)
-            .ok_or_else(|| EditError::NoSuchStage(stage.to_string()))?;
-        child_mut(stage_item, "output")
-            .and_then(|output| {
-                output
-                    .as_table_like_mut()
-                    .expect("child_mut checked")
-                    .get_mut("artifacts")
-            })
-            .and_then(|list| artifact_tables_mut(list).into_iter().nth(index))
+        let table = self.stage_table_mut(stage)?;
+        sub_mut(table, "output")
+            .and_then(|output| output.get_mut("artifacts"))
+            .and_then(|list| list_tables_mut(list).into_iter().nth(index))
             .ok_or_else(|| no_artifact(index))
     }
 }

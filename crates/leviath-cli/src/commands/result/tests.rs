@@ -11,7 +11,7 @@ fn answer(content: &str, format: Option<&str>) -> leviath_core::FinalOutput {
     )
 }
 
-/// `render` takes the answer directly now: `meta.json` carries only the
+/// `render` takes the answer directly: the run's record carries only the
 /// descriptor, and the caller fetches the bytes from the sidecar.
 fn shown(output: Option<&leviath_core::FinalOutput>, json: bool, raw: bool) -> Option<String> {
     render("run-1", output, json, raw)
@@ -141,7 +141,7 @@ fn raw_output_carries_no_file_list() {
     assert_eq!(out, "just the answer\n");
 }
 
-/// End to end over the real files: `meta.json` says there is an answer, the
+/// End to end over the real files: the run file says there is an answer, the
 /// sidecar beside it holds the bytes. Both have to line up, because a run whose
 /// descriptor says yes and whose sidecar is missing reads as no answer at all.
 #[tokio::test]

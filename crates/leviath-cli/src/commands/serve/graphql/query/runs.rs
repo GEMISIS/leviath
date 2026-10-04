@@ -371,3 +371,17 @@ pub(crate) async fn open_interactions(
         .gql()?;
     super::super::types::interaction::open(open, filter, order_by, first, after).await
 }
+
+/// Every question asked by a run the daemon holds off this machine, read off
+/// each held run's file. None can be answered until its run is back.
+pub(crate) async fn held_interactions(
+    ctx: &Context<'_>,
+    filter: Option<super::super::types::interaction::InteractionFilter>,
+    order_by: Option<Vec<super::super::types::interaction::InteractionOrder>>,
+    first: i32,
+    after: Option<Cursor>,
+) -> async_graphql::Result<Connection<super::super::types::interaction::Interaction>> {
+    let state = ctx.data_unchecked::<AppState>();
+    let held = super::super::super::core::held::held_questions(&state.control).await;
+    super::super::types::interaction::held(held, filter, order_by, first, after).await
+}

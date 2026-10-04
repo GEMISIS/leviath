@@ -128,7 +128,7 @@ async fn a_conflict_names_the_act_it_refused() {
 /// A run that finishes while the control request is in flight is a conflict,
 /// not an act that landed.
 ///
-/// Both surfaces read this: `POST /api/agents/{id}/cancel` answers 409 and the
+/// Both surfaces read this: `POST /api/runs/{id}/cancel` answers 409 and the
 /// GraphQL sweep reports `ALREADY_FINISHED`. The record is read on each side of
 /// the request, because a run over in the daemon's world has not had its record
 /// written yet when the first read happens, and the daemon's cancel is
@@ -173,20 +173,6 @@ async fn a_cancel_that_lands_is_not_a_conflict() {
     .await;
 }
 
-/// A run still taking messages can be cancelled: finishing its stages is not
-/// the same as being over.
-#[tokio::test]
-async fn a_run_that_still_takes_messages_can_be_cancelled() {
-    crate::runstate::with_isolated_runs_dir_async("lifecycle-interactive", |_d| async move {
-        create_run(&run_in("run-open", RunStatus::CompleteInteractive)).expect("run written");
-        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
-        act(&state_with(control), "run-open", Action::Cancel)
-            .await
-            .expect("an interactive run can be cancelled");
-    })
-    .await;
-}
-
 /// The daemon's "no" is one answer for several reasons, so the failure names
 /// the reasons rather than claiming the run does not exist.
 #[tokio::test]
@@ -206,12 +192,31 @@ async fn a_refusal_names_what_it_could_mean() {
     }
 }
 
+/// A run the daemon still cannot take back on this machine stays paused, and
+/// the failure is a conflict that says what to put back.
+#[tokio::test]
+async fn a_held_run_says_why_it_did_not_resume() {
+    let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Error {
+        message: "run 'held' cannot go on on this machine as it stands: put 'openai' back"
+            .to_string(),
+    });
+    let failure = act(&state_with(control), "held", Action::Resume)
+        .await
+        .expect_err("still held");
+    assert_eq!(failure.code(), "CONFLICT");
+    assert!(
+        failure.to_string().contains("put 'openai' back"),
+        "{failure}"
+    );
+}
+
 /// An answer to a different question is this server's problem, not the
 /// caller's, and it is reported as one.
 #[tokio::test]
 async fn an_answer_to_another_question_is_internal() {
     let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
         run_id: "x".to_string(),
+        warnings: Default::default(),
     });
     let failure = act(&state_with(control), "run-a", Action::Pause)
         .await

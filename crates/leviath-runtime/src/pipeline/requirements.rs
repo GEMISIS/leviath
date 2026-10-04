@@ -5,6 +5,7 @@
 //! Distinct from `gate.rs`, which is the taint gate on tool output.
 
 use super::*;
+use crate::insert::RunSpecC;
 
 /// `requires_children` gate (exclusive, mirrors the fan-out wait): a stage marked
 /// `requires_children` may not transition while any of the agent's spawned
@@ -22,13 +23,13 @@ pub(crate) fn gate_requires_children(world: &mut World) {
     {
         let mut q = world.query_filtered::<(
             Entity,
-            &AgentBlueprint,
+            &RunSpecC,
             &StageCursor,
             &SubAgentChildren,
             &AgentState,
         ), With<ResolveTransition>>();
-        for (e, bp, cursor, children, _) in q.iter(world) {
-            if bp.0.stages[cursor.index].requires_children {
+        for (e, spec, cursor, children, _) in q.iter(world) {
+            if spec.0.graph.stages[cursor.index].requires_children {
                 candidates.push((e, children.children.clone()));
             }
         }
@@ -89,6 +90,11 @@ pub(crate) fn gate_requires_children(world: &mut World) {
 /// warning). Overridable per stage via `max_revisits`.
 pub(crate) const DEFAULT_REQUIRED_REENTRY_CAP: usize = 3;
 
+/// How many times a stage is re-run for a missing final output before it is
+/// let through with the run's `output_forced` flag set. The same as the gate
+/// budget, and independent of a stage's `max_revisits`.
+const OUTPUT_REENTRY_CAP: usize = 3;
+
 /// Counts how many times the current stage has been re-run to satisfy required
 /// context regions. Absent ⇒ 0; reset when a new stage is entered.
 #[derive(Component, Debug, Clone, Copy)]
@@ -99,42 +105,31 @@ pub(crate) struct RequiredReentries(pub usize);
 /// context-writing tool (gating a stage that can't populate the region would loop
 /// pointlessly). Ported from the imperative `unmet_required_regions`.
 pub(crate) fn unmet_required_regions(
-    blueprint: &leviath_core::Blueprint,
-    stage: &leviath_core::Stage,
+    graph: &crate::spec::graph::RunGraph,
+    stage: &crate::spec::graph::StageDef,
     window: &ContextWindow,
 ) -> Vec<(String, Option<String>)> {
-    let can_write = stage.grants_all_builtins()
-        || stage
-            .available_tools
-            .iter()
-            .any(|t| t == "context_write" || t == "context_append");
+    let can_write = spec_view::grants_all_builtins(stage)
+        || spec_view::named_tools(stage).any(|t| t == "context_write" || t == "context_append");
     if !can_write {
         return Vec::new();
     }
-    let layout = stage
-        .context_layout
-        .as_ref()
-        .unwrap_or(&blueprint.context_layout);
-    layout
+    graph
+        .layout_for(stage)
         .regions
         .iter()
         .filter(|r| r.required)
-        // Caller-input regions are validated (and seeded) at spawn, not written
+        // Regions an input fills are checked (and seeded) at spawn, not written
         // by the agent - skip them here so this gate never nags the agent to
         // populate a slot the caller owns.
-        .filter(|r| {
-            !matches!(
-                r.seed,
-                Some(leviath_core::layout::RegionSeed::CallerInput { .. })
-            )
-        })
+        .filter(|r| !spec_view::input_fills(graph, r.name.as_str()))
         .filter(|r| {
             window
-                .get_region(&r.name)
+                .get_region(r.name.as_str())
                 .map(|reg| reg.content.is_empty())
                 .unwrap_or(true)
         })
-        .map(|r| (r.name.clone(), r.required_message.clone()))
+        .map(|r| (r.name.to_string(), r.required_message.clone()))
         .collect()
 }
 
@@ -164,7 +159,7 @@ pub(crate) fn inject_required_region_nudges(
 /// lifetimes: the borrow is bound when the query is fetched.
 type ContextRegionQuery = (
     Entity,
-    &'static AgentBlueprint,
+    &'static RunSpecC,
     &'static StageCursor,
     &'static mut ContextWindow,
     Option<&'static RequiredReentries>,
@@ -183,7 +178,7 @@ pub(crate) fn require_context_regions(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, bp, cursor, mut window, reentries, outcome, mut flags) in agents.iter_mut() {
+    for (entity, spec, cursor, mut window, reentries, outcome, mut flags) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         // A stage that gave up is not the last word: `sources_index` abandoned in
         // `gather` can be written by `analyze`, and then the artifact exists.
@@ -207,12 +202,14 @@ pub(crate) fn require_context_regions(
         if outcome.is_some() {
             continue; // error / max-iterations transition takes precedence
         }
-        let stage = &bp.0.stages[cursor.index];
-        let unmet = unmet_required_regions(&bp.0, stage, &window);
+        let stage = &spec.0.graph.stages[cursor.index];
+        let unmet = unmet_required_regions(&spec.0.graph, stage, &window);
         if unmet.is_empty() {
             continue;
         }
-        let cap = stage.max_revisits.unwrap_or(DEFAULT_REQUIRED_REENTRY_CAP);
+        let cap = stage
+            .max_revisits
+            .map_or(DEFAULT_REQUIRED_REENTRY_CAP, |n| n as usize);
         let round = reentries.map_or(0, |r| r.0);
         if round >= cap {
             let names: Vec<&str> = unmet.iter().map(|(n, _)| n.as_str()).collect();
@@ -269,7 +266,7 @@ const MISSING_OUTPUT_NUDGE: &str = "This stage is not finished: you have not cal
 /// lifetimes: the borrow is bound when the query is fetched.
 type FinalOutputQuery = (
     Entity,
-    &'static AgentBlueprint,
+    &'static RunSpecC,
     &'static StageCursor,
     &'static AgentState,
     &'static mut ContextWindow,
@@ -286,7 +283,7 @@ type FinalOutputQuery = (
 /// The same shape as [`require_context_regions`] and the edge gate's
 /// `require_modifications`, and deliberately so: a missing output never strands
 /// a run. When the re-entry budget is spent the transition proceeds and the run
-/// records `output_forced`, so a caller reading `meta.json` can tell "no answer
+/// records `output_forced`, so a caller reading the run's flags can tell "no answer
 /// because the agent never gave one" from "no answer because nobody asked".
 ///
 /// Skipped when the stage ended on an error or max-iterations outcome, which
@@ -304,7 +301,7 @@ pub(crate) fn require_final_output(
     crate::tick_scope::clear();
     for (
         entity,
-        bp,
+        spec,
         cursor,
         state,
         mut window,
@@ -316,7 +313,7 @@ pub(crate) fn require_final_output(
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
-        let stage = &bp.0.stages[cursor.index];
+        let stage = &spec.0.graph.stages[cursor.index];
         if !stage.require_output {
             continue;
         }
@@ -350,8 +347,10 @@ pub(crate) fn require_final_output(
         // a pure "bytes in, bytes out" agent needs no text model at all. A
         // stage that produced nothing to satisfy its declared artifacts falls
         // through to the nudge below, exactly as before.
-        if let Some(output) = crate::output_tool::auto_emit::try_emit(
-            stage,
+        let targets: Vec<&str> = stage.output_routing.values().map(|r| r.as_str()).collect();
+        if let Some(output) = crate::output_tool::auto_emit::try_emit_for(
+            stage.name.as_str(),
+            &targets,
             stage_inf.and_then(|si| si.output.as_ref()),
             chrono::Utc::now().timestamp(),
             &mut window,
@@ -369,7 +368,7 @@ pub(crate) fn require_final_output(
         // context, and an output stage runs last, when that context is at its
         // largest: an agent with `max_revisits = 10` billed ten full prompts to
         // fail to say one word.
-        let cap = leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP;
+        let cap = OUTPUT_REENTRY_CAP;
         let round = reentries.map_or(0, |r| r.0);
         if round >= cap {
             tracing::warn!(
@@ -407,7 +406,7 @@ pub(crate) struct FanOutReentries(pub usize);
 /// the borrow is bound when the query is fetched.
 type RequireFanOutQuery = (
     Entity,
-    &'static AgentBlueprint,
+    &'static RunSpecC,
     &'static StageCursor,
     &'static mut ContextWindow,
     Option<&'static FanOutReentries>,
@@ -435,12 +434,12 @@ pub(crate) fn require_fan_out(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, bp, cursor, mut window, reentries, outcome, fanned_out, mut flags) in
+    for (entity, spec, cursor, mut window, reentries, outcome, fanned_out, mut flags) in
         agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
-        let stage = &bp.0.stages[cursor.index];
-        let leviath_core::blueprint::StageMode::FanOut { config } = &stage.mode else {
+        let stage = &spec.0.graph.stages[cursor.index];
+        let crate::spec::graph::StageMode::FanOut(config) = &stage.mode else {
             continue;
         };
         // The stage's own budget when it set one; a small or local model may
@@ -448,7 +447,9 @@ pub(crate) fn require_fan_out(
         // refusal rather than pay for retries that will not land.
         let cap = config
             .max_attempts
-            .unwrap_or(leviath_core::blueprint::DEFAULT_FAN_OUT_ATTEMPTS);
+            .map_or(crate::spec::graph::FanOutDef::DEFAULT_MAX_ATTEMPTS, |n| {
+                n as usize
+            });
         // Set by every accepted call and cleared on stage entry, so its
         // presence means "this entry has already fanned out" rather than "this
         // run has, at some point".
@@ -474,7 +475,7 @@ pub(crate) fn require_fan_out(
             );
             crate::pipeline::note_unusable_split(
                 &mut window,
-                &stage.name,
+                stage.name.as_str(),
                 "the stage never called `fan_out`",
             );
             if let Some(flags) = flags.as_mut() {

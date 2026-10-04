@@ -21,7 +21,7 @@ pub(super) struct Resolved {
     pub(super) provider: Arc<dyn Provider>,
 }
 
-/// Run the real stage-model fallback chain against an **empty** [`ModelConfig`],
+/// Run the real stage-model fallback chain against an **empty** [`ModelChoice`],
 /// so what comes back is what the user's config alone would pick for a stage
 /// that states no preference of its own.
 ///
@@ -43,12 +43,7 @@ pub(super) fn resolve_check(
     model_override: Option<&str>,
     registry: &ProviderRegistry,
 ) -> (Check, Option<Resolved>) {
-    let empty = ModelConfig {
-        models: Vec::new(),
-        allow_user_default: true,
-        parameters: std::collections::HashMap::new(),
-        request_timeout_secs: None,
-    };
+    let empty = ModelChoice::default();
     let defaults = model_defaults(config);
     let (provider_name, model) = resolve_stage_model(&empty, model_override, &defaults, registry);
 

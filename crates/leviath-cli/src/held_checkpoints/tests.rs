@@ -1,46 +1,51 @@
 use super::*;
 
-/// A manifest with one interactive stage whose point carries `unattended`, and
-/// one autonomous stage whose `required_tools` keep a blocking tool.
-fn manifest(unattended: &str, required: &str) -> String {
+/// A blueprint with one stage whose interaction point carries `unattended`
+/// and whose `required_tools` keep `required`, then an autonomous stage.
+fn blueprint(unattended: &str, required: &str) -> String {
     format!(
         r#"
-[agent]
+[blueprint]
 name = "held-fixture"
 version = "0.1.0"
 description = "a fixture"
 
-[stages.plan]
-mode = "interactive_points"
-model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
-max_iterations = 5
-available_tools = ["read_file", "ask_user_text"]
-required_tools = [{required}]
+[graph]
+edges = [{{ name = "build", from = "plan", to = "build" }}]
 
-[[stages.plan.interaction_points]]
+[[graph.stages]]
+name = "plan"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
+tools = ["read_file", "ask_user_text"]
+required_tools = [{required}]
+max_iterations = 5
+
+[[graph.stages.mode.interactive_points]]
 name = "plan_approval"
 prompt = "Review the plan"
 style = "confirm"
 {unattended}
 
-[stages.plan.transitions.build]
-condition = "always"
-
-[stages.build]
-mode = "autonomous"
+[[graph.stages]]
+name = "build"
 model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
+tools = ["read_file"]
 max_iterations = 5
-available_tools = ["read_file"]
 
-[context.regions]
-system = {{ kind = "pinned", max_tokens = 1000 }}
-conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
+[graph.layout]
+total_budget_tokens = 11000
+regions = [
+    {{ name = "system", kind = "pinned", budget = 1000 }},
+    {{ name = "conversation", kind = {{ kind = "sliding_window", max_items = 50 }}, budget = 10000 }},
+]
 "#
     )
 }
 
-fn parse(unattended: &str, required: &str) -> leviath_core::Blueprint {
-    leviath_core::manifest::parse_manifest(&manifest(unattended, required)).expect("fixture parses")
+fn parse(unattended: &str, required: &str) -> leviath_runtime::spec::graph::RunGraph {
+    leviath_blueprint::BlueprintFile::parse(&blueprint(unattended, required))
+        .expect("fixture parses")
+        .run_graph()
 }
 
 #[test]

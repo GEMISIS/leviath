@@ -2,7 +2,7 @@
 //! Crate-local names for the shared helpers in `leviath-testkit`, plus the ones
 //! that only this crate needs.
 
-pub(crate) use leviath_testkit::{PANIC_HOOK_LOCK, with_silenced_panics, with_tracing};
+pub(crate) use leviath_testkit::{PANIC_HOOK_LOCK, with_tracing};
 
 /// Silence the process panic hook for as long as the guard lives.
 ///
@@ -59,5 +59,46 @@ pub(crate) fn hints(on: bool) -> leviath_core::config::PromptHints {
     leviath_core::config::PromptHints {
         batch_tool: on,
         shell: on,
+    }
+}
+
+/// A provider whose `infer` panics, standing in for any bug that kills a lane
+/// task before it can report - the case that would otherwise leave the agent
+/// waiting on an outcome that never arrives.
+pub(crate) struct Exploding;
+#[async_trait::async_trait]
+impl leviath_providers::Provider for Exploding {
+    async fn infer(
+        &self,
+        _r: &leviath_providers::InferenceRequest,
+    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+        panic!("provider adapter blew up")
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        100_000
+    }
+    fn name(&self) -> &str {
+        "exploding"
+    }
+    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities::default()
+    }
+}
+
+mod exploding_tests {
+    use super::Exploding;
+
+    #[tokio::test]
+    async fn exploding_provider_metadata_is_exercised() {
+        use leviath_providers::Provider;
+        // Keep the mock's non-`infer` trait methods measured.
+        let p = Exploding;
+        assert_eq!(p.name(), "exploding");
+        assert_eq!(p.count_tokens("t", "m").await, 1);
+        assert_eq!(p.max_context_tokens("m"), 100_000);
+        let _ = p.capabilities("m");
     }
 }

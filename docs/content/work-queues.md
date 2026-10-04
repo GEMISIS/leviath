@@ -22,8 +22,8 @@ three fields that will mislead you if you read them the obvious way.
 
 ## Three things that are not what they look like
 
-**`updated_at` in `meta.json` is a heartbeat, not progress.** The daemon rewrites a run's metadata
-every 30 seconds whether or not the run moved. That is deliberate: a stale timestamp tells you the
+**A run's `updated_at` is a heartbeat, not progress.** The daemon writes to a run's file every
+30 seconds whether or not the run moved. That is deliberate: a stale timestamp tells you the
 daemon stopped, not that the run stopped. So a fresh `updated_at` proves the daemon is alive and
 proves nothing about the run.
 
@@ -60,8 +60,8 @@ for it to still remember, the runs on disk it is not holding, and whether it ans
 ```
 
 Note the casing. Entries in `runs` and `finished` carry the daemon's own status
-(`Active`, `Waiting`, `Complete`, and `Error` as an object with a `message`), while `not_running`
-entries come from `meta.json` on disk and use lowercase (`complete`, `error`). Match on both.
+(`Active`, `Waiting`, `Complete`, and `Error` as an object with a `message`). `not_running`
+entries come from each run's file on disk and use lowercase (`complete`, `error`). Match on both.
 
 For each run your queue thinks is in progress, act on which list it turned up in:
 
@@ -87,7 +87,8 @@ takes. `lev ps` says what each run is waiting on.
 That is the right default for somebody at a keyboard and the wrong one for a queue. Two ways to
 bound it:
 
-- Start the run unattended: `--yolo` on `lev run`, or `"yolo": true` on the API spawn. The tools
+- Start the run unattended: `--yolo` on `lev run`, or `"launch": {"unattended": "all"}` in the
+  `POST /api/runs` request. The tools
   that wait for a person are never offered to the model.
 - Set `[limits] interaction_timeout_secs`. A prompt nobody answers within that resolves the way
   cancelling it would, so a tool approval and a taint gate are denied.
@@ -117,7 +118,7 @@ the [HTTP API](/docs/api) is the better surface, and it answers the same questio
 - **`since=` beats deep paging** when you only want what changed since your last check.
 - **Or stop polling.** The `/ws` WebSocket pushes status changes as they happen, so your reconciler
   reacts instead of sweeping. Keep the poll as a slow backstop for missed events.
-- **Completion can come to you.** A run started with a callback URL fires a signed webhook when it
+- **Completion can come to you.** A run started with a `delivery.callback` URL fires a signed webhook when it
   finishes, with a stable `delivery_id` to deduplicate on. See [the API guide](/docs/api).
 
 The same `daemon_reachable` rule applies: a request that fails to reach the daemon is not evidence

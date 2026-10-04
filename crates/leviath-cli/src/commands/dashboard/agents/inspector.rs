@@ -154,11 +154,11 @@ pub(in crate::commands::dashboard) enum FieldId {
     DeleteRegion,
     /// A region the stage reads, on its inputs tab; opens the region.
     IoRegionRow(String),
-    /// `[stages.<name>.input] accepts` (a chooser).
+    /// The stage's `input_accepts` (a chooser).
     StageAccepts,
-    /// `[stages.<name>.input] as_text` (a chooser).
+    /// The stage's `input_as_text` (a chooser).
     StageAsText,
-    /// `[stages.<name>.output] format`.
+    /// The stage's `output.format`.
     OutputFormat,
     /// The stage's `n`th declared file; opens it, `x` drops it.
     ArtifactRow(usize),
@@ -177,11 +177,11 @@ pub(in crate::commands::dashboard) enum FieldId {
     /// What one of the stage's tools may be handed (a chooser); `x` lifts
     /// the limit.
     ToolLimitRow(String),
-    /// `[stages.<name>.output_routing]`: where the model's produced parts go
+    /// The stage's `output_routing`: where the model's produced parts go
     /// by mime type, edited as `pattern = region` pairs. Enter opens the
     /// editor; an empty box clears the map.
     OutputRouting,
-    /// `[stages.<name>.context] reset`: the regions emptied on entry, edited
+    /// The stage's `reset`: the regions emptied on entry, edited
     /// as a list of region names. Enter opens the editor; an empty box clears
     /// the list.
     ContextReset,
@@ -906,7 +906,7 @@ fn region_fields(doc: &ManifestDoc, scope: &RegionScope, name: &str) -> Vec<Fiel
             FieldId::RegionOverflow,
             "Window: overflow",
             FieldValue::Number(region.overflow),
-            "How many items over the limit before it evicts.",
+            "Bulk: how many items over the limit before it evicts. Compact: how many it summarizes at once.",
         )
         .enabled(sliding),
         Field::new(

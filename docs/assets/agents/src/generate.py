@@ -37,10 +37,22 @@ OMIT = {"error_recovery"}
 TD_THRESHOLD = 5
 
 
+def worker_label(worker: dict) -> str:
+    """How a fan-out worker that is not a stage of this graph is labelled."""
+    if "blueprint" in worker:
+        return worker["blueprint"]["name"]
+    if "query" in worker:
+        return worker["query"]
+    if "blueprint_file" in worker:
+        return Path(worker["blueprint_file"]).name
+    return "workers"
+
+
 def blueprint_to_mermaid(path: Path) -> str:
-    data = tomllib.loads(path.read_text())
-    entry = data["agent"]["entry_stage"]
-    stages = {k: v for k, v in data["stages"].items() if k not in OMIT}
+    graph = tomllib.loads(path.read_text())["graph"]
+    stages = {s["name"]: s for s in graph["stages"] if s["name"] not in OMIT}
+    entry = graph.get("entry") or graph["stages"][0]["name"]
+    all_edges = graph.get("edges", [])
 
     # (from, to, label, style) with style in {solid, condition, fanout}
     edges: list[tuple[str, str, str, str]] = []
@@ -50,35 +62,40 @@ def blueprint_to_mermaid(path: Path) -> str:
     external: dict[str, str] = {}
 
     for name, stage in stages.items():
-        if stage.get("interaction_points"):
+        mode = stage.get("mode")
+        mode = mode if isinstance(mode, dict) else {}
+        if mode.get("interactive_points"):
             decisions.add(name)
-        if stage.get("mode") == "fan_out":
-            merge = stage["merge_stage"]
-            per = f"×{stage['max_workers']} workers" if "max_workers" in stage else "workers"
-            # A worker is either a stage of this blueprint (`worker_stage`) or a
-            # separate installed agent (`worker_agent`). The first is a real node
-            # in this graph; the second is not, so it gets a labelled node of its
-            # own rather than being drawn as a stage that does not exist here.
-            worker = stage.get("worker_stage")
+        fan_out = mode.get("fan_out")
+        if fan_out:
+            merge = fan_out.get("merge_stage")
+            per = f"×{fan_out['max_workers']} workers" if "max_workers" in fan_out else "workers"
+            # A worker is either a stage of this blueprint (`{ stage = ... }`)
+            # or another blueprint. The first is a real node in this graph; the
+            # second is not, so it gets a labelled node of its own rather than
+            # being drawn as a stage that does not exist here.
+            source = fan_out["worker"]
+            worker = source.get("stage")
             if worker is None:
-                agent = stage.get("worker_agent") or stage.get("worker_query", "workers")
                 worker = f"{name}_workers"
-                external[worker] = f"{agent} (sub-agent)"
+                external[worker] = f"{worker_label(source)} (sub-agent)"
             edges.append((name, worker, per, "fanout"))
-            edges.append((worker, merge, "merge", "fanout"))
+            if merge:
+                edges.append((worker, merge, "merge", "fanout"))
 
         plain = 0
-        for target, spec in stage.get("transitions", {}).items():
-            if target in OMIT:
+        for edge in all_edges:
+            if edge["from"] != name or edge["to"] in OMIT:
                 continue
-            cond = spec.get("condition", "") if isinstance(spec, dict) else ""
-            if cond == "error":
+            target = edge["to"]
+            when = edge.get("when", "always")
+            if when == "error":
                 continue
-            if cond:
-                edges.append((name, target, cond, "condition"))
-            else:
+            if when in ("always", "llm_choice"):
                 edges.append((name, target, "", "solid"))
                 plain += 1
+            else:
+                edges.append((name, target, when, "condition"))
         if plain >= 2:
             decisions.add(name)
 
@@ -116,7 +133,7 @@ def render(mmd: Path, svg: Path, theme: Path) -> None:
 
 def main() -> None:
     do_render = "--render" in sys.argv
-    blueprints = sorted(AGENTS_DIR.glob("*/agent.leviath"))
+    blueprints = sorted(AGENTS_DIR.glob("*/agent.toml"))
     if not blueprints:
         sys.exit(f"no blueprints found under {AGENTS_DIR}")
     for bp in blueprints:

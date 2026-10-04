@@ -38,7 +38,7 @@ pub struct McpPool {
     /// connected, which is what makes naming a variable in `allow_env_vars`
     /// take effect on the next load rather than the next daemon restart.
     security: StdMutex<PoolSecurity>,
-    /// Per-run leases on per-agent servers (see [`Self::lease_blueprint`]).
+    /// Per-run leases on per-agent servers (see [`Self::lease_servers`]).
     /// Same `std` mutex discipline as `connected`: held briefly, never across
     /// an `.await`.
     leases: StdMutex<LeaseTable>,
@@ -60,13 +60,27 @@ struct PoolSecurity {
     allow_env_vars: Vec<String>,
 }
 
-/// Which runs hold which per-agent servers open.
+/// The per-agent MCP servers one run holds open, kept on the run's entity.
+///
+/// What a run holds is the run's own state, so it lives with the run: the
+/// reap hook reads it off the entity being reaped and hands it back to
+/// [`McpPool::release`]. What stays in the pool is the other side of the
+/// lease, each server's holder count, because that is shared by every run
+/// declaring the server and is what decides when its connection (an I/O
+/// resource the pool owns) is torn down.
+#[derive(bevy_ecs::component::Component, Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct McpLease {
+    /// The run holding the servers.
+    pub run_id: String,
+    /// The signatures of the servers it holds; global servers are never here.
+    pub signatures: Vec<String>,
+}
+
+/// Which servers are held open, and by how many runs.
 #[derive(Default)]
 struct LeaseTable {
     /// Signature → the server's lease state.
     servers: HashMap<String, ServerLease>,
-    /// Run id → the signatures it holds, so a reap releases them all.
-    runs: HashMap<String, Vec<String>>,
     /// Signatures of the global config servers, seeded at startup: their
     /// lifecycle belongs to the daemon, never to a run, so they are exempt
     /// from idle disconnection.
@@ -324,22 +338,21 @@ impl McpPool {
         }
     }
 
-    /// Record `run_id` as holding every per-agent server `blueprint_path`
-    /// declares, so the connections stay up exactly as long as some run needs
-    /// them. Global (seeded) servers are skipped. A missing or unreadable
-    /// manifest leases nothing.
+    /// Record `run_id` as holding every per-agent server in `servers`, so the
+    /// connections stay up exactly as long as some run needs them. Global
+    /// (seeded) servers are skipped.
     ///
-    /// Called from every path that brings a run into the world with a
-    /// blueprint: the spawner, the restart reloader, and the fan-out worker
-    /// spawner. The matching release is [`Self::release_run`], from the reap
-    /// hook.
-    pub(crate) fn lease_blueprint(&self, blueprint_path: &str, run_id: &str) {
-        let Ok(toml) = std::fs::read_to_string(blueprint_path) else {
-            return;
+    /// Called from every path that brings a run into the world: a start, a
+    /// fan-out worker, and a run resumed from its file. What comes back goes
+    /// on the run's entity, and the reap hook hands it to [`Self::release`].
+    pub(crate) fn lease_servers(&self, servers: &[MCPServerConfig], run_id: &str) -> McpLease {
+        let mut lease = McpLease {
+            run_id: run_id.to_string(),
+            signatures: Vec::new(),
         };
         let mut table = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
-        for server in parse_blueprint_mcp_servers(&toml) {
-            let sig = signature(&server);
+        for server in servers {
+            let sig = signature(server);
             if table.global.contains(&sig) {
                 continue;
             }
@@ -352,18 +365,20 @@ impl McpPool {
                     generation: 0,
                 });
             entry.generation += 1;
-            if entry.holders.insert(run_id.to_string()) {
-                table.runs.entry(run_id.to_string()).or_default().push(sig);
-            }
+            entry.holders.insert(run_id.to_string());
+            // A server listed twice is held once: releasing it the second
+            // time finds the run no longer among its holders.
+            lease.signatures.push(sig);
         }
+        lease
     }
 
-    /// Release every lease `run_id` holds. Servers whose holder count reaches
+    /// Release every server `lease` holds. Servers whose holder count reaches
     /// zero get an idle-disconnect scheduled (when a runtime is available and
     /// `idle_disconnect` is non-zero); a new lease during the grace window
     /// bumps the generation and turns the pending disconnect into a no-op.
-    pub(crate) fn release_run(self: &Arc<Self>, run_id: &str) {
-        let zeroed = self.release_run_bookkeeping(run_id);
+    pub(crate) fn release(self: &Arc<Self>, lease: &McpLease) {
+        let zeroed = self.release_bookkeeping(lease);
         if self.idle_disconnect.is_zero() {
             return;
         }
@@ -399,20 +414,20 @@ impl McpPool {
         }
     }
 
-    /// The synchronous half of [`Self::release_run`]: drop the run's leases and
+    /// The synchronous half of [`Self::release`]: drop the run's holds and
     /// return the `(signature, name, generation)` of every server that now has
-    /// zero holders.
-    fn release_run_bookkeeping(&self, run_id: &str) -> Vec<(String, String, u64)> {
+    /// zero holders. A server the run does not hold (released already) is
+    /// left alone, so releasing twice zeroes nothing twice.
+    fn release_bookkeeping(&self, lease: &McpLease) -> Vec<(String, String, u64)> {
         let mut table = self.leases.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(sigs) = table.runs.remove(run_id) else {
-            return Vec::new();
-        };
         let mut zeroed = Vec::new();
-        for sig in sigs {
-            let Some(entry) = table.servers.get_mut(&sig) else {
+        for sig in &lease.signatures {
+            let Some(entry) = table.servers.get_mut(sig) else {
                 continue;
             };
-            entry.holders.remove(run_id);
+            if !entry.holders.remove(&lease.run_id) {
+                continue;
+            }
             entry.generation += 1;
             if entry.holders.is_empty() {
                 zeroed.push((sig.clone(), entry.name.clone(), entry.generation));
@@ -491,7 +506,7 @@ impl McpPool {
 
     /// The signatures currently holding leases, for tests and diagnostics.
     #[cfg(test)]
-    fn leased_holders(&self, config: &MCPServerConfig) -> usize {
+    pub(crate) fn leased_holders(&self, config: &MCPServerConfig) -> usize {
         self.leases
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -597,41 +612,24 @@ impl McpPool {
         }
     }
 
-    /// Warm the per-agent `[[mcp_servers]]` of every non-terminal persisted run in
-    /// `runs_dir`, so a run reloaded on daemon restart can still *execute* its
-    /// blueprint MCP tools (their advertisement is restored from the snapshot;
-    /// only the shared connection is lost across a restart). Blueprint paths are
-    /// collected synchronously, then connected - no fs iterator is held across an
-    /// `.await`.
+    /// Connect the MCP servers every unfinished run under `runs_dir` declares,
+    /// so a run resumed on restart can still call its own servers' tools. A
+    /// run file that cannot be read is skipped here; resuming it reports why.
     pub(crate) async fn warm_recovered(&self, runs_dir: &std::path::Path) {
-        use leviath_core::run_meta::RunStatus;
-        let Ok(entries) = std::fs::read_dir(runs_dir) else {
-            return;
-        };
-        let mut paths: Vec<String> = Vec::new();
-        for entry in entries.flatten() {
-            let Ok(text) =
-                std::fs::read_to_string(entry.path().join(leviath_core::files::META_FILE))
-            else {
-                continue;
-            };
-            let Ok(meta) = serde_json::from_str::<leviath_core::run_meta::RunMeta>(&text) else {
-                continue;
-            };
-            // Only runs that recovery will actually reload (non-terminal).
-            if matches!(
-                meta.status,
-                RunStatus::Starting | RunStatus::Running | RunStatus::WaitingInput
-            ) {
-                paths.push(meta.agent_path);
-            }
-        }
-        for path in paths {
-            if let Ok(toml) = std::fs::read_to_string(&path) {
-                for server in parse_blueprint_mcp_servers(&toml) {
-                    self.ensure(&server).await;
-                }
-            }
+        // Only a run that has not finished is read, found through the run
+        // index.
+        let servers: Vec<MCPServerConfig> = crate::run_index::unfinished(runs_dir)
+            .iter()
+            .filter_map(|dir| {
+                leviath_runtime::restore::read_for_resume(dir)
+                    .ok()
+                    .flatten()
+            })
+            .flat_map(|run| leviath_runtime::restore::triage(vec![run], |r| r))
+            .flat_map(|run| crate::daemon::starter::mcp_configs(&run.spec.graph))
+            .collect();
+        for server in servers {
+            self.ensure(&server).await;
         }
     }
 
@@ -672,34 +670,25 @@ impl McpPool {
     }
 }
 
-/// Parse a blueprint manifest's `[[mcp_servers]]` array. Parsed
-/// CLI-side because `leviath-core` cannot depend on `leviath-mcp` (that crate
-/// already depends on core - a cycle). Returns an empty vec when the section is
-/// absent or malformed; a malformed entry is skipped with a warning.
-pub(crate) fn parse_blueprint_mcp_servers(manifest_toml: &str) -> Vec<MCPServerConfig> {
-    // `toml::from_str`, not `manifest_toml.parse::<toml::Value>()`. In toml 1.x
-    // `FromStr for Value` parses a single *value*, not a document - so a real
-    // manifest starting with `[agent]` reads as an array literal followed by
-    // junk and fails. Both spellings compile, so swapping them is silent.
-    let Ok(value) = toml::from_str::<toml::Value>(manifest_toml) else {
-        return Vec::new();
-    };
-    let Some(array) = value.get("mcp_servers").and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in array {
-        match entry.clone().try_into::<MCPServerConfig>() {
-            Ok(cfg) => out.push(cfg),
-            Err(e) => tracing::warn!(error = %e, "skipping malformed [[mcp_servers]] entry"),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The MCP servers the blueprint `text` declares; none when it does not
+    /// read.
+    fn parse_blueprint_mcp_servers(text: &str) -> Vec<MCPServerConfig> {
+        leviath_blueprint::BlueprintFile::parse(text)
+            .map(|file| crate::daemon::starter::mcp_configs(&file.graph))
+            .unwrap_or_default()
+    }
+
+    /// Lease `run_id` every server the manifest at `path` declares, as a run
+    /// started from it is leased them. A manifest that cannot be read leases
+    /// nothing.
+    fn lease(pool: &McpPool, path: impl AsRef<std::path::Path>, run_id: &str) -> McpLease {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        pool.lease_servers(&parse_blueprint_mcp_servers(&text), run_id)
+    }
     use crate::test_support::{McpStub, with_tracing};
 
     /// A minimal stdio MCP server (python3) speaking initialize / tools/list /
@@ -901,13 +890,36 @@ mod tests {
     /// its manifest path.
     fn blueprint_declaring(server: &str, stub: &std::path::Path) -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
+        let manifest = dir.path().join("agent.toml");
         std::fs::write(
             &manifest,
             format!(
                 // Single-quoted TOML literal so a Windows path's backslashes
                 // aren't parsed as string escapes (`\\U…` → invalid unicode).
-                "[agent]\nname = \"a\"\n\n[[mcp_servers]]\nname = \"{server}\"\ncommand = \"python3\"\nargs = ['{}']\n",
+                r#"[blueprint]
+name = "a"
+version = "0.1.0"
+
+[graph]
+mcp_servers = [{{ name = "{server}", command = "python3", args = ['{}'] }}]
+
+[[graph.stages]]
+name = "main"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-4-6" }}] }}
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = {{ kind = "sliding_window", max_items = 10 }}
+budget = 10000
+"#,
                 stub.to_string_lossy()
             ),
         )
@@ -915,62 +927,93 @@ mod tests {
         (dir, manifest.to_string_lossy().to_string())
     }
 
-    fn write_run_meta(
-        runs_dir: &std::path::Path,
-        run_id: &str,
-        agent_path: &str,
-        status: leviath_core::run_meta::RunStatus,
-    ) {
-        let dir = runs_dir.join(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut meta = leviath_core::run_meta::RunMeta::new(
-            run_id.to_string(),
-            "a".to_string(),
-            agent_path.to_string(),
-            "t".to_string(),
-            None,
-            std::env::temp_dir().to_string_lossy().to_string(),
-            1,
+    /// A run of a blueprint declaring the stdio server `server` (running
+    /// `stub`), recorded under `runs` and left at `status`. Returns the
+    /// server as the pool connects it.
+    fn run_declaring(
+        runs: &std::path::Path,
+        server: &str,
+        stub: &std::path::Path,
+        status: leviath_runtime::state::RunStatus,
+    ) -> MCPServerConfig {
+        let agent = tempfile::tempdir().unwrap().keep();
+        let manifest = crate::daemon::starter::testing::manifest_in(
+            &agent,
+            &format!(
+                r#"[blueprint]
+name = "a"
+version = "0.1.0"
+
+[graph]
+mcp_servers = [{{ name = "{server}", command = "python3", args = ['{}'] }}]
+
+[[graph.stages]]
+name = "main"
+model = {{ models = [{{ provider = "fake", model = "m" }}] }}
+
+[graph.layout]
+regions = [{{ name = "task", kind = "pinned", budget = 200 }}]
+total_budget_tokens = 200
+
+[[graph.inputs]]
+name = "task"
+type = {{ kind = "text", multiline = true }}
+binds = [{{ region = "task" }}]
+"#,
+                stub.to_string_lossy()
+            ),
         );
-        meta.status = status;
-        std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+        let mut registry = leviath_runtime::ProviderRegistry::new();
+        registry.register(
+            "fake".to_string(),
+            Arc::new(crate::test_support::FakeProvider::new().context_window(100_000)),
+        );
+        let run_id = crate::daemon::starter::testing::run_on_disk(
+            crate::config::Config::default(),
+            registry,
+            runs,
+            &manifest,
+        );
+        let path = runs.join(&run_id).join(leviath_core::files::RUN_FILE);
+        let mut writer =
+            leviath_runtime::runfile::RunFileWriter::open(&path, Default::default()).unwrap();
+        let mut next = writer.state().clone();
+        next.status = status;
+        writer.record(next, 1, Vec::new()).unwrap();
+        let graph = leviath_runtime::runfile::RunFileReader::open(&path)
+            .unwrap()
+            .spec()
+            .graph
+            .clone();
+        crate::daemon::starter::mcp_configs(&graph).remove(0)
     }
 
     #[tokio::test]
-    async fn warm_recovered_connects_only_nonterminal_run_blueprints() {
-        use leviath_core::run_meta::RunStatus;
+    async fn warm_recovered_connects_only_unfinished_runs_servers() {
+        use leviath_runtime::state::RunStatus;
         with_tracing(|| {});
         with_temp_home(|| async {
             let (_sd, stub) = stub_py();
-            let (_bd_live, live_bp) = blueprint_declaring("liveserver", &stub);
-            let (_bd_done, done_bp) = blueprint_declaring("doneserver", &stub);
             let runs = tempfile::tempdir().unwrap();
-            write_run_meta(runs.path(), "run-live", &live_bp, RunStatus::Running);
-            write_run_meta(runs.path(), "run-done", &done_bp, RunStatus::Complete);
-            // A non-terminal run whose blueprint file no longer exists → the
-            // "unreadable manifest" arm (skipped, no panic).
-            write_run_meta(
-                runs.path(),
-                "run-gone",
-                "/no/such/agent.leviath",
-                RunStatus::WaitingInput,
-            );
-            // A junk dir with no meta.json is skipped without error.
+            let live = run_declaring(runs.path(), "liveserver", &stub, RunStatus::Active);
+            let done = run_declaring(runs.path(), "doneserver", &stub, RunStatus::Complete);
+            // A directory with no run file, and one whose run file does not
+            // read, are passed over.
             std::fs::create_dir_all(runs.path().join("junk")).unwrap();
-            // A dir with an unparseable meta.json is skipped (the parse-error arm).
             std::fs::create_dir_all(runs.path().join("garbled")).unwrap();
-            std::fs::write(runs.path().join("garbled/meta.json"), "not json {{").unwrap();
+            std::fs::write(
+                runs.path()
+                    .join("garbled")
+                    .join(leviath_core::files::RUN_FILE),
+                "not a run file",
+            )
+            .unwrap();
 
             let pool = pool();
             pool.warm_recovered(runs.path()).await;
 
-            // The non-terminal run's server is connected; the terminal one is not.
-            let live_servers =
-                parse_blueprint_mcp_servers(&std::fs::read_to_string(&live_bp).unwrap());
-            let done_servers =
-                parse_blueprint_mcp_servers(&std::fs::read_to_string(&done_bp).unwrap());
-            assert_eq!(pool.cached_defs_for(&live_servers).len(), 1);
-            assert!(pool.cached_defs_for(&done_servers).is_empty());
+            assert_eq!(pool.cached_defs_for(std::slice::from_ref(&live)).len(), 1);
+            assert!(pool.cached_defs_for(std::slice::from_ref(&done)).is_empty());
         })
         .await;
     }
@@ -997,21 +1040,28 @@ mod tests {
             // Connect for real, so there is a live client to tear down.
             assert_eq!(pool.ensure(cfg).await.len(), 1);
 
-            pool.lease_blueprint(&bp, "run-a");
-            pool.lease_blueprint(&bp, "run-b");
+            let a = lease(&pool, &bp, "run-a");
+            assert_eq!(
+                a.signatures,
+                vec![signature(cfg)],
+                "the run holds what it leased"
+            );
+            lease(&pool, &bp, "run-b");
             // Leasing twice from the same run holds once.
-            pool.lease_blueprint(&bp, "run-b");
+            let b = lease(&pool, &bp, "run-b");
             assert_eq!(pool.leased_holders(cfg), 2);
 
             // Releasing one run leaves the server held (nothing zeroed, no
             // timer scheduled).
-            pool.release_run("run-a");
+            pool.release(&a);
             assert_eq!(pool.leased_holders(cfg), 1);
             assert!(!pool.cached_defs_for(&servers).is_empty());
 
             // The last release zeroes it; drive the disconnect directly (the
             // scheduled timer runs the same call after the grace window).
-            let zeroed = pool.release_run_bookkeeping("run-b");
+            let zeroed = pool.release_bookkeeping(&b);
+            // Releasing the same lease again zeroes nothing a second time.
+            assert!(pool.release_bookkeeping(&b).is_empty());
             assert_eq!(zeroed.len(), 1);
             let (sig, name, generation) = zeroed[0].clone();
             assert_eq!(
@@ -1042,11 +1092,11 @@ mod tests {
             let cfg = &servers[0];
             assert_eq!(pool.ensure(cfg).await.len(), 1);
 
-            pool.lease_blueprint(&bp, "run-a");
-            let zeroed = pool.release_run_bookkeeping("run-a");
+            let a = lease(&pool, &bp, "run-a");
+            let zeroed = pool.release_bookkeeping(&a);
             let (sig, name, generation) = zeroed[0].clone();
             // A new run leases before the timer would have fired.
-            pool.lease_blueprint(&bp, "run-b");
+            lease(&pool, &bp, "run-b");
             assert_eq!(
                 pool.disconnect_if_still_idle(&sig, &name, generation).await,
                 IdleOutcome::Stale,
@@ -1072,8 +1122,8 @@ mod tests {
             let pool = Arc::new(pool());
             let servers = parse_blueprint_mcp_servers(&std::fs::read_to_string(&bp).unwrap());
             assert_eq!(pool.ensure(&servers[0]).await.len(), 1);
-            pool.lease_blueprint(&bp, "run-a");
-            let zeroed = pool.release_run_bookkeeping("run-a");
+            let a = lease(&pool, &bp, "run-a");
+            let zeroed = pool.release_bookkeeping(&a);
             let (sig, name, generation) = zeroed[0].clone();
 
             // A call holds the client the way `ToolExecutor::execute` does:
@@ -1130,8 +1180,8 @@ mod tests {
             let pool = Arc::new(pool());
             let servers = parse_blueprint_mcp_servers(&std::fs::read_to_string(&bp).unwrap());
             assert_eq!(pool.ensure(&servers[0]).await.len(), 1);
-            pool.lease_blueprint(&bp, "run-a");
-            let zeroed = pool.release_run_bookkeeping("run-a");
+            let a = lease(&pool, &bp, "run-a");
+            let zeroed = pool.release_bookkeeping(&a);
             let (sig, name, generation) = zeroed[0].clone();
 
             let held = pool.shared.lock().await.route("retryserver__echo");
@@ -1164,9 +1214,9 @@ mod tests {
     /// release is bookkeeping only: there is nowhere to spawn the grace
     /// timer, and that must be a quiet no-op rather than a panic.
     #[test]
-    fn release_run_without_a_runtime_is_bookkeeping_only() {
+    fn release_without_a_runtime_is_bookkeeping_only() {
         let pool = Arc::new(pool());
-        pool.release_run("no-runtime-run");
+        pool.release(&McpLease::default());
     }
 
     /// The scheduled path end to end: a real release on a live runtime spawns
@@ -1179,7 +1229,7 @@ mod tests {
     /// subprocess is real, so a paused clock is out, and a slow runner used to
     /// turn a 1 s timer plus 2.5 s of slack into the suite's one flake.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn release_run_schedules_the_grace_disconnect() {
+    async fn release_schedules_the_grace_disconnect() {
         with_tracing(|| {});
         with_temp_home(|| async {
             let (_sd, stub) = stub_py();
@@ -1188,8 +1238,8 @@ mod tests {
             let timed = Arc::new(pool().with_idle_disconnect(grace));
             let servers = parse_blueprint_mcp_servers(&std::fs::read_to_string(&bp).unwrap());
             assert_eq!(timed.ensure(&servers[0]).await.len(), 1);
-            timed.lease_blueprint(&bp, "run-a");
-            timed.release_run("run-a");
+            let a = lease(&timed, &bp, "run-a");
+            timed.release(&a);
             // Within the grace window the connection survives...
             assert!(!timed.cached_defs_for(&servers).is_empty());
             // ...and after it, the timer has torn it down.
@@ -1207,8 +1257,8 @@ mod tests {
             // spawned by mistake.
             let keeper = Arc::new(pool().with_idle_disconnect_secs(0));
             assert_eq!(keeper.ensure(&servers[0]).await.len(), 1);
-            keeper.lease_blueprint(&bp, "run-b");
-            keeper.release_run("run-b");
+            let b = lease(&keeper, &bp, "run-b");
+            keeper.release(&b);
             tokio::time::sleep(grace * 5).await;
             assert!(!keeper.cached_defs_for(&servers).is_empty());
         })
@@ -1226,8 +1276,8 @@ mod tests {
             let (_bd, bp) = blueprint_declaring("neverconnected", &stub);
             let pool = Arc::new(pool());
             // Leased but never `ensure`d: nothing in the executor to remove.
-            pool.lease_blueprint(&bp, "run-a");
-            let zeroed = pool.release_run_bookkeeping("run-a");
+            let a = lease(&pool, &bp, "run-a");
+            let zeroed = pool.release_bookkeeping(&a);
             let (sig, name, generation) = zeroed[0].clone();
             assert_eq!(
                 pool.disconnect_if_still_idle(&sig, &name, generation).await,
@@ -1235,15 +1285,15 @@ mod tests {
                 "no client to remove is a no-op, not an error"
             );
 
-            // A runs-map entry whose server row is gone (cannot happen through
-            // the public API, which mutates both under one lock) is skipped.
-            pool.lease_blueprint(&bp, "run-b");
+            // A lease naming a server whose row is gone (the server was torn
+            // down and forgotten) is skipped.
+            let b = lease(&pool, &bp, "run-b");
             pool.leases
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .servers
                 .clear();
-            assert!(pool.release_run_bookkeeping("run-b").is_empty());
+            assert!(pool.release_bookkeeping(&b).is_empty());
         })
         .await;
     }
@@ -1261,12 +1311,13 @@ mod tests {
             let servers = parse_blueprint_mcp_servers(&std::fs::read_to_string(&bp).unwrap());
             pool.seed(&servers[0], Vec::new());
 
-            pool.lease_blueprint(&bp, "run-a");
+            let a = lease(&pool, &bp, "run-a");
             assert_eq!(pool.leased_holders(&servers[0]), 0, "global: no lease");
-            pool.release_run("run-a"); // nothing held → nothing zeroed
-            assert!(pool.release_run_bookkeeping("never-leased").is_empty());
-            pool.lease_blueprint("/no/such/agent.leviath", "run-b");
-            assert!(pool.release_run_bookkeeping("run-b").is_empty());
+            assert!(a.signatures.is_empty(), "a run holds no global server");
+            pool.release(&a); // nothing held → nothing zeroed
+            assert!(pool.release_bookkeeping(&McpLease::default()).is_empty());
+            let b = lease(&pool, "/no/such/agent.toml", "run-b");
+            assert!(pool.release_bookkeeping(&b).is_empty());
         })
         .await;
     }
@@ -1287,39 +1338,5 @@ mod tests {
         );
         // Built-in names are reserved.
         assert!(pool.reserved.contains("read_file"));
-    }
-
-    #[test]
-    fn parse_blueprint_mcp_servers_reads_array() {
-        let toml = r#"
-[agent]
-name = "x"
-[[mcp_servers]]
-name = "search"
-command = "leviath-search"
-args = ["--provider", "brave"]
-[[mcp_servers]]
-name = "http-one"
-url = "http://localhost:9/mcp"
-"#;
-        let servers = parse_blueprint_mcp_servers(toml);
-        assert_eq!(servers.len(), 2);
-        assert_eq!(servers[0].name, "search");
-        assert_eq!(servers[0].command.as_deref(), Some("leviath-search"));
-        assert_eq!(servers[1].url.as_deref(), Some("http://localhost:9/mcp"));
-    }
-
-    #[test]
-    fn parse_blueprint_mcp_servers_absent_or_malformed() {
-        // No section → empty.
-        assert!(parse_blueprint_mcp_servers("[agent]\nname='x'").is_empty());
-        // Not even valid TOML → empty.
-        assert!(parse_blueprint_mcp_servers("this is = = not toml").is_empty());
-        // Section present but not an array of tables → empty (as_array is None).
-        assert!(parse_blueprint_mcp_servers("mcp_servers = 5").is_empty());
-        // A malformed entry (name is not a string) is skipped with a warning.
-        with_tracing(|| {});
-        let servers = parse_blueprint_mcp_servers("[[mcp_servers]]\nname = 5\n");
-        assert!(servers.is_empty());
     }
 }

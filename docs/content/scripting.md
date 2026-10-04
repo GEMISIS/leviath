@@ -27,21 +27,26 @@ can copy and change. [rhai.rs](https://rhai.rs) has the language reference if yo
 | What | Where it goes | What the script decides |
 |---|---|---|
 | [**Model providers**](/docs/rhai-providers) | `~/.leviath/providers/<name>.rhai` | How to map a request onto some HTTP API, and the response back |
-| [**Context regions**](/docs/rhai-regions) | beside the agent, referenced by `script =` | How one region renders, accepts writes, and sheds content under pressure |
-| [**Stage hooks**](/docs/rhai-hooks) | beside the agent, referenced by `[stages.<name>.hooks]` | What happens at seven points in an agent's lifecycle, from entering a stage through to the end |
-| [**Global tools**](/docs/rhai-tools) | `~/.leviath/tools/*.rhai`, or an agent's own `tools/` | A new tool, its schema, what it does, and the typed [parts](/docs/mime) it reads and makes |
-| [**Output validators**](/docs/rhai-validators) | beside the agent, referenced by the stage's `[output]` block | Whether a submitted final output is accepted, and what the model is told when it is not |
-| [**Mime checks**](/docs/rhai-mime-checks) | beside the config or the agent, referenced by a mime row's `check` | Whether bytes claiming one of your mime types are that type, before they are stored |
+| [**Context regions**](/docs/rhai-regions) | beside the blueprint, named by the region's `kind = { kind = "custom", code = ... }` | How one region renders, accepts writes, and sheds content under pressure |
+| [**Stage hooks**](/docs/rhai-hooks) | beside the blueprint, named in a stage's `hooks` | What happens at seven points in a run's life, from entering a stage through to the end |
+| [**Global tools**](/docs/rhai-tools) | `~/.leviath/tools/*.rhai`, or a blueprint's own `tools/` | A new tool, its schema, what it does, and the typed [parts](/docs/mime) it reads and makes |
+| [**Output validators**](/docs/rhai-validators) | beside the blueprint, named by a stage's `output.validator` | Whether a submitted final output is accepted, and what the model is told when it is not |
+| [**Mime checks**](/docs/rhai-mime-checks) | beside the config or the blueprint, named by a mime row's `check` | Whether bytes claiming one of your mime types are that type, before they are stored |
+| [**Region seeds**](/docs/context#seeding-a-region) | beside the blueprint, named by a region's `seed = { code = ... }` | The text a region starts with |
 | [**Policy rules**](/docs/rhai-tools#policy-rules) | `rules/*.rhai` in your OS config dir, see [configuration](/docs/configuration#policytoml) | Whether a given tool call is allowed to fire |
 
 Each page walks its point end to end with a complete, copy-pasteable example.
 
-A region hook, a stage hook and an output validator are all named by path in the manifest, so a file
-sitting beside the agent is invisible until something names it. If you are building an editor rather
-than writing the manifest by hand,
+A blueprint names every script it ships the same way, as `{ file = "path.rhai" }` relative to the
+directory holding its `agent.toml`. That covers a custom region's `code`, a stage's `hooks`, an
+output `validator`, a `code` seed, a mime row's `check` and a dependency's `check`. A file sitting
+beside the blueprint is invisible until something names it. A graph sent whole in a spawn request
+has no directory, so it writes each script itself as `{ inline = "..." }`.
+
+If you are building an editor rather than writing `agent.toml` by hand,
 [`GET /api/scripts?agent=<name>&include=candidates`](/docs/api#offering-a-file-nobody-has-named-yet)
-lists the `.rhai` files under an agent's directory that nothing declares yet. Each comes with the
-manifest-relative path to write into `validator = "..."` or `[stages.<name>.hooks]`.
+lists the `.rhai` files under a blueprint's directory that nothing declares yet. Each comes with the
+relative path to write into `validator = { file = "..." }` or a stage's `hooks`.
 
 ## The sandbox they all share
 
@@ -97,7 +102,7 @@ rule you add, edit, or delete gates the next run. Nothing is restarted for that 
 
 A mime check named by the operator's rows is recompiled whenever `mime_types.toml` or the
 config changes. That reaches the runs already under way as well as the next one. One named
-by a blueprint is compiled at spawn, like the agent's other scripts.
+by a blueprint is compiled at spawn, like the blueprint's other scripts.
 
 Neither is scanned or executed until something actually references it, so dropping a file into a
 directory does not by itself run it.

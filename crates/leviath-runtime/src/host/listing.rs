@@ -27,7 +27,7 @@ impl WorldHost {
         let entity = agent.resolve_in(world)?;
         let state = world.get::<AgentState>(entity)?;
         // The precedence itself lives in `leviath_core`, shared with the
-        // persistence system that writes the same answer to `meta.json`: two
+        // persistence system that records the same answer with the run: two
         // copies of it would disagree the first time either was edited.
         leviath_core::run_meta::wait_reason_from(
             matches!(state.status, AgentStatus::Waiting | AgentStatus::Paused),
@@ -134,7 +134,7 @@ impl WorldHost {
                     // persist tick fills it, so it is answered from the live
                     // entity here. Without this, a researcher that submitted a
                     // perfectly good answer still read `complete (no output)`
-                    // in `lev ps` while `meta.json` said otherwise - the exact
+                    // in `lev ps` while the run's record said otherwise - the exact
                     // drift between the two surfaces that one shared
                     // `is_empty_output` exists to prevent.
                     let mut flags = f.0.clone();
@@ -143,6 +143,10 @@ impl WorldHost {
                 }),
             read_paths: metadata.and_then(|m| m.read_paths),
             has_final_output: has_output,
+            may_never_finish: world
+                .get::<crate::insert::RunSpecC>(entity)
+                .map(|spec| spec.0.warnings().iter().map(ToString::to_string).collect())
+                .unwrap_or_default(),
         }
     }
 

@@ -86,6 +86,12 @@ pub enum Commands {
     /// Validate an agent blueprint
     Validate(commands::validate::ValidateArgs),
 
+    /// Convert an `agent.leviath` manifest into an `agent.toml` blueprint
+    Blueprint(commands::blueprint::BlueprintArgs),
+
+    /// Print the JSON Schema of a spawn request
+    Schema(commands::schema::SchemaArgs),
+
     /// Inspect and install an agent's declared dependencies
     Deps(commands::deps::DepsArgs),
 
@@ -99,7 +105,7 @@ pub enum Commands {
     Tools(commands::tools::ToolsArgs),
 
     // ─── Running agents ───────────────────────────────────────────────────────
-    /// Run an agent
+    /// Run an agent, check a run without starting it, or show a run's file
     Run(commands::run::RunArgs),
 
     /// List agent runs in the shared-world daemon
@@ -200,13 +206,15 @@ Blueprints:
   add           Install a blueprint
   remove        Remove an installed blueprint
   validate      Validate an agent blueprint
+  blueprint     Convert an `agent.leviath` manifest into an `agent.toml` blueprint
+  schema        Print the JSON Schema of a spawn request
   deps          Inspect and install an agent's dependencies
   test          Run blueprint tests
   pack          Bundle a blueprint for distribution
   tools         List and validate the global Rhai script tools
 
 Running agents:
-  run           Run an agent
+  run           Run an agent, check a run without starting it, or show a run's file
   ps            List agent runs in the shared-world daemon
   msg           Send a message to a running agent
   cancel        Cancel a running agent (alias: `kill`)
@@ -358,15 +366,62 @@ pub trait RiskyExecutors {
     ) -> impl std::future::Future<Output = anyhow::Result<()>>;
 }
 
-/// Inject argv-prescanned dynamic `--<region>` seed flags into a parsed
-/// `run` command. A no-op for every other subcommand. Kept here (a tested lib
-/// seam) so the bin entrypoint's post-parse wiring stays branch-free.
+/// The `lev` command line, as clap reads it: every subcommand and the
+/// binary's one global flag, `--verbose`. The argv pre-scan asks it which
+/// flags `run` owns ([`commands::run::extract_region_flags`]).
+pub fn command_line() -> clap::Command {
+    use clap::Subcommand as _;
+    Commands::augment_subcommands(
+        clap::Command::new("lev").arg(
+            clap::Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .global(true)
+                .action(clap::ArgAction::SetTrue),
+        ),
+    )
+}
+
+/// Finish a parsed `run` command: put the inputs the argv pre-scan found
+/// (`--<name> value`) on it, and note whether a PATH and a `--workdir` were
+/// typed, which the binary's defaults would otherwise hide. A no-op for every
+/// other subcommand. Kept here (a tested lib seam) so the bin entrypoint's
+/// post-parse wiring stays branch-free.
 pub fn apply_region_flags(
     command: &mut Commands,
     regions: std::collections::HashMap<String, String>,
 ) {
     if let Commands::Run(args) = command {
-        args.regions = regions;
+        args.regions.named = regions;
+        args.regions.path_given = args.path.is_some();
+        args.regions.workdir_given = args.workdir.is_some();
+    }
+}
+
+/// Whether `command` talks to the daemon, so that a daemon of another build
+/// than this `lev` changes what it does or shows. Only these say so before
+/// they run; a command that reads files or config alone has no daemon to
+/// differ from, and `lev daemon status` says how the builds stand itself.
+pub fn reaches_daemon(command: &Commands) -> bool {
+    match command {
+        Commands::Run(commands::run::RunArgs {
+            command: Some(commands::run::RunCommand::Show(_)),
+            ..
+        }) => false,
+        Commands::Serve(args) => !args.print_graphql_schema,
+        Commands::Doctor(args) => !args.no_daemon && !args.offline,
+        Commands::Run(_)
+        | Commands::Ps(_)
+        | Commands::Msg(_)
+        | Commands::Cancel(_)
+        | Commands::Pause(_)
+        | Commands::Resume(_)
+        | Commands::Interactions(_)
+        | Commands::Respond(_)
+        | Commands::Dashboard(_)
+        | Commands::AgentClient(_)
+        | Commands::Rage(_) => true,
+        _ => false,
     }
 }
 
@@ -377,6 +432,11 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
     match command {
         Commands::Create(args) => commands::create::execute(args).await,
         Commands::Setup(args) => ex.setup(args).await,
+        // Reading a run's file starts nothing and needs no daemon.
+        Commands::Run(commands::run::RunArgs {
+            command: Some(commands::run::RunCommand::Show(args)),
+            ..
+        }) => commands::run::show::execute(args).await,
         Commands::Run(args) => ex.run(args).await,
         Commands::Ps(args) => ex.ps(args).await,
         Commands::Msg(args) => ex.msg(args).await,
@@ -395,6 +455,8 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Models(args) => commands::models::execute(args).await,
         Commands::Mime(args) => commands::mime::execute(args).await,
         Commands::Validate(args) => commands::validate::execute(args).await,
+        Commands::Blueprint(args) => commands::blueprint::execute(args).await,
+        Commands::Schema(args) => commands::schema::execute(args).await,
         Commands::Tools(args) => commands::tools::execute(args).await,
         Commands::Approvals(args) => commands::approvals::execute(args).await,
         Commands::Policy(args) => commands::policy::execute(args).await,
@@ -444,6 +506,49 @@ mod tests {
                 COMMANDS_HELP.contains(&format!("  {name} ")),
                 "`{name}` is not listed in COMMANDS_HELP - add it to a section"
             );
+        }
+    }
+
+    /// The commands parsed from `argv`.
+    fn parsed(argv: &[&str]) -> Commands {
+        use clap::{Command, FromArgMatches, Subcommand};
+        let lev = Commands::augment_subcommands(Command::new("lev"));
+        Commands::from_arg_matches(&lev.get_matches_from(argv)).expect("the command parses")
+    }
+
+    /// The mixed-build warning is for commands that talk to the daemon, and
+    /// only those.
+    #[test]
+    fn only_a_command_that_talks_to_the_daemon_warns_of_its_build() {
+        let reaching: [&[&str]; 13] = [
+            &["lev", "ps"],
+            &["lev", "run", "bp", "--task", "t"],
+            &["lev", "msg", "r", "hi"],
+            &["lev", "kill", "r"],
+            &["lev", "pause", "r"],
+            &["lev", "resume", "r"],
+            &["lev", "interactions"],
+            &["lev", "respond", "q", "yes"],
+            &["lev", "dash"],
+            &["lev", "serve"],
+            &["lev", "agent-client"],
+            &["lev", "rage"],
+            &["lev", "doctor"],
+        ];
+        for argv in reaching {
+            assert!(reaches_daemon(&parsed(argv)), "{argv:?}");
+        }
+        let local: [&[&str]; 7] = [
+            &["lev", "list"],
+            &["lev", "validate", "bp"],
+            &["lev", "run", "show", "r"],
+            &["lev", "serve", "--print-graphql-schema"],
+            &["lev", "doctor", "--no-daemon"],
+            &["lev", "doctor", "--offline"],
+            &["lev", "daemon", "status"],
+        ];
+        for argv in local {
+            assert!(!reaches_daemon(&parsed(argv)), "{argv:?}");
         }
     }
 
@@ -553,10 +658,30 @@ mod tests {
     fn apply_region_flags_populates_run_and_noops_other_commands() {
         let mut run = Commands::Run(commands::run::RunArgs::default());
         let flags = std::collections::HashMap::from([("criteria".to_string(), "safe".to_string())]);
-        apply_region_flags(&mut run, flags);
+        apply_region_flags(&mut run, flags.clone());
+        let untyped = commands::run::RunInputs {
+            named: flags.clone(),
+            ..Default::default()
+        };
         assert!(
-            matches!(&run, Commands::Run(a) if a.regions.get("criteria").map(String::as_str) == Some("safe")),
+            matches!(&run, Commands::Run(a) if a.regions == untyped),
             "region flag was injected into the Run args"
+        );
+        let mut typed = Commands::Run(commands::run::RunArgs {
+            path: Some("coder".to_string()),
+            workdir: Some(std::path::PathBuf::from("w")),
+            ..Default::default()
+        });
+        apply_region_flags(&mut typed, flags.clone());
+        let given = commands::run::RunInputs {
+            named: flags,
+            path_given: true,
+            workdir_given: true,
+            ..Default::default()
+        };
+        assert!(
+            matches!(&typed, Commands::Run(a) if a.regions == given),
+            "a typed PATH and --workdir are noted"
         );
         // A non-run command hits the no-op branch: it must not panic (and there
         // is nothing to inject). Asserting the variant here would leave an
@@ -575,6 +700,40 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
+    }
+
+    /// `lev run show` reads a run's file and starts nothing, so it answers
+    /// here rather than through the executor (which would say Ok): a run
+    /// with no file is the error only a direct read gives. The schema and
+    /// the blueprint conversion answer here too.
+    #[tokio::test]
+    async fn run_show_schema_and_blueprint_answer_without_the_executor() {
+        crate::runstate::with_isolated_runs_dir_async("dispatch-run-show", |_d| async {
+            let show = Commands::Run(commands::run::RunArgs {
+                command: Some(commands::run::RunCommand::Show(
+                    commands::run::show::ShowArgs {
+                        run_id: "ghost".to_string(),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            });
+            assert!(dispatch(show, &MockRisky::default()).await.is_err());
+        })
+        .await;
+        let schema = Commands::Schema(commands::schema::SchemaArgs {
+            schema: commands::schema::Schema::SpawnRequest,
+        });
+        assert!(dispatch(schema, &MockRisky::default()).await.is_ok());
+        let migrate = Commands::Blueprint(commands::blueprint::BlueprintArgs {
+            command: commands::blueprint::BlueprintCommand::Migrate(
+                commands::blueprint::MigrateArgs {
+                    path: std::path::PathBuf::from("/no/such/agent.leviath"),
+                    ..Default::default()
+                },
+            ),
+        });
+        assert!(dispatch(migrate, &MockRisky::default()).await.is_err());
     }
 
     #[tokio::test]

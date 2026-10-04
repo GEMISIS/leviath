@@ -212,8 +212,8 @@ async fn a_query_refused_before_it_runs_says_why_in_its_extensions() {
         ("a syntax error", "{ runs { results { id }"),
         (
             "two members of a @oneOf input",
-            r#"mutation { spawnRun(request: { blueprint: { name: "a" }, task: "t",
-                 yolo: { everything: true, profileName: "p" } }) { run { id } } }"#,
+            r#"mutation { spawnRun(request: { source: { blueprint: { name: "a" },
+                 graph: {} } }) { __typename } }"#,
         ),
         ("a query nested too deep", &deep_query()),
         (
@@ -787,7 +787,7 @@ fn every_listing_a_client_can_reach_is_a_connection() {
 
     /// The bounded lists: each one is as long as the document or the act it
     /// belongs to, and none of them grows with use.
-    const BOUNDED: [&str; 10] = [
+    const BOUNDED: [&str; 12] = [
         // One answer per id asked about, so the client sets the length.
         "Query.nodes",
         // The group tokens a stage may name: a handful, fixed by this build.
@@ -798,10 +798,14 @@ fn every_listing_a_client_can_reach_is_a_connection() {
         "BlueprintOutput.dependencies",
         "BlueprintOutput.mimeTypes",
         "BlueprintOutput.transforms",
+        "BlueprintOutput.inputs",
         // One row per stage the blueprint declares.
         "RunOutput.stageModels",
         // What the spawn attached, which the spawn wrote.
         "RunOutput.metadata",
+        // The steps between `from` and `to`, which the caller sets and which
+        // one call caps at 200.
+        "RunOutput.deltas",
         // The steps of one update, fixed by this build.
         "UpdateJobOutput.steps",
     ];

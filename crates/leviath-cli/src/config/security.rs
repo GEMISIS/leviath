@@ -118,7 +118,7 @@ pub struct SecurityConfig {
     /// Whether a blueprint's `[read_paths]` declarations are honored as-is.
     ///
     /// **Off by default.** A `[read_paths]` block travels inside the
-    /// `agent.leviath` you installed, and a manifest may only *tighten* what
+    /// `agent.toml` you installed, and a blueprint may only *tighten* what
     /// your config allows, never widen it - otherwise any agent package could
     /// read `~/.ssh`, this very config file (your API keys), or a password
     /// store by shipping one TOML line. With this off, an agent's declared
@@ -134,7 +134,7 @@ pub struct SecurityConfig {
     ///
     /// **Off by default**, and for the same reason as
     /// [`Self::allow_blueprint_read_paths`]: a `[safe_commands]` block travels
-    /// inside an `agent.leviath` you installed, so letting it count by itself
+    /// inside an `agent.toml` you installed, so letting it count by itself
     /// would let any agent package pre-approve its own shell with one TOML line.
     /// With this off, a blueprint's list is inert until you opt in, either here
     /// for every agent or per agent via

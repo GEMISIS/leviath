@@ -80,6 +80,8 @@ fn every_frame() -> Vec<ServerEvent> {
             from: "plan".to_string(),
             to: "build".to_string(),
             iteration: 2,
+            edge: Some("build".to_string()),
+            reason: None,
         },
         ServerEvent::ToolCallStarted {
             execution_id: "x1".to_string(),

@@ -3,12 +3,15 @@
 //! edges that were offered.
 
 use super::*;
+use crate::insert::RunSpecC;
+use crate::spec::graph::{EdgeDef, StageDef};
+use spec_view::StageToolOverrides;
 
 /// A transition-choice inference is in flight (an LLM is picking the next stage);
 /// holds the choosable edges so the collect system can match the response back to
 /// one. (Ported from the async portion of `graph::prompt_llm_transition`.)
 #[derive(Component, Debug, Clone)]
-pub(crate) struct AwaitingTransitionResponse(pub Vec<leviath_core::blueprint::TransitionEdge>);
+pub(crate) struct AwaitingTransitionResponse(pub Vec<EdgeDef>);
 
 /// The receiving end of the transition-choice outcomes channel, as a world
 /// resource for the collect system. (The sending end lives in
@@ -18,10 +21,7 @@ pub(crate) struct TransitionResults(pub UnboundedReceiver<InferenceOutcome>);
 
 /// Build the LLM prompt that asks which stage to run next. (Ported from the
 /// prompt-building portion of `graph::prompt_llm_transition`.)
-pub(crate) fn build_transition_prompt(
-    stage: &leviath_core::Stage,
-    edges: &[leviath_core::blueprint::TransitionEdge],
-) -> String {
+pub(crate) fn build_transition_prompt(stage: &StageDef, edges: &[EdgeDef]) -> String {
     let mut p = match &stage.transition_prompt {
         Some(custom) => {
             let mut p = custom.clone();
@@ -34,7 +34,7 @@ pub(crate) fn build_transition_prompt(
         ),
     };
     for edge in edges {
-        p.push_str(&format!("- {}", edge.target));
+        p.push_str(&format!("- {}", edge.to));
         if let Some(hint) = &edge.hint {
             p.push_str(&format!(": {hint}"));
         }
@@ -62,7 +62,18 @@ pub(crate) fn build_transition_prompt(
     p
 }
 
+/// [`route_choice`] without the reason.
+#[cfg(test)]
+pub(crate) fn match_transition_choice(
+    choice: &str,
+    edges: &[EdgeDef],
+    allow_complete: bool,
+) -> Option<String> {
+    route_choice(choice, edges, allow_complete).map(|(to, _)| to)
+}
+
 /// Match an LLM transition response to one of the choosable edges' target stages,
+/// with why the run goes there,
 /// or `None` if the stage may complete and the LLM chose to end here.
 ///
 /// Models are asked to answer with only the target stage name (or `DONE`), but
@@ -72,12 +83,13 @@ pub(crate) fn build_transition_prompt(
 /// substring-scanning the whole response, where a stage name mentioned in
 /// passing ("the implementation", "the approved plan") would hijack the routing.
 /// When nothing matches, a stage that may complete ends the run; otherwise the
-/// run advances along the first declared edge.
-pub(crate) fn match_transition_choice(
+/// run advances along the first declared edge, as a fallback: the model chose
+/// nothing it could take.
+pub(crate) fn route_choice(
     choice: &str,
-    edges: &[leviath_core::blueprint::TransitionEdge],
+    edges: &[EdgeDef],
     allow_complete: bool,
-) -> Option<String> {
+) -> Option<(String, crate::state::TransitionReason)> {
     let lines: Vec<&str> = choice
         .lines()
         .map(str::trim)
@@ -106,8 +118,14 @@ pub(crate) fn match_transition_choice(
             if allow_complete && word.eq_ignore_ascii_case("done") {
                 return None;
             }
-            if let Some(edge) = edges.iter().find(|e| word.eq_ignore_ascii_case(&e.target)) {
-                return Some(edge.target.clone());
+            if let Some(edge) = edges
+                .iter()
+                .find(|e| word.eq_ignore_ascii_case(e.to.as_str()))
+            {
+                return Some((
+                    edge.to.to_string(),
+                    crate::state::TransitionReason::ModelChoice,
+                ));
             }
         }
     }
@@ -116,7 +134,12 @@ pub(crate) fn match_transition_choice(
     if allow_complete {
         None
     } else {
-        edges.first().map(|edge| edge.target.clone())
+        edges.first().map(|edge| {
+            (
+                edge.to.to_string(),
+                crate::state::TransitionReason::Fallback,
+            )
+        })
     }
 }
 
@@ -129,7 +152,7 @@ type TransitionChoiceQuery = (
     &'static AgentState,
     &'static mut ContextWindow,
     &'static StageInference,
-    &'static AgentBlueprint,
+    &'static RunSpecC,
     &'static StageCursor,
     &'static AwaitingTransitionChoice,
     Option<&'static InFlightWork>,
@@ -225,7 +248,7 @@ pub(crate) fn dispatch_transition_choice(
 ) {
     crate::tick_scope::clear();
     let now = chrono::Utc::now().timestamp();
-    for (entity, state, mut window, si, bp, cursor, choice, in_flight, stalled, built_from) in
+    for (entity, state, mut window, si, spec, cursor, choice, in_flight, stalled, built_from) in
         agents.iter_mut()
     {
         let (config, progress, prefix, block_prefix, calibration) = built_from;
@@ -249,7 +272,7 @@ pub(crate) fn dispatch_transition_choice(
             continue; // pool full - retry next tick
         };
 
-        let current = &bp.0.stages[cursor.index];
+        let current = &spec.0.graph.stages[cursor.index];
         let prompt = build_transition_prompt(current, &choice.0);
         let tokens = leviath_core::estimate_tokens(&prompt);
         let _ = window.add_typed_entry_caused(
@@ -281,6 +304,7 @@ pub(crate) fn dispatch_transition_choice(
             .0
             .apply_retention_knobs(&si.provider_name, &mut request.extra);
         let job = InferenceJob {
+            jobs: None,
             entity,
             refused: providers.0.retention_refusal(&si.provider_name, &si.model),
             provider,
@@ -304,38 +328,19 @@ pub(crate) fn dispatch_transition_choice(
             // does.
             journal: None,
         };
-        let cancel = crate::cancel::CancelToken::new();
-        // Supervised for the same reason as the inference lane: the agent is
-        // about to wait on `AwaitingTransitionResponse`, so a job that dies
-        // without reporting would strand it mid-route.
-        let lost_outcomes = stage.transition_outcomes.clone();
-        let lost_wake = stage.wake.clone();
-        crate::lane_supervisor::spawn_supervised(
-            &stage.runtime,
-            "transition-choice",
-            run_inference_job(
-                job,
-                stage.transition_outcomes.clone(),
-                stage.wake.clone(),
-                crate::inference_bridge::RetryPolicy::default(),
-                cancel.clone(),
-            ),
-            move |message| {
-                let _ = lost_outcomes.send(crate::inference_bridge::InferenceOutcome {
-                    entity,
-                    attempt_id: String::new(),
-                    result: Err(leviath_providers::ProviderError::Other(message)),
-                    latency: std::time::Duration::ZERO,
-                    // A job that never reached a provider has no rates and no
-                    // cost; there is nothing to price.
-                    pricing: None,
-                });
-                lost_wake.notify_one();
-            },
+        // Held on the agent as a call like the stage's own, so the agent waits
+        // on `AwaitingTransitionResponse` while the world decides on each
+        // failed trip; the trips themselves are supervised.
+        let (call, cancel) = crate::inference_call::start_call(
+            &stage,
+            job,
+            crate::inference_bridge::RetryPolicy::default(),
+            crate::inference_call::CallLane::Routing,
         );
         track_in_flight(&mut commands, entity, in_flight, cancel);
         commands
             .entity(entity)
+            .insert(call)
             .remove::<AwaitingTransitionChoice>()
             .remove::<DispatchStall>()
             .insert(AwaitingTransitionResponse(choice.0.clone()));
@@ -347,12 +352,11 @@ pub(crate) fn dispatch_transition_choice(
 /// `&'static` is bevy's `WorldQuery` convention, not a claim about
 /// lifetimes: the borrow is bound when the query is fetched.
 type CollectTransitionChoiceQuery = (
-    &'static AgentBlueprint,
+    &'static RunSpecC,
     &'static mut StageCursor,
     &'static mut AgentState,
     &'static mut StageProgress,
-    &'static StageInferences,
-    &'static StageSetups,
+    Option<&'static StageToolOverrides>,
     &'static mut VisitCounts,
     &'static mut ContextWindow,
     &'static AwaitingTransitionResponse,
@@ -371,19 +375,19 @@ type CollectTransitionChoiceQuery = (
 pub(crate) fn collect_transition_choice(
     mut results: ResMut<TransitionResults>,
     mut agents: Query<CollectTransitionChoiceQuery>,
+    mut calls: crate::inference_call::CallParams,
     sink: Option<Res<crate::host::WorldEventSink>>,
-    persist: Option<Res<crate::pipeline::PersistenceStage>>,
+    persist: Option<Res<crate::pipeline::JournalSender>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    while let Ok(outcome) = results.0.try_recv() {
+    while let Ok(mut outcome) = results.0.try_recv() {
         let Ok((
-            bp,
+            spec,
             mut cursor,
             mut state,
             mut progress,
-            stage_infs,
-            setups,
+            overrides,
             mut visits,
             mut window,
             resp,
@@ -398,6 +402,7 @@ pub(crate) fn collect_transition_choice(
             continue; // stale: agent cancelled/despawned since dispatch
         };
         crate::tick_scope::enter(outcome.entity);
+        let graph = &spec.0.graph;
         // Cancelled/failed mid-choice: every arm below rewrites the status
         // (including a bare `Complete` when nothing matches), which would report
         // a cancelled run as having finished normally.
@@ -405,7 +410,12 @@ pub(crate) fn collect_transition_choice(
             commands
                 .entity(outcome.entity)
                 .remove::<AwaitingTransitionResponse>()
-                .remove::<InFlightWork>();
+                .remove::<InFlightWork>()
+                .remove::<crate::inference_call::InferenceCall>();
+            continue;
+        }
+        // A failed trip the call will make again: the agent keeps waiting.
+        if calls.settle(&mut outcome, &mut commands) != crate::inference_call::Next::Done {
             continue;
         }
         // Paused mid-routing. Same hazard as the stage lane: every arm below
@@ -434,9 +444,10 @@ pub(crate) fn collect_transition_choice(
                 // The provider named is the one this call went to: the live
                 // component, which a failover earlier in the stage moved on
                 // from the one the stage resolved to.
+                let planned = spec_view::stage_inference(&spec.0, cursor.index, overrides);
                 let provider = called
                     .map(|si| si.provider_name.as_str())
-                    .unwrap_or(&stage_infs.0[cursor.index].provider_name);
+                    .unwrap_or(&planned.provider_name);
                 if let Some((blocker, message)) = crate::pipeline::park::setup_park(&err, provider)
                 {
                     tracing::warn!(
@@ -487,21 +498,17 @@ pub(crate) fn collect_transition_choice(
         // boundary of every branching run. Read off the stage's own inference
         // config, which is what dispatch resolved the provider from.
         //
-        // Indexed rather than looked up, like the `bp.0.stages[cursor.index]`
-        // below it: `StageInferences` is built one entry per stage at spawn, so
-        // a cursor that could miss here would already have panicked there.
-        //
         // Billed to the stage being left, which is the stage that asked the
         // question. `state.current_stage` is still that stage here: the cursor
         // does not move until `enter_stage` below.
-        let si = &stage_infs.0[cursor.index];
+        let si = spec_view::stage_inference(&spec.0, cursor.index, overrides);
         crate::inference_usage::record_call(
             totals.as_deref_mut(),
             ledger.as_deref_mut(),
             persist.as_deref(),
             metadata,
             &crate::inference_usage::CallUsage {
-                kind: leviath_core::run_archive::InferenceKind::Routing,
+                kind: crate::runfile::record::InferenceKind::Routing,
                 stage: &state.current_stage,
                 iteration: state.iteration,
                 provider: &si.provider_name,
@@ -523,21 +530,18 @@ pub(crate) fn collect_transition_choice(
             tokens,
         );
 
-        let allow_complete = bp.0.stages[cursor.index].allow_complete;
-        match match_transition_choice(&choice, &resp.0, allow_complete) {
-            Some(target) => {
-                let idx =
-                    bp.0.stages
-                        .iter()
-                        .position(|s| s.name == target)
-                        .unwrap_or(0);
+        let allow_complete = graph.stages[cursor.index].allow_complete;
+        match route_choice(&choice, &resp.0, allow_complete) {
+            Some((target, picked)) => {
+                let idx = spec_view::stage_index(graph, &target).unwrap_or(0);
                 // The chosen edge (absent when the matched target has no explicit
                 // edge, e.g. a fallback - then Direct, ungated).
-                let edge = resp.0.iter().find(|e| e.target == target);
-                let transform = edge.map(|e| e.transform.clone()).unwrap_or_default();
+                let edge = resp.0.iter().find(|e| e.to.as_str() == target);
+                let transform = edge.map(|e| e.carry.clone()).unwrap_or_default();
                 // The edge's gate is checked BEFORE its transform runs, so a
                 // held stage keeps the context it still needs.
-                let stage = &bp.0.stages[cursor.index];
+                let stage = &graph.stages[cursor.index];
+                let mut reason = picked;
                 match gate_blocks(
                     edge.and_then(|e| e.gate.as_ref()),
                     stage,
@@ -555,6 +559,7 @@ pub(crate) fn collect_transition_choice(
                         continue;
                     }
                     GateDecision::Forced => {
+                        reason = crate::state::TransitionReason::Gate;
                         if let Some(flags) = flags.as_mut() {
                             flags.0.gates_forced += 1;
                         }
@@ -562,12 +567,13 @@ pub(crate) fn collect_transition_choice(
                     GateDecision::Pass => {}
                 }
                 let to_compact = apply_edge_transform(&mut window, &transform);
-                let setup = &setups.0[idx];
+                let setup = spec_view::stage_setup(&spec.0, idx);
                 let from = state.current_stage.clone();
+                let edge_name = edge.map(|e| e.name.clone());
                 match enter_stage(
                     idx,
-                    &bp.0,
-                    setup,
+                    graph,
+                    &setup,
                     StageEntry {
                         cursor: &mut cursor,
                         state: &mut state,
@@ -585,11 +591,31 @@ pub(crate) fn collect_transition_choice(
                         // only yields `Choose` from the branch that ran with no
                         // stage outcome, so an errored stage routes to `Next`
                         // and never reaches an LLM choice.
-                        let name = bp.0.stages[idx].name.clone();
-                        emit_stage_transition(&sink, metadata, &state.agent_id, from, &name, visit);
+                        let name = graph.stages[idx].name.to_string();
+                        let how = (edge_name.as_ref(), reason);
+                        emit_stage_transition(
+                            &sink,
+                            metadata,
+                            &state.agent_id,
+                            from.clone(),
+                            &name,
+                            visit,
+                            how,
+                        );
+                        let taken = transition_record(&from, &state, edge_name, reason);
+                        super::transition::journal_transition(
+                            persist.as_deref(),
+                            metadata,
+                            taken.as_ref(),
+                        );
                         let mut ec = commands.entity(outcome.entity);
                         ec.remove::<AwaitingTransitionResponse>();
-                        attach_stage_components(ec, stage_infs.0[idx].clone(), setup, idx, name);
+                        taken.into_iter().for_each(|t| {
+                            ec.insert(t);
+                        });
+                        let inference = spec_view::stage_inference(&spec.0, idx, overrides);
+                        attach_stage_components(ec, inference, &setup, idx, name);
+
                         if !to_compact.is_empty() {
                             commands
                                 .entity(outcome.entity)

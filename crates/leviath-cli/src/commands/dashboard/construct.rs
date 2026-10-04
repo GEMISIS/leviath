@@ -138,8 +138,9 @@ impl Dashboard {
             stage_explorer: None,
             context_tree: ContextTreeState::default(),
             history: None,
-            history_loader: runstate::context_history,
-            history_stamp: runstate::archive_stamp,
+            history_loader: runstate::run_history,
+            history_stamp: runstate::run_file_stamp,
+            answers: Default::default(),
             detail_scroll: 0,
             choice_selected: 0,
             selected_stage: 0,
@@ -192,6 +193,7 @@ impl Dashboard {
             new_run_inputs: Vec::new(),
             new_run_input_selected: 0,
             new_run_inputs_key: String::new(),
+            new_run_refused: None,
             new_run_file_ref: false,
             new_run_file_query: String::new(),
             new_run_file_selected: 0,
@@ -237,7 +239,7 @@ impl Dashboard {
     pub(super) fn take_spawn_bg_ends(
         &mut self,
     ) -> Option<(
-        mpsc::UnboundedReceiver<SpawnCommand>,
+        mpsc::UnboundedReceiver<NewRunCommand>,
         mpsc::UnboundedSender<SpawnOutcome>,
     )> {
         self.spawn_bg_ends.take()

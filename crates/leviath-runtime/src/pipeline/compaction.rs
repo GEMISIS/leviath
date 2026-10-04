@@ -33,15 +33,30 @@ pub(crate) const EVICTION_THRESHOLD: f32 = 0.9;
 /// which returns the agent to `ReadyToInfer` with its context untouched - the
 /// same place a genuine summarization failure leaves it.
 fn spawn_supervised_compaction(stage: &InferenceStage, entity: Entity, job: CompactionJob) {
-    let lost_outcomes = stage.compaction_outcomes.clone();
+    spawn_summary_job(stage, &stage.compaction_outcomes, "compaction", entity, job);
+}
+
+/// Spawn a summarization job under the lane supervisor, reporting into
+/// `outcomes`: compaction's own lane, or the content-summary lane a child's
+/// summarized region waits on. A job that dies without reporting is reported
+/// as an error named after `lane`, which each lane's collect system already
+/// treats as a failed summary.
+pub(crate) fn spawn_summary_job(
+    stage: &InferenceStage,
+    outcomes: &tokio::sync::mpsc::UnboundedSender<CompactionOutcome>,
+    lane: &'static str,
+    entity: Entity,
+    job: CompactionJob,
+) {
+    let lost_outcomes = outcomes.clone();
     let lost_wake = stage.wake.clone();
     crate::lane_supervisor::spawn_supervised(
         &stage.runtime,
-        "compaction",
+        lane,
         run_compaction_job(
             job,
             std::time::Duration::from_secs(leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS),
-            stage.compaction_outcomes.clone(),
+            outcomes.clone(),
             stage.wake.clone(),
         ),
         move |message| {
@@ -74,14 +89,21 @@ type CompactionQuery = (
 );
 
 /// Compaction-dispatch system: for each `ReadyToInfer` agent with
-/// [`CompactionSettings`] whose window is over the eviction threshold, do the
-/// synchronous eviction inline; if that surfaces regions needing LLM
-/// summarization (and content to summarize), build one request per region,
-/// acquire a permit for the compaction model, spawn the job, and hold the agent
-/// as `AwaitingCompaction`. Anything that can't proceed (under threshold, nothing
-/// to summarize, provider missing, pool full) simply leaves the agent
-/// `ReadyToInfer` so inference proceeds - compaction is best-effort. (Ported from
-/// `AgentEngine::evict_and_compact`.)
+/// [`CompactionSettings`], summarize every compacting region that is past its
+/// own threshold (`compact_at`), and when the window as a whole is over the
+/// eviction threshold, run the synchronous eviction first. Builds one request
+/// per region with content to summarize, acquires a permit for the compaction
+/// model, spawns the job, and holds the agent as `AwaitingCompaction`. Anything
+/// that can't proceed (nothing past a threshold, nothing to summarize, provider
+/// missing, pool full) simply leaves the agent `ReadyToInfer` so inference
+/// proceeds - compaction is best-effort.
+///
+/// A region's own threshold is what `compact_at` promises, and acting on it
+/// before the window fills is what keeps a compacting region summarizing
+/// rather than rolling its oldest entries off when a write does not fit.
+/// Without window pressure a region holding a single entry waits: summarizing
+/// one entry in place leaves one entry, and a summary still past the threshold
+/// would be summarized again before every request.
 pub(crate) fn dispatch_compaction(
     mut agents: Query<CompactionQuery, (With<ReadyToInfer>, Without<AwaitingCompaction>)>,
     stage: Res<InferenceStage>,
@@ -98,30 +120,27 @@ pub(crate) fn dispatch_compaction(
         // there to leave room between "nearly full" and "over the window", and
         // an estimate measured running light spends that room without ever
         // reporting it.
-        if !crate::pipeline::needs_eviction_calibrated(
+        let pressed = crate::pipeline::needs_eviction_calibrated(
             window.current_tokens,
             window.max_tokens,
             EVICTION_THRESHOLD,
             calibration,
-        ) {
-            continue; // under threshold - nothing to do
-        }
+        );
         let target_free = window.max_tokens / 10;
-        let Ok(eviction) = window.try_evict(target_free) else {
+        if pressed && window.try_evict(target_free).is_err() {
             continue; // couldn't evict - proceed to inference as-is
-        };
+        }
 
-        // Build a summarize request per region that both needs compaction and
+        // Build a summarize request per region that is past its threshold and
         // has content to summarize.
         let config = &settings.0;
         let mut requests = Vec::new();
-        for region_name in &eviction.needs_compaction {
-            // The names come from `try_evict`'s own scan of `window.regions`, and
-            // nothing between there and here mutates the region set, so the region
-            // is guaranteed present.
-            let region = window
-                .get_region(region_name)
-                .expect("needs_compaction region present: named by try_evict's own scan");
+        for region in window
+            .regions
+            .iter()
+            .filter(|r| r.needs_compaction() && (pressed || r.content.len() > 1))
+        {
+            let region_name = &region.name;
             let content: String = region
                 .content
                 .iter()
@@ -204,7 +223,7 @@ type CollectCompactionQuery = (
 pub(crate) fn collect_compaction(
     mut results: ResMut<CompactionResults>,
     mut agents: Query<CollectCompactionQuery, With<AwaitingCompaction>>,
-    persist: Option<Res<crate::pipeline::PersistenceStage>>,
+    persist: Option<Res<crate::pipeline::JournalSender>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -242,7 +261,7 @@ pub(crate) fn collect_compaction(
                 persist.as_deref(),
                 md,
                 &crate::inference_usage::CallUsage {
-                    kind: leviath_core::run_archive::InferenceKind::Compaction,
+                    kind: crate::runfile::record::InferenceKind::Compaction,
                     stage: state.map_or("", |s| s.current_stage.as_str()),
                     iteration: state.map_or(0, |s| s.iteration),
                     provider: &outcome.provider_name,
@@ -304,14 +323,11 @@ pub(crate) fn collect_compaction(
                             if source_region == &region_name)
                     })
                     .map(|r| r.name.clone());
-                if let Some(history_name) = history {
-                    let _ = window.add_to_region_caused(
-                        leviath_core::ContextCause::Compaction,
-                        &history_name,
-                        summary,
-                        summary_tokens,
-                    );
-                }
+                // The summary rolls forward into the region's `compact_history`
+                // when it has one, and otherwise stays in the region it
+                // summarizes: a compacting region summarizes instead of
+                // evicting, so its older content is never simply dropped.
+                let into = history.unwrap_or_else(|| region_name.clone());
                 let before = window.begin_change(&region_name);
                 if let Some(region) = window.get_region_mut(&region_name) {
                     region.clear();
@@ -322,6 +338,12 @@ pub(crate) fn collect_compaction(
                     leviath_core::ContextCause::Compaction,
                     before,
                     crate::components::Pushed::Nothing,
+                );
+                let _ = window.add_to_region_caused(
+                    leviath_core::ContextCause::Compaction,
+                    &into,
+                    summary,
+                    summary_tokens,
                 );
             }
             window.current_tokens = window.calculate_tokens();
@@ -391,12 +413,12 @@ pub fn is_stage_specific(kind: &leviath_core::RegionKind) -> bool {
 /// as-is.)
 pub(crate) fn apply_edge_transform(
     window: &mut ContextWindow,
-    transform: &leviath_core::blueprint::EdgeTransform,
+    transform: &crate::spec::graph::EdgeCarry,
 ) -> Vec<String> {
-    use leviath_core::blueprint::EdgeTransform;
+    use crate::spec::graph::EdgeCarry;
     match transform {
-        EdgeTransform::Direct => Vec::new(),
-        EdgeTransform::Clear => {
+        EdgeCarry::Direct => Vec::new(),
+        EdgeCarry::Clear => {
             window
                 .regions
                 .iter_mut()
@@ -408,13 +430,13 @@ pub(crate) fn apply_edge_transform(
         // Kind cannot tell a transcript from a table of results, so a region
         // whose author said its content does not survive a paraphrase is left
         // alone however the edge is spelled.
-        EdgeTransform::Compact { .. } => window
+        EdgeCarry::Compact { .. } => window
             .regions
             .iter()
             .filter(|r| is_stage_specific(&r.kind) && r.summarizable && !r.content.is_empty())
             .map(|r| r.name.clone())
             .collect(),
-        EdgeTransform::Custom {
+        EdgeCarry::Custom {
             carry,
             compact,
             clear,
@@ -426,7 +448,7 @@ pub(crate) fn apply_edge_transform(
             let cleared: Vec<&str> = clear
                 .iter()
                 .filter(|n| !carry.contains(n))
-                .map(String::as_str)
+                .map(|n| n.as_str())
                 .collect();
             let emptying = window.begin_changes(cleared.iter().copied());
             for name in &cleared {
@@ -450,7 +472,7 @@ pub(crate) fn apply_edge_transform(
                     // rather than at each of the N edges that might touch it.
                     // Said out loud, because refusing an explicit instruction
                     // silently is the thing this issue is about.
-                    match window.get_region(n) {
+                    match window.get_region(n.as_str()) {
                         Some(r) if !r.summarizable => {
                             tracing::warn!(
                                 region = %n,
@@ -463,7 +485,7 @@ pub(crate) fn apply_edge_transform(
                         None => false,
                     }
                 })
-                .cloned()
+                .map(ToString::to_string)
                 .collect()
         }
     }

@@ -32,6 +32,13 @@ pub(crate) enum ServeError {
     #[error("{0}")]
     Conflict(String),
 
+    /// The question named was asked by a run the daemon holds off this
+    /// machine: its provider was taken away, say. Nothing can answer it until
+    /// the run is back, and then it is asked anew under a new id, so the
+    /// remedy is to put back what the message names, not to answer again.
+    #[error("{0}")]
+    Held(String),
+
     /// The server is configured to refuse this: a workdir outside
     /// `--workdir-root`, an unattended run on a `--no-remote-yolo` server, a
     /// callback URL the outbound policy will not allow.
@@ -97,6 +104,7 @@ impl ServeError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Held(_) => StatusCode::CONFLICT,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::DaemonUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::DaemonIncompatible(_) => StatusCode::BAD_GATEWAY,
@@ -118,6 +126,7 @@ impl ServeError {
             Self::BadRequest(_) => "BAD_USER_INPUT",
             Self::NotFound(_) => "NOT_FOUND",
             Self::Conflict(_) => "CONFLICT",
+            Self::Held(_) => "RUN_HELD",
             Self::Forbidden(_) => "FORBIDDEN",
             Self::DaemonUnavailable(_) => "DAEMON_UNAVAILABLE",
             Self::DaemonIncompatible(_) => "DAEMON_INCOMPATIBLE",
@@ -140,6 +149,7 @@ impl ServeError {
             Self::BadRequest(_) => Self::BadRequest(said),
             Self::NotFound(_) => Self::NotFound(said),
             Self::Conflict(_) => Self::Conflict(said),
+            Self::Held(_) => Self::Held(said),
             Self::Forbidden(_) => Self::Forbidden(said),
             Self::DaemonUnavailable(_) => Self::DaemonUnavailable(said),
             Self::DaemonIncompatible(_) => Self::DaemonIncompatible(said),
@@ -212,6 +222,11 @@ mod tests {
                 ServeError::Conflict("c".into()),
                 StatusCode::CONFLICT,
                 "CONFLICT",
+            ),
+            (
+                ServeError::Held("h".into()),
+                StatusCode::CONFLICT,
+                "RUN_HELD",
             ),
             (
                 ServeError::Forbidden("f".into()),
@@ -314,6 +329,7 @@ mod tests {
         for failure in [
             ServeError::BadRequest("b".into()),
             ServeError::Conflict("c".into()),
+            ServeError::Held("h".into()),
             ServeError::Forbidden("f".into()),
             ServeError::DaemonUnavailable("d".into()),
             ServeError::DaemonIncompatible("i".into()),

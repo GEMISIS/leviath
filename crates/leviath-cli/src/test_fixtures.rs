@@ -124,7 +124,6 @@ impl Provider for FakeProvider {
 /// field of the same value now. A test that wants one field different uses
 /// struct-update syntax over the fixture.
 pub(crate) mod fixtures {
-    use leviath_core::blueprint::{FanOutConfig, WorkerFailurePolicy};
     use leviath_core::run_meta::RunMeta;
     use leviath_providers::{FinishReason, InferenceRequest, InferenceResponse, TokenUsage};
 
@@ -183,20 +182,16 @@ pub(crate) mod fixtures {
         )
     }
 
-    /// A single-worker fan-out with no worker source, whose split prompt is
-    /// `s` and whose failed workers are skipped.
-    pub(crate) fn fanout_config() -> FanOutConfig {
-        FanOutConfig {
-            worker_agent: None,
-            worker_stage: None,
-            worker_query: None,
-            merge_stage: None,
-            max_workers: 1,
-            on_worker_failure: WorkerFailurePolicy::Continue,
-            split_prompt: "s".to_string(),
-            results_region: None,
-            max_items: None,
-            max_attempts: None,
+    /// An empty pinned region named `name`: what makes a recorded window one,
+    /// since a run with no region at all holds no window.
+    pub(crate) fn region(name: &str) -> leviath_core::run_meta::RegionSnapshot {
+        leviath_core::run_meta::RegionSnapshot {
+            name: name.to_string(),
+            kind: "pinned".to_string(),
+            current_tokens: 0,
+            max_tokens: 100,
+            entries: Vec::new(),
+            description: None,
         }
     }
 }
@@ -249,7 +244,6 @@ mod tests {
             (meta.run_id.as_str(), meta.agent_name.as_str()),
             ("r1", "a")
         );
-        assert_eq!(fixtures::fanout_config().max_workers, 1);
     }
 }
 

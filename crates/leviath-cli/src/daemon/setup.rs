@@ -1,8 +1,8 @@
 //! Daemon assembly: build a fully-wired [`WorldHost`] (world + tool service +
-//! interaction hub + the blueprint spawner) ready to be driven by
+//! interaction hub + the run starter) ready to be driven by
 //! [`WorldHost::serve`]. The async setup (provider registry, MCP connections)
 //! happens in the binary and is passed in; this wiring is synchronous and
-//! testable - spawning an agent through the installed spawner exercises the whole
+//! testable - starting a run through the installed starter exercises the whole
 //! path.
 
 use std::sync::Arc;
@@ -15,11 +15,12 @@ use leviath_runtime::world::PipelineWorld;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
+use leviath_runtime::control_socket::StartupBoard;
 use leviath_runtime::fanout::FanOutSpawnerRes;
 
 use crate::config::Config;
 use crate::daemon::fanout_spawner::DaemonFanOutSpawner;
-use crate::daemon::spawn::build_agent;
+use crate::daemon::starter::DaemonStarter;
 use crate::daemon::tool_service::CliToolService;
 use crate::tools::ToolRegistry;
 
@@ -76,16 +77,28 @@ pub(crate) fn build_marker_path() -> Option<std::path::PathBuf> {
     leviath_core::paths::data_dir().map(|d| d.join("daemon.build"))
 }
 
-/// Record [`CURRENT_BUILD`] so the CLI can detect a stale daemon later.
-/// Best-effort - a missing marker just triggers a restart on the next command.
+/// Record this build (its id, version and commit time; see
+/// [`super::build::Build::marker`]) so a `lev` of another build can tell how
+/// it stands to this daemon. Best-effort: a missing marker reads as an older
+/// daemon, which the next spawn command replaces.
 pub fn write_build_marker() {
     // Combinators (rather than `if let`) so the "no home dir" / "no parent"
     // fallbacks don't add branches that can't be exercised where a home always
     // resolves - mirroring `control_address`'s `.map` style.
     build_marker_path().into_iter().for_each(|path| {
         let _ = path.parent().map(std::fs::create_dir_all);
-        let _ = std::fs::write(&path, CURRENT_BUILD);
+        let _ = std::fs::write(&path, super::build::Build::current().marker());
     });
+}
+
+/// [`write_build_marker`] before the control channel at `id` is bound, so the
+/// first `lev` to reach this daemon reads its build, never the build of the
+/// daemon before it. A daemon already answering at `id` keeps its marker:
+/// this one is about to lose the single-instance bind to it.
+pub fn write_build_marker_unless_running(id: &leviath_runtime::control_socket::ControlId) {
+    if !leviath_runtime::control_socket::is_daemon_running(id) {
+        write_build_marker();
+    }
 }
 
 /// The build id a running daemon recorded, if the marker exists and is readable.
@@ -95,24 +108,20 @@ pub fn read_build_marker() -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Whether a running daemon should be restarted because it is on a different
-/// build than this CLI (or recorded no build at all - e.g. it predates this
-/// check).
-pub fn daemon_build_is_stale(recorded: Option<&str>) -> bool {
-    recorded != Some(CURRENT_BUILD)
-}
-
 /// Build the daemon's [`WorldHost`], doing the async startup work: build the
 /// provider registry from config and connect the shared MCP servers (both reused
-/// by every agent), then wire the host + spawner via [`build_host`].
+/// by every agent), upgrade what an earlier release left in the home, then wire
+/// the host + spawner via [`build_host`]. Each step says on `board` what it is
+/// doing, for the clients that reach the daemon meanwhile.
 pub async fn setup_daemon_host(
     config: Config,
     runs_dir: std::path::PathBuf,
     runtime: Handle,
+    board: &StartupBoard,
 ) -> anyhow::Result<WorldHost> {
     setup_daemon_host_with(
         config,
-        runs_dir,
+        (runs_dir, board),
         runtime,
         &leviath_providers::provider::build_http_client,
     )
@@ -131,7 +140,7 @@ const PROVIDER_PRIME_TIMEOUT_SECS: u64 = 10;
 /// start-up failure path is reachable from a test.
 pub(crate) async fn setup_daemon_host_with(
     config: Config,
-    runs_dir: std::path::PathBuf,
+    (runs_dir, board): (std::path::PathBuf, &StartupBoard),
     runtime: Handle,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> anyhow::Result<WorldHost> {
@@ -166,6 +175,7 @@ pub(crate) async fn setup_daemon_host_with(
     // name silently gets a 128 000-token window, with every percentage region
     // budget sized against it. Awaited rather than spawned so the first run has
     // the answer instead of racing it; failures are warnings.
+    board.begin("asking providers which models they serve", 0);
     let prime_failures = providers
         .prime_capabilities(
             std::time::Duration::from_secs(PROVIDER_PRIME_TIMEOUT_SECS),
@@ -201,12 +211,12 @@ pub(crate) async fn setup_daemon_host_with(
     let refresher_config = reloader.clone();
     // MCP connections are shared across agents; the workdir here only seeds the
     // (discarded) built-ins - each agent gets its own over its own workdir.
+    board.begin("connecting MCP servers", 0);
     let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
     // The shared MCP pool: seed the connected global servers, then reconnect the
-    // per-agent MCP servers of any non-terminal persisted run so a run reloaded on
-    // restart can still execute its blueprint MCP tools (recovery warming - the
-    // async counterpart of the live-spawn preprocessor, done here before the
-    // sync reload inside build_host).
+    // per-agent MCP servers of any unfinished run so a run resumed on restart
+    // can still call its blueprint's MCP tools. Done here, before the
+    // synchronous resume inside build_host, as the starter does for a new run.
     let mcp_pool = crate::daemon::mcp_pool::McpPool::for_daemon_with(
         registry.mcp.clone(),
         &config.mcp_servers,
@@ -223,7 +233,41 @@ pub(crate) async fn setup_daemon_host_with(
         &registry.mcp_tool_defs,
         &registry.mcp_tool_owners,
     );
+    // Old run directories become run files first, each stage looked up
+    // against this machine's providers and tools, so the servers they declare
+    // are warmed with everyone else's.
+    let agents_dir = leviath_core::paths::agents_dir();
+    // Blueprints a previous release installed become `agent.toml` first, so
+    // they are found by name and an old run's workers are pinned to them.
+    let mut upgrade = crate::daemon::upgrade::Upgrade::default();
+    crate::blueprint_upgrade::upgrade_at_start(
+        &runs_dir,
+        &crate::runstate::runs_dir(),
+        (agents_dir.as_deref(), &config.agent_paths),
+        board,
+        &mut upgrade,
+    );
+    let runs = crate::daemon::convert_old::convert_at_start(
+        &runs_dir,
+        crate::daemon::convert_old::AtStart {
+            config: &config,
+            registry: provider_reload.registry(),
+            agents_dir: agents_dir.as_deref(),
+            mcp_defs: &registry.mcp_tool_defs,
+            mcp_owners: &registry.mcp_tool_owners,
+            shared_mcp: registry.mcp.clone(),
+            pool: &mcp_pool,
+        },
+        board,
+    )
+    .await;
+    upgrade.add_runs(runs);
+    upgrade.finish(&crate::home_backup::Backup::of_runs(&runs_dir));
+    board.begin("bringing back unfinished runs", 0);
     mcp_pool.warm_recovered(&runs_dir).await;
+    // The index `lev ps` and the dashboard list runs from follows the runs
+    // as they change.
+    crate::run_index::keep_fresh(&runtime, runs_dir.clone());
     let refresher_runtime = runtime.clone();
     let host = build_host(HostParts {
         config,
@@ -239,13 +283,11 @@ pub(crate) async fn setup_daemon_host_with(
         provider_reload: Some(provider_reload),
     });
     // Every list not read live at start is asked for until it answers, and
-    // then every list now and then; a run held for one is paged in when it
-    // does.
+    // then every list now and then.
     crate::daemon::catalog_refresh::spawn(
         &refresher_runtime,
         refresher_reload,
         refresher_config,
-        host.catalog_waker(),
         crate::daemon::catalog_refresh::Pacing::DAEMON,
     );
     Ok(host)
@@ -260,14 +302,13 @@ fn make_reaper(
     mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
 ) -> leviath_runtime::host::Reaper {
     Box::new(move |world, entity| {
-        // Release the run's MCP leases before the entity (and its metadata)
-        // goes away; servers nobody else holds get an idle-disconnect timer.
-        if let Some(md) = world
+        // Release the run's MCP leases before the entity goes away; servers
+        // nobody else holds get an idle-disconnect timer.
+        if let Some(lease) = world
             .world()
-            .get::<leviath_runtime::persistence::RunMetadata>(entity)
+            .get::<crate::daemon::mcp_pool::McpLease>(entity)
         {
-            let run_id = md.run_id.clone();
-            mcp_pool.release_run(&run_id);
+            mcp_pool.release(lease);
         }
         // A finished run deletes what it put in providers' file storage.
         leviath_runtime::provider_files::forget_finished(world.world(), entity);
@@ -353,9 +394,9 @@ pub struct HostParts {
 }
 
 /// Build the daemon's [`WorldHost`]: one world hosting every agent, its tool
-/// service + interaction hub, and a `Spawn`-op spawner that loads blueprints
-/// and registers per-agent tool state. The MCP connections in [`HostParts`]
-/// are shared: every agent dispatches through the one pool.
+/// service + interaction hub, and the starter every run goes through. The MCP
+/// connections in [`HostParts`] are shared: every agent dispatches through the
+/// one pool.
 pub fn build_host(parts: HostParts) -> WorldHost {
     let hub = InteractionHub::new();
     let tool_service = Arc::new(CliToolService::new());
@@ -364,9 +405,9 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // install can't fan out unbounded requests against provider rate limits),
     // alongside the per-model overrides and the per-provider caps.
     let pool_config = parts.config.limits.inference_pools();
-    // Kept before the world takes ownership: the spawn preprocessor warms this
-    // run's models through the same registry the world will infer on, so both
-    // see one set of learned windows rather than two.
+    // Kept before the world takes ownership: the starter warms each run's
+    // models through the same registry the world will infer on, so both see
+    // one set of learned windows rather than two.
     let pp_providers = parts.providers.clone();
     let mut world = PipelineWorld::new(
         parts.providers,
@@ -394,34 +435,6 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // Handed to each agent's tool state so its sub-agent tools reach the world
     // through the host.
     let subagent_tx = host.subagent_sender();
-
-    // Restart recovery: reload persisted non-terminal agents so interrupted runs
-    // (including mid-inference ones) resume. Done before the spawner moves the
-    // shared resources.
-    let reloaded = crate::daemon::recovery::reload_persisted_agents(
-        host.world_mut(),
-        crate::daemon::spawn::SpawnDeps {
-            tool_service: tool_service.as_ref(),
-            config: &parts.config,
-            shared_mcp: parts.shared_mcp.clone(),
-            mcp_tool_defs: &parts.mcp_tool_defs,
-            mcp_tool_owners: &parts.mcp_tool_owners,
-            hub: &hub,
-            now_secs: (parts.now_secs)(),
-            subagent_tx: subagent_tx.clone(),
-        },
-        &parts.runs_dir,
-    );
-    for (run_id, entity) in reloaded.reloaded {
-        host.register(run_id, entity);
-    }
-    // A run whose stages need a model list that has not been read is held
-    // rather than crashed, and resumes on its own once the list comes in.
-    let unread = pp_providers.unread_catalogs();
-    for meta in reloaded.held {
-        let entry = crate::daemon::recovery::held_entry(&meta, &unread);
-        host.hold_for_catalog(meta.run_id, entry, unread.clone());
-    }
 
     // Config hot-reload: after boot, spawn-time parts.config (permissions,
     // `[read_paths]`, sandbox, limits, taint) is served from here, reloaded
@@ -457,24 +470,6 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         parts.mcp_tool_owners.clone(),
     );
 
-    // Install the fan-out spawner as a world resource so the parts.runtime's fan-out
-    // systems can start workers (it captures the same context as the spawner
-    // below, cloned before those move into the closure).
-    let fanout_spawner = DaemonFanOutSpawner {
-        config: reloader.clone(),
-        shared_mcp: parts.shared_mcp.clone(),
-        mcp_global: mcp_global.clone(),
-        mcp_pool: parts.mcp_pool.clone(),
-        hub: hub.clone(),
-        subagent_tx: subagent_tx.clone(),
-        tool_service: tool_service.clone(),
-        agents_dir: leviath_core::paths::agents_dir(),
-        now_secs: parts.now_secs,
-    };
-    host.world_mut()
-        .world_mut()
-        .insert_resource(FanOutSpawnerRes(Arc::new(fanout_spawner)));
-
     // The taint gate's two files: the tool allowlist (`policy.toml`) and the
     // scripted rules (`<config>/leviath/rules/*.rhai`). Reading them is this
     // reload's first refresh, so the boot install and every later one go
@@ -504,66 +499,61 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     let telemetry_reload = crate::daemon::telemetry_reload::TelemetryReload::for_daemon();
     telemetry_reload.refresh_into(host.world_mut(), &parts.config.observability);
 
+    // What starts every run: a person's, a child an agent asks for, and a
+    // fan-out worker. It shares the world's blob store, so a run's files are
+    // where its tools look for them.
+    let blob_store = host
+        .world_mut()
+        .world()
+        .resource::<leviath_runtime::blob_store::BlobStoreHandle>()
+        .0
+        .clone();
+    let starter = Arc::new(DaemonStarter {
+        config: reloader.clone(),
+        providers: provider_reload.clone(),
+        policy: policy_reload.clone(),
+        telemetry: telemetry_reload.clone(),
+        limits: live_limits.clone(),
+        mcp_global,
+        mcp_pool: parts.mcp_pool.clone(),
+        shared_mcp: parts.shared_mcp.clone(),
+        tool_service: tool_service.clone(),
+        hub: hub.clone(),
+        subagent_tx,
+        runs_dir: parts.runs_dir.clone(),
+        agents_dir: leviath_core::paths::agents_dir(),
+        blob_store,
+    });
+
+    // Install the fan-out spawner as a world resource so the fan-out systems
+    // can start workers through the same starter.
+    host.world_mut()
+        .world_mut()
+        .insert_resource(FanOutSpawnerRes(Arc::new(DaemonFanOutSpawner {
+            starter: starter.clone(),
+            agents_dir: leviath_core::paths::agents_dir(),
+        })));
+
+    // Restart recovery: every unfinished run comes back from its run file, so
+    // interrupted runs (including mid-inference ones) resume.
+    let recovered =
+        crate::daemon::recovery::resume_all(host.world_mut(), &starter, &parts.runs_dir);
+    for (run_id, entity) in recovered.reloaded {
+        host.register(run_id, entity);
+    }
+    for entry in recovered.held {
+        host.hold(entry);
+    }
+
     // Reload-on-demand: an op targeting an unloaded run pages it back in from
-    // disk. Capture the shared context (cloned before the spawner moves the
-    // originals below).
-    let reload_tools = tool_service.clone();
-    let reload_reloader = reloader.clone();
-    let reload_mcp = parts.shared_mcp.clone();
-    let reload_global = mcp_global.clone();
-    let reload_hub = hub.clone();
-    let reload_tx = subagent_tx.clone();
-    let reload_runs = parts.runs_dir.clone();
-    let reload_pool = parts.mcp_pool.clone();
-    let reload_provider_reload = provider_reload.clone();
-    let reload_policy = policy_reload.clone();
-    let reload_telemetry = telemetry_reload.clone();
-    let reload_limits = live_limits.clone();
-    host.set_reloader(Box::new(move |world, run_id| {
-        // Pages a run back in with the current on-disk parts.config, matching what a
-        // real restart would restore it with.
-        let reload_config = reload_reloader.current();
-        // A run parked on a provider that has since been replaced re-resolves
-        // its stages here, so the new set has to be in the world first: this
-        // is what lets `lev resume` move a credits-paused run onto the
-        // provider the config names now.
-        reload_provider_reload.refresh(&reload_config);
-        reload_provider_reload.install(world);
-        // A run paged back in is rebuilt from scratch, so it gets the policy
-        // the files name now rather than the one this daemon booted with.
-        reload_policy.refresh_into(world);
-        reload_telemetry.refresh_into(world, &reload_config.observability);
-        // Including its limits: a run being paged back in is as much a fresh
-        // start as a spawn, and it must not resume against the numbers the
-        // daemon booted with.
-        reload_limits.apply(&reload_config, world);
-        // The global MCP set as it stands now, not as it stood at boot: a run
-        // paged back in is rebuilt with the tools a fresh spawn would get.
-        let (reload_defs, reload_owners) = reload_global.current();
-        let entity = crate::daemon::recovery::reload_run(
-            world,
-            crate::daemon::spawn::SpawnDeps {
-                tool_service: reload_tools.as_ref(),
-                config: &reload_config,
-                shared_mcp: reload_mcp.clone(),
-                mcp_tool_defs: &reload_defs,
-                mcp_tool_owners: &reload_owners,
-                hub: &reload_hub,
-                now_secs: (parts.now_secs)(),
-                subagent_tx: reload_tx.clone(),
-            },
-            run_id,
-            &reload_runs,
-        );
-        lease_reloaded(&reload_pool, run_id, entity.is_some());
-        entity
-    }));
+    // its run file, against the machine as it stands now.
+    host.set_reloader(crate::daemon::recovery::reloader(starter.clone()));
 
     // Last resort for a cancel the world can't service: force the run's on-disk
     // state to `Cancelled`. The reloader above declines whenever a run can't be
     // rebuilt - deleted blueprint, unreadable metadata, died mid-spawn - and
     // without this a cancel in that state writes nothing at all, leaving
-    // `meta.json` claiming the run is live with nothing able to clear it.
+    // the run file claiming the run is live with nothing able to clear it.
     let terminate_runs = parts.runs_dir.clone();
     host.set_force_terminator(Box::new(move |run_id| {
         crate::runstate::force_cancel_in(&terminate_runs.join(run_id), (parts.now_secs)())
@@ -589,378 +579,37 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // for the next `lev run` to walk the spawn path.
     host.set_housekeeper(make_housekeeper(reloader.clone(), live_limits.clone()));
 
-    // Preprocessor: before the sync spawner runs, connect the blueprint's declared
-    // MCP servers into the shared pool (lazy, deduped) so they're warm to advertise -
-    // and pre-warm the servers declared by any `worker_agent`/`worker_query`
-    // fan-out worker this blueprint will spawn, so the *first* such worker already
-    // advertises them (they'd otherwise land one turn late).
-    let pp_pool = parts.mcp_pool.clone();
-    let pp_agents_dir = leviath_core::paths::agents_dir();
-    // The models too, and for a reason the MCP warming does not have: a stage's
-    // percentage region budgets resolve once, at spawn, into absolute numbers.
-    // A model whose real window is only knowable once it is loaded - which is
-    // every Ollama model - would otherwise have every region in the run sized
-    // against a guess from its name, and nothing later corrects it.
-    let pp_reloader = reloader.clone();
-    let pp_reload = provider_reload.clone();
-    let pp_global = mcp_global.clone();
-    host.set_spawn_preprocessor(Box::new(move |args| {
-        let pool = pp_pool.clone();
-        let blueprint_path = args.blueprint_path.clone();
-        let agents_dir = pp_agents_dir.clone();
-        let config = pp_reloader.current();
-        let reload = pp_reload.clone();
-        let global = pp_global.clone();
-        Box::pin(async move {
-            // Before the blueprint's own servers, and before the sync spawner
-            // reads the set: connecting is async, and this is the only hook on
-            // the spawn path that can await.
-            global.refresh(&config).await;
-            warm_blueprint_mcp(&pool, &blueprint_path).await;
-            warm_fanout_worker_mcp(&pool, &blueprint_path, agents_dir.as_deref()).await;
-            // Before the models are warmed, not after: a provider the user
-            // configured since this daemon started has to exist before anyone
-            // asks it what its models are. The sync spawner installs whatever
-            // this built.
-            reload.refresh_and_prime(&config).await;
-            // A model list that could not be read when the daemon started (a
-            // gateway behind a proxy that was down) is asked for again, so
-            // this spawn resolves against it if it is back.
-            reload.prime_unread(&config).await;
-            // Under zero retention, what the providers read their answer
-            // from (Bedrock's account mode) is read again here, on the one
-            // hook that can await, so the gate a moment later judges this
-            // spawn by the mode as it is now.
-            reload.refresh_retention(&config).await;
-            warm_blueprint_models(
-                &reload.registry(),
-                &blueprint_path,
-                &config.default_provider,
-            )
-            .await;
-        })
-    }));
-
-    // The spawner captures everything an agent needs; `parts.now_secs` is called at
-    // spawn time for the run's start timestamp. Per-agent MCP defs = the global
-    // servers' defs plus this blueprint's declared servers' defs (warmed above).
-    let spawn_pool = parts.mcp_pool.clone();
-    let spawn_runs_dir = parts.runs_dir.clone();
-    let spawn_reloader = reloader.clone();
-    let spawn_provider_reload = provider_reload.clone();
-    let spawn_policy = policy_reload.clone();
-    let spawn_telemetry = telemetry_reload.clone();
-    let spawn_global = mcp_global.clone();
-    let spawn_limits = live_limits.clone();
-    host.set_spawner(Box::new(move |world, args| {
-        // Stake out the run directory before anything that can fail: blueprint
-        // parsing, sandbox creation, provider resolution and seed validation all
-        // come later, and a failure at any of them would otherwise leave no
-        // trace on disk - no run dir, no meta.json, nothing to diagnose.
-        // The reload path deliberately doesn't do this: it must not overwrite a
-        // recovering run's own metadata.
-        write_placeholder_meta(&spawn_runs_dir, args);
-        // The global set the preprocessor just reconciled, plus this
-        // blueprint's own servers.
-        let (global_defs, global_owners) = spawn_global.current();
-        let (defs, owners) = per_agent_mcp_defs(
-            &spawn_pool,
-            &global_defs,
-            &global_owners,
-            &args.blueprint_path,
-        );
-        // Hold the blueprint's per-agent servers open for this run's life;
-        // the reap hook releases them (idle-disconnect follows).
-        spawn_pool.lease_blueprint(&args.blueprint_path, &args.run_id);
-        // Fresh config per spawn: a `config.toml` edit (a new `[read_paths]`
-        // grant, a permission change) takes effect on the next `lev run`
-        // without a daemon restart.
-        let config = spawn_reloader.current();
-        // The registry, before the stages resolve against it. The preprocessor
-        // has usually built it already; refreshing here too covers the paths
-        // that do not run one (a sub-agent spawn, a fan-out worker) and costs
-        // a credential comparison when nothing changed.
-        spawn_provider_reload.refresh(&config);
-        spawn_provider_reload.install(world);
-        // Same for the taint gate: `lev policy add` and an edited `.rhai` rule
-        // are in force for this run, without a daemon restart. Both are a stat
-        // of two paths when nothing changed.
-        spawn_policy.refresh_into(world);
-        // The exporter the file names now, before this run emits anything.
-        spawn_telemetry.refresh_into(world, &config.observability);
-        // Before the agent is built, not after: `build_agent` decides from this
-        // same config whether the run is marked for a title, and the system
-        // that makes titles reads the world. Applying here is what stops those
-        // two reading different documents.
-        spawn_limits.apply(&config, world);
-        let built = build_agent(
-            world.world_mut(),
-            crate::daemon::spawn::SpawnDeps {
-                tool_service: tool_service.as_ref(),
-                config: &config,
-                shared_mcp: parts.shared_mcp.clone(),
-                mcp_tool_defs: &defs,
-                mcp_tool_owners: &owners,
-                hub: &hub,
-                now_secs: (parts.now_secs)(),
-                subagent_tx: subagent_tx.clone(),
-            },
-            args,
-        );
-        // The placeholder above is `Starting`, which is *not* terminal, so a
-        // failed spawn would leave a run claiming to be alive for ever, listed
-        // by `lev ps` and the dashboard with nothing behind it. Record the
-        // failure where the placeholder is.
-        if let Err(message) = &built {
-            crate::runstate::force_error_in(
-                &spawn_runs_dir.join(&args.run_id),
-                message,
-                (parts.now_secs)(),
-            );
-        }
-        built
-    }));
+    host.set_starter(starter);
     host
-}
-
-/// Create the run directory and write a `Starting` `meta.json` for a run that is
-/// about to be built, so a spawn that dies partway through still leaves something
-/// on disk to explain itself (in one live batch, 3 of 13 empty runs crashed
-/// before any state existed). Everything the agent hasn't resolved yet - model,
-/// stage names, stage count - is left blank; the first persistence tick
-/// overwrites the file with the real thing. Best-effort: a failure here must not
-/// block the spawn.
-///
-/// Writes under the host's configured `runs_dir` - the same directory the
-/// persistence lane and the reloader use. It deliberately does *not* go through
-/// `runstate::create_run`, which resolves the runs dir globally from
-/// `dirs::home_dir()`: that ignores a daemon configured with a different runs
-/// dir and, because `dirs::home_dir()` cannot be redirected by `$HOME` on macOS,
-/// lets any test that spawns through a real host write placeholder runs into the
-/// developer's own `~/.leviath/runs` (where they then show as permanently
-/// ACTIVE, since nothing would ever advance them).
-fn write_placeholder_meta(runs_dir: &std::path::Path, args: &leviath_runtime::host::SpawnArgs) {
-    // The real agent name lives in the blueprint, which hasn't been parsed yet -
-    // but the run id is `<agent>-<unix-secs>-<hex4>`, so its prefix is the name
-    // (dashes inside the agent name included).
-    let agent_name = args
-        .run_id
-        .rsplitn(3, '-')
-        .nth(2)
-        .unwrap_or(&args.run_id)
-        .to_string();
-    let mut meta = leviath_core::run_meta::RunMeta::new(
-        args.run_id.clone(),
-        agent_name,
-        args.blueprint_path.clone(),
-        args.task.clone(),
-        None,
-        args.workdir.clone(),
-        0,
-    );
-    let dir = runs_dir.join(&args.run_id);
-    // The manifest text, read before it is parsed: a blueprint that will not
-    // load still leaves behind the bytes that would not load, which is what
-    // somebody reading the failure wants to see.
-    let snapshot = std::fs::read_to_string(&args.blueprint_path).ok();
-    meta.blueprint_digest = snapshot
-        .as_deref()
-        .map(|text| leviath_core::mime::store::sha256_hex(text.as_bytes()));
-    if let Err(e) = crate::runstate::create_run_in(&dir, &meta) {
-        tracing::warn!(run_id = %args.run_id, error = %e, "could not pre-create run directory");
-    }
-    if let Some(text) = snapshot {
-        write_blueprint_snapshot(&dir, &text, &args.run_id);
-    }
-}
-
-/// Copy the manifest a run is about to execute into the run directory.
-///
-/// Best-effort, like the placeholder metadata beside it: a run that executes
-/// is better than a run refused because its own archive copy could not be
-/// written. A reader that finds no snapshot falls back to the installed file,
-/// which is what every run before this behaved like.
-fn write_blueprint_snapshot(dir: &std::path::Path, manifest: &str, run_id: &str) {
-    let path = dir.join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE);
-    if let Err(e) = crate::runstate::write_private_atomic(&path, manifest) {
-        tracing::warn!(run_id = %run_id, error = %e, "could not snapshot the run's blueprint");
-    }
-}
-
-/// The blueprint a run should execute: its own snapshot when it has one, and
-/// the installed file otherwise.
-///
-/// Recovery pages a run back in by spawning it afresh from a manifest path, so
-/// this is what decides whether a restart resumes the run on what it started
-/// with or on whatever the installed file says now. Runs written before
-/// snapshots existed have only the latter, and keep the old behaviour.
-pub(crate) fn blueprint_source(dir: &std::path::Path, installed: &str) -> String {
-    let snapshot = dir.join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE);
-    match snapshot.is_file() {
-        true => snapshot.to_string_lossy().into_owned(),
-        false => installed.to_string(),
-    }
-}
-
-/// Re-lease a paged-in run's per-agent MCP servers, exactly like a fresh
-/// spawn (its reap released them when it was parked or unloaded). A declined
-/// reload, or a run whose metadata cannot be read back, leases nothing.
-/// Extracted from the reloader closure so its arms are unit-testable.
-fn lease_reloaded(pool: &crate::daemon::mcp_pool::McpPool, run_id: &str, reloaded: bool) {
-    if !reloaded {
-        return;
-    }
-    if let Ok(meta) = crate::runstate::read_meta(run_id) {
-        pool.lease_blueprint(&meta.agent_path, run_id);
-    }
-}
-
-/// The spawn-preprocessor body: connect the blueprint's declared `[[mcp_servers]]`
-/// into `pool` (lazy, deduped by signature). A missing/unreadable manifest is a
-/// no-op. Extracted from the closure so its body is unit-testable.
-async fn warm_blueprint_mcp(pool: &crate::daemon::mcp_pool::McpPool, blueprint_path: &str) {
-    if let Ok(toml) = std::fs::read_to_string(blueprint_path) {
-        for server in crate::daemon::mcp_pool::parse_blueprint_mcp_servers(&toml) {
-            pool.ensure(&server).await;
-        }
-    }
-}
-
-/// Every model a blueprint's stages name, bare and deduplicated.
-///
-/// Every entry, not the first of each stage: which one a stage lands on depends
-/// on what this machine has keys for, and that resolution happens later, inside
-/// the spawn. Warming the whole set is what makes the answer right whichever way
-/// it goes, and a provider ignores the names it does not serve, so the extra
-/// ones cost nothing on the providers they are not for.
-///
-/// The provider half of an entry is dropped on purpose. A blueprint may name a
-/// model with no provider at all - that is the point of `models = ["gpt-5.5"]` -
-/// so the name is the only part every entry is guaranteed to have.
-fn blueprint_model_names(blueprint: &leviath_core::Blueprint) -> Vec<String> {
-    let mut seen = std::collections::BTreeSet::new();
-    for stage in &blueprint.stages {
-        for entry in &stage.model.models {
-            if !entry.model.is_empty() {
-                seen.insert(entry.model.clone());
-            }
-        }
-    }
-    seen.into_iter().collect()
-}
-
-/// Warm the models this blueprint's stages name, before the run is built.
-///
-/// A blueprint that will not read or parse warms nothing: the spawn that follows
-/// is about to fail on the same file and say so properly, and a second complaint
-/// from here would only be noise in front of it.
-async fn warm_blueprint_models(
-    providers: &leviath_runtime::ProviderRegistry,
-    blueprint_path: &str,
-    default_provider: &str,
-) {
-    let Ok(content) = std::fs::read_to_string(blueprint_path) else {
-        return;
-    };
-    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
-        return;
-    };
-    let models = blueprint_model_names(&blueprint);
-    providers
-        .warm_models(
-            &models,
-            std::time::Duration::from_secs(MODEL_WARM_TIMEOUT_SECS),
-            Some(default_provider),
-        )
-        .await;
-}
-
-/// How long the whole warm-up may take per provider before a run starts anyway.
-///
-/// Generous because it covers a genuinely cold local model - a 32B-class one
-/// measured at 7.9 seconds to load on a developer machine, and a larger one on a
-/// slower disk will take longer. A model already resident answers in about two
-/// tenths of a second, which is the case this is paid in on every run after the
-/// first.
-///
-/// It is a ceiling, not a wait: crossing it means the run starts on the compiled
-/// table rather than that the run is refused.
-const MODEL_WARM_TIMEOUT_SECS: u64 = 90;
-
-/// Pre-warm the MCP servers declared by this blueprint's `worker_agent` /
-/// `worker_query` fan-out workers, so the *first* worker spawned advertises them
-/// immediately instead of one turn late. `worker_stage` workers reuse
-/// the parent's own blueprint, already warmed by [`warm_blueprint_mcp`], so they
-/// are skipped here. A worker source that can't be read/resolved is skipped.
-/// Extracted from the preprocessor closure so its body is unit-testable.
-async fn warm_fanout_worker_mcp(
-    pool: &crate::daemon::mcp_pool::McpPool,
-    blueprint_path: &str,
-    agents_dir: Option<&std::path::Path>,
-) {
-    let Ok(content) = std::fs::read_to_string(blueprint_path) else {
-        return;
-    };
-    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
-        return;
-    };
-    for stage in &blueprint.stages {
-        let leviath_core::blueprint::StageMode::FanOut { config } = &stage.mode else {
-            continue;
-        };
-        // A `worker_stage` worker runs the parent blueprint (already warmed).
-        if config.worker_stage.is_some() {
-            continue;
-        }
-        let Ok((resolve_path, _)) = crate::daemon::fanout_spawner::resolve_worker_source(
-            config,
-            blueprint_path,
-            agents_dir,
-        ) else {
-            continue;
-        };
-        let Ok(manifest) = crate::commands::run::manifest::find_manifest(&resolve_path) else {
-            continue;
-        };
-        if let Ok(worker_toml) = std::fs::read_to_string(&manifest) {
-            for server in crate::daemon::mcp_pool::parse_blueprint_mcp_servers(&worker_toml) {
-                pool.ensure(&server).await;
-            }
-        }
-    }
-}
-
-/// The per-agent MCP tool defs: the global servers' defs plus this blueprint's
-/// declared servers' cached defs (the pool must already be warm - the
-/// preprocessor ran). A missing/unreadable manifest yields just the global defs.
-/// Extracted from the spawner closure so its body is unit-testable.
-fn per_agent_mcp_defs(
-    pool: &crate::daemon::mcp_pool::McpPool,
-    global: &[Tool],
-    global_owners: &leviath_runtime::pipeline::ToolOwners,
-    blueprint_path: &str,
-) -> (Vec<Tool>, leviath_runtime::pipeline::ToolOwners) {
-    let mut defs = global.to_vec();
-    let mut owners = global_owners.clone();
-    if let Ok(toml) = std::fs::read_to_string(blueprint_path) {
-        let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(&toml);
-        defs.extend(pool.cached_defs_for(&servers));
-        // A blueprint's own servers can grant connectors too, and they are the
-        // likelier case: a manifest that declares a server is the one whose
-        // author wants to name it.
-        owners.extend(pool.cached_owners_for(&servers));
-    }
-    (defs, owners)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::McpStub;
+    use crate::daemon::starter::testing::{
+        blueprint_with_mcp, run_on_disk, stub_server_py, task_request,
+    };
     use crate::test_support::{FakeProvider, fixtures};
     use leviath_runtime::components::AgentStatus;
-    use leviath_runtime::host::{ControlOp, SpawnArgs};
+    use leviath_runtime::host::ControlOp;
+    use leviath_runtime::spec::issues::SpawnIssues;
+    use leviath_runtime::spec::names::RunId;
+    use leviath_runtime::spec::request::{SpawnRequest, SpawnSource};
     use tokio::sync::oneshot;
+
+    /// Ask `host` to start `request`, and wait for the answer.
+    async fn spawn_through(
+        host: &mut WorldHost,
+        request: SpawnRequest,
+    ) -> Result<RunId, SpawnIssues> {
+        let (reply, rx) = oneshot::channel();
+        host.handle(ControlOp::Spawn {
+            request: Box::new(request),
+            reply,
+        });
+        host.finish_starts().await;
+        rx.await.unwrap().map(|spawned| spawned.run_id)
+    }
 
     /// A config whose registry actually has `anthropic` in it, so a spawn of a
     /// manifest naming that provider is not refused for having none.
@@ -1089,13 +738,11 @@ mod tests {
             None,
             Handle::current(),
         );
-        let mut reaper = make_reaper(
-            tool_service.clone(),
-            crate::daemon::mcp_pool::McpPool::for_daemon(
-                Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new())),
-                &[],
-            ),
+        let pool = crate::daemon::mcp_pool::McpPool::for_daemon(
+            Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new())),
+            &[],
         );
+        let mut reaper = make_reaper(tool_service.clone(), pool.clone());
         // No registered state for this entity → a clean no-op (the reap-branch
         // logic itself is covered by CliToolService::reap's own unit test).
         let entity = bevy_ecs::entity::Entity::from_raw_u32(1)
@@ -1103,33 +750,42 @@ mod tests {
         reaper(&mut world, entity);
         assert!(tool_service.take(entity).is_none());
 
-        // An entity that carries run metadata also releases its MCP leases on
-        // reap (a run that never leased releases nothing - the pool's own
-        // tested no-op arm).
-        let with_meta = world.spawn_agent((leviath_runtime::persistence::RunMetadata {
-            run_id: "reaped-run".to_string(),
-            agent_name: "a".to_string(),
-            agent_path: "/p".to_string(),
-            task: "t".to_string(),
-            model: None,
-            workdir: "/w".to_string(),
-            num_stages: 1,
-            started_at: 0,
-            parent_run_id: None,
-            metadata: std::collections::HashMap::new(),
-            callback_url: None,
-            callback_secret: None,
-            title: None,
-            title_error: None,
-            blueprint_digest: None,
-            unattended: false,
-            yolo_profile: None,
-            read_paths: None,
-            output_request: None,
-            model_override: None,
-        },));
+        // An entity that holds MCP servers hands them back on reap.
+        let server = leviath_mcp::MCPServerConfig::stdio("held", "true", vec![]);
+        let lease = pool.lease_servers(std::slice::from_ref(&server), "reaped-run");
+        assert_eq!(pool.leased_holders(&server), 1);
+        let with_meta = world.spawn_agent((
+            lease,
+            leviath_runtime::persistence::RunMetadata {
+                run_id: "reaped-run".to_string(),
+                agent_name: "a".to_string(),
+                agent_path: "/p".to_string(),
+                task: "t".to_string(),
+                model: None,
+                workdir: "/w".to_string(),
+                num_stages: 1,
+                started_at: 0,
+                parent_run_id: None,
+                metadata: std::collections::HashMap::new(),
+                callback_url: None,
+                callback_secret: None,
+                title: None,
+                title_error: None,
+                blueprint_digest: None,
+                unattended: false,
+                yolo_profile: None,
+                read_paths: None,
+                output_request: None,
+                model_override: None,
+            },
+        ));
         reaper(&mut world, with_meta.entity());
         assert!(tool_service.take(with_meta.entity()).is_none());
+        assert_eq!(
+            pool.leased_holders(&server),
+            0,
+            "the reap released the run's servers"
+        );
     }
 
     fn fake_provider() -> FakeProvider {
@@ -1176,266 +832,86 @@ mod tests {
                     config_with_anthropic_key(),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("the daemon host builds in tests");
 
-                // Spawning through the wired host exercises the real setup end to end
-                // (including the now_secs timestamp closure).
+                // Spawning through the wired host exercises the real setup end to end.
                 let dir = tempfile::tempdir().unwrap();
-                let manifest = dir.path().join("agent.leviath");
+                let manifest = dir.path().join("agent.toml");
                 std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
-                let (reply, rx) = oneshot::channel();
-                host.handle(ControlOp::Spawn {
-                    args: Box::new(SpawnArgs {
-                        run_id: "run-s".to_string(),
-                        blueprint_path: manifest.to_string_lossy().to_string(),
-                        task: "t".to_string(),
-                        regions: Default::default(),
-                        model: None,
-                        workdir: std::env::temp_dir().to_string_lossy().to_string(),
-                        metadata: Default::default(),
-                        callback_url: None,
-                        callback_secret: None,
-                        yolo: false,
-                        yolo_profile: None,
-                        no_seed_commands: false,
-                        allow: Vec::new(),
-                        max_depth: None,
-                        parent_run_id: None,
-                        worker_stage: None,
-                        output: None,
-                        parts: Vec::new(),
-                        capture_model_input: false,
-                    }),
-                    reply,
-                });
-                assert_eq!(rx.await.unwrap(), Ok("run-s".to_string()));
+                let run_id = spawn_through(&mut host, task_request(&manifest, "t"))
+                    .await
+                    .expect("the run starts");
+                assert!(
+                    runs.path()
+                        .join(run_id.as_str())
+                        .join(leviath_core::files::RUN_FILE)
+                        .is_file(),
+                    "and is recorded in its run file"
+                );
             },
         )
         .await;
     }
 
-    /// A spawn can die before any state exists (3 of 13 empty runs in one live
-    /// batch), leaving nothing on disk to diagnose. The spawner stakes out the
-    /// run directory first, so a spawn that fails at *any* later step still
-    /// leaves a `meta.json` - and, since `Starting` is not terminal and would
-    /// otherwise claim the run was alive for ever, records the failure in it.
+    /// A spawn of a blueprint that is not there is refused before anything is
+    /// written: no run id is taken and no run directory is left behind for
+    /// a listing to show as a run that never moves.
     #[tokio::test]
-    async fn spawner_records_the_failure_in_the_run_dir_it_staked_out() {
+    async fn a_refused_spawn_says_why_and_leaves_nothing_on_disk() {
         let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
         crate::config::with_isolated_config_path_async(
-            "spawner_records_the_failure_in_the_run_dir_it_staked_out",
+            "a_refused_spawn_says_why_and_leaves_nothing_on_disk",
             |_| async move {
-                // `setup_daemon_host_with` mirrors `[security] allow_local_network`
-                // into a process-wide atomic, which makes this test a writer of the
-                // switch the script-host redirect tests read. Without the lock, standing
-                // up a host here flipped that switch mid-request over there and the
-                // refusal it saw was this test's config, not its own.
+                // A writer of the redirect mirror, like every test that stands up a
+                // host: see `setup_daemon_host_builds_a_working_host`.
                 let runs = tempfile::tempdir().unwrap();
                 let mut host = setup_daemon_host(
                     Config::default(),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("the daemon host builds in tests");
-                let (reply, rx) = oneshot::channel();
-                host.handle(ControlOp::Spawn {
-                    args: Box::new(SpawnArgs {
-                        // A blueprint path that doesn't exist: the spawn fails at the
-                        // very first step inside build_agent.
-                        run_id: "my-agent-1234-ab12".to_string(),
-                        blueprint_path: "/no/such/agent.leviath".to_string(),
-                        task: "t".to_string(),
-                        workdir: std::env::temp_dir().to_string_lossy().to_string(),
-                        ..Default::default()
-                    }),
-                    reply,
-                });
-                assert!(rx.await.unwrap().is_err());
-
-                let meta = crate::runstate::read_meta_from(&runs.path().join("my-agent-1234-ab12"))
-                    .expect("a failed spawn still leaves meta.json behind");
-                // Terminal, not `Starting`: nothing is going to advance this run.
-                assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Error);
+                let gone = runs.path().join("no-such-blueprint");
+                let request = SpawnRequest::new(SpawnSource::BlueprintFile(
+                    leviath_runtime::spec::names::BlueprintPath::new(gone.to_string_lossy())
+                        .unwrap(),
+                ));
+                let issues = spawn_through(&mut host, request)
+                    .await
+                    .expect_err("there is no such blueprint");
                 assert!(
-                    meta.error
-                        .is_some_and(|e| e.contains("/no/such/agent.leviath")),
-                    "and it says what went wrong"
+                    issues.to_string().contains("no-such-blueprint"),
+                    "it says what went wrong: {issues}"
                 );
-                assert_eq!(meta.task, "t");
-                // The agent name is recovered from the run id's prefix, dashes and all.
-                assert_eq!(meta.agent_name, "my-agent");
+                assert!(run_ids_in(runs.path()).is_empty());
             },
         )
         .await;
     }
 
-    /// The run keeps its own copy of the manifest it is about to execute, and
-    /// records that copy's digest.
-    ///
-    /// This is what makes "what did this run execute" answerable later. Without
-    /// it, the answer was whatever the installed file said by the time somebody
-    /// asked, which is a different file after any edit.
-    #[test]
-    fn a_spawn_snapshots_the_manifest_it_is_about_to_run() {
-        let runs = tempfile::tempdir().unwrap();
-        let installed = tempfile::tempdir().unwrap();
-        let manifest = installed.path().join("agent.leviath");
-        let text = "[agent]\nname = \"my-agent\"\n";
-        std::fs::write(&manifest, text).unwrap();
-        let args = SpawnArgs {
-            run_id: "my-agent-1788924523-abc123".to_string(),
-            blueprint_path: manifest.to_string_lossy().into_owned(),
-            task: "t".to_string(),
-            ..Default::default()
-        };
-
-        write_placeholder_meta(runs.path(), &args);
-
-        let dir = runs.path().join(&args.run_id);
-        let snapshot =
-            std::fs::read_to_string(dir.join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE))
-                .unwrap();
-        assert_eq!(snapshot, text, "the bytes the run will execute");
-        let meta = crate::runstate::read_meta_from(&dir).unwrap();
-        assert_eq!(
-            meta.blueprint_digest.as_deref(),
-            Some(leviath_core::mime::store::sha256_hex(text.as_bytes()).as_str()),
-            "the digest identifies the snapshot"
-        );
-    }
-
-    /// A manifest that cannot be read leaves no snapshot and no digest, and the
-    /// spawn carries on to fail on its own terms.
-    ///
-    /// `None` here reads as "unknown", which is the truth. A digest over
-    /// nothing would have claimed the run executed something.
-    #[test]
-    fn a_manifest_that_cannot_be_read_leaves_no_snapshot() {
-        let runs = tempfile::tempdir().unwrap();
-        let args = SpawnArgs {
-            run_id: "ghost-1788924523-abc123".to_string(),
-            blueprint_path: "/nowhere/agent.leviath".to_string(),
-            ..Default::default()
-        };
-
-        write_placeholder_meta(runs.path(), &args);
-
-        let dir = runs.path().join(&args.run_id);
-        assert!(
-            !dir.join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE)
-                .exists(),
-            "nothing to copy"
-        );
-        assert!(
-            crate::runstate::read_meta_from(&dir)
-                .unwrap()
-                .blueprint_digest
-                .is_none()
-        );
-    }
-
-    /// A snapshot that cannot be written is logged, not fatal.
-    ///
-    /// The copy is an archive, not a prerequisite: a run that executes is
-    /// better than a run refused because its own record could not be filed.
-    #[test]
-    fn a_snapshot_that_cannot_be_written_is_logged_not_fatal() {
-        crate::test_support::with_tracing(|| {
-            let dir = tempfile::tempdir().unwrap();
-            // A regular file where the snapshot's directory should be, so the
-            // write cannot land.
-            let blocker = dir.path().join("run-a");
-            std::fs::write(&blocker, "x").unwrap();
-            write_blueprint_snapshot(&blocker, "[agent]\nname = \"a\"\n", "run-a");
-            assert!(
-                !blocker
-                    .join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE)
-                    .exists()
-            );
-        });
-    }
-
-    /// A run with a snapshot resumes on its own copy; one without falls back to
-    /// the installed file, exactly as every run did before snapshots existed.
-    #[test]
-    fn a_reload_prefers_the_runs_own_blueprint() {
-        let dir = tempfile::tempdir().unwrap();
-        let run_dir = dir.path().join("run-a");
-        std::fs::create_dir_all(&run_dir).unwrap();
-        let installed = "/agents/coder/agent.leviath";
-
-        assert_eq!(
-            blueprint_source(&run_dir, installed),
-            installed,
-            "no snapshot, so the installed file"
-        );
-
-        let snapshot = run_dir.join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE);
-        std::fs::write(&snapshot, "[agent]\nname = \"coder\"\n").unwrap();
-        assert_eq!(
-            blueprint_source(&run_dir, installed),
-            snapshot.to_string_lossy(),
-            "the run's own copy wins"
-        );
-    }
-
-    #[test]
-    fn placeholder_meta_falls_back_to_the_whole_run_id_as_the_agent_name() {
-        let runs = tempfile::tempdir().unwrap();
-        let args = SpawnArgs {
-            // Not the `<agent>-<secs>-<hex>` shape the run-id minter makes.
-            run_id: "odd".to_string(),
-            task: "t".to_string(),
-            ..Default::default()
-        };
-        write_placeholder_meta(runs.path(), &args);
-        let meta = crate::runstate::read_meta_from(&runs.path().join("odd")).unwrap();
-        assert_eq!(meta.agent_name, "odd");
-    }
-
-    #[test]
-    fn placeholder_meta_failure_is_logged_not_fatal() {
-        // An unwritable runs dir (here: a path *under a regular file*) must not
-        // stop the spawn - the placeholder is a diagnostic, not a prerequisite.
-        crate::test_support::with_tracing(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let blocker = dir.path().join("not-a-dir");
-            std::fs::write(&blocker, "x").unwrap();
-            let args = SpawnArgs {
-                run_id: "blocked".to_string(),
-                ..Default::default()
-            };
-            write_placeholder_meta(&blocker.join("runs"), &args);
-            assert!(
-                crate::runstate::read_meta_from(&blocker.join("runs").join("blocked")).is_err()
-            );
-        });
-    }
-
-    /// The spawner stakes out the run directory under the **host's configured**
-    /// `runs_dir`, never the home-resolved global one.
+    /// A run is recorded under the **host's configured** `runs_dir`, never the
+    /// home-resolved global one.
     ///
     /// This is an isolation invariant, not a convenience: `runstate::run_dir()`
     /// goes through `dirs::home_dir()`, which ignores a `$HOME` override on macOS,
-    /// so a spawner that used it wrote into the developer's real `~/.leviath/runs`
-    /// from any test that drove a real host - leaving `status: "starting"` runs
-    /// that no daemon owned and nothing could ever advance. Asserting the global
-    /// dir is untouched is what keeps that from coming back.
+    /// so a spawn that used it would write into the developer's real
+    /// `~/.leviath/runs` from any test that drove a real host. Asserting the
+    /// global dir is untouched is what keeps that from happening.
     #[tokio::test]
-    async fn spawner_writes_the_placeholder_under_the_hosts_runs_dir() {
+    async fn a_spawn_records_its_run_under_the_hosts_runs_dir() {
         // A writer of the redirect mirror, like every test that stands up a
         // host: see `setup_daemon_host_builds_a_working_host`.
         let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
         let runs = tempfile::tempdir().unwrap();
         // The assertion below is "spawning wrote nothing into the *global* runs
         // dir", which is only decidable if no other test can write there while
-        // this one runs. Resolving it once is not enough - that was the previous
-        // attempt, and it still compared a directory the rest of the suite
-        // shares. `with_isolated_runs_dir_async` points `LEVIATH_RUNS_DIR` at a
-        // directory only this test can reach, and `temp_env` serialises the
+        // this one runs. `with_isolated_runs_dir_async` points `LEVIATH_RUNS_DIR`
+        // at a directory only this test can reach, and `temp_env` serialises the
         // change process-wide, so the comparison is deterministic.
         crate::runstate::with_isolated_runs_dir_async(
             "setup-host-isolation",
@@ -1443,32 +919,24 @@ mod tests {
                 let global_before = run_ids_in(&global);
 
                 let mut host = setup_daemon_host(
-                    Config::default(),
+                    config_with_anthropic_key(),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("the daemon host builds in tests");
-                let (reply, rx) = oneshot::channel();
-                host.handle(ControlOp::Spawn {
-                    args: Box::new(SpawnArgs {
-                        // A blueprint that doesn't exist: the spawn fails *after* the
-                        // placeholder is staked out, which is the case that leaves a run
-                        // dir behind.
-                        run_id: "isolation-1234-ab12".to_string(),
-                        blueprint_path: "/no/such/agent.leviath".to_string(),
-                        task: "t".to_string(),
-                        workdir: std::env::temp_dir().to_string_lossy().to_string(),
-                        ..Default::default()
-                    }),
-                    reply,
-                });
-                assert!(rx.await.unwrap().is_err(), "the spawn itself fails");
+                let agent = tempfile::tempdir().unwrap();
+                let manifest = agent.path().join("agent.toml");
+                std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
+                let run_id = spawn_through(&mut host, task_request(&manifest, "t"))
+                    .await
+                    .expect("the run starts");
 
-                assert!(
-                    crate::runstate::read_meta_from(&runs.path().join("isolation-1234-ab12"))
-                        .is_ok(),
-                    "the placeholder lands in the host's configured runs dir"
+                assert_eq!(
+                    run_ids_in(runs.path()),
+                    [run_id.to_string()].into_iter().collect(),
+                    "the run lands in the host's configured runs dir"
                 );
                 assert_eq!(
                     run_ids_in(&global),
@@ -1480,11 +948,10 @@ mod tests {
         .await;
     }
 
-    /// End-to-end for the unkillable-run shape: a run whose blueprint no longer
-    /// exists cannot be rebuilt, so the reloader declines - and a cancel that
-    /// stops there, replying "no such run" and writing nothing, leaves
-    /// `meta.json` claiming the run is live with no way to ever clear it. It
-    /// must be terminated on disk instead.
+    /// End-to-end for a run the daemon is not holding: its blueprint is gone,
+    /// but its run file holds everything a resume needs, so the cancel pages
+    /// it in and cancels it there, and the cancel reaches its file. A run id
+    /// that names nothing is still an honest miss.
     #[tokio::test]
     async fn cancelling_an_unreloadable_run_terminates_it_on_disk() {
         let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
@@ -1498,6 +965,7 @@ mod tests {
                     Config::default(),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("the daemon host builds in tests");
@@ -1510,7 +978,7 @@ mod tests {
                     "gone-1234-ab12".to_string(),
                     "gone".to_string(),
                     // A blueprint path that does not exist - the deleted-manifest case.
-                    "/no/such/dir/agent.leviath".to_string(),
+                    "/no/such/dir/agent.toml".to_string(),
                     "t".to_string(),
                     None,
                     std::env::temp_dir().to_string_lossy().to_string(),
@@ -1529,12 +997,8 @@ mod tests {
                     run_id: "gone-1234-ab12".to_string(),
                     reply,
                 });
+                host.land_pages().await;
                 assert!(rx.await.unwrap(), "the cancel reports that it applied");
-                assert_eq!(
-                    crate::runstate::read_meta_from(&run_dir).unwrap().status,
-                    leviath_core::run_meta::RunStatus::Cancelled,
-                    "and it reached disk, so nothing shows the run as live any more"
-                );
 
                 // A run id that names nothing at all is still an honest miss.
                 let (reply, rx) = oneshot::channel();
@@ -1542,7 +1006,19 @@ mod tests {
                     run_id: "no-such-run".to_string(),
                     reply,
                 });
+                host.land_pages().await;
                 assert!(!rx.await.unwrap());
+
+                // A closed control channel ends the serve loop, which writes
+                // what is queued before it returns.
+                let (control, control_rx) = tokio::sync::mpsc::unbounded_channel();
+                drop(control);
+                host.serve(control_rx).await;
+                assert_eq!(
+                    crate::runstate::read_meta_from(&run_dir).unwrap().status,
+                    leviath_core::run_meta::RunStatus::Cancelled,
+                    "and it reached disk, so nothing shows the run as live any more"
+                );
             },
         )
         .await;
@@ -1551,10 +1027,13 @@ mod tests {
     /// The run ids present in `dir`. An unreadable or absent directory is an
     /// empty set, which is the same assertion for the isolation check.
     fn run_ids_in(dir: &std::path::Path) -> std::collections::BTreeSet<String> {
+        // Runs are directories; the daemon's own session mark beside them
+        // is not one.
         std::fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
+            .filter(|e| e.path().is_dir())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect()
     }
@@ -1574,324 +1053,11 @@ mod tests {
         assert!(run_ids_in(&dir.path().join("nope")).is_empty());
     }
 
-    // ── per-agent MCP ──
-
-    /// A python stub MCP server written to a temp file; returns (tempdir, path).
-    fn stub_server_py() -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("stub.py");
-        let stub = McpStub::new()
-            .list_changed(true)
-            .tool("stub_search", Some("s"))
-            .input_schema(r#"{"type": "object", "properties": {}}"#)
-            .replying("ok");
-        std::fs::write(&path, stub.source()).unwrap();
-        (dir, path)
-    }
-
-    /// Write a blueprint declaring one stdio `[[mcp_servers]]` → the stub; returns
-    /// its manifest path.
-    fn blueprint_with_mcp(dir: &std::path::Path, stub_py: &std::path::Path) -> std::path::PathBuf {
-        let manifest = dir.join("agent.leviath");
-        std::fs::write(
-            &manifest,
-            format!(
-                r#"
-[agent]
-name = "mcpagent"
-entry_stage = "work"
-
-[[mcp_servers]]
-name = "search"
-command = "python3"
-args = ['{}']
-
-[stages.work]
-mode = "autonomous"
-model = {{ provider = "fake", model = "m" }}
-available_tools = ["stub_search"]
-system_prompt = "use stub_search"
-
-[context.regions]
-task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
-"#,
-                stub_py.to_string_lossy()
-            ),
-        )
-        .unwrap();
-        manifest
-    }
-
     fn empty_pool() -> crate::daemon::mcp_pool::McpPool {
         crate::daemon::mcp_pool::McpPool::new(
             Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             Default::default(),
         )
-    }
-
-    /// Every arm of the reloader's re-lease: a declined reload consults
-    /// nothing, a reload with no readable metadata leases nothing, and a
-    /// reload with metadata routes through the pool's lease.
-    #[test]
-    fn lease_reloaded_leases_only_on_a_successful_reload() {
-        crate::runstate::with_isolated_runs_dir("lease-reloaded", |_d| {
-            let pool = empty_pool();
-            lease_reloaded(&pool, "any-run", false);
-            lease_reloaded(&pool, "ghost-run", true);
-            let meta = leviath_core::run_meta::RunMeta::new(
-                "reloaded-run".to_string(),
-                "agent".to_string(),
-                "/no/such/agent.leviath".to_string(),
-                "t".to_string(),
-                None,
-                "/w".to_string(),
-                1,
-            );
-            crate::runstate::create_run(&meta).unwrap();
-            // The manifest path is consulted; an unreadable one leases nothing,
-            // which is the pool's own (tested) arm.
-            lease_reloaded(&pool, "reloaded-run", true);
-        });
-    }
-
-    #[tokio::test]
-    async fn warm_blueprint_mcp_connects_declared_servers() {
-        let (_stub_dir, stub) = stub_server_py();
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = blueprint_with_mcp(dir.path(), &stub);
-        let pool = empty_pool();
-        warm_blueprint_mcp(&pool, &manifest.to_string_lossy()).await;
-        // The declared server is now warm: its tool is cached + advertised.
-        let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(
-            &std::fs::read_to_string(&manifest).unwrap(),
-        );
-        let defs = pool.cached_defs_for(&servers);
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "search__stub_search");
-    }
-
-    #[tokio::test]
-    async fn warm_blueprint_mcp_missing_manifest_is_noop() {
-        let pool = empty_pool();
-        // Unreadable path → the read-error arm, no panic.
-        warm_blueprint_mcp(&pool, "/no/such/agent.leviath").await;
-    }
-
-    /// Write a parent blueprint whose fan-out stage delegates to `worker_source`
-    /// (a `worker_agent` path). Returns the parent manifest path.
-    fn parent_with_fanout_worker_agent(
-        dir: &std::path::Path,
-        worker_source: &str,
-    ) -> std::path::PathBuf {
-        let manifest = dir.join("parent.leviath");
-        std::fs::write(
-            &manifest,
-            format!(
-                "[agent]\nname = \"parent\"\n\n\
-                 [stages.main]\nmode = \"autonomous\"\n\n\
-                 [stages.parallel]\nmode = \"fan_out\"\nworker_agent = '{worker_source}'\nsplit_prompt = \"go\"\n"
-            ),
-        )
-        .unwrap();
-        manifest
-    }
-
-    /// Every entry across every stage, deduplicated, with the provider half
-    /// dropped: a blueprint may name a model with no provider at all, so the
-    /// name is the only part every entry is guaranteed to have.
-    #[test]
-    fn blueprint_models_are_every_entry_deduplicated() {
-        let manifest = r#"
-[agent]
-name = "m"
-version = "0.1.0"
-entry_stage = "one"
-
-[stages.one]
-system_prompt = "x"
-model = { models = ["shared", { provider = "ollama", model = "local:latest" }] }
-
-[stages.two]
-system_prompt = "y"
-model = { models = ["shared", "other", ""] }
-"#;
-        let blueprint =
-            leviath_core::manifest::parse_manifest(manifest).expect("the fixture parses");
-
-        assert_eq!(
-            blueprint_model_names(&blueprint),
-            vec![
-                "local:latest".to_string(),
-                "other".to_string(),
-                "shared".to_string()
-            ],
-            "sorted and deduplicated, providers dropped, and the empty entry \
-             skipped - no provider serves a nameless model, and passing one \
-             would ask every provider about nothing"
-        );
-    }
-
-    /// A stage that names no model is not a stage with no model: the parser
-    /// fills in the build's default, and that is the one a run would use, so it
-    /// is the one worth warming. Asserted because "names nothing" and "warms
-    /// nothing" read like the same statement and are not.
-    #[test]
-    fn a_stage_naming_no_model_yields_the_default_it_would_run() {
-        let manifest = r#"
-[agent]
-name = "m"
-version = "0.1.0"
-entry_stage = "one"
-
-[stages.one]
-system_prompt = "x"
-"#;
-        let blueprint =
-            leviath_core::manifest::parse_manifest(manifest).expect("the fixture parses");
-        assert_eq!(
-            blueprint_model_names(&blueprint),
-            vec!["claude-sonnet-4-6".to_string()],
-            "the default a model-less stage resolves to is what a run would use"
-        );
-    }
-
-    /// A path that will not read, and a file that will not parse, both warm
-    /// nothing. The spawn that follows fails on the same file and says so
-    /// properly; a second complaint from here would be noise in front of it.
-    #[tokio::test]
-    async fn an_unreadable_or_unparsable_blueprint_warms_nothing() {
-        let registry = leviath_runtime::ProviderRegistry::new();
-
-        warm_blueprint_models(&registry, "/no/such/blueprint.leviath", "anthropic").await;
-
-        let dir = tempfile::tempdir().expect("a temp dir");
-        let bad = dir.path().join("broken.leviath");
-        std::fs::write(&bad, "this is not TOML at all {{{").expect("writes");
-        warm_blueprint_models(&registry, &bad.display().to_string(), "anthropic").await;
-    }
-
-    #[tokio::test]
-    async fn warm_fanout_worker_mcp_prewarms_worker_agent_servers() {
-        let (_stub_dir, stub) = stub_server_py();
-        // A worker blueprint declaring an MCP server.
-        let worker_dir = tempfile::tempdir().unwrap();
-        blueprint_with_mcp(worker_dir.path(), &stub);
-        // A parent whose fan-out delegates to that worker directory.
-        let parent_dir = tempfile::tempdir().unwrap();
-        let parent = parent_with_fanout_worker_agent(
-            parent_dir.path(),
-            &worker_dir.path().to_string_lossy(),
-        );
-        let pool = empty_pool();
-        warm_fanout_worker_mcp(&pool, &parent.to_string_lossy(), None).await;
-        // The worker's declared server is now warm (its tool cached), so the first
-        // worker will advertise it immediately.
-        let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(
-            &std::fs::read_to_string(worker_dir.path().join("agent.leviath")).unwrap(),
-        );
-        let defs = pool.cached_defs_for(&servers);
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "search__stub_search");
-    }
-
-    #[tokio::test]
-    async fn warm_fanout_worker_mcp_skips_and_tolerates_every_arm() {
-        let pool = empty_pool();
-        // Unreadable parent → read-error return.
-        warm_fanout_worker_mcp(&pool, "/no/such/parent.leviath", None).await;
-        // Unparsable parent → parse-error return.
-        let dir = tempfile::tempdir().unwrap();
-        let bad = dir.path().join("bad.leviath");
-        std::fs::write(&bad, "not : valid : toml").unwrap();
-        warm_fanout_worker_mcp(&pool, &bad.to_string_lossy(), None).await;
-        // A blueprint with only a non-fan-out stage → the `continue` (not FanOut).
-        let plain = dir.path().join("plain.leviath");
-        std::fs::write(
-            &plain,
-            "[agent]\nname = \"p\"\n\n[stages.main]\nmode = \"autonomous\"\n",
-        )
-        .unwrap();
-        warm_fanout_worker_mcp(&pool, &plain.to_string_lossy(), None).await;
-        // A `worker_stage` fan-out → skipped (reuses the parent's own servers).
-        let ws = dir.path().join("ws.leviath");
-        std::fs::write(
-            &ws,
-            "[agent]\nname = \"p\"\n\n\
-             [stages.parallel]\nmode = \"fan_out\"\nworker_stage = \"w\"\nsplit_prompt = \"go\"\n\n\
-             [stages.w]\nmode = \"autonomous\"\nallow_as_worker = true\n",
-        )
-        .unwrap();
-        warm_fanout_worker_mcp(&pool, &ws.to_string_lossy(), None).await;
-        // A `worker_query` with no agents dir → resolve_worker_source errors → skip.
-        let wq = dir.path().join("wq.leviath");
-        std::fs::write(
-            &wq,
-            "[agent]\nname = \"p\"\n\n\
-             [stages.parallel]\nmode = \"fan_out\"\nworker_query = \"x\"\nsplit_prompt = \"go\"\n",
-        )
-        .unwrap();
-        warm_fanout_worker_mcp(&pool, &wq.to_string_lossy(), None).await;
-        // A `worker_agent` pointing at a nonexistent path → find_manifest errors → skip.
-        let miss = parent_with_fanout_worker_agent(dir.path(), "/no/such/worker/xyz");
-        warm_fanout_worker_mcp(&pool, &miss.to_string_lossy(), None).await;
-        // A `worker_agent` whose blueprint declares no [[mcp_servers]] → read-ok,
-        // empty server loop.
-        let worker_dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            worker_dir.path().join("agent.leviath"),
-            "[agent]\nname = \"w\"\n\n[stages.main]\nmode = \"autonomous\"\n",
-        )
-        .unwrap();
-        let noservers =
-            parent_with_fanout_worker_agent(dir.path(), &worker_dir.path().to_string_lossy());
-        warm_fanout_worker_mcp(&pool, &noservers.to_string_lossy(), None).await;
-        // A `worker_agent` dir whose `agent.leviath` is itself a directory:
-        // find_manifest resolves it (it `exists()`), but reading it fails → the
-        // inner read-error arm.
-        let dir_manifest = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir_manifest.path().join("agent.leviath")).unwrap();
-        let unreadable =
-            parent_with_fanout_worker_agent(dir.path(), &dir_manifest.path().to_string_lossy());
-        warm_fanout_worker_mcp(&pool, &unreadable.to_string_lossy(), None).await;
-    }
-
-    #[test]
-    fn per_agent_mcp_defs_appends_declared_and_falls_back_to_global() {
-        let (_stub_dir, stub) = stub_server_py();
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = blueprint_with_mcp(dir.path(), &stub);
-        let pool = empty_pool();
-        // Warm the pool by seeding the declared server's defs (avoids a live
-        // connect in this sync test).
-        let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(
-            &std::fs::read_to_string(&manifest).unwrap(),
-        );
-        pool.seed(
-            &servers[0],
-            vec![Tool {
-                name: "stub_search".into(),
-                description: String::new(),
-                parameters: serde_json::json!({}),
-            }],
-        );
-        let global = vec![Tool {
-            name: "global_tool".into(),
-            description: String::new(),
-            parameters: serde_json::json!({}),
-        }];
-        let (defs, _) = per_agent_mcp_defs(
-            &pool,
-            &global,
-            &Default::default(),
-            &manifest.to_string_lossy(),
-        );
-        let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["global_tool", "stub_search"]);
-        // Missing manifest → just the global defs (read-error arm).
-        let (only_global, _) =
-            per_agent_mcp_defs(&pool, &global, &Default::default(), "/no/such/x");
-        assert_eq!(only_global.len(), 1);
-        assert_eq!(only_global[0].name, "global_tool");
     }
 
     #[tokio::test]
@@ -2006,14 +1172,14 @@ system_prompt = "x"
         );
     }
 
+    /// A run started through `serve()` whose blueprint declares an MCP server
+    /// has that server connected before it is bound, so its tools are there
+    /// for its first stage.
     #[tokio::test]
-    async fn serve_runs_spawn_preprocessor_for_per_agent_mcp() {
+    async fn a_spawn_connects_the_blueprints_mcp_servers_first() {
         crate::config::with_isolated_config_path_async(
-            "serve_runs_spawn_preprocessor_for_per_agent_mcp",
+            "a_spawn_connects_the_blueprints_mcp_servers_first",
             |_| async move {
-                // Drive a real spawn through `serve()` so the spawn preprocessor fires
-                // (the only path that invokes it): the agent declares an MCP server, which
-                // gets connected + advertised, and the spawn replies Ok.
                 let (_stub_dir, stub) = stub_server_py();
                 let agent_dir = tempfile::tempdir().unwrap();
                 let manifest = blueprint_with_mcp(agent_dir.path(), &stub);
@@ -2021,6 +1187,10 @@ system_prompt = "x"
                 let mut providers = ProviderRegistry::new();
                 providers.register("fake".to_string(), Arc::new(fake_provider()));
                 let runs = tempfile::tempdir().unwrap();
+                let pool = crate::daemon::mcp_pool::McpPool::for_daemon(
+                    Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+                    &[],
+                );
                 let mut host = build_host(HostParts {
                     config: Config::default(),
                     providers,
@@ -2028,47 +1198,27 @@ system_prompt = "x"
                     shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
                     mcp_tool_defs: Vec::new(),
                     mcp_tool_owners: Default::default(),
-                    mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
-                        Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-                        &[],
-                    ),
+                    mcp_pool: pool.clone(),
                     runtime: Handle::current(),
                     now_secs: || 0,
                     reloader: None,
                     provider_reload: None,
                 });
+                let (op, reply_rx) = spawn_op(&manifest);
                 let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
-                let (reply, reply_rx) = oneshot::channel();
-                ctl_tx
-                    .send(ControlOp::Spawn {
-                        args: Box::new(SpawnArgs {
-                            run_id: "run-mcp".to_string(),
-                            blueprint_path: manifest.to_string_lossy().to_string(),
-                            task: "t".to_string(),
-                            regions: Default::default(),
-                            model: None,
-                            workdir: std::env::temp_dir().to_string_lossy().to_string(),
-                            metadata: Default::default(),
-                            callback_url: None,
-                            callback_secret: None,
-                            yolo: false,
-                            yolo_profile: None,
-                            no_seed_commands: false,
-                            allow: Vec::new(),
-                            max_depth: None,
-                            parent_run_id: None,
-                            worker_stage: None,
-                            output: None,
-                            parts: Vec::new(),
-                            capture_model_input: false,
-                        }),
-                        reply,
-                    })
-                    .unwrap();
+                ctl_tx.send(op).unwrap();
                 // Close the control channel so serve() returns after handling the op.
                 drop(ctl_tx);
                 host.serve(ctl_rx).await;
-                assert_eq!(reply_rx.await.unwrap(), Ok("run-mcp".to_string()));
+                assert!(reply_rx.await.unwrap().is_ok());
+                let file = leviath_blueprint::BlueprintFile::parse(
+                    &std::fs::read_to_string(&manifest).unwrap(),
+                )
+                .unwrap();
+                let servers = crate::daemon::starter::mcp_configs(&file.graph);
+                let defs = pool.cached_defs_for(&servers);
+                assert_eq!(defs.len(), 1);
+                assert_eq!(defs[0].name, "search__stub_search");
             },
         )
         .await;
@@ -2089,28 +1239,84 @@ system_prompt = "x"
 
     /// A one-stage blueprint naming `claude-opus-5` by bare name, in `dir`.
     fn story_manifest(dir: &std::path::Path) -> std::path::PathBuf {
-        let manifest = dir.join("story.leviath");
+        let manifest = dir.join("agent.toml");
         std::fs::write(
             &manifest,
-            "[agent]\nname = \"storyteller\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-             [context.regions]\ntask = { kind = \"pinned\", max_tokens = 2000, seed = \"task\" }\n\n\
-             [stages.story]\nmode = \"autonomous\"\ndescription = \"d\"\n\
-             model = { models = [\"claude-opus-5\"] }\navailable_tools = []\n",
+            r#"[blueprint]
+name = "storyteller"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "story"
+description = "d"
+model = { models = [{ model = "claude-opus-5" }] }
+
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 2000 }]
+total_budget_tokens = 2000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+"#,
         )
         .unwrap();
         manifest
     }
 
-    /// Write `run_id` into `runs` as a run that was working on `manifest` when
-    /// its daemon died.
-    fn run_in_flight(runs: &std::path::Path, run_id: &str, manifest: &std::path::Path) {
-        let mut meta = crate::test_fixtures::fixtures::run_meta(run_id);
-        meta.agent_path = manifest.to_string_lossy().to_string();
-        meta.workdir = std::env::temp_dir().to_string_lossy().to_string();
-        meta.current_stage = "story".to_string();
-        meta.status = leviath_core::run_meta::RunStatus::Running;
-        std::fs::create_dir_all(runs.join(run_id)).unwrap();
-        crate::runstate::write_meta_to(&runs.join(run_id), &meta).unwrap();
+    /// A run of `manifest` started by a daemon whose gateway at `url`
+    /// answered its model list, which stopped before the run made a call:
+    /// what the next daemon finds in `runs`. The capability cache that daemon
+    /// wrote is removed, so the next one starts with no copy of the list.
+    async fn run_in_flight(
+        runs: &std::path::Path,
+        manifest: &std::path::Path,
+        url: String,
+    ) -> String {
+        let mut host = setup_daemon_host(
+            gateway_config(url),
+            runs.to_path_buf(),
+            Handle::current(),
+            &StartupBoard::default(),
+        )
+        .await
+        .expect("the first daemon starts");
+        let run_id = spawn_through(&mut host, task_request(manifest, "t"))
+            .await
+            .expect("the run starts while the gateway answers");
+        drop(host);
+        let cache = leviath_core::paths::capability_cache_path().expect("an isolated home");
+        let _ = std::fs::remove_file(cache);
+        run_id.to_string()
+    }
+
+    /// The model list the gateway in these tests answers with.
+    const LISTING: &[u8] =
+        br#"{"data":[{"id":"anthropic/claude-opus-5","context_length":200000}]}"#;
+
+    /// The model the stage `run_id` is in calls, `None` when the run is not
+    /// in the world.
+    fn model_of(host: &mut WorldHost, run_id: &str) -> Option<String> {
+        let world = host.world_mut().world_mut();
+        let mut runs = world.query::<(
+            &leviath_runtime::insert::RunSpecC,
+            &leviath_runtime::pipeline::StageInference,
+        )>();
+        runs.iter(world)
+            .find(|(spec, _)| spec.0.run_id.as_str() == run_id)
+            .map(|(_, inference)| inference.model.clone())
+    }
+
+    /// The status `run_id`'s file holds last.
+    fn status_on_disk(runs: &std::path::Path, run_id: &str) -> leviath_runtime::state::RunStatus {
+        leviath_runtime::runfile::RunFileReader::open(
+            &runs.join(run_id).join(leviath_core::files::RUN_FILE),
+        )
+        .and_then(|r| r.latest_state())
+        .expect("the run file reads")
+        .status
     }
 
     /// The status the daemon reports for `run_id`, `None` when it holds none.
@@ -2123,67 +1329,48 @@ system_prompt = "x"
         rx.await.unwrap()
     }
 
-    /// The same restart with a run in flight. Resuming it would refuse its
-    /// stage (the list is unread, and there is no cached copy yet), and a
-    /// resume that fails marks the run crashed for good; a proxy down for a
-    /// minute at the wrong moment would have ended it. It is held instead:
-    /// listed as paused on the gateway, untouched on disk, and paged back in
-    /// by itself once the list is read.
+    /// The same restart with a run in flight. The run chose its model when it
+    /// started and its file says which, so a gateway whose list cannot be
+    /// read, with no copy of it on disk, does not hold it back: it resumes on
+    /// that model at once, and its file is untouched.
     #[tokio::test]
-    async fn a_run_in_flight_is_held_through_a_dead_gateway_and_resumes_when_it_answers() {
+    async fn a_run_in_flight_resumes_through_a_dead_gateway() {
         let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
         crate::config::with_isolated_config_path_async(
-            "a_run_in_flight_is_held_through_a_dead_gateway_and_resumes_when_it_answers",
+            "a_run_in_flight_resumes_through_a_dead_gateway",
             |_| async move {
-                let listing =
-                    br#"{"data":[{"id":"anthropic/claude-opus-5","context_length":200000}]}"#;
-                let (url, _) = leviath_testkit::spawn_mock_sequence(vec![
-                    (503, "Service Unavailable", b"proxy down".to_vec()),
-                    (200, "OK", listing.to_vec()),
-                ])
-                .await;
                 let dir = tempfile::tempdir().unwrap();
                 let manifest = story_manifest(dir.path());
                 let runs = tempfile::tempdir().unwrap();
-                run_in_flight(runs.path(), "run-mid", &manifest);
+                // The gateway answers the first daemon, then goes down.
+                let (url, _) = leviath_testkit::spawn_mock_sequence(vec![
+                    (200, "OK", LISTING.to_vec()),
+                    (503, "Service Unavailable", b"proxy down".to_vec()),
+                ])
+                .await;
+                let mid = run_in_flight(runs.path(), &manifest, url.clone()).await;
 
                 let mut host = setup_daemon_host(
                     gateway_config(url),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("the daemon starts");
 
-                assert_eq!(host.held_for_catalog(), ["run-mid"]);
+                assert_eq!(status_of(&mut host, &mid).await, Some(AgentStatus::Active));
                 assert_eq!(
-                    status_of(&mut host, "run-mid").await,
-                    Some(AgentStatus::Paused)
+                    model_of(&mut host, &mid).as_deref(),
+                    Some("anthropic/claude-opus-5"),
+                    "on the model it chose, not the fallback"
                 );
-                let meta: leviath_core::run_meta::RunMeta = serde_json::from_str(
-                    &std::fs::read_to_string(runs.path().join("run-mid").join("meta.json"))
-                        .unwrap(),
-                )
-                .unwrap();
-                assert_eq!(
-                    meta.status,
-                    leviath_core::run_meta::RunStatus::Running,
-                    "a held run is not marked crashed"
-                );
-
-                // Another spawn asks the gateway again, which answers now; the
-                // next pass of the serve loop pages the held run back in.
-                let (op, rx) = spawn_op("run-new", &manifest);
-                let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
-                ctl_tx.send(op).unwrap();
-                drop(ctl_tx);
-                host.serve(ctl_rx).await;
-                assert_eq!(rx.await.unwrap(), Ok("run-new".to_string()));
-                assert!(host.held_for_catalog().is_empty());
-                let resumed = status_of(&mut host, "run-mid").await;
                 assert!(
-                    resumed.is_some() && resumed != Some(AgentStatus::Paused),
-                    "the held run is back in the world: {resumed:?}"
+                    !matches!(
+                        status_on_disk(runs.path(), &mid),
+                        leviath_runtime::state::RunStatus::Error(_)
+                    ),
+                    "a resumed run is not marked failed"
                 );
             },
         )
@@ -2200,6 +1387,16 @@ system_prompt = "x"
         crate::config::with_isolated_config_path_async(
             "a_cached_model_list_answers_while_the_gateway_is_down",
             |_| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let manifest = story_manifest(dir.path());
+                let runs = tempfile::tempdir().unwrap();
+                let (url, _) = leviath_testkit::spawn_mock_sequence(vec![
+                    (200, "OK", LISTING.to_vec()),
+                    (503, "Service Unavailable", b"proxy down".to_vec()),
+                ])
+                .await;
+                let mid = run_in_flight(runs.path(), &manifest, url.clone()).await;
+
                 let cache_path = leviath_core::paths::capability_cache_path().unwrap();
                 let mut cache = leviath_providers::CapabilityCache::new(1);
                 cache.set(
@@ -2213,40 +1410,30 @@ system_prompt = "x"
                 );
                 std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
                 cache.save(&cache_path).unwrap();
-                let (url, _) = leviath_testkit::spawn_mock_sequence(vec![(
-                    503,
-                    "Service Unavailable",
-                    b"proxy down".to_vec(),
-                )])
-                .await;
-                let dir = tempfile::tempdir().unwrap();
-                let manifest = story_manifest(dir.path());
-                let runs = tempfile::tempdir().unwrap();
-                run_in_flight(runs.path(), "run-mid", &manifest);
 
                 let mut host = setup_daemon_host(
                     gateway_config(url),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("the daemon starts");
 
-                assert!(
-                    host.held_for_catalog().is_empty(),
-                    "nothing waits on a cached list"
-                );
-                assert!(status_of(&mut host, "run-mid").await.is_some());
-                let (op, rx) = spawn_op("run-new", &manifest);
+                assert!(status_of(&mut host, &mid).await.is_some());
+                let (op, rx) = spawn_op(&manifest);
                 let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
                 ctl_tx.send(op).unwrap();
                 drop(ctl_tx);
                 host.serve(ctl_rx).await;
-                assert_eq!(rx.await.unwrap(), Ok("run-new".to_string()));
-                let meta = std::fs::read_to_string(runs.path().join("run-new").join("meta.json"))
-                    .unwrap_or_default();
-                assert!(meta.contains("anthropic/claude-opus-5"), "{meta}");
-                assert!(!meta.contains("claude-sonnet-5"), "{meta}");
+                let new = rx.await.unwrap().expect("the new run starts");
+                for run_id in [new.run_id.as_str(), mid.as_str()] {
+                    assert_eq!(
+                        model_of(&mut host, run_id).as_deref(),
+                        Some("anthropic/claude-opus-5"),
+                        "{run_id} runs the model its stage named, not the fallback"
+                    );
+                }
 
                 let cache = leviath_providers::CapabilityCache::load(&cache_path).unwrap();
                 let outcome = cache.check("openrouter").map(|c| c.outcome.clone());
@@ -2269,9 +1456,10 @@ system_prompt = "x"
     /// down came up with an empty model list, every bare model name in the
     /// blueprint went unrouted, and every stage ran on `fallback_model` with
     /// nothing but a warning in daemon.log. Here the gateway refuses the boot
-    /// listing, and a stage naming a model it does carry must be refused
-    /// rather than started on the fallback. Once the gateway answers, the next
-    /// spawn reads the list again and goes through, with no restart.
+    /// listing and the next one, and a stage naming a model it does carry must
+    /// be refused rather than started on the fallback. Once the gateway
+    /// answers, the next spawn reads the list again and goes through, with no
+    /// restart.
     #[tokio::test]
     async fn a_daemon_started_against_a_dead_gateway_refuses_instead_of_falling_back() {
         let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
@@ -2280,8 +1468,10 @@ system_prompt = "x"
             |_| async move {
                 let listing =
                     br#"{"data":[{"id":"anthropic/claude-opus-5","context_length":200000}]}"#;
-                // The boot listing fails (the proxy is down); the next answers.
+                // The boot listing and the first spawn's fail (the proxy is
+                // down); the next answers.
                 let (url, _) = leviath_testkit::spawn_mock_sequence(vec![
+                    (503, "Service Unavailable", b"proxy down".to_vec()),
                     (503, "Service Unavailable", b"proxy down".to_vec()),
                     (200, "OK", listing.to_vec()),
                 ])
@@ -2291,6 +1481,7 @@ system_prompt = "x"
                     gateway_config(url),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("a dead gateway does not stop the daemon starting");
@@ -2298,32 +1489,26 @@ system_prompt = "x"
                 let dir = tempfile::tempdir().unwrap();
                 let manifest = story_manifest(dir.path());
 
-                // Straight to the spawner, the way the list stood at boot.
-                let (op, rx) = spawn_op("run-dead", &manifest);
-                host.handle(op);
-                let err = rx
+                let err = spawn_through(&mut host, task_request(&manifest, "t"))
                     .await
-                    .unwrap()
-                    .expect_err("must not start on the fallback");
+                    .expect_err("must not start on the fallback")
+                    .to_string();
                 assert!(err.contains("stage 'story' names claude-opus-5"), "{err}");
                 assert!(
                     err.contains("model list of openrouter has not been read"),
                     "{err}"
                 );
 
-                // Through the serve loop, whose spawn hook asks the gateway
-                // again: it answers now, so the stage resolves to the model it
-                // named rather than to the fallback.
-                let (op, rx) = spawn_op("run-back", &manifest);
-                let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
-                ctl_tx.send(op).unwrap();
-                drop(ctl_tx);
-                host.serve(ctl_rx).await;
-                assert_eq!(rx.await.unwrap(), Ok("run-back".to_string()));
-                let meta = std::fs::read_to_string(runs.path().join("run-back").join("meta.json"))
-                    .unwrap_or_default();
-                assert!(meta.contains("anthropic/claude-opus-5"), "{meta}");
-                assert!(!meta.contains("claude-sonnet-5"), "{meta}");
+                // The next spawn asks the gateway again: it answers now, so the
+                // stage resolves to the model it named rather than to the
+                // fallback.
+                let back = spawn_through(&mut host, task_request(&manifest, "t"))
+                    .await
+                    .expect("the gateway answers now");
+                assert_eq!(
+                    model_of(&mut host, back.as_str()).as_deref(),
+                    Some("anthropic/claude-opus-5")
+                );
             },
         )
         .await;
@@ -2359,23 +1544,33 @@ system_prompt = "x"
     /// A one-stage blueprint pinned to `provider`, with the user default
     /// refused: the only way it can run is if that provider is registered.
     fn blueprint_pinned_to(dir: &std::path::Path, provider: &str) -> std::path::PathBuf {
-        let manifest = dir.join("agent.leviath");
+        let manifest = dir.join("agent.toml");
         std::fs::write(
             &manifest,
             format!(
-                r#"
-[agent]
+                r#"[blueprint]
 name = "pinned"
-entry_stage = "work"
+version = "0.1.0"
 
-[stages.work]
-mode = "autonomous"
-model = {{ models = [{{ provider = "{provider}", model = "m" }}], allow_user_default = false }}
-available_tools = []
+[graph]
+entry = "work"
+
+[[graph.stages]]
+name = "work"
 system_prompt = "reply"
 
-[context.regions]
-task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
+[graph.stages.model]
+models = [{{ provider = "{provider}", model = "m" }}]
+allow_user_default = false
+
+[graph.layout]
+regions = [{{ name = "task", kind = "pinned", budget = 200 }}]
+total_budget_tokens = 200
+
+[[graph.inputs]]
+name = "task"
+type = {{ kind = "text", multiline = true }}
+binds = [{{ region = "task" }}]
 "#
             ),
         )
@@ -2383,33 +1578,22 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         manifest
     }
 
+    /// A spawn of `manifest` for the control channel, and where its answer
+    /// arrives.
     fn spawn_op(
-        run_id: &str,
         manifest: &std::path::Path,
-    ) -> (ControlOp, oneshot::Receiver<Result<String, String>>) {
+    ) -> (
+        ControlOp,
+        oneshot::Receiver<
+            Result<
+                leviath_runtime::spec::summary::Spawned,
+                leviath_runtime::spec::issues::SpawnIssues,
+            >,
+        >,
+    ) {
         let (reply, reply_rx) = oneshot::channel();
         let op = ControlOp::Spawn {
-            args: Box::new(SpawnArgs {
-                run_id: run_id.to_string(),
-                blueprint_path: manifest.to_string_lossy().to_string(),
-                task: "t".to_string(),
-                regions: Default::default(),
-                model: None,
-                workdir: std::env::temp_dir().to_string_lossy().to_string(),
-                metadata: Default::default(),
-                callback_url: None,
-                callback_secret: None,
-                yolo: false,
-                yolo_profile: None,
-                no_seed_commands: false,
-                allow: Vec::new(),
-                max_depth: None,
-                parent_run_id: None,
-                worker_stage: None,
-                output: None,
-                parts: Vec::new(),
-                capture_model_input: false,
-            }),
+            request: Box::new(task_request(manifest, "t")),
             reply,
         };
         (op, reply_rx)
@@ -2455,7 +1639,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         // lane on the way out, so a host only ever serves once. The driver
         // task rewrites the config between the two, which is the whole point.
         let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (first, first_reply) = spawn_op("run-before", &manifest);
+        let (first, first_reply) = spawn_op(&manifest);
         ctl_tx.send(first).unwrap();
         let driver_tx = ctl_tx.clone();
         let driver_config = config_path.clone();
@@ -2464,7 +1648,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             let before = first_reply.await.unwrap();
             // What `lev setup` (or `PUT /api/config`) does: rewrite the file.
             config_naming(&driver_config, &[("beta", "http://127.0.0.1:9/v1")], "beta");
-            let (second, second_reply) = spawn_op("run-after", &driver_manifest);
+            let (second, second_reply) = spawn_op(&driver_manifest);
             driver_tx.send(second).unwrap();
             let after = second_reply.await.unwrap();
             drop(driver_tx);
@@ -2478,10 +1662,9 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             before.is_err(),
             "beta is not configured yet, so the spawn has nowhere to go: {before:?}"
         );
-        assert_eq!(
-            after,
-            Ok("run-after".to_string()),
-            "the provider the user just configured has to work without a daemon restart"
+        assert!(
+            after.is_ok(),
+            "the provider the user just configured has to work without a daemon restart: {after:?}"
         );
         assert!(
             host.world_mut().providers().has("beta"),
@@ -2505,193 +1688,43 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
     }
 
     #[tokio::test]
-    async fn build_host_spawns_agents_through_the_installed_spawner() {
+    async fn build_host_spawns_agents_through_the_installed_starter() {
         crate::config::with_isolated_config_path_async(
-            "build_host_spawns_agents_through_the_installed_spawner",
+            "build_host_spawns_agents_through_the_installed_starter",
             |_| async move {
                 let dir = tempfile::tempdir().unwrap();
-                let manifest = dir.path().join("agent.leviath");
+                let manifest = dir.path().join("agent.toml");
                 std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
 
-                let mut registry = ProviderRegistry::new();
-                registry.register("anthropic".to_string(), Arc::new(fake_provider()));
-                let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-
                 let runs = tempfile::tempdir().unwrap();
-                let mut host = build_host(HostParts {
-                    config: Config::default(),
-                    providers: registry,
-                    runs_dir: runs.path().to_path_buf(),
-                    shared_mcp: mcp,
-                    mcp_tool_defs: vec![],
-                    mcp_tool_owners: Default::default(),
-                    mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
-                        Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-                        &[],
-                    ),
-                    runtime: Handle::current(),
-                    now_secs: || 100,
-                    reloader: None,
-                    provider_reload: None,
-                });
+                let mut host = fake_host(runs.path());
 
-                // Drive a Spawn control op through the host.
-                let (reply, rx) = oneshot::channel();
-                host.handle(ControlOp::Spawn {
-                    args: Box::new(SpawnArgs {
-                        run_id: "run-1".to_string(),
-                        blueprint_path: manifest.to_string_lossy().to_string(),
-                        task: "do it".to_string(),
-                        regions: Default::default(),
-                        model: None,
-                        workdir: std::env::temp_dir().to_string_lossy().to_string(),
-                        metadata: Default::default(),
-                        callback_url: None,
-                        callback_secret: None,
-                        yolo: false,
-                        yolo_profile: None,
-                        no_seed_commands: false,
-                        allow: Vec::new(),
-                        max_depth: None,
-                        parent_run_id: None,
-                        worker_stage: None,
-                        output: None,
-                        parts: Vec::new(),
-                        capture_model_input: false,
-                    }),
-                    reply,
-                });
-                assert_eq!(rx.await.unwrap(), Ok("run-1".to_string()));
+                let run_id = spawn_through(&mut host, task_request(&manifest, "do it"))
+                    .await
+                    .expect("the run starts");
 
                 // The run is registered and Active.
-                let (reply, rx) = oneshot::channel();
-                host.handle(ControlOp::Status {
-                    run_id: "run-1".to_string(),
-                    reply,
-                });
-                assert_eq!(rx.await.unwrap(), Some(AgentStatus::Active));
+                assert_eq!(
+                    status_of(&mut host, run_id.as_str()).await,
+                    Some(AgentStatus::Active)
+                );
             },
         )
         .await;
     }
 
-    #[tokio::test]
-    async fn build_host_reloads_and_registers_persisted_runs() {
-        crate::config::with_isolated_config_path_async(
-            "build_host_reloads_and_registers_persisted_runs",
-            |_| async move {
-                // A running run persisted under the runs dir must be reloaded + registered
-                // by `build_host` (exercising the recovery register loop).
-                let agent = tempfile::tempdir().unwrap();
-                let manifest = agent.path().join("agent.leviath");
-                std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
-
-                let runs = tempfile::tempdir().unwrap();
-                let run_dir = runs.path().join("resumed");
-                std::fs::create_dir_all(&run_dir).unwrap();
-                let meta = leviath_core::run_meta::RunMeta {
-                    stage_models: Vec::new(),
-                    active: Default::default(),
-                    run_id: "resumed".to_string(),
-                    agent_name: "coder".to_string(),
-                    agent_path: manifest.to_string_lossy().to_string(),
-                    task: "resume".to_string(),
-                    model: None,
-                    pid: 0,
-                    status: leviath_core::run_meta::RunStatus::Running,
-                    current_stage: "implement".to_string(),
-                    stage_index: 0,
-                    num_stages: 1,
-                    iteration: 2,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    cached_tokens: 0,
-                    cache_write_tokens: 0,
-                    tool_calls: 0,
-                    cost_usd: Some(0.0),
-                    unpriced_calls: 0,
-                    cost_is_exact: true,
-                    cost_priced_usd: 0.0,
-                    workdir: std::env::temp_dir().to_string_lossy().to_string(),
-                    started_at: 1,
-                    updated_at: 1,
-                    last_progress_at: None,
-                    error: None,
-                    title: None,
-                    title_error: None,
-                    blueprint_digest: None,
-                    metadata: Default::default(),
-                    callback_url: None,
-                    callback_secret: None,
-                    parent_run_id: None,
-                    children: Vec::new(),
-                    depth: 0,
-                    max_child_depth: 0,
-                    flags: Default::default(),
-                    yolo: false,
-                    yolo_profile: None,
-                    read_paths: None,
-                    final_output: None,
-                    waiting_on: None,
-                    output_request: None,
-                    model_override: None,
-                };
-                std::fs::write(
-                    run_dir.join("meta.json"),
-                    serde_json::to_string(&meta).unwrap(),
-                )
-                .unwrap();
-
-                let mut registry = ProviderRegistry::new();
-                registry.register("anthropic".to_string(), Arc::new(fake_provider()));
-                let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-                let mut host = build_host(HostParts {
-                    config: Config::default(),
-                    providers: registry,
-                    runs_dir: runs.path().to_path_buf(),
-                    shared_mcp: mcp,
-                    mcp_tool_defs: vec![],
-                    mcp_tool_owners: Default::default(),
-                    mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
-                        Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
-                        &[],
-                    ),
-                    runtime: Handle::current(),
-                    now_secs: || 100,
-                    reloader: None,
-                    provider_reload: None,
-                });
-
-                // The reloaded run is registered → Status resolves it.
-                let (reply, rx) = oneshot::channel();
-                host.handle(ControlOp::Status {
-                    run_id: "resumed".to_string(),
-                    reply,
-                });
-                assert_eq!(rx.await.unwrap(), Some(AgentStatus::Active));
-            },
-        )
-        .await;
+    /// A host over the fake `anthropic` provider, keeping its runs in `runs`.
+    fn fake_host(runs: &std::path::Path) -> WorldHost {
+        host_over(runs, fake_registry())
     }
 
-    #[tokio::test]
-    async fn build_host_installs_a_reloader_that_pages_in_unloaded_runs() {
-        // A run that lands on disk *after* startup (so it is not auto-reloaded)
-        // must still be reachable: a control op targeting it fires the installed
-        // reloader, which pages it into the world on demand.
-        let agent = tempfile::tempdir().unwrap();
-        let manifest = agent.path().join("agent.leviath");
-        std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
-
-        let runs = tempfile::tempdir().unwrap();
-        let mut registry = ProviderRegistry::new();
-        registry.register("anthropic".to_string(), Arc::new(fake_provider()));
-        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-        let mut host = build_host(HostParts {
+    /// A host over `providers`, keeping its runs in `runs`.
+    fn host_over(runs: &std::path::Path, providers: ProviderRegistry) -> WorldHost {
+        build_host(HostParts {
             config: Config::default(),
-            providers: registry,
-            runs_dir: runs.path().to_path_buf(),
-            shared_mcp: mcp,
+            providers,
+            runs_dir: runs.to_path_buf(),
+            shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             mcp_tool_defs: vec![],
             mcp_tool_owners: Default::default(),
             mcp_pool: crate::daemon::mcp_pool::McpPool::for_daemon(
@@ -2702,79 +1735,94 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             now_secs: || 100,
             reloader: None,
             provider_reload: None,
-        });
+        })
+    }
 
-        // Persist a running run only now - build_host's startup reload already ran,
-        // so it is on disk but absent from the world.
-        let run_dir = runs.path().join("late");
-        std::fs::create_dir_all(&run_dir).unwrap();
-        let meta = leviath_core::run_meta::RunMeta {
-            stage_models: Vec::new(),
-            active: Default::default(),
-            run_id: "late".to_string(),
-            agent_name: "coder".to_string(),
-            agent_path: manifest.to_string_lossy().to_string(),
-            task: "page me in".to_string(),
-            model: None,
-            pid: 0,
-            status: leviath_core::run_meta::RunStatus::Running,
-            current_stage: "implement".to_string(),
-            stage_index: 0,
-            num_stages: 1,
-            iteration: 1,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            tool_calls: 0,
-            cost_usd: Some(0.0),
-            unpriced_calls: 0,
-            cost_is_exact: true,
-            cost_priced_usd: 0.0,
-            workdir: std::env::temp_dir().to_string_lossy().to_string(),
-            started_at: 1,
-            updated_at: 1,
-            last_progress_at: None,
-            error: None,
-            title: None,
-            title_error: None,
-            blueprint_digest: None,
-            metadata: Default::default(),
-            callback_url: None,
-            callback_secret: None,
-            parent_run_id: None,
-            children: Vec::new(),
-            depth: 0,
-            max_child_depth: 0,
-            flags: Default::default(),
-            yolo: false,
-            yolo_profile: None,
-            read_paths: None,
-            final_output: None,
-            waiting_on: None,
-            output_request: None,
-            model_override: None,
-        };
-        std::fs::write(
-            run_dir.join("meta.json"),
-            serde_json::to_string(&meta).unwrap(),
+    /// The fake `anthropic` provider, as a registry.
+    fn fake_registry() -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        registry.register("anthropic".to_string(), Arc::new(fake_provider()));
+        registry
+    }
+
+    #[tokio::test]
+    async fn build_host_reloads_and_registers_persisted_runs() {
+        crate::config::with_isolated_config_path_async(
+            "build_host_reloads_and_registers_persisted_runs",
+            |_| async move {
+                // A run recorded under the runs dir is resumed and registered by
+                // `build_host`.
+                let agent = tempfile::tempdir().unwrap();
+                let manifest = agent.path().join("agent.toml");
+                std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
+                let runs = tempfile::tempdir().unwrap();
+                let run_id =
+                    run_on_disk(Config::default(), fake_registry(), runs.path(), &manifest);
+
+                let mut host = fake_host(runs.path());
+
+                // The resumed run is registered → Status resolves it.
+                assert_eq!(
+                    status_of(&mut host, &run_id).await,
+                    Some(AgentStatus::Active)
+                );
+            },
         )
-        .unwrap();
+        .await;
+    }
+
+    /// A run this machine can no longer take back is held at startup: listed,
+    /// paused, rather than ended.
+    #[tokio::test]
+    async fn build_host_holds_a_run_this_machine_cannot_take_back() {
+        crate::config::with_isolated_config_path_async(
+            "build_host_holds_a_run_this_machine_cannot_take_back",
+            |_| async move {
+                let agent = tempfile::tempdir().unwrap();
+                let manifest = agent.path().join("agent.toml");
+                std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
+                let runs = tempfile::tempdir().unwrap();
+                let run_id =
+                    run_on_disk(Config::default(), fake_registry(), runs.path(), &manifest);
+
+                let mut host = host_over(runs.path(), ProviderRegistry::new());
+
+                assert_eq!(
+                    status_of(&mut host, &run_id).await,
+                    Some(AgentStatus::Paused)
+                );
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_host_installs_a_reloader_that_pages_in_unloaded_runs() {
+        // A run that lands on disk *after* startup (so it is not resumed then)
+        // must still be reachable: a control op targeting it fires the installed
+        // reloader, which pages it into the world on demand.
+        let agent = tempfile::tempdir().unwrap();
+        let manifest = agent.path().join("agent.toml");
+        std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
+
+        let runs = tempfile::tempdir().unwrap();
+        let mut host = fake_host(runs.path());
+
+        // Recorded only now - build_host's startup resume already ran, so it
+        // is on disk but absent from the world.
+        let run_id = run_on_disk(Config::default(), fake_registry(), runs.path(), &manifest);
 
         // It is not loaded yet: a read-only Status does not page it in.
-        let (reply, rx) = oneshot::channel();
-        host.handle(ControlOp::Status {
-            run_id: "late".to_string(),
-            reply,
-        });
-        assert_eq!(rx.await.unwrap(), None);
+        assert_eq!(status_of(&mut host, &run_id).await, None);
 
-        // A Cancel routes through the reloader, paging it in and acting on it.
+        // A Cancel routes through the reloader, paging it in off the loop and
+        // acting on it once it lands.
         let (reply, rx) = oneshot::channel();
         host.handle(ControlOp::Cancel {
-            run_id: "late".to_string(),
+            run_id: run_id.clone(),
             reply,
         });
+        host.land_pages().await;
         assert!(rx.await.unwrap());
     }
 
@@ -2804,32 +1852,40 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
     }
 
     #[test]
-    fn daemon_build_is_stale_compares_against_current_build() {
-        assert!(daemon_build_is_stale(None), "missing marker is stale");
-        assert!(
-            daemon_build_is_stale(Some("some-other-build")),
-            "a different build is stale"
-        );
-        assert!(
-            !daemon_build_is_stale(Some(CURRENT_BUILD)),
-            "the current build is not stale"
-        );
-    }
-
-    #[test]
     fn build_marker_round_trips_and_is_current() {
         let dir = tempfile::tempdir().unwrap();
         temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
-            // No marker yet → read is None → treated as stale.
+            use super::super::build::{Build, Standing};
+            // No marker yet: an older daemon, which a spawn replaces.
             assert!(read_build_marker().is_none());
-            assert!(daemon_build_is_stale(read_build_marker().as_deref()));
+            let current = Build::current();
+            assert_eq!(Build::parse("").standing(&current), Standing::Older);
 
             write_build_marker();
             let path = build_marker_path().unwrap();
             assert!(path.exists());
-            assert_eq!(read_build_marker().as_deref(), Some(CURRENT_BUILD));
-            // A daemon that wrote the current build is not stale.
-            assert!(!daemon_build_is_stale(read_build_marker().as_deref()));
+            let marker = read_build_marker().unwrap();
+            assert!(marker.starts_with(CURRENT_BUILD), "{marker}");
+            // A daemon that wrote this build is this build.
+            assert_eq!(Build::parse(&marker), current);
+            assert_eq!(Build::parse(&marker).standing(&current), Standing::Same);
+        });
+    }
+
+    /// A starting daemon records its build before a client can reach it,
+    /// unless another daemon already answers, whose marker stays.
+    #[tokio::test]
+    async fn the_build_is_recorded_before_the_bind_unless_a_daemon_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+            let id = control_address().unwrap();
+            write_build_marker_unless_running(&id);
+            let path = build_marker_path().unwrap();
+            assert!(path.exists(), "nothing answers, so this build is recorded");
+            std::fs::remove_file(&path).unwrap();
+            let _listener = leviath_runtime::control_socket::bind_control_listener(&id).unwrap();
+            write_build_marker_unless_running(&id);
+            assert!(!path.exists(), "the daemon answering keeps its own marker");
         });
     }
 
@@ -2846,13 +1902,15 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         let dir = tempfile::tempdir().expect("tempdir");
         let mut config = Config::default();
         config.providers.anthropic_api_key = Some("k".to_string());
-        let err =
-            setup_daemon_host_with(config, dir.path().to_path_buf(), Handle::current(), &|_t| {
-                Err(leviath_providers::provider::malformed_url_error())
-            })
-            .await
-            .err()
-            .expect("a failing client factory should stop the daemon starting");
+        let err = setup_daemon_host_with(
+            config,
+            (dir.path().to_path_buf(), &StartupBoard::default()),
+            Handle::current(),
+            &|_t| Err(leviath_providers::provider::malformed_url_error()),
+        )
+        .await
+        .err()
+        .expect("a failing client factory should stop the daemon starting");
         assert!(err.to_string().contains("root certificate store"));
     }
 
@@ -2892,20 +1950,11 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         })
     }
 
-    /// Spawn `run_id` through the host's real spawner and assert it took.
-    async fn spawn_ok(host: &mut WorldHost, run_id: &str, manifest: &std::path::Path) {
-        let (reply, rx) = oneshot::channel();
-        host.handle(ControlOp::Spawn {
-            args: Box::new(SpawnArgs {
-                run_id: run_id.to_string(),
-                blueprint_path: manifest.to_string_lossy().to_string(),
-                task: "name this run".to_string(),
-                workdir: std::env::temp_dir().to_string_lossy().to_string(),
-                ..Default::default()
-            }),
-            reply,
-        });
-        assert_eq!(rx.await.unwrap(), Ok(run_id.to_string()));
+    /// Spawn `manifest` through the host's real starter and assert it took.
+    async fn spawn_ok(host: &mut WorldHost, manifest: &std::path::Path) {
+        spawn_through(host, task_request(manifest, "name this run"))
+            .await
+            .expect("the run starts");
     }
 
     /// A `[limits]` edit is picked up by the next spawn, with no daemon
@@ -2947,9 +1996,9 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         save_config(&path, &after);
 
         let agent = tempfile::tempdir().unwrap();
-        let manifest = agent.path().join("agent.leviath");
+        let manifest = agent.path().join("agent.toml");
         std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
-        spawn_ok(&mut host, "limits-1234-ab12", &manifest).await;
+        spawn_ok(&mut host, &manifest).await;
 
         let settings = host.settings();
         let world = host.world_mut();
@@ -3013,9 +2062,9 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         save_config(&path, &after);
 
         let agent = tempfile::tempdir().unwrap();
-        let manifest = agent.path().join("agent.leviath");
+        let manifest = agent.path().join("agent.toml");
         std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
-        spawn_ok(&mut host, "titled-1234-ab12", &manifest).await;
+        spawn_ok(&mut host, &manifest).await;
 
         let world = host.world_mut().world_mut();
         let mut pending = world.query::<&leviath_runtime::title::PendingTitle>();

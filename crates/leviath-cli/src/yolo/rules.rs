@@ -10,7 +10,23 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::config::ToolPolicy;
-use leviath_core::blueprint::{ToolGroup, is_tool_group_token};
+use leviath_runtime::spec::graph::ToolGroup;
+
+/// The tool groups an entry may name, as a blueprint's `tools` list spells
+/// them.
+const GROUPS: [(&str, ToolGroup); 5] = [
+    ("@all", ToolGroup::All),
+    ("@builtin", ToolGroup::Builtin),
+    ("@subagent", ToolGroup::Subagent),
+    ("@scripts", ToolGroup::Scripts),
+    ("@mcp", ToolGroup::Mcp),
+];
+
+/// Whether a tool of `source` is one of `group`'s: `@all` covers every
+/// source, and any other group its own.
+pub(crate) fn covers(group: ToolGroup, source: ToolGroup) -> bool {
+    group == ToolGroup::All || group == source
+}
 
 /// What a profile decides for a call: run it, put it to a person, or refuse it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,19 +241,18 @@ impl ToolRule {
                 reason: "an empty entry names no tool".to_string(),
             });
         }
-        let matcher = if is_tool_group_token(trimmed) {
-            match ToolGroup::parse(trimmed) {
-                Some(group) => ToolMatcher::Group(group),
-                None => {
-                    return Err(RuleError {
-                        entry: entry.to_string(),
-                        reason: format!(
-                            "not a tool group; the groups are {}",
-                            leviath_core::blueprint::group_tokens_list()
-                        ),
-                    });
-                }
-            }
+        let matcher = if trimmed.starts_with('@') {
+            let group = GROUPS
+                .iter()
+                .find(|(token, _)| *token == trimmed)
+                .ok_or_else(|| RuleError {
+                    entry: entry.to_string(),
+                    reason: format!(
+                        "not a tool group; the groups are {}",
+                        GROUPS.map(|(token, _)| token).join(", ")
+                    ),
+                })?;
+            ToolMatcher::Group(group.1)
         } else if trimmed.contains(['*', '?', '[']) {
             ToolMatcher::Glob(glob::Pattern::new(trimmed).map_err(|e| RuleError {
                 entry: entry.to_string(),
@@ -255,7 +270,7 @@ impl ToolRule {
     /// Whether this entry covers `tool`, a tool of `source`.
     pub(crate) fn matches(&self, tool: &str, source: ToolGroup) -> bool {
         match &self.matcher {
-            ToolMatcher::Group(group) => group.covers(source),
+            ToolMatcher::Group(group) => covers(*group, source),
             ToolMatcher::Glob(pattern) => pattern.matches(tool),
             ToolMatcher::Name(name) => leviath_tools::tool_name_spellings(tool).any(|s| s == name),
         }

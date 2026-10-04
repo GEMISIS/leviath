@@ -1,3 +1,15 @@
+"The run started or stopped taking messages."
+type AcceptsMessagesChangeOutput {
+	"Whether it takes them now."
+	acceptsMessages: Boolean!
+}
+
+"The run submitted its answer."
+type AnswerChangeOutput {
+	"The answer now."
+	answer: StateAnswerOutput
+}
+
 "Which ask to answer, and what to answer it with."
 input AnswerInteractionRequest {
 	"The open request being answered."
@@ -14,16 +26,61 @@ type AnswerInteractionResult {
 	outcome: AnswerOutcome!
 }
 
+"One option an open ask lists, as every surface lists it."
+type AnswerOptionOutput {
+	"""
+	The word that answers with this option, and what
+	`answerInteraction(answer: { option: { id } })` takes. Stable: an
+	approval's words are `allow`, `allow-stage`, `allow-run`, `deny` and
+	`deny-feedback`, a confirm's `yes` and `no`, and a choice's is made
+	from its label, so reordering the options does not move it.
+	"""
+	id: ID!
+	"The option as the ask words it."
+	label: String!
+	"""
+	Where it is listed, counting from 1, the same number `lev interactions`
+	and the dashboard show. Never needed to answer.
+	"""
+	number: Int!
+	"The whole `lev respond` command that answers with this option."
+	answer: String!
+}
+
+"One of the options an ask lists, named by its word."
+input AnswerOptionWrite {
+	"""
+	The option's `id` from the ask's `answerOptions`: `allow`,
+	`allow-stage`, `allow-run`, `deny`, `yes`, `no`, or a choice's own
+	word. The option's `number` is taken as well.
+	"""
+	id: ID!
+	"""
+	On a deny, what to tell the model instead. Refused beside any other
+	option.
+	"""
+	feedback: String
+}
+
 "Whether an answer was the one that settled the ask."
 enum AnswerOutcome {
 	"The daemon took this answer."
 	ACCEPTED
 	"""
-	Nothing open carries that id any more: it was answered already, or it
-	expired. Two people clicking one prompt is ordinary, so this is an
-	outcome rather than a failure.
+	Nothing open carries that id any more, and a run on this machine is
+	the one that asked it: it was answered already, or it expired. Two
+	people clicking one prompt is ordinary, so this is an outcome rather
+	than a failure. An id no run here asked is an error coded `NOT_FOUND`.
 	"""
 	ALREADY_SETTLED
+}
+
+"A question was answered."
+type AnsweredStepOutput {
+	"The question."
+	questionId: ID!
+	"The answer."
+	answer: String!
 }
 
 """
@@ -209,6 +266,14 @@ type ArtifactOutput {
 	url: String!
 }
 
+"The files an execution produced."
+type ArtifactsStepOutput {
+	"The execution."
+	producerId: ID!
+	"The files."
+	files: [ProducedFileOutput!]!
+}
+
 "Arguments for the `ask_user_choice` tool."
 type AskUserChoiceArgsOutput {
 	"The question asked."
@@ -275,6 +340,26 @@ type AskUserTextCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: AskUserTextArgsOutput!
+}
+
+"The output shape a `spawn_agent` call asked its child for."
+type AskedOutputOutput {
+	"The format label: markdown, json, a mime type, a house format."
+	format: String
+	"Guidance about that shape."
+	instructions: String
+	"An example answer."
+	example: String
+	"A JSON Schema the answer must meet."
+	schema: JSON
+}
+
+"Where an attachment's bytes come from."
+input AttachmentContentWrite @oneOf {
+	"A file inside the run's working directory, by its path relative to it."
+	path: String
+	"The bytes themselves, base64 encoded."
+	base64: String
 }
 
 "One file to attach, by its path inside the run's working directory."
@@ -434,6 +519,47 @@ type AttemptOutcomeOutput {
 	capacity: Boolean
 	"What the loop did next."
 	retry: RetryDecision
+}
+
+"A model call, in full."
+type AttemptStepOutput {
+	"The attempt's id."
+	attemptId: ID!
+	"Which try at this request it was, from 1."
+	number: Int!
+	"The provider asked."
+	provider: String!
+	"The model asked."
+	model: String!
+	"Whether it answered."
+	ended: AttemptOutcomeKind!
+	"How it failed, when it did."
+	failure: CallFailureOutput
+	"Why the model stopped, in this build's words."
+	stopReason: String
+	"""
+	Why it stopped, in the provider's words, when this build has no name
+	for it.
+	"""
+	stoppedFor: String
+	"How long it took."
+	durationMs: BigInt!
+	"How long it waited before it was sent."
+	backoffMs: BigInt!
+	"What was sent, in brief."
+	digest: RequestBriefOutput!
+	"The request itself, when it was captured."
+	modelInput: CapturedRequestOutput
+}
+
+"What a run answers for itself instead of asking a person."
+type AutoAnswersOutput {
+	"The model's own questions are answered for it."
+	questions: Boolean!
+	"Stage checkpoints approve themselves."
+	checkpoints: Boolean!
+	"Taint-gate prompts approve themselves."
+	gate: Boolean!
 }
 
 """
@@ -640,6 +766,12 @@ type BlobEntryOutput {
 	url: String
 }
 
+"The run stored a part beside its run file."
+type BlobsChangeOutput {
+	"Every stored part it names now."
+	blobs: [StateBlobOutput!]!
+}
+
 """
 One page of a listing: the items, where to resume, and how many there are
 altogether.
@@ -823,7 +955,8 @@ input BlueprintInput {
 	"""
 	Filter on `BlueprintOutput.digest`.
 	
-	Content digest of this manifest, lowercase hex SHA-256.
+	Content digest, lowercase hex SHA-256: of the installed `agent.toml`, or
+	of the graph a run executed.
 	"""
 	digest: StringFilter
 	"""
@@ -835,13 +968,13 @@ input BlueprintInput {
 	"""
 	Filter on `BlueprintOutput.version`.
 	
-	From `[agent] version`.
+	From `[blueprint] version`. Empty for a run of a graph its caller wrote.
 	"""
 	version: StringFilter
 	"""
 	Filter on `BlueprintOutput.description`.
 	
-	From `[agent] description`.
+	From `[blueprint] description`.
 	"""
 	description: StringFilter
 	"""
@@ -850,7 +983,7 @@ input BlueprintInput {
 	The stage a run starts in. Defaults to the first stage declared.
 	
 	Null for a blueprint that declares no stages, and for one whose
-	`entry_stage` names a stage it does not declare, which `lev validate`
+	`entry` names a stage it does not declare, which `lev validate`
 	refuses and the daemon will not spawn. `entryStageName` is the name it
 	wrote.
 	"""
@@ -858,7 +991,7 @@ input BlueprintInput {
 	"""
 	Filter on `BlueprintOutput.entryStageName`.
 	
-	The name the manifest gave as its entry stage, verbatim. Null where it
+	The name the graph gave as its entry stage, verbatim. Null where it
 	names none, which starts the run in the first stage declared.
 	"""
 	entryStageName: StringFilter
@@ -993,6 +1126,12 @@ input BlueprintInput {
 	isNull: Boolean
 }
 
+"A `blueprint` input: an installed blueprint, as `name` or `name@digest`."
+type BlueprintInputTypeOutput {
+	"What values it takes, in words."
+	summary: String!
+}
+
 "One sort key a listing of `BlueprintOutput` runs in, and its direction."
 input BlueprintOrder {
 	"Which field to order by."
@@ -1010,15 +1149,15 @@ enum BlueprintOrderField {
 }
 
 """
-A blueprint: the manifest that says what an agent is, whole.
+A blueprint: the graph that says what an agent is, whole.
 
 Its stages, regions, tools and models are the declaration and nothing more.
-Nothing here belongs to any one execution: that is a `Run`, which carries
-its own frozen copy of the blueprint it started from.
+Nothing here belongs to any one execution: that is a `Run`, whose file
+carries the graph it was resolved to.
 
-So read from a run, this is the manifest that run executed; read from the
-blueprint listing, it is the definition installed now. The `source` field
-says which, and the digest in the id says whether they are the same bytes.
+So read from a run, this is the graph that run executed, with its inputs
+applied; read from the blueprint listing, it is the definition installed
+now. The `source` field says which.
 """
 type BlueprintOutput implements Node {
 	"""
@@ -1034,25 +1173,28 @@ type BlueprintOutput implements Node {
 	id: ID!
 	"Unique within the installed set."
 	name: String!
-	"Content digest of this manifest, lowercase hex SHA-256."
+	"""
+	Content digest, lowercase hex SHA-256: of the installed `agent.toml`, or
+	of the graph a run executed.
+	"""
 	digest: String!
 	"Which file this was read from."
 	source: BlueprintSource!
-	"From `[agent] version`."
+	"From `[blueprint] version`. Empty for a run of a graph its caller wrote."
 	version: String!
-	"From `[agent] description`."
+	"From `[blueprint] description`."
 	description: String!
 	"""
 	The stage a run starts in. Defaults to the first stage declared.
 	
 	Null for a blueprint that declares no stages, and for one whose
-	`entry_stage` names a stage it does not declare, which `lev validate`
+	`entry` names a stage it does not declare, which `lev validate`
 	refuses and the daemon will not spawn. `entryStageName` is the name it
 	wrote.
 	"""
 	entryStage: StageOutput
 	"""
-	The name the manifest gave as its entry stage, verbatim. Null where it
+	The name the graph gave as its entry stage, verbatim. Null where it
 	names none, which starts the run in the first stage declared.
 	"""
 	entryStageName: String
@@ -1071,6 +1213,11 @@ type BlueprintOutput implements Node {
 	are on `Stage.context.regions` rather than here.
 	"""
 	regions: [RegionOutput!]!
+	"""
+	The inputs a spawn of this blueprint takes, typed: what `spawnRun`'s
+	`inputs` may name, which of them it must, and where each value goes.
+	"""
+	inputs: [InputDeclOutput!]!
 	"""
 	Paths this blueprint declares it needs beyond its workdir. Declaring is not
 	granting: an entry takes effect only where the host grants it.
@@ -1230,10 +1377,7 @@ enum BlueprintSource {
 	the installed file says now.
 	"""
 	SNAPSHOT
-	"""
-	The installed file. For a run, this means it kept no snapshot, so the
-	file may have changed since it ran.
-	"""
+	"The installed `agent.toml`, as it is now."
 	INSTALLED
 }
 
@@ -1249,6 +1393,30 @@ input BlueprintSourceFilter {
 	notIn: [BlueprintSource!]
 	"Match where there is no value at all."
 	isNull: Boolean
+}
+
+"A `blueprint` input's value."
+type BlueprintValueOutput {
+	"The blueprint's name."
+	name: String!
+	"The revision it is pinned to, when it is."
+	digest: String
+	"The value as a region shows it."
+	asText: String!
+}
+
+"A `bool` input."
+type BoolInputTypeOutput {
+	"What values it takes, in words."
+	summary: String!
+}
+
+"A `bool` input's value."
+type BoolValueOutput {
+	"The value."
+	flag: Boolean!
+	"The value as a region shows it."
+	asText: String!
 }
 
 """
@@ -1284,6 +1452,18 @@ type BuiltinToolOutput implements Tool {
 	origin: ToolOrigin!
 }
 
+"How a failed model call failed, and what happened next."
+type CallFailureOutput {
+	"The kind of failure, as the provider layer names it."
+	kind: String!
+	"Whether a retry could work."
+	transient: Boolean!
+	"Whether the provider was out of capacity."
+	capacity: Boolean!
+	"What happened next."
+	next: RetryDecision!
+}
+
 """
 Where a run posts its events, and what signs them.
 
@@ -1292,8 +1472,8 @@ sign for cannot be written down at all.
 """
 input CallbackWrite {
 	"""
-	The URL the daemon POSTs this run's events to. Checked against the same
-	outbound policy a model-supplied URL is.
+	The URL the daemon POSTs to when the run finishes. Checked against the
+	same outbound policy a model-supplied URL is.
 	"""
 	url: String!
 	"""
@@ -1379,6 +1559,24 @@ input CaptureStatusFilter {
 	notIn: [CaptureStatus!]
 	"Match where there is no value at all."
 	isNull: Boolean
+}
+
+"A captured model request."
+type CapturedRequestOutput {
+	"Whether the body was kept."
+	capture: CaptureStatus!
+	"The request as sent, when it was kept."
+	request: JSON
+	"The body's size in bytes."
+	bytes: BigInt!
+	"A digest of the context it was assembled from."
+	sourceContextDigest: String!
+	"The sampling parameters it was sent with, by name."
+	parameters: JSON!
+	"The version of the tool catalog it offered."
+	toolCatalogVersion: String!
+	"The version of the assembly that built it."
+	assemblyVersion: String!
 }
 
 "Arguments for the `check_agent` tool."
@@ -1474,6 +1672,98 @@ type CheckProviderResult {
 	unlistedModelIds: [String!]!
 }
 
+"A checklist item an entry carries."
+type ChecklistItemOutput {
+	"The item's number in its list."
+	number: Int!
+	"Whether it is done."
+	done: Boolean!
+	"A note on it."
+	note: String
+}
+
+"The run moved among its stage's checkpoints, or put one to a person."
+type CheckpointChangeOutput {
+	"Where it is among them now."
+	checkpoint: CheckpointProgressOutput!
+}
+
+"""
+Where a run is among the checkpoints of the stage it is in: the questions
+a stage puts to a person before it may move on.
+"""
+type CheckpointProgressOutput {
+	"The checkpoint it is on, by its position in the stage's list."
+	index: Int!
+	"The rounds of revision taken at that checkpoint."
+	round: Int!
+	"While the checkpoint is put to a person: the document it shows them."
+	document: String
+}
+
+"The run started a child run."
+type ChildrenChangeOutput {
+	"Its children now."
+	children: [ID!]!
+}
+
+"A `choice` input: one of a fixed set of options."
+type ChoiceInputTypeOutput {
+	"The options, in the order a form lists them."
+	options: [String!]!
+	"What values it takes, in words."
+	summary: String!
+}
+
+"A `choice` input's value."
+type ChoiceValueOutput {
+	"The option chosen."
+	choice: String!
+	"The value as a region shows it."
+	asText: String!
+}
+
+"The working clock started, stopped or banked time."
+type ClockChangeOutput {
+	"The clock now."
+	clock: StateClockOutput!
+}
+
+"""
+One piece of code a run uses, and the digest its bytes are stored under in
+the run file.
+"""
+type CodeEntryOutput {
+	"The graph's reference to it."
+	code: CodeRefOutput!
+	"The lowercase hex SHA-256 of the code that ran."
+	digest: String!
+}
+
+"Whether some code is a file beside the blueprint or text written inline."
+enum CodeRefKind {
+	"A file, by its path relative to the blueprint."
+	FILE
+	"Source written inline in the graph."
+	INLINE
+}
+
+"Code a run's graph names: a hook, a validator, a script."
+type CodeRefOutput {
+	"Which of the two it is."
+	kind: CodeRefKind!
+	"The path, or the source itself."
+	text: String!
+}
+
+"Code a graph or an output shape names."
+input CodeRefWrite @oneOf {
+	"A file, by its path relative to the blueprint."
+	file: String
+	"The source itself."
+	inline: String
+}
+
 "The settings the Codex transport has and no other provider does."
 type CodexOptionsOutput {
 	"""
@@ -1523,6 +1813,26 @@ enum CodexVerbosity {
 	HIGH
 }
 
+"One region's side of a committed context change."
+type CommittedRegionOutput {
+	"The region."
+	region: String!
+	"Its content digest before."
+	digestBefore: String!
+	"Its content digest after."
+	digestAfter: String!
+	"Its tokens before."
+	tokensBefore: BigInt!
+	"Its tokens after."
+	tokensAfter: BigInt!
+	"Its entries before."
+	entriesBefore: BigInt!
+	"Its entries after."
+	entriesAfter: BigInt!
+	"Entries the change itself pushed."
+	entriesAdded: BigInt!
+}
+
 """
 Filter on `CompactionConfigOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -1532,7 +1842,8 @@ input CompactionConfigInput {
 	"""
 	Filter on `CompactionConfigOutput.provider`.
 	
-	The provider that serves the summarizer.
+	The provider that serves the summarizer. Empty when the blueprint
+	names the model alone and the machine's provider order picks one.
 	"""
 	provider: StringFilter
 	"""
@@ -1586,7 +1897,10 @@ Its own model on purpose: compaction is cheap, frequent and not the work, so
 a run on an expensive model usually summarizes on a small one.
 """
 type CompactionConfigOutput {
-	"The provider that serves the summarizer."
+	"""
+	The provider that serves the summarizer. Empty when the blueprint
+	names the model alone and the machine's provider order picks one.
+	"""
 	provider: String!
 	"The model it runs on."
 	model: String!
@@ -1598,6 +1912,18 @@ type CompactionConfigOutput {
 	maxSummaryTokens: Int!
 	"How much it may wander. A summary wants little."
 	temperature: Float!
+}
+
+"An execution that ended."
+type CompletedStepOutput {
+	"The provider's id for the call."
+	callId: String!
+	"The execution's own id."
+	executionId: ID!
+	"How it ended, when that was observed."
+	outcome: ToolOutcome
+	"The names of the stored parts its result carried."
+	parts: [String!]!
 }
 
 """
@@ -1995,8 +2321,9 @@ input ContextChangeInput {
 	
 	Where in the run's journal the record that carries this change sits.
 	
-	A byte offset. It only climbs within a run and never changes, so it orders
-	changes and names one for as long as the run exists.
+	The step of the run file that made the change, counted from the run's
+	start. It only climbs within a run and never changes, so it orders
+	changes; the changes one step made share it.
 	"""
 	journalPosition: BigIntFilter
 	"""
@@ -2090,12 +2417,27 @@ type ContextChangeOutput {
 	"""
 	Where in the run's journal the record that carries this change sits.
 	
-	A byte offset. It only climbs within a run and never changes, so it orders
-	changes and names one for as long as the run exists.
+	The step of the run file that made the change, counted from the run's
+	start. It only climbs within a run and never changes, so it orders
+	changes; the changes one step made share it.
 	"""
 	journalPosition: BigInt!
 	"When the transaction committed."
 	at: Timestamp!
+}
+
+"A context change with its cause and the window revisions on either side."
+type ContextCommittedStepOutput {
+	"What caused it."
+	cause: ContextCause!
+	"The execution it came from, when a tool's did."
+	committedBy: ID
+	"The window's revision before."
+	revisionBefore: String!
+	"The window's revision after."
+	revisionAfter: String!
+	"Each region it moved."
+	regions: [CommittedRegionOutput!]!
 }
 
 "Arguments for the `context_delete` tool."
@@ -2123,6 +2465,66 @@ type ContextDeleteCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: ContextDeleteArgsOutput!
+}
+
+"The context window changed."
+type ContextDiffChangeOutput {
+	"What changed in it."
+	diff: ContextDiffOutput!
+}
+
+"What one step did to a run's context window."
+type ContextDiffOutput {
+	"Each region the step changed."
+	regions: [RegionDiffOutput!]!
+	"Regions the step removed."
+	removed: [String!]!
+	"The regions' new order, when it changed."
+	order: [String!]
+	"The new hidden set, when it changed."
+	hidden: [String!]
+	"The window's new budget, when it changed."
+	maxTokens: Int
+}
+
+"What a context entry is."
+enum ContextEntryKind {
+	"Plain text."
+	TEXT
+	"A person's message."
+	USER_MESSAGE
+	"A model's turn; its tool calls are under `toolCalls`."
+	ASSISTANT_TURN
+	"A tool's result; `callId`, `tool` and `isError` say which."
+	TOOL_RESULT
+}
+
+"One entry in a context region."
+type ContextEntryOutput {
+	"What it is."
+	kind: ContextEntryKind!
+	"Its text."
+	text: String!
+	"Its typed parts."
+	parts: [StatePartOutput!]!
+	"What it costs in the window."
+	tokens: Int!
+	"When it landed."
+	timestamp: Timestamp!
+	"The tool calls an `ASSISTANT_TURN` made."
+	toolCalls: [StateToolCallOutput!]!
+	"The call a `TOOL_RESULT` answers."
+	callId: String
+	"The tool a `TOOL_RESULT` came from."
+	tool: String
+	"Whether a `TOOL_RESULT` is a failure."
+	isError: Boolean
+	"The checklist item it is, when it is one."
+	checklist: ChecklistItemOutput
+	"The key it was written under, for a region that keys its entries."
+	key: String
+	"The model's reasoning that came with it."
+	reasoning: String
 }
 
 "Arguments for the `context_export` tool."
@@ -2184,6 +2586,20 @@ type ContextListCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: ContextListArgsOutput!
+}
+
+"A change to one region with its cause."
+type ContextNotedStepOutput {
+	"The region."
+	region: String!
+	"What caused it."
+	cause: ContextCause!
+	"Entries it added."
+	entriesAdded: Int!
+	"Entries it removed."
+	entriesRemoved: Int!
+	"How many tokens it moved the region by."
+	tokenDelta: BigInt!
 }
 
 "Arguments for the `context_read` tool."
@@ -2329,6 +2745,22 @@ type ContextRegionOutput {
 	content: String!
 }
 
+"One region of a run's context window."
+type ContextRegionStateOutput {
+	"The region."
+	name: String!
+	"Its budget, in tokens."
+	maxTokens: Int!
+	"What it holds now, in tokens."
+	currentTokens: Int!
+	"Whether its conversation is due to be summarized."
+	needsMessageCompaction: Boolean!
+	"How sensitive what it holds is, when taint is tracked."
+	taint: RegionTaintOutput
+	"Its entries, oldest first."
+	entries: [ContextEntryOutput!]!
+}
+
 """
 One page of a listing: the items, where to resume, and how many there are
 altogether.
@@ -2404,6 +2836,16 @@ type ContextSnapshotPointOutput {
 	to come back to exactly this content, whatever the run does next.
 	"""
 	window: ContextWindowOutput!
+}
+
+"A run's context window: its regions, in the order a model reads them."
+type ContextStateOutput {
+	"The regions."
+	regions: [ContextRegionStateOutput!]!
+	"Regions the current stage hides from the model."
+	hidden: [String!]!
+	"The window's budget, in tokens."
+	maxTokens: Int!
 }
 
 """
@@ -2804,6 +3246,12 @@ one listing cannot resume a different one.
 """
 scalar Cursor
 
+"The run's stage, visit or turn moved."
+type CursorChangeOutput {
+	"Where it is now."
+	cursor: StateCursorOutput!
+}
+
 "The daemon on the other end of the link."
 type DaemonIdentityOutput {
 	"The version it was built from."
@@ -3056,6 +3504,17 @@ enum Delivery {
 	STAND_IN
 }
 
+"Who hears about a run, and the caller's labels for it."
+input DeliveryWrite {
+	"Where to post when the run finishes."
+	callback: CallbackWrite
+	"""
+	Labels for whoever started the run, such as a ticket or a tenant. The
+	run reads none of them, and the run search looks through them.
+	"""
+	metadata: [KeyValueWrite!]
+}
+
 "Refuse the call an ask is about."
 input DenyWrite {
 	"""
@@ -3157,6 +3616,27 @@ input DependencyKindFilter {
 	isNull: Boolean
 }
 
+"Arguments for the `describe_blueprint` tool."
+type DescribeBlueprintArgsOutput {
+	"The installed blueprint asked about."
+	blueprint: SpawnAgentBlueprintSourceOutput!
+}
+
+"One `describe_blueprint` call."
+type DescribeBlueprintCallOutput implements ToolCall {
+	"Tool name, exactly as the model called it."
+	toolName: String!
+	"What the tool does, as this build describes it."
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"The call's arguments."
+	args: DescribeBlueprintArgsOutput!
+}
+
 """
 Filter on `DirectiveEntryOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -3232,6 +3712,24 @@ type DirectoryOutput {
 	entries: [String!]!
 }
 
+"The execution one call of a batch was dispatched as."
+type DispatchedCallOutput {
+	"The provider's id for the call."
+	callId: String!
+	"The execution it was dispatched as. Empty where the run recorded none."
+	executionId: ID!
+}
+
+"A tool call dispatched as one execution."
+type DispatchedStepOutput {
+	"The provider's id for the call."
+	callId: String!
+	"The execution's own id."
+	executionId: ID!
+	"The model call that asked for it."
+	requestedBy: String!
+}
+
 "One environment or configuration check."
 type DoctorCheckOutput {
 	"What was checked."
@@ -3257,6 +3755,36 @@ type DoctorReportOutput {
 	isLive: Boolean!
 	"The checks themselves, in the order they ran."
 	checks: [DoctorCheckOutput!]!
+}
+
+"A `duration` input: `90s`, `5m`, `2h`, `1d` or a sum such as `1h30m`."
+type DurationInputTypeOutput {
+	"What values it takes, in words."
+	summary: String!
+}
+
+"A `duration` input's value."
+type DurationValueOutput {
+	"The span, in seconds."
+	seconds: BigInt!
+	"The value as a region shows it, such as `1h30m`."
+	asText: String!
+}
+
+"When an edge is followed."
+enum EdgeCondition {
+	"Whenever the stage ends."
+	ALWAYS
+	"When the stage fails."
+	ERROR
+	"When the stage runs out of iterations."
+	MAX_ITERATIONS
+	"When the model chooses it."
+	LLM_CHOICE
+	"When the stage can go nowhere else."
+	DEAD_END
+	"When the stage is stuck."
+	STUCK
 }
 
 "Arguments for the `edit_document` tool."
@@ -3356,6 +3884,14 @@ type EffectiveStageSettingsOutput {
 	tracksTaint: Boolean!
 }
 
+"Whether a step added entries to a region or replaced them all."
+enum EntriesChangeMode {
+	"`entries` were added after the ones the region held."
+	APPEND
+	"`entries` are everything the region holds now."
+	REPLACE
+}
+
 """
 Filter on `EnvEntryOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -3412,6 +3948,19 @@ type EnvEntryOutput {
 	manifest and never appears here.
 	"""
 	value: String!
+}
+
+"""
+What a run relied on from the machine it was resolved on, so a resume can
+tell when that has changed.
+"""
+type EnvFingerprintOutput {
+	"Each provider the run uses, by the digest of its configuration."
+	providers: [NamedDigestOutput!]!
+	"Each MCP server the run uses, by the digest of its tool list."
+	mcpServers: [NamedDigestOutput!]!
+	"The Leviath version that resolved the run."
+	leviathVersion: String!
 }
 
 "One `environment_info` call, which takes nothing."
@@ -3477,6 +4026,16 @@ enum ExportStatus {
 	FAILED
 }
 
+"A model call moved to a fallback model."
+type FailoverStepOutput {
+	"The model that failed."
+	fromModel: String!
+	"The model tried next."
+	toModel: String!
+	"Why."
+	reason: String!
+}
+
 "Arguments for the `fan_out` tool."
 type FanOutArgsOutput {
 	"""
@@ -3506,6 +4065,12 @@ type FanOutCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: FanOutArgsOutput!
+}
+
+"A fan-out started, moved or ended."
+type FanOutChangeOutput {
+	"The fan-out now. Null once it ended."
+	fanOut: FanOutProgressOutput
 }
 
 """
@@ -3572,8 +4137,8 @@ input FanOutInput {
 	"""
 	Filter on `FanOutOutput.maxWorkers`.
 	
-	How many workers run at once. Zero means as many as the daemon's
-	inference pool will carry.
+	How many workers run at once. Null means every item starts at once,
+	and the daemon's inference pool paces their model calls.
 	"""
 	maxWorkers: IntFilter
 	"""
@@ -3629,18 +4194,38 @@ input FanOutInput {
 	isNull: Boolean
 }
 
+"""
+One fan-out item and what became of it: the worker running it, its summary,
+or why it failed.
+"""
+type FanOutItemOutcomeOutput {
+	"The item's own id."
+	itemId: ID!
+	"The worker run, the summary or the failure."
+	detail: String!
+}
+
 "One unit of work handed to a fan-out worker."
 type FanOutItemOutput {
 	"The item's own id, which names its child run."
 	id: ID!
 	"""
-	Everything the worker gets, which the blueprint's author defines.
+	Values for the worker graph's declared inputs, by name, as the model
+	wrote them. Checked against those declarations before any worker
+	starts. Null when the model gave the item none.
 	
-	Raw JSON because the tool declares it as an object and nothing more: the
-	worker is seeded with whatever this holds, so its shape is a contract
-	between one blueprint's stages and nothing this schema can name.
+	JSON because the names and types are the worker graph's own, declared
+	by whoever wrote it, and this schema cannot name them.
 	"""
-	context: JSON!
+	inputs: JSON
+}
+
+"One fan-out item waiting for a worker."
+type FanOutItemStateOutput {
+	"The item's own id."
+	id: ID!
+	"The inputs its worker gets."
+	inputs: [InputEntryOutput!]!
 }
 
 """
@@ -3688,10 +4273,10 @@ type FanOutOutput {
 	"The prompt that produces the work items."
 	splitPrompt: String!
 	"""
-	How many workers run at once. Zero means as many as the daemon's
-	inference pool will carry.
+	How many workers run at once. Null means every item starts at once,
+	and the daemon's inference pool paces their model calls.
 	"""
-	maxWorkers: Int!
+	maxWorkers: Int
 	"""
 	The most work items the split may produce. Null means however many it
 	produces. This bounds what there is at all, where `maxWorkers` bounds how
@@ -3717,6 +4302,44 @@ type FanOutOutput {
 	resultsRegion: RegionOutput
 	"The results region's name, verbatim. Null when the fan-out names none."
 	resultsRegionName: String
+}
+
+"A fan-out in progress: the stage running it, its queue, and its workers."
+type FanOutProgressOutput {
+	"The stage running the fan-out."
+	stage: String!
+	"Where its workers' graph comes from."
+	workerKind: FanOutWorkerKind!
+	"The blueprint, stage or query that names it."
+	worker: String!
+	"The stage that merges the results, when there is one."
+	mergeStage: String
+	"What one worker failing does to the rest."
+	onWorkerFailure: WorkerFailurePolicy!
+	"How many workers run at once. Null means every item at once."
+	maxWorkers: Int
+	"Items not started yet."
+	queued: [FanOutItemStateOutput!]!
+	"Items running, each with its worker's run id as `detail`."
+	active: [FanOutItemOutcomeOutput!]!
+	"Items finished, each with its summary as `detail`."
+	done: [FanOutItemOutcomeOutput!]!
+	"Items failed, each with the failure as `detail`."
+	failed: [FanOutItemOutcomeOutput!]!
+	"Whether the fan-out is paused."
+	paused: Boolean!
+}
+
+"Where a fan-out's worker graph comes from."
+enum FanOutWorkerKind {
+	"An installed blueprint."
+	BLUEPRINT
+	"A blueprint read from its directory on the daemon's machine."
+	BLUEPRINT_FILE
+	"A stage of this run's own graph."
+	STAGE
+	"A blueprint chosen by a query."
+	QUERY
 }
 
 """
@@ -3856,6 +4479,14 @@ type FileEntryOutput {
 	mimeType: String!
 }
 
+"A `file` input: the name of an attachment on the request."
+type FileInputTypeOutput {
+	"The mime types accepted. Empty accepts any."
+	accepts: [String!]!
+	"What values it takes, in words."
+	summary: String!
+}
+
 "Which question a file listing answers."
 enum FileSource {
 	"""
@@ -3951,6 +4582,14 @@ type FileTrackingConfigOutput {
 	maxFileTokens: Int
 }
 
+"A `file` input's value."
+type FileValueOutput {
+	"The name of the attachment it names."
+	attachment: String!
+	"The value as a region shows it."
+	asText: String!
+}
+
 "One window of one file's text."
 type FileWindowOutput {
 	"The resolved absolute path that was read."
@@ -3968,6 +4607,12 @@ type FileWindowOutput {
 	content: String!
 	"Whether the file continues past this window."
 	truncated: Boolean!
+}
+
+"The run's answer, logs or audits beside its run file changed."
+type FilesChangeOutput {
+	"The files it names now."
+	files: StateFilesOutput!
 }
 
 """
@@ -4066,6 +4711,12 @@ type FixedOutput {
 	tokens: Int!
 }
 
+"The run noticed something about itself."
+type FlagsChangeOutput {
+	"The flags now."
+	flags: StateFlagsOutput!
+}
+
 """
 Comparisons on one binary floating-point field.
 
@@ -4092,6 +4743,27 @@ input FloatFilter {
 	gte: Float
 	"Match where there is no number at all."
 	isNull: Boolean
+}
+
+"""
+A `float` input: a number, optionally bounded (inclusive). A whole number
+is accepted.
+"""
+type FloatInputTypeOutput {
+	"The smallest allowed."
+	minValue: Float
+	"The largest allowed."
+	maxValue: Float
+	"What values it takes, in words."
+	summary: String!
+}
+
+"A `float` input's value."
+type FloatValueOutput {
+	"The value."
+	number: Float!
+	"The value as a region shows it."
+	asText: String!
 }
 
 "What backs a custom gateway."
@@ -4164,6 +4836,24 @@ input GatewayWrite {
 }
 
 """
+A person approved a call for the run or its stage, or a stage grant
+ended.
+"""
+type GrantsChangeOutput {
+	"The grants now."
+	grants: StateGrantsOutput!
+}
+
+"""
+The run was held because this machine could not take it back, or it
+came back.
+"""
+type HeldChangeOutput {
+	"What it is held for now. Null when it is no longer held."
+	held: [SpawnIssueOutput!]
+}
+
+"""
 Whether a prompt hint is included at one manifest level.
 
 Omitting guidance never discourages the behaviour. It leaves the paragraph
@@ -4216,6 +4906,12 @@ input IDFilter {
 	notIn: [ID!]
 	"Match where there is no id at all."
 	isNull: Boolean
+}
+
+"A message arrived or was delivered."
+type InboxChangeOutput {
+	"The waiting messages now."
+	inbox: [StateMessageOutput!]!
 }
 
 """
@@ -4418,6 +5114,18 @@ type InferenceAttemptOutput {
 	failover: InferenceFailoverOutput
 }
 
+"Which kind of model call an inference was."
+enum InferenceCallKind {
+	"A turn of the stage's own work."
+	STAGE
+	"A summary of a region."
+	COMPACTION
+	"The call that named the run."
+	TITLE
+	"A call asking the model which edge to take."
+	ROUTING
+}
+
 """
 Filter on `InferenceFailoverOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -4520,6 +5228,142 @@ type InferenceFailoverOutput {
 	failureKind: String
 	"When the move was made."
 	at: Timestamp!
+}
+
+"A model call finished and was billed. One per call."
+type InferenceStepOutput {
+	"The id of the attempt that answered. Empty when none was recorded."
+	attempt: String!
+	"The model that answered, as `provider/model`."
+	model: String!
+	"What it cost."
+	spend: StateSpendOutput!
+	"Why the model stopped, in the provider's words."
+	finishReason: String
+	"Which kind of call it was."
+	kind: InferenceCallKind!
+	"""
+	The stage it was made for. Null for the title call, which no stage
+	owns.
+	"""
+	stage: String
+	"The iteration it was made in."
+	iteration: Int!
+}
+
+"An input a run graph declares: what a spawn of it may, or must, supply."
+type InputDeclOutput {
+	"The input's name, as a request's `inputs` names it."
+	name: String!
+	"Its type."
+	type: InputType!
+	"""
+	Whether a spawn must supply it. An input with a `default` is never
+	missing.
+	"""
+	required: Boolean!
+	"The value used when a spawn does not supply one."
+	default: InputValue
+	"What the input is for, as a form or an agent reads it."
+	description: String
+	"Where the value goes."
+	binds: [InputSlotOutput!]!
+}
+
+"One named value: an input of a run, or a field of a `record` value."
+type InputEntryOutput {
+	"The input's or the field's name."
+	name: String!
+	"Its value."
+	value: InputValue!
+}
+
+"One named input value, or one field of a `record` value."
+input InputEntryWrite {
+	"The input's or the field's name."
+	name: String!
+	"Its value."
+	value: InputValueWrite!
+}
+
+"What kind of path a `path` input names."
+enum InputPathKind {
+	"A file."
+	FILE
+	"A directory."
+	DIR
+	"Either."
+	ANY
+}
+
+"Where an input's value goes in the run."
+enum InputSlotKind {
+	"Into a context region, as text, at spawn."
+	REGION
+	"A stage's model."
+	STAGE_MODEL
+	"A stage's iteration cap."
+	STAGE_MAX_ITERATIONS
+	"A fan-out stage's worker cap."
+	FAN_OUT_MAX_WORKERS
+	"The run's output format."
+	OUTPUT_FORMAT
+	"The run's output instructions."
+	OUTPUT_INSTRUCTIONS
+}
+
+"One place an input's value goes."
+type InputSlotOutput {
+	"What the value sets."
+	kind: InputSlotKind!
+	"The region a `REGION` slot fills."
+	region: String
+	"""
+	The text a `REGION` slot seeds, with `{name}` standing for an input's
+	value. Null seeds the value alone.
+	"""
+	template: String
+	"""
+	The stage a `STAGE_MODEL`, `STAGE_MAX_ITERATIONS` or
+	`FAN_OUT_MAX_WORKERS` slot sets.
+	"""
+	stage: String
+}
+
+"""
+The type of a declared input, one member per type. Each member's
+`summary` says in words what values it takes.
+"""
+union InputType = TextInputTypeOutput | BoolInputTypeOutput | IntInputTypeOutput | FloatInputTypeOutput | ChoiceInputTypeOutput | ListInputTypeOutput | RecordInputTypeOutput | FileInputTypeOutput | PathInputTypeOutput | ModelInputTypeOutput | BlueprintInputTypeOutput | DurationInputTypeOutput | UrlInputTypeOutput
+
+"A checked input value, one member per input type."
+union InputValue = TextValueOutput | BoolValueOutput | IntValueOutput | FloatValueOutput | ChoiceValueOutput | ListValueOutput | RecordValueOutput | FileValueOutput | PathValueOutput | ModelValueOutput | BlueprintValueOutput | DurationValueOutput | UrlValueOutput
+
+"""
+One input value, as the request writes it. Exactly one member: the
+declared type of the input it is for decides how it is read, so `text`
+for a `model` input is a model name and `text` for a `choice` input is the
+option.
+"""
+input InputValueWrite @oneOf {
+	"""
+	Text, for a `text`, `choice`, `file`, `path`, `model`, `blueprint`,
+	`duration` or `url` input.
+	"""
+	text: String
+	"`true` or `false`."
+	bool: Boolean
+	"A whole number, for an `int` or a `float` input."
+	int: BigInt
+	"A number, for a `float` input."
+	float: Float
+	"A list, for a `list` input."
+	list: [InputValueWrite!]
+	"""
+	Named fields, for a `record` input or a `model` written as
+	`provider` and `model`.
+	"""
+	record: [InputEntryWrite!]
 }
 
 """
@@ -4676,14 +5520,39 @@ input IntFilter {
 	isNull: Boolean
 }
 
+"An `int` input: a whole number, optionally bounded (inclusive)."
+type IntInputTypeOutput {
+	"The smallest allowed."
+	min: BigInt
+	"The largest allowed."
+	max: BigInt
+	"What values it takes, in words."
+	summary: String!
+}
+
+"An `int` input's value."
+type IntValueOutput {
+	"The value."
+	integer: BigInt!
+	"The value as a region shows it."
+	asText: String!
+}
+
 """
 The answer to one pending ask.
 
-Exactly one field, and which one the request's own kind decides: a choice
-for a multiple-choice ask, text for a free-text or edit-text one, an
-approval or a denial for a confirm or a tool approval.
+Exactly one field, and which one the request's own kind decides: an
+option's word for any ask that lists options, a choice for a
+multiple-choice ask, text for a free-text or edit-text one, an approval or
+a denial for a confirm or a tool approval.
 """
 input InteractionAnswerWrite @oneOf {
+	"""
+	For any ask that lists options: the option, by the word its
+	`answerOptions` gives it. Read against the open ask, so a choice's
+	word means the option it was made from wherever that now sits.
+	"""
+	option: AnswerOptionWrite
 	"""
 	For a multiple-choice ask: which option, zero-based into the request's
 	own list.
@@ -4919,6 +5788,12 @@ type InteractionOutput {
 	"The choices, for a multiple-choice ask. Empty once settled."
 	options: [String!]!
 	"""
+	Every option the ask lists, numbered from 1 in its own order, each with
+	the word `answerInteraction` takes for it. Empty for a free-text or
+	edit-text ask, which is answered with `text`, and once settled.
+	"""
+	answerOptions: [AnswerOptionOutput!]!
+	"""
 	The call awaiting approval, typed. Null for every other kind of ask,
 	and null once settled: the journal keeps the tool's name, not its
 	arguments.
@@ -4948,6 +5823,13 @@ type InteractionOutput {
 	open.
 	"""
 	settledAt: Timestamp
+	"""
+	Why nothing can answer this yet, and what to put back, for a question
+	asked by a run the daemon holds off this machine (`heldInteractions`
+	lists them). Answering one is refused with `RUN_HELD`; once the run is
+	back, the question reopens under a new id. Null for every other.
+	"""
+	held: String
 }
 
 """
@@ -5229,6 +6111,14 @@ type KeyVerdictOutput {
 	message: String
 }
 
+"A count kept against one key: a region's digest, a file's edits."
+type KeyedCountOutput {
+	"What is counted."
+	key: String!
+	"The count."
+	count: BigInt!
+}
+
 "Arguments for the `kill_agent` tool."
 type KillAgentArgsOutput {
 	"The agent killed, by its live id."
@@ -5248,6 +6138,140 @@ type KillAgentCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: KillAgentArgsOutput!
+}
+
+"""
+When the run last made progress, as its record keeps that apart from
+its last step, changed.
+"""
+type LastProgressAtChangeOutput {
+	"When it last made progress. Null when that is its last step."
+	lastProgressAt: Timestamp
+}
+
+"What a run is trusted with, once decided."
+type LaunchPolicyOutput {
+	"How much goes ahead without a person."
+	unattended: UnattendedMode!
+	"The yolo profile, when `unattended` is `PROFILE`."
+	profile: String
+	"Tools approved without asking."
+	allow: [String!]!
+	"How many more levels of child runs this run may start."
+	maxDepth: Int!
+	"Whether region seeds that run a shell command may run."
+	seedCommands: Boolean!
+	"Whether every model request is recorded in the run's journal."
+	captureModelInput: Boolean!
+}
+
+"How much a run is trusted with."
+input LaunchWrite {
+	"""
+	How much goes ahead without a person. Refused on a server started with
+	`--no-remote-yolo`.
+	"""
+	unattended: UnattendedWrite
+	"""
+	Tools approved for this run without asking. Refused on a server started
+	with `--no-remote-yolo`.
+	"""
+	allow: [String!]
+	"""
+	How deep the run's tree of child runs may grow, from 0 to 255. Absent
+	takes the graph's own.
+	"""
+	maxDepth: Int
+	"""
+	Whether region seeds that run a shell command may run at spawn. Always
+	off on a server started with `--no-remote-seed-commands`.
+	"""
+	seedCommands: Boolean! = true
+	"""
+	Write this run's exact requests into its journal, once per provider
+	attempt. A captured request is the whole prompt, and every call re-sends
+	the window, so the journal grows by roughly the context size per
+	attempt. Read it back on `InferenceAttempt.modelInput`.
+	"""
+	captureModelInput: Boolean! = false
+}
+
+"One line of the ledger was written."
+type LedgerRecordChangeOutput {
+	"The line's position, from 0."
+	index: Int!
+	"The line now."
+	record: LedgerStageOutput!
+}
+
+"One stage's line in a run's ledger."
+type LedgerStageOutput {
+	"The stage."
+	stage: String!
+	"Where it stands."
+	status: LedgerStageStatus!
+	"Whether it has been entered at all."
+	entered: Boolean!
+	"What it spent across every visit."
+	spend: StateSpendOutput!
+	"The models it ran on, as `provider/model`."
+	models: [String!]!
+	"Each visit, oldest first."
+	visits: [LedgerVisitOutput!]!
+	"Each region's size the last time it was measured, in tokens."
+	regionTokens: [KeyedCountOutput!]!
+	"The prompt size of its first model call."
+	firstCallPromptTokens: BigInt
+	"Whether the run was warned that this stage is running away."
+	runawayWarned: Boolean!
+	"Whether its output cap was raised."
+	outputCapRaised: Boolean!
+	"When it started."
+	startedAt: Timestamp
+	"When it ended."
+	endedAt: Timestamp
+	"Its working time."
+	clock: StateClockOutput!
+}
+
+"Where one stage of a run's ledger stands."
+enum LedgerStageStatus {
+	"Not entered yet."
+	PENDING
+	"The run is in it."
+	ACTIVE
+	"Waiting for a person or for the runs it started."
+	WAITING_INPUT
+	"Paused, or held until the machine can take the run back."
+	PAUSED
+	"Done."
+	COMPLETE
+	"Failed."
+	ERROR
+	"Cancelled."
+	CANCELLED
+	"Passed over."
+	SKIPPED
+}
+
+"The ledger was cut short."
+type LedgerTruncateChangeOutput {
+	"How many lines it keeps."
+	length: Int!
+}
+
+"One visit to a stage."
+type LedgerVisitOutput {
+	"The visit."
+	id: ID!
+	"When it began."
+	enteredAt: Timestamp!
+	"When it ended, once it has."
+	leftAt: Timestamp
+	"What it spent."
+	spend: StateSpendOutput!
+	"Its working time."
+	clock: StateClockOutput!
 }
 
 "Arguments for the `list_dir` tool."
@@ -5272,6 +6296,26 @@ type ListDirCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: ListDirArgsOutput!
+}
+
+"A `list` input: values of one type, optionally bounded in length."
+type ListInputTypeOutput {
+	"The type of every item."
+	item: InputType!
+	"The fewest items allowed."
+	minItems: Int
+	"The most items allowed."
+	maxItems: Int
+	"What values it takes, in words."
+	summary: String!
+}
+
+"A `list` input's value."
+type ListValueOutput {
+	"The items, in order."
+	items: [InputValue!]!
+	"The value as a region shows it: one item per line."
+	asText: String!
 }
 
 "One `locale_info` call, which takes nothing."
@@ -5328,6 +6372,12 @@ input LogStageOptions @oneOf {
 	index: Int
 	"Every stage's logs, in order, instead of one stage's."
 	all: Boolean
+}
+
+"A line the run logged."
+type LogStepOutput {
+	"The line."
+	line: String!
 }
 
 "Which stream `logs` reads."
@@ -5913,6 +6963,12 @@ input McpTransportWrite @oneOf {
 	http: McpHttpWrite
 }
 
+"A message was delivered."
+type MessageStepOutput {
+	"The message."
+	message: StateMessageOutput!
+}
+
 """
 Filter on `MetadataEntryOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -6409,6 +7465,12 @@ input ModelInput {
 	isNull: Boolean
 }
 
+"A `model` input: `provider/model` or a bare model id."
+type ModelInputTypeOutput {
+	"What values it takes, in words."
+	summary: String!
+}
+
 "Where a model's token limits came from."
 enum ModelLimitsSource {
 	"What the provider's own API reports."
@@ -6770,6 +7832,16 @@ type ModelRequestOutput {
 	assemblyVersion: String!
 }
 
+"A `model` input's value."
+type ModelValueOutput {
+	"The provider, when the value named one."
+	provider: String
+	"The model."
+	model: String!
+	"The value as a region shows it."
+	asText: String!
+}
+
 """
 The whole write side: the acts on runs and blueprints, plus the ones
 `--allow-admin` opens.
@@ -6779,14 +7851,15 @@ other mutation to a client that is allowed to use it, and does not exist to
 a client that is not.
 
 Every field takes one argument named `request` and answers with a result
-carrying what it changed. Nothing inside a result is a failure: a refusal is
-a GraphQL error, and its `extensions.code` is the thing to branch on, from
-this vocabulary.
+carrying what it changed. `spawnRun` and `validateSpawn` answer a refused
+request with a `SpawnRejectedOutput` member listing every issue; everywhere
+else a refusal is a GraphQL error, and its `extensions.code` is the thing to
+branch on, from this vocabulary.
 
 | `code` | `httpStatus` | Means |
 |---|---|---|
-| `BAD_USER_INPUT` | 400 | The request is wrong as written: a negative `maxDepth`, an empty filter on a destructive sweep, an unknown export field. Sending it again unchanged fails the same way. |
-| `FORBIDDEN` | 403 | This server is configured to refuse it: a workdir outside `--workdir-root`, an unattended run on a `--no-remote-yolo` server, an attachment path outside the working directory. |
+| `BAD_USER_INPUT` | 400 | The request is wrong as written: an empty filter on a destructive sweep, an unknown export field. Sending it again unchanged fails the same way. |
+| `FORBIDDEN` | 403 | This server is configured to refuse it: a message's attachment path outside the run's working directory. |
 | `NOT_FOUND` | 404 | Nothing by that name, or nothing in the state the act needs: an unknown run id, a blueprint that is not installed. |
 | `CONFLICT` | 409 | It exists and its state refuses the change: a finished run cannot be paused, a stale digest pin cannot write. |
 | `PAYLOAD_TOO_LARGE` | 413 | An attachment is over this server's `max_upload_bytes`. |
@@ -6861,19 +7934,30 @@ type Mutation {
 	"""
 	Start a run.
 	
-	Answers with the run itself, so a client renders the new row without a
-	second request. `warnings` names checks the blueprint declared that this
-	request's own output shape retires.
-	
-	The refusals are the server's, not the daemon's: a workdir outside
-	`--workdir-root`, an unattended run on a `--no-remote-yolo` server, an
-	attachment outside the working directory, or a callback URL the outbound
-	policy will not allow.
+	Answers `SpawnedOutput` with the new run's id, or `SpawnRejectedOutput`
+	with every problem the request has, each at its own path: an input
+	that does not fit its declared type, a blueprint pin to another
+	revision, a name with a bad character. This server's own refusals are
+	issues too: a workdir outside `--workdir-root`, an unattended run on a
+	`--no-remote-yolo` server, a callback URL the outbound policy will not
+	allow. A GraphQL error means something the request did not cause, such
+	as a daemon that cannot be reached.
 	"""
 	spawnRun(
 		"Everything about the new run."
 		request: SpawnRunRequest!
 	): SpawnRunResult!
+	"""
+	Check a spawn request the whole way without starting anything.
+	
+	Answers `SpawnSummaryOutput` with the run it would start (each stage's
+	model and tools, the checked inputs, what it would be trusted with), or
+	`SpawnRejectedOutput` with every reason `spawnRun` would refuse it.
+	"""
+	validateSpawn(
+		"The request `spawnRun` would be sent."
+		request: SpawnRunRequest!
+	): ValidateSpawnResult!
 	"""
 	Send a message to a run that is going.
 	
@@ -6937,7 +8021,10 @@ type Mutation {
 	
 	The first answer wins. A second answer to the same request is not an
 	error on the client's part: two people clicking one prompt is ordinary,
-	and it reads as `ALREADY_SETTLED` rather than as a failure.
+	and it reads as `ALREADY_SETTLED` rather than as a failure. A question
+	a held run asked (see `heldInteractions`) is an error coded `RUN_HELD`,
+	saying what to put back: it reopens under a new id once the run is back.
+	An id no run on this machine asked is an error coded `NOT_FOUND`.
 	"""
 	answerInteraction(
 		"The ask, and exactly one answer of the kind it takes."
@@ -7183,6 +8270,14 @@ type Mutation {
 	): DeleteYoloProfileResult!
 }
 
+"A name and the digest of what it stood for."
+type NamedDigestOutput {
+	"The provider or MCP server."
+	name: String!
+	"The digest of its configuration or tool list."
+	digest: String!
+}
+
 """
 Anything this schema can hand back from its id alone.
 
@@ -7275,6 +8370,16 @@ input NudgePolicyFilter {
 	isNull: Boolean
 }
 
+"A question a run has open, waiting for an answer."
+type OpenQuestionOutput {
+	"The question."
+	id: ID!
+	"What it asks."
+	prompt: String!
+	"The options offered, when it offers any."
+	options: [String!]!
+}
+
 "Which way a listing runs."
 enum OrderDirection {
 	"Smallest first: oldest, or A to Z."
@@ -7359,15 +8464,16 @@ type OutputArtifactOutput {
 	description: String
 }
 
-"The output shape a spawn asks the run for."
-input OutputRequestWrite {
-	"""
-	The format label to ask for. Carried through opaquely, so a house
-	format needs no server support.
-	"""
-	format: String
-	"Extra instructions for the run's output stage."
-	instructions: String
+"One file the final output must hand back."
+input OutputArtifactWrite {
+	"The file's name."
+	name: String!
+	"Its mime type or pattern."
+	mimeType: String!
+	"Whether the answer must include it."
+	required: Boolean! = false
+	"What it is."
+	description: String
 }
 
 """
@@ -7484,6 +8590,61 @@ type OutputRouteOutput {
 	regionName: String!
 }
 
+"One file the final output hands back."
+type OutputShapeArtifactOutput {
+	"The file's name."
+	name: String!
+	"Its mime type or pattern."
+	mimeType: String!
+	"Whether the answer must include it."
+	required: Boolean!
+	"What it is."
+	description: String
+}
+
+"The shape a run's or a stage's final output must take."
+type OutputShapeOutput {
+	"The format, as an opaque label the model is told."
+	format: String
+	"How to write it."
+	instructions: String
+	"An example answer."
+	example: String
+	"A JSON Schema the answer must meet."
+	schema: JSON
+	"Code that checks the answer."
+	validator: CodeRefOutput
+	"What happens when that code refuses an answer. Null is `REJECT`."
+	onValidatorError: ValidatorErrorPolicy
+	"Whether a later answer may replace files an earlier one wrote."
+	overwriteArtifacts: Boolean
+	"Files the answer hands back beside its text."
+	artifacts: [OutputShapeArtifactOutput!]!
+}
+
+"The shape a caller wants the run's final output in, over the graph's."
+input OutputShapeWrite {
+	"""
+	The format, as an opaque label the model is told: `markdown`, `json`,
+	a house format.
+	"""
+	format: String
+	"How to write it."
+	instructions: String
+	"An example answer."
+	example: String
+	"A JSON Schema the answer must meet."
+	schema: JSON
+	"Code that checks the answer."
+	validator: CodeRefWrite
+	"What happens when that code refuses an answer. Absent is `REJECT`."
+	onValidatorError: ValidatorErrorPolicy
+	"Whether a later answer may replace files an earlier one wrote."
+	overwriteArtifacts: Boolean
+	"Files the answer hands back beside its text."
+	artifacts: [OutputArtifactWrite!]
+}
+
 """
 Filter on `OutputSpecOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -7517,7 +8678,8 @@ input OutputSpecInput {
 	"""
 	Filter on `OutputSpecOutput.validator`.
 	
-	A script that checks the answer, beyond the schema.
+	A script that checks the answer, beyond the schema: a path beside the
+	blueprint, or the script itself when the blueprint writes it inline.
 	"""
 	validator: StringFilter
 	"""
@@ -7570,7 +8732,10 @@ type OutputSpecOutput {
 	example: String
 	"A JSON Schema the answer must satisfy."
 	schema: JSON
-	"A script that checks the answer, beyond the schema."
+	"""
+	A script that checks the answer, beyond the schema: a path beside the
+	blueprint, or the script itself when the blueprint writes it inline.
+	"""
 	validator: String
 	"""
 	What happens when that script refuses an answer. Null leaves the default,
@@ -7584,6 +8749,44 @@ type OutputSpecOutput {
 	overwriteArtifacts: Boolean
 	"The files the answer is expected to carry."
 	artifacts: [OutputArtifactOutput!]!
+}
+
+"A `path` input: a path inside the run's working directory."
+type PathInputTypeOutput {
+	"What the path must name."
+	kind: InputPathKind!
+	"Whether it must exist when the run is resolved."
+	mustExist: Boolean!
+	"What values it takes, in words."
+	summary: String!
+}
+
+"What one step of an issue's path is."
+enum PathSegmentKind {
+	"A field of the request: `launch`, `max_depth`."
+	FIELD
+	"A named member of a collection: the `plan` in `stages.plan`."
+	KEY
+	"A position in a list: the `2` in `items[2]`."
+	INDEX
+}
+
+"One step of the path to an issue."
+type PathSegmentOutput {
+	"What the step is."
+	kind: PathSegmentKind!
+	"The field or member name, for a `FIELD` or a `KEY`."
+	name: String
+	"The position, for an `INDEX`."
+	index: Int
+}
+
+"A `path` input's value."
+type PathValueOutput {
+	"The path, inside the run's working directory."
+	path: String!
+	"The value as a region shows it."
+	asText: String!
 }
 
 "Which run to pause."
@@ -7625,6 +8828,25 @@ type PauseRunsResult {
 	runs: [RunOutput!]!
 	"The ones the act passed over, each with the reason."
 	skipped: [SkippedOutput!]!
+}
+
+"A batch of tool calls went out, a result came in, or the batch ended."
+type PendingChangeOutput {
+	"The batch now. Null once it ended."
+	pending: PendingToolBatchOutput
+}
+
+"The batch of tool calls a run has out."
+type PendingToolBatchOutput {
+	"The calls, in the order the model made them."
+	calls: [StateToolCallOutput!]!
+	"The results that are in."
+	done: [ToolCallReplyOutput!]!
+	"""
+	The execution each call was dispatched as: none while the batch
+	still waits to be dispatched.
+	"""
+	executions: [DispatchedCallOutput!]!
 }
 
 """
@@ -7778,6 +9000,38 @@ type PerSecondOutput {
 	tokensPerSecond: Int!
 }
 
+"The engine moved the run to another phase."
+type PhaseChangeOutput {
+	"The phase now."
+	phase: RunPhaseOutput!
+}
+
+"What the engine is doing with a run."
+enum PipelinePhaseKind {
+	"Ready for its next model call."
+	READY_TO_INFER
+	"A model call is out."
+	AWAITING_INFERENCE
+	"A batch of tool calls is running."
+	AWAITING_TOOLS
+	"The context is being summarized."
+	AWAITING_COMPACTION
+	"The model has to choose an edge; `edges` lists them."
+	AWAITING_CHOICE
+	"Waiting for its child runs."
+	WAITING_FOR_CHILDREN
+	"Running a fan-out."
+	FAN_OUT
+	"Waiting for a person."
+	AWAITING_PERSON
+	"Stuck where nothing will move it; `reason` says why."
+	WEDGED
+	"Paused."
+	PAUSED
+	"Finished."
+	DONE
+}
+
 "Arguments for the `present_for_review` tool."
 type PresentForReviewArgsOutput {
 	"The short title shown above the review prompt."
@@ -7799,6 +9053,26 @@ type PresentForReviewCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: PresentForReviewArgsOutput!
+}
+
+"A file an execution produced."
+type ProducedFileOutput {
+	"What it is called."
+	name: String!
+	"Where it is, inside the run's working directory."
+	path: String!
+	"Its mime type."
+	mimeType: String!
+	"Its size in bytes."
+	size: BigInt!
+	"The sha256 of its bytes, when it was taken."
+	sha256: String!
+}
+
+"The current stage's counters moved."
+type ProgressChangeOutput {
+	"The counters now."
+	progress: StageProgressOutput!
 }
 
 "How a provider proves who this machine is."
@@ -8409,6 +9683,25 @@ type Query {
 		after: Cursor
 	): InteractionConnection!
 	"""
+	Every question asked by a run the daemon holds off this machine: its
+	provider was taken away, say.
+	
+	None of these can be answered yet, which is why they are not in
+	`openInteractions`. Each says what to put back in `held`; answering
+	one is refused with `RUN_HELD`, and once its run is back the question
+	reopens under a new id and is listed in `openInteractions`.
+	"""
+	heldInteractions(
+		"Which held questions to include. Omitted means all of them."
+		filter: InteractionInput,
+		"Sort key and direction. Omitted means the order they were read."
+		orderBy: [InteractionOrder!],
+		"Page size; capped by the server's page-size cap."
+		first: Int! = 50,
+		"Cursor from the previous page."
+		after: Cursor
+	): InteractionConnection!
+	"""
 	Keyset-paged run listing.
 	
 	The filter mirrors `RunOutput` itself: a field of the run is a field of
@@ -8497,6 +9790,12 @@ type Query {
 	): ScriptVerdictOutput!
 }
 
+"A question opened or was answered."
+type QuestionsChangeOutput {
+	"The open questions now."
+	questions: [OpenQuestionOutput!]!
+}
+
 "Arguments for the `read_file` tool."
 type ReadFileArgsOutput {
 	"Path to the file, relative to the working directory."
@@ -8539,6 +9838,33 @@ type ReadFilesCallOutput implements ToolCall {
 	args: ReadFilesArgsOutput!
 }
 
+"The run's read-path grants were fixed."
+type ReadPathsChangeOutput {
+	"""
+	How many `read_paths` its blueprint declares. Null when it declares
+	none.
+	"""
+	declared: Int
+	"How many of them this machine grants. Null when it declares none."
+	granted: Int
+}
+
+"A `record` input: a fixed set of named, typed fields."
+type RecordInputTypeOutput {
+	"The fields. A record is placed whole, so their `binds` are empty."
+	fields: [InputDeclOutput!]!
+	"What values it takes, in words."
+	summary: String!
+}
+
+"A `record` input's value."
+type RecordValueOutput {
+	"The fields, by name."
+	fields: [InputEntryOutput!]!
+	"The value as a region shows it: one `name: value` per line."
+	asText: String!
+}
+
 "Which provider's models to go and ask for."
 input RefreshModelsRequest {
 	"The provider to refresh. Omitted means every configured one."
@@ -8571,6 +9897,32 @@ input RegionAdmissionFilter {
 	notIn: [RegionAdmission!]
 	"Match where there is no value at all."
 	isNull: Boolean
+}
+
+"A region's budget in one stage."
+type RegionBudgetOutput {
+	"The region."
+	region: String!
+	"Its budget, in tokens."
+	tokens: Int!
+}
+
+"What one step did to one region."
+type RegionDiffOutput {
+	"The region."
+	name: String!
+	"Its budget after the step."
+	maxTokens: Int!
+	"What it held after the step, in tokens."
+	currentTokens: Int!
+	"Whether its conversation is due to be summarized."
+	needsMessageCompaction: Boolean!
+	"Its taint after the step."
+	taint: RegionTaintOutput
+	"How its entries changed. Null when only the figures above did."
+	mode: EntriesChangeMode
+	"The entries added, or all of them."
+	entries: [ContextEntryOutput!]!
 }
 
 """
@@ -8644,12 +9996,12 @@ input RegionInput {
 	"""
 	Filter on `RegionOutput.declaredByStage`.
 	
-	The stage whose own `[context.regions]` declares this region. Null for a
+	The stage whose own `layout` declares this region. Null for a
 	region the blueprint declares run-wide, which is every region in
 	`Blueprint.regions`.
 	
 	A stage may declare a layout of its own, and a name resolved from
-	anywhere in the manifest can land in one of those. This says where the
+	anywhere in the blueprint can land in one of those. This says where the
 	declaration was read from, so a client can tell a run-wide region from
 	one only a single stage sets up.
 	"""
@@ -8754,6 +10106,9 @@ input RegionInput {
 	
 	What fills this region before the first inference. Null means it starts
 	empty, for the run to fill.
+	
+	A region an input of the graph is bound to is filled by whoever starts
+	the run, under that input's name.
 	"""
 	seed: RegionSeedInput
 	"""
@@ -8815,7 +10170,8 @@ input RegionInput {
 	"""
 	Filter on `RegionOutput.script`.
 	
-	The Rhai script that owns this region, for a custom one.
+	The Rhai script that owns this region, for a custom one: a path beside
+	the blueprint, or the script itself when the blueprint writes it inline.
 	"""
 	script: StringFilter
 	"""
@@ -8842,9 +10198,7 @@ input RegionInput {
 """
 What a region does when it fills.
 
-One value per kind the daemon recognises. The manifest accepts `hashmap`
-and `hash_map` for the same kind, which is a spelling the TOML takes; the
-API has one name for one thing.
+One value per kind the daemon recognises, named as a blueprint names it.
 """
 enum RegionKind {
 	"Stays in the prompt verbatim."
@@ -8860,14 +10214,14 @@ enum RegionKind {
 	"Keeps compacted summaries of its own past."
 	COMPACT_HISTORY
 	"Key-value entries with admission control."
-	HASHMAP
+	KEYED
 	"Open and done items a gate can require empty."
 	CHECKLIST
 	"Behaviour defined by a Rhai script under `context_hooks/`."
 	CUSTOM
 }
 
-"Exact and set tests on `RegionKind` (PINNED, TEMPORARY, CLEARABLE, SLIDING_WINDOW, COMPACTING, COMPACT_HISTORY, HASHMAP, CHECKLIST, CUSTOM)."
+"Exact and set tests on `RegionKind` (PINNED, TEMPORARY, CLEARABLE, SLIDING_WINDOW, COMPACTING, COMPACT_HISTORY, KEYED, CHECKLIST, CUSTOM)."
 input RegionKindFilter {
 	"Exactly this value."
 	eq: RegionKind
@@ -8980,12 +10334,12 @@ type RegionOutput {
 	"Region name, unique within the layout that declares it."
 	name: String!
 	"""
-	The stage whose own `[context.regions]` declares this region. Null for a
+	The stage whose own `layout` declares this region. Null for a
 	region the blueprint declares run-wide, which is every region in
 	`Blueprint.regions`.
 	
 	A stage may declare a layout of its own, and a name resolved from
-	anywhere in the manifest can land in one of those. This says where the
+	anywhere in the blueprint can land in one of those. This says where the
 	declaration was read from, so a client can tell a run-wide region from
 	one only a single stage sets up.
 	"""
@@ -9046,6 +10400,9 @@ type RegionOutput {
 	"""
 	What fills this region before the first inference. Null means it starts
 	empty, for the run to fill.
+	
+	A region an input of the graph is bound to is filled by whoever starts
+	the run, under that input's name.
 	"""
 	seed: RegionSeed
 	"The most entries a sliding region keeps."
@@ -9076,7 +10433,10 @@ type RegionOutput {
 	sourceRegionName: String
 	"The most keys a key-value region holds."
 	maxEntries: Int
-	"The Rhai script that owns this region, for a custom one."
+	"""
+	The Rhai script that owns this region, for a custom one: a path beside
+	the blueprint, or the script itself when the blueprint writes it inline.
+	"""
 	script: String
 	"""
 	Whether a custom region is never evicted, like a pinned one, rather than
@@ -9220,14 +10580,6 @@ input RegionSeedInput {
 	isNull: Boolean
 }
 
-"Seed text for one context region at spawn."
-input RegionSeedWrite {
-	"The region to seed."
-	region: RegionRef!
-	"The text it starts with."
-	text: String!
-}
-
 """
 How a sliding region makes room.
 
@@ -9259,6 +10611,14 @@ input RegionStrategyFilter {
 	notIn: [RegionStrategy!]
 	"Match where there is no value at all."
 	isNull: Boolean
+}
+
+"A region's taint: its own level and each entry's."
+type RegionTaintOutput {
+	"The most sensitive level any entry carries."
+	level: TaintLevel!
+	"Each entry's level, in entry order."
+	entries: [TaintLevel!]!
 }
 
 """
@@ -9458,6 +10818,26 @@ input RegionVolatilityFilter {
 	isNull: Boolean
 }
 
+"A remote job a run's model call submitted: a Meshy task, a video."
+type RemoteJobOutput {
+	"""
+	The call's name for the step the job is for, such as
+	`meshy/text-to-3d/preview`.
+	"""
+	step: String!
+	"The job's id at the provider."
+	job: String!
+}
+
+"""
+The remote jobs the run's model call has submitted changed: one was
+submitted, or the call ended.
+"""
+type RemoteJobsChangeOutput {
+	"The jobs now."
+	remoteJobs: [RemoteJobOutput!]!
+}
+
 """
 Filter on `RepetitionDetectionOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -9517,6 +10897,20 @@ type RepetitionDetectionOutput {
 	them.
 	"""
 	maxReadonlyStreak: Int
+}
+
+"What one model request was, in brief."
+type RequestBriefOutput {
+	"A hash of the system prompt."
+	systemHash: BigInt!
+	"How many messages it carried."
+	messages: Int!
+	"How many tools it offered."
+	tools: Int!
+	"The reply cap it asked for."
+	maxTokens: Int!
+	"The sampling temperature."
+	temperature: Float!
 }
 
 """
@@ -9745,6 +11139,16 @@ type RunConnection {
 	highlights: [RunHighlightOutput!]!
 }
 
+"Who hears about a run, and the caller's labels for it."
+type RunDeliveryOutput {
+	"The URL the daemon posts to when the run finishes."
+	callbackUrl: String
+	"Whether that post is signed. The secret itself is never read back."
+	callbackSigned: Boolean!
+	"The caller's labels, carried through untouched."
+	metadata: [MetadataEntryOutput!]!
+}
+
 """
 One frame about a run.
 
@@ -9966,6 +11370,60 @@ type RunFlagsOutput {
 }
 
 """
+A whole run graph, as the JSON object a blueprint's `[graph]` table reads
+as. Only an object is taken here; what it holds is read by the runtime's
+own graph reader, and every key it does not know comes back as an issue.
+"""
+scalar RunGraphDocument
+
+"""
+One edge of a run's graph, and how often the run took it: a declared
+edge, or a move the run made that no declared edge joins (a fan-out stage
+sent to its merge stage, a person moving the run).
+"""
+type RunGraphEdgeOutput {
+	"The stage it leaves."
+	from: String!
+	"The stage it enters."
+	to: String!
+	"""
+	Its name, unique among the edges leaving `from`. Null for a move no
+	edge joins.
+	"""
+	name: String
+	"When it is followed. Null for a move no edge joins."
+	condition: EdgeCondition
+	"Why the run made a move no edge joins. Null for a declared edge."
+	reason: TransitionReason
+	"""
+	How many times the run took it, counted from the moves its run file
+	records.
+	"""
+	taken: Int!
+}
+
+"One stage of a run's graph, and the run's time in it."
+type RunGraphNodeOutput {
+	"The stage."
+	stage: String!
+	"How many times the run entered it."
+	visits: Int!
+	"Whether the run is in it now, or, for a finished run, ended in it."
+	current: Boolean!
+}
+
+"A run's graph: its stages and edges, with how the run walked them."
+type RunGraphOutput {
+	"The stages, in the graph's order."
+	nodes: [RunGraphNodeOutput!]!
+	"""
+	The edges, in the graph's order, then each move the run made that no
+	edge joins, in the order it first made it.
+	"""
+	edges: [RunGraphEdgeOutput!]!
+}
+
+"""
 Where a search matched one run, and enough text to show a person why.
 
 The part of search a browser cannot do: the client never holds a run's
@@ -9986,6 +11444,41 @@ type RunHighlightOutput {
 	snippet: String!
 	"Which stage the match came from, for the sources that have one."
 	stageIndex: Int
+}
+
+"Arguments for the `run_history` tool."
+type RunHistoryArgsOutput {
+	"The run read."
+	runId: ID!
+	"What it asked to see. Null asked for the summary."
+	view: RunHistoryView
+	"The step the state was asked at. Null asked for now."
+	at: Int
+}
+
+"One `run_history` call."
+type RunHistoryCallOutput implements ToolCall {
+	"Tool name, exactly as the model called it."
+	toolName: String!
+	"What the tool does, as this build describes it."
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"The call's arguments."
+	args: RunHistoryArgsOutput!
+}
+
+"What a `run_history` call asked to see."
+enum RunHistoryView {
+	"The run in brief."
+	SUMMARY
+	"Its whole state, now or at a step."
+	STATE
+	"Each edge it took."
+	TRANSITIONS
 }
 
 """
@@ -10152,12 +11645,13 @@ input RunInput {
 	"""
 	Filter on `RunOutput.blueprintDigest`.
 	
-	The digest of the manifest this run executed, lowercase hex SHA-256.
+	The digest of the installed blueprint revision this run was spawned
+	from, lowercase hex SHA-256.
 	
 	Recorded at spawn. Compare it with the installed blueprint's digest to
 	tell "this run executed what is installed now" from "this run executed
-	something else". Null for a run recorded before snapshots existed,
-	where the answer is unknown rather than "the same".
+	something else". Null for a run of a graph its caller wrote, which
+	came from no installed revision.
 	"""
 	blueprintDigest: StringFilter
 	"""
@@ -10197,8 +11691,8 @@ input RunInput {
 	
 	The run's context window as it stands right now.
 	
-	Null for a run that has not written one yet, and for a finished run
-	whose window was never persisted. Region contents are their own field,
+	Null for a run that never held one: a run converted from an earlier
+	release whose record kept no window. Region contents are their own field,
 	so asking for the shape of the window does not read its text.
 	"""
 	context: ContextWindowInput
@@ -10298,6 +11792,20 @@ enum RunOrderField {
 	LAST_PROGRESS_AT
 }
 
+"Where a run's graph came from, and which revision of it ran."
+type RunOriginOutput {
+	"Which of the four it was."
+	kind: SpecOriginKind!
+	"The blueprint's name. Null for a graph the caller wrote."
+	blueprintName: String
+	"The revision that ran, as the lowercase hex SHA-256 of its manifest."
+	digest: String
+	"The blueprint's declared version."
+	version: String
+	"The directory a `BLUEPRINT_FILE` was read from."
+	path: String
+}
+
 """
 One execution of a blueprint: the work itself, from the task it was given
 to whatever it finally produced.
@@ -10388,24 +11896,23 @@ type RunOutput implements Node {
 	"""
 	The blueprint this run executed.
 	
-	The run's own snapshot of the manifest, taken at spawn, so it answers
-	for the run even after the installed blueprint is edited or deleted.
-	For a run recorded before snapshots existed there is no copy, and this
-	falls back to the installed file: `blueprint.source` says which, and
-	`blueprintDigest` is set only for a run that carries its own.
+	The graph in the run's own file, as it was resolved at spawn with the
+	run's inputs applied, so it answers for the run even after the
+	installed blueprint is edited or deleted.
 	
-	Null, with an error naming the file, when neither can be read. Nullable
-	on purpose: one unreadable blueprint in a page of fifty runs must not
-	cost a client the other forty-nine.
+	Null, with an error, when the run's file cannot be read. Nullable on
+	purpose: one unreadable run in a page of fifty must not cost a client
+	the other forty-nine.
 	"""
 	blueprint: BlueprintOutput
 	"""
-	The digest of the manifest this run executed, lowercase hex SHA-256.
+	The digest of the installed blueprint revision this run was spawned
+	from, lowercase hex SHA-256.
 	
 	Recorded at spawn. Compare it with the installed blueprint's digest to
 	tell "this run executed what is installed now" from "this run executed
-	something else". Null for a run recorded before snapshots existed,
-	where the answer is unknown rather than "the same".
+	something else". Null for a run of a graph its caller wrote, which
+	came from no installed revision.
 	"""
 	blueprintDigest: String
 	"""
@@ -10446,8 +11953,8 @@ type RunOutput implements Node {
 	"""
 	The run's context window as it stands right now.
 	
-	Null for a run that has not written one yet, and for a finished run
-	whose window was never persisted. Region contents are their own field,
+	Null for a run that never held one: a run converted from an earlier
+	release whose record kept no window. Region contents are their own field,
 	so asking for the shape of the window does not read its text.
 	"""
 	context: ContextWindowOutput
@@ -10719,7 +12226,7 @@ type RunOutput implements Node {
 	the cheaper direction to read.
 	
 	Unfiltered, only the page's own windows are read, exactly as
-	`GET /api/agents/{id}/context/history` reads them. A `filter` is a
+	`GET /api/runs/{id}/context/history` reads them. A `filter` is a
 	question about each point, and answering it means opening that point's
 	window, so a filtered page reads the run's whole history to decide what
 	is on it. Page first and filter in the client where the history is long.
@@ -10801,6 +12308,58 @@ type RunOutput implements Node {
 	can read.
 	"""
 	metadata: [MetadataEntryOutput!]!
+	"""
+	The run as it was resolved: the request decided against the machine it
+	started on. Null for a run with no run file.
+	"""
+	spec: RunSpecOutput
+	"""
+	The run's whole state at step `at`, or now. Now is the daemon's own
+	view while it holds the run, and the run file's last step otherwise.
+	Null for a run with no run file.
+	"""
+	state(
+		"The step to read the state after. Step 0 is the state the run started in. Omitted means now."
+		at: Int
+	): RunStateOutput
+	"""
+	The run's steps from `from` to `to`, both included, as its run file
+	records them: what each changed and what happened during it. At most
+	200 steps per call. Empty for a run with no run file.
+	"""
+	deltas(
+		"The first step. Omitted means step 1."
+		from: Int,
+		"The last step. Omitted means 199 steps after `from`, or the run's last step if that comes first."
+		to: Int
+	): [StateDeltaOutput!]!
+	"""
+	The run's stages and edges, with how often it entered each stage and
+	took each edge. Null for a run with no run file.
+	"""
+	graph: RunGraphOutput
+}
+
+"What the engine is doing with a run, with what that phase carries."
+type RunPhaseOutput {
+	"The phase."
+	kind: PipelinePhaseKind!
+	"The edges an `AWAITING_CHOICE` run chooses between."
+	edges: [String!]!
+	"Why a `WEDGED` run is stuck."
+	reason: String
+}
+
+"Where a run sits: its working directory and its place in a tree of runs."
+type RunPlacementOutput {
+	"The directory its tools work in."
+	workdir: String!
+	"The run that started this one, when one did."
+	parentId: ID
+	"How far below the top of its tree this run is. A top-level run is 0."
+	depth: Int!
+	"For a fan-out worker, the stage of the parent's graph it runs."
+	workerStage: String
 }
 
 "A run acquired a title, or had the one it was showing replaced."
@@ -10874,6 +12433,148 @@ type RunSpawnedEvent implements Event & RunEvent {
 	it. Null once the run has been deleted.
 	"""
 	run: RunOutput
+}
+
+"""
+A run as it was resolved: the request decided against the machine it
+started on, and the first frame of its run file.
+
+Nothing in it is looked up again. A resume binds to it, and a run's
+`state` and `deltas` are what happened next.
+"""
+type RunSpecOutput {
+	"The run."
+	runId: ID!
+	"Where its graph came from."
+	origin: RunOriginOutput!
+	"""
+	The graph, with the request's input slots applied, in the same JSON
+	form `spawnRun` takes a graph in.
+	"""
+	graph: JSON!
+	"The checked inputs."
+	inputs: [InputEntryOutput!]!
+	"One plan per stage, in the graph's stage order."
+	stages: [StagePlanOutput!]!
+	"What each region held at spawn."
+	seeded: [SeededRegionOutput!]!
+	"The code the run uses."
+	code: [CodeEntryOutput!]!
+	"The output shape the caller asked for, as asked."
+	requestedOutput: OutputShapeOutput
+	"The model the caller asked for, as asked."
+	requestedModel: String
+	"What the run is trusted with."
+	launch: LaunchPolicyOutput!
+	"What its unattended setting answers without a person."
+	autoAnswers: AutoAnswersOutput!
+	"Where it runs."
+	placement: RunPlacementOutput!
+	"Who hears about it."
+	delivery: RunDeliveryOutput!
+	"What it relied on from the machine."
+	env: EnvFingerprintOutput!
+	"When it was resolved."
+	createdAt: Timestamp!
+}
+
+"""
+A run at one step: everything about it that has to survive a restart.
+
+Read live from the daemon while it holds the run, and from the run file's
+checkpoints and deltas otherwise, so both are the same shape.
+"""
+type RunStateOutput {
+	"The step this is the state after. The state a run starts in is step 0."
+	seq: Int!
+	"Where the run is in its life."
+	status: RunStateStatus!
+	"What went wrong, when `status` is `ERROR`."
+	error: String
+	"The stage, visit and turn."
+	cursor: StateCursorOutput!
+	"What the engine is doing with it."
+	phase: RunPhaseOutput!
+	"Whether it takes messages now."
+	acceptsMessages: Boolean!
+	"How many times each stage was entered."
+	visits: [StageVisitCountOutput!]!
+	"The counters for the stage it is in."
+	progress: StageProgressOutput!
+	"One line per stage it has reached."
+	ledger: [LedgerStageOutput!]!
+	"Its context window: regions and the entries in them."
+	context: ContextStateOutput!
+	"The batch of tool calls it has out."
+	pending: PendingToolBatchOutput
+	"The fan-out it is running."
+	fanOut: FanOutProgressOutput
+	"Messages waiting to be delivered."
+	inbox: [StateMessageOutput!]!
+	"Questions waiting for an answer."
+	questions: [OpenQuestionOutput!]!
+	"What it has spent and done."
+	totals: StateTotalsOutput!
+	"Its working time."
+	clock: StateClockOutput!
+	"What it noticed about itself."
+	flags: StateFlagsOutput!
+	"The runs it started."
+	children: [ID!]!
+	"Its title, once titled."
+	title: String
+	"Its answer, once it has one."
+	answer: StateAnswerOutput
+	"Why it is waiting, while it waits."
+	waitReason: String
+	"The last move it made between stages."
+	lastTransition: StageTransitionOutput
+	"Where it is among its stage's checkpoints."
+	checkpoint: CheckpointProgressOutput!
+	"""
+	Why it is held rather than running: each thing it names that this
+	machine no longer has, or that changed since it started. Null when it
+	is not held.
+	"""
+	held: [SpawnIssueOutput!]
+	"The answer, logs and audits it keeps beside its run file."
+	files: StateFilesOutput!
+	"The stored parts it keeps beside its run file."
+	blobs: [StateBlobOutput!]!
+	"What a person approved for it beyond the calls they were asked about."
+	grants: StateGrantsOutput!
+	"The bytes it has written, against its write ceilings."
+	writtenBytes: BigInt!
+	"""
+	When it last made progress, when its record keeps that apart from
+	its last step (a run converted from an earlier release). Null when
+	its last step is its progress.
+	"""
+	lastProgressAt: Timestamp
+	"""
+	The remote jobs its model call in flight has submitted, which the
+	call made again after a restart polls rather than paying for again.
+	Empty between calls.
+	"""
+	remoteJobs: [RemoteJobOutput!]!
+}
+
+"Where a run is in its life."
+enum RunStateStatus {
+	"Placed, and not yet moving."
+	IDLE
+	"Inferring, calling tools, moving between stages."
+	ACTIVE
+	"Waiting on a person or on its children."
+	WAITING
+	"Paused."
+	PAUSED
+	"Finished."
+	COMPLETE
+	"Failed; `error` says how."
+	ERROR
+	"Stopped from outside."
+	CANCELLED
 }
 
 """
@@ -11863,6 +13564,19 @@ type SeedToolCallOutput {
 	args: JSON!
 }
 
+"""
+What one region held when the run started: its seeds and bound inputs,
+resolved.
+"""
+type SeededRegionOutput {
+	"The region."
+	region: String!
+	"The text it starts with."
+	text: String!
+	"The parts it starts with."
+	parts: [StatePartOutput!]!
+}
+
 "A message for a run that is going."
 input SendMessageRequest {
 	"The run to message."
@@ -11951,6 +13665,24 @@ type ServerInfoOutput {
 	isAdminEnabled: Boolean!
 	"The numbers a client should never hardcode."
 	limits: ServeLimitsOutput!
+}
+
+"A question a person settled, whole."
+type SettledStepOutput {
+	"The question."
+	settledId: ID!
+	"What it asked for."
+	kind: InteractionKind!
+	"The tool an approval was for."
+	tool: String
+	"The question as the person saw it."
+	prompt: String!
+	"The stage the run was in when it asked."
+	stage: String!
+	"How it ended, as the settlement's JSON."
+	settlement: JSON!
+	"When it was asked."
+	askedAt: Timestamp!
 }
 
 """
@@ -12107,9 +13839,14 @@ enum SetupBlocker {
 	PROVIDER_TIMED_OUT
 	"The provider failed."
 	PROVIDER_FAILED
+	"""
+	The run names something this machine no longer has, or has changed
+	since it started.
+	"""
+	MACHINE_CHANGED
 }
 
-"Exact and set tests on `SetupBlocker` (PROVIDER_MISSING, CREDITS_EXHAUSTED, AUTH_FAILED, FORBIDDEN, PROVIDERS_UNAVAILABLE, PROVIDER_UNREACHABLE, PROVIDER_TIMED_OUT, PROVIDER_FAILED)."
+"Exact and set tests on `SetupBlocker` (PROVIDER_MISSING, CREDITS_EXHAUSTED, AUTH_FAILED, FORBIDDEN, PROVIDERS_UNAVAILABLE, PROVIDER_UNREACHABLE, PROVIDER_TIMED_OUT, PROVIDER_FAILED, MACHINE_CHANGED)."
 input SetupBlockerFilter {
 	"Exactly this value."
 	eq: SetupBlocker
@@ -12298,30 +14035,48 @@ type SkippedToolOutput {
 	reason: String!
 }
 
-"Arguments for the `spawn_agent` tool."
+"""
+Arguments for the `spawn_agent` tool, and for `validate_spawn`, which takes
+exactly the same.
+"""
 type SpawnAgentArgsOutput {
-	"The blueprint to run, by name."
-	blueprint: String!
-	"The task handed to it."
-	task: String!
+	"What the child runs: an installed blueprint, or a whole graph."
+	source: SpawnAgentSource!
+	"""
+	Values for the child graph's declared inputs, by name, as the model
+	wrote them. JSON because the names and types are that graph's own.
+	"""
+	inputs: JSON
 	"""
 	Whether the caller blocked until it finished. Left out means no, which is
 	also what the tool's own default says.
 	"""
 	wait: Boolean
-	"Context put in the child's first pinned region."
-	seedContext: String
+	"A depth limit for the child's own children."
+	maxChildDepth: Int
+	"""
+	The tools the child may call without asking. Left out, the child
+	asked for the caller's own list.
+	"""
+	allow: [String!]
+	"The output shape the child was asked for, over its graph's own."
+	output: AskedOutputOutput
 	"""
 	Stored parts of this run handed to the child, each by name or by the
 	start of its sha256.
 	"""
 	parts: [String!]
-	"A depth limit for the child's own children."
-	maxChildDepth: Int
-	"The shape the child was asked to answer in, overriding its blueprint's."
-	outputFormat: String
-	"Extra guidance about that shape."
-	outputInstructions: String
+}
+
+"An installed blueprint a `spawn_agent` or `describe_blueprint` call named."
+type SpawnAgentBlueprintSourceOutput {
+	"The blueprint's name."
+	name: String!
+	"""
+	The revision the model pinned it to. Null when it named the blueprint
+	alone.
+	"""
+	digest: String
 }
 
 "One `spawn_agent` call."
@@ -12339,76 +14094,255 @@ type SpawnAgentCallOutput implements ToolCall {
 	args: SpawnAgentArgsOutput!
 }
 
-"Everything about a new run."
+"A whole graph a `spawn_agent` call wrote for its child."
+type SpawnAgentGraphSourceOutput {
+	"""
+	The graph, as the model wrote it, in the JSON form a spawn request's
+	raw graph takes.
+	"""
+	graph: JSON!
+}
+
+"""
+What a `spawn_agent` call asked the child to run.
+
+The tool takes either an installed blueprint or a whole graph, and which
+one the model chose is part of what it asked for, so it is a union here
+rather than a reading that flattens the two.
+"""
+union SpawnAgentSource = SpawnAgentBlueprintSourceOutput | SpawnAgentGraphSourceOutput
+
+"""
+A file sent with a spawn: for a `file` input to name, or placed straight
+into a region.
+"""
+input SpawnAttachmentWrite {
+	"""
+	The name a `file` input names it by. Defaults to the file's own name
+	for a `path`, and is required for `base64`.
+	"""
+	name: String
+	"The bytes."
+	content: AttachmentContentWrite!
+	"Its mime type. Sniffed from the bytes and the name when absent."
+	mimeType: String
+	"A region to place it in directly, when no `file` input takes it."
+	region: RegionRef
+	"How a model should receive it, over the region's default."
+	deliver: Delivery
+	"Text placed beside it."
+	caption: String
+}
+
+"What kind of problem a spawn issue is."
+enum SpawnIssueCode {
+	"Something required was not given."
+	MISSING
+	"A key or name that nothing declares."
+	UNKNOWN
+	"A value of the wrong type."
+	WRONG_TYPE
+	"A number outside its range, or a list or text of the wrong length."
+	OUT_OF_RANGE
+	"""
+	A value without the shape its type requires: a bad name, a malformed
+	URL, a path that leaves the working directory.
+	"""
+	INVALID
+	"The same name given twice."
+	DUPLICATE
+	"A reference to a stage, region, edge or input that is not declared."
+	DANGLING
+	"Two settings that cannot both hold."
+	CONFLICT
+	"Something this request is not allowed to ask for here."
+	NOT_ALLOWED
+	"""
+	This machine cannot provide what the request names: an unknown model, a
+	blueprint that is not installed, a pin to another revision.
+	"""
+	UNRESOLVABLE
+	"A resumed run names something this machine no longer has."
+	UNAVAILABLE
+	"A resumed run names something that has changed since it started."
+	CHANGED
+	"A warning, never a refusal: stages the run can reach and never leave."
+	MAY_NEVER_FINISH
+}
+
+"One problem with a spawn request."
+type SpawnIssueOutput {
+	"""
+	Where the problem is, written the way a person reads it:
+	`inputs.items[2].id`, `source.blueprint.digest`. Paths name the
+	runtime's request fields, which are the snake-case spelling of this
+	schema's.
+	"""
+	path: String!
+	"The same path, one step at a time."
+	segments: [PathSegmentOutput!]!
+	"What kind of problem it is."
+	code: SpawnIssueCode!
+	"One sentence saying what is wrong."
+	message: String!
+	"What would have been accepted, when that is one thing."
+	expected: String
+	"What arrived instead."
+	got: String
+	"How to fix it."
+	hint: String
+	"The valid choices, when the problem is picking one."
+	known: [String!]!
+}
+
+"A request refused: every problem with it, at once."
+type SpawnRejectedOutput {
+	"The problems, in the order they were found. Never empty."
+	issues: [SpawnIssueOutput!]!
+}
+
+"""
+Everything about a new run: what to run, the values it takes, and how far
+it is trusted.
+
+`spawnRun` starts it and `validateSpawn` checks it without starting
+anything; both take exactly this, so a request checked by one is the
+request the other starts.
+"""
 input SpawnRunRequest {
+	"What to run."
+	source: SpawnSourceWrite!
 	"""
-	The blueprint to start. A `digest` on it refuses the spawn where what is
-	installed under that name is a different revision, which is how a client
-	starts the blueprint it read rather than whatever is there now.
+	Values for the graph's declared inputs, by name. `BlueprintOutput.inputs`
+	lists what a blueprint takes.
 	"""
-	blueprint: BlueprintRef!
-	"The initial ask."
-	task: String!
+	inputs: [InputEntryWrite!]
+	"Files for `file` inputs, and parts placed straight into regions."
+	attachments: [SpawnAttachmentWrite!]
 	"""
-	Override the blueprint's model for this run, as `provider/model` or a
-	bare model name. Wins over every other model setting.
+	A model to run every stage on that allows the operator's choice, as
+	`provider/model` or a bare model name.
 	"""
 	model: String
-	"How deep sub-agent spawning may nest for this run."
-	maxDepth: Int
+	"The final-output shape the caller wants, over the graph's."
+	output: OutputShapeWrite
 	"""
-	Where the run's tools execute. Defaults to this server's own directory,
+	Where the run's tools work. Defaults to this server's own directory,
 	and is refused outside `--workdir-root` when the operator set one.
 	"""
 	workdir: String
-	"""
-	Run unattended, in one of the two ways there are to do it. Absent means
-	the run asks a person.
-	"""
-	yolo: YoloWrite
-	"Tools to allow without asking, for this run."
-	allowTools: [String!]
-	"""
-	Refuse this blueprint's command seeds, which run before any approval
-	prompt exists.
-	"""
-	skipSeedCommands: Boolean! = false
-	"""
-	Write this run's exact requests into its journal, once per provider
-	attempt, whatever this machine is configured to do for other runs.
-	
-	A captured request is the whole prompt, holding whatever the run's
-	context held: file contents, command output, the words somebody typed.
-	There is no size cap, and every call re-sends the window, so a captured
-	run's journal grows by roughly the context size per attempt. Read it
-	back on `InferenceAttempt.modelInput`.
-	"""
-	captureModelInput: Boolean! = false
-	"Seed text for named context regions."
-	regions: [RegionSeedWrite!]
-	"""
-	Caller-supplied metadata: labels for whoever started the run, such as a
-	ticket or a tenant. The run reads none of them, and the run search looks
-	through them. Not a typed extension point.
-	"""
-	metadata: [KeyValueWrite!]
-	"The output shape to ask the run for, instead of the blueprint's own."
-	output: OutputRequestWrite
-	"Where to post this run's events, and what signs them."
-	callback: CallbackWrite
-	"Files inside the working directory to start the run with."
-	attachments: [AttachmentWrite!]
+	"How much the run is trusted with."
+	launch: LaunchWrite
+	"Who hears about the run, and the caller's labels for it."
+	delivery: DeliveryWrite
 }
 
-"What a spawn answers with."
-type SpawnRunResult {
-	"The run that was started."
-	run: RunOutput!
+"""
+What `spawnRun` answers with: the run it started, or every reason it did
+not.
+"""
+union SpawnRunResult = SpawnedOutput | SpawnRejectedOutput
+
+"Arguments for the `spawn_schema` tool."
+type SpawnSchemaArgsOutput {
 	"""
-	Retired checks the blueprint declared that this request's own output
-	shape supersedes. Empty unless something was.
+	The part of the spawn request's schema asked for. Null asked for the
+	top level.
 	"""
-	warnings: [String!]!
+	part: String
+}
+
+"One `spawn_schema` call."
+type SpawnSchemaCallOutput implements ToolCall {
+	"Tool name, exactly as the model called it."
+	toolName: String!
+	"What the tool does, as this build describes it."
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"The call's arguments."
+	args: SpawnSchemaArgsOutput!
+}
+
+"What a run runs: an installed blueprint, or a whole graph."
+input SpawnSourceWrite @oneOf {
+	"""
+	An installed blueprint, optionally pinned to the revision on
+	`BlueprintOutput.digest`. A pin that does not match what is installed
+	is refused.
+	"""
+	blueprint: BlueprintRef
+	"""
+	A whole run graph, in the JSON form a blueprint's `[graph]` table
+	reads as. Unknown keys are refused.
+	"""
+	graph: RunGraphDocument
+}
+
+"""
+A run a request would start, in brief: what a dry run answers with when it
+found nothing wrong.
+"""
+type SpawnSummaryOutput {
+	"What the run is called: its blueprint's name, or a raw graph's title."
+	title: String!
+	"Where its graph came from."
+	origin: RunOriginOutput!
+	"The stage it starts in."
+	entryStage: String!
+	"Each stage, in the graph's order."
+	stages: [StageSummaryOutput!]!
+	"The inputs, checked and with their defaults filled in."
+	inputs: [InputEntryOutput!]!
+	"What it would be trusted with."
+	launch: LaunchPolicyOutput!
+	"The directory its tools would work in."
+	workdir: String!
+	"""
+	What may keep the run from ever finishing: stages it can reach and
+	never leave, each named. Warnings, never refusals: the run would
+	start. Empty for most runs.
+	"""
+	warnings: [SpawnIssueOutput!]!
+}
+
+"""
+A run that was started: its id, and the run itself once its record is
+written.
+"""
+type SpawnedOutput {
+	"The new run's id."
+	runId: ID!
+	"""
+	What may keep the run from ever finishing: stages it can reach and
+	never leave, each named. The run started anyway; show these loudly.
+	Empty for most runs.
+	"""
+	warnings: [SpawnIssueOutput!]!
+	"""
+	The run as its record stands. Null in the moment between the daemon
+	starting it and writing its first record; read `runId` then, and ask
+	for the run again.
+	"""
+	run: RunOutput
+}
+
+"Where a run's graph came from."
+enum SpecOriginKind {
+	"An installed blueprint."
+	BLUEPRINT
+	"A blueprint read from its directory on the daemon's machine."
+	BLUEPRINT_FILE
+	"A graph the caller wrote."
+	RAW
+	"""
+	The graph a run from an earlier release recorded, its blueprint gone
+	when it was converted. Such a run never resumes.
+	"""
+	RECORDED
 }
 
 "A run's spend passed a figure the operator asked to be told about."
@@ -12551,6 +14485,18 @@ type StageContextOutput {
 	resetNames: [String!]!
 }
 
+"One stage's files beside its run's file."
+type StageFileSetOutput {
+	"The stage's position in the run's graph."
+	index: Int!
+	"What the model wrote in the stage."
+	output: StateFileOutput
+	"The stage's tool activity and events."
+	logs: StateFileOutput
+	"The taint gate's decisions in the stage."
+	taintAudit: StateFileOutput
+}
+
 """
 Filter on `StageHooksOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -12617,7 +14563,8 @@ input StageHooksInput {
 """
 The scripts a stage runs at points in its own lifecycle.
 
-Each names a Rhai file relative to the blueprint. The function a script has to
+Each names a Rhai file relative to the blueprint, or is the script itself
+when the blueprint writes it inline. The function a script has to
 define is named for the field it is given as, so one file may back several
 hooks. A stage that declares none costs nothing: no file is read and no
 engine is built.
@@ -12991,7 +14938,9 @@ input StageModelRouteInput {
 	"""
 	Filter on `StageModelRouteOutput.provider`.
 	
-	The provider that serves it, as the config names providers.
+	The provider that serves it, as the config names providers. Empty when
+	the blueprint names the model alone and the machine's provider order
+	picks one.
 	"""
 	provider: StringFilter
 	"""
@@ -13028,7 +14977,11 @@ input StageModelRouteListInput {
 
 "One provider and model, in a stage's ordered list."
 type StageModelRouteOutput {
-	"The provider that serves it, as the config names providers."
+	"""
+	The provider that serves it, as the config names providers. Empty when
+	the blueprint names the model alone and the machine's provider order
+	picks one.
+	"""
 	provider: String!
 	"The model id, as that provider spells it."
 	model: String!
@@ -13272,6 +15225,64 @@ type StagePartsOutput {
 	asText: [String!]!
 }
 
+"One stage, as it was decided when the run was resolved."
+type StagePlanOutput {
+	"The stage."
+	stage: String!
+	"The provider that serves it."
+	provider: String!
+	"The model it runs."
+	model: String!
+	"That model's context window, in tokens."
+	contextWindow: Int!
+	"The cap on one reply, in tokens, when there is one."
+	maxOutputTokens: Int
+	"Where to go if the provider fails, best first, as `provider/model`."
+	fallbacks: [String!]!
+	"The tools it gets."
+	tools: [ToolDefOutput!]!
+	"The final-output shape it asks for, with the caller's request applied."
+	output: OutputShapeOutput
+	"Each region's budget in this stage."
+	regionBudgets: [RegionBudgetOutput!]!
+	"Lines worth logging about how the stage was decided."
+	notes: [String!]!
+}
+
+"The counters the engine keeps for the stage a run is in."
+type StageProgressOutput {
+	"Tool calls made in the stage."
+	totalToolCalls: Int!
+	"Nudges sent after a reply with no tool call."
+	textOnlyNudges: Int!
+	"Nudges sent after a reply cut off by the output cap."
+	cutOffNudges: Int!
+	"Whether the next reply gets a raised output cap."
+	raiseOutputCap: Boolean!
+	"Inference turns taken in the stage."
+	iterations: Int!
+	"Tool calls that changed something."
+	modifyingToolCalls: Int!
+	"Modifying calls that were blocked."
+	blockedModificationCalls: Int!
+	"Each region's content digest when the stage was entered."
+	entryRegionDigests: [KeyedCountOutput!]!
+	"How many times a gate sent the run back into the stage."
+	gateReentries: Int!
+	"When the stage was entered."
+	stageStartedAt: Timestamp
+	"When the run started waiting, while it waits."
+	waitingSince: Timestamp
+	"Edits made to each file."
+	editsByPath: [KeyedCountOutput!]!
+	"Whether stuck detection has fired in the stage."
+	stuckFired: Boolean!
+	"Images produced in the stage."
+	imagesProduced: Int!
+	"Nudges sent after a reply that should have produced an image."
+	noImageNudges: Int!
+}
+
 """
 One page of a listing: the items, where to resume, and how many there are
 altogether.
@@ -13489,17 +15500,27 @@ enum StageStatus {
 	PENDING
 	"The stage the run is in right now."
 	ACTIVE
-	"Entered, and blocked on a person answering."
+	"""
+	Entered, and parked: on a person answering, or on the runs it
+	started.
+	"""
 	WAITING_INPUT
+	"""
+	The stage a paused run is in, paused by a person or held until the
+	machine can take the run back.
+	"""
+	PAUSED
 	"Finished and left."
 	COMPLETE
 	"Ended in a failure. The run's own error carries the message."
 	ERROR
+	"The stage a run was in when it was cancelled."
+	CANCELLED
 	"The run finished without ever entering this stage."
 	SKIPPED
 }
 
-"Exact and set tests on `StageStatus` (PENDING, ACTIVE, WAITING_INPUT, COMPLETE, ERROR, SKIPPED)."
+"Exact and set tests on `StageStatus` (PENDING, ACTIVE, WAITING_INPUT, PAUSED, COMPLETE, ERROR, CANCELLED, SKIPPED)."
 input StageStatusFilter {
 	"Exactly this value."
 	eq: StageStatus
@@ -13511,6 +15532,32 @@ input StageStatusFilter {
 	notIn: [StageStatus!]
 	"Match where there is no value at all."
 	isNull: Boolean
+}
+
+"One stage of a resolved run, in brief."
+type StageSummaryOutput {
+	"The stage."
+	stage: String!
+	"The provider that would serve it."
+	provider: String!
+	"The model it would run on."
+	model: String!
+	"The tools it would be given, by name."
+	tools: [String!]!
+}
+
+"One move from a stage to the next."
+type StageTransitionOutput {
+	"The stage it left."
+	fromStage: String!
+	"The stage it entered."
+	toStage: String!
+	"The edge it took, when it took a named one."
+	edge: String
+	"Why."
+	reason: TransitionReason!
+	"The visit to `to` it began."
+	visit: String!
 }
 
 "The run entered a new stage."
@@ -13546,6 +15593,14 @@ type StageTransitionedEvent implements Event & RunEvent {
 	it. Null once the run has been deleted.
 	"""
 	run: RunOutput
+}
+
+"How many times a run has entered one stage."
+type StageVisitCountOutput {
+	"The stage."
+	stage: String!
+	"How many times it was entered."
+	visits: Int!
 }
 
 """
@@ -13695,6 +15750,244 @@ input StartUpdateRequest {
 type StartUpdateResult {
 	"The job. Poll `updateJob(id:)`, or watch the live frames."
 	job: UpdateJobOutput!
+}
+
+"A run's final answer, once it has one."
+type StateAnswerOutput {
+	"""
+	Its size in bytes. The answer itself is in the file the run's `files`
+	name, and `Run.finalOutput` reads it.
+	"""
+	bytes: BigInt!
+	"The format it was asked for in."
+	format: String
+	"The stage that submitted it."
+	stage: String!
+	"When."
+	submittedAt: Timestamp!
+	"Whether the answer was cut short."
+	truncated: Boolean!
+}
+
+"A stored part a run holds, in `blobs/` beside its run file."
+type StateBlobOutput {
+	"The sha256 of its bytes, which is also its file's name."
+	sha256: String!
+	"Its mime type."
+	mimeType: String!
+	"Its size in bytes."
+	size: BigInt!
+	"Its file name, when it had one."
+	name: String
+	"The region it first appeared in."
+	region: String
+	"The tool whose result carried it, when one did."
+	tool: String
+}
+
+"One part of a run's state that a step changed, with its new value."
+union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput | HeldChangeOutput | FilesChangeOutput | BlobsChangeOutput | GrantsChangeOutput | WrittenChangeOutput | LastProgressAtChangeOutput | RemoteJobsChangeOutput
+
+"Working time: seconds banked, and when the running clock started."
+type StateClockOutput {
+	"Seconds of work banked so far."
+	bankedSecs: BigInt!
+	"When the clock started running, while it runs."
+	since: Timestamp
+}
+
+"Where in its stage a run is: the stage, the visit and the turn."
+type StateCursorOutput {
+	"The stage."
+	stage: String!
+	"This visit to it."
+	visit: String!
+	"Inference turns taken in this visit."
+	iteration: Int!
+}
+
+"One step of a run: what changed, and what happened."
+type StateDeltaOutput {
+	"The step. The first step a run takes is 1."
+	seq: Int!
+	"When it was taken."
+	at: Timestamp!
+	"The parts of the state it changed, each with its new value."
+	changes: [StateChange!]!
+	"What happened during it."
+	events: [StepEvent!]!
+}
+
+"One file beside a run's file."
+type StateFileOutput {
+	"Where it is, relative to the run's directory."
+	path: String!
+	"""
+	Its size in bytes when the step that names it was written. A log only
+	grows, so it may be longer by now.
+	"""
+	bytes: BigInt!
+	"The sha256 of its contents, for a file written whole."
+	sha256: String
+}
+
+"The answer, logs and audits a run keeps beside its run file."
+type StateFilesOutput {
+	"The file holding the answer, once it has one."
+	finalOutput: StateFileOutput
+	"Each stage's files, in stage order."
+	stages: [StageFileSetOutput!]!
+}
+
+"What a run noticed about itself on the way."
+type StateFlagsOutput {
+	"Files it changed, up to a cap."
+	modifiedFiles: [String!]!
+	"How many files it changed in all."
+	modifiedFileCount: Int!
+	"Whether it finished with an empty answer."
+	emptyOutput: Boolean!
+	"Whether it finished without the tool that submits an answer."
+	noOutputTools: Boolean!
+	"Searches run."
+	searchesRun: Int!
+	"Searches that found nothing."
+	searchesEmpty: Int!
+	"Times a stage hit its iteration cap."
+	maxIterationsHit: Int!
+	"Times a gate was forced open."
+	gatesForced: Int!
+	"Required regions left unfilled when a stage gave up on them."
+	requiredRegionsAbandoned: [String!]!
+	"Whether its working directory disappeared."
+	workspaceLost: Boolean!
+	"Whether it produced an answer."
+	producedOutput: Boolean!
+	"Times an answer was forced out of it."
+	outputForced: Int!
+	"Fan-out splits that fell back to fewer workers."
+	splitsDegraded: Int!
+	"Scripts that would not run."
+	brokenScripts: [String!]!
+}
+
+"""
+The approvals a person granted a run beyond the call they were asked
+about, by the keys a later call is matched on: a command, or a path.
+"""
+type StateGrantsOutput {
+	"Keys allowed for the rest of the run."
+	run: [String!]!
+	"Keys allowed while the run stays in the stage they were granted in."
+	stage: [String!]!
+	"""
+	The stage those were granted in, by its position in the graph from 0.
+	Null when nothing was granted for a stage.
+	"""
+	stageIndex: Int
+	"Tools a person cleared at the taint gate for the rest of the run."
+	cleared: [String!]!
+}
+
+"A message waiting in a run's inbox."
+type StateMessageOutput {
+	"Who sent it."
+	sender: String!
+	"What it says."
+	text: String!
+	"The region it goes to, when it names one."
+	region: String
+}
+
+"A typed part in a context entry: an image, a document, a recording."
+type StatePartOutput {
+	"Its mime type."
+	mimeType: String!
+	"Its name."
+	name: String
+	"How it reaches a model, when that was decided for it."
+	deliver: Delivery
+	"Its text, for a part small enough to keep inline."
+	inline: String
+	"Its stored bytes, for every other part."
+	blob: StoredBlobOutput
+}
+
+"Tokens and money spent."
+type StateSpendOutput {
+	"Input tokens, cached ones included."
+	promptTokens: BigInt!
+	"Output tokens."
+	completionTokens: BigInt!
+	"Input tokens read from the provider's cache."
+	cachedTokens: BigInt!
+	"Tokens written to the provider's cache."
+	cacheWriteTokens: BigInt!
+	"What the calls cost, in US dollars, as far as they were priced."
+	pricedUsd: Decimal!
+	"Calls whose provider reported the cost."
+	reportedCalls: Int!
+	"Calls whose cost was computed from a price table."
+	computedCalls: Int!
+	"Calls nothing could price."
+	unpricedCalls: Int!
+	"""
+	Whether what it cost is not known though no call was counted as
+	unpriced: a record from an earlier release that named no cost.
+	"""
+	costUnknown: Boolean!
+}
+
+"One tool call a model made."
+type StateToolCallOutput {
+	"The provider's id for the call."
+	callId: String!
+	"The tool called."
+	name: String!
+	"The arguments, as the model wrote them."
+	arguments: JSON!
+	"""
+	The provider's opaque signature of the reasoning behind the call, when
+	it sent one.
+	"""
+	thoughtSignature: String
+}
+
+"What a run has spent and done, in total."
+type StateTotalsOutput {
+	"Tokens and money."
+	spend: StateSpendOutput!
+	"Tool calls made."
+	toolCalls: BigInt!
+}
+
+"The new status, and the error a failed run carries."
+type StatusChangeOutput {
+	"Where the run is in its life now."
+	status: RunStateStatus!
+	"What went wrong, when `status` is `ERROR`."
+	error: String
+}
+
+"Something that happened during a step that the state alone does not show."
+union StepEvent = InferenceStepOutput | FailoverStepOutput | ToolStartedStepOutput | ToolFinishedStepOutput | AnsweredStepOutput | MessageStepOutput | LogStepOutput | AttemptStepOutput | DispatchedStepOutput | CompletedStepOutput | ArtifactsStepOutput | SettledStepOutput | ContextCommittedStepOutput | ContextNotedStepOutput | TransitionStepOutput
+
+"A part's bytes, stored once in the run file by digest."
+type StoredBlobOutput {
+	"The lowercase hex SHA-256 of the bytes."
+	digest: String!
+	"Their size."
+	size: BigInt!
+	"An image's or a video's width, in pixels."
+	width: Int
+	"An image's or a video's height, in pixels."
+	height: Int
+	"A recording's length."
+	durationMs: BigInt
+	"What the part costs in a model's window."
+	tokens: Int!
+	"The text a model that cannot take the bytes reads instead."
+	standIn: String!
 }
 
 """
@@ -13964,6 +16257,16 @@ type SystemInfoCallOutput implements ToolCall {
 	rawArguments: JSON!
 }
 
+"How sensitive what a region holds is."
+enum TaintLevel {
+	"Freely shareable."
+	PUBLIC
+	"Work-related but not personal."
+	INTERNAL
+	"Personal or highly sensitive."
+	PRIVATE
+}
+
 """
 Whether taint tracking runs.
 
@@ -13989,6 +16292,26 @@ input TaintTrackingFilter {
 	notIn: [TaintTracking!]
 	"Match where there is no value at all."
 	isNull: Boolean
+}
+
+"A `text` input: text, optionally bounded in length."
+type TextInputTypeOutput {
+	"Whether the text is expected to span lines, so a form shows a text area."
+	multiline: Boolean!
+	"The fewest characters allowed."
+	minLength: Int
+	"The most characters allowed."
+	maxLength: Int
+	"What values it takes, in words."
+	summary: String!
+}
+
+"A `text` input's value."
+type TextValueOutput {
+	"The text."
+	text: String!
+	"The value as a region shows it."
+	asText: String!
 }
 
 """
@@ -14023,6 +16346,18 @@ input TimestampFilter {
 	gte: Timestamp
 	"Match where there is no time at all."
 	isNull: Boolean
+}
+
+"The run was titled or renamed."
+type TitleChangeOutput {
+	"The title now."
+	title: String
+}
+
+"Titling the run gave up, or a title came after all."
+type TitleErrorChangeOutput {
+	"Why the run has no title now. Null when nothing went wrong."
+	titleError: String
 }
 
 "Arguments for the `todo_add` tool."
@@ -14327,6 +16662,16 @@ type ToolCallFinishedEvent implements Event & RunEvent {
 	run: RunOutput
 }
 
+"One tool call's result, once it is in."
+type ToolCallReplyOutput {
+	"The provider's id for the call it answers."
+	callId: String!
+	"The result, as the model reads it."
+	text: String!
+	"Whether the call failed."
+	isError: Boolean!
+}
+
 "A tool call was handed to the async tool lane."
 type ToolCallStartedEvent implements Event & RunEvent {
 	"""
@@ -14394,6 +16739,38 @@ type ToolConnection {
 	same directories could not use.
 	"""
 	skipped: [SkippedToolOutput!]!
+}
+
+"A tool as a stage gets it, frozen when the run was resolved."
+type ToolDefOutput {
+	"Its name, as the model calls it."
+	name: String!
+	"What it does, as the model reads it."
+	description: String!
+	"The JSON Schema of its arguments."
+	schema: JSON!
+	"Where it comes from."
+	source: ToolDefSource!
+	"A script tool's code, by digest."
+	scriptDigest: String
+	"An MCP tool's server."
+	mcpServer: String
+	"An MCP tool's name on that server."
+	mcpTool: String
+}
+
+"Where a tool a stage gets comes from."
+enum ToolDefSource {
+	"Compiled into Leviath."
+	BUILTIN
+	"A child-run tool."
+	SUBAGENT
+	"A stage-control tool the engine handles itself."
+	STAGE_CONTROL
+	"A script tool."
+	SCRIPT
+	"An MCP server's tool."
+	MCP
 }
 
 """
@@ -14535,8 +16912,10 @@ input ToolExecutionInput {
 	
 	Where in the run's journal the record that dispatched it sits.
 	
-	A byte offset. It only climbs within a run and never changes, so it orders
-	executions and names one for as long as the run exists.
+	The step of the run file that dispatched it, counted from the run's
+	start. It only climbs within a run and never changes, so it orders
+	executions. The calls one batch dispatched share a step, so with
+	`callId` it names one for as long as the run exists.
 	"""
 	journalPosition: BigIntFilter
 	"""
@@ -14692,8 +17071,10 @@ type ToolExecutionOutput {
 	"""
 	Where in the run's journal the record that dispatched it sits.
 	
-	A byte offset. It only climbs within a run and never changes, so it orders
-	executions and names one for as long as the run exists.
+	The step of the run file that dispatched it, counted from the run's
+	start. It only climbs within a run and never changes, so it orders
+	executions. The calls one batch dispatched share a step, so with
+	`callId` it names one for as long as the run exists.
 	"""
 	journalPosition: BigInt!
 	"""
@@ -14707,6 +17088,18 @@ type ToolExecutionOutput {
 	window, not something the tool returned.
 	"""
 	result: ToolReturnOutput
+}
+
+"A tool call finished."
+type ToolFinishedStepOutput {
+	"The provider's id for the call."
+	callId: String!
+	"The result, as the model reads it."
+	text: String!
+	"Whether the call failed."
+	isError: Boolean!
+	"How long it took."
+	millis: BigInt!
 }
 
 "One group token an `available_tools` list may name in place of tool names."
@@ -15203,6 +17596,12 @@ type ToolRoutingOutput {
 	maxResultTokensPerTool: [ToolTokenCeilingOutput!]!
 }
 
+"A tool call started."
+type ToolStartedStepOutput {
+	"The call."
+	call: StateToolCallOutput!
+}
+
 """
 Filter on `ToolTokenCeilingOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -15308,6 +17707,12 @@ type ToolUseGuidanceOutput {
 	the stage offers the `shell` tool.
 	"""
 	shellForMultiStepWork: HintSetting!
+}
+
+"The run spent something or called a tool."
+type TotalsChangeOutput {
+	"The totals now."
+	totals: StateTotalsOutput!
 }
 
 """
@@ -15425,6 +17830,12 @@ type TransformConfigOutput {
 	compactPrompt: String
 }
 
+"The run moved between stages."
+type TransitionChangeOutput {
+	"The move."
+	transition: StageTransitionOutput
+}
+
 "When an edge may be taken."
 enum TransitionCondition {
 	"Taken as soon as the stage finishes."
@@ -15478,7 +17889,7 @@ input TransitionEdgeInput {
 	"""
 	Filter on `TransitionEdgeOutput.targetName`.
 	
-	The stage name this edge was keyed by, verbatim.
+	The stage name this edge leads to, verbatim.
 	"""
 	targetName: StringFilter
 	"""
@@ -15561,7 +17972,7 @@ type TransitionEdgeOutput {
 	wrote.
 	"""
 	target: StageOutput
-	"The stage name this edge was keyed by, verbatim."
+	"The stage name this edge leads to, verbatim."
 	targetName: String!
 	"Told to the model when it is choosing where to go next."
 	hint: String
@@ -15800,6 +18211,36 @@ type TransitionGateOutput {
 	maxAttempts: Int
 }
 
+"Why a run moved from one stage to another."
+enum TransitionReason {
+	"The edge's condition held."
+	CONDITION
+	"A gate let it through."
+	GATE
+	"The model chose the edge."
+	MODEL_CHOICE
+	"""
+	The model named no edge it could take, so the run took the stage's
+	first edge.
+	"""
+	FALLBACK
+	"Something outside the run forced it."
+	FORCED
+	"A fan-out worker finished."
+	WORKER
+	"A routing script chose the edge."
+	ROUTER
+}
+
+"""
+The run took an edge. One per edge taken, so a step that moved the run
+twice lists both moves.
+"""
+type TransitionStepOutput {
+	"The move."
+	transition: StageTransitionOutput!
+}
+
 "What happens to the context on the way through an edge."
 enum TransitionTransform {
 	"Everything carries over untouched."
@@ -15830,6 +18271,16 @@ input TransitionTransformFilter {
 	isNull: Boolean
 }
 
+"How much of a run goes ahead without a person."
+enum UnattendedMode {
+	"A person answers every approval and question."
+	OFF
+	"Nothing waits for a person."
+	ALL
+	"The named yolo profile says which prompts still reach a person."
+	PROFILE
+}
+
 "What a checkpoint does when nobody is watching."
 enum UnattendedPolicy {
 	"Taken as approved, and the run carries on."
@@ -15853,6 +18304,17 @@ input UnattendedPolicyFilter {
 	notIn: [UnattendedPolicy!]
 	"Match where there is no value at all."
 	isNull: Boolean
+}
+
+"""
+How much of a run goes ahead without a person. Exactly one member;
+leaving `unattended` out means a person answers everything.
+"""
+input UnattendedWrite @oneOf {
+	"`true` waives every prompt; `false` waives none."
+	all: Boolean
+	"Waive the prompts the named profile in `yolo.toml` waives."
+	profile: String
 }
 
 """
@@ -16385,6 +18847,41 @@ type UpsertYoloProfileResult {
 	isNew: Boolean!
 }
 
+"A `url` input: an http or https URL."
+type UrlInputTypeOutput {
+	"What values it takes, in words."
+	summary: String!
+}
+
+"A `url` input's value."
+type UrlValueOutput {
+	"The URL."
+	url: String!
+	"The value as a region shows it."
+	asText: String!
+}
+
+"One `validate_spawn` call: a spawn checked and not started."
+type ValidateSpawnCallOutput implements ToolCall {
+	"Tool name, exactly as the model called it."
+	toolName: String!
+	"What the tool does, as this build describes it."
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"The call's arguments."
+	args: SpawnAgentArgsOutput!
+}
+
+"""
+What `validateSpawn` answers with: the run the request would start, in
+brief, or every reason it would be refused.
+"""
+union ValidateSpawnResult = SpawnSummaryOutput | SpawnRejectedOutput
+
 """
 What a validation found.
 
@@ -16426,6 +18923,12 @@ input ValidatorErrorPolicyFilter {
 	isNull: Boolean
 }
 
+"A stage was entered again."
+type VisitsChangeOutput {
+	"Every stage's count now."
+	visits: [StageVisitCountOutput!]!
+}
+
 "Arguments for the `wait_for_agent` tool."
 type WaitForAgentArgsOutput {
 	"The agent waited for, by its live id."
@@ -16445,6 +18948,12 @@ type WaitForAgentCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: WaitForAgentArgsOutput!
+}
+
+"The run started or stopped waiting."
+type WaitReasonChangeOutput {
+	"Why it waits now. Null when it no longer does."
+	waitReason: String
 }
 
 """
@@ -16669,6 +19178,12 @@ type WriteFileCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: WriteFileArgsOutput!
+}
+
+"The run wrote something."
+type WrittenChangeOutput {
+	"The bytes it has written now."
+	writtenBytes: BigInt!
 }
 
 """
@@ -17047,23 +19562,6 @@ input YoloWaiverFilter {
 	notIn: [YoloWaiver!]
 	"Match where there is no value at all."
 	isNull: Boolean
-}
-
-"""
-How a run answers prompts it would otherwise put to a person.
-
-Exactly one of the two: a blanket waiver, or the named profile that says
-which prompts are waived. Both at once is two answers to one question, and
-the schema says so rather than the server refusing it after the fact.
-"""
-input YoloWrite @oneOf {
-	"""
-	Waive every prompt. Refused outright on a server started with
-	`--no-remote-yolo`.
-	"""
-	everything: Boolean
-	"Waive the prompts the named profile in `yolo.toml` waives."
-	profileName: String
 }
 
 "Directs the executor to include this field or fragment only when the `if` argument is true."

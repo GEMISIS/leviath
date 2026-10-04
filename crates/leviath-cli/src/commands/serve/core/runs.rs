@@ -8,8 +8,8 @@
 //! cursor, which is the point: a run that a REST filter keeps and a GraphQL
 //! filter drops would be a bug nobody could explain.
 //!
-//! Every listing starts from the shared run index (`run_index`), which parses
-//! a `meta.json` only when its stat changes, so a page of fifty costs a stat
+//! Every listing starts from the shared run index (`run_index`), which reads
+//! a run file only when its stat changes, so a page of fifty costs a stat
 //! per live run rather than a parse of every run on the machine.
 //! [`MAX_SEARCH_SCAN`] bounds the half of search that reads files.
 
@@ -159,7 +159,7 @@ pub(crate) enum ParentFilter {
     /// and what makes `total` a count of the rows a client will actually draw.
     Roots,
     /// `parent=<run_id>`: that run's direct children. `GET
-    /// /api/agents/{id}/children` answers the same question in one unpaged,
+    /// /api/runs/{id}/children` answers the same question in one unpaged,
     /// unsorted array, which a fan-out of two hundred workers has no windowed
     /// form of.
     Of(String),
@@ -756,7 +756,7 @@ pub(crate) fn deletable(id: &str, force: bool) -> Result<(), super::error::Serve
             "Run '{id}' is {}; cancel it before deleting it",
             meta.status
         ))),
-        // A run whose `meta.json` will not parse says nothing about whether it
+        // A run whose run file will not read says nothing about whether it
         // is finished, and "cannot read it" must not quietly read as "finished".
         // An unparseable record is what a *live* run looks like to a binary
         // whose `RunMeta` has moved on, and the failure mode there is deleting a

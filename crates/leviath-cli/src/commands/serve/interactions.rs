@@ -3,28 +3,40 @@
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use leviath_core::interaction::{ApprovalScope, InteractionResponse};
+use leviath_core::interaction::{
+    AnswerOption, ApprovalScope, InteractionRequest, InteractionResponse,
+};
 
 use super::types::*;
 
-/// `GET /api/agents/{id}/interaction`: the open interaction the daemon has for
-/// this agent, if any (from the in-memory interaction hub).
+/// An open request as the API shows it: the request, and each option it
+/// offers with its word, its label, the number it is listed under and the
+/// `lev respond` command that answers with it.
+#[derive(serde::Serialize)]
+struct ShownRequest<'a> {
+    #[serde(flatten)]
+    request: &'a InteractionRequest,
+    answer_options: Vec<AnswerOption>,
+}
+
+/// `GET /api/runs/{id}/interaction`: the open interaction the daemon has for
+/// this agent, if any (from the in-memory interaction hub). A run the daemon
+/// holds off this machine is a 409 saying so: its question cannot be
+/// answered until the run is back.
 pub(super) async fn get_interaction(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let open = super::core::spawn::open_interactions(&state)
+    let request = super::core::spawn::run_interaction(&state, &id)
         .await
         .map_err(|e| super::core::error::as_api_error(&e))?;
-    match open.into_iter().find(|(agent_id, _)| agent_id == &id) {
-        Some((_, request)) => Ok(Json(
-            serde_json::to_value(&request).unwrap_or(serde_json::Value::Null),
-        )),
-        None => Err(err(
-            StatusCode::NOT_FOUND,
-            "No pending interaction".to_string(),
-        )),
-    }
+    Ok(Json(
+        serde_json::to_value(ShownRequest {
+            request: &request,
+            answer_options: leviath_core::interaction::answer_options(&request),
+        })
+        .unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 /// Read an approval scope off the wire.
@@ -41,7 +53,7 @@ fn approval_scope_from_wire(s: &str) -> ApprovalScope {
     }
 }
 
-/// `POST /api/agents/{id}/interaction`: answer an open interaction. The request
+/// `POST /api/runs/{id}/interaction`: answer an open interaction. The request
 /// id in the body selects the interaction (globally unique in the daemon);
 /// the run in the path is where a `parts` list or a `@path` in the answer
 /// finds its files.
@@ -74,20 +86,52 @@ pub(super) async fn submit_interaction(
         body.value = Some(kept);
         parts.extend(named);
     }
-    let scope = body.scope.as_deref().map(approval_scope_from_wire);
-    let response = InteractionResponse {
-        request_id: body.request_id,
-        value: body.value,
-        choice_index: body.choice_index,
-        approved: body.approved,
-        scope,
-        feedback: body.feedback,
-        parts,
+    let response = match body.option.as_deref() {
+        Some(word) => option_response(&state, &body, word).await?,
+        None => InteractionResponse {
+            scope: body.scope.as_deref().map(approval_scope_from_wire),
+            request_id: body.request_id,
+            value: body.value,
+            choice_index: body.choice_index,
+            approved: body.approved,
+            feedback: body.feedback,
+            parts,
+        },
     };
     super::core::spawn::answer_interaction(&state, response)
         .await
         .map(|()| StatusCode::ACCEPTED)
         .map_err(|e| super::core::error::as_api_error(&e))
+}
+
+/// The response an `option` answer names: the word of one of the open
+/// request's options, read against that request.
+///
+/// The word is a whole answer, so it travels alone, or beside `feedback` on a
+/// deny; and only the request knows what a choice's word means, so it is read
+/// against the one that is open under `request_id`.
+async fn option_response(
+    state: &AppState,
+    body: &SubmitInteractionReq,
+    word: &str,
+) -> Result<InteractionResponse, ApiError> {
+    if body.value.is_some()
+        || body.choice_index.is_some()
+        || body.approved.is_some()
+        || body.scope.is_some()
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "`option` is a whole answer: send it without `value`, `choice_index`, `approved` \
+             or `scope`"
+                .to_string(),
+        ));
+    }
+    let request = super::core::spawn::open_request(state, &body.request_id)
+        .await
+        .map_err(|e| super::core::error::as_api_error(&e))?;
+    leviath_core::interaction::answer_with_option(&request, word, body.feedback.as_deref())
+        .map_err(|why| err(StatusCode::BAD_REQUEST, why))
 }
 
 /// The parts a request names inside run `id`'s workdir, by `listed` and by
@@ -119,7 +163,7 @@ fn workdir_parts(
     }
 }
 
-/// `POST /api/agents/{id}/message`: deliver a message to a running agent.
+/// `POST /api/runs/{id}/message`: deliver a message to a running agent.
 pub(super) async fn send_message(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -171,10 +215,14 @@ mod tests {
         };
         Router::new()
             .route(
+                "/api/runs/{id}/interaction",
+                get(get_interaction).post(submit_interaction),
+            )
+            .route(
                 "/api/agents/{id}/interaction",
                 get(get_interaction).post(submit_interaction),
             )
-            .route("/api/agents/{id}/message", post(send_message))
+            .route("/api/runs/{id}/message", post(send_message))
             .with_state(state)
     }
 
@@ -231,7 +279,7 @@ mod tests {
         let control = ControlClient::for_home(id, dir.path()).with_build("this-build");
         let req = Request::builder()
             .method("GET")
-            .uri("/api/agents/a1/interaction")
+            .uri("/api/runs/a1/interaction")
             .body(Body::empty())
             .unwrap();
         let response = app_with(control).oneshot(req).await.unwrap();
@@ -258,7 +306,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "GET",
-                "/api/agents/a1/interaction",
+                "/api/runs/a1/interaction",
                 Body::empty()
             )
             .await,
@@ -275,7 +323,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "GET",
-                "/api/agents/none/interaction",
+                "/api/runs/none/interaction",
                 Body::empty()
             )
             .await,
@@ -290,7 +338,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "GET",
-                "/api/agents/a/interaction",
+                "/api/runs/a/interaction",
                 Body::empty()
             )
             .await,
@@ -304,7 +352,7 @@ mod tests {
             status_of(
                 app_with(no_daemon()),
                 "GET",
-                "/api/agents/a/interaction",
+                "/api/runs/a/interaction",
                 Body::empty()
             )
             .await,
@@ -331,7 +379,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "POST",
-                "/api/agents/a/interaction",
+                "/api/runs/a/interaction",
                 Body::from(r#"{"request_id":"q1","scope":"once","value":"hi"}"#),
             )
             .await,
@@ -353,7 +401,7 @@ mod tests {
         let status = status_of(
             app_with(control),
             "POST",
-            "/api/agents/a/interaction",
+            "/api/runs/a/interaction",
             Body::from(body),
         )
         .await;
@@ -394,7 +442,7 @@ mod tests {
         // No daemon: the refusal happens before one would be asked.
         let req = Request::builder()
             .method("POST")
-            .uri("/api/agents/a/interaction")
+            .uri("/api/runs/a/interaction")
             .header("content-type", "application/json")
             .body(Body::from(
                 r#"{"request_id":"q1","approved":true,"feedback":"why"}"#,
@@ -414,7 +462,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "POST",
-                "/api/agents/a/interaction",
+                "/api/runs/a/interaction",
                 Body::from(r#"{"request_id":"q1","scope":"session","approved":true}"#),
             )
             .await,
@@ -426,12 +474,13 @@ mod tests {
     async fn submit_interaction_unexpected_is_500() {
         let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
             run_id: "x".to_string(),
+            warnings: Default::default(),
         });
         assert_eq!(
             status_of(
                 app_with(control),
                 "POST",
-                "/api/agents/a/interaction",
+                "/api/runs/a/interaction",
                 Body::from(r#"{"request_id":"q1"}"#),
             )
             .await,
@@ -445,11 +494,178 @@ mod tests {
             status_of(
                 app_with(no_daemon()),
                 "POST",
-                "/api/agents/a/interaction",
+                "/api/runs/a/interaction",
                 Body::from(r#"{"request_id":"q1"}"#),
             )
             .await,
             StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    // ─── answering with an option's word ─────────────────────────────────────
+
+    /// Post `body` to a daemon holding `open` under `ask-1`: the status, the
+    /// body of the reply, and the answer the daemon was handed, if any.
+    async fn option_answer(
+        open: InteractionRequest,
+        body: &'static str,
+    ) -> (StatusCode, String, Option<serde_json::Value>) {
+        use leviath_runtime::control_socket::ControlRequest;
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&captured);
+        let (control, _dir, _srv) =
+            crate::commands::serve::testutil::busy_daemon(move |req| match req {
+                ControlRequest::ListInteractions => ControlResponse::Interactions {
+                    interactions: vec![("a".to_string(), open.clone())],
+                },
+                // Asked on a miss, for whether a held run asked it: none did.
+                ControlRequest::List => crate::commands::serve::core::held::listing(Vec::new()),
+                other => {
+                    let seen = serde_json::to_value(&other).unwrap()["response"].clone();
+                    *sink.lock().unwrap() = Some(seen);
+                    ControlResponse::Ok { ok: true }
+                }
+            });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/runs/a/interaction")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app_with(control).oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let seen = captured.lock().unwrap().take();
+        (status, String::from_utf8_lossy(&bytes).to_string(), seen)
+    }
+
+    fn approval() -> InteractionRequest {
+        InteractionRequest::tool_approval("ask-1", "bash", serde_json::json!({}), "s", &[])
+    }
+
+    /// Every kind with options answers to the word the listing gives it, and
+    /// the daemon is handed the decision that word names.
+    #[tokio::test]
+    async fn an_option_word_answers_with_that_option() {
+        let (status, _, seen) =
+            option_answer(approval(), r#"{"request_id":"ask-1","option":"allow-run"}"#).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let seen = seen.expect("answered");
+        assert_eq!(seen["approved"], true);
+        assert_eq!(seen["scope"], "session");
+
+        let (status, _, seen) = option_answer(
+            approval(),
+            r#"{"request_id":"ask-1","option":"deny","feedback":"read it first"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let seen = seen.expect("answered");
+        assert_eq!(seen["approved"], false);
+        assert_eq!(seen["feedback"], "read it first");
+
+        let choice = InteractionRequest::multiple_choice(
+            "ask-1",
+            "Pick",
+            vec!["Postgres".to_string(), "SQLite".to_string()],
+            "s",
+        );
+        let (status, _, seen) =
+            option_answer(choice, r#"{"request_id":"ask-1","option":"sqlite"}"#).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(seen.expect("answered")["choice_index"], 1);
+
+        let confirm = InteractionRequest::confirm("ask-1", "Sure?", "s");
+        let (status, _, seen) =
+            option_answer(confirm, r#"{"request_id":"ask-1","option":"no"}"#).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(seen.expect("answered")["approved"], false);
+    }
+
+    /// A word the request does not offer is a 400 listing the ones it does,
+    /// and nothing reaches the daemon's answer path.
+    #[tokio::test]
+    async fn a_word_the_request_does_not_offer_is_refused_with_the_ones_it_does() {
+        let (status, text, seen) =
+            option_answer(approval(), r#"{"request_id":"ask-1","option":"maybe"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            text.contains("answer allow, allow-stage, allow-run, deny or deny-feedback (or 1-5)"),
+            "{text}"
+        );
+        assert!(seen.is_none());
+
+        let text_q = InteractionRequest::free_text("ask-1", "Why?", "s", true);
+        let (status, text, seen) =
+            option_answer(text_q, r#"{"request_id":"ask-1","option":"allow"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(text.contains("is a text question"), "{text}");
+        assert!(seen.is_none());
+
+        let (status, _, seen) =
+            option_answer(approval(), r#"{"request_id":"gone","option":"allow"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(seen.is_none());
+    }
+
+    /// The word is a whole answer: beside another one it is a 400 before the
+    /// daemon is asked anything.
+    #[tokio::test]
+    async fn an_option_word_beside_another_answer_is_refused() {
+        for body in [
+            r#"{"request_id":"ask-1","option":"allow","value":"x"}"#,
+            r#"{"request_id":"ask-1","option":"allow","choice_index":0}"#,
+            r#"{"request_id":"ask-1","option":"allow","approved":true}"#,
+            r#"{"request_id":"ask-1","option":"allow","scope":"stage"}"#,
+        ] {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/runs/a/interaction")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = app_with(no_daemon()).oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+        // Alone, the word is read against the open request, so with no daemon
+        // to read it from the answer is a 503 rather than a guess.
+        assert_eq!(
+            status_of(
+                app_with(no_daemon()),
+                "POST",
+                "/api/runs/a/interaction",
+                Body::from(r#"{"request_id":"ask-1","option":"allow"}"#),
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// The open request comes with its options, each under the word, the
+    /// number and the command that answer with it.
+    #[tokio::test]
+    async fn the_open_request_lists_its_options_with_their_words() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Interactions {
+            interactions: vec![("a1".to_string(), approval())],
+        });
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/runs/a1/interaction")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app_with(control).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let shown: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(shown["id"], "ask-1");
+        assert_eq!(
+            shown["answer_options"][1],
+            serde_json::json!({
+                "id": "allow-stage",
+                "label": "Allow for this stage (nothing reusable - it will ask again)",
+                "number": 2,
+                "answer": "lev respond ask-1 allow-stage",
+            })
         );
     }
 
@@ -461,7 +677,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "POST",
-                "/api/agents/a/message",
+                "/api/runs/a/message",
                 Body::from(r#"{"message":"hi"}"#),
             )
             .await,
@@ -483,7 +699,7 @@ mod tests {
         });
         let req = Request::builder()
             .method("POST")
-            .uri(format!("/api/agents/{run_id}/message"))
+            .uri(format!("/api/runs/{run_id}/message"))
             .header("content-type", content_type)
             .body(Body::from(body))
             .unwrap();
@@ -583,7 +799,7 @@ mod tests {
         });
         let req = Request::builder()
             .method("POST")
-            .uri(format!("/api/agents/{run_id}/interaction"))
+            .uri(format!("/api/runs/{run_id}/interaction"))
             .header("content-type", content_type)
             .body(Body::from(body))
             .unwrap();
@@ -689,7 +905,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "POST",
-                "/api/agents/a/message",
+                "/api/runs/a/message",
                 Body::from(r#"{"message":"hi","target_region":"conversation"}"#),
             )
             .await,
@@ -708,7 +924,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "POST",
-                "/api/agents/a/message",
+                "/api/runs/a/message",
                 Body::from(r#"{"message":"hi"}"#),
             )
             .await,
@@ -722,11 +938,102 @@ mod tests {
             status_of(
                 app_with(no_daemon()),
                 "POST",
-                "/api/agents/a/message",
+                "/api/runs/a/message",
                 Body::from(r#"{"message":"hi"}"#),
             )
             .await,
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    // ─── a held run's question ───────────────────────────────────────────────
+
+    /// A daemon holding run `held-1` off this machine, with its question
+    /// `held-1-ask-1` on its file: nothing is open, and an answer finds
+    /// nothing.
+    fn holding_daemon() -> (
+        ControlClient,
+        tempfile::TempDir,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use crate::commands::serve::core::held::{listing, seed_held};
+        let reply = listing(vec![seed_held("held-1", "held-1-ask-1")]);
+        crate::commands::serve::testutil::busy_daemon(move |req| match req {
+            leviath_runtime::control_socket::ControlRequest::List => reply.clone(),
+            leviath_runtime::control_socket::ControlRequest::ListInteractions => {
+                ControlResponse::Interactions {
+                    interactions: Vec::new(),
+                }
+            }
+            _ => ControlResponse::Ok { ok: false },
+        })
+    }
+
+    /// The status and body text `method uri` answers with.
+    async fn answered(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: &'static str,
+    ) -> (StatusCode, String) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    /// Reading or answering a held run's question, on the routes and on their
+    /// `/api/agents` twins, is a 409 saying the run is held and what to put
+    /// back, not a 404 saying there is no such question.
+    #[tokio::test]
+    async fn a_held_runs_question_is_a_409_saying_why() {
+        crate::runstate::with_isolated_runs_dir_async("rest-held", |_d| async {
+            for base in ["/api/runs", "/api/agents"] {
+                for (method, body) in [
+                    ("GET", ""),
+                    ("POST", r#"{"request_id":"held-1-ask-1","value":"blue"}"#),
+                    ("POST", r#"{"request_id":"held-1-ask-1","option":"red"}"#),
+                ] {
+                    let (control, _dir, _srv) = holding_daemon();
+                    let uri = format!("{base}/held-1/interaction");
+                    let (status, text) = answered(app_with(control), method, &uri, body).await;
+                    assert_eq!(
+                        status,
+                        StatusCode::CONFLICT,
+                        "{method} {uri} {body}: {text}"
+                    );
+                    let error = serde_json::from_str::<serde_json::Value>(&text).unwrap()["error"]
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+                    assert!(error.contains("run 'held-1'"), "{error}");
+                    assert!(error.contains("configure 'openai' again"), "{error}");
+                    assert!(error.contains("new id"), "{error}");
+                }
+            }
+            // Any other run, and any other question, is still not found.
+            let (control, _dir, _srv) = holding_daemon();
+            let (status, _) =
+                answered(app_with(control), "GET", "/api/runs/other/interaction", "").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            let (control, _dir, _srv) = holding_daemon();
+            let (status, _) = answered(
+                app_with(control),
+                "POST",
+                "/api/runs/held-1/interaction",
+                r#"{"request_id":"other","value":"blue"}"#,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        })
+        .await;
     }
 }

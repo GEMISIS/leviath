@@ -104,7 +104,7 @@ impl UrlSigner {
 /// routes that serve file bytes and nothing else: no listing, no run record, no
 /// config, and nothing that writes.
 pub(super) fn is_signable(path: &str) -> bool {
-    let bytes = path.starts_with("/api/agents/")
+    let bytes = path.starts_with("/api/runs/")
         && (path.contains("/blobs/")
             || path.contains("/artifacts/")
             || path.ends_with("/files/raw"));

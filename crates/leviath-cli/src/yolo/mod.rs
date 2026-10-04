@@ -73,7 +73,7 @@ impl fmt::Display for YoloError {
             ),
             YoloError::NoFile { name, path } => write!(
                 f,
-                "--yolo={name} names a profile, but {} does not exist; `lev yolo init` writes an \
+                "the yolo profile {name:?} was asked for, but {} does not exist; `lev yolo init` writes an \
                  example to start from",
                 path.display()
             ),

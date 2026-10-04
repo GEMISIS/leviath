@@ -2,15 +2,22 @@
 
 use clap::Args;
 use leviath_providers::InferenceRequest;
+use leviath_runtime::spec::graph::{CodeRef, RegionKind, RegionLayoutDef, RunGraph, StageDef};
+use leviath_runtime::spec::inputs::InputSlot;
 use leviath_runtime::{ContextWindow, ProviderRegistry, context_setup};
+use leviath_scripting::region_hook::RegionScript;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::Config;
-use leviath_core::manifest::parse_manifest;
 use leviath_core::truncate_at_boundary;
+
+/// Compiled custom-region scripts, keyed the way the context window looks
+/// them up: a file's path as written, or inline code's own text.
+type RegionScripts = HashMap<String, Arc<RegionScript>>;
 
 /// Arguments for `lev test`.
 #[derive(Args)]
@@ -156,11 +163,11 @@ async fn execute_with_registry(
 
     let project_path = Path::new(&path);
 
-    // Verify agent.leviath exists
-    let manifest_path = project_path.join(leviath_core::files::MANIFEST_FILENAME);
-    if !manifest_path.exists() {
+    let blueprint_path = project_path.join(leviath_blueprint::FILE_NAME);
+    if !blueprint_path.exists() {
         anyhow::bail!(
-            "No agent.leviath found in '{}'. Not an agent project.",
+            "No {} found in '{}'. Not an agent project.",
+            leviath_blueprint::FILE_NAME,
             project_path.display()
         );
     }
@@ -186,22 +193,17 @@ async fn execute_with_registry(
         println!("Dry run mode: validating test structure only (no API calls)\n");
     }
 
-    // Parse blueprint and set up providers (only if not dry_run)
-    let manifest_content = fs::read_to_string(&manifest_path)?;
-    let blueprint = parse_manifest(&manifest_content)?;
+    // Read and check the blueprint the way a spawn would: the graph holds
+    // together, and every piece of code it names compiles.
+    let loaded = leviath_blueprint::validate(&blueprint_path)?;
+    let graph = &loaded.graph;
 
-    // Custom regions' Rhai scripts, resolved exactly as a real spawn would
-    // (blueprint-dir-relative, compile-checked, hard error) - `lev test` is
-    // precisely the preview loop where a hook author wants the hook to run.
-    let region_scripts =
-        crate::daemon::spawn::resolve_region_scripts(&blueprint, &manifest_path.to_string_lossy())
-            .map_err(|e| anyhow::anyhow!(e))?;
-    // Output validators and stage hook scripts are hard spawn errors too, so
-    // the preview loop checks them the same way; only the compile verdict is
-    // wanted here, the compiled scripts themselves run at spawn.
-    crate::daemon::spawn::resolve_output_validators(&blueprint, &manifest_path.to_string_lossy())
-        .map_err(|e| anyhow::anyhow!(e))?;
-    crate::daemon::spawn::resolve_stage_hook_scripts(&blueprint, &manifest_path.to_string_lossy())
+    // Custom regions' scripts, read beside the blueprint and compiled: `lev
+    // test` is the preview loop where a hook author wants the hook to run.
+    let region_scripts = region_scripts(graph, &loaded.base_dir)?;
+    // Output validators and stage hooks are hard spawn errors too, so the
+    // preview loop checks them the same way; only the verdict is wanted here.
+    crate::daemon::spawn::check_graph_code(graph, &loaded.base_dir)
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let registry = if !args.dry_run {
@@ -259,7 +261,7 @@ async fn execute_with_registry(
                     let registry = registry
                         .as_ref()
                         .expect("registry should exist in non-dry-run");
-                    match run_test_case(&blueprint, registry, test_case, &region_scripts).await {
+                    match run_test_case(graph, registry, test_case, &region_scripts).await {
                         Ok(true) => {
                             passed += 1;
                             println!("  PASS: {}", test_case.name);
@@ -363,7 +365,7 @@ fn resolved_max_tokens(case_cap: Option<usize>, ceiling: usize) -> usize {
 /// `lev test` drives one inference, so this is the same set the first turn of a
 /// real run would see - which is what makes `expect_tool_call` mean the same
 /// thing here as it does in production.
-fn stage_tools(stage: &leviath_core::Stage) -> Vec<leviath_providers::Tool> {
+fn stage_tools(stage: &StageDef) -> Vec<leviath_providers::Tool> {
     // Built over a throwaway workdir: `lev test` never executes a tool, it only
     // needs the definitions so the model can choose to call one.
     let builtins =
@@ -374,35 +376,164 @@ fn stage_tools(stage: &leviath_core::Stage) -> Vec<leviath_providers::Tool> {
     // cut mean here what they mean in a run. No MCP servers and no scripts
     // are behind it: a test drives one inference, not a tool.
     let owners = leviath_runtime::pipeline::ToolOwners::new();
+    let granted = leviath_runtime::bind::host::stage_grants(stage, &owners);
+    let required: Vec<String> = stage
+        .required_tools
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     leviath_runtime::pipeline::filter_tools_for_stage(
         leviath_runtime::pipeline::ToolCatalog {
             defs: &defs,
             owners: &owners,
         },
-        &stage.available_tools,
-        &stage.required_tools,
+        &granted,
+        &required,
         false,
     )
+}
+
+/// Read and compile every custom region's script the graph names, in its own
+/// layout and each stage's, keyed the way the context window looks them up.
+/// A file is read from `base`, the blueprint's directory, and never from
+/// outside it. One script shared by several regions is compiled once.
+fn region_scripts(graph: &RunGraph, base: &Path) -> anyhow::Result<RegionScripts> {
+    let mut scripts = RegionScripts::new();
+    let layouts =
+        std::iter::once(&graph.layout).chain(graph.stages.iter().filter_map(|s| s.layout.as_ref()));
+    for region in layouts.flat_map(|l| &l.regions) {
+        let RegionKind::Custom { code, .. } = &region.kind else {
+            continue;
+        };
+        let key = match code {
+            CodeRef::File(path) => path.clone(),
+            CodeRef::Inline(source) => source.clone(),
+        };
+        if scripts.contains_key(&key) {
+            continue;
+        }
+        let bytes = leviath_runtime::bind::host::read_code(code, Some(base))
+            .map_err(|e| anyhow::anyhow!("region '{}': {e}", region.name))?;
+        let compiled =
+            leviath_scripting::region_hook::compile(&key, &String::from_utf8_lossy(&bytes))
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "region '{}': custom region script failed to compile: {e}",
+                        region.name
+                    )
+                })?;
+        scripts.insert(key, Arc::new(compiled));
+    }
+    Ok(scripts)
+}
+
+/// The region a test case's input lands in: where the graph's `task` input
+/// binds, else a pinned region named `task`, else the first pinned region.
+fn task_region(graph: &RunGraph, layout: &RegionLayoutDef) -> Option<String> {
+    let declared = |name: &str| layout.regions.iter().any(|r| r.name.as_str() == name);
+    let bound = graph
+        .inputs
+        .iter()
+        .filter(|i| i.name.as_str() == "task")
+        .flat_map(|i| &i.binds)
+        .find_map(|slot| match slot {
+            InputSlot::Region(binding) if declared(binding.region.as_str()) => {
+                Some(binding.region.to_string())
+            }
+            _ => None,
+        });
+    let pinned: Vec<&str> = layout
+        .regions
+        .iter()
+        .filter(|r| matches!(r.kind, RegionKind::Pinned))
+        .map(|r| r.name.as_str())
+        .collect();
+    bound.or_else(|| {
+        pinned
+            .iter()
+            .find(|name| **name == "task")
+            .or(pinned.first())
+            .map(|name| name.to_string())
+    })
+}
+
+/// Lay `window` out from `layout`, every budget resolved against a model
+/// window of `context_window` tokens, add the `tool_results` and
+/// `conversation` regions a run always has, and write `task` into the region
+/// [`task_region`] picks, trimmed to fit it.
+fn seed_window(
+    window: &mut ContextWindow,
+    graph: &RunGraph,
+    layout: &RegionLayoutDef,
+    context_window: usize,
+    task: &str,
+) {
+    for def in &layout.regions {
+        let budget = def.budget.resolve(context_window);
+        window.add_region(context_setup::region_from_def(def, budget));
+    }
+    if window.get_region("tool_results").is_none() {
+        window.add_region(leviath_core::Region::new(
+            "tool_results".to_string(),
+            leviath_core::RegionKind::Temporary,
+            5000,
+        ));
+    }
+    if window.get_region("conversation").is_none() {
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            10000,
+        ));
+    }
+    let Some(region) = task_region(graph, layout) else {
+        return;
+    };
+    let budget = window.get_region(&region).map_or(0, |r| r.max_tokens);
+    // The token estimate is `len / 4 + 1`, so this is the most text that fits.
+    let room = budget.saturating_sub(1).saturating_mul(4);
+    let fitted = truncate_at_boundary(task, room).to_string();
+    let tokens = leviath_core::estimate_tokens(&fitted);
+    let _ = window.add_to_region(&region, fitted, tokens);
+}
+
+/// The provider and model a stage's test case runs on: the first model the
+/// stage lists, which must name its provider, since `lev test` has no
+/// operator preference to route an open entry by.
+fn stage_route(stage: &StageDef) -> anyhow::Result<(&str, &str)> {
+    let Some(first) = stage.model.models.first() else {
+        anyhow::bail!(
+            "stage '{}' names no model; `lev test` runs a stage's first model",
+            stage.name
+        );
+    };
+    let Some(provider) = &first.provider else {
+        anyhow::bail!(
+            "stage '{}' names {} with no provider; `lev test` needs the stage's first model as \
+             provider and model",
+            stage.name,
+            first.model
+        );
+    };
+    Ok((provider.as_str(), first.model.as_str()))
 }
 
 /// Run a single test case: build a one-off context window from the blueprint,
 /// run one inference against the resolved provider, and check the assertions.
 async fn run_test_case(
-    blueprint: &leviath_core::Blueprint,
+    graph: &RunGraph,
     registry: &ProviderRegistry,
     test: &TestCase,
-    region_scripts: &std::collections::HashMap<
-        String,
-        std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
-    >,
+    region_scripts: &RegionScripts,
 ) -> anyhow::Result<bool> {
-    // Model config comes from the first stage.
-    let stage = blueprint
-        .stages
-        .first()
+    // The case runs the stage a run starts in.
+    let stage = graph
+        .entry_stage()
         .ok_or(anyhow::anyhow!("Blueprint has no stages"))?;
-    let provider_name = stage.model.provider();
-    let model_name = stage.model.model();
+    let (provider_name, model_name) = stage_route(stage)?;
 
     let provider = registry.get(provider_name).ok_or_else(|| {
         anyhow::anyhow!(
@@ -418,18 +549,26 @@ async fn run_test_case(
     let mut extra = serde_json::Value::Null;
     registry.apply_retention_knobs(provider_name, &mut extra);
 
-    // Build a standalone context window from the blueprint's layout, seeding the
+    // Build a standalone context window from the stage's layout, seeding the
     // test input as the task, then assemble a single inference request. This
-    // mirrors what the ECS pipeline's spawner does, without the shared world:
-    // `lev test` only needs one inference to validate a stage's first response.
-    let mut window = ContextWindow::new(blueprint.context_layout.total_budget_tokens);
+    // mirrors what a spawn does, without the shared world: `lev test` only
+    // needs one inference to check a stage's first response. Percentage
+    // budgets resolve against the model's own window, and a layout with no
+    // total takes that window as its total.
+    let context_window = provider.max_context_tokens(model_name);
+    let layout = graph.layout_for(stage);
+    let total = match layout.total_budget_tokens {
+        0 => context_window,
+        n => n as usize,
+    };
+    let mut window = ContextWindow::new(total);
     window.region_scripts = region_scripts.clone();
-    context_setup::init_window(&mut window, blueprint, &test.input);
+    seed_window(&mut window, graph, layout, context_window, &test.input);
 
     // Assemble with real stage metadata so custom-region render hooks see
     // what a live run's first inference would (iteration 0).
     let assembled = window.assemble_with_meta(&leviath_runtime::custom_region::AssembleMeta {
-        stage_name: stage.name.clone(),
+        stage_name: stage.name.to_string(),
         stage_iterations: 0,
         model: model_name.to_string(),
         // One assembly, so there is no previous request to compare against.
@@ -533,6 +672,22 @@ fn truncate_str(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::test_support::{fixtures, with_tracing, write_test_agent};
+
+    /// The smallest blueprint `lev test` runs: one stage on a named provider,
+    /// a pinned region and a conversation. A test appends keys to its stage.
+    const MINIMAL_BLUEPRINT: &str = r#"
+[blueprint]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[graph]
+layout = { total_budget_tokens = 11000, regions = [{ name = "system", kind = "pinned", budget = 1000 }, { name = "conversation", kind = { kind = "sliding_window", max_items = 50 }, budget = 10000 }] }
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+"#;
 
     // ─── validate_test_case ────────────────────────────────────────────────
 
@@ -662,10 +817,11 @@ max_tokens = 500
         assert_eq!(test_file.test[1].max_tokens, Some(500));
     }
 
-    /// A minimal model config, since `Stage::new` needs one and these tests
-    /// never reach a provider.
-    fn test_model() -> leviath_core::blueprint::ModelConfig {
-        leviath_core::blueprint::ModelConfig::new("anthropic".to_string(), "m".to_string())
+    /// A stage granting `tools`, as a graph writes one.
+    fn stage_granting(tools: &[&str]) -> StageDef {
+        let list: Vec<String> = tools.iter().map(|t| format!("\"{t}\"")).collect();
+        toml::from_str(&format!("name = \"s\"\ntools = [{}]", list.join(", ")))
+            .expect("a stage table")
     }
 
     /// The bug these two fixes closed, pinned so it cannot reopen: both keys
@@ -696,8 +852,7 @@ max_tokens = 500
     /// the agent did.
     #[test]
     fn a_stage_advertises_its_tools_so_a_tool_call_is_possible() {
-        let mut stage = leviath_core::Stage::new("s".to_string(), test_model());
-        stage.available_tools = vec!["read_file".to_string(), "write_file".to_string()];
+        let stage = stage_granting(&["read_file", "write_file"]);
         let tools = stage_tools(&stage);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"read_file"), "got {names:?}");
@@ -708,30 +863,30 @@ max_tokens = 500
     /// text-assertion case is unchanged.
     #[test]
     fn a_stage_with_no_tools_advertises_none() {
-        let stage = leviath_core::Stage::new("s".to_string(), test_model());
-        assert!(stage_tools(&stage).is_empty());
+        assert!(stage_tools(&stage_granting(&[])).is_empty());
     }
 
     /// A name the builtins do not know is dropped rather than sent as a tool the
     /// provider would reject.
     #[test]
     fn an_unknown_tool_name_is_not_advertised() {
-        let mut stage = leviath_core::Stage::new("s".to_string(), test_model());
-        stage.available_tools = vec!["definitely_not_a_tool".to_string()];
-        assert!(stage_tools(&stage).is_empty());
+        assert!(stage_tools(&stage_granting(&["definitely_not_a_tool"])).is_empty());
     }
 
     /// The same resolver a run uses, so an alias and a group grant advertise
     /// here what they advertise there.
     #[test]
     fn an_alias_and_a_group_grant_resolve_as_in_a_run() {
-        let mut stage = leviath_core::Stage::new("s".to_string(), test_model());
-        stage.available_tools = vec!["bash".to_string()];
-        let names: Vec<String> = stage_tools(&stage).into_iter().map(|t| t.name).collect();
+        let names: Vec<String> = stage_tools(&stage_granting(&["bash"]))
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
         assert_eq!(names, vec!["shell"]);
 
-        stage.available_tools = vec!["@builtin".to_string()];
-        let names: Vec<String> = stage_tools(&stage).into_iter().map(|t| t.name).collect();
+        let names: Vec<String> = stage_tools(&stage_granting(&["@builtin"]))
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
         assert!(names.contains(&"read_file".to_string()), "got {names:?}");
         assert!(names.contains(&"write_file".to_string()), "got {names:?}");
         assert!(!names.contains(&"spawn_agent".to_string()), "got {names:?}");
@@ -766,16 +921,7 @@ expect_contains = "ok"
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
 
-        // Create minimal agent.leviath
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
 
         // Create tests directory with a test file
@@ -806,19 +952,9 @@ expect_contains = "world"
     async fn dry_run_rejects_an_output_validator_that_does_not_compile() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-
-[stages.main.output]
-format = "a2ui"
-validator = "shape.rhai"
-"#;
+        let manifest = &format!(
+            "{MINIMAL_BLUEPRINT}output = {{ format = \"a2ui\", validator = {{ file = \"shape.rhai\" }} }}\n"
+        );
         write_test_agent(project, manifest);
         std::fs::write(project.join("shape.rhai"), "fn validate(content) { ][ }").unwrap();
         std::fs::create_dir_all(project.join("tests")).unwrap();
@@ -838,18 +974,9 @@ validator = "shape.rhai"
     async fn dry_run_rejects_a_stage_hook_script_that_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-
-[stages.main.hooks]
-on_stage_enter = "missing.rhai"
-"#;
+        let manifest = &format!(
+            "{MINIMAL_BLUEPRINT}hooks = {{ on_stage_enter = {{ file = \"missing.rhai\" }} }}\n"
+        );
         write_test_agent(project, manifest);
         std::fs::create_dir_all(project.join("tests")).unwrap();
 
@@ -867,15 +994,7 @@ on_stage_enter = "missing.rhai"
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
 
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
 
         let args = TestArgs {
@@ -899,7 +1018,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         };
         let result = execute(args).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("agent.leviath"));
+        assert!(result.unwrap_err().to_string().contains("agent.toml"));
     }
 
     // ─── TestCase struct construction ──────────────────────────────────────
@@ -1005,15 +1124,7 @@ max_tokens = 500
     async fn dry_run_with_filter_matches() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1043,15 +1154,7 @@ expect_contains = "world"
     async fn dry_run_failing_test_case() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1134,15 +1237,7 @@ test = []
     async fn dry_run_with_filter_no_match() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1170,15 +1265,7 @@ expect_contains = "world"
     async fn dry_run_with_rhai_script_passing() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1199,15 +1286,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     async fn dry_run_with_rhai_script_returning_false() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1228,15 +1307,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     async fn dry_run_with_rhai_script_error() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1261,15 +1332,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     async fn dry_run_with_rhai_non_bool_result_passes() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1290,15 +1353,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     async fn dry_run_with_rhai_filter_matches() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1323,15 +1378,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     async fn dry_run_with_multiple_test_files() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1366,15 +1413,7 @@ expect_tool_call = "bar"
     async fn dry_run_with_invalid_toml_file() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1504,36 +1543,24 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         }
     }
 
-    fn basic_blueprint() -> leviath_core::Blueprint {
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
+    /// The run graph of an `agent.toml`'s text.
+    fn graph_of(text: &str) -> RunGraph {
+        leviath_blueprint::BlueprintFile::parse(text)
+            .expect("the fixture parses")
+            .run_graph()
+    }
 
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
-        parse_manifest(manifest).unwrap()
+    fn basic_blueprint() -> RunGraph {
+        graph_of(MINIMAL_BLUEPRINT)
     }
 
     /// Blueprint with an explicit `tool_results` region, so the
     /// `if window.get_region("tool_results").is_none()` branch is NOT taken.
-    fn blueprint_with_tool_results_region() -> leviath_core::Blueprint {
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-
-[context.regions.tool_results]
-kind = "temporary"
-max_tokens = 5000
-"#;
-        parse_manifest(manifest).unwrap()
+    fn blueprint_with_tool_results_region() -> RunGraph {
+        graph_of(&MINIMAL_BLUEPRINT.replace(
+            "regions = [",
+            "regions = [{ name = \"tool_results\", kind = \"temporary\", budget = 5000 }, ",
+        ))
     }
 
     /// A provider that records the request it receives, so a test can assert
@@ -1574,25 +1601,21 @@ max_tokens = 5000
     /// metadata - the preview a hook author iterates against.
     #[tokio::test]
     async fn run_test_case_renders_custom_region_through_its_script() {
-        let manifest = r#"
-[agent]
+        let blueprint = graph_of(
+            r#"
+[blueprint]
 name = "custom-test-agent"
 version = "0.1.0"
 description = "test"
 
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+[graph]
+layout = { total_budget_tokens = 8000, regions = [{ name = "task", kind = "pinned", budget = 4000 }, { name = "brain", kind = { kind = "custom", code = { file = "hooks/brain.rhai" } }, budget = 4000 }] }
 
-[context.regions.task]
-kind = "pinned"
-max_tokens = 4000
-
-[context.regions.brain]
-kind = "custom"
-script = "hooks/brain.rhai"
-max_tokens = 4000
-"#;
-        let blueprint = parse_manifest(manifest).unwrap();
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+"#,
+        );
         let scripts = std::collections::HashMap::from([(
             "hooks/brain.rhai".to_string(),
             std::sync::Arc::new(
@@ -1644,24 +1667,7 @@ max_tokens = 4000
     async fn execute_fails_fast_on_a_broken_custom_region_script() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        std::fs::write(
-            project.join("agent.leviath"),
-            r#"
-[agent]
-name = "broken-custom"
-version = "0.1.0"
-description = "d"
-
-[stages.main]
-model = { provider = "anthropic", model = "m" }
-
-[context.regions.brain]
-kind = "custom"
-script = "hooks/missing.rhai"
-max_tokens = 4000
-"#,
-        )
-        .unwrap();
+        write_test_agent(project, broken_custom_blueprint());
         std::fs::create_dir(project.join("tests")).unwrap();
         std::fs::write(
             project.join("tests/basic.toml"),
@@ -1676,6 +1682,153 @@ max_tokens = 4000
         let err = execute(args).await.unwrap_err().to_string();
         assert!(err.contains("region 'brain'"), "{err}");
         assert!(err.contains("hooks/missing.rhai"), "{err}");
+    }
+
+    /// A blueprint with one custom region whose script is a file in `hooks/`.
+    fn broken_custom_blueprint() -> &'static str {
+        r#"
+[blueprint]
+name = "broken-custom"
+version = "0.1.0"
+description = "d"
+
+[graph]
+layout = { total_budget_tokens = 4000, regions = [{ name = "brain", kind = { kind = "custom", code = { file = "hooks/missing.rhai" } }, budget = 4000 }] }
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+"#
+    }
+
+    /// A script that is there but does not compile is refused the same way,
+    /// naming the region.
+    #[test]
+    fn a_custom_region_script_that_does_not_compile_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("hooks")).unwrap();
+        std::fs::write(
+            dir.path().join("hooks/missing.rhai"),
+            "fn render(ctx) { ][ }",
+        )
+        .unwrap();
+        let err = region_scripts(&graph_of(broken_custom_blueprint()), dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("region 'brain'"), "{err}");
+        assert!(err.contains("failed to compile"), "{err}");
+    }
+
+    /// Every custom region is compiled, in the graph's layout and a stage's
+    /// own, once per script however many regions share it. Inline code is
+    /// keyed by its text, which is how the window looks it up.
+    #[test]
+    fn region_scripts_compile_each_script_once_wherever_it_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("hooks")).unwrap();
+        std::fs::write(
+            dir.path().join("hooks/brain.rhai"),
+            "fn render(ctx) { \"b\" }",
+        )
+        .unwrap();
+        let inline = "fn render(ctx) { \\\"i\\\" }";
+        let graph = graph_of(&format!(
+            r#"
+[blueprint]
+name = "shared"
+version = "0.1.0"
+
+[graph]
+layout = {{ total_budget_tokens = 4000, regions = [{{ name = "a", kind = {{ kind = "custom", code = {{ file = "hooks/brain.rhai" }} }}, budget = 1000 }}, {{ name = "b", kind = {{ kind = "custom", code = {{ file = "hooks/brain.rhai" }} }}, budget = 1000 }}, {{ name = "notes", kind = "pinned", budget = 1000 }}] }}
+
+[[graph.stages]]
+name = "main"
+layout = {{ total_budget_tokens = 1000, regions = [{{ name = "c", kind = {{ kind = "custom", code = {{ inline = "{inline}" }} }}, budget = 1000 }}] }}
+"#
+        ));
+        let scripts = region_scripts(&graph, dir.path()).unwrap();
+        let mut keys: Vec<&String> = scripts.keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["fn render(ctx) { \"i\" }", "hooks/brain.rhai"],
+            "one per script"
+        );
+    }
+
+    /// The task lands where the graph's `task` input binds; without one, in a
+    /// pinned `task` region, else the first pinned region, else nowhere.
+    #[test]
+    fn the_task_lands_where_the_graph_puts_it() {
+        let layout = |regions: &str| {
+            format!(
+                r#"
+[blueprint]
+name = "t"
+version = "0.1.0"
+
+[graph]
+layout = {{ total_budget_tokens = 4000, regions = [{regions}] }}
+stages = [{{ name = "main" }}]
+"#
+            )
+        };
+        let region = |name: &str, kind: &str| {
+            format!("{{ name = \"{name}\", kind = \"{kind}\", budget = 1000 }}")
+        };
+        let pick = |graph: &RunGraph| task_region(graph, &graph.layout);
+
+        let two_pinned = layout(&[region("notes", "pinned"), region("task", "pinned")].join(", "));
+        assert_eq!(pick(&graph_of(&two_pinned)).as_deref(), Some("task"));
+        let first_pinned =
+            layout(&[region("scratch", "clearable"), region("notes", "pinned")].join(", "));
+        assert_eq!(pick(&graph_of(&first_pinned)).as_deref(), Some("notes"));
+        assert_eq!(pick(&graph_of(&layout(&region("x", "clearable")))), None);
+
+        // A bound input wins, and a binding to a region the layout lacks
+        // (another stage's) or another slot falls through to the rule above.
+        let bound = format!(
+            "{}inputs = [{{ name = \"task\", type = \"text\", binds = [\"output_format\", {{ region = \"brief\" }}] }}]\n",
+            layout(&[region("task", "pinned"), region("brief", "clearable")].join(", "))
+        );
+        assert_eq!(pick(&graph_of(&bound)).as_deref(), Some("brief"));
+        let elsewhere = bound.replace("{ region = \"brief\" }", "{ region = \"gone\" }");
+        let mut graph = graph_of(&elsewhere.replace(
+            "stages = [{ name = \"main\" }]",
+            "stages = [{ name = \"main\", layout = { total_budget_tokens = 1000, regions = [{ name = \"gone\", kind = \"pinned\", budget = 1000 }] } }]",
+        ));
+        assert_eq!(pick(&graph).as_deref(), Some("task"));
+        graph.inputs[0].name = leviath_runtime::spec::names::InputName::new("other").unwrap();
+        assert_eq!(pick(&graph).as_deref(), Some("task"));
+    }
+
+    /// A stage `lev test` cannot route is refused with what to change: one
+    /// with no model, and one whose first model names no provider.
+    #[tokio::test]
+    async fn a_stage_with_no_routable_first_model_is_refused() {
+        let registry = ProviderRegistry::new();
+        let tc = TestCase {
+            name: "route".to_string(),
+            input: "hi".to_string(),
+            expect_contains: Some("x".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        let no_model = graph_of(&MINIMAL_BLUEPRINT.replace(
+            "model = { models = [{ provider = \"anthropic\", model = \"claude-sonnet-4-6\" }] }",
+            "",
+        ));
+        let err = run_test_case(&no_model, &registry, &tc, &Default::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names no model"), "{err}");
+        let open = graph_of(&MINIMAL_BLUEPRINT.replace("provider = \"anthropic\", ", ""));
+        let err = run_test_case(&open, &registry, &tc, &Default::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("with no provider"), "{err}");
     }
 
     // ── new coverage tests ────────────────────────────────────────────────────
@@ -1702,12 +1855,9 @@ max_tokens = 4000
     /// Covers the `ok_or(anyhow!("Blueprint has no stages"))` path.
     #[tokio::test]
     async fn run_test_case_blueprint_with_no_stages_errors() {
-        use leviath_core::{Blueprint, layout::ContextLayout};
-        let blueprint = Blueprint::new(
-            "no-stages".to_string(),
-            "test".to_string(),
-            vec![],
-            ContextLayout::new(vec![], 4096),
+        let blueprint = graph_of(
+            "[blueprint]\nname = \"no-stages\"\nversion = \"0.1.0\"\n\n[graph]\nstages = []\n\
+             layout = { total_budget_tokens = 4096, regions = [] }\n",
         );
         let registry = ProviderRegistry::new();
         let tc = TestCase {
@@ -1780,14 +1930,14 @@ max_tokens = 4000
         );
     }
 
-    /// Covers `fs::read_to_string(&manifest_path)?` failing by making
-    /// `agent.leviath` a *directory*: `exists()` passes the guard but the read
-    /// fails on every platform.
+    /// A blueprint that cannot be read fails the command: `agent.toml` is a
+    /// *directory*, so `exists()` passes the guard but the read fails on every
+    /// platform.
     #[tokio::test]
     async fn execute_with_registry_manifest_unreadable_errors() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        std::fs::create_dir_all(project.join("agent.leviath")).unwrap();
+        std::fs::create_dir_all(project.join(leviath_blueprint::FILE_NAME)).unwrap();
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         let args = TestArgs {
@@ -1807,15 +1957,7 @@ max_tokens = 4000
     async fn execute_with_registry_config_load_fails_errors() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1840,13 +1982,12 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         .await;
     }
 
-    /// Covers the `parse_manifest(&manifest_content)?` error path
-    /// in `execute_with_registry` (invalid TOML in agent.leviath).
+    /// A blueprint that is not valid TOML fails the command.
     #[tokio::test]
     async fn execute_with_registry_manifest_invalid_toml_errors() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        std::fs::write(project.join("agent.leviath"), "not valid toml {{{").unwrap();
+        write_test_agent(project, "not valid toml {{{");
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         let args = TestArgs {
@@ -1866,15 +2007,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     async fn execute_with_registry_tests_dir_unreadable_errors() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         // `tests` is a file, not a directory.
         std::fs::write(project.join("tests"), "not a dir").unwrap();
@@ -1894,15 +2027,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     async fn execute_with_registry_toml_unreadable_errors() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1923,15 +2048,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     async fn execute_with_registry_rhai_unreadable_errors() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -1945,23 +2062,15 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         assert!(result.is_err());
     }
 
-    /// A blueprint with no Pinned region still runs: `init_window` simply skips
-    /// seeding the task, and the inference proceeds.
+    /// A blueprint with no pinned region still runs: the task is simply not
+    /// seeded, and the inference proceeds. Its layout sets no total either,
+    /// so the window takes the model's own.
     #[tokio::test]
     async fn run_test_case_with_no_pinned_region_still_runs() {
-        use leviath_core::Blueprint;
-        use leviath_core::layout::ContextLayout;
-        let blueprint = Blueprint::new(
-            "no-regions".to_string(),
-            "test".to_string(),
-            vec![leviath_core::Stage::new(
-                "main".to_string(),
-                leviath_core::blueprint::ModelConfig::new(
-                    "anthropic".to_string(),
-                    "claude-sonnet-4-6".to_string(),
-                ),
-            )],
-            ContextLayout::new(vec![], 4096),
+        let blueprint = graph_of(
+            "[blueprint]\nname = \"no-regions\"\nversion = \"0.1.0\"\n\n[graph]\n\
+             layout = { total_budget_tokens = 0, regions = [] }\n\
+             stages = [{ name = \"main\", model = { models = [{ provider = \"anthropic\", model = \"claude-sonnet-4-6\" }] } }]\n",
         );
         let mut registry = ProviderRegistry::new();
         registry.register(
@@ -2252,15 +2361,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     }
 
     fn write_project_with_test_file(project: &std::path::Path, test_toml: &str) {
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
@@ -2308,8 +2409,8 @@ expect_contains = "world"
         // Covers the `unwrap_or_else(|| ".".to_string())` closure, never
         // invoked by any other test (all of which pass an explicit `path`).
         // `cargo test`'s cwd is this crate's own source directory, which
-        // has no `agent.leviath`, so this deterministically hits the
-        // "No agent.leviath found" bail - proving the closure ran without
+        // has no `agent.toml`, so this deterministically hits the
+        // "No agent.toml found" bail - proving the closure ran without
         // depending on (or mutating) any real project directory.
         let args = TestArgs {
             path: None,
@@ -2322,7 +2423,7 @@ expect_contains = "world"
             result
                 .unwrap_err()
                 .to_string()
-                .contains("No agent.leviath found")
+                .contains("No agent.toml found")
         );
     }
 
@@ -2458,19 +2559,13 @@ expect_contains = "x"
                 // Overwrite the manifest with a provider name the mock registry never
                 // registers, so `run_test_case`'s "not configured" error path fires
                 // (the `Err(e)` arm of `execute`'s match, not `Ok(false)`).
-                std::fs::write(
-                    project.join("agent.leviath"),
-                    r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "nonexistent-provider", model = "x" }
-"#,
-                )
-                .unwrap();
+                write_test_agent(
+                    project,
+                    MINIMAL_BLUEPRINT.replace(
+                        "provider = \"anthropic\", model = \"claude-sonnet-4-6\"",
+                        "provider = \"nonexistent-provider\", model = \"x\"",
+                    ),
+                );
 
                 let args = TestArgs {
                     path: Some(project.to_str().unwrap().to_string()),
@@ -2526,15 +2621,7 @@ model = { provider = "nonexistent-provider", model = "x" }
             |_fake_dir| async move {
                 let dir = tempfile::tempdir().unwrap();
                 let project = dir.path();
-                let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+                let manifest = MINIMAL_BLUEPRINT;
                 write_test_agent(project, manifest);
                 let tests_dir = project.join("tests");
                 std::fs::create_dir_all(&tests_dir).unwrap();
@@ -2562,15 +2649,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             |_fake_dir| async move {
                 let dir = tempfile::tempdir().unwrap();
                 let project = dir.path();
-                let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+                let manifest = MINIMAL_BLUEPRINT;
                 write_test_agent(project, manifest);
                 let tests_dir = project.join("tests");
                 std::fs::create_dir_all(&tests_dir).unwrap();
@@ -2599,15 +2678,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             |_fake_dir| async move {
                 let dir = tempfile::tempdir().unwrap();
                 let project = dir.path();
-                let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+                let manifest = MINIMAL_BLUEPRINT;
                 write_test_agent(project, manifest);
                 let tests_dir = project.join("tests");
                 std::fs::create_dir_all(&tests_dir).unwrap();
@@ -2636,15 +2707,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             |_fake_dir| async move {
                 let dir = tempfile::tempdir().unwrap();
                 let project = dir.path();
-                let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+                let manifest = MINIMAL_BLUEPRINT;
                 write_test_agent(project, manifest);
                 let tests_dir = project.join("tests");
                 std::fs::create_dir_all(&tests_dir).unwrap();
@@ -2674,15 +2737,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             |_fake_dir| async move {
                 let dir = tempfile::tempdir().unwrap();
                 let project = dir.path();
-                let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+                let manifest = MINIMAL_BLUEPRINT;
                 write_test_agent(project, manifest);
                 let tests_dir = project.join("tests");
                 std::fs::create_dir_all(&tests_dir).unwrap();
@@ -2762,15 +2817,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     async fn execute_with_registry_ignores_non_test_files_in_tests_dir() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "test"
-
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-"#;
+        let manifest = MINIMAL_BLUEPRINT;
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
