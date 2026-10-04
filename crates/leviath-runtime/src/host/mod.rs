@@ -768,3 +768,7 @@ impl WorldHost {
 #[cfg(test)]
 #[path = "../host_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../host_resume_tests.rs"]
+mod resume_tests;

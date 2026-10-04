@@ -192,6 +192,12 @@ pub(crate) enum Next {
 
 /// One model call in progress for an agent, from the first trip until the
 /// world applies what it came to.
+/// The remote jobs a run's model call has submitted, kept on the run so its
+/// file records them and a call made again after a restart polls them (see
+/// [`leviath_providers::jobs`]). Every run placed from a spec carries one.
+#[derive(Component, Clone, Default)]
+pub(crate) struct RemoteJobs(pub(crate) leviath_providers::jobs::JobLog);
+
 #[derive(Component)]
 pub(crate) struct InferenceCall {
     /// The provider being asked.
@@ -223,6 +229,8 @@ pub(crate) struct InferenceCall {
     renewed_files: bool,
     /// Whether the next trip uploads the request's files again.
     renew_next: bool,
+    /// The run's log of the remote jobs the call submits.
+    jobs: Option<leviath_providers::jobs::JobLog>,
 }
 
 impl InferenceCall {
@@ -240,6 +248,7 @@ impl InferenceCall {
             stream,
             hydration,
             journal,
+            jobs,
         } = job;
         let call = Self {
             provider,
@@ -256,6 +265,7 @@ impl InferenceCall {
             waited: Duration::ZERO,
             renewed_files: false,
             renew_next: false,
+            jobs,
         };
         (call, refused)
     }
@@ -287,6 +297,7 @@ impl InferenceCall {
             plan: self.journal.as_ref().map(|j| j.model_input.clone()),
             deadline: self.clock.deadline(),
             job_timeout: self.policy.job_timeout,
+            jobs: self.jobs.clone(),
         }
     }
 
@@ -349,6 +360,12 @@ impl InferenceCall {
         };
         if next == Next::Done {
             outcome.latency = self.clock.elapsed();
+            // The call is over, answered or failed: the jobs it submitted are
+            // spent, and the run's file drops them on the step that records
+            // how it ended.
+            if let Some(jobs) = &self.jobs {
+                jobs.clear();
+            }
         }
         next
     }

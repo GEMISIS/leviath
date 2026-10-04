@@ -89,6 +89,14 @@ pub struct PersistWatermark {
     /// effect: a run brought back from its file asks the checkpoint again
     /// otherwise, and the answer is lost.
     last_point: Option<(usize, usize, bool)>,
+    /// How many times the run's log of remote jobs had changed as of the last
+    /// snapshot.
+    ///
+    /// A provider records a job it submits while its call is still out,
+    /// moving nothing else, and the run's file has to hold it at once: a
+    /// restart before the call ends otherwise submits, and pays for, the
+    /// same job again.
+    last_jobs: Option<u64>,
 }
 
 impl PersistWatermark {
@@ -409,6 +417,7 @@ type PersistenceQuery = (
         // hosts) still persists; those runs simply keep no working clock and
         // fall back to wall-clock age when read.
         Option<&'static mut crate::persistence::RunClock>,
+        Option<&'static crate::inference_call::RemoteJobs>,
     ),
 );
 
@@ -498,6 +507,7 @@ fn build_snapshots(
             point_cursor,
             point_rounds,
             clock,
+            remote_jobs,
         ),
     ) in agents.iter_mut()
     {
@@ -586,6 +596,8 @@ fn build_snapshots(
             awaiting_point.is_some(),
         );
         let point_changed = watermark.last_point != Some(point_now);
+        let jobs_now = remote_jobs.map(|j| j.0.version());
+        let jobs_changed = watermark.last_jobs != jobs_now;
         // Beat even when nothing changed, so `updated_at` distinguishes a run
         // that is slow from one that nothing is driving.
         let due_for_heartbeat = watermark
@@ -596,6 +608,7 @@ fn build_snapshots(
             || tools_changed
             || fan_out_changed
             || point_changed
+            || jobs_changed
             || due_for_heartbeat;
         if !due && !has_appends {
             continue; // nothing meaningful changed, nothing buffered, beat not due
@@ -644,6 +657,7 @@ fn build_snapshots(
         watermark.last_awaiting_tools = Some(awaiting_tools);
         watermark.last_fan_out = fan_out_now;
         watermark.last_point = Some(point_now);
+        watermark.last_jobs = jobs_now;
         watermark.last_written_at = Some(now);
 
         // Tree links, for a deterministic restart-time rebuild of the graph.

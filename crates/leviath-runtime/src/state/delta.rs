@@ -94,6 +94,8 @@ pub enum Change {
     Written(u64),
     /// `last_progress_at`.
     LastProgressAt(Option<i64>),
+    /// `remote_jobs`.
+    RemoteJobs(BTreeMap<String, String>),
 }
 
 /// An edge a run took, and why.
@@ -284,6 +286,7 @@ impl StateDelta {
             grants => Grants,
             written => Written,
             last_progress_at => LastProgressAt,
+            remote_jobs => RemoteJobs,
         );
         Self {
             seq: prev.seq + 1,
@@ -350,6 +353,7 @@ impl StateDelta {
                 Change::Grants(v) => state.grants = v,
                 Change::Written(v) => state.written = v,
                 Change::LastProgressAt(v) => state.last_progress_at = v,
+                Change::RemoteJobs(v) => state.remote_jobs = v,
             }
         }
         state.seq = self.seq;

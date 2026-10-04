@@ -920,6 +920,22 @@
               "LastProgressAt"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`remote_jobs`.",
+            "properties": {
+              "RemoteJobs": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "RemoteJobs"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -11207,6 +11223,13 @@
         ],
         "description": "How many of its blueprint's `read_paths` this machine grants, as\nfixed when it was placed. `None` for a blueprint that declares none."
       },
+      "remote_jobs": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "description": "The remote jobs its model call in flight has submitted (a Meshy task,\na video), by the call's name for each step, so the call made again\nafter a restart polls them rather than paying for them again. Empty\nbetween calls.",
+        "type": "object"
+      },
       "seq": {
         "description": "The number of deltas applied to reach this state. The initial state\nis 0.",
         "format": "uint64",
@@ -11282,7 +11305,8 @@
       "files",
       "blobs",
       "grants",
-      "written"
+      "written",
+      "remote_jobs"
     ],
     "title": "RunState",
     "type": "object"

@@ -83,6 +83,9 @@ pub fn insert(
         crate::pipeline::PersistWatermark::default(),
         place::outcome_flags(state),
         crate::pipeline::RunBlobs(state.blobs.clone()),
+        crate::inference_call::RemoteJobs(leviath_providers::jobs::JobLog::new(
+            state.remote_jobs.clone(),
+        )),
     ));
     place::spec_components(&mut entity, &spec, &setup);
     place::optional_state(&mut entity, state);

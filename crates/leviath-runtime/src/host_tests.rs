@@ -60,7 +60,7 @@ impl Provider for Script {
     }
 }
 
-struct NoTools;
+pub(super) struct NoTools;
 impl ToolService for NoTools {
     fn exec_for(
         &self,

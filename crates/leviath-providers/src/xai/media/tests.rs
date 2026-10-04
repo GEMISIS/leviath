@@ -528,3 +528,40 @@ async fn a_video_past_its_deadline_and_audio_that_does_not_decode_are_errors() {
     .unwrap_err();
     assert!(err.to_string().contains("needs an audio part"), "{err}");
 }
+
+/// A call made again after a restart polls the task it submitted before and
+/// submits nothing.
+#[tokio::test]
+async fn a_video_call_made_again_polls_the_task_it_submitted() {
+    let video =
+        spawn_mock_server_with_headers(200, "OK", "Content-Type: video/mp4\r\n", b"MP4".to_vec())
+            .await;
+    let (url, bodies) = spawn_mock_sequence(vec![(
+        200,
+        "OK",
+        serde_json::json!({ "status": "done", "video": { "url": video, "duration": 8 } })
+            .to_string()
+            .into_bytes(),
+    )])
+    .await;
+    let log = crate::jobs::JobLog::new(
+        [(
+            "xai/grok-imagine-video/video".to_string(),
+            "req-1".to_string(),
+        )]
+        .into(),
+    );
+    let response = log
+        .scope(run(
+            &endpoint(&url),
+            "xai",
+            Kind::Video,
+            &request("grok-imagine-video", "a cat surfing", vec![], Value::Null),
+            &billing(PriceUnit::VideoSecond, 0.05),
+            FAST,
+        ))
+        .await
+        .expect("the video it paid for");
+    assert_eq!(response.parts[0].bytes, b"MP4");
+    assert_eq!(bodies.lock().unwrap().len(), 1, "one poll, no create");
+}

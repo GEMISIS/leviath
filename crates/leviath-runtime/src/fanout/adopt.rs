@@ -8,19 +8,28 @@
 //! would start the item again and the worker would run it too.
 //!
 //! So when a restart finds such a worker, the parent's fan-out decides what
-//! it is: the worker for an item it still has queued is adopted, as the
-//! item's running worker; one for an item it is not waiting on (already
-//! running under another worker, finished, or a fan-out that ended) is
-//! cancelled. Either way the item runs once.
+//! it is. A worker is adopted only when it is provably the worker the parent
+//! would start for an item it still has queued: started under this parent,
+//! for that item, from the blueprint or stage the fan-out runs, at the depth
+//! a start would place it, and with the inputs, model, output shape and
+//! workdir the parent would ask for. Adopting it does what a start does: the
+//! item's running worker, linked to its parent and counted in its tree, its
+//! context seeded from the parent's when its file holds only its first
+//! record. Any other worker (for an item the parent is not waiting on, or
+//! one that does not match its item) is cancelled, and the item runs fresh.
+//! Either way the item runs once.
 
 use super::*;
+use crate::spec::inputs::{CheckCtx, check_inputs};
+use crate::spec::run_spec::{RunSpec, SpecOrigin};
 
 /// What became of a worker its parent never recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnrecordedWorker {
     /// It is the running worker for the item its parent still had queued.
     Adopted,
-    /// Its parent is not waiting on its item, so it was cancelled.
+    /// It is not the worker its parent would start for its item, so it was
+    /// cancelled.
     Cancelled,
 }
 
@@ -34,57 +43,146 @@ pub fn settle_unrecorded_worker(
 ) -> Option<UnrecordedWorker> {
     let spec = world.get::<RunSpecC>(worker)?.0.clone();
     let item_id = spec.delivery.metadata.get(WORK_ITEM_LABEL)?.clone();
-    let queued = world.get_mut::<FanOutWaiting>(parent).and_then(|mut w| {
-        let at = w.pending.iter().position(|item| item.id == item_id)?;
-        w.pending.remove(at);
-        w.active.push(ActiveWorker {
-            item_id: item_id.clone(),
-            entity: worker,
-            run_id: spec.run_id.to_string(),
-        });
-        Some(())
-    });
     let worker_id = spec.run_id.to_string();
-    let Some(()) = queued else {
-        tracing::warn!(
-            worker = %worker_id,
-            item = %item_id,
-            "a fan-out worker its parent never recorded is for an item the parent is not waiting on; cancelling it"
-        );
-        set_status(world, worker, AgentStatus::Cancelled);
-        return Some(UnrecordedWorker::Cancelled);
+    let depths = match proven_worker(world, parent, &spec, &item_id) {
+        Ok(depths) => depths,
+        Err(why) => {
+            tracing::warn!(
+                worker = %worker_id,
+                item = %item_id,
+                why = %why,
+                "a fan-out worker its parent never recorded is not the worker for its item; cancelling it"
+            );
+            set_status(world, worker, AgentStatus::Cancelled);
+            return Some(UnrecordedWorker::Cancelled);
+        }
     };
     tracing::info!(
         worker = %worker_id,
         item = %item_id,
         "adopting a fan-out worker its parent never recorded"
     );
-    let max_child_depth = world
-        .get::<RunSpecC>(parent)
-        .and_then(|p| p.0.graph.max_child_depth.map(usize::from))
-        .unwrap_or(DEFAULT_FANOUT_DEPTH);
-    let parent_agent_id = world
-        .get::<AgentState>(parent)
-        .map(|s| s.agent_id.clone())
-        .unwrap_or_default();
-    world.entity_mut(worker).insert(ParentRef {
-        parent_entity: parent,
-        parent_agent_id,
-        depth: usize::from(spec.placement.depth),
+    let mut w = world
+        .get_mut::<FanOutWaiting>(parent)
+        .expect("a proven worker's parent is fanning out");
+    w.pending.retain(|item| item.id != item_id);
+    w.active.push(ActiveWorker {
+        item_id,
+        entity: worker,
+        run_id: worker_id.clone(),
     });
-    match world.get_mut::<SubAgentChildren>(parent) {
-        Some(mut kids) => kids.children.push(worker),
-        None => {
-            world.entity_mut(parent).insert(SubAgentChildren {
-                children: vec![worker],
-                max_child_depth,
-            });
-        }
-    }
-    world
-        .get_mut::<AgentState>(parent)
-        .expect("a fan-out parent always has AgentState")
-        .spawned_children_ids
-        .push(worker_id);
+    // A worker whose file holds only the record its start wrote was never
+    // seeded from its parent's context: that happens as it is placed, and
+    // its next record would have held it.
+    let first_record = world
+        .get_resource::<crate::pipeline::PersistLaneHealth>()
+        .map_or(0, |lane| lane.0.step_of(&worker_id))
+        == 0;
+    starts::link(world, parent, worker, depths, first_record);
     Some(UnrecordedWorker::Adopted)
+}
+
+/// Where `worker` (whose spec is `spec`) sits under `parent` when it is the
+/// worker `parent` would start now for its queued item `item_id`, or why it
+/// is not.
+fn proven_worker(
+    world: &World,
+    parent: Entity,
+    spec: &RunSpec,
+    item_id: &str,
+) -> Result<starts::Depths, String> {
+    let w = world
+        .get::<FanOutWaiting>(parent)
+        .ok_or("its parent is not fanning out")?;
+    let item = w
+        .pending
+        .iter()
+        .find(|item| item.id == item_id)
+        .ok_or("its parent is not waiting on its item")?;
+    let parent_spec = &world
+        .get::<RunSpecC>(parent)
+        .expect("a run fanning out was placed from its spec")
+        .0;
+    let depths = starts::depths(world, parent, parent_spec, w.starting.len())?;
+    if spec.placement.parent.as_ref() != Some(&parent_spec.run_id)
+        || usize::from(spec.placement.depth) != depths.child
+    {
+        return Err("it is not placed where a worker of its parent would be".to_string());
+    }
+    let source = expected_source(world, &w.config, parent_spec)?;
+    let stage = match &w.config.worker {
+        WorkerSource::Stage(stage) => Some(stage),
+        WorkerSource::Blueprint(_) | WorkerSource::BlueprintFile(_) | WorkerSource::Query(_) => {
+            None
+        }
+    };
+    if !runs_from(&source, &spec.origin) || spec.placement.worker_stage.as_ref() != stage {
+        return Err("it does not run what the fan-out starts".to_string());
+    }
+    let (request, _) = items::worker_request(parent_spec, &w.config, item, source, 0);
+    let decls: Vec<InputDecl> = spec
+        .graph
+        .inputs
+        .iter()
+        .cloned()
+        .map(|decl| InputDecl {
+            required: false,
+            ..decl
+        })
+        .collect();
+    let inputs = check_inputs(&decls, &request.inputs, &CheckCtx { attachments: &[] }).ok();
+    let asked = (
+        inputs.as_ref(),
+        request.model.as_ref(),
+        request.output.as_ref(),
+        request.workdir.as_ref(),
+    );
+    let has = (
+        Some(&spec.inputs),
+        spec.requested_model.as_ref(),
+        spec.requested_output.as_ref(),
+        Some(&spec.placement.workdir),
+    );
+    match asked == has {
+        true => Ok(depths),
+        false => Err("it was not started with what its item asks for".to_string()),
+    }
+}
+
+/// What the fan-out `config` of a run whose spec is `parent` starts its
+/// workers from, as a start would work it out.
+fn expected_source(
+    world: &World,
+    config: &FanOutDef,
+    parent: &RunSpec,
+) -> Result<SpawnSource, String> {
+    Ok(match &config.worker {
+        WorkerSource::Stage(_) => parent.same_graph_source(),
+        WorkerSource::Blueprint(blueprint) => SpawnSource::Blueprint(blueprint.clone()),
+        WorkerSource::BlueprintFile(path) => SpawnSource::BlueprintFile(path.clone()),
+        WorkerSource::Query(query) => SpawnSource::Blueprint(
+            world
+                .get_resource::<FanOutSpawnerRes>()
+                .ok_or("no fan-out spawner installed to answer its query")?
+                .0
+                .find_worker(query)?,
+        ),
+    })
+}
+
+/// Whether a run that came from `origin` is one `source` starts. A
+/// blueprint asked for without a revision is any revision of it.
+fn runs_from(source: &SpawnSource, origin: &SpecOrigin) -> bool {
+    match (source, origin) {
+        (SpawnSource::Blueprint(want), SpecOrigin::Blueprint { blueprint, .. }) => {
+            want.name == blueprint.name
+                && want
+                    .digest
+                    .as_ref()
+                    .is_none_or(|digest| Some(digest) == blueprint.digest.as_ref())
+        }
+        (SpawnSource::BlueprintFile(want), SpecOrigin::BlueprintFile { path, .. }) => want == path,
+        (SpawnSource::Raw(_), SpecOrigin::Raw) => true,
+        _ => false,
+    }
 }

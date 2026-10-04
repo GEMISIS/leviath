@@ -755,3 +755,135 @@ async fn a_checkpoint_answered_while_paused_is_answered_when_the_run_comes_back(
         again.flush_and_stop().await;
     }
 }
+
+/// A provider that answers each call by submitting one remote job and
+/// waiting on it until `done` is set, the way Meshy and the video models
+/// work. Counts every job it submits.
+struct PolledJob {
+    submitted: Arc<std::sync::atomic::AtomicUsize>,
+    done: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl Provider for PolledJob {
+    async fn infer(&self, _req: &InferenceRequest) -> leviath_providers::Result<InferenceResponse> {
+        use std::sync::atomic::Ordering;
+        let ran = leviath_providers::jobs::submit_or_resume(
+            "script/m/job",
+            || async {
+                let n = self.submitted.fetch_add(1, Ordering::SeqCst) + 1;
+                Ok(format!("job-{n}"))
+            },
+            |id| async move {
+                while !self.done.load(Ordering::SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Ok(id)
+            },
+        )
+        .await?;
+        Ok(text(&format!("made by {}", ran.value)))
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        100_000
+    }
+    fn name(&self) -> &str {
+        "script"
+    }
+    fn capabilities(&self, _m: &str) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+}
+
+/// A world over `dir` whose model is `job`.
+fn job_world(dir: &std::path::Path, job: PolledJob) -> PipelineWorld {
+    let mut providers = crate::ProviderRegistry::new();
+    providers.register("script".to_string(), Arc::new(job));
+    PipelineWorld::new(
+        providers,
+        Arc::new(EchoTools),
+        crate::InferencePoolConfig::new(),
+        1,
+        Some(dir.to_path_buf()),
+        Handle::current(),
+    )
+}
+
+/// A daemon that dies while a call waits on a remote job it submitted comes
+/// back polling that job: the run's file held the job's id from the moment
+/// it was submitted, the call made again submits nothing, and once the call
+/// is over its file holds no job.
+#[tokio::test]
+async fn a_restart_mid_job_polls_the_job_the_run_recorded() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let submitted = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+    let job = || PolledJob {
+        submitted: submitted.clone(),
+        done: done.clone(),
+    };
+    // A reply in text ends the run: no nudge asks for another call.
+    let mut quiet = graph();
+    quiet.nudge = Some(crate::spec::graph::NudgeDef {
+        enabled: Some(false),
+        ..Default::default()
+    });
+    let spec = crate::test_graph::both(quiet).0;
+    let run_id = spec.run_id.to_string();
+    let mut world = job_world(dir.path(), job());
+    crate::insert::insert(
+        world.world_mut(),
+        spec.clone(),
+        crate::spec::env::Bindings::new().with(stage()),
+        &crate::insert::initial_state(&spec),
+    );
+    let run_dir = dir.path().join(&run_id);
+    let recorded = || {
+        crate::restore::read_for_resume(&run_dir)
+            .ok()
+            .flatten()
+            .map(|r| r.state.remote_jobs)
+            .unwrap_or_default()
+    };
+    for _ in 0..500 {
+        world.run_to_fixed_point();
+        if !recorded().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        recorded(),
+        [("script/m/job".to_string(), "job-1".to_string())].into(),
+        "the run's file holds the job while its call still waits on it"
+    );
+    // The daemon dies: nothing more of this world reaches the file.
+    drop(world);
+
+    let run = crate::restore::read_for_resume(&run_dir).unwrap().unwrap();
+    done.store(true, Ordering::SeqCst);
+    let mut again = job_world(dir.path(), job());
+    let e = crate::restore::resume(
+        again.world_mut(),
+        run,
+        crate::spec::env::Bindings::new().with(stage()),
+    );
+    again.run_until_idle(40).await;
+    again.flush_and_stop().await;
+    assert_eq!(submitted.load(Ordering::SeqCst), 1, "one submit in all");
+    let after = crate::state::inspect::inspect(again.world(), e).unwrap();
+    assert_eq!(after.status, crate::state::RunStatus::Complete);
+    assert!(after.remote_jobs.is_empty(), "the call is over");
+    assert!(recorded().is_empty(), "and its file says so");
+    let said = after
+        .context
+        .regions
+        .iter()
+        .flat_map(|r| &r.entries)
+        .any(|e| e.text.contains("made by job-1"));
+    assert!(said, "the answer came from the job submitted before");
+}

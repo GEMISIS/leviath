@@ -214,40 +214,51 @@ impl super::GeminiProvider {
             "{}/models/{}:predictLongRunning",
             self.base_url, request.model
         );
-        let started = self.post_media(&url, &body).await?;
-        let name = started
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                ProviderError::InvalidResponse(
-                    "the video request answered no operation name".into(),
-                )
-            })?
-            .to_string();
-
-        let operation_url = format!("{}/{name}", self.base_url);
-        let done = media::poll_until("the Veo video operation", deadline, poll_interval, || {
-            let url = operation_url.clone();
-            async move {
-                let operation = self.get_media_json(&url).await?;
-                Ok(
-                    match (
-                        operation.get("done").and_then(Value::as_bool),
-                        operation.get("error"),
-                    ) {
-                        (_, Some(error)) => Poll::Failed(
-                            error
-                                .get("message")
-                                .and_then(Value::as_str)
-                                .map_or_else(|| error.to_string(), str::to_string),
-                        ),
-                        (Some(true), None) => Poll::Done(operation),
-                        _ => Poll::Running,
-                    },
-                )
-            }
-        })
-        .await?;
+        let submit = || async {
+            let started = self.post_media(&url, &body).await?;
+            started
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    ProviderError::InvalidResponse(
+                        "the video request answered no operation name".into(),
+                    )
+                })
+        };
+        let wait = |name: String| {
+            let operation_url = format!("{}/{name}", self.base_url);
+            media::poll_until(
+                "the Veo video operation",
+                deadline,
+                poll_interval,
+                move || {
+                    let url = operation_url.clone();
+                    async move {
+                        let operation = self.get_media_json(&url).await?;
+                        Ok(
+                            match (
+                                operation.get("done").and_then(Value::as_bool),
+                                operation.get("error"),
+                            ) {
+                                (_, Some(error)) => Poll::Failed(
+                                    error
+                                        .get("message")
+                                        .and_then(Value::as_str)
+                                        .map_or_else(|| error.to_string(), str::to_string),
+                                ),
+                                (Some(true), None) => Poll::Done(operation),
+                                _ => Poll::Running,
+                            },
+                        )
+                    }
+                },
+            )
+        };
+        let step = format!("google/{}/video", request.model);
+        let crate::jobs::Ran {
+            value: done, note, ..
+        } = crate::jobs::submit_or_resume(&step, submit, wait).await?;
 
         let samples = done.pointer("/response/generateVideoResponse/generatedSamples");
         let uri = samples
@@ -272,7 +283,10 @@ impl super::GeminiProvider {
             .and_then(|p| p.unit)
             .map(|u| u.cost(length));
         Ok(media::response(
-            media::summary(&format!("google/{}", request.model), &parts),
+            crate::jobs::noted(
+                media::summary(&format!("google/{}", request.model), &parts),
+                [note],
+            ),
             parts,
             cost,
         ))

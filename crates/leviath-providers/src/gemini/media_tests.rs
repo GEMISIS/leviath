@@ -404,3 +404,35 @@ async fn a_clip_is_priced_by_the_clip() {
     assert!(per_clip.is_some(), "the shipped table prices Lyria");
     assert_eq!(response.tokens_used.reported_cost_usd, per_clip);
 }
+
+/// A call made again after a restart polls the operation it started before
+/// and starts nothing.
+#[tokio::test]
+async fn a_veo_call_made_again_polls_the_operation_it_started() {
+    let video =
+        spawn_mock_server_with_headers(200, "OK", "Content-Type: video/mp4\r\n", b"MP4".to_vec())
+            .await;
+    let done = serde_json::json!({
+        "done": true,
+        "response": { "generateVideoResponse": { "generatedSamples": [{ "video": { "uri": video } }] } }
+    });
+    let (url, bodies) = spawn_mock_sequence(vec![(200, "OK", done.to_string().into_bytes())]).await;
+    let log = crate::jobs::JobLog::new(
+        [(
+            "google/veo-3.1-lite-generate-preview/video".to_string(),
+            "models/veo/operations/op1".to_string(),
+        )]
+        .into(),
+    );
+    let response = log
+        .scope(provider(&url).infer(&request(
+            "veo-3.1-lite-generate-preview",
+            "a paper boat",
+            vec![],
+            Value::Null,
+        )))
+        .await
+        .expect("the video it paid for");
+    assert_eq!(response.parts[0].bytes, b"MP4");
+    assert_eq!(bodies.lock().unwrap().len(), 1, "one poll, no start");
+}

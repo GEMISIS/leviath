@@ -884,6 +884,31 @@ pub(crate) struct RunState {
     /// its last step (a run converted from an earlier release). Null when
     /// its last step is its progress.
     pub(crate) last_progress_at: Option<Timestamp>,
+    /// The remote jobs its model call in flight has submitted, which the
+    /// call made again after a restart polls rather than paying for again.
+    /// Empty between calls.
+    pub(crate) remote_jobs: Vec<RemoteJob>,
+}
+
+/// A remote job a run's model call submitted: a Meshy task, a video.
+#[mirror(no_filter)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct RemoteJob {
+    /// The call's name for the step the job is for, such as
+    /// `meshy/text-to-3d/preview`.
+    pub(crate) step: String,
+    /// The job's id at the provider.
+    pub(crate) job: String,
+}
+
+/// A run's remote jobs, as the schema lists them.
+pub(crate) fn remote_jobs(jobs: &std::collections::BTreeMap<String, String>) -> Vec<RemoteJob> {
+    jobs.iter()
+        .map(|(step, job)| RemoteJob {
+            step: step.clone(),
+            job: job.clone(),
+        })
+        .collect()
 }
 
 /// The approvals a person granted a run beyond the call they were asked
@@ -961,6 +986,7 @@ impl From<&CoreState> for RunState {
             grants: StateGrants::from(&s.grants),
             written_bytes: big(s.written),
             last_progress_at: s.last_progress_at.map(Timestamp),
+            remote_jobs: remote_jobs(&s.remote_jobs),
         }
     }
 }
