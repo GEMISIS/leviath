@@ -175,10 +175,12 @@ impl Unconverted {
     }
 
     /// Why the run in the directory `name` did not convert, when it did not.
+    #[cfg(feature = "legacy-runs")]
     fn why(&self, name: &str) -> Option<&str> {
         self.runs.get(name).map(String::as_str)
     }
 
+    #[cfg(feature = "legacy-runs")]
     fn add(&mut self, name: String, why: String) {
         self.runs.insert(name, why);
         self.changed = true;
@@ -214,10 +216,13 @@ enum Done {
     /// Not an old run directory.
     Nothing,
     /// Converted into a run file.
+    #[cfg(feature = "legacy-runs")]
     Converted,
     /// Tried, and not converted.
+    #[cfg(feature = "legacy-runs")]
     Failed,
     /// Left as it was: it did not convert before.
+    #[cfg(feature = "legacy-runs")]
     Held,
 }
 
@@ -233,8 +238,11 @@ impl Pass {
     fn add(&mut self, done: Done) {
         match done {
             Done::Nothing => {}
+            #[cfg(feature = "legacy-runs")]
             Done::Converted => self.converted += 1,
+            #[cfg(feature = "legacy-runs")]
             Done::Failed => self.failed += 1,
+            #[cfg(feature = "legacy-runs")]
             Done::Held => self.held += 1,
         }
     }
@@ -510,11 +518,13 @@ pub(crate) struct AtStart<'a> {
     pub(crate) pool: &'a crate::daemon::mcp_pool::McpPool,
     /// The child that converts the runs, so the memory converting takes
     /// leaves with it; `None` converts them in the daemon.
+    #[cfg(feature = "legacy-runs")]
     pub(crate) child: Option<ChildCmd>,
 }
 
 /// How the daemon starts the child that converts its old runs (see
 /// [`crate::daemon::convert_child`]).
+#[cfg(feature = "legacy-runs")]
 #[derive(Debug, Clone)]
 pub(crate) struct ChildCmd {
     pub(crate) program: PathBuf,
@@ -527,6 +537,7 @@ pub(crate) struct ChildCmd {
     pub(crate) quiet_limit: std::time::Duration,
 }
 
+#[cfg(feature = "legacy-runs")]
 impl ChildCmd {
     /// How long a child may say nothing. It says something after every run,
     /// and the largest old run converts in seconds.
@@ -599,9 +610,8 @@ pub(crate) async fn convert_at_start(
     start: AtStart<'_>,
     board: &StartupBoard,
 ) -> Upgrade {
-    let child = start.child.as_ref();
     #[cfg(feature = "legacy-runs")]
-    if let Some(cmd) = child.filter(|_| any_to_convert(runs_dir)) {
+    if let Some(cmd) = start.child.as_ref().filter(|_| any_to_convert(runs_dir)) {
         match crate::daemon::convert_child::convert(cmd, runs_dir, &start, board).await {
             Ok(upgrade) => return upgrade,
             Err(so_far) => {
@@ -610,8 +620,6 @@ pub(crate) async fn convert_at_start(
             }
         }
     }
-    #[cfg(not(feature = "legacy-runs"))]
-    let _ = child;
     in_daemon(runs_dir, &start, board).await
 }
 

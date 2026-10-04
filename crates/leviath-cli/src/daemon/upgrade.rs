@@ -57,6 +57,7 @@ impl Upgrade {
     }
 
     /// Add a dropped key of the blueprint `name`, from one converted run.
+    #[cfg(feature = "legacy-runs")]
     pub(crate) fn dropped_in_run(&mut self, name: &str, line: String) {
         *self
             .dropped_in_runs

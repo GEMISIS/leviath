@@ -42,6 +42,7 @@ const OLD_MANIFEST: &str = "agent.leviath";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
     /// Migrated to an `agent.toml` beside its files.
+    #[cfg(feature = "legacy-runs")]
     Migrated {
         /// A line for each setting the new file spells differently.
         notes: Vec<String>,
@@ -349,6 +350,7 @@ pub(crate) fn upgrade_logged(
     for done in upgrade_all(agents_dir, others, backup, board) {
         let (name, dir) = (done.name(), done.dir.display().to_string());
         match &done.outcome {
+            #[cfg(feature = "legacy-runs")]
             Outcome::Migrated { notes, dropped } => {
                 upgrade.blueprints += 1;
                 let notes = notes.join("; ");

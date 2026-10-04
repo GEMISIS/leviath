@@ -71,6 +71,7 @@ static VERBOSE: AtomicBool = AtomicBool::new(false);
 
 /// Whether this process logs debug lines, so a process it starts can be
 /// asked to as well.
+#[cfg(feature = "legacy-runs")]
 pub(crate) fn verbose() -> bool {
     VERBOSE.load(Ordering::Relaxed)
 }
@@ -257,6 +258,7 @@ pub fn attach_log_file(path: PathBuf, mirror_stderr: bool) -> bool {
 /// Write a line another process logged, as it logged it, where this
 /// process's own lines go: its log file, and stderr while that is watched.
 /// The daemon hands its converting child's log lines on through this.
+#[cfg(feature = "legacy-runs")]
 pub(crate) fn forward(line: &str) {
     let line = format!("{line}\n");
     let _ = DaemonLogWriter.write_all(line.as_bytes());
