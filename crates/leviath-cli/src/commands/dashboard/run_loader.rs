@@ -15,6 +15,12 @@
 //! runs one on a thread of its own ([`spawn_run_feed`]) and picks up the newest
 //! snapshot each tick without waiting for it. Tests call
 //! [`RunLoader::collect`] directly, which reads the same files the same way.
+//!
+//! While the detail view is open the thread also replays the run's history
+//! (its window at every recorded point, and the path it took), the most
+//! expensive read the dashboard makes: a long run's file is megabytes of
+//! steps. The detail view draws at once from the cheap data and takes the
+//! history when it lands.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -25,7 +31,7 @@ use leviath_core::run_meta::StageRecord;
 use leviath_runtime::spec::graph::RunGraph;
 use tokio::sync::watch;
 
-use crate::runstate::{self, ContextSnapshot, RunMeta, StatCache};
+use crate::runstate::{self, ContextSnapshot, FileStamp, RunHistory, RunMeta, StatCache};
 use crate::tui::flowgraph::StageGraph;
 
 /// One run as the run list needs it, all shared: a snapshot is handed to the
@@ -70,6 +76,41 @@ pub(crate) struct RunSnapshot {
     pub(crate) context: Option<(String, Arc<ContextSnapshot>)>,
 }
 
+/// One run's history, read off its run file by the loader thread.
+#[derive(Debug)]
+pub(crate) struct LoadedHistory {
+    /// The run it belongs to.
+    pub(crate) run_id: String,
+    /// The run file's stat, taken before it was read.
+    pub(crate) stamp: Option<FileStamp>,
+    /// What the run file holds.
+    pub(crate) history: RunHistory,
+}
+
+/// How often one run's history is read again. A replay of a long run is
+/// tens of milliseconds, too much to repeat on every round a live run grows.
+const HISTORY_REREAD: Duration = Duration::from_secs(1);
+
+/// The stat of the run file the history the dashboard holds was read at;
+/// `None` when it holds none for the run.
+pub(crate) type Held = Option<Option<FileStamp>>;
+
+/// Which run's history the dashboard holds, and at what stat: written every
+/// tick, and read by the loader when it decides whether to read a history.
+/// Shared rather than sent, so that taking a history does not wake the
+/// loader for a round of its own.
+type HeldSlot = Arc<std::sync::Mutex<(Option<String>, Held)>>;
+
+/// What `slot` says the dashboard holds of `run_id`'s history; nothing when
+/// it speaks of another run (the dashboard has moved on since).
+fn held_for(slot: &HeldSlot, run_id: &str) -> Held {
+    let held = leviath_core::sync::lock(slot);
+    match &held.0 {
+        Some(run) if run == run_id => held.1,
+        _ => None,
+    }
+}
+
 /// The reader behind a [`RunSnapshot`], with its caches. Each file is parsed
 /// again only when its stat changes. A run's graph is read once, since a run's
 /// spec never changes, and drawn once however many runs share it: a fan-out
@@ -85,6 +126,8 @@ pub(crate) struct RunLoader {
     /// Every distinct graph read so far and its drawing, so runs of one graph
     /// share one.
     drawn: Vec<(RunGraph, Arc<StageGraph>)>,
+    /// The run whose history was read last, and when.
+    history_read: Option<(String, std::time::Instant)>,
     /// Last round's runs, by the address of their run record. The meta cache
     /// hands back the same record until the run file changes, so a
     /// finished run found here is unchanged since last round, and so are its
@@ -156,6 +199,28 @@ impl RunLoader {
         }
     }
 
+    /// The history of `run_id`, unless the dashboard holds it as the run
+    /// file stands (`held`), or it was read less than [`HISTORY_REREAD`] ago.
+    pub(crate) fn history_of(&mut self, run_id: &str, held: Held) -> Option<LoadedHistory> {
+        let stamp = runstate::run_file_stamp(run_id);
+        let recent = self
+            .history_read
+            .as_ref()
+            .is_some_and(|(read, at)| read == run_id && at.elapsed() < HISTORY_REREAD);
+        if held == Some(stamp) || recent {
+            return None;
+        }
+        // Stat before reading: an append that lands during the read makes
+        // the next round read again, rather than hiding behind a newer stat.
+        let history = runstate::run_history(run_id);
+        self.history_read = Some((run_id.to_string(), std::time::Instant::now()));
+        Some(LoadedHistory {
+            run_id: run_id.to_string(),
+            stamp,
+            history,
+        })
+    }
+
     /// The drawn graph of `run_id`, read off the front of its run file the
     /// first time and kept after. A run with no readable run file yet is
     /// asked again next round.
@@ -181,27 +246,45 @@ impl RunLoader {
 /// The loader's end of the snapshot channel: `None` until the first read.
 type SnapshotSender = watch::Sender<Option<Arc<RunSnapshot>>>;
 
+/// What the dashboard tells the loader: the run the cursor is on, and
+/// whether its history is wanted, which it is while the detail view is open.
+type Shown = (Option<String>, bool);
+
 /// The dashboard's end of a running [`RunLoader`] thread.
 pub(crate) struct RunFeed {
     /// The newest snapshot; `None` until the first one lands.
     snapshots: watch::Receiver<Option<Arc<RunSnapshot>>>,
+    /// The history of the run on screen, each read once.
+    histories: std_mpsc::Receiver<LoadedHistory>,
     /// Which run the detail view is drawing, sent when it changes.
-    showing: std_mpsc::Sender<Option<String>>,
+    showing: std_mpsc::Sender<Shown>,
     /// The last value sent on `showing`, so a tick sends nothing new.
-    last_showing: Option<String>,
+    last_showing: Shown,
+    /// What of the history of the run on screen is held.
+    held: HeldSlot,
 }
 
 impl RunFeed {
-    /// Tell the loader which run is on screen; it reads that run's context
-    /// window at once rather than on its next round.
-    pub(crate) fn show(&mut self, run_id: Option<&str>) {
-        if self.last_showing.as_deref() == run_id {
+    /// Tell the loader which run is on screen, and, when its history is
+    /// wanted, what of it is held; it reads them at once rather than on its
+    /// next round.
+    pub(crate) fn show(&mut self, run_id: Option<&str>, history: Option<Held>) {
+        *leviath_core::sync::lock(&self.held) = (run_id.map(str::to_string), history.flatten());
+        let wanted = history.is_some();
+        if self.last_showing.0.as_deref() == run_id && self.last_showing.1 == wanted {
             return;
         }
-        self.last_showing = run_id.map(str::to_string);
+        self.last_showing = (run_id.map(str::to_string), wanted);
         // A loader that has gone away takes no more questions; the list keeps
         // the last snapshot it sent.
         let _ = self.showing.send(self.last_showing.clone());
+    }
+
+    /// The newest history the loader read, if one arrived since the last
+    /// call. Only the newest matters: an older one is of a run left since, or
+    /// of the same run before it grew.
+    pub(crate) fn take_history(&mut self) -> Option<LoadedHistory> {
+        self.histories.try_iter().last()
     }
 
     /// The newest snapshot, if one arrived since the last call.
@@ -221,33 +304,77 @@ impl RunFeed {
 /// and a round over thousands of runs is long enough to hold up whatever
 /// else a runtime worker had queued.
 pub(crate) fn spawn_run_feed(interval: Duration) -> RunFeed {
-    let (snap_tx, snapshots) = watch::channel(None);
-    let (showing, show_rx) = std_mpsc::channel();
+    let (feed, ends) = RunFeed::new();
     std::thread::Builder::new()
         .name("lev-dash-runs".to_string())
-        .spawn(move || run_feed_loop(RunLoader::default(), snap_tx, show_rx, interval))
+        .spawn(move || run_feed_loop(RunLoader::default(), ends, interval))
         .expect("spawn the run loader thread");
-    RunFeed {
-        snapshots,
-        showing,
-        last_showing: None,
+    feed
+}
+
+/// The loader thread's ends of the feed's channels.
+pub(crate) struct FeedEnds {
+    /// Where the snapshots go.
+    pub(crate) snapshots: SnapshotSender,
+    /// Where the histories go.
+    pub(crate) histories: std_mpsc::Sender<LoadedHistory>,
+    /// What the dashboard says is on screen.
+    pub(crate) showing: std_mpsc::Receiver<Shown>,
+    /// What of its history the dashboard holds.
+    pub(crate) held: HeldSlot,
+}
+
+impl RunFeed {
+    /// A feed and the ends a loader holds: the thread's in the dashboard, a
+    /// test's when it plays the loader.
+    pub(crate) fn new() -> (Self, FeedEnds) {
+        let (snap_tx, snapshots) = watch::channel(None);
+        let (history_tx, histories) = std_mpsc::channel();
+        let (showing, show_rx) = std_mpsc::channel();
+        let held = HeldSlot::default();
+        let feed = Self {
+            snapshots,
+            histories,
+            showing,
+            last_showing: (None, false),
+            held: held.clone(),
+        };
+        let ends = FeedEnds {
+            snapshots: snap_tx,
+            histories: history_tx,
+            showing: show_rx,
+            held,
+        };
+        (feed, ends)
     }
 }
 
 /// The loader thread's body; see [`spawn_run_feed`].
-fn run_feed_loop(
-    mut loader: RunLoader,
-    snapshots: SnapshotSender,
-    showing: std_mpsc::Receiver<Option<String>>,
-    interval: Duration,
-) {
-    let mut on_screen: Option<String> = None;
+fn run_feed_loop(mut loader: RunLoader, ends: FeedEnds, interval: Duration) {
+    let FeedEnds {
+        snapshots,
+        histories,
+        showing,
+        held,
+    } = ends;
+    let mut on_screen: Shown = (None, false);
     // The list first, then the rest: every column of the run list comes from
     // the run's record, so the list can be drawn before the stage ledgers are read.
     let mut with_stages = false;
     loop {
-        let snapshot = loader.collect(on_screen.as_deref(), with_stages);
+        let snapshot = loader.collect(on_screen.0.as_deref(), with_stages);
         if snapshots.send(Some(Arc::new(snapshot))).is_err() {
+            return;
+        }
+        // The history after the snapshot: the detail view draws from the
+        // snapshot first, and the history fills in the path and the past.
+        let history = match &on_screen {
+            (Some(run_id), true) => loader.history_of(run_id, held_for(&held, run_id)),
+            _ => None,
+        };
+        if let Some(history) = history
+            && histories.send(history).is_err()
+        {
             return;
         }
         let wait = if with_stages {
@@ -265,22 +392,6 @@ fn run_feed_loop(
         while let Ok(run_id) = showing.try_recv() {
             on_screen = run_id;
         }
-    }
-}
-
-#[cfg(test)]
-impl RunFeed {
-    /// A feed with no loader thread behind it: the test holds the other ends
-    /// and plays the loader.
-    pub(crate) fn detached() -> (Self, SnapshotSender, std_mpsc::Receiver<Option<String>>) {
-        let (snap_tx, snapshots) = watch::channel(None);
-        let (showing, show_rx) = std_mpsc::channel();
-        let feed = Self {
-            snapshots,
-            showing,
-            last_showing: None,
-        };
-        (feed, snap_tx, show_rx)
     }
 }
 
@@ -478,84 +589,171 @@ mod tests {
         });
     }
 
-    /// The feed hands over each new snapshot once, and tells the loader about
-    /// the run on screen only when it changes.
+    /// The feed hands over each new snapshot once, and the newest history
+    /// once, and tells the loader about the run on screen only when it, or
+    /// whether its history is wanted, changes.
     #[test]
     fn a_feed_takes_each_snapshot_once_and_shows_changes_only() {
-        let (mut feed, snap_tx, show_rx) = RunFeed::detached();
+        let (mut feed, ends) = RunFeed::new();
         assert!(feed.take().is_none(), "nothing sent yet");
         let snapshot = Arc::new(RunSnapshot {
             taken_at: std::time::Instant::now(),
             runs: vec![],
             context: None,
         });
-        snap_tx.send(Some(snapshot.clone())).unwrap();
+        ends.snapshots.send(Some(snapshot.clone())).unwrap();
         assert!(Arc::ptr_eq(&feed.take().unwrap(), &snapshot));
         assert!(
             feed.take().is_none(),
             "the same snapshot is not taken twice"
         );
 
-        feed.show(Some("a"));
-        feed.show(Some("a"));
-        feed.show(None);
-        assert_eq!(show_rx.try_recv().unwrap(), Some("a".to_string()));
-        assert_eq!(show_rx.try_recv().unwrap(), None);
-        assert!(show_rx.try_recv().is_err(), "the repeat sent nothing");
+        assert!(feed.take_history().is_none(), "nothing read yet");
+        for run_id in ["older", "newer"] {
+            ends.histories
+                .send(LoadedHistory {
+                    run_id: run_id.to_string(),
+                    stamp: None,
+                    history: RunHistory::default(),
+                })
+                .unwrap();
+        }
+        assert_eq!(feed.take_history().unwrap().run_id, "newer");
+        assert!(feed.take_history().is_none(), "each is taken once");
+
+        feed.show(Some("a"), None);
+        feed.show(Some("a"), None);
+        feed.show(Some("a"), Some(None));
+        // What is held changes without a word to the loader.
+        feed.show(Some("a"), Some(Some(None)));
+        assert_eq!(held_for(&ends.held, "a"), Some(None));
+        assert_eq!(held_for(&ends.held, "b"), None, "said of another run");
+        feed.show(None, Some(None));
+        let shown: Vec<Shown> = ends.showing.try_iter().collect();
+        assert_eq!(
+            shown,
+            [
+                (Some("a".to_string()), false),
+                (Some("a".to_string()), true),
+                (None, true)
+            ],
+            "the repeats sent nothing"
+        );
 
         // A loader that has gone away is not an error for the dashboard.
-        drop(show_rx);
-        drop(snap_tx);
-        feed.show(Some("b"));
+        drop(ends);
+        feed.show(Some("b"), None);
         assert!(feed.take().is_none());
+        assert!(feed.take_history().is_none());
     }
 
-    /// The loader thread sends snapshots, reads the run it is shown, and
-    /// carries on until the dashboard goes.
+    /// A history is read unless the dashboard holds it as the run file
+    /// stands, and not twice in a second for one run: not on every round of
+    /// a run that keeps writing.
+    #[test]
+    fn a_history_is_read_unless_it_is_held_as_it_stands() {
+        with_isolated_runs_dir("run-loader-history", |_| {
+            let mut loader = RunLoader::default();
+            let first = loader.history_of("r1", None).expect("none held");
+            assert_eq!((first.run_id.as_str(), first.stamp), ("r1", None));
+            assert!(first.history.points.is_empty(), "no run file, no points");
+            assert!(
+                loader.history_of("r1", None).is_none(),
+                "read less than a second ago"
+            );
+            let age = |loader: &mut RunLoader| {
+                let (_, at) = loader.history_read.as_mut().unwrap();
+                *at -= HISTORY_REREAD;
+            };
+            age(&mut loader);
+            assert!(
+                loader.history_of("r1", Some(None)).is_none(),
+                "held as it stands"
+            );
+
+            let dir = runstate::run_dir("r1");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(runstate::run_file::path_in(&dir), b"grown").unwrap();
+            let again = loader
+                .history_of("r1", Some(None))
+                .expect("held, but the run file has moved on");
+            assert!(again.stamp.is_some());
+            assert!(
+                loader.history_of("r1", Some(None)).is_none(),
+                "still stale, but read less than a second ago"
+            );
+            assert_eq!(loader.history_of("r2", None).unwrap().run_id, "r2");
+        });
+    }
+
+    /// The loader thread sends snapshots, reads the run it is shown and its
+    /// history when that is wanted, and carries on until the dashboard goes.
     #[test]
     fn the_feed_thread_reads_the_run_it_is_shown() {
         with_isolated_runs_dir("run-loader-thread", |_| {
             create_run(&run("r1", "/p", RunStatus::Running, 10)).unwrap();
             runstate::write_context_snapshot("r1", &context()).unwrap();
             let mut feed = spawn_run_feed(Duration::from_millis(1));
-            feed.show(Some("r1"));
+            feed.show(Some("r1"), Some(None));
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             let mut seen_context = false;
+            let mut seen_history = false;
             // Whether a round of the wait finds a snapshot ready is the
             // scheduler's business: the loader can finish both its rounds
             // before the first `take`, or not be started yet. `is_some_and`
             // keeps that out of the test's own branches, which are counted.
-            while !seen_context && std::time::Instant::now() < deadline {
-                seen_context = feed.take().is_some_and(|snapshot| {
+            while !(seen_context && seen_history) && std::time::Instant::now() < deadline {
+                seen_context |= feed.take().is_some_and(|snapshot| {
                     assert_eq!(snapshot.runs.len(), 1);
                     snapshot.context.is_some()
                 });
+                seen_history |= feed.take_history().is_some_and(|h| h.run_id == "r1");
                 std::thread::yield_now();
             }
             assert!(seen_context, "the run on screen had its context read");
+            assert!(seen_history, "the run on screen had its history read");
         });
     }
 
-    /// The loop returns when nobody takes its snapshots any more, and when
-    /// nobody can tell it what is on screen any more.
+    /// The loop returns when nobody takes its snapshots any more, when nobody
+    /// takes its histories any more, and when nobody can tell it what is on
+    /// screen any more.
     #[test]
     fn the_feed_loop_returns_when_either_end_goes() {
         with_isolated_runs_dir("run-loader-loop-ends", |_| {
             // Nobody receiving snapshots: the first send fails.
-            let (snap_tx, snap_rx) = watch::channel(None);
-            let (_show_tx, show_rx) = std_mpsc::channel();
-            drop(snap_rx);
-            run_feed_loop(RunLoader::default(), snap_tx, show_rx, Duration::ZERO);
+            let (feed, ends) = RunFeed::new();
+            drop(feed);
+            run_feed_loop(RunLoader::default(), ends, Duration::ZERO);
+
+            // Nobody receiving histories: the first one read is not sent.
+            let (feed, ends) = RunFeed::new();
+            let RunFeed {
+                snapshots,
+                histories,
+                showing,
+                ..
+            } = feed;
+            drop(histories);
+            showing.send((Some("r".to_string()), true)).unwrap();
+            run_feed_loop(RunLoader::default(), ends, Duration::ZERO);
+            assert!(snapshots.borrow().is_some(), "it sent before it stopped");
 
             // Nobody sending: two queued changes are taken, then the wait for
             // the next sees the sender gone.
-            let (snap_tx, snap_rx) = watch::channel(None);
-            let (show_tx, show_rx) = std_mpsc::channel();
-            show_tx.send(Some("queued".to_string())).unwrap();
-            show_tx.send(Some("latest".to_string())).unwrap();
-            drop(show_tx);
-            run_feed_loop(RunLoader::default(), snap_tx, show_rx, Duration::ZERO);
-            assert!(snap_rx.borrow().is_some(), "it sent before it stopped");
+            let (feed, ends) = RunFeed::new();
+            let RunFeed {
+                snapshots,
+                histories,
+                showing,
+                ..
+            } = feed;
+            showing.send((Some("queued".to_string()), false)).unwrap();
+            showing.send((Some("latest".to_string()), false)).unwrap();
+            drop(showing);
+            run_feed_loop(RunLoader::default(), ends, Duration::ZERO);
+            assert!(snapshots.borrow().is_some(), "it sent before it stopped");
+            assert!(histories.try_recv().is_err(), "no history was wanted");
         });
     }
 }

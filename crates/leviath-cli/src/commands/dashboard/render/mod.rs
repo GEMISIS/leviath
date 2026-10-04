@@ -240,10 +240,11 @@ impl Dashboard {
         let info_h: u16 = 4; // task + workdir/stats strip (2 content + 2 border lines)
         // The stage row: the graph band on a tall terminal, the three-row
         // strip otherwise (the band would cost every other pane its rows).
-        // The band's height follows the run's path, so the archive has to be
-        // read before the rows are handed out - otherwise a run whose path
-        // has already wrapped opens short and jumps a frame later.
-        self.ensure_history(&agent.id);
+        // The band's height follows the run's path, which is read off the
+        // run's history: here for a short run, so the view opens at its
+        // height, and by the loader thread for a long one, so the view opens
+        // on the strip and takes the band when the history lands.
+        self.ensure_history_on_draw(&agent.id);
         let tabs_h: u16 = self.stage_row_height(area, &agent);
         let context_h: u16 = if agent.context_snapshot.is_some() || !agent.stages.is_empty() {
             5

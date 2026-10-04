@@ -332,7 +332,7 @@ impl Dashboard {
             return false;
         }
         // The path (and the visit counts behind it) comes from the run file.
-        self.ensure_history(&agent.id);
+        self.ensure_history_on_draw(&agent.id);
         let (graph, live, visits) = self.run_path_for(agent);
         if visits == 0 {
             return false;

@@ -299,15 +299,7 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
             .draw(|frame| dashboard.draw(frame))
             .map_err(|e| anyhow::anyhow!("terminal draw failed: {e}"))?;
 
-        // Handle input. Until the first snapshot of the runs directory lands,
-        // look again soon rather than a whole tick later, so the list appears
-        // the moment it has been read.
-        let wait = if dashboard.runs_loading {
-            LOADING_POLL
-        } else {
-            tick_rate
-        };
-        if let Some(event) = events.poll_event(wait)? {
+        if let Some(event) = wait_for_input(dashboard, events, tick_rate)? {
             handle_input_batch(dashboard, events, event)?;
         }
 
@@ -317,7 +309,37 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
     }
 }
 
-/// How long the loop waits for input while the run list is still loading.
+/// Wait up to `tick_rate` for input, `None` when none came.
+///
+/// Until the first snapshot of the runs directory lands, the wait is short,
+/// so the list is drawn the moment it has been read. While the detail view
+/// waits on the loader thread for its run's history, the wait is cut into
+/// short looks that end the moment the history lands, so it is drawn at once
+/// with nothing drawn again in between.
+fn wait_for_input(
+    dashboard: &mut Dashboard,
+    events: &mut impl crate::tui::EventSource,
+    tick_rate: Duration,
+) -> anyhow::Result<Option<Event>> {
+    let deadline = std::time::Instant::now() + tick_rate;
+    loop {
+        let owed = dashboard.owes_history();
+        let wait = match dashboard.runs_loading || owed {
+            true => LOADING_POLL.min(deadline.saturating_duration_since(std::time::Instant::now())),
+            false => tick_rate,
+        };
+        let event = events.poll_event(wait)?;
+        if event.is_some()
+            || !owed
+            || dashboard.take_fed_history()
+            || std::time::Instant::now() >= deadline
+        {
+            return Ok(event);
+        }
+    }
+}
+
+/// How long one look for input lasts while something is being loaded.
 const LOADING_POLL: Duration = Duration::from_millis(5);
 
 /// The most queued events one pass of the loop takes before it draws.
@@ -1155,7 +1177,7 @@ mod tests {
     /// only looks for input more often, to show the list the moment it lands.
     #[tokio::test]
     async fn the_loop_takes_keys_while_the_run_list_is_loading() {
-        let (feed, _snapshots, _shown) = run_loader::RunFeed::detached();
+        let (feed, _ends) = run_loader::RunFeed::new();
         let mut dashboard = make_test_dashboard();
         dashboard.run_feed = Some(feed);
         dashboard.runs_loading = true;

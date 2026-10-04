@@ -529,7 +529,7 @@ impl Dashboard {
     /// stat moved: a finished run's run file cannot change, and it can be tens
     /// of MB to replay on the draw loop.
     pub(super) fn ensure_history(&mut self, run_id: &str) {
-        use super::history::{HISTORY_TTL_TICKS, RunHistoryCache};
+        use super::history::HISTORY_TTL_TICKS;
         let tick = self.tick_count;
         let stamp_of = self.history_stamp;
         if let Some(h) = self.history.as_mut().filter(|h| h.run_id == run_id) {
@@ -541,26 +541,20 @@ impl Dashboard {
                 return;
             }
         }
-        // A run switch drops any browsed position along with the old run file.
-        if self.history.as_ref().is_some_and(|h| h.run_id != run_id) {
-            self.context_history_idx = None;
-        }
         // Stat before reading: an append that lands during the read makes the
         // next check read again, rather than hiding behind a newer stamp.
         let stamp = stamp_of(run_id);
-        let runstate::RunHistory {
-            points,
-            transitions,
-        } = (self.history_loader)(run_id);
-        let visits = super::history::derive_visits(&points);
-        self.history = Some(RunHistoryCache {
-            run_id: run_id.to_string(),
-            points,
-            visits,
-            checked_at_tick: tick,
-            stamp,
-            transitions,
-        });
+        let history = (self.history_loader)(run_id);
+        self.keep_history(run_id, stamp, history);
+    }
+
+    /// [`Self::ensure_history`] on the draw loop, for a run whose history
+    /// is read there (see [`Self::history_on_draw_loop`]); the loader
+    /// thread reads any other's.
+    pub(super) fn ensure_history_on_draw(&mut self, run_id: &str) {
+        if self.history_on_draw_loop(run_id) {
+            self.ensure_history(run_id);
+        }
     }
 
     /// The cached history, if it belongs to the selected run.
@@ -3970,7 +3964,7 @@ mod tests {
     fn a_fed_list_loads_from_its_snapshots() {
         crate::runstate::with_isolated_runs_dir("dash-fed-list", |_d| {
             runstate::create_run(&make_run_meta("fed-run", RunStatus::Complete)).unwrap();
-            let (feed, snapshots, shown) = super::super::run_loader::RunFeed::detached();
+            let (feed, ends) = super::super::run_loader::RunFeed::new();
             let mut dash = make_test_dashboard();
             dash.run_feed = Some(feed);
             dash.runs_loading = true;
@@ -3980,7 +3974,9 @@ mod tests {
             assert!(dash.runs_loading);
 
             let snapshot = super::super::run_loader::RunLoader::default().collect(None, true);
-            snapshots.send(Some(std::sync::Arc::new(snapshot))).unwrap();
+            ends.snapshots
+                .send(Some(std::sync::Arc::new(snapshot)))
+                .unwrap();
             dash.sync_from_run_state();
             assert_eq!(dash.agents.len(), 1);
             assert!(!dash.runs_loading);
@@ -3989,8 +3985,183 @@ mod tests {
             // the run now under the cursor is named to the loader.
             dash.sync_from_run_state();
             assert_eq!(dash.agents.len(), 1);
-            assert_eq!(shown.try_recv().unwrap(), Some("fed-run".to_string()));
+            let shown: Vec<_> = ends.showing.try_iter().collect();
+            assert_eq!(shown.last(), Some(&(Some("fed-run".to_string()), false)));
         });
+    }
+
+    /// With a loader thread feeding it, the detail view asks the thread for
+    /// the run's history and never reads the run file on the draw loop; a
+    /// history the thread sends is kept, and one it already holds, read at
+    /// the same stat, changes nothing.
+    #[test]
+    fn a_fed_detail_view_takes_its_history_from_the_loader() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        fn long_run(_run_id: &str) -> Option<crate::runstate::FileStamp> {
+            Some(crate::runstate::FileStamp {
+                mtime: std::time::UNIX_EPOCH,
+                len: 2 << 20,
+            })
+        }
+        fn short_run(_run_id: &str) -> Option<crate::runstate::FileStamp> {
+            Some(crate::runstate::FileStamp {
+                mtime: std::time::UNIX_EPOCH,
+                len: 1,
+            })
+        }
+        static LOADS: AtomicUsize = AtomicUsize::new(0);
+        fn counting_loader(_run_id: &str) -> crate::runstate::RunHistory {
+            LOADS.fetch_add(1, Ordering::SeqCst);
+            crate::runstate::RunHistory::default()
+        }
+        let point = |stage: &str, at: i64| {
+            let mut meta = fixtures::run_meta("fed");
+            meta.current_stage = stage.to_string();
+            leviath_runtime::runfile::history::RunPoint {
+                meta,
+                context: leviath_core::run_meta::ContextSnapshot {
+                    stage_name: stage.to_string(),
+                    total_tokens: 0,
+                    max_tokens: 100,
+                    regions: vec![],
+                },
+                at,
+            }
+        };
+        let loaded = |points| super::super::run_loader::LoadedHistory {
+            run_id: "fed".to_string(),
+            stamp: None,
+            history: crate::runstate::RunHistory {
+                points,
+                transitions: None,
+            },
+        };
+        crate::runstate::with_isolated_runs_dir("dash-fed-history", |_d| {
+            LOADS.store(0, Ordering::SeqCst);
+            let (feed, ends) = super::super::run_loader::RunFeed::new();
+            let mut dash = make_test_dashboard();
+            dash.history_loader = counting_loader;
+            dash.history_stamp = long_run;
+            dash.run_feed = Some(feed);
+            dash.detail_view = true;
+            assert!(!dash.owes_history(), "no run is selected");
+            dash.detail_view = false;
+            runstate::create_run(&make_run_meta("fed", RunStatus::Complete)).unwrap();
+            let snapshot = super::super::run_loader::RunLoader::default().collect(None, true);
+            ends.snapshots
+                .send(Some(std::sync::Arc::new(snapshot)))
+                .unwrap();
+            dash.sync_from_run_state();
+            assert!(!dash.owes_history(), "the list owes nothing");
+            dash.detail_view = true;
+            assert!(dash.owes_history(), "the detail view waits on the loader");
+
+            dash.ensure_history_on_draw("fed");
+            assert_eq!(
+                LOADS.load(Ordering::SeqCst),
+                0,
+                "the draw loop read nothing"
+            );
+            assert!(dash.history.is_none());
+
+            ends.histories
+                .send(loaded(vec![point("plan", 1), point("build", 2)]))
+                .unwrap();
+            dash.sync_from_run_state();
+            assert_eq!(dash.selected_history().unwrap().visits.len(), 2);
+            assert!(!dash.owes_history(), "it has it now");
+            // The loader is told the history is wanted, and once it is held,
+            // at what stat: here a run with no run file.
+            dash.sync_from_run_state();
+            let shown: Vec<_> = ends.showing.try_iter().collect();
+            assert_eq!(shown, [(Some("fed".to_string()), true)]);
+            assert_eq!(
+                *leviath_core::sync::lock(&ends.held),
+                (Some("fed".to_string()), Some(None))
+            );
+
+            // The same history again, at the same stat: what is held stays.
+            dash.context_history_idx = Some(1);
+            ends.histories.send(loaded(vec![])).unwrap();
+            dash.sync_from_run_state();
+            assert_eq!(dash.selected_history().unwrap().points.len(), 2);
+            assert_eq!(dash.context_history_idx, Some(1));
+            assert_eq!(LOADS.load(Ordering::SeqCst), 0);
+
+            // A short run's the draw loop reads itself, and owes nothing.
+            dash.history = None;
+            dash.history_stamp = short_run;
+            assert!(!dash.owes_history());
+            dash.ensure_history_on_draw("fed");
+            assert_eq!(LOADS.load(Ordering::SeqCst), 1);
+            dash.sync_from_run_state();
+            let shown: Vec<_> = ends.showing.try_iter().collect();
+            assert_eq!(shown, [(Some("fed".to_string()), false)], "not asked for");
+            // So is any run's without a feed.
+            dash.run_feed = None;
+            dash.history_stamp = long_run;
+            dash.history = None;
+            assert!(!dash.owes_history());
+            dash.ensure_history_on_draw("fed");
+            assert_eq!(LOADS.load(Ordering::SeqCst), 2);
+        });
+    }
+
+    /// The wait for input: one look a tick long when nothing is loading, a
+    /// short one while the list loads, and while the detail view waits on its
+    /// run's history, short looks that end on input, when the history lands
+    /// (taken there and then), or when the tick is up.
+    #[test]
+    fn the_wait_for_input_ends_when_what_it_waits_on_lands() {
+        use crate::tui::{TestEventSource, key};
+        use crossterm::event::KeyCode;
+        let wait = super::super::wait_for_input;
+        let tick = std::time::Duration::from_secs(3600);
+        let mut dash = make_test_dashboard();
+        let mut events = TestEventSource::new_with_nones(vec![None, Some(key(KeyCode::Char('x')))]);
+        assert!(wait(&mut dash, &mut events, tick).unwrap().is_none());
+        dash.runs_loading = true;
+        assert!(wait(&mut dash, &mut events, tick).unwrap().is_some());
+        dash.runs_loading = false;
+
+        fn long_run(_run_id: &str) -> Option<crate::runstate::FileStamp> {
+            Some(crate::runstate::FileStamp {
+                mtime: std::time::UNIX_EPOCH,
+                len: 2 << 20,
+            })
+        }
+        let (feed, ends) = super::super::run_loader::RunFeed::new();
+        dash.run_feed = Some(feed);
+        dash.history_stamp = long_run;
+        dash.agents
+            .push(make_test_agent("owed", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        assert!(dash.owes_history());
+        // Input ends it, after looks that found nothing.
+        let mut events =
+            TestEventSource::new_with_nones(vec![None, None, Some(key(KeyCode::Char('x')))]);
+        assert!(wait(&mut dash, &mut events, tick).unwrap().is_some());
+        // So does the tick running out.
+        assert!(
+            wait(&mut dash, &mut events, std::time::Duration::ZERO)
+                .unwrap()
+                .is_none()
+        );
+        // And the history landing.
+        ends.histories
+            .send(super::super::run_loader::LoadedHistory {
+                run_id: "owed".to_string(),
+                stamp: None,
+                history: crate::runstate::RunHistory::default(),
+            })
+            .unwrap();
+        assert!(wait(&mut dash, &mut events, tick).unwrap().is_none());
+        assert!(!dash.owes_history(), "it was taken");
+        // A source that fails is an error.
+        dash.history = None;
+        let mut failing = TestEventSource::failing();
+        assert!(wait(&mut dash, &mut failing, tick).is_err());
     }
 
     /// A run deleted here is left out of a snapshot read before the delete,
