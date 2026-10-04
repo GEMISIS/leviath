@@ -3717,7 +3717,7 @@ type DispatchedCallOutput {
 	"The provider's id for the call."
 	callId: String!
 	"The execution it was dispatched as. Empty where the run recorded none."
-	executionId: String!
+	executionId: ID!
 }
 
 "A tool call dispatched as one execution."

@@ -449,7 +449,7 @@ pub(crate) struct DispatchedCall {
     /// The provider's id for the call.
     pub(crate) call_id: String,
     /// The execution it was dispatched as. Empty where the run recorded none.
-    pub(crate) execution_id: String,
+    pub(crate) execution_id: ID,
 }
 
 /// The batch of tool calls a run has out.
@@ -483,7 +483,7 @@ impl From<&PendingBatch> for PendingToolBatch {
                 .iter()
                 .map(|(call_id, execution_id)| DispatchedCall {
                     call_id: call_id.clone(),
-                    execution_id: execution_id.clone(),
+                    execution_id: ID(execution_id.clone()),
                 })
                 .collect(),
         }
