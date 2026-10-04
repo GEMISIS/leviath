@@ -193,6 +193,13 @@ fn spec() -> Arc<crate::spec::run_spec::RunSpec> {
     crate::test_graph::both(graph()).0
 }
 
+/// [`spec`], for the run `run_id`.
+fn spec_of(run_id: &str) -> Arc<crate::spec::run_spec::RunSpec> {
+    let mut spec = (*spec()).clone();
+    spec.run_id = crate::spec::names::RunId::new(run_id).unwrap();
+    Arc::new(spec)
+}
+
 /// A mock agent runs a few turns; afterwards its run file's last state is the
 /// state the world holds.
 #[tokio::test]
@@ -515,7 +522,7 @@ async fn a_call_that_finished_mid_batch_is_not_run_again_after_a_restart() {
                 crate::pipeline::PersistWatermark::default(),
                 crate::persistence::RunClock::default(),
                 ReadyToInfer,
-                crate::insert::RunSpecC(spec()),
+                crate::insert::RunSpecC(spec_of("run-r1")),
             ),
         ));
         for _ in 0..500 {
@@ -602,7 +609,180 @@ async fn a_call_that_finished_mid_batch_is_not_run_again_after_a_restart() {
             .flat_map(|r| &r.entries)
             .any(|e| e.text == crate::restore::INTERRUPTED_TOOL_RESULT);
         assert!(told, "the model is told what it must check");
+        let (dispatched, finished) = executions_in_file(dir.path(), "run-r1");
+        let sent: Vec<(&str, usize)> = dispatched
+            .iter()
+            .map(|(call, _, started)| (call.as_str(), *started))
+            .collect();
+        assert_eq!(
+            sent,
+            [("c1", 1), ("c2", 1)],
+            "each call starts and is dispatched once, restart or not"
+        );
+        assert_eq!(
+            finished,
+            [
+                ("c1".to_string(), dispatched[0].1.clone(), None),
+                (
+                    "c2".to_string(),
+                    dispatched[1].1.clone(),
+                    Some(crate::state::journal::ToolOutcomeState::Indeterminate)
+                ),
+            ],
+            "each ends once, as the execution it was sent as, the interrupted one unobserved"
+        );
     }
+}
+
+/// A batch brought back from the run's file with calls that never ran is
+/// sent on as the executions the file names: a call the stage no longer
+/// offers is refused now and ends as its execution, and the call sent to the
+/// lane again is dispatched again under its own id, never started anew.
+#[tokio::test]
+async fn a_batch_sent_again_keeps_its_executions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut world = tool_world(
+        dir.path(),
+        vec![with_tools(&["c1", "c2"])],
+        FirstThenHold {
+            asked: Arc::new(Mutex::new(Vec::new())),
+            hold: true,
+        },
+    );
+    world.spawn_agent((
+        (
+            StageCursor { index: 0 },
+            agent("s"),
+            MessageInbox::default(),
+            StageProgress::default(),
+            VisitCounts::default(),
+            window(),
+            stage(),
+            setup().inference_config,
+        ),
+        (
+            metadata("run-r2"),
+            crate::persistence::TokenTotals::default(),
+            crate::pipeline::PersistWatermark::default(),
+            crate::persistence::RunClock::default(),
+            ReadyToInfer,
+            crate::insert::RunSpecC(spec_of("run-r2")),
+        ),
+    ));
+    for _ in 0..500 {
+        world.run_to_fixed_point();
+        if file_has_finished(dir.path(), "run-r2", "c1") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    world.flush_and_stop().await;
+    let mut run = crate::restore::read_for_resume(&dir.path().join("run-r2"))
+        .unwrap()
+        .unwrap();
+    // As a batch stopped on a question comes back: the call still out is
+    // not settled, and a call the stage does not offer is in it.
+    let pending = run.state.pending.as_mut().unwrap();
+    pending.done.remove("c2");
+    pending.calls.push(crate::state::context::ToolCallState {
+        id: "z".to_string(),
+        name: "nope".to_string(),
+        args: leviath_core::JsonDoc::new(serde_json::json!({})),
+        thought_signature: None,
+    });
+    pending.executions.insert("z".to_string(), "xz".to_string());
+    let sent_as = pending.executions["c2"].clone();
+
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let mut again = tool_world(
+        dir.path(),
+        vec![text("all done")],
+        FirstThenHold {
+            asked: asked.clone(),
+            hold: false,
+        },
+    );
+    crate::restore::resume(
+        again.world_mut(),
+        run,
+        crate::spec::env::Bindings::new().with(stage()),
+    );
+    again.run_until_idle(40).await;
+    again.flush_and_stop().await;
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["c2"],
+        "only the call still out runs"
+    );
+    let (dispatched, finished) = executions_in_file(dir.path(), "run-r2");
+    let sent: Vec<(&str, &str, usize)> = dispatched
+        .iter()
+        .map(|(call, execution, started)| (call.as_str(), execution.as_str(), *started))
+        .collect();
+    assert_eq!(sent[2], ("c2", sent_as.as_str(), 1), "sent again as itself");
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    let ended: Vec<(&str, &str)> = finished
+        .iter()
+        .map(|(call, execution, _)| (call.as_str(), execution.as_str()))
+        .collect();
+    assert_eq!(
+        ended,
+        [("c1", sent[0].1), ("z", "xz"), ("c2", sent_as.as_str())]
+    );
+}
+
+/// A dispatched call: its id, its execution's, and how many times it started.
+type Sent = (String, String, usize);
+
+/// An execution that ended: its call's id, its own, and how it ended.
+type Ended = (
+    String,
+    String,
+    Option<crate::state::journal::ToolOutcomeState>,
+);
+
+/// The calls `run_id`'s file records as dispatched, as (call id, execution
+/// id, how many times it started), and the ones it records as ending, as
+/// (call id, execution id, outcome).
+fn executions_in_file(dir: &std::path::Path, run_id: &str) -> (Vec<Sent>, Vec<Ended>) {
+    use crate::state::RunEvent;
+    let file = RunFileReader::open(&dir.join(run_id).join(leviath_core::files::RUN_FILE)).unwrap();
+    let events: Vec<RunEvent> = file
+        .deltas(1, file.last_seq())
+        .unwrap()
+        .into_iter()
+        .flat_map(|d| d.events)
+        .collect();
+    let started = |id: &str| {
+        events
+            .iter()
+            .filter(|e| matches!(e, RunEvent::ToolStarted(c) if c.id == id))
+            .count()
+    };
+    let dispatched = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Dispatched {
+                call_id,
+                execution_id,
+                ..
+            } => Some((call_id.clone(), execution_id.clone(), started(call_id))),
+            _ => None,
+        })
+        .collect();
+    let finished = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Completed {
+                call_id,
+                execution_id,
+                outcome,
+                ..
+            } => Some((call_id.clone(), execution_id.clone(), *outcome)),
+            _ => None,
+        })
+        .collect();
+    (dispatched, finished)
 }
 
 /// [`graph`] with its stage stopping at `points` approval checkpoints.

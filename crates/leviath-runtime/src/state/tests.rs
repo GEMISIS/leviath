@@ -164,6 +164,7 @@ pub(crate) fn busy() -> RunState {
             },
         )]
         .into(),
+        executions: Default::default(),
     });
     s.fan_out = Some(FanOutState {
         stage: stage("split"),

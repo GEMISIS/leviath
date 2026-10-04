@@ -507,7 +507,18 @@ fn pending(b: &PendingToolBatch, report: &mut Report) -> PendingBatch {
             "an old journal kept a finished call's text but not whether it failed",
         );
     }
-    PendingBatch { calls, done }
+    // Every call of the batch was recorded as dispatched, as the execution
+    // the old journal named (none, before releases named one).
+    let executions = b
+        .calls
+        .iter()
+        .map(|c| (c.id.clone(), c.execution_id.clone()))
+        .collect();
+    PendingBatch {
+        calls,
+        done,
+        executions,
+    }
 }
 
 /// The fan-out the run was waiting on, and how many of its workers left no

@@ -11,7 +11,9 @@ use leviath_runtime::ProviderRegistry;
 use leviath_runtime::insert::RunSpecC;
 use leviath_runtime::runfile::RunFileWriter;
 use leviath_runtime::state::context::ToolCallState;
-use leviath_runtime::state::{OpenInteraction, PendingBatch, PipelinePhase, RunState, WaitState};
+use leviath_runtime::state::{
+    OpenInteraction, PendingBatch, PipelinePhase, RunEvent, RunState, WaitState,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -147,6 +149,32 @@ fn live(world: &mut PipelineWorld, run_id: &str) -> RunState {
     leviath_runtime::state::inspect::inspect(world.world(), entity).expect("the run reads")
 }
 
+/// What `run_id`'s file says of its tool calls, one line per event: a call
+/// started, sent as an execution, or ended as one.
+fn told_in_file(runs: &Path, run_id: &str) -> Vec<String> {
+    let file = leviath_runtime::runfile::RunFileReader::open(&run_file(runs, run_id))
+        .expect("the run file reads");
+    file.deltas(1, file.last_seq())
+        .expect("the steps read")
+        .into_iter()
+        .flat_map(|d| d.events)
+        .filter_map(|e| match e {
+            RunEvent::ToolStarted(call) => Some(format!("started {}", call.id)),
+            RunEvent::Dispatched {
+                call_id,
+                execution_id,
+                ..
+            } => Some(format!("sent {call_id} as {execution_id}")),
+            RunEvent::Completed {
+                call_id,
+                execution_id,
+                ..
+            } => Some(format!("ended {call_id} as {execution_id}")),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A run stopped on an `ask_user_text` call comes back asking it again,
 /// under an id of its own, waiting on a person as it was; answering it lets
 /// the batch finish.
@@ -168,6 +196,7 @@ async fn a_question_put_to_a_person_is_asked_again_after_a_restart() {
                 thought_signature: None,
             }],
             done: Default::default(),
+            executions: [("call_1".to_string(), "exec-1".to_string())].into(),
         });
         s.interactions = vec![OpenInteraction {
             id: old_id.clone(),
@@ -199,6 +228,11 @@ async fn a_question_put_to_a_person_is_asked_again_after_a_restart() {
     let pending = state.pending.expect("the batch is still in flight");
     assert_eq!(pending.calls.len(), 1);
     assert!(pending.done.is_empty());
+    assert_eq!(
+        pending.executions,
+        [("call_1".to_string(), "exec-1".to_string())].into(),
+        "the call is still the execution it was sent as"
+    );
 
     assert!(
         starter
@@ -210,6 +244,17 @@ async fn a_question_put_to_a_person_is_asked_again_after_a_restart() {
     // The run may already be at its next stage's checkpoint; the question it
     // asked again is settled.
     assert!(open_for(&starter, &run_id).iter().all(|q| q.id != asked.id));
+    // The file names the question as the one execution it was, sent again
+    // and then answered, never as a second call.
+    let ended = drive_until(&mut world, |_| {
+        told_in_file(runs.path(), &run_id)
+            .iter()
+            .any(|t| t.starts_with("ended"))
+    })
+    .await;
+    assert!(ended, "the answer reaches the run's file");
+    let told = told_in_file(runs.path(), &run_id);
+    assert_eq!(told, ["sent call_1 as exec-1", "ended call_1 as exec-1"]);
 }
 
 /// A run stopped at a stage's checkpoint comes back asking it again, under
@@ -431,6 +476,7 @@ async fn a_call_running_when_the_daemon_died_comes_back_interrupted() {
                     },
                 )]
                 .into(),
+                executions: Default::default(),
             });
         });
         change(runs.path(), &asking, |s| {
@@ -438,6 +484,7 @@ async fn a_call_running_when_the_daemon_died_comes_back_interrupted() {
             s.pending = Some(PendingBatch {
                 calls: vec![call("q", "ask_user_text"), call("c2", "shell")],
                 done: Default::default(),
+                executions: Default::default(),
             });
         });
         if crashed {
@@ -683,6 +730,7 @@ async fn a_call_running_at_a_clean_stop_is_not_started_again() {
                 thought_signature: None,
             }],
             done: Default::default(),
+            executions: Default::default(),
         });
     });
     let mut world = world_for(&starter);

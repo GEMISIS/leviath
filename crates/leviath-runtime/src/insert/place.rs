@@ -711,7 +711,8 @@ fn open_point(entity: &mut EntityWorldMut<'_>, body: &str) {
 }
 
 /// `pending`: the batch's calls as the model made them, the results already
-/// in, and the marker that dispatches the rest.
+/// in, the executions a dispatched batch's calls were recorded as, and the
+/// marker that dispatches the rest.
 pub(crate) fn pending_batch(entity: &mut EntityWorldMut<'_>, batch: &crate::state::PendingBatch) {
     let calls = batch
         .calls
@@ -749,6 +750,11 @@ pub(crate) fn pending_batch(entity: &mut EntityWorldMut<'_>, batch: &crate::stat
         crate::pipeline::RecoveredResults(done),
         crate::pipeline::ReadyForTools,
     ));
+    if !batch.executions.is_empty() {
+        entity.insert(crate::pipeline::ResumedExecutions(
+            batch.executions.clone().into_iter().collect(),
+        ));
+    }
 }
 
 /// The entities of the runs in the world, by run id, for the fan-out workers

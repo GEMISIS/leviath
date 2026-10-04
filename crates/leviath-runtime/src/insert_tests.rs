@@ -512,6 +512,9 @@ fn mid_run() -> RunState {
             ),
         ]
         .into(),
+        executions: [("a", "x1"), ("b", "x2"), ("c", "x3")]
+            .map(|(call, execution)| (call.to_string(), execution.to_string()))
+            .into(),
     });
     state.inbox = vec![MessageState {
         from: "person".into(),

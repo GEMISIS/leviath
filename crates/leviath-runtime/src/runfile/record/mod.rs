@@ -232,6 +232,20 @@ pub enum RunRecord {
         /// Unix seconds.
         at: i64,
     },
+    /// Calls of a batch the run's file already records, sent to the tool lane
+    /// again after the run came back: a question nobody had answered when the
+    /// daemon stopped is asked again. Each keeps the execution it was first
+    /// dispatched as, so a reader sees one execution sent twice rather than
+    /// two executions.
+    ToolCallsResent {
+        /// The calls, as (provider call id, execution id).
+        calls: Vec<(String, String)>,
+        /// The provider attempt whose answer asked for them, when the run
+        /// still knows it. Empty otherwise.
+        requested_by: String,
+        /// Unix seconds.
+        at: i64,
+    },
     /// Files one tool execution produced, sent as it produced them.
     ///
     /// The run's answer names the artifacts of its latest submission only, and

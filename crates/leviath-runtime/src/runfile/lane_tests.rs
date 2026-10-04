@@ -133,6 +133,7 @@ async fn a_step_records_the_state_it_is_handed() {
             thought_signature: None,
         }],
         done: Default::default(),
+        executions: Default::default(),
     });
     let mut lane = RunFileLane::new("m", "w");
     lane.record(runs.path(), step("r1", busy.clone()))

@@ -47,6 +47,9 @@ pub(crate) struct PendingBatch {
     decided: HashMap<String, Decision>,
     /// Whether this is a stage's seed calls rather than a turn's batch.
     seeds: bool,
+    /// Whether the batch was brought back from the run's file, which already
+    /// records it as dispatched.
+    resumed: bool,
 }
 
 /// The journaling a batch did when it was first seen.
@@ -93,7 +96,13 @@ impl PendingBatch {
             journal: None,
             decided: HashMap::new(),
             seeds: false,
+            resumed: false,
         }
+    }
+
+    /// The batch, brought back from the run's file when `resumed`.
+    pub(crate) fn resumed(self, resumed: bool) -> Self {
+        Self { resumed, ..self }
     }
 
     /// A stage's seed calls: decided like any batch, journaled not at all.
@@ -271,9 +280,9 @@ fn decide_in_order(
     None
 }
 
-/// Journal the batch: the record, its artifacts, and the start of every lane
-/// call, as dispatch has always done before a batch can run. Returns the
-/// progress hook and the ack the batch's exec will wait on.
+/// Journal the batch: its records, its artifacts, and the start of every lane
+/// call, before any of it can run. Returns the progress hook and the ack the
+/// batch's exec will wait on.
 fn journal_batch(
     lane: &LaneServices,
     state: &AgentState,
@@ -282,11 +291,12 @@ fn journal_batch(
     cursor: Option<&StageCursor>,
     batch: &PendingBatch,
 ) -> BatchJournal {
-    let dispatch = super::tools::BatchDispatch {
+    let dispatch = super::batch_record::BatchDispatch {
         calls: &result.tool_calls,
         executions: &batch.executions,
         inline: &batch.context_results,
         recovered: &batch.recovered,
+        resumed: batch.resumed,
         stage_index: cursor.map_or(0, |c| c.index),
         iteration: state.iteration,
         visit_id: &state.current_visit,
@@ -299,8 +309,15 @@ fn journal_batch(
     // unpersisted agents) dispatch unjournaled with a no-op progress.
     let journal = match (lane.persist.as_ref(), metadata) {
         (Some(persist), Some(md)) => {
-            let ack_rx = persist.record_acked(&md.run_id, dispatch.record());
-            super::tools::journal_artifacts(persist, &md.run_id, &batch.produced);
+            // The last record says the lane calls are sent, so it is the one
+            // the batch waits on.
+            let mut records = dispatch.records(&batch.lane_calls);
+            let sent = records.pop().expect("a lane batch has calls to send");
+            for record in records {
+                persist.record(&md.run_id, record);
+            }
+            let ack_rx = persist.record_acked(&md.run_id, sent);
+            super::batch_record::journal_artifacts(persist, &md.run_id, &batch.produced);
             // The calls finish off the tick, so their records wake the world:
             // one that lands while the rest of the batch runs is in the run's
             // file before the batch ends.

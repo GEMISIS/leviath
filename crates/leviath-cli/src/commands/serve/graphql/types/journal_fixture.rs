@@ -64,6 +64,7 @@ fn at_of(record: &RunRecord, before: i64) -> i64 {
         RunRecord::InferenceUsage { at, .. }
         | RunRecord::ToolBatch { at, .. }
         | RunRecord::ToolCallDone { at, .. }
+        | RunRecord::ToolCallsResent { at, .. }
         | RunRecord::ArtifactsProduced { at, .. }
         | RunRecord::Interaction { at, .. }
         | RunRecord::ContextTransaction { at, .. } => *at,

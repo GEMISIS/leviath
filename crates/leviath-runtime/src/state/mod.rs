@@ -471,6 +471,10 @@ pub struct PendingBatch {
     pub calls: Vec<ToolCallState>,
     /// The results that have come back, by call id.
     pub done: BTreeMap<String, ToolResultState>,
+    /// The execution each call was dispatched as, by call id: every call of
+    /// a batch the run's file records as dispatched, and none of one still
+    /// waiting to be. Empty where a run recorded no execution id for a call.
+    pub executions: BTreeMap<String, String>,
 }
 
 /// A tool call's result.

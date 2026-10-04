@@ -124,10 +124,12 @@ pub(crate) use lane_batch::{dispatch_lane_batches, settle_write_ledgers};
 pub(crate) mod tool_verdicts;
 pub use crate::approval_prompt::{declined_result, unanswered_approval_result};
 pub use tool_verdicts::{DecideCtx, DecidedCall, Decision, ToolGrants, ToolVerdict, WriteLedger};
+mod batch_record;
 mod tools;
 pub(crate) use tools::{
-    AwaitingTools, ContextToolResults, LandedResults, RecoveredResults, ToolServiceRes, ToolStage,
-    ToolsNeedRefresh, call_had_no_effect, dispatch_tools, merge_in_call_order, one_line,
+    AwaitingTools, ContextToolResults, LandedResults, RecoveredResults, ResumedExecutions,
+    ToolServiceRes, ToolStage, ToolsNeedRefresh, call_had_no_effect, dispatch_tools,
+    merge_in_call_order, one_line,
 };
 pub use tools::{DynamicTools, RescanBeforeDispatch, ToolProgress, ToolService, noop_progress};
 #[cfg(test)]

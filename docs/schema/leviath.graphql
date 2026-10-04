@@ -3711,6 +3711,14 @@ type DirectoryOutput {
 	entries: [String!]!
 }
 
+"The execution one call of a batch was dispatched as."
+type DispatchedCallOutput {
+	"The provider's id for the call."
+	callId: String!
+	"The execution it was dispatched as. Empty where the run recorded none."
+	executionId: String!
+}
+
 "A tool call dispatched as one execution."
 type DispatchedStepOutput {
 	"The provider's id for the call."
@@ -8832,6 +8840,11 @@ type PendingToolBatchOutput {
 	calls: [StateToolCallOutput!]!
 	"The results that are in."
 	done: [ToolCallReplyOutput!]!
+	"""
+	The execution each call was dispatched as: none while the batch
+	still waits to be dispatched.
+	"""
+	executions: [DispatchedCallOutput!]!
 }
 
 """

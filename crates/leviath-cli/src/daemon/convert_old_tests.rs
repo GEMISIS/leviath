@@ -316,3 +316,94 @@ fn a_list_that_cannot_be_written_is_said_so() {
     assert!(Unconverted::path_for(&runs).is_dir());
     assert!(leviath_legacy_runs::is_legacy(&run));
 }
+
+/// An old run stopped mid tool batch carries the batch on after it converts,
+/// rather than dispatching it again: each call stays the one execution the
+/// old journal named, and the call that was running ends once, unobserved.
+#[cfg(feature = "legacy-runs")]
+#[tokio::test]
+async fn a_converted_batch_keeps_the_executions_the_old_journal_named() {
+    let home = tempfile::tempdir().unwrap();
+    let runs = home.path().join("runs");
+    // Under its own run id, as an old daemon left it.
+    let old = runs.join("probe-1790811952-ac34bdb9b3eb");
+    copy_dir(&fixture("mid-tool-batch"), &old);
+    let mut registry = leviath_runtime::ProviderRegistry::new();
+    registry.register("openai".into(), Arc::new(FakeProvider::new()));
+    let starter =
+        crate::daemon::starter::testing::starter(crate::config::Config::default(), registry, &runs);
+    let mut world = leviath_runtime::world::PipelineWorld::new(
+        starter.providers.registry(),
+        starter.tool_service.clone(),
+        leviath_runtime::inference_pool::InferencePoolConfig::new(),
+        1,
+        Some(starter.runs_dir.clone()),
+        tokio::runtime::Handle::current(),
+    );
+    crate::daemon::recovery::resume_all(&mut world, &starter, &runs);
+    use leviath_runtime::state::RunEvent;
+    use leviath_runtime::state::journal::ToolOutcomeState;
+    let path = old.join(leviath_core::files::RUN_FILE);
+    let events_of = |path: &Path| {
+        let file = leviath_runtime::runfile::RunFileReader::open(path).unwrap();
+        file.deltas(1, file.last_seq())
+            .unwrap()
+            .into_iter()
+            .flat_map(|d| d.events)
+            .collect::<Vec<_>>()
+    };
+    let endings_of = |events: &[RunEvent], call: &str| -> Vec<(String, Option<ToolOutcomeState>)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Completed {
+                    call_id,
+                    execution_id,
+                    outcome,
+                    ..
+                } if call_id == call => Some((execution_id.clone(), *outcome)),
+                _ => None,
+            })
+            .collect()
+    };
+    let sent_of = |events: &[RunEvent]| -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Dispatched {
+                    call_id,
+                    execution_id,
+                    ..
+                } => Some((call_id.clone(), execution_id.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    let (call, execution) = sent_of(&events_of(&path))
+        .pop()
+        .expect("the old batch was dispatched");
+    for _ in 0..1500 {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(20), world.run()).await;
+        if !endings_of(&events_of(&path), &call).is_empty() {
+            break;
+        }
+    }
+    let events = events_of(&path);
+    let sent = sent_of(&events);
+    let started = events
+        .iter()
+        .filter(|e| matches!(e, RunEvent::ToolStarted(_)))
+        .count();
+    assert_eq!(started, sent.len(), "{sent:?}");
+    let unique: HashSet<&str> = sent.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(
+        unique.len(),
+        sent.len(),
+        "each call is dispatched once: {sent:?}"
+    );
+    assert_eq!(
+        endings_of(&events, &call),
+        [(execution, Some(ToolOutcomeState::Indeterminate))],
+        "the running call ends once, as the execution it was"
+    );
+}

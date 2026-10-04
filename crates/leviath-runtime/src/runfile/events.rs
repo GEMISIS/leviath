@@ -95,6 +95,19 @@ pub(crate) fn push_events(events: &mut Vec<RunEvent>, answered: &mut Answered, r
                 }
             }
         }
+        RunRecord::ToolCallsResent {
+            calls,
+            requested_by,
+            ..
+        } => events.extend(
+            calls
+                .iter()
+                .map(|(call_id, execution_id)| RunEvent::Dispatched {
+                    call_id: call_id.clone(),
+                    execution_id: execution_id.clone(),
+                    requested_by: requested_by.clone(),
+                }),
+        ),
         RunRecord::ToolCallDone {
             call_id,
             execution_id,

@@ -183,15 +183,23 @@ pub(crate) struct ContextToolResults(pub Vec<(String, String)>);
 
 /// Results a batch already had before a restart, carried into its re-dispatch.
 ///
-/// A daemon that died while a batch waited on a person had asked its question
-/// and run nothing after it; recovery re-arms the batch rather than handing
-/// the model a stand-in (see `restore::restore_pending_batch`). The calls that
-/// finished before the crash are here, with the result the journal recorded,
-/// so [`dispatch_tools`] runs only the rest and none of these twice. Held until
-/// [`super::collect_tools`] merges them, or until an all-inline
-/// batch applies them.
+/// The calls that finished before the daemon stopped are here with the result
+/// the run's file recorded, and so is the stand-in for each call a stop
+/// interrupted (see `restore::interrupt_in_flight`), so [`dispatch_tools`] runs
+/// only the rest and none of these twice. A batch stopped on a question to a
+/// person has no stand-ins: nothing in it ran after the question, so it is
+/// asked again. Held until [`super::collect_tools`] merges them, or until an
+/// all-inline batch applies them.
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct RecoveredResults(pub Vec<crate::tool_bridge::ToolResult>);
+
+/// The execution each call of a batch brought back from a run's file was
+/// dispatched as, by call id. Its presence says the file already records the
+/// batch as dispatched, so [`dispatch_tools`] keeps these ids and records only
+/// what is new: the results it settles now, and the calls it sends to the
+/// lane again.
+#[derive(Component, Debug, Clone, Default)]
+pub(crate) struct ResumedExecutions(pub std::collections::HashMap<String, String>);
 
 /// The results of a batch's lane calls that have landed while the rest still
 /// run, written by the batch's [`ToolProgress`] the moment each call resolves.
@@ -450,94 +458,6 @@ type DispatchToolsQuery = (
     Option<&'static crate::insert::RunSpecC>,
 );
 
-/// One dispatched batch, in the shape the journal records it.
-///
-/// Gathered once and borrowed, because two paths write the same record and
-/// neither can see the other's: a batch with lane work journals it with an ack
-/// the exec waits on, and a batch the dispatcher resolved entirely journals it
-/// on its way out. Two copies of the field list would be two chances for one of
-/// them to stop carrying something.
-pub(super) struct BatchDispatch<'a> {
-    /// The calls, in the order the model asked for them.
-    pub(super) calls: &'a [crate::components::ToolCall],
-    /// The execution id minted for each, by provider call id.
-    pub(super) executions: &'a std::collections::HashMap<String, String>,
-    /// The results the dispatcher already has, by provider call id. A call with
-    /// one here never reaches the lane and no completion record will follow it.
-    pub(super) inline: &'a [(String, String)],
-    /// Results carried from before a restart, which are journaled the same
-    /// way, so a second crash still sees them as done.
-    pub(super) recovered: &'a [crate::tool_bridge::ToolResult],
-    /// The stage the batch was dispatched in.
-    pub(super) stage_index: usize,
-    /// The stage-local iteration that produced it.
-    pub(super) iteration: usize,
-    /// The stay in the stage it was dispatched during.
-    pub(super) visit_id: &'a str,
-    /// The provider attempt whose answer asked for the calls.
-    pub(super) requested_by: &'a str,
-    /// The assistant text of the turn that issued them.
-    pub(super) response: &'a str,
-}
-
-impl BatchDispatch<'_> {
-    /// The record.
-    pub(super) fn record(&self) -> crate::runfile::record::RunRecord {
-        crate::runfile::record::RunRecord::ToolBatch {
-            calls: self
-                .calls
-                .iter()
-                .map(|c| crate::runfile::record::ToolCallRecord {
-                    id: c.tool_id.clone(),
-                    execution_id: self.executions.get(&c.tool_id).cloned().unwrap_or_default(),
-                    name: c.name.clone(),
-                    arguments: c.arguments.to_string(),
-                    result: self
-                        .inline
-                        .iter()
-                        .find(|(id, _)| id == &c.tool_id)
-                        .map(|(_, r)| r.clone().into())
-                        .or_else(|| {
-                            self.recovered
-                                .iter()
-                                .find(|(id, _)| id == &c.tool_id)
-                                .map(|(_, r)| r.clone())
-                        }),
-                    thought_signature: c.thought_signature.clone(),
-                })
-                .collect(),
-            at: chrono::Utc::now().timestamp(),
-            stage_index: self.stage_index,
-            iteration: self.iteration,
-            visit_id: self.visit_id.to_string(),
-            requested_by: self.requested_by.to_string(),
-            response: self.response.to_string(),
-        }
-    }
-}
-
-/// Journal the files each execution produced, one record per execution.
-///
-/// Fire and forget, like the change records: nothing waits on it, and a run with
-/// no lane writes nothing. Called from the same place the batch record is written
-/// so the artifacts cannot land before the dispatch that made them.
-pub(super) fn journal_artifacts(
-    journal: &super::JournalSender,
-    run_id: &str,
-    produced: &[(String, Vec<leviath_core::output::Artifact>)],
-) {
-    for (execution_id, artifacts) in produced {
-        journal.record(
-            run_id,
-            crate::runfile::record::RunRecord::ArtifactsProduced {
-                execution_id: execution_id.clone(),
-                artifacts: artifacts.clone(),
-                at: chrono::Utc::now().timestamp(),
-            },
-        );
-    }
-}
-
 /// The resources the daemon installs, which a bare world does not have.
 ///
 /// Every field is optional because `lev run` drives these same systems with no
@@ -574,7 +494,7 @@ pub(crate) struct DaemonServices<'w> {
 /// recorded results instead of re-running their side effects.
 pub(crate) fn dispatch_tools(
     mut agents: Query<DispatchToolsQuery, With<ReadyForTools>>,
-    recovered_results: Query<&RecoveredResults>,
+    carried: Query<(Option<&RecoveredResults>, Option<&ResumedExecutions>)>,
     daemon: DaemonServices,
     mime: crate::blob_store::MimeParams,
     mut commands: Commands,
@@ -648,9 +568,12 @@ pub(crate) fn dispatch_tools(
             leviath_core::TaintLevel,
             leviath_core::TaintLevel,
         )> = Vec::new();
-        // One execution id per call, minted before anything runs. The provider's
-        // own id travels beside it: a provider may reuse one across a retry, and
-        // two attempts under one id cannot be told apart afterwards.
+        let (recovered, resumed) = carried.get(entity).unwrap_or_default();
+        // One execution id per call, minted before anything runs, and kept by
+        // a batch brought back from the run's file, whose calls the file
+        // already names. The provider's own id travels beside it: a provider
+        // may reuse one across a retry, and two attempts under one id cannot be
+        // told apart afterwards.
         //
         // Minted ahead of the loop rather than beside the journal write below,
         // because the calls this dispatcher resolves itself need theirs while it
@@ -660,9 +583,10 @@ pub(crate) fn dispatch_tools(
             .tool_calls
             .iter()
             .map(|c| {
+                let kept = resumed.and_then(|r| r.0.get(&c.tool_id).cloned());
                 (
                     c.tool_id.clone(),
-                    leviath_core::execution::mint_execution_id(),
+                    kept.unwrap_or_else(leviath_core::execution::mint_execution_id),
                 )
             })
             .collect();
@@ -673,10 +597,8 @@ pub(crate) fn dispatch_tools(
         // What the batch had already finished before a restart. Checked before
         // anything else below, so a context write, a submission or a file tool
         // that already ran is never run again.
-        let recovered: Vec<crate::tool_bridge::ToolResult> = recovered_results
-            .get(entity)
-            .map(|r| r.0.clone())
-            .unwrap_or_default();
+        let recovered: Vec<crate::tool_bridge::ToolResult> =
+            recovered.map(|r| r.0.clone()).unwrap_or_default();
         for c in &result.tool_calls {
             if recovered.iter().any(|(id, _)| id == &c.tool_id) {
                 continue;
@@ -1033,7 +955,7 @@ pub(crate) fn dispatch_tools(
             commands
                 .entity(entity)
                 .remove::<ReadyForTools>()
-                .remove::<RecoveredResults>()
+                .remove::<(RecoveredResults, ResumedExecutions)>()
                 .insert(crate::fanout::PendingFanOut { call_id, request });
             continue;
         }
@@ -1042,11 +964,12 @@ pub(crate) fn dispatch_tools(
             // What the journal is told about this batch. A batch with lane
             // work is journaled by `dispatch_lane_batches`, which holds it
             // while each call is decided.
-            let dispatch = BatchDispatch {
+            let dispatch = super::batch_record::BatchDispatch {
                 calls: &result.tool_calls,
                 executions: &executions,
                 inline: &context_results,
                 recovered: &recovered,
+                resumed: resumed.is_some(),
                 stage_index: cursor.map_or(0, |c| c.index),
                 iteration: state.iteration,
                 visit_id: &state.current_visit,
@@ -1060,8 +983,10 @@ pub(crate) fn dispatch_tools(
             // names an execution a reader can find. No ack, because nothing is
             // about to run that could outrace the record.
             if let (Some(persist), Some(md)) = (persist.as_ref(), metadata) {
-                persist.record(&md.run_id, dispatch.record());
-                journal_artifacts(persist, &md.run_id, &produced);
+                for record in dispatch.records(&[]) {
+                    persist.record(&md.run_id, record);
+                }
+                super::batch_record::journal_artifacts(persist, &md.run_id, &produced);
             }
             // Nothing async to run - apply the context results now and loop back.
             let mut resolved = typed_results(&context_results);
@@ -1102,20 +1027,24 @@ pub(crate) fn dispatch_tools(
             commands
                 .entity(entity)
                 .remove::<ReadyForTools>()
-                .remove::<RecoveredResults>()
+                .remove::<(RecoveredResults, ResumedExecutions)>()
                 .insert(ReadyToInfer);
             continue;
         }
         // Lane work: decided call by call in the world, journaled and sent by
         // `dispatch_lane_batches`, which the batch is handed to here.
-        commands.entity(entity).remove::<ReadyForTools>().insert(
-            super::lane_batch::PendingBatch::new(
-                lane_calls,
-                context_results,
-                executions,
-                recovered,
-                produced,
-            ),
-        );
+        commands
+            .entity(entity)
+            .remove::<(ReadyForTools, ResumedExecutions)>()
+            .insert(
+                super::lane_batch::PendingBatch::new(
+                    lane_calls,
+                    context_results,
+                    executions,
+                    recovered,
+                    produced,
+                )
+                .resumed(resumed.is_some()),
+            );
     }
 }

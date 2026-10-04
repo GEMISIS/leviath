@@ -496,3 +496,22 @@ fn a_call_carried_back_interrupted_ends_unobserved_and_failed() {
         parts: Vec::new(),
     }));
 }
+
+/// Calls sent to the lane again are dispatched again as the executions they
+/// already were, and nothing about them starts anew.
+#[test]
+fn calls_sent_again_are_the_executions_they_were() {
+    let events = journal_events(&RunRecord::ToolCallsResent {
+        calls: vec![("q".into(), "x1".into())],
+        requested_by: "a1".into(),
+        at: 1,
+    });
+    assert_eq!(
+        events,
+        [RunEvent::Dispatched {
+            call_id: "q".into(),
+            execution_id: "x1".into(),
+            requested_by: "a1".into(),
+        }]
+    );
+}

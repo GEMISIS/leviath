@@ -6141,7 +6141,7 @@ fn produced_files_are_journaled_against_the_call_that_made_them() {
         size: 12,
         sha256: "abc".to_string(),
     };
-    super::tools::journal_artifacts(
+    super::batch_record::journal_artifacts(
         &stage,
         "run-a",
         &[
@@ -6177,7 +6177,7 @@ fn produced_files_are_journaled_against_the_call_that_made_them() {
     );
     // Nothing produced is nothing written: a run whose answer named no file has
     // no artifact records rather than an empty one.
-    super::tools::journal_artifacts(&stage, "run-a", &[]);
+    super::batch_record::journal_artifacts(&stage, "run-a", &[]);
     assert!(prx.try_recv().is_err());
 }
 

@@ -442,6 +442,16 @@ pub(crate) struct ToolCallReply {
     pub(crate) is_error: bool,
 }
 
+/// The execution one call of a batch was dispatched as.
+#[mirror(no_filter)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct DispatchedCall {
+    /// The provider's id for the call.
+    pub(crate) call_id: String,
+    /// The execution it was dispatched as. Empty where the run recorded none.
+    pub(crate) execution_id: String,
+}
+
 /// The batch of tool calls a run has out.
 #[mirror(no_filter)]
 #[derive(Debug, SimpleObject)]
@@ -450,6 +460,9 @@ pub(crate) struct PendingToolBatch {
     pub(crate) calls: Vec<StateToolCall>,
     /// The results that are in.
     pub(crate) done: Vec<ToolCallReply>,
+    /// The execution each call was dispatched as: none while the batch
+    /// still waits to be dispatched.
+    pub(crate) executions: Vec<DispatchedCall>,
 }
 
 impl From<&PendingBatch> for PendingToolBatch {
@@ -463,6 +476,14 @@ impl From<&PendingBatch> for PendingToolBatch {
                     call_id: call_id.clone(),
                     text: result.text.clone(),
                     is_error: result.is_error,
+                })
+                .collect(),
+            executions: batch
+                .executions
+                .iter()
+                .map(|(call_id, execution_id)| DispatchedCall {
+                    call_id: call_id.clone(),
+                    execution_id: execution_id.clone(),
                 })
                 .collect(),
         }

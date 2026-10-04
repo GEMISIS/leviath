@@ -2264,11 +2264,19 @@
             },
             "description": "The results that have come back, by call id.",
             "type": "object"
+          },
+          "executions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The execution each call was dispatched as, by call id: every call of\na batch the run's file records as dispatched, and none of one still\nwaiting to be. Empty where a run recorded no execution id for a call.",
+            "type": "object"
           }
         },
         "required": [
           "calls",
-          "done"
+          "done",
+          "executions"
         ],
         "type": "object"
       },
@@ -9922,11 +9930,19 @@
             },
             "description": "The results that have come back, by call id.",
             "type": "object"
+          },
+          "executions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The execution each call was dispatched as, by call id: every call of\na batch the run's file records as dispatched, and none of one still\nwaiting to be. Empty where a run recorded no execution id for a call.",
+            "type": "object"
           }
         },
         "required": [
           "calls",
-          "done"
+          "done",
+          "executions"
         ],
         "type": "object"
       },

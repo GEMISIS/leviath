@@ -239,6 +239,7 @@ fn a_run_comes_back_with_its_answer_and_the_questions_it_asked() {
             thought_signature: None,
         }],
         done: Default::default(),
+        executions: Default::default(),
     });
     next.final_output = Some(crate::state::FinalOutputState {
         bytes: 10,
@@ -477,6 +478,7 @@ fn calls_interrupted_by_a_crash_get_a_result_that_says_to_check() {
     state.pending = Some(PendingBatch {
         calls: vec![call("a", "shell"), call("b", "spawn_agent")],
         done: Default::default(),
+        executions: Default::default(),
     });
     interrupt_in_flight(&mut state);
     let done = &state.pending.as_ref().unwrap().done;
@@ -487,6 +489,7 @@ fn calls_interrupted_by_a_crash_get_a_result_that_says_to_check() {
     state.pending = Some(PendingBatch {
         calls: vec![call("q", "ask_user_text"), call("a", "shell")],
         done: Default::default(),
+        executions: Default::default(),
     });
     interrupt_in_flight(&mut state);
     assert!(state.pending.unwrap().done.is_empty());

@@ -591,7 +591,25 @@ pub(crate) fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> 
     for (id, content) in recovered.into_iter().chain(landed) {
         done.insert(id, result_of(content.into_string()));
     }
-    Some(PendingBatch { calls, done })
+    // A batch on the lane was recorded as its executions when it was sent; one
+    // brought back from the file and not yet sent again keeps the ones the
+    // file recorded. One never sent has none yet.
+    let executions = match dispatched {
+        true => world
+            .get::<crate::components::BatchExecutions>(entity)
+            .map(|b| b.ids.clone()),
+        false => world
+            .get::<crate::pipeline::ResumedExecutions>(entity)
+            .map(|r| r.0.clone()),
+    }
+    .unwrap_or_default()
+    .into_iter()
+    .collect();
+    Some(PendingBatch {
+        calls,
+        done,
+        executions,
+    })
 }
 
 fn result_of(text: String) -> ToolResultState {
