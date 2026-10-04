@@ -30,9 +30,10 @@
 //! A line redrawn in place on stderr (a starting daemon's progress, see
 //! `daemon::startup_view`) shares the terminal with the log the same way:
 //! it is written through [`StatusWriter`], and a log line written while it
-//! is drawn clears it, takes its place, and draws it again below.
+//! is drawn clears it, takes its place, and draws it again below. Colour
+//! codes go only to a terminal, and never when `NO_COLOR` is set.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -124,6 +125,12 @@ fn write_under_status(out: &mut dyn Write, status: &[u8], buf: &[u8]) -> std::io
         return out.write_all(buf);
     }
     out.write_all(&[CLEAR_LINE, buf, status].concat())
+}
+
+/// Whether stderr's log lines carry colour codes: only on a terminal, and
+/// not when `NO_COLOR` is set to anything (<https://no-color.org>).
+fn colour(terminal: bool, no_color: Option<std::ffi::OsString>) -> bool {
+    terminal && no_color.is_none_or(|v| v.is_empty())
 }
 
 /// Append `buf` to `parked`, keeping at most `cap` bytes by discarding the
@@ -312,6 +319,10 @@ pub fn init(verbose: bool) {
         .with(otel_layer)
         .with(
             tracing_subscriber::fmt::layer()
+                .with_ansi(colour(
+                    std::io::stderr().is_terminal(),
+                    std::env::var_os("NO_COLOR"),
+                ))
                 .with_writer(writer)
                 .with_filter(EnvFilter::new(level)),
         )
@@ -541,6 +552,16 @@ mod tests {
         assert_eq!(*leviath_core::sync::lock(&STATUS), b"bar 2/4");
         StatusWriter.write_all(b"\r\x1b[2K").expect("cleared");
         assert!(leviath_core::sync::lock(&STATUS).is_empty());
+    }
+
+    /// Colour goes to a terminal only, and `NO_COLOR` set to anything turns
+    /// it off; set empty, it is as if unset.
+    #[test]
+    fn colour_only_on_a_terminal_without_no_color() {
+        assert!(colour(true, None));
+        assert!(colour(true, Some("".into())));
+        assert!(!colour(true, Some("1".into())));
+        assert!(!colour(false, None));
     }
 
     /// The cap is a ring: dropping comes off the front of what is parked
