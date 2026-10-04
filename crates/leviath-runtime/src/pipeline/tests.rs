@@ -6114,6 +6114,7 @@ async fn dispatch_journals_the_batch_then_each_completion() {
         iteration,
         call_id,
         result,
+        outcome,
         ..
     } = record
     else {
@@ -6122,6 +6123,11 @@ async fn dispatch_journals_the_batch_then_each_completion() {
     assert_eq!(iteration, agent_state().iteration);
     assert_eq!(call_id, "c_lane");
     assert_eq!(result, "ran read_file");
+    assert_eq!(
+        outcome,
+        Some(leviath_core::execution::ToolOutcome::Succeeded),
+        "a call that ran and answered says so"
+    );
 }
 
 /// The files a submission produced are journaled against the execution that

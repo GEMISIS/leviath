@@ -280,6 +280,7 @@ fn failovers_tools_and_answers_become_events() {
         done(Some(leviath_core::execution::ToolOutcome::Failed), "no"),
         done(None, "[error] gone"),
         done(None, "fine"),
+        done(None, "[denied] Tool 'shell' is not permitted."),
         answered,
     ]);
     // The events that keep a record whole sit beside the ones it always
@@ -290,8 +291,8 @@ fn failovers_tools_and_answers_become_events() {
             RunEvent::Dispatched { .. } | RunEvent::Completed { .. } | RunEvent::Settled(_)
         )
     });
-    assert_eq!(whole.len(), 2 + 4 + 1);
-    let RunEvent::Settled(settled) = &whole[6] else {
+    assert_eq!(whole.len(), 2 + 5 + 1);
+    let RunEvent::Settled(settled) = &whole[7] else {
         unreachable!()
     };
     assert_eq!(settled.kind, QuestionKind::FreeText);
@@ -308,11 +309,12 @@ fn failovers_tools_and_answers_become_events() {
         vec![
             Some(ToolOutcomeState::Succeeded),
             Some(ToolOutcomeState::Failed),
-            None,
-            None
+            Some(ToolOutcomeState::Failed),
+            Some(ToolOutcomeState::Succeeded),
+            Some(ToolOutcomeState::Blocked),
         ]
     );
-    assert_eq!(events.len(), 8);
+    assert_eq!(events.len(), 9);
     assert_eq!(
         events[0],
         RunEvent::Failover {
@@ -329,15 +331,17 @@ fn failovers_tools_and_answers_become_events() {
         unreachable!()
     };
     assert_eq!(second.args.value(), &json!("not json"));
-    let errors: Vec<bool> = events[3..7]
+    let errors: Vec<bool> = events[3..8]
         .iter()
         .filter_map(|e| match e {
             RunEvent::ToolFinished { result, .. } => Some(result.is_error),
             _ => None,
         })
         .collect();
-    assert_eq!(errors, vec![false, true, true, false]);
-    let RunEvent::Answered { id, answer } = &events[7] else {
+    // A refusal is not a failure of the tool: only a call that ran and
+    // failed, or one whose ending nobody saw, reads as an error.
+    assert_eq!(errors, vec![false, true, true, false, false]);
+    let RunEvent::Answered { id, answer } = &events[8] else {
         unreachable!()
     };
     assert_eq!(id, "q1");
@@ -388,7 +392,7 @@ fn a_batch_names_its_executions_and_ends_the_calls_it_carries() {
     assert!(events.contains(&RunEvent::Completed {
         call_id: "c1".into(),
         execution_id: "x1".into(),
-        outcome: None,
+        outcome: Some(ToolOutcomeState::Blocked),
         parts: vec!["chart.png".into()],
     }));
     refused.result = None;
@@ -514,4 +518,51 @@ fn calls_sent_again_are_the_executions_they_were() {
             requested_by: "a1".into(),
         }]
     );
+}
+
+/// How a call ended, read off its result: the words every refusal and
+/// failure starts with say which it was, and anything else ran and answered.
+#[test]
+fn a_result_says_how_its_call_ended() {
+    use leviath_core::execution::ToolOutcome;
+    let cases = [
+        ("fn a() {}", ToolOutcome::Succeeded),
+        ("", ToolOutcome::Succeeded),
+        ("[error] no such file", ToolOutcome::Failed),
+        (
+            crate::restore::INTERRUPTED_TOOL_RESULT,
+            ToolOutcome::Indeterminate,
+        ),
+        (
+            "[blocked] Tool 'shell' would send data",
+            ToolOutcome::Blocked,
+        ),
+        (
+            "[unavailable] 'x' is not available in this stage.",
+            ToolOutcome::Blocked,
+        ),
+        (
+            "[denied] Tool 'shell' is not permitted.",
+            ToolOutcome::Blocked,
+        ),
+        (
+            &crate::approval_prompt::declined_result("shell", Some("no")),
+            ToolOutcome::Denied,
+        ),
+        (
+            &crate::approval_prompt::unanswered_approval_result("shell", Some(5)),
+            ToolOutcome::Denied,
+        ),
+        (
+            &crate::approval_prompt::unanswered_approval_result("shell", None),
+            ToolOutcome::Denied,
+        ),
+        (
+            &crate::approval_prompt::lost_approval_result("shell", "gone"),
+            ToolOutcome::Denied,
+        ),
+    ];
+    for (text, want) in cases {
+        assert_eq!(outcome_of(text), want, "{text}");
+    }
 }

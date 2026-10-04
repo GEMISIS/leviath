@@ -80,7 +80,7 @@ fn a_resumed_batch_records_only_what_is_new() {
     assert_eq!(
         said,
         [
-            "done c xc None 2".to_string(),
+            format!("done c xc {:?} 2", Some(ToolOutcome::Failed)),
             format!("done b xb {:?} 2", Some(ToolOutcome::Indeterminate)),
             r#"resent [("q", "xq")] r"#.to_string(),
         ]

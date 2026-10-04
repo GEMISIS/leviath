@@ -54,28 +54,19 @@ impl BatchDispatch<'_> {
                 r.as_str()
                     .starts_with(crate::restore::INTERRUPTED_TOOL_RESULT)
             })
-            .map(|(id, r)| {
-                let outcome = Some(leviath_core::execution::ToolOutcome::Indeterminate);
-                (id, r.clone(), outcome)
-            });
+            .map(|(id, r)| (id, r.clone()));
         let settled = self
             .inline
             .iter()
-            .map(|(id, text)| {
-                (
-                    id,
-                    leviath_core::region::EntryContent::from(text.clone()),
-                    None,
-                )
-            })
+            .map(|(id, text)| (id, leviath_core::region::EntryContent::from(text.clone())))
             .chain(interrupted);
         let mut records: Vec<RunRecord> = settled
-            .map(|(id, result, outcome)| RunRecord::ToolCallDone {
+            .map(|(id, result)| RunRecord::ToolCallDone {
                 iteration: self.iteration,
                 call_id: id.clone(),
                 execution_id: self.execution_of(id),
+                outcome: Some(crate::runfile::outcome_of(result.as_str())),
                 result,
-                outcome,
                 at: chrono::Utc::now().timestamp(),
             })
             .collect();

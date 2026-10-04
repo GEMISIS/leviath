@@ -11,7 +11,7 @@
 //! execution produced follow as an event of their own. A file written without
 //! those (one converted from an older layout) names a call by the provider's
 //! call id alone, so that id stands for the execution's, and an ending is read
-//! off whether the result was an error.
+//! off its result.
 //!
 //! The payloads stay out of the listing on purpose. Every execution is a
 //! handful of facts plus the arguments the model sent, and a result is fetched
@@ -100,7 +100,7 @@ pub(crate) fn read(run_id: &str) -> Result<Vec<Execution>, ServeError> {
                         execution.result_position = Some(step.delta.seq);
                         execution.outcome = Some(match result.is_error {
                             true => ToolOutcome::Failed,
-                            false => ToolOutcome::Succeeded,
+                            false => leviath_runtime::runfile::outcome_of(&result.text),
                         });
                     }
                 }
@@ -129,7 +129,9 @@ pub(crate) fn read(run_id: &str) -> Result<Vec<Execution>, ServeError> {
                         .rev()
                         .find(|e| e.id == *execution_id && e.call_id == *call_id)
                     {
-                        execution.outcome = outcome.map(tool_outcome);
+                        // An ending that does not say how leaves what the
+                        // result said.
+                        execution.outcome = outcome.map(tool_outcome).or(execution.outcome);
                     }
                 }
                 RunEvent::Artifacts {
@@ -294,6 +296,7 @@ mod tests {
                     started("c1", serde_json::json!({ "path": "a.rs" })),
                     started("c2", serde_json::json!("not json at all")),
                     started("c3", serde_json::json!({})),
+                    started("c4", serde_json::json!({})),
                 ],
                 |s| s.cursor.iteration += 1,
             );
@@ -304,13 +307,22 @@ mod tests {
                 vec![
                     finished("c1", "fn a() {}", false),
                     finished("c2", &long, true),
+                    finished("c4", "[denied] Tool 'read_file' is not permitted.", false),
+                    // An ending that does not say how the call ended leaves
+                    // what its result said.
+                    RunEvent::Completed {
+                        call_id: "c1".into(),
+                        execution_id: "c1".into(),
+                        outcome: None,
+                        parts: Vec::new(),
+                    },
                     finished("ghost", "for a call never started", false),
                 ],
                 |s| s.cursor.iteration += 1,
             );
 
             let ran = read(&run_id).unwrap();
-            assert_eq!(ran.len(), 3);
+            assert_eq!(ran.len(), 4);
             let first = &ran[0];
             assert_eq!((first.id.as_str(), first.call_id.as_str()), ("c1", "c1"));
             assert_eq!(first.tool, "read_file");
@@ -324,6 +336,7 @@ mod tests {
             assert_eq!(ran[1].arguments, "not json at all");
             assert_eq!(ran[1].outcome, Some(ToolOutcome::Failed));
             assert!(ran[2].unfinished());
+            assert_eq!(ran[3].outcome, Some(ToolOutcome::Blocked));
 
             let text = result(&run_id, 2, "c1").unwrap().unwrap();
             assert_eq!(text.text, "fn a() {}");

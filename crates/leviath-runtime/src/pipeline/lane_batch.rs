@@ -335,10 +335,8 @@ fn journal_batch(
                         // be attached to a different attempt that shared the
                         // provider's id.
                         execution_id: minted.get(call_id).cloned().unwrap_or_default(),
+                        outcome: Some(crate::runfile::outcome_of(result.as_str())),
                         result: result.clone(),
-                        // The completion says only that the call finished:
-                        // its verdict is not known here.
-                        outcome: None,
                         at: chrono::Utc::now().timestamp(),
                     },
                 );

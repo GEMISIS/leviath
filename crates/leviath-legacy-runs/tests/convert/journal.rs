@@ -1,6 +1,7 @@
 //! Journal records of every kind, and how each one reads.
 
 use leviath_legacy_runs::journal::JournalRecord;
+use leviath_runtime::state::journal::ToolOutcomeState;
 use leviath_runtime::state::{RunEvent, RunStatus};
 use serde_json::json;
 
@@ -384,8 +385,8 @@ fn model_calls_and_executions_read_back_as_recorded() {
     );
     assert_eq!(
         completed,
-        vec![("call_1".to_string(), None)],
-        "the record did not say how the call ended"
+        vec![("call_1".to_string(), Some(ToolOutcomeState::Succeeded))],
+        "a record that does not say how the call ended is read off its result"
     );
     assert_eq!(file.fold(), file.last);
 

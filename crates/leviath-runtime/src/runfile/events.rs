@@ -82,16 +82,10 @@ pub(crate) fn push_events(events: &mut Vec<RunEvent>, answered: &mut Answered, r
                 requested_by: requested_by.clone(),
             }));
             // A call that came back in the batch record itself (a refusal, a
-            // result settled before dispatch) ends there. One a restart found
-            // still running ended unobserved: its effect may or may not have
-            // landed.
+            // result settled before dispatch) ends there, as its result says.
             for c in calls {
                 if let Some(result) = &c.result {
-                    let outcome = result
-                        .as_str()
-                        .starts_with(crate::restore::INTERRUPTED_TOOL_RESULT)
-                        .then_some(leviath_core::execution::ToolOutcome::Indeterminate);
-                    push_done(events, &c.id, &c.execution_id, result, outcome);
+                    push_done(events, &c.id, &c.execution_id, result, None);
                 }
             }
         }
@@ -217,7 +211,36 @@ pub(crate) fn push_events(events: &mut Vec<RunEvent>, answered: &mut Answered, r
     }
 }
 
+/// How a call ended, read off its result.
+///
+/// Every refusal and failure a call can end in starts with a marker the
+/// model reads too: `[error]` it ran and failed (and the stand-in a restart
+/// gives a call it found running ends unobserved), `[blocked]` and
+/// `[unavailable]` a gate or the stage refused it, and `[denied]` a
+/// permission rule refused it, or a person did when the refusal came from an
+/// approval prompt. A result with no marker is a call that ran and answered.
+pub fn outcome_of(result: &str) -> leviath_core::execution::ToolOutcome {
+    use leviath_core::execution::ToolOutcome;
+    if result.starts_with(crate::restore::INTERRUPTED_TOOL_RESULT) {
+        ToolOutcome::Indeterminate
+    } else if result.starts_with("[error]") {
+        ToolOutcome::Failed
+    } else if result.starts_with("[denied] User declined") {
+        ToolOutcome::Denied
+    } else if result.starts_with("[denied]") {
+        match result.contains("approval prompt") {
+            true => ToolOutcome::Denied,
+            false => ToolOutcome::Blocked,
+        }
+    } else if result.starts_with("[blocked]") || result.starts_with("[unavailable]") {
+        ToolOutcome::Blocked
+    } else {
+        ToolOutcome::Succeeded
+    }
+}
+
 /// A finished call: its result, and how it ended with the parts it carried.
+/// A record that does not say how the call ended is read off its result.
 fn push_done(
     events: &mut Vec<RunEvent>,
     call_id: &str,
@@ -225,10 +248,11 @@ fn push_done(
     result: &leviath_core::region::EntryContent,
     outcome: Option<leviath_core::execution::ToolOutcome>,
 ) {
-    let is_error = match outcome {
-        Some(o) => o != leviath_core::execution::ToolOutcome::Succeeded,
-        None => result.as_str().starts_with("[error]"),
-    };
+    use leviath_core::execution::ToolOutcome;
+    let outcome = outcome.unwrap_or(outcome_of(result.as_str()));
+    // A refusal is not an error of the tool's: only a call that ran and
+    // failed, or one nobody saw end, is.
+    let is_error = matches!(outcome, ToolOutcome::Failed | ToolOutcome::Indeterminate);
     events.push(RunEvent::ToolFinished {
         call_id: call_id.to_string(),
         result: ToolResultState {
@@ -240,7 +264,7 @@ fn push_done(
     events.push(RunEvent::Completed {
         call_id: call_id.to_string(),
         execution_id: execution_id.to_string(),
-        outcome: outcome.map(super::recorded::outcome),
+        outcome: Some(super::recorded::outcome(outcome)),
         parts: result
             .stored()
             .filter_map(|part| part.name.clone())

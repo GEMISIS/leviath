@@ -622,7 +622,11 @@ async fn a_call_that_finished_mid_batch_is_not_run_again_after_a_restart() {
         assert_eq!(
             finished,
             [
-                ("c1".to_string(), dispatched[0].1.clone(), None),
+                (
+                    "c1".to_string(),
+                    dispatched[0].1.clone(),
+                    Some(crate::state::journal::ToolOutcomeState::Succeeded)
+                ),
                 (
                     "c2".to_string(),
                     dispatched[1].1.clone(),
