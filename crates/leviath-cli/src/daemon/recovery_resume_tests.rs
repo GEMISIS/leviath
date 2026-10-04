@@ -762,6 +762,16 @@ async fn a_call_running_at_a_clean_stop_is_not_started_again() {
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "start\n");
 }
 
+/// What the last step on `run_id`'s file says its batch is held on, if
+/// anything.
+fn held_on_disk(runs: &Path, run_id: &str) -> Option<leviath_runtime::state::HeldBatch> {
+    leviath_runtime::runfile::RunFileReader::open(&run_file(runs, run_id))
+        .and_then(|file| file.latest_state())
+        .ok()?
+        .pending?
+        .held
+}
+
 /// A blueprint whose one stage lists a directory, which a person approves.
 const APPROVER: &str = r#"[blueprint]
 name = "approver"
@@ -882,6 +892,15 @@ async fn an_approval_waiting_at_a_restart_is_asked_again_without_a_new_turn() {
         assert!(asked, "the call is put to a person");
         let question = open_for(&first, &run).remove(0);
         assert_eq!(model.asked.load(Ordering::SeqCst), 1);
+        // The run's file is written off the tick, so the step that holds the
+        // question lands a moment after it is asked. A daemon that died
+        // before then never recorded it, and asks its model again; one that
+        // died after comes back asking the same question.
+        let recorded = drive_until(&mut world, |_| {
+            held_on_disk(runs.path(), &run).is_some_and(|h| h.asked.contains_key("c1"))
+        })
+        .await;
+        assert!(recorded, "the run's file holds the question");
 
         match crashed {
             // A daemon that dies leaves its world as it was.
@@ -922,6 +941,14 @@ async fn an_approval_waiting_at_a_restart_is_asked_again_without_a_new_turn() {
             drive_until(&mut world, |w| live(w, &run).status == RunStatus::Complete).await;
         assert!(finished, "the allowed call runs and the run finishes");
         assert_eq!(model.asked.load(Ordering::SeqCst), 2);
+        // The call's end is recorded off the tick too.
+        let ended = drive_until(&mut world, |_| {
+            told_in_file(runs.path(), &run)
+                .iter()
+                .any(|t| t.starts_with("ended c1"))
+        })
+        .await;
+        assert!(ended, "the call's end reaches the run's file");
         let told = told_in_file(runs.path(), &run);
         let ended = told.iter().filter(|t| t.starts_with("ended c1")).count();
         assert_eq!(ended, 1, "the call ran once: {told:?}");
