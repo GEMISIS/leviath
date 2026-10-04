@@ -565,6 +565,23 @@ async fn a_message_no_run_will_read_says_which_run_and_why() {
                 "{run}"
             );
         }
+
+        // A daemon that will not list its runs holds none that anybody can
+        // see, so the run's own record decides.
+        let (control, _socket, _srv) =
+            crate::commands::serve::testutil::busy_daemon(|req| match req {
+                ControlRequest::List => ControlResponse::Error {
+                    message: "not now".to_string(),
+                },
+                _ => ControlResponse::Error {
+                    message: "run 'done-1' reads no more messages".to_string(),
+                },
+            });
+        state.control = control;
+        let failure = send_message(&state, "done-1", "hi".to_string(), None, Vec::new())
+            .await
+            .expect_err("the run reads no more messages");
+        assert_eq!(failure.code(), "CONFLICT");
     })
     .await;
 }
