@@ -13,7 +13,8 @@
 //!
 //! The start-up steps write to a [`StartupBoard`]; the control channel reads
 //! it. Once the host is serving, the [`ControlGate`] sends every new
-//! connection to it instead.
+//! connection to it instead. A subscription is the exception: it is taken at
+//! any time, and its events begin with the world's first.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -22,7 +23,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{ControlToken, DaemonIdentity};
+use super::{ControlToken, DaemonIdentity, EventLog};
 use crate::host::{ControlOp, WorldEvent};
 
 /// The start-up step a daemon is on.
@@ -89,15 +90,16 @@ impl StartupBoard {
 /// How long the accept loop waits after an accept fails.
 const ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// What a served connection needs from the host.
-type HostEnds = (UnboundedSender<ControlOp>, broadcast::Sender<WorldEvent>);
-
 /// Where the daemon's accept loop sends each connection: to the start-up
 /// answer until [`open`](Self::open) is called, to the host after.
 #[derive(Clone)]
 pub struct ControlGate {
     board: StartupBoard,
-    host: Arc<OnceLock<HostEnds>>,
+    host: Arc<OnceLock<UnboundedSender<ControlOp>>>,
+    /// The world's events, for subscribers. Here from the start, so a client
+    /// that subscribes while the daemon starts is sent the world's first
+    /// events rather than being turned away.
+    events: EventLog,
 }
 
 impl ControlGate {
@@ -106,12 +108,16 @@ impl ControlGate {
         Self {
             board,
             host: Arc::default(),
+            events: EventLog::new(),
         }
     }
 
-    /// The host is serving: every connection from now on reaches it.
+    /// The host is serving: every connection from now on reaches it, and
+    /// subscribers are sent what the world sends from here on. Called before
+    /// the world first runs, so no event goes unrecorded.
     pub fn open(&self, op_tx: UnboundedSender<ControlOp>, events: broadcast::Sender<WorldEvent>) {
-        let _ = self.host.set((op_tx, events));
+        self.events.record(&events);
+        let _ = self.host.set(op_tx);
     }
 
     /// Accept connections on `listener` for the daemon's life, each served
@@ -154,18 +160,14 @@ impl ControlGate {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        let (op_tx, events, starting) = match self.host.get() {
-            Some((op_tx, events)) => (op_tx.clone(), events.clone(), None),
-            None => (
-                tokio::sync::mpsc::unbounded_channel().0,
-                broadcast::channel(1).0,
-                Some(&self.board),
-            ),
+        let (op_tx, starting) = match self.host.get() {
+            Some(op_tx) => (op_tx.clone(), None),
+            None => (tokio::sync::mpsc::unbounded_channel().0, Some(&self.board)),
         };
         super::handle_connection_capped(
             stream,
             op_tx,
-            events,
+            self.events.clone(),
             token,
             identity,
             super::MAX_REQUEST_BYTES,

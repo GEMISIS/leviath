@@ -213,7 +213,8 @@ each one wants and the settings worth adjusting.
 
 A `lev daemon restart` while a prompt is streaming does not end the turn. The bridge waits for the
 daemon to come back (up to ten seconds), subscribes again, and follows the run, which the new
-daemon reloads from disk. The editor sees the output pause and resume. The turn ends only when no
+daemon reloads from disk. It picks the event stream up where it left off, so a run that finished
+during the gap still ends the turn with its answer. The editor sees the output pause and resume. The turn ends only when no
 daemon returns, with whatever the run had written by then.
 
 The daemon can come back on a different build than the bridge, which is what a `lev update` looks

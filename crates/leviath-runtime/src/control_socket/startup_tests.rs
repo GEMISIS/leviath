@@ -59,8 +59,8 @@ async fn ask(gate: &ControlGate, lines: &[ControlRequest]) -> Vec<ControlRespons
     out
 }
 
-/// While the gate is closed, every request but `authenticate` is answered
-/// with the start-up step, a subscription included, and nothing reaches a
+/// While the gate is closed, every request but `authenticate` and a
+/// subscription is answered with the start-up step, and nothing reaches a
 /// host; a line that does not parse is still refused as one.
 #[tokio::test]
 async fn a_closed_gate_answers_every_request_with_the_step_under_way() {
@@ -76,7 +76,7 @@ async fn a_closed_gate_answers_every_request_with_the_step_under_way() {
                 hello: true,
             },
             ControlRequest::List,
-            ControlRequest::Subscribe,
+            ControlRequest::Status { run_id: "r".into() },
         ],
     )
     .await;
@@ -102,6 +102,39 @@ async fn a_closed_gate_answers_every_request_with_the_step_under_way() {
         message.starts_with(super::super::INVALID_REQUEST),
         "{message}"
     );
+}
+
+/// A subscription taken while the daemon starts is not turned away: it is
+/// sent the world's events from the first, once the gate opens. Turned away,
+/// it was a stream that never carried anything, since a subscriber does not
+/// ask again, and a gateway that reconnected during a restart heard nothing
+/// more from the daemon until the next one.
+#[tokio::test]
+async fn a_subscription_taken_while_starting_carries_the_worlds_first_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = control_id(dir.path());
+    let mut listener = bind_control_listener(&id).unwrap();
+    let gate = ControlGate::new(StartupBoard::default());
+    let serving = gate.clone();
+    tokio::spawn(async move {
+        let stream = listener.accept().await.unwrap().unwrap();
+        let _ = serving
+            .serve(stream, None, DaemonIdentity::this_process("test"))
+            .await;
+    });
+    let mut stream = ControlClient::new(id).subscribe().await.unwrap();
+    let events = gate.events.clone();
+    leviath_testkit::wait_until("the stream is open", || events.subscribers() > 0).await;
+    let (world, _keep) = broadcast::channel(4);
+    gate.open(mpsc::unbounded_channel().0, world.clone());
+    let first = WorldEvent::Log {
+        run_id: "r".into(),
+        agent_id: "a".into(),
+        line: "the world's first event".into(),
+    };
+    world.send(first.clone()).unwrap();
+    assert_eq!(stream.next().await, Some(first));
+    assert_eq!(stream.cursor().map(|c| c.after), Some(1));
 }
 
 /// A host that answers a status query, and counts the queries.

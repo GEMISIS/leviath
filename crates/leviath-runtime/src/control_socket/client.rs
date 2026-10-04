@@ -766,10 +766,24 @@ impl ControlClient {
     /// stale token is re-read once, and a daemon that is not there is waited
     /// for. Subscribing has no effect to double, so a retry is always safe.
     pub async fn subscribe(&self) -> std::io::Result<WorldEventStream> {
+        self.subscribe_from(None).await
+    }
+
+    /// [`Self::subscribe`], picking up where a stream that dropped had got
+    /// to ([`WorldEventStream::cursor`]): the events it missed come first,
+    /// including those of a daemon that replaced the one it was reading.
+    pub async fn subscribe_from(
+        &self,
+        cursor: Option<&super::EventCursor>,
+    ) -> std::io::Result<WorldEventStream> {
+        let request = cursor.map_or(ControlRequest::Subscribe, |c| ControlRequest::Resubscribe {
+            session: c.session.clone(),
+            after: c.after,
+        });
         let mut refreshed = false;
         let mut backoff = RECONNECT_BACKOFF_START;
         loop {
-            match self.subscribe_once().await {
+            match self.subscribe_once(&request).await {
                 Ok(stream) => {
                     self.reached();
                     return Ok(stream);
@@ -791,13 +805,12 @@ impl ControlClient {
     }
 
     /// One subscribe attempt with the currently-cached token.
-    async fn subscribe_once(&self) -> std::io::Result<WorldEventStream> {
+    async fn subscribe_once(&self, request: &ControlRequest) -> std::io::Result<WorldEventStream> {
         let stream = connect(&self.id).await?;
         let (read_half, mut write_half) = tokio::io::split(stream);
         let mut lines = BufReader::new(read_half).lines();
         self.authenticate(&mut write_half, &mut lines).await?;
-        let mut line =
-            serde_json::to_string(&ControlRequest::Subscribe).expect("ControlRequest serializes");
+        let mut line = serde_json::to_string(request).expect("ControlRequest serializes");
         line.push('\n');
         // A failed write means the peer is already gone; the read side then sees
         // EOF and `next` returns `None`, so the write needs no separate handling.
@@ -805,6 +818,7 @@ impl ControlClient {
         Ok(WorldEventStream {
             lines,
             _write: write_half,
+            cursor: None,
         })
     }
 }
@@ -815,6 +829,13 @@ pub struct WorldEventStream {
     lines: tokio::io::Lines<BufReader<tokio::io::ReadHalf<ClientStream>>>,
     // Held open so the connection (and thus the subscription) stays alive.
     _write: tokio::io::WriteHalf<ClientStream>,
+    cursor: Option<super::EventCursor>,
+}
+
+/// The number a daemon puts beside each event it streams.
+#[derive(serde::Deserialize)]
+struct Numbered {
+    seq: Option<u64>,
 }
 
 impl WorldEventStream {
@@ -829,8 +850,26 @@ impl WorldEventStream {
         loop {
             let line = self.lines.next_line().await.ok().flatten()?;
             if let Ok(event) = serde_json::from_str(&line) {
+                let seq = serde_json::from_str::<Numbered>(&line)
+                    .ok()
+                    .and_then(|n| n.seq);
+                if let (Some(cursor), Some(seq)) = (self.cursor.as_mut(), seq) {
+                    cursor.after = seq;
+                }
                 return Some(event);
             }
+            if let Ok(ControlResponse::Subscribed { session, after }) = serde_json::from_str(&line)
+            {
+                self.cursor = Some(super::EventCursor { session, after });
+            }
         }
+    }
+
+    /// Where this stream has got to, for
+    /// [`ControlClient::subscribe_from`] to pick it up again once it drops.
+    /// `None` until the daemon has said, which a daemon that does not number
+    /// its events never does.
+    pub fn cursor(&self) -> Option<super::EventCursor> {
+        self.cursor.clone()
     }
 }

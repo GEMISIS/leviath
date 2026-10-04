@@ -36,8 +36,12 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
         state.limits.allow_local_network,
     );
     let mut link = LinkWatch::new(&state);
+    // Where the stream had got to when it last dropped, so the next one
+    // starts with what was missed: above all a run that a restarted daemon
+    // finished before this loop was back, whose webhook is fired from here.
+    let mut cursor = None;
     loop {
-        consume_once(&state, &client, &mut link).await;
+        consume_once(&state, &client, &mut link, &mut cursor).await;
         // The stream ended (daemon closed / restarted) or was unreachable; back
         // off briefly, then re-subscribe.
         tokio::time::sleep(backoff).await;
@@ -114,10 +118,16 @@ impl LinkWatch {
     }
 }
 
-/// One subscribe-and-consume pass: forward events until the stream ends. Returns
+/// One subscribe-and-consume pass: forward events until the stream ends,
+/// starting after `cursor` and leaving it where the stream got to. Returns
 /// immediately if the daemon can't be reached.
-async fn consume_once(state: &AppState, client: &reqwest::Client, link: &mut LinkWatch) {
-    let Ok(mut stream) = state.control.subscribe().await else {
+async fn consume_once(
+    state: &AppState,
+    client: &reqwest::Client,
+    link: &mut LinkWatch,
+    cursor: &mut Option<leviath_runtime::control_socket::EventCursor>,
+) {
+    let Ok(mut stream) = state.control.subscribe_from(cursor.as_ref()).await else {
         link.down(state);
         return;
     };
@@ -125,6 +135,9 @@ async fn consume_once(state: &AppState, client: &reqwest::Client, link: &mut Lin
     while let Some(event) = stream.next().await {
         handle_event(state, client, event);
     }
+    // A stream that dropped before the daemon said where it starts leaves
+    // the cursor where it was.
+    *cursor = stream.cursor().or(cursor.take());
     link.down(state);
 }
 
@@ -1326,7 +1339,7 @@ mod tests {
         );
         let (state, mut rx) = state_with(control);
         let client = reqwest::Client::new();
-        consume_once(&state, &client, &mut LinkWatch::new(&state)).await; // returns when the stream closes
+        consume_once(&state, &client, &mut LinkWatch::new(&state), &mut None).await; // returns when the stream closes
         server.await.unwrap();
         assert_eq!(tag(&rx.try_recv().unwrap()), "agent_status");
     }
@@ -1335,7 +1348,75 @@ mod tests {
     async fn consume_once_returns_when_daemon_absent() {
         let (state, _rx) = state_with(no_daemon_client());
         let client = reqwest::Client::new();
-        consume_once(&state, &client, &mut LinkWatch::new(&state)).await; // subscribe fails → returns immediately
+        consume_once(&state, &client, &mut LinkWatch::new(&state), &mut None).await; // subscribe fails → returns immediately
+    }
+
+    /// A daemon on `id` serving one connection from `log`, as the real
+    /// daemon's gate serves every connection from its one log.
+    fn log_daemon(
+        id: &leviath_runtime::control_socket::ControlId,
+        log: &leviath_runtime::control_socket::EventLog,
+    ) -> tokio::task::JoinHandle<()> {
+        let mut listener = bind_control_listener(id).unwrap();
+        let log = log.clone();
+        tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (op_tx, _op_rx) = tokio::sync::mpsc::unbounded_channel();
+            let identity = crate::test_support::same_code_daemon(1);
+            let _ = leviath_runtime::control_socket::handle_connection_as(
+                stream, op_tx, log, None, identity,
+            )
+            .await;
+        })
+    }
+
+    /// The daemon was killed and started again, and a run it restored
+    /// finished before this relay was subscribed again. Its completion went
+    /// out to nobody; the relay picks the stream up from where it was, so it
+    /// is sent the completion anyway and fires the run's webhook, rather than
+    /// the run ending in silence.
+    #[tokio::test]
+    async fn a_run_finished_while_the_relay_was_away_is_still_completed() {
+        use leviath_runtime::control_socket::EventLog;
+        let dir = tempfile::tempdir().unwrap();
+        let id = control_id(dir.path());
+        let (state, mut rx) = state_with(ControlClient::new(id.clone()));
+        let client = reqwest::Client::new();
+        let mut link = LinkWatch::new(&state);
+        let mut cursor = None;
+
+        // The first daemon: the relay is subscribed, then the daemon dies.
+        let (world, _keep) = broadcast::channel(16);
+        let first = EventLog::recording(&world);
+        let served = log_daemon(&id, &first);
+        drop(world);
+        consume_once(&state, &client, &mut link, &mut cursor).await;
+        served.await.unwrap();
+        let down = serde_json::to_value(rx.try_recv().unwrap().event).unwrap();
+        assert_eq!(down["connected"], false);
+
+        // Its replacement restores the run and finishes it at once.
+        let (world, _keep) = broadcast::channel(16);
+        let second = EventLog::recording(&world);
+        world
+            .send(WorldEvent::Completed {
+                run_id: "restored".into(),
+                agent_id: "a".into(),
+                status: "complete".into(),
+                final_output: None,
+            })
+            .unwrap();
+        drop(world);
+        let served = log_daemon(&id, &second);
+        consume_once(&state, &client, &mut link, &mut cursor).await;
+        served.await.unwrap();
+        let frames: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|frame| tag(&frame))
+            .collect();
+        assert!(
+            frames.contains(&"agent_completed".to_string()),
+            "the completion reached the relay: {frames:?}"
+        );
     }
 
     /// A fake daemon that accepts `passes` subscribe connections, streaming one
@@ -1415,8 +1496,8 @@ mod tests {
         let (state, mut rx) = state_with(no_daemon_client());
         let client = reqwest::Client::new();
         let mut link = LinkWatch::new(&state);
-        consume_once(&state, &client, &mut link).await;
-        consume_once(&state, &client, &mut link).await;
+        consume_once(&state, &client, &mut link, &mut None).await;
+        consume_once(&state, &client, &mut link, &mut None).await;
         let down = serde_json::to_value(rx.try_recv().unwrap().event).unwrap();
         assert_eq!(down["type"], "daemon_link");
         assert_eq!(down["connected"], false);
@@ -1447,7 +1528,7 @@ mod tests {
         };
 
         // Pass 1: nothing listening.
-        consume_once(&state, &client, &mut link).await;
+        consume_once(&state, &client, &mut link, &mut None).await;
         let down = next(&mut rx);
         assert_eq!(down["connected"], false);
 
@@ -1476,7 +1557,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             drop(events);
         });
-        consume_once(&state, &client, &mut link).await;
+        consume_once(&state, &client, &mut link, &mut None).await;
         ender.await.unwrap();
         server_a.await.unwrap();
         let up = next(&mut rx);
@@ -1499,7 +1580,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             drop(events);
         });
-        consume_once(&state, &client, &mut link).await;
+        consume_once(&state, &client, &mut link, &mut None).await;
         ender.await.unwrap();
         server_b.await.unwrap();
         let up = next(&mut rx);

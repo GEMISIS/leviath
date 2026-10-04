@@ -24,10 +24,9 @@ use leviath_providers::{
 };
 use leviath_runtime::ProviderRegistry;
 use leviath_runtime::control_socket::{
-    ControlClient, ControlResponse, ControlToken, bind_control_listener, control_id,
+    ControlClient, ControlResponse, ControlToken, EventLog, bind_control_listener, control_id,
     handle_connection_as,
 };
-use leviath_runtime::host::WorldEvent;
 use tokio::sync::{Mutex, broadcast};
 
 use super::testutil::WsTestClient;
@@ -112,10 +111,10 @@ struct Seam {
     control: ControlClient,
     /// Where the websocket route is listening.
     addr: std::net::SocketAddr,
-    /// The host's event sender, kept only to ask how many subscribers it has:
+    /// The daemon's event log, kept only to ask how many subscribers it has:
     /// one means the relay's `Subscribe` connection is live, which is the
     /// readiness signal that makes a sleep unnecessary here.
-    events: broadcast::Sender<WorldEvent>,
+    events: EventLog,
     _dir: tempfile::TempDir,
     _tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -145,7 +144,7 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
 
     // The daemon half: the host's own event sender served over a real control
     // socket, wired the way `main.rs` wires it.
-    let events = host.event_sender();
+    let events = EventLog::recording(&host.event_sender());
     let served = events.clone();
     let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel();
     let dir = tempfile::tempdir().expect("socket dir");
@@ -273,12 +272,12 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
     let mut client = WsTestClient::connect(seam.addr, "/ws").await;
 
     // Spawn only once the relay's `Subscribe` is live, so nothing under test
-    // has already happened by the time anyone is listening. A receiver on the
-    // host's broadcast channel is exactly that connection: nothing else in
-    // this chain subscribes.
+    // has already happened by the time anyone is listening. A stream open on
+    // the daemon's log is exactly that connection: nothing else in this chain
+    // subscribes.
     let events = seam.events.clone();
     leviath_testkit::wait_until("the relay subscribed to the daemon", || {
-        events.receiver_count() > 0
+        events.subscribers() > 0
     })
     .await;
 

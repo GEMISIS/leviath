@@ -233,3 +233,25 @@ async fn a_run_paged_back_in_announces_only_what_is_new() {
         "running again, and nothing it had said before: {back:?}"
     );
 }
+
+/// A run restored mid-call whose call is answered before the host's first
+/// event pass over it finishes once, on that pass: what it had announced is
+/// read from its file, where it was still going, not from the world.
+#[tokio::test]
+async fn a_restored_run_that_finishes_before_the_first_pass_completes() {
+    let mut host = host();
+    let mut rx = host.subscribe();
+    let entity = crate::restore::resume(
+        host.world_mut().world_mut(),
+        resumable(0.0, RunStatus::Active),
+        crate::spec::env::Bindings::new(),
+    );
+    host.world_mut()
+        .world_mut()
+        .get_mut::<crate::components::AgentState>(entity)
+        .unwrap()
+        .status = crate::components::AgentStatus::Complete;
+    host.emit_events();
+    let events = drain(&mut rx);
+    assert!(kinds(&events).contains(&"completed"), "{events:?}");
+}

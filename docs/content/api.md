@@ -2242,6 +2242,11 @@ events stop, and one when they resume:
 `daemon` is absent until the daemon has introduced itself, which every current daemon does on
 connect.
 
+What happened while the link was down still arrives. The daemon numbers its events and keeps the
+latest few thousand, and `lev serve` picks its stream up where it left off. So a run that a
+restarted daemon finished before `lev serve` was back still gets its `agent_completed` frame and
+its webhook.
+
 The daemon can come back on a different build than the running `lev serve`. The usual cause is a
 `lev update` with the server left running. The frame then also carries `restart_advised`, a
 sentence that names both builds and says to restart `lev serve`. Every subscriber that connects

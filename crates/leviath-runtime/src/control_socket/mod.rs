@@ -22,10 +22,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 
 use crate::components::AgentStatus;
-use crate::host::{ControlOp, DaemonHealth, RunListEntry, WorldEvent};
+use crate::host::{ControlOp, DaemonHealth, RunListEntry};
 use crate::spec::issues::SpawnIssues;
 use crate::spec::request::SpawnRequest;
 use crate::spec::summary::SpawnSummary;
@@ -38,12 +38,14 @@ pub use client::{
     WorldEventStream,
 };
 mod startup;
+mod stream;
 #[cfg(test)]
 use client::{
     DEFAULT_CONTROL_TIMEOUT_SECS, SPAWN_CONTROL_TIMEOUT_SECS, is_transient, request_timeout,
     timeout_for,
 };
 pub use startup::{ControlGate, StartupBoard, StartupProgress};
+pub use stream::{EventCursor, EventLog, KEPT};
 
 #[cfg(unix)]
 mod unix;
@@ -307,9 +309,19 @@ pub enum ControlRequest {
     },
     /// Shut the daemon down.
     Shutdown,
-    /// Switch this connection to an event stream: the daemon writes newline-JSON
-    /// [`WorldEvent`]s until the client disconnects. No per-request reply.
+    /// Switch this connection to an event stream: the daemon answers
+    /// [`ControlResponse::Subscribed`], then writes newline-JSON
+    /// [`WorldEvent`](crate::host::WorldEvent)s, each numbered in a `seq` field, until the client
+    /// disconnects. Sent only what happens from then on.
     Subscribe,
+    /// [`Subscribe`](Self::Subscribe), picking up a stream that dropped:
+    /// sent first the kept events it missed (see [`EventLog`]).
+    Resubscribe {
+        /// The session the dropped stream was reading.
+        session: String,
+        /// The number of the last event it was sent.
+        after: u64,
+    },
 }
 
 impl ControlRequest {
@@ -332,6 +344,7 @@ impl ControlRequest {
                 | Self::List
                 | Self::ListInteractions
                 | Self::Subscribe
+                | Self::Resubscribe { .. }
         )
     }
 }
@@ -419,6 +432,14 @@ pub enum ControlResponse {
     Starting {
         /// The start-up step under way.
         progress: StartupProgress,
+    },
+    /// The first line of an event stream: the daemon session its events are
+    /// numbered in, and the number it starts after.
+    Subscribed {
+        /// The daemon session.
+        session: String,
+        /// The stream's first event is numbered after this.
+        after: u64,
     },
 }
 
@@ -667,53 +688,11 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
                 ok: rx.await.unwrap_or(false),
             }
         }
-        // `Subscribe` is intercepted by `handle_connection` (it streams rather
-        // than replies once); reaching here would be a routing bug.
-        ControlRequest::Subscribe => ControlResponse::Error {
+        // A subscription is intercepted by `handle_connection` (it streams
+        // rather than replies once); reaching here would be a routing bug.
+        ControlRequest::Subscribe | ControlRequest::Resubscribe { .. } => ControlResponse::Error {
             message: "subscribe is a streaming request, not a single-reply op".to_string(),
         },
-    }
-}
-
-/// Stream [`WorldEvent`]s to a subscribed client until it disconnects or the
-/// broadcast channel closes. Lagged events are skipped.
-///
-/// The read half is watched alongside the writes: a subscriber that hangs up
-/// is otherwise only noticed when the *next* event's write fails, and an idle
-/// daemon may not produce one for hours - each such half-dead connection
-/// parked a task and a `broadcast::Receiver` here for the daemon's life
-/// (serve's polling loop re-subscribes every 500ms after a drop, and the ACP
-/// client subscribes once per prompt turn, so these accumulated fast).
-async fn stream_events<R, W>(
-    read: &mut tokio::io::Lines<BufReader<R>>,
-    write: &mut W,
-    mut rx: broadcast::Receiver<WorldEvent>,
-) -> std::io::Result<()>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    loop {
-        tokio::select! {
-            event = rx.recv() => match event {
-                Ok(event) => {
-                    let mut line = serde_json::to_string(&event).expect("WorldEvent serializes");
-                    line.push('\n');
-                    if write.write_all(line.as_bytes()).await.is_err() {
-                        return Ok(()); // client hung up
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => return Ok(()),
-            },
-            line = read.next_line() => match line {
-                // A subscriber has nothing left to say; any line it does send
-                // is ignored chatter, not a request.
-                Ok(Some(_)) => continue,
-                // EOF or a read error: the client is gone.
-                Ok(None) | Err(_) => return Ok(()),
-            },
-        }
     }
 }
 
@@ -729,16 +708,20 @@ where
 pub(crate) async fn handle_connection<S>(
     stream: S,
     op_tx: UnboundedSender<ControlOp>,
-    events: broadcast::Sender<WorldEvent>,
+    events: tokio::sync::broadcast::Sender<crate::host::WorldEvent>,
     token: Option<ControlToken>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Recorded from here, and the sender let go, so the stream ends once the
+    // test's own sender goes.
+    let log = EventLog::recording(&events);
+    drop(events);
     handle_connection_as(
         stream,
         op_tx,
-        events,
+        log,
         token,
         DaemonIdentity::this_process(DaemonIdentity::unknown_build()),
     )
@@ -751,7 +734,7 @@ where
 pub async fn handle_connection_as<S>(
     stream: S,
     op_tx: UnboundedSender<ControlOp>,
-    events: broadcast::Sender<WorldEvent>,
+    events: EventLog,
     token: Option<ControlToken>,
     identity: DaemonIdentity,
 ) -> std::io::Result<()>
@@ -791,7 +774,7 @@ fn authenticated_reply(hello: bool, identity: &DaemonIdentity) -> ControlRespons
 async fn handle_connection_capped<S>(
     stream: S,
     op_tx: UnboundedSender<ControlOp>,
-    events: broadcast::Sender<WorldEvent>,
+    events: EventLog,
     token: Option<ControlToken>,
     identity: DaemonIdentity,
     max_request_bytes: u64,
@@ -894,20 +877,23 @@ where
             (Ok(ControlRequest::Authenticate { hello, .. }), _) => {
                 authenticated_reply(hello, &identity)
             }
-            // Still starting: nothing reaches the world yet, a subscription
-            // included, and the client asks again.
+            // A subscription switches this connection to an event stream and
+            // never returns to the request loop. Taken while the daemon is
+            // still starting too: the log is there from the start, and its
+            // first events are the world's first.
+            (Ok(ControlRequest::Subscribe), _) => {
+                return stream::stream_events(&mut lines, &mut write_half, events, None).await;
+            }
+            (Ok(ControlRequest::Resubscribe { session, after }), _) => {
+                let from = EventCursor { session, after };
+                return stream::stream_events(&mut lines, &mut write_half, events, Some(from))
+                    .await;
+            }
+            // Still starting: nothing reaches the world yet, and the client
+            // asks again.
             (Ok(_), Some(board)) => ControlResponse::Starting {
                 progress: board.current(),
             },
-            // Subscribe switches this connection to an event stream and never
-            // returns to the request loop. Drop this connection's sender clone
-            // after subscribing so the channel closes once the world's sender
-            // does (a clean end on daemon shutdown).
-            (Ok(ControlRequest::Subscribe), None) => {
-                let rx = events.subscribe();
-                drop(events);
-                return stream_events(&mut lines, &mut write_half, rx).await;
-            }
             (Ok(req), None) => dispatch(req, &op_tx).await,
             (Err(e), _) => ControlResponse::Error {
                 message: format!("{INVALID_REQUEST}: {e}"),
@@ -1055,7 +1041,8 @@ mod tests {
         assert!(!err.contains("no control token was found"), "{err}");
     }
     use super::*;
-    use tokio::sync::mpsc;
+    use crate::host::WorldEvent;
+    use tokio::sync::{broadcast, mpsc};
 
     /// An event sender with no live world behind it (tests that don't stream).
     fn no_events() -> broadcast::Sender<WorldEvent> {
@@ -1264,7 +1251,7 @@ mod tests {
             handle_connection_capped(
                 stream,
                 op_tx,
-                no_events(),
+                EventLog::new(),
                 None,
                 DaemonIdentity::this_process("test"),
                 40,
@@ -1340,7 +1327,7 @@ mod tests {
             handle_connection_capped(
                 stream,
                 op_tx,
-                no_events(),
+                EventLog::new(),
                 None,
                 DaemonIdentity::this_process("test"),
                 40,
@@ -1410,7 +1397,7 @@ mod tests {
             handle_connection_capped(
                 stream,
                 op_tx,
-                no_events(),
+                EventLog::new(),
                 None,
                 DaemonIdentity::this_process("test"),
                 40,
@@ -1680,110 +1667,21 @@ mod tests {
     #[tokio::test]
     async fn dispatch_rejects_subscribe_as_a_single_reply_op() {
         let (op_tx, _rx) = mpsc::unbounded_channel();
-        let resp = dispatch(ControlRequest::Subscribe, &op_tx).await;
-        assert_eq!(
-            std::mem::discriminant(&resp),
-            std::mem::discriminant(&ControlResponse::Error {
-                message: String::new()
-            })
-        );
-    }
-
-    /// A quiet inbound half for driving `stream_events` directly: the returned
-    /// guard keeps the peer's write side open so `next_line` stays pending.
-    fn quiet_read_half() -> (
-        tokio::io::Lines<BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
-        tokio::io::WriteHalf<tokio::io::DuplexStream>,
-    ) {
-        let (client, server) = tokio::io::duplex(4096);
-        let (server_read, _server_write) = tokio::io::split(server);
-        let (_client_read, client_write) = tokio::io::split(client);
-        // Leak the unused halves' drop by returning the write guard only; the
-        // client read half closing is invisible to the server's reader.
-        std::mem::forget(_server_write);
-        std::mem::forget(_client_read);
-        (BufReader::new(server_read).lines(), client_write)
-    }
-
-    #[tokio::test]
-    async fn stream_events_skips_lagged_writes_ok_and_stops_on_closed() {
-        use tokio::io::AsyncReadExt;
-        let (tx, rx) = broadcast::channel::<WorldEvent>(1);
-        // Overflow the 1-slot buffer so the receiver lags, then leave one to read.
-        tx.send(completed("first")).unwrap();
-        tx.send(completed("second")).unwrap();
-        tx.send(completed("third")).unwrap();
-        drop(tx); // no more senders → Closed once drained
-
-        let (mut lines, _keep_open) = quiet_read_half();
-        let (mut w, mut r) = tokio::io::duplex(4096);
-        let server = tokio::spawn(async move { stream_events(&mut lines, &mut w, rx).await });
-        let mut buf = String::new();
-        r.read_to_string(&mut buf).await.unwrap();
-        server.await.unwrap().unwrap();
-        // The lagged-past earliest events were skipped; the latest was written.
-        assert!(buf.contains("third"));
-        assert!(!buf.contains("first"));
-    }
-
-    #[tokio::test]
-    async fn stream_events_returns_when_the_client_hangs_up() {
-        let (tx, rx) = broadcast::channel::<WorldEvent>(4);
-        tx.send(completed("x")).unwrap();
-        let (mut lines, _keep_open) = quiet_read_half();
-        let (mut w, r) = tokio::io::duplex(64);
-        drop(r); // reader gone → the write fails, ending the stream
-        stream_events(&mut lines, &mut w, rx).await.unwrap();
-        drop(tx);
-    }
-
-    /// A subscriber that closes its half of the connection ends the stream
-    /// even when no event ever arrives. Waiting for the next write to fail
-    /// instead keeps the daemon-side task, and its broadcast receiver, alive
-    /// for ever on an idle daemon.
-    #[tokio::test]
-    async fn stream_events_returns_on_client_eof_without_any_event() {
-        let (tx, rx) = broadcast::channel::<WorldEvent>(4);
-        let (client, server) = tokio::io::duplex(4096);
-        let (server_read, _server_write) = tokio::io::split(server);
-        let mut lines = BufReader::new(server_read).lines();
-        drop(client); // EOF on the read half, nothing was ever sent
-
-        let (mut w, _r) = tokio::io::duplex(4096);
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            stream_events(&mut lines, &mut w, rx),
-        )
-        .await
-        .expect("EOF must end the stream promptly")
-        .unwrap();
-        drop(tx);
-    }
-
-    /// A line the subscriber sends mid-stream is chatter, not a request: the
-    /// stream keeps delivering events after it.
-    #[tokio::test]
-    async fn stream_events_ignores_subscriber_chatter() {
-        use tokio::io::AsyncReadExt;
-        let (tx, rx) = broadcast::channel::<WorldEvent>(4);
-        let (client, server) = tokio::io::duplex(4096);
-        let (server_read, _server_write) = tokio::io::split(server);
-        let (_client_read, mut client_write) = tokio::io::split(client);
-        std::mem::forget(_server_write);
-        std::mem::forget(_client_read);
-        let mut lines = BufReader::new(server_read).lines();
-
-        client_write.write_all(b"hello?\n").await.unwrap();
-        let (mut w, mut r) = tokio::io::duplex(4096);
-        let server = tokio::spawn(async move { stream_events(&mut lines, &mut w, rx).await });
-        // Give the chatter a chance to be read, then deliver a real event.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        tx.send(completed("after-chatter")).unwrap();
-        drop(tx);
-        let mut buf = String::new();
-        r.read_to_string(&mut buf).await.unwrap();
-        server.await.unwrap().unwrap();
-        assert!(buf.contains("after-chatter"));
+        for request in [
+            ControlRequest::Subscribe,
+            ControlRequest::Resubscribe {
+                session: "s".to_string(),
+                after: 1,
+            },
+        ] {
+            let resp = dispatch(request, &op_tx).await;
+            assert_eq!(
+                std::mem::discriminant(&resp),
+                std::mem::discriminant(&ControlResponse::Error {
+                    message: String::new()
+                })
+            );
+        }
     }
 
     /// `create` reports rather than panicking when its directory cannot be
@@ -2622,7 +2520,7 @@ mod tests {
             for _ in 0..connections {
                 let stream = listener.accept().await.unwrap().unwrap();
                 let op_tx = op_tx.clone();
-                let events = server_events.clone();
+                let events = EventLog::recording(&server_events);
                 let token = token.clone();
                 let identity = identity.clone();
                 served.push(tokio::spawn(async move {
@@ -3082,7 +2980,7 @@ mod tests {
             let _ = handle_connection_as(
                 stream,
                 op_tx,
-                no_events(),
+                EventLog::new(),
                 Some(draining_token),
                 same_code(1),
             )

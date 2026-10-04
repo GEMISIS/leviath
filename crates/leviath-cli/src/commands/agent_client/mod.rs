@@ -508,7 +508,7 @@ impl Server {
                         if silent_drops > MAX_SILENT_DROPS {
                             return StopReason::EndTurn;
                         }
-                        match self.resubscribe(&session_id).await {
+                        match self.resubscribe(&session_id, stream.cursor()).await {
                             Some(fresh) => stream = fresh,
                             None => return StopReason::EndTurn,
                         }
@@ -573,7 +573,9 @@ impl Server {
         StopReason::EndTurn
     }
 
-    /// Reopen the daemon's event stream after it dropped mid-turn.
+    /// Reopen the daemon's event stream after it dropped mid-turn, from
+    /// `cursor`, where the dropped one had got to: an event sent while it was
+    /// down, the run's completion above all, still arrives.
     ///
     /// `None` when no daemon came back within the control client's grace, and
     /// the turn has to end. When one did, and it runs different code than
@@ -581,9 +583,13 @@ impl Server {
     /// the editor is told so in the conversation, since a bridge that stays
     /// on the older code will eventually stop understanding the daemon and
     /// the fix (restart the session) is on the editor's side.
-    async fn resubscribe(&mut self, session_id: &str) -> Option<WorldEventStream> {
+    async fn resubscribe(
+        &mut self,
+        session_id: &str,
+        cursor: Option<leviath_runtime::control_socket::EventCursor>,
+    ) -> Option<WorldEventStream> {
         tokio::time::sleep(RESUBSCRIBE_PAUSE).await;
-        let stream = self.control.subscribe().await.ok()?;
+        let stream = self.control.subscribe_from(cursor.as_ref()).await.ok()?;
         if let Some(mismatch) = self.control.code_mismatch() {
             let notice = format!("\n[leviath: {mismatch}]\n");
             self.emit_chunk(session_id, &notice).await;
