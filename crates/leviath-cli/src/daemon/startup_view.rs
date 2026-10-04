@@ -61,12 +61,14 @@ impl StartupView {
     }
 
     /// A view on this process's stderr, redrawn in place when that is a
-    /// terminal. With `announce` it shows the summary of an upgrade of this
-    /// home nobody has seen once the daemon is ready; a daemon nobody watches
-    /// leaves that for the next command a person runs.
+    /// terminal, through the writer this process's log lines know to clear
+    /// it for and draw again below them. With `announce` it shows the
+    /// summary of an upgrade of this home nobody has seen once the daemon is
+    /// ready; a daemon nobody watches leaves that for the next command a
+    /// person runs.
     pub fn on_stderr(announce: bool) -> Arc<Self> {
         Self::new(
-            Box::new(std::io::stderr()),
+            Box::new(crate::logging::StatusWriter),
             std::io::IsTerminal::is_terminal(&std::io::stderr()),
             leviath_core::paths::data_dir().filter(|_| announce),
         )
