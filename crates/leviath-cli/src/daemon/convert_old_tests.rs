@@ -1,10 +1,13 @@
 use super::*;
 
-use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 
+#[cfg(feature = "legacy-runs")]
+use std::{collections::HashSet, sync::Arc};
+
+#[cfg(feature = "legacy-runs")]
 use crate::daemon::mcp_pool::McpPool;
+#[cfg(feature = "legacy-runs")]
 use crate::test_support::{FakeProvider, McpStub};
 
 fn fixture(name: &str) -> PathBuf {

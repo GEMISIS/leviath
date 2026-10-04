@@ -18,10 +18,10 @@ use leviath_legacy_runs::Migrated;
 /// never converts, so none is ever made.
 #[cfg(not(feature = "legacy-runs"))]
 pub(crate) struct Migrated {
-    name: String,
-    text: String,
-    notes: Vec<String>,
-    dropped: Vec<String>,
+    pub(crate) name: String,
+    pub(crate) text: String,
+    pub(crate) notes: Vec<String>,
+    pub(crate) dropped: Vec<String>,
 }
 
 /// Arguments for `lev blueprint`.

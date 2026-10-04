@@ -197,6 +197,10 @@ jobs:
         run: cargo check -p leviath-runtime --all-targets
       - name: Check the facade without its optional features
         run: cargo check -p leviath
+      # The release publishes `lev` without `legacy-runs` (its crate is never
+      # published, so prod.yml deletes the feature), which no other job builds.
+      - name: Check the lev that crates.io gets
+        run: cargo check -p leviath-cli --no-default-features --features mimalloc-allocator
       # The rot this job exists to catch was in the docs, not the build, so
       # checking only compilation would not have caught it.
       - name: Document the runtime without its optional features
