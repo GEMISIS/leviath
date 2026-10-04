@@ -206,11 +206,7 @@ fn load(run_id: &str) -> anyhow::Result<RunTimeline> {
     let (meta, moments) = crate::runstate::run_file::open_in(&dir)
         .map_err(|e| Cow::Owned(e.to_string()))
         .and_then(|reader| {
-            let meta = leviath_runtime::runfile::summary(&reader)
-                .map_err(|e| Cow::Owned(e.to_string()))?;
-            run_file_moments(&reader)
-                .map(|moments| (meta, moments))
-                .ok_or(Cow::Borrowed("its steps do not decode"))
+            run_file_moments(&reader).ok_or(Cow::Borrowed("its steps do not decode"))
         })
         .map_err(|why| anyhow::anyhow!("no readable record for run '{run_id}': {why}"))?;
     Ok(analyze(&meta, &moments))
@@ -218,8 +214,12 @@ fn load(run_id: &str) -> anyhow::Result<RunTimeline> {
 
 /// A run file's steps as the moments [`analyze`] reads: each model call in
 /// the stage and iteration it was made in, each finished tool call, and each
-/// change of status. `None` when a step does not decode.
-fn run_file_moments(reader: &leviath_runtime::runfile::RunFileReader) -> Option<Vec<Moment>> {
+/// change of status. With them, the run's record as of its last step, read
+/// off the state the walk ends in rather than by decoding the file's last
+/// checkpoint a second time. `None` when a step does not decode.
+fn run_file_moments(
+    reader: &leviath_runtime::runfile::RunFileReader,
+) -> Option<(RunMeta, Vec<Moment>)> {
     let start = reader.state_at(0).ok();
     let deltas = reader.deltas(1, reader.last_seq()).ok();
     start
@@ -227,18 +227,23 @@ fn run_file_moments(reader: &leviath_runtime::runfile::RunFileReader) -> Option<
         .map(|(state, deltas)| moments_of(reader.spec(), state, deltas))
 }
 
-/// The steps `deltas` took from `state`, the run's start, as moments. A call
-/// carries its own kind, stage and iteration, so a title call is its own
-/// row and a call is placed where it was made, whatever step recorded it.
+/// The steps `deltas` took from `state`, the run's start, as moments, and the
+/// run's record where they end. A call carries its own kind, stage and
+/// iteration, so a title call is its own row and a call is placed where it
+/// was made, whatever step recorded it.
 fn moments_of(
     spec: &leviath_runtime::spec::run_spec::RunSpec,
     mut state: leviath_runtime::state::RunState,
     deltas: Vec<leviath_runtime::state::StateDelta>,
-) -> Vec<Moment> {
+) -> (RunMeta, Vec<Moment>) {
     use leviath_runtime::state::{Change, RunEvent};
     let mut moments = Vec::new();
+    // When the run last moved: its last step, or when it was resolved for one
+    // that has taken none.
+    let mut updated_at = spec.created_at;
     for delta in deltas {
         delta.apply(&mut state);
+        updated_at = delta.at;
         for event in &delta.events {
             match event {
                 RunEvent::Inference {
@@ -269,7 +274,8 @@ fn moments_of(
             });
         }
     }
-    moments
+    let meta = leviath_runtime::runfile::summary_of(spec, &state, updated_at);
+    (meta, moments)
 }
 
 /// Reduce a run's steps to its timeline. Pure, so the shape is testable
@@ -287,8 +293,10 @@ pub(crate) fn analyze(meta: &RunMeta, moments: &[Moment]) -> RunTimeline {
     for moment in moments {
         match moment {
             Moment::Status { status, at } => {
+                // Said again while already waiting, the wait still began the
+                // first time.
                 if matches!(status, RunStatus::WaitingInput) {
-                    waiting_since = Some(*at);
+                    waiting_since.get_or_insert(*at);
                 } else if let Some(since) = waiting_since.take() {
                     totals.waiting += (*at - since).max(0);
                     prev = *at;
@@ -324,8 +332,12 @@ pub(crate) fn analyze(meta: &RunMeta, moments: &[Moment]) -> RunTimeline {
                 }
                 prev = *at;
             }
+            // A tool that ends while the run is parked was in flight when the
+            // wait began (the approval it asked for, the children it
+            // started): its time runs up to the wait, which is waiting.
             Moment::ToolDone { at } => {
-                totals.tools += (*at - prev).max(0);
+                let until = waiting_since.map_or(*at, |since| since.min(*at));
+                totals.tools += (until - prev).max(0);
                 prev = *at;
             }
         }

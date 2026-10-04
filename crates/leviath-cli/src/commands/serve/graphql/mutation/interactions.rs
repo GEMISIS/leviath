@@ -84,9 +84,10 @@ pub(crate) struct AnswerInteractionRequest {
 pub(crate) enum AnswerOutcome {
     /// The daemon took this answer.
     Accepted,
-    /// Nothing open carries that id any more: it was answered already, or it
-    /// expired. Two people clicking one prompt is ordinary, so this is an
-    /// outcome rather than a failure.
+    /// Nothing open carries that id any more, and a run on this machine is
+    /// the one that asked it: it was answered already, or it expired. Two
+    /// people clicking one prompt is ordinary, so this is an outcome rather
+    /// than a failure. An id no run here asked is an error coded `NOT_FOUND`.
     AlreadySettled,
 }
 
@@ -155,7 +156,9 @@ impl AnswerInteractionRequest {
 /// on the client's part: two people clicking one prompt is ordinary, and it
 /// reads as `ALREADY_SETTLED` rather than as a failure. A question a held run
 /// asked is an error coded `RUN_HELD`, saying what to put back: nothing can
-/// answer it until the run is back, and then it reopens under a new id.
+/// answer it until the run is back, and then it reopens under a new id. An id
+/// that no run on this machine asked is an error coded `NOT_FOUND`, the miss
+/// REST answers 404 to.
 pub(crate) async fn answer_interaction(
     ctx: &Context<'_>,
     request: AnswerInteractionRequest,
@@ -171,12 +174,31 @@ pub(crate) async fn answer_interaction(
             interaction_id,
             outcome: AnswerOutcome::Accepted,
         }),
-        // Nothing open under that id: answered already, or expired. The other
-        // failures, a held run's question among them, stay failures.
-        Err(ServeError::NotFound(_)) => Ok(AnswerInteractionResult {
-            interaction_id,
-            outcome: AnswerOutcome::AlreadySettled,
-        }),
+        // Nothing open under that id, and a run here asked it: answered
+        // already, or expired. The other failures, a held run's question among
+        // them, stay failures.
+        Err(ServeError::NotFound(_)) if asked_here(&interaction_id) => {
+            Ok(AnswerInteractionResult {
+                interaction_id,
+                outcome: AnswerOutcome::AlreadySettled,
+            })
+        }
+        Err(ServeError::NotFound(_)) => Err(graphql_error(&ServeError::NotFound(format!(
+            "No interaction '{}': no run on this machine asked it",
+            interaction_id.as_str()
+        )))),
         Err(other) => Err(graphql_error(&other)),
     }
+}
+
+/// Whether a run on this machine could have asked the question `id` names.
+///
+/// An id is `<run>-<kind>-<n>`, and a run id has dashes of its own, so each
+/// dash is tried as the end of the run's part. The run's directory is the
+/// test rather than its record of what it settled: an answer is written to
+/// the run file a tick after the hub hands it over, and a second click inside
+/// that tick is still a second click.
+fn asked_here(id: &str) -> bool {
+    id.match_indices('-')
+        .any(|(at, _)| crate::runstate::run_dir(id.get(..at).unwrap_or_default()).is_dir())
 }

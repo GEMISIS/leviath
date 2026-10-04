@@ -14,10 +14,6 @@
 //! sent to the world as things happen, which the world folds into the events
 //! of each step, and [`history`] is what a reader makes of the steps.
 
-use std::sync::OnceLock;
-
-use sha2::Digest as _;
-
 pub mod codec;
 mod error;
 pub(crate) mod events;
@@ -65,14 +61,20 @@ pub const LAYOUT_VERSION: u32 = 2;
 
 /// The hash of [`frame_schemas`] and [`LAYOUT_VERSION`]: two builds share it
 /// exactly when their run files have the same shape.
+///
+/// Written out rather than worked out: building every frame type's JSON
+/// Schema takes milliseconds, which every `lev` command that reads a run file
+/// would pay before reading a byte of it. A test works it out and holds this
+/// to it, and names the value to write here when a frame type changes.
+pub const FINGERPRINT: [u8; 32] = [
+    0x41, 0x76, 0x01, 0xdc, 0xbd, 0x89, 0x91, 0x4b, 0x2e, 0x4f, 0xfa, 0xd9, 0x3b, 0xc0, 0x0c, 0xf7,
+    0xa7, 0x89, 0x17, 0xa5, 0x93, 0x0e, 0x8f, 0xed, 0xa4, 0x4b, 0xa9, 0x3b, 0x38, 0xab, 0xb3, 0xfe,
+];
+
+/// [`FINGERPRINT`], the header every run file this build writes carries and
+/// every one it reads must.
 pub fn fingerprint() -> &'static [u8; 32] {
-    static FP: OnceLock<[u8; 32]> = OnceLock::new();
-    FP.get_or_init(|| {
-        let mut h = sha2::Sha256::new();
-        h.update(frame_schemas().to_string().as_bytes());
-        h.update(LAYOUT_VERSION.to_le_bytes());
-        h.finalize().into()
-    })
+    &FINGERPRINT
 }
 
 /// The JSON Schema of a spawn request, as published for outside tools and

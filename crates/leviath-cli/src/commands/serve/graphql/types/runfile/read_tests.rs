@@ -212,19 +212,52 @@ async fn a_live_run_is_read_from_the_daemon() {
     .await;
 }
 
-/// The steps a client may not ask for are refused with the reason.
+/// The steps a client may not ask for are refused with the reason, and with
+/// the code and status REST answers the same request with: a step past the
+/// run's last is a window the file does not hold (416), and the rest are
+/// wrong as written (400).
 #[tokio::test]
 async fn a_step_the_run_does_not_have_is_refused() {
     crate::runstate::with_isolated_runs_dir_async("graphql-runfile-steps", |_base| async move {
         let runs = crate::runstate::runs_dir();
         let run_id = walked(&runs);
-        for (field, says) in [
-            ("state(at: 9) { seq }", "has no step 9"),
-            ("state(at: -1) { seq }", "`at` is never negative"),
-            ("deltas(from: -1) { seq }", "`from` is never negative"),
-            ("deltas(to: -1) { seq }", "`to` is never negative"),
-            ("deltas(from: 3, to: 1) { seq }", "is before"),
-            ("deltas(from: 1, to: 500) { seq }", "at most 200 steps"),
+        for (field, says, code, status) in [
+            (
+                "state(at: 9) { seq }",
+                "has no step 9",
+                "RANGE_NOT_SATISFIABLE",
+                416,
+            ),
+            (
+                "state(at: -1) { seq }",
+                "`at` is never negative",
+                "BAD_USER_INPUT",
+                400,
+            ),
+            (
+                "deltas(from: -1) { seq }",
+                "`from` is never negative",
+                "BAD_USER_INPUT",
+                400,
+            ),
+            (
+                "deltas(to: -1) { seq }",
+                "`to` is never negative",
+                "BAD_USER_INPUT",
+                400,
+            ),
+            (
+                "deltas(from: 3, to: 1) { seq }",
+                "is before",
+                "BAD_USER_INPUT",
+                400,
+            ),
+            (
+                "deltas(from: 1, to: 500) { seq }",
+                "at most 200 steps",
+                "BAD_USER_INPUT",
+                400,
+            ),
         ] {
             let answer = ask(
                 no_daemon_client(),
@@ -232,8 +265,9 @@ async fn a_step_the_run_does_not_have_is_refused() {
             )
             .await;
             let error = &answer["errors"][0];
+            assert_eq!(error["extensions"]["code"], code, "{field}: {answer}");
             assert_eq!(
-                error["extensions"]["code"], "BAD_USER_INPUT",
+                error["extensions"]["httpStatus"], status,
                 "{field}: {answer}"
             );
             assert!(

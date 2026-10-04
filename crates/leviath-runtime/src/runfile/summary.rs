@@ -14,7 +14,7 @@ use super::error::RunFileError;
 use super::reader::RunFileReader;
 use super::tail::RunFileTail;
 use crate::insert::place;
-use crate::persistence::{RunMetaSources, RunPosition, build_context_snapshot, build_run_meta};
+use crate::persistence::{RunMetaSources, RunPosition, build_run_meta, context_snapshot_of};
 use crate::spec::run_spec::{ListedAs, RunSpec};
 use crate::state::RunState;
 
@@ -110,8 +110,8 @@ fn active_clock(clock: &crate::state::Clock) -> leviath_core::run_meta::ActiveCl
 /// The run's context window in `state`, as a snapshot: each region shaped as
 /// its graph declares it, with the state's entries in it.
 pub fn context_snapshot(spec: &RunSpec, state: &RunState) -> ContextSnapshot {
-    build_context_snapshot(
-        &place::context_window(spec, state),
+    context_snapshot_of(
+        place::context_window(spec, state),
         state.cursor.stage.as_str(),
     )
 }

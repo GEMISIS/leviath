@@ -122,6 +122,23 @@ fn the_binary_layout_matches_its_version() {
     );
 }
 
+/// The fingerprint written into the build is the hash of the frame schemas
+/// this build generates, so a change to any frame type fails here until the
+/// new value is written in.
+#[test]
+fn the_fingerprint_is_the_hash_of_this_builds_frame_schemas() {
+    use sha2::Digest as _;
+    let mut h = sha2::Sha256::new();
+    h.update(super::frame_schemas().to_string().as_bytes());
+    h.update(super::LAYOUT_VERSION.to_le_bytes());
+    let worked_out: [u8; 32] = h.finalize().into();
+    assert!(
+        worked_out == super::FINGERPRINT,
+        "the frame schemas changed: set runfile::FINGERPRINT to {:#04x?}",
+        worked_out
+    );
+}
+
 #[test]
 fn the_fingerprint_is_stable_and_covers_every_frame_type() {
     assert_eq!(super::fingerprint(), super::fingerprint());

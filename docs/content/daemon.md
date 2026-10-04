@@ -224,19 +224,26 @@ build, newer or not, and shows its own view of the home without a warning.
 
 To return to the release you upgraded from:
 
-1. Stop the daemon: `lev daemon stop`.
+1. Stop the daemon with this release's `lev`: `lev daemon stop`.
 2. For each name in `~/.leviath/backups/<version>-<time>/agents/`, replace
    `~/.leviath/agents/<name>` with the backup's copy. Do the same for each name in the backup's
    `runs/`, replacing `~/.leviath/runs/<name>`. A blueprint under the backup's `agent_paths/` goes
    back to the agent path it came from; its folder is named after it, followed by a digest of
    where it was.
-3. Delete `~/.leviath/runs.unconverted` and `~/.leviath/runs.index`.
-4. Start the old binary: `lev daemon start` with the earlier release's `lev`.
+3. Delete `~/.leviath/runs.index`, and `~/.leviath/runs.unconverted` if there is one.
+4. Put the earlier release's `lev` back on your `PATH` and start its daemon: `lev daemon start`.
+
+Release 0.1.0 has no daemon, so it has no `lev daemon start` either. For it, steps 2 and 3 are
+all there is: it runs each agent in the foreground with `lev run`, as it always did.
+
+The backup holds each run as it was when the upgrade converted it. A run this release resumed and
+carried on is back where it was at the upgrade, and the earlier daemon picks up each unfinished
+run from there, as after any restart.
 
 Runs started after the upgrade stay unreadable by the earlier release: they exist only as run
 files, which it does not read, so it leaves their directories out of `lev ps`. Copy them aside
 before going back if you want them later; the new release reads them again when you upgrade once
-more.
+more. The same goes for a blueprint installed after the upgrade, which is an `agent.toml`.
 
 Started on an upgraded home without restoring, an earlier release changes nothing, but it sees
 little. `lev ps` and `lev list` come back empty, because every run is a run file and every

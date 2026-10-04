@@ -162,6 +162,39 @@ fn five_replies_at_the_cap_are_named_as_one_warning() {
     assert!(t.warnings[0].contains("(600s)"));
 }
 
+/// A tool that finishes while the run is parked was in flight when the wait
+/// began: an approval it asked for, children it started. Its time runs up to
+/// the wait and the wait is waiting, never both, so the split adds up to the
+/// wall clock. Seen on a real run cancelled at its approval prompt: tools 82
+/// and waiting 74 of a wall of 82.
+#[test]
+fn a_tool_that_ends_while_parked_is_not_counted_twice() {
+    let moments = [
+        tool_done(1_001),
+        tool_done(1_005),
+        status(RunStatus::WaitingInput, 1_008),
+        tool_done(1_082),
+        status(RunStatus::Cancelled, 1_082),
+    ];
+    let t = analyze(&meta("r", 1_000, 1_082), &moments).totals;
+    assert_eq!((t.tools, t.waiting, t.other), (8, 74, 0));
+    assert_eq!(t.inference + t.tools + t.waiting + t.other, t.wall);
+}
+
+/// A run said to be waiting twice over is waiting from the first time: the
+/// second says nothing new, and starting the wait again would drop the time
+/// between them from every total.
+#[test]
+fn waiting_said_twice_keeps_the_first_start() {
+    let moments = [
+        status(RunStatus::WaitingInput, 1_010),
+        status(RunStatus::WaitingInput, 1_050),
+        status(RunStatus::Running, 1_100),
+    ];
+    let t = analyze(&meta("r", 1_000, 1_100), &moments).totals;
+    assert_eq!((t.waiting, t.other), (90, 10));
+}
+
 #[test]
 fn a_run_with_no_records_is_all_other_time() {
     let t = analyze(&meta("r", 1_000, 1_100), &[]);

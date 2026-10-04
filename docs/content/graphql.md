@@ -1205,7 +1205,8 @@ mutation {
 
 `feedback` is what the model reads instead of the call, which is why it sits on the denial rather
 than beside an approval. The first answer wins, and a second one comes back `ALREADY_SETTLED`
-rather than as an error, because two people clicking one prompt is ordinary.
+rather than as an error, because two people clicking one prompt is ordinary. An id that no run on
+this machine asked, such as a typo, is an error coded `NOT_FOUND`.
 
 A run the daemon holds off the machine, because its provider was taken out of the config say, keeps
 the question it was waiting on, and nothing can answer it until the run is back. It is not in
@@ -1628,6 +1629,8 @@ before any resolver ran included: those are `BAD_USER_INPUT`.
 | `CONFLICT` | It exists and its state refuses the change | `409` |
 | `RUN_HELD` | The question was asked by a run the daemon holds off the machine. Put back what the message names | `409` |
 | `PAYLOAD_TOO_LARGE` | An attachment is over this server's `max_upload_bytes` | `413` |
+| `UNSUPPORTED_MEDIA_TYPE` | A text read of a file that is not text. Fetch it whole instead | `415` |
+| `RANGE_NOT_SATISFIABLE` | The window is not in the thing, such as `state(at:)` past a run's last step | `416` |
 | `UNPROCESSABLE` | Well formed, and something on disk will not answer, such as a `yolo.toml` a profile you never touched has broken | `422` |
 | `UPSTREAM` | Something this server depends on answered badly. Retrying may well work | `502` |
 | `DAEMON_INCOMPATIBLE` | The daemon was updated under a running server. Restart `lev serve` | `502` |
@@ -1636,6 +1639,28 @@ before any resolver ran included: those are `BAD_USER_INPUT`.
 
 `extensions.httpStatus` carries that same number, so a client that already knows the REST
 vocabulary needs no second table.
+
+The same situation answers the same way on both surfaces:
+
+| Situation | GraphQL | REST |
+|---|---|---|
+| Pause, resume or cancel a run that does not exist | `NOT_FOUND` | `404` |
+| Pause, resume or cancel a run that has finished | `CONFLICT` | `409` |
+| Message a run that does not exist | `NOT_FOUND` | `404` |
+| Message a run that finished, failed or was cancelled | `CONFLICT` | `409` |
+| Message a run the daemon holds off the machine | `RUN_HELD` | `409` |
+| Message with no text and no files | `BAD_USER_INPUT` | `400` |
+| Answer an id no run on this machine asked | `NOT_FOUND` | `404` |
+| Answer a question already answered or expired | outcome `ALREADY_SETTLED` | `404` |
+| Answer a question a held run asked | `RUN_HELD` | `409` |
+| Answer that does not fit the question, such as text for a choice | `BAD_USER_INPUT` | `400` |
+| Spawn a run that cannot start, such as an unknown blueprint | `SpawnRejectedOutput` with `issues` | `422` with `issues` |
+| Read a run that does not exist | `run` is `null` | `404` |
+| Read a step past a run's last | `RANGE_NOT_SATISFIABLE` | `416` |
+| The daemon is not running | `DAEMON_UNAVAILABLE` | `503` |
+
+Two rows differ in shape and not in meaning. A second answer to one question is an outcome rather
+than an error, and a lookup by id answers `null` for a miss, as GraphQL lookups do.
 
 Nothing inside a result is a failure. A bulk sweep reports what it did not touch under `skipped`, a
 run that ended by itself while the sweep was reaching it reports itself as `ALREADY_FINISHED`, and
