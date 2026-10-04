@@ -11,9 +11,10 @@
 //! command that edits one) can leave it stale without anyone reading a wrong
 //! summary.
 //!
-//! Whoever lists the runs saves what changed. The daemon also brings it up to
-//! date every couple of seconds while it runs, so a listing usually finds
-//! every entry current and only stats.
+//! Whoever lists the runs saves what changed. The daemon also looks at the
+//! run files every couple of seconds while it runs, and brings the index up
+//! to date when one changed, so a listing usually finds every entry current
+//! and only stats.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -32,7 +33,7 @@ pub(crate) const REFRESH_EVERY: Duration = Duration::from_secs(2);
 
 /// A run file's size and modification time, which change whenever it is
 /// written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct Stamp {
     len: u64,
     secs: u64,
@@ -202,22 +203,127 @@ pub(crate) fn list(runs_dir: &Path) -> Vec<RunMeta> {
 /// its index: what a daemon brings back when it starts, found without
 /// reading the file of every run that finished.
 pub(crate) fn unfinished(runs_dir: &Path) -> Vec<PathBuf> {
-    indexed(runs_dir)
-        .into_iter()
-        .filter(|(_, run)| !runstate::is_terminal_status(&run.status))
-        .map(|(dir, _)| dir)
-        .collect()
+    unfinished_at_a_glance(runs_dir).unwrap_or_else(|| {
+        indexed(runs_dir)
+            .into_iter()
+            .filter(|(_, run)| !runstate::is_terminal_status(&run.status))
+            .map(|(dir, _)| dir)
+            .collect()
+    })
 }
 
-/// Bring the index of `runs_dir` up to date every [`REFRESH_EVERY`] for as
-/// long as `runtime` runs, off its worker threads.
+/// One run in the index, with only what says whether it finished.
+#[derive(Deserialize)]
+struct Glance {
+    stamp: Stamp,
+    run: GlanceRun,
+}
+
+#[derive(Deserialize)]
+struct GlanceRun {
+    status: runstate::RunStatus,
+}
+
+/// The index, with only what says whether each run finished.
+#[derive(Deserialize)]
+struct GlanceFile {
+    version: u32,
+    runs: BTreeMap<String, Glance>,
+}
+
+/// [`unfinished`], answered from each run's status in the index, when the
+/// index is up to date: every run file under `runs_dir` is as it last read,
+/// and it holds no other. `None` when it is not, or does not read.
+///
+/// A summary of a run is a few kilobytes. Making one for each of a thousand
+/// finished runs, only to drop them again, leaves a daemon holding megabytes
+/// of freed memory between what it keeps, for as long as it runs.
+fn unfinished_at_a_glance(runs_dir: &Path) -> Option<Vec<PathBuf>> {
+    // Read through a small buffer rather than whole: the index of a thousand
+    // runs is megabytes, and nearly all of it is passed over.
+    let index = std::fs::File::open(path_for(runs_dir)).ok()?;
+    let file = serde_json::from_reader::<_, GlanceFile>(std::io::BufReader::new(index))
+        .ok()
+        .filter(|file| file.version == VERSION)?;
+    let mut dirs: Vec<(PathBuf, String)> = std::fs::read_dir(runs_dir)
+        .ok()?
+        .flatten()
+        .map(|e| (e.path(), e.file_name().to_string_lossy().into_owned()))
+        .collect();
+    dirs.sort();
+    let mut indexed = 0;
+    let mut open = Vec::new();
+    for (dir, name) in dirs {
+        let Some(stamp) = Stamp::of(&dir) else {
+            continue;
+        };
+        let entry = file.runs.get(&name).filter(|e| e.stamp == stamp)?;
+        indexed += 1;
+        if !runstate::is_terminal_status(&entry.run.status) {
+            open.push(dir);
+        }
+    }
+    (indexed == file.runs.len()).then_some(open)
+}
+
+/// How the run files under `runs_dir` look from outside: one number made
+/// from the directory name, size and modification time of each. It changes
+/// whenever a run file is added, removed or written, and costs a stat per
+/// run to make.
+fn look_of(runs_dir: &Path) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let Ok(entries) = std::fs::read_dir(runs_dir) else {
+        return 0;
+    };
+    // Summed rather than hashed in turn, so the order a directory lists its
+    // entries in does not matter.
+    entries.flatten().fold(0u64, |look, entry| {
+        let Some(stamp) = Stamp::of(&entry.path()) else {
+            return look;
+        };
+        let mut hasher = DefaultHasher::new();
+        entry.file_name().hash(&mut hasher);
+        stamp.hash(&mut hasher);
+        look.wrapping_add(hasher.finish())
+    })
+}
+
+/// Bring the index of `runs_dir` up to date, unless its run files still
+/// look the way they did at `seen` (see [`look_of`]). Returns how they look
+/// now.
+///
+/// An index is a few kilobytes per run, so reading it is far from free in a
+/// home of a thousand runs. A daemon sitting idle leaves every run file as it
+/// was, and this reads nothing but the directory.
+fn refresh(runs_dir: &Path, seen: u64) -> u64 {
+    let look = look_of(runs_dir);
+    if look != seen {
+        indexed(runs_dir);
+    }
+    look
+}
+
+/// Keep the index of `runs_dir` up to date for as long as `runtime` runs, off
+/// its worker threads: every [`REFRESH_EVERY`] the run files are looked at,
+/// and the index is read and brought up to date when one has changed since
+/// the last look. The first look is taken now, so the index is taken to be up
+/// to date already, as the daemon's start leaves it.
 pub(crate) fn keep_fresh(runtime: &tokio::runtime::Handle, runs_dir: PathBuf) {
+    keep_fresh_every(runtime, runs_dir, REFRESH_EVERY);
+}
+
+/// [`keep_fresh`], checking every `every`.
+fn keep_fresh_every(runtime: &tokio::runtime::Handle, runs_dir: PathBuf, every: Duration) {
+    let mut seen = look_of(&runs_dir);
     runtime.spawn(async move {
-        let mut tick = tokio::time::interval(REFRESH_EVERY);
+        let start = tokio::time::Instant::now() + every;
+        let mut tick = tokio::time::interval_at(start, every);
         loop {
             tick.tick().await;
             let dir = runs_dir.clone();
-            let _ = tokio::task::spawn_blocking(move || list(&dir)).await;
+            seen = tokio::task::spawn_blocking(move || refresh(&dir, seen))
+                .await
+                .unwrap_or(seen);
         }
     });
 }

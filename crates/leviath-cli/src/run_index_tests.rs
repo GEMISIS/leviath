@@ -138,18 +138,121 @@ fn a_start_reads_only_the_runs_that_have_not_finished() {
     assert!(unfinished(&home.path().join("gone")).is_empty());
 }
 
-/// The daemon keeps the index up to date on its own.
+/// Whether the saved index still has the run id of `name`'s summary: a start
+/// that answered from the index at a glance never rewrites it, and one that
+/// had to read the index whole writes it back complete.
+fn has_run_id(runs_dir: &Path, name: &str) -> bool {
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path_for(runs_dir)).unwrap()).unwrap();
+    saved["runs"][name]["run"]["run_id"].is_string()
+}
+
+fn names(dirs: &[PathBuf]) -> Vec<String> {
+    dirs.iter()
+        .map(|d| d.file_name().unwrap().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// A start whose index is up to date finds the unfinished runs from each
+/// one's status alone, without making a summary of every run; once a run
+/// file has changed, or the index names a run that is gone, the index is
+/// read whole and brought up to date.
+#[test]
+fn a_start_reads_the_index_at_a_glance_while_it_is_up_to_date() {
+    let home = runs();
+    let dir = home.path().join("runs");
+    let mut done = meta("done-run", "done", 300);
+    done.status = leviath_core::run_meta::RunStatus::Complete;
+    create_run_in(&dir.join("done-run"), &done).unwrap();
+    list(&dir);
+    // A summary without its run id does not read whole, so a start that
+    // made summaries would read the index as empty and write it again.
+    let strip = |v: &mut serde_json::Value| {
+        v["runs"]["old-run"]["run"]
+            .as_object_mut()
+            .unwrap()
+            .remove("run_id");
+    };
+    edit_index(&dir, strip);
+    assert_eq!(names(&unfinished(&dir)), ["new-run", "old-run"]);
+    assert!(!has_run_id(&dir, "old-run"), "answered at a glance");
+
+    std::thread::sleep(Duration::from_millis(5));
+    create_run_in(&dir.join("new-run"), &meta("new-run", "rewritten", 200)).unwrap();
+    assert_eq!(names(&unfinished(&dir)), ["new-run", "old-run"]);
+    assert!(
+        has_run_id(&dir, "old-run"),
+        "a changed run file reads it whole"
+    );
+
+    edit_index(&dir, strip);
+    std::fs::remove_dir_all(dir.join("done-run")).unwrap();
+    assert_eq!(names(&unfinished(&dir)), ["new-run", "old-run"]);
+    assert!(
+        has_run_id(&dir, "old-run"),
+        "a run that is gone reads it whole"
+    );
+
+    edit_index(&dir, |v| v["version"] = 0.into());
+    assert_eq!(names(&unfinished(&dir)), ["new-run", "old-run"]);
+    std::fs::write(path_for(&dir), b"{ not json").unwrap();
+    assert_eq!(names(&unfinished(&dir)), ["new-run", "old-run"]);
+
+    // An index beside a runs directory that is gone answers nothing.
+    let gone = home.path().join("gone");
+    std::fs::write(path_for(&gone), br#"{"version":1,"runs":{}}"#).unwrap();
+    assert!(unfinished(&gone).is_empty());
+}
+
+/// A refresh reads nothing but the directory while every run file looks as
+/// it did: an idle daemon never loads the index. Once a run is added or
+/// written, the index is brought up to date.
+#[test]
+fn a_refresh_reads_the_index_only_when_a_run_file_changed() {
+    let home = runs();
+    let dir = home.path().join("runs");
+    list(&dir);
+    let seen = look_of(&dir);
+    assert_eq!(
+        look_of(&dir),
+        seen,
+        "nothing changed, so neither did the look"
+    );
+    // An index this cannot read would be rebuilt by any read of it.
+    std::fs::write(path_for(&dir), b"left alone").unwrap();
+    assert_eq!(refresh(&dir, seen), seen);
+    assert_eq!(std::fs::read(path_for(&dir)).unwrap(), b"left alone");
+
+    create_run_in(&dir.join("third-run"), &meta("third-run", "third", 300)).unwrap();
+    let now = refresh(&dir, seen);
+    assert_ne!(now, seen);
+    let saved: IndexFile = serde_json::from_slice(&std::fs::read(path_for(&dir)).unwrap()).unwrap();
+    assert_eq!(saved.runs.len(), 3);
+    assert_eq!(look_of(&home.path().join("gone")), 0);
+}
+
+/// The daemon keeps the index up to date on its own: a run added while it
+/// runs is in the index a moment later.
 #[tokio::test]
 async fn the_daemon_keeps_the_index_fresh() {
     let home = runs();
     let dir = home.path().join("runs");
-    keep_fresh(&tokio::runtime::Handle::current(), dir.clone());
-    for _ in 0..200 {
-        if path_for(&dir).is_file() {
+    list(&dir);
+    keep_fresh_every(
+        &tokio::runtime::Handle::current(),
+        dir.clone(),
+        Duration::from_millis(10),
+    );
+    create_run_in(&dir.join("third-run"), &meta("third-run", "third", 300)).unwrap();
+    let indexed = || -> usize {
+        serde_json::from_slice::<IndexFile>(&std::fs::read(path_for(&dir)).unwrap())
+            .map_or(0, |saved| saved.runs.len())
+    };
+    for _ in 0..500 {
+        if indexed() == 3 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let saved: IndexFile = serde_json::from_slice(&std::fs::read(path_for(&dir)).unwrap()).unwrap();
-    assert_eq!(saved.runs.len(), 2);
+    assert_eq!(indexed(), 3);
 }
