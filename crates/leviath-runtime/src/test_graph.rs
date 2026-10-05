@@ -251,8 +251,7 @@ pub(crate) fn plan_inference(i: usize) -> StageInference {
 /// The spec a spawn of `graph` runs, each stage on the matching inference of
 /// `infs` and an 8k-token window, every region at its own budget against it.
 pub(crate) fn spec_with(graph: RunGraph, infs: &[StageInference]) -> RunSpecC {
-    let windows = vec![WINDOW as usize; infs.len()];
-    let mut spec = spec_from(graph, "t-run", infs, &windows);
+    let mut spec = spec_from(graph, "t-run", infs, WINDOW);
     spec.launch.max_depth = 0;
     for plan in &mut spec.stages {
         plan.region_budgets.clear();
@@ -278,29 +277,24 @@ pub(crate) fn both(graph: RunGraph) -> RunSpecC {
             ..Default::default()
         })
         .collect();
-    let windows = vec![128_000; stages.len()];
-    RunSpecC(Arc::new(spec_from(graph, "run", &stages, &windows)))
+    RunSpecC(Arc::new(spec_from(graph, "run", &stages, 128_000)))
 }
 
-/// `graph` as the spec a resolver makes of it: run `agent_id`, stage `i` on
-/// `stages[i]` with a window of `windows[i]`, and each region a stage sees
-/// budgeted as [`budgets`] sizes it.
-fn spec_from(
-    graph: RunGraph,
-    agent_id: &str,
-    stages: &[StageInference],
-    windows: &[usize],
-) -> RunSpec {
+/// `graph` as a spec: run `agent_id`, stage `i` on `stages[i]` with a window
+/// of `window`, and each region budgeted as the resolver sizes it against
+/// that window.
+fn spec_from(graph: RunGraph, agent_id: &str, stages: &[StageInference], window: u32) -> RunSpec {
+    let windows = vec![window; stages.len()];
     let plans = graph
         .stages
         .iter()
-        .zip(stages.iter().zip(windows))
+        .zip(stages)
         .enumerate()
-        .map(|(i, (def, (inference, window)))| StagePlan {
+        .map(|(i, (def, inference))| StagePlan {
             stage: def.name.clone(),
             provider: ProviderName::new(&inference.provider_name).expect("a test's provider"),
             model: ModelId::new(&inference.model).expect("a test's model id"),
-            context_window: clamp(*window),
+            context_window: window,
             max_output_tokens: None,
             fallbacks: inference.fallbacks.clone(),
             tools: inference.tools.iter().map(tool_def).collect(),
@@ -308,7 +302,7 @@ fn spec_from(
                 .output
                 .as_ref()
                 .map(|o| OutputDef::from_output_spec(o).expect("a test's output shape reads")),
-            region_budgets: budgets(&graph, i, windows),
+            region_budgets: crate::resolve::budgets(&graph, i, &windows),
             notes: Vec::new(),
         })
         .collect();
@@ -352,73 +346,6 @@ fn spec_from(
     }
 }
 
-/// Each region's budget in stage `index`, in tokens.
-///
-/// A stage with its own layout sizes its regions against its own window, and
-/// takes the graph layout's regions as well, sized as the graph layout sizes
-/// them. A region of the graph's layout is sized against the smallest window
-/// among the stages that use that layout and see it, so a region budgeted for
-/// a wide-window stage is never counted against a narrow one that never reads
-/// it. A region no such stage sees takes the first stage's window.
-fn budgets(graph: &RunGraph, index: usize, windows: &[usize]) -> BTreeMap<RegionName, u32> {
-    let shared = graph.layout.regions.iter().map(|r| {
-        let window = graph
-            .stages
-            .iter()
-            .zip(windows)
-            .filter(|(s, _)| {
-                s.layout.is_none()
-                    && crate::pipeline::spec_view::visible_regions(graph, s)
-                        .contains(r.name.as_str())
-            })
-            .map(|(_, w)| *w)
-            .min()
-            .unwrap_or(windows[0]);
-        (r.name.clone(), clamp(r.budget.resolve(window)))
-    });
-    let own = graph.stages[index]
-        .layout
-        .iter()
-        .flat_map(|l| l.regions.iter())
-        .map(|r| (r.name.clone(), clamp(r.budget.resolve(windows[index]))));
-    shared.chain(own).collect()
-}
-
-/// Refuse a graph one of whose stages has too little room to work in: its
-/// fixed regions, over the regions it sees, leave less than 8000 tokens of a
-/// window of at least 20,000.
-fn check_working_room(spec: &RunSpec) -> Result<(), String> {
-    for (stage, plan) in spec.graph.stages.iter().zip(&spec.stages) {
-        let window = plan.context_window as usize;
-        let visible = crate::pipeline::spec_view::visible_regions(&spec.graph, stage);
-        let fixed: usize = spec
-            .graph
-            .layout_for(stage)
-            .regions
-            .iter()
-            .filter(|r| visible.contains(r.name.as_str()))
-            .filter(|r| {
-                matches!(
-                    r.kind,
-                    RegionKind::Pinned
-                        | RegionKind::Keyed { .. }
-                        | RegionKind::CompactHistory { .. }
-                        | RegionKind::Custom { pinned: true, .. }
-                )
-            })
-            .map(|r| plan.region_budgets.get(&r.name).copied().unwrap_or(0) as usize)
-            .sum();
-        let working = window.saturating_sub(fixed);
-        if window >= 20_000 && working < 8000 {
-            return Err(format!(
-                "context layout leaves only {working} working tokens after fixed regions \
-                 consume {fixed} of the {window} window"
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// A number of tokens as the spec stores it.
 fn clamp(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
@@ -436,30 +363,40 @@ fn tool_def(tool: &leviath_providers::Tool) -> ToolDef {
 }
 
 /// Spawning runs from a graph, for tests of the systems that run them.
+///
+/// A test names each stage's model and tools itself, or has a host choose
+/// them over a registry and a tool catalog; everything else (the operator's
+/// defaults folded in, the region budgets, the working-room check, where an
+/// input lands) is decided by the real [`resolve`](crate::resolve::resolve),
+/// and the result is placed with [`insert`](crate::insert::insert) as every
+/// spawn is.
 pub(crate) mod spawning {
-    use super::{check_working_room, spec_from};
-    use crate::pipeline::{Providers, StageInference};
-    use crate::spec::graph::{NudgeDef, RunGraph};
-    use bevy_ecs::prelude::*;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
 
-    /// A model's context window as the registered [`Providers`] report it, or
-    /// the pipeline's default window when the provider is not registered.
-    fn context_window_tokens(world: &World, provider_name: &str, model: &str) -> usize {
-        match world
-            .get_resource::<Providers>()
-            .and_then(|p| p.0.get(provider_name))
-        {
-            Some(provider) => provider.max_context_tokens(model),
-            None => {
-                tracing::warn!(
-                    provider = provider_name,
-                    model,
-                    "provider not registered; using default context window for percentage budgets"
-                );
-                crate::pipeline::DEFAULT_CONTEXT_WINDOW_TOKENS
-            }
-        }
-    }
+    use async_trait::async_trait;
+    use bevy_ecs::prelude::*;
+    use leviath_core::mime::MimeRegistry;
+
+    use crate::bind::host;
+    use crate::pipeline::{ModelDefaults, Providers};
+    use crate::providers::ProviderRegistry;
+    use crate::resolve::{ResolveMode, Resolved, resolve};
+    use crate::spec::env::{
+        Caller, CodeFiles, CodeUse, LoadedBlueprint, ModelPlan, OperatorDefaults, ResolveEnv,
+        SeedCx, SpawnLimits, StageTools,
+    };
+    use crate::spec::graph::{
+        CodeRef, DependencyDef, MimeRows, NudgeDef, RunGraph, Seed, StageDef,
+    };
+    use crate::spec::inputs::{InputDecl, InputSlot, InputType, PathKind, RawInput, RegionBinding};
+    use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+    use crate::spec::names::{
+        BlueprintName, BlueprintRef, Digest, InputName, McpServerName, MimePattern, ModelId,
+        ModelRef, ProviderName, RegionName, RunId, WorkdirPath,
+    };
+    use crate::spec::request::{SpawnRequest, SpawnSource};
+    use crate::spec::run_spec::{SeededContent, ToolDef};
 
     /// Spawn a run of `graph` into `world` with `task` in its task region and
     /// stage `i` on `stages[i]`, and return its entity. Everything else is as
@@ -496,10 +433,12 @@ pub(crate) mod spawning {
         pub(crate) agent_id: String,
         /// The graph being spawned.
         pub(crate) graph: RunGraph,
-        /// Content for named regions, keyed by region name. The `task` key
-        /// lands in the pinned region named `task`, else the first pinned one.
+        /// Content for named regions, keyed by region name: each is the input
+        /// of that name, declared as a text input bound to the region of its
+        /// name when the graph does not declare it. A key that names no region
+        /// is dropped.
         pub(crate) seeds: std::collections::HashMap<String, String>,
-        /// The graph's stages, already resolved against the provider registry.
+        /// The model and tools of each of the graph's stages, in order.
         pub(crate) stages: Vec<crate::pipeline::ResolvedStage>,
         /// Operator prompt hints, applied where the graph says nothing.
         pub(crate) global_hints: leviath_core::config::PromptHints,
@@ -512,49 +451,261 @@ pub(crate) mod spawning {
         >,
     }
 
-    /// The operator's defaults folded into the graph, as a resolver folds them,
-    /// so the run's spec carries them: each hint and nudge setting the graph
-    /// leaves open takes the operator's.
-    fn fold_operator_defaults(
-        graph: &mut RunGraph,
-        hints: leviath_core::config::PromptHints,
-        nudge: &NudgeDef,
-    ) {
-        graph.batch_tool_hint = Some(graph.batch_tool_hint.unwrap_or(hints.batch_tool));
-        graph.shell_hint = Some(graph.shell_hint.unwrap_or(hints.shell));
-        let own = graph.nudge.clone().unwrap_or_default();
-        graph.nudge = Some(NudgeDef {
-            enabled: own.enabled.or(nudge.enabled),
-            max: own.max.or(nudge.max),
-            text: own.text.or_else(|| nudge.text.clone()),
-        });
+    /// How a [`TestEnv`] answers for each stage's model and tools.
+    pub(crate) enum StageAnswers {
+        /// Each stage's model and tools as the test names them, by stage.
+        Given(BTreeMap<String, (ModelPlan, Vec<ToolDef>)>),
+        /// As a host chooses them.
+        Host(Box<HostAnswers>),
     }
 
-    /// The region a seed lands in: its own name, or for the `task` seed, the
-    /// pinned region named `task` or else the first pinned region.
-    fn seed_target(graph: &RunGraph, key: &str) -> Option<crate::spec::names::RegionName> {
-        use crate::spec::graph::RegionKind;
-        let regions = &graph.layout.regions;
-        let pinned = |r: &&crate::spec::graph::RegionDef| matches!(r.kind, RegionKind::Pinned);
-        let found = match key {
-            "task" => regions
-                .iter()
-                .filter(pinned)
-                .find(|r| r.name.as_str() == "task")
-                .or_else(|| regions.iter().find(pinned)),
-            _ => regions.iter().find(|r| r.name.as_str() == key),
-        };
-        found.map(|r| r.name.clone())
+    /// What a host chooses a stage's model and tools from: the model by
+    /// [`choose_model`](host::choose_model) over `registry` and `defaults`,
+    /// the tools by [`select_tools`](host::select_tools) from `catalog`.
+    pub(crate) struct HostAnswers {
+        pub(crate) defaults: ModelDefaults,
+        pub(crate) registry: ProviderRegistry,
+        pub(crate) catalog: Vec<ToolDef>,
     }
 
-    /// Spawn a run of a graph with seeds and resolved stages: build its spec,
+    /// A machine that answers what each test says: the graph is the one
+    /// installed blueprint, and each stage's model and tools are answered as
+    /// [`StageAnswers`] says.
+    pub(crate) struct TestEnv {
+        blueprint: LoadedBlueprint,
+        run_id: String,
+        stages: StageAnswers,
+        limits: SpawnLimits,
+    }
+
+    impl TestEnv {
+        /// A machine whose one blueprint is `graph`, named after its title,
+        /// that mints `run_id` for the run and answers for its stages as
+        /// `stages` says, under `limits`.
+        pub(crate) fn new(
+            graph: RunGraph,
+            run_id: &str,
+            stages: StageAnswers,
+            limits: SpawnLimits,
+        ) -> Self {
+            let name = BlueprintName::new(graph.title.as_deref().unwrap_or("t"))
+                .expect("a test graph's title");
+            Self {
+                blueprint: LoadedBlueprint {
+                    graph,
+                    reference: BlueprintRef { name, digest: None },
+                    version: "0.1.0".into(),
+                    base_dir: PathBuf::new(),
+                },
+                run_id: run_id.to_string(),
+                stages,
+                limits,
+            }
+        }
+
+        /// A request for this machine's blueprint, with every other field at
+        /// its default.
+        pub(crate) fn request(&self) -> SpawnRequest {
+            SpawnRequest::new(SpawnSource::Blueprint(self.blueprint.reference.clone()))
+        }
+
+        /// Resolve `request` as a top-level spawn. The resolver is async; a
+        /// thread of its own lets a test call this inside a runtime or
+        /// outside one.
+        pub(crate) fn resolve(&self, request: &SpawnRequest) -> Result<Resolved, SpawnIssues> {
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .expect("a runtime for the resolver")
+                        .block_on(resolve(
+                            request,
+                            &Caller::TopLevel,
+                            self,
+                            ResolveMode::Spawn,
+                        ))
+                })
+                .join()
+                .expect("the resolver ran")
+            })
+        }
+    }
+
+    /// The limits a test spawn answers to: no depth limit, every seed allowed,
+    /// no attachment limit, and `defaults` for what a graph leaves open.
+    pub(crate) fn limits(defaults: OperatorDefaults) -> SpawnLimits {
+        SpawnLimits {
+            default_max_depth: u8::MAX,
+            seed_commands_allowed: true,
+            max_attachment_bytes: u64::MAX,
+            default_max_iterations: None,
+            defaults,
+        }
+    }
+
+    /// A stage's model plan: `stage`'s provider and model, with the window and
+    /// reply size the world's provider reports, or the host's defaults when
+    /// the provider is not registered.
+    fn model_plan(world: &World, stage: &crate::pipeline::ResolvedStage) -> ModelPlan {
+        let registered = world
+            .get_resource::<Providers>()
+            .and_then(|p| p.0.get(&stage.provider_name));
+        let window = registered
+            .as_ref()
+            .map_or(crate::pipeline::DEFAULT_CONTEXT_WINDOW_TOKENS, |p| {
+                p.max_context_tokens(&stage.model)
+            });
+        let most = registered.map_or(
+            leviath_providers::ModelCapabilities::default().max_output_tokens,
+            |p| p.capabilities(&stage.model).max_output_tokens,
+        );
+        ModelPlan {
+            provider: ProviderName::new(&stage.provider_name).expect("a test's provider"),
+            model: ModelId::new(&stage.model).expect("a test's model id"),
+            context_window: super::clamp(window),
+            max_output_tokens: super::clamp(most),
+            fallbacks: stage.fallbacks.clone(),
+            notes: stage.notes.clone(),
+        }
+    }
+
+    #[async_trait]
+    impl ResolveEnv for TestEnv {
+        async fn blueprint(&self, reference: &BlueprintRef) -> Result<LoadedBlueprint, SpawnIssue> {
+            (reference.name == self.blueprint.reference.name)
+                .then(|| self.blueprint.clone())
+                .ok_or_else(|| {
+                    SpawnIssue::new(SpecPath::root(), IssueCode::Unknown, "no such blueprint")
+                })
+        }
+
+        fn limits(&self) -> SpawnLimits {
+            self.limits.clone()
+        }
+
+        fn new_run_id(&self, _title: &str) -> RunId {
+            RunId::new(&self.run_id).expect("a test run id")
+        }
+
+        fn workdir(&self, _requested: Option<&Path>) -> Result<PathBuf, String> {
+            Ok(PathBuf::new())
+        }
+
+        fn path_exists(&self, _workdir: &Path, _path: &WorkdirPath, _kind: PathKind) -> bool {
+            false
+        }
+
+        async fn model(
+            &self,
+            stage: &StageDef,
+            requested: Option<&ModelRef>,
+        ) -> Result<ModelPlan, SpawnIssue> {
+            match &self.stages {
+                StageAnswers::Given(given) => Ok(given[stage.name.as_str()].0.clone()),
+                StageAnswers::Host(h) => {
+                    host::choose_model(stage, requested, &h.defaults, &h.registry).map_err(|i| *i)
+                }
+            }
+        }
+
+        fn compaction_model(&self, _model: &ModelRef) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn tools(
+            &self,
+            _graph: &RunGraph,
+            stage: &StageDef,
+            _code: &CodeFiles,
+            _base: Option<&Path>,
+            _workdir: Option<&Path>,
+        ) -> Result<StageTools, SpawnIssues> {
+            match &self.stages {
+                StageAnswers::Given(given) => {
+                    Ok(StageTools::from(given[stage.name.as_str()].1.clone()))
+                }
+                StageAnswers::Host(h) => {
+                    host::select_tools(&h.catalog, stage).map(StageTools::from)
+                }
+            }
+        }
+
+        /// Inline code as written; a file's code is its name, since a test's
+        /// render hooks arrive compiled.
+        async fn code(&self, code: &CodeRef, _base: Option<&Path>) -> Result<Vec<u8>, String> {
+            Ok(match code {
+                CodeRef::Inline(source) => source.as_bytes().to_vec(),
+                CodeRef::File(file) => file.as_bytes().to_vec(),
+            })
+        }
+
+        fn check_code(&self, _code: &[u8], _used_as: CodeUse) -> Result<(), String> {
+            Ok(())
+        }
+
+        /// A seed's content is the seed written out.
+        async fn seed(&self, seed: &Seed, _cx: SeedCx<'_>) -> Result<SeededContent, String> {
+            Ok(SeededContent {
+                text: format!("{seed:?}"),
+                parts: Vec::new(),
+            })
+        }
+
+        fn mime_registry(&self, rows: &MimeRows) -> Result<MimeRegistry, String> {
+            host::run_registry(&MimeRegistry::builtin(), rows)
+        }
+
+        fn sniff(
+            &self,
+            registry: &MimeRegistry,
+            name: &str,
+            bytes: &[u8],
+            declared: Option<&MimePattern>,
+        ) -> Result<String, String> {
+            host::sniff(registry, name, bytes, declared)
+        }
+
+        async fn dependency(
+            &self,
+            _dependency: &DependencyDef,
+            _code: Option<&[u8]>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_fingerprint(&self, _provider: &ProviderName) -> Option<Digest> {
+            None
+        }
+
+        fn mcp_fingerprint(&self, _server: &McpServerName) -> Option<Digest> {
+            None
+        }
+    }
+
+    /// A text input named `name`, bound to the region of the same name.
+    fn region_input(name: &str) -> InputDecl {
+        InputDecl {
+            name: InputName::new(name).expect("a test's input name"),
+            ty: InputType::Text {
+                multiline: true,
+                min_len: None,
+                max_len: None,
+            },
+            required: false,
+            default: None,
+            description: None,
+            binds: vec![InputSlot::Region(RegionBinding {
+                region: RegionName::new(name).expect("a test's region name"),
+                template: None,
+            })],
+        }
+    }
+
+    /// Spawn a run of a graph with seeds and its stages' models: resolve it,
     /// lay out and seed its window, enter its first stage, and
-    /// [`insert`](crate::insert::insert) it. Returns `Err` when a stage has
-    /// too little room to work in, or when the first stage's system prompt
-    /// does not fit its region.
-    ///
-    /// Every percentage region budget is sized here against the model windows
-    /// the providers report, and written into each stage's plan.
+    /// [`insert`](crate::insert::insert) it. Returns `Err` with the
+    /// resolver's issues when it refuses the spawn, or when the first stage's
+    /// system prompt does not fit its region.
     pub(crate) fn place_test_run(world: &mut World, spawn: TestRun) -> Result<Entity, String> {
         let TestRun {
             agent_id,
@@ -578,41 +729,47 @@ pub(crate) mod spawning {
                 )
                 .expect("a test graph's mime rows read")
             });
-        let windows: Vec<usize> = stages
-            .iter()
-            .map(|rs| context_window_tokens(world, &rs.provider_name, &rs.model))
+        let regions: BTreeSet<String> = std::iter::once(&graph.layout)
+            .chain(graph.stages.iter().filter_map(|s| s.layout.as_ref()))
+            .flat_map(|l| &l.regions)
+            .map(|r| r.name.to_string())
             .collect();
-        let notes: Vec<Vec<String>> = stages.iter().map(|rs| rs.notes.clone()).collect();
-        let infs: Vec<StageInference> = stages
-            .into_iter()
-            .map(|rs| StageInference {
-                provider_name: rs.provider_name,
-                model: rs.model,
-                tools: rs.tools,
-                tool_filter: None,
-                fallbacks: rs.fallbacks,
-                output: rs.output,
+        let mut inputs = Vec::new();
+        for (key, text) in seeds.into_iter().filter(|(k, _)| regions.contains(k)) {
+            let declared = graph.inputs.iter().any(|d| d.name.as_str() == key);
+            if !declared {
+                graph.inputs.push(region_input(&key));
+            }
+            inputs.push((key, RawInput::Text(text)));
+        }
+        let given = graph
+            .stages
+            .iter()
+            .zip(&stages)
+            .map(|(def, stage)| {
+                let tools = stage.tools.iter().map(super::tool_def).collect();
+                (def.name.to_string(), (model_plan(world, stage), tools))
             })
             .collect();
-        fold_operator_defaults(&mut graph, global_hints, &global_nudge);
-        let mut spec = spec_from(graph, &agent_id, &infs, &windows);
-        for (plan, notes) in spec.stages.iter_mut().zip(notes) {
-            plan.notes = notes;
-        }
-        check_working_room(&spec)?;
-        for (key, content) in &seeds {
-            let Some(target) = seed_target(&spec.graph, key) else {
-                continue;
-            };
-            spec.seeded.insert(
-                target,
-                crate::spec::run_spec::SeededContent {
-                    text: content.clone(),
-                    parts: Vec::new(),
-                },
-            );
-        }
-        let spec = std::sync::Arc::new(spec);
+        let defaults = OperatorDefaults {
+            batch_tool_hint: global_hints.batch_tool,
+            shell_hint: global_hints.shell,
+            nudge: global_nudge,
+            ..OperatorDefaults::default()
+        };
+        let env = TestEnv::new(
+            graph,
+            &agent_id,
+            StageAnswers::Given(given),
+            limits(defaults),
+        );
+        let request = inputs
+            .into_iter()
+            .fold(env.request(), |request, (key, value)| {
+                request.input(key, value)
+            });
+        let resolved = env.resolve(&request).map_err(|issues| issues.to_string())?;
+        let spec = std::sync::Arc::new(resolved.spec);
 
         let mut window = crate::insert::seeded_window(&spec, &region_scripts);
         crate::insert::enter_first_stage(&spec, &mut window)?;
@@ -691,5 +848,60 @@ mod tests {
             let read = format!("{:?}", kind(core));
             assert!(read.contains(shown), "{read} lacks {shown}");
         }
+    }
+
+    /// The test machine answers the questions no test spawn happens to ask:
+    /// another blueprint is not there, no path exists, a seed is written
+    /// out, attached bytes are typed by the host, and every dependency is met.
+    #[tokio::test]
+    async fn the_test_machine_answers_every_question() {
+        use crate::spec::env::{CodeFiles, ResolveEnv, SeedCx};
+        use crate::spec::graph::{DependencyDef, Needs, Seed};
+        use spawning::{StageAnswers, TestEnv, limits};
+        use std::path::Path;
+
+        let g = graph(vec![stage("s")], layout(Vec::new(), 0));
+        let env = TestEnv::new(
+            g.clone(),
+            "r",
+            StageAnswers::Given(BTreeMap::new()),
+            limits(Default::default()),
+        );
+        let other = BlueprintRef::parse("other").expect("a name");
+        assert!(env.blueprint(&other).await.is_err());
+        let path = crate::spec::names::WorkdirPath::new("a.txt").expect("a path");
+        assert!(!env.path_exists(Path::new(""), &path, crate::spec::inputs::PathKind::Any));
+        let run_id = RunId::new("r").expect("an id");
+        let launch = LaunchPolicy::top_level(&Default::default(), 0, true);
+        let code = CodeFiles::new();
+        let cx = SeedCx {
+            run_id: &run_id,
+            agent: "a",
+            graph: &g,
+            launch: &launch,
+            workdir: Path::new(""),
+            blueprint_dir: None,
+            commands_allowed: true,
+            code: &code,
+            code_refs: &[],
+            inputs: &InputValues::default(),
+        };
+        let seed = Seed::Literal("hi".into());
+        let seeded = env.seed(&seed, cx).await.expect("a seed");
+        assert_eq!(seeded.text, format!("{seed:?}"));
+        let registry = leviath_core::mime::MimeRegistry::builtin();
+        assert_eq!(
+            env.sniff(&registry, "a.txt", b"hello", None).as_deref(),
+            Ok("text/plain")
+        );
+        let dependency = DependencyDef {
+            name: "d".into(),
+            needs: Needs::Env("NOWHERE".into()),
+            required: true,
+            remedy: None,
+            description: None,
+            install: None,
+        };
+        assert!(env.dependency(&dependency, None).await.is_ok());
     }
 }

@@ -1110,99 +1110,82 @@ mod tests {
     use crate::pipeline::ResolvedStage;
     use crate::spec::graph::RunGraph;
 
-    /// Rewrite the `submit_output` definition in `tools` to describe the shape this
-    /// stage is meant to produce.
-    ///
-    /// This is the entire mechanism for arbitrary output formats. There is no
-    /// per-format code path anywhere: what makes a model emit a2ui, a house schema,
-    /// or something invented after this was written is that the format label, the
-    /// author's instructions, and a literal example are pasted into the description
-    /// the model reads. A stage that declares nothing keeps the generic wording.
-    ///
-    /// A no-op when the stage does not offer the tool, which is most stages.
-    fn apply_output_shape(tools: &mut [Tool], spec: Option<&leviath_core::output::OutputSpec>) {
-        let Some(spec) = spec else { return };
-        let described = leviath_core::describe_spec(spec);
-        if described.is_empty() {
-            return;
-        }
-        for tool in tools
-            .iter_mut()
-            .filter(|t| t.name == leviath_tools::SUBMIT_OUTPUT_TOOL)
-        {
-            tool.description = leviath_tools::submit_output_description(&described);
-        }
+    /// A tool catalog as a host offers it: each tool an MCP server owns is
+    /// that server's, every other one is built in.
+    fn catalog_defs(catalog: ToolCatalog<'_>) -> Vec<crate::spec::run_spec::ToolDef> {
+        catalog
+            .defs
+            .iter()
+            .flat_map(|tool| match catalog.owners.get(&tool.name) {
+                Some(server) => crate::bind::host::mcp_defs(
+                    &crate::spec::names::McpServerName::new(server).expect("a test's server"),
+                    std::slice::from_ref(tool),
+                ),
+                None => crate::bind::host::builtin_defs(std::slice::from_ref(tool)),
+            })
+            .collect()
     }
 
-    /// Every stage's route and tool set, composed the way a stage plan is: the
-    /// tests' way to drive [`resolve_stage_route`] and [`filter_tools_for_stage`]
-    /// over a whole graph.
-    ///
-    /// `unattended` is the run's `--yolo` setting: it decides whether a stage's
-    /// human-in-the-loop tools are advertised at all (see
-    /// [`filter_tools_for_stage`]).
-    ///
-    /// `output_request` is the shape whoever launched the run asked for, if any. It
-    /// is resolved here, alongside the model and tool choices, because this is the
-    /// one place that can see all three levels at once - and because a caller's
-    /// request only exists at launch.
-    fn resolve_stages(
+    /// Resolve `graph` as a spawn does, each stage's model chosen over
+    /// `registry` by `defaults` and its tools picked from `catalog`, and say
+    /// each stage's model, tools, output shape and notes. `model` is the
+    /// caller's `--model`, `unattended` whether the run is unattended, and
+    /// `output` the final-output shape the caller asked for. `Err` is the
+    /// resolver's issues, written out.
+    fn resolve_graph(
         graph: &RunGraph,
-        model_override: Option<&str>,
+        model: Option<&str>,
         defaults: &ModelDefaults,
         registry: &ProviderRegistry,
         catalog: ToolCatalog<'_>,
         unattended: bool,
-        output_request: Option<&leviath_core::output::OutputSpec>,
+        output: Option<&leviath_core::output::OutputSpec>,
     ) -> Result<Vec<ResolvedStage>, String> {
-        let graph_output = graph
-            .output
-            .as_ref()
-            .map(super::super::spec_view::output_spec);
-        graph
+        use crate::test_graph::spawning::{HostAnswers, StageAnswers, TestEnv, limits};
+        let env = TestEnv::new(
+            graph.clone(),
+            "run",
+            StageAnswers::Host(Box::new(HostAnswers {
+                defaults: defaults.clone(),
+                registry: registry.clone(),
+                catalog: catalog_defs(catalog),
+            })),
+            limits(Default::default()),
+        );
+        let mut request = env.request();
+        request.model = model.map(|m| ModelRef::parse(m).expect("a test's model"));
+        request.launch.unattended = match unattended {
+            true => crate::spec::launch::Unattended::All,
+            false => crate::spec::launch::Unattended::Off,
+        };
+        request.output = output.map(|o| {
+            crate::spec::graph::OutputDef::from_output_spec(o).expect("a test's shape reads")
+        });
+        let resolved = env.resolve(&request).map_err(|issues| issues.to_string())?;
+        Ok(resolved
+            .spec
             .stages
-            .iter()
-            .map(|stage| {
-                let route = resolve_stage_route(
-                    stage.name.as_str(),
-                    &stage.model,
-                    &graph.stage_inputs(stage),
-                    model_override,
-                    defaults,
-                    registry,
-                )?;
-                // An empty tool list exposes no tools; otherwise filter the full
-                // set by name (alias-resolved) and by group. A name matching
-                // nothing (a typo, or an MCP tool whose server isn't installed)
-                // is simply omitted. An unattended run also loses the tools that
-                // block on a person.
-                let granted = crate::bind::host::stage_grants(stage, catalog.owners);
-                let required: Vec<String> = stage
-                    .required_tools
+            .into_iter()
+            .map(|plan| ResolvedStage {
+                provider_name: plan.provider.to_string(),
+                model: plan.model.to_string(),
+                tools: plan
+                    .tools
                     .iter()
-                    .map(ToString::to_string)
-                    .collect();
-                let mut tools = filter_tools_for_stage(catalog, &granted, &required, unattended);
-                let stage_output = stage
+                    .map(|d| Tool {
+                        name: d.name.to_string(),
+                        description: d.description.clone(),
+                        parameters: d.schema.value().clone(),
+                    })
+                    .collect(),
+                fallbacks: plan.fallbacks,
+                output: plan
                     .output
                     .as_ref()
-                    .map(super::super::spec_view::output_spec);
-                let output = leviath_core::resolve_output_spec(
-                    graph_output.as_ref(),
-                    stage_output.as_ref(),
-                    output_request,
-                );
-                apply_output_shape(&mut tools, output.as_ref());
-                Ok(ResolvedStage {
-                    provider_name: route.provider_name,
-                    model: route.model,
-                    tools,
-                    fallbacks: route.fallbacks,
-                    output,
-                    notes: route.notes,
-                })
+                    .map(super::super::spec_view::output_spec),
+                notes: plan.notes,
             })
-            .collect()
+            .collect())
     }
     use crate::spec::graph::{RegionLayoutDef, StageDef};
     use std::collections::HashMap;
@@ -1699,7 +1682,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_stages_empty_available_tools_gets_none() {
+    fn resolving_empty_available_tools_gets_none() {
         let mut stage = st("s".to_string(), model_cfg(vec![("anthropic", "m")]));
         stage.tools = crate::test_graph::tools(&[]); // empty ⇒ no tools
         let layout = crate::test_graph::layout(vec![], 1000);
@@ -1709,7 +1692,7 @@ mod tests {
             description: String::new(),
             parameters: serde_json::Value::Null,
         }];
-        let resolved = resolve_stages(
+        let resolved = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -1723,7 +1706,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_stages_refuses_a_stage_with_no_usable_provider() {
+    fn resolving_refuses_a_stage_with_no_usable_provider() {
         // The last fallback in `resolve_stage_model` is unchecked, so "ghost"
         // resolves and would spawn an agent that can never take a turn. It has
         // to be an error the caller sees.
@@ -1731,7 +1714,7 @@ mod tests {
         let layout = crate::test_graph::layout(vec![], 1000);
         let bp = bp_new(vec![stage], layout);
 
-        let err = resolve_stages(
+        let err = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -1754,7 +1737,7 @@ mod tests {
     /// the API rejects. Refused rather than skipped on purpose - promoting the
     /// next entry is the silent substitution this check exists to end.
     #[test]
-    fn resolve_stages_refuses_a_model_the_provider_does_not_carry() {
+    fn resolving_refuses_a_model_the_provider_does_not_carry() {
         let stage = st(
             "plan".to_string(),
             model_cfg(vec![("groq", "llama-3.1-70b")]),
@@ -1762,7 +1745,7 @@ mod tests {
         let layout = crate::test_graph::layout(vec![], 1000);
         let bp = bp_new(vec![stage], layout);
 
-        let err = resolve_stages(
+        let err = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -1785,7 +1768,7 @@ mod tests {
     /// the failover list, with a note in the stage's log; off, the fallback
     /// stays.
     #[test]
-    fn resolve_stages_drops_a_retaining_fallback_when_zero_retention_is_asked_for() {
+    fn resolving_drops_a_retaining_fallback_when_zero_retention_is_asked_for() {
         let stage = st(
             "plan".to_string(),
             model_cfg(vec![
@@ -1809,7 +1792,7 @@ mod tests {
             ..ModelDefaults::default()
         };
 
-        let resolved = resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None)
+        let resolved = resolve_graph(&bp, None, &defaults, &registry, catalog(&[]), false, None)
             .expect("the head keeps nothing");
         assert_eq!(resolved[0].provider_name, "ollama");
         // The local fallback keeps nothing and stays; OpenAI's is dropped.
@@ -1826,7 +1809,7 @@ mod tests {
         );
         assert_eq!(resolved[0].notes.len(), 1, "{notes}");
 
-        let off = resolve_stages(
+        let off = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -1841,7 +1824,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_stages_refuses_a_retaining_model_when_zero_retention_is_asked_for() {
+    fn resolving_refuses_a_retaining_model_when_zero_retention_is_asked_for() {
         let stage = |name: &str, provider: &str, model: &str| {
             st(name.to_string(), model_cfg(vec![(provider, model)]))
         };
@@ -1856,14 +1839,14 @@ mod tests {
         };
         let registry = registry_publishing(&[("openai", &["gpt-5.5"]), ("ollama", &["q"])]);
 
-        let err = resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None)
+        let err = resolve_graph(&bp, None, &defaults, &registry, catalog(&[]), false, None)
             .expect_err("OpenAI keeps an abuse log");
         assert!(err.contains("plan"), "{err}");
         assert!(err.contains("30 days"), "{err}");
         assert!(err.contains("zero_retention_agreements"), "{err}");
 
         let local = bp_new(vec![stage("plan", "ollama", "q")], layout.clone());
-        resolve_stages(
+        resolve_graph(
             &local,
             None,
             &defaults,
@@ -1875,7 +1858,7 @@ mod tests {
         .expect("local inference keeps nothing");
 
         // Off, nothing is checked.
-        resolve_stages(
+        resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -1894,7 +1877,7 @@ mod tests {
             },
             ..ModelDefaults::default()
         };
-        resolve_stages(
+        resolve_graph(
             &bp,
             None,
             &with_agreement,
@@ -1915,7 +1898,7 @@ mod tests {
     /// other to change the stage or the plan. This is the message somebody
     /// actually reads when a run will not start.
     #[test]
-    fn resolve_stages_prefers_the_providers_own_reason() {
+    fn resolving_prefers_the_providers_own_reason() {
         let stage = st(
             "plan".to_string(),
             model_cfg(vec![("codexish", "gpt-5.3-spark")]),
@@ -1937,7 +1920,7 @@ mod tests {
             }),
         );
 
-        let err = resolve_stages(
+        let err = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -1967,7 +1950,7 @@ mod tests {
     /// that will not say what it serves cannot refuse anything, so the stage
     /// resolves exactly as it would with no check at all.
     #[test]
-    fn resolve_stages_allows_a_model_an_unpublishing_provider_never_denied() {
+    fn resolving_allows_a_model_an_unpublishing_provider_never_denied() {
         let stage = st(
             "plan".to_string(),
             model_cfg(vec![("groq", "llama-3.1-70b")]),
@@ -1975,7 +1958,7 @@ mod tests {
         let layout = crate::test_graph::layout(vec![], 1000);
         let bp = bp_new(vec![stage], layout);
 
-        let resolved = resolve_stages(
+        let resolved = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -1991,7 +1974,7 @@ mod tests {
 
     /// A fallback the provider will refuse is dropped rather than kept, so a
     /// failover cannot spend a step landing on it. The head is not filtered
-    /// this way - `resolve_stages` refuses it outright instead.
+    /// this way - `resolve_graph` refuses it outright instead.
     #[test]
     fn a_fallback_the_provider_refuses_is_dropped_from_the_chain() {
         let cfg = model_cfg(vec![
@@ -2008,14 +1991,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_stages_refuses_an_override_naming_an_unregistered_provider() {
+    fn resolving_refuses_an_override_naming_an_unregistered_provider() {
         // `--model ghost/x` short-circuits every fallback, so the override is
         // the only provider that was tried.
         let stage = st("plan".to_string(), model_cfg(vec![("anthropic", "m")]));
         let layout = crate::test_graph::layout(vec![], 1000);
         let bp = bp_new(vec![stage], layout);
 
-        let err = resolve_stages(
+        let err = resolve_graph(
             &bp,
             Some("ghost/x"),
             &ModelDefaults::default(),
@@ -2026,11 +2009,9 @@ mod tests {
         )
         .expect_err("the override names a provider that isn't registered");
 
-        assert!(err.contains("tried: ghost"), "got: {err}");
-        assert!(
-            !err.contains("anthropic"),
-            "the override skipped the blueprint's list entirely: {err}"
-        );
+        // Only the override was tried: the blueprint's anthropic entry is not
+        // in the list (the issue still names the registered providers).
+        assert!(err.contains("(tried: ghost)"), "got: {err}");
     }
 
     #[test]
@@ -2070,7 +2051,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_stages_matches_by_alias_and_skips_unknown_names() {
+    fn resolving_matches_by_alias_and_skips_unknown_names() {
         // A stage names `bash` (an alias) and a not-installed MCP tool. The
         // filter must select the canonical `shell` definition for the alias and
         // silently omit the unknown name (no error, no panic).
@@ -2090,7 +2071,7 @@ mod tests {
                 parameters: serde_json::Value::Null,
             },
         ];
-        let resolved = resolve_stages(
+        let resolved = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -2511,7 +2492,7 @@ mod tests {
         };
         let registry = registry_with_unread_gateway("claude-sonnet-5");
 
-        let err = resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None)
+        let err = resolve_graph(&bp, None, &defaults, &registry, catalog(&[]), false, None)
             .expect_err("an unjudgeable first choice must not start on the fallback");
         assert!(is_unread_catalog_refusal(&err), "{err}");
         assert!(!is_unread_catalog_refusal(
@@ -2535,7 +2516,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let resolved = resolve_stages(&bp, None, &defaults, &read, catalog(&[]), false, None)
+        let resolved = resolve_graph(&bp, None, &defaults, &read, catalog(&[]), false, None)
             .expect("a read list is a real answer");
         assert_eq!(resolved[0].model, "gpt-5.4-mini");
     }
@@ -2562,7 +2543,7 @@ mod tests {
             model_cfg_open(vec!["claude-sonnet-5", "claude-opus-5"]),
         );
         let bp = bp_new(vec![routed_first], layout());
-        let resolved = resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None)
+        let resolved = resolve_graph(&bp, None, &defaults, &registry, catalog(&[]), false, None)
             .expect("the first choice has a route");
         assert_eq!(resolved[0].model, "claude-sonnet-5");
 
@@ -2571,7 +2552,7 @@ mod tests {
         let stage = st("b".to_string(), pinned_first);
         let bp = bp_new(vec![stage], layout());
         assert!(
-            resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None).is_ok(),
+            resolve_graph(&bp, None, &defaults, &registry, catalog(&[]), false, None).is_ok(),
             "a pinned, registered first choice is the author's route"
         );
 
@@ -2581,15 +2562,13 @@ mod tests {
         pinned_away.models.push(entry("", "claude-opus-5"));
         let stage = st("c".to_string(), pinned_away);
         let bp = bp_new(vec![stage], layout());
-        assert!(
-            resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None).is_err()
-        );
+        assert!(resolve_graph(&bp, None, &defaults, &registry, catalog(&[]), false, None).is_err());
 
         // A pinned `provider/model` override names its own route.
         let stage = st("d".to_string(), model_cfg_open(vec!["claude-opus-5"]));
         let bp = bp_new(vec![stage], layout());
         assert!(
-            resolve_stages(
+            resolve_graph(
                 &bp,
                 Some("anthropic/claude-sonnet-5"),
                 &defaults,
@@ -2606,7 +2585,7 @@ mod tests {
     /// substitution and the blueprint's own list, nothing when the blueprint's
     /// choice stands.
     #[test]
-    fn resolve_stages_notes_a_substitution_and_is_silent_otherwise() {
+    fn resolving_notes_a_substitution_and_is_silent_otherwise() {
         let stage = st("fix".to_string(), model_cfg(vec![("anthropic", "opus")]));
         let layout = crate::test_graph::layout(vec![], 1000);
         let bp = bp_new(vec![stage], layout);
@@ -2619,7 +2598,7 @@ mod tests {
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
         };
-        let resolved = resolve_stages(&bp, None, &overridden, &registry, catalog(&[]), false, None)
+        let resolved = resolve_graph(&bp, None, &overridden, &registry, catalog(&[]), false, None)
             .expect("anthropic is registered");
         assert_eq!(
             resolved[0].notes,
@@ -2629,7 +2608,7 @@ mod tests {
                     .to_string()
             ]
         );
-        let quiet = resolve_stages(
+        let quiet = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -2652,7 +2631,7 @@ mod tests {
             fallback_order: Vec::new(),
             provider_order: Vec::new(),
         };
-        let resolved = resolve_stages(&bp, None, &fallback, &registry, catalog(&[]), false, None)
+        let resolved = resolve_graph(&bp, None, &fallback, &registry, catalog(&[]), false, None)
             .expect("the fallback carries it");
         assert_eq!(
             resolved[0].notes,
@@ -2886,7 +2865,7 @@ mod tests {
 
     #[test]
     fn candidates_are_never_empty_even_with_nothing_registered() {
-        // `resolve_stages` needs a name the user wrote to report against.
+        // `resolve_graph` needs a name the user wrote to report against.
         let cfg = ModelChoice {
             allow_user_default: false,
             ..model_cfg(vec![("ghost", "nope")])
@@ -2897,7 +2876,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_stages_carries_the_tail_onto_the_resolved_stage() {
+    fn resolving_carries_the_tail_onto_the_resolved_stage() {
         let mut stage = st(
             "work".to_string(),
             model_cfg(vec![("openrouter", "deepseek"), ("anthropic", "sonnet")]),
@@ -2906,7 +2885,7 @@ mod tests {
         let layout = crate::test_graph::layout(vec![], 1000);
         let bp = bp_new(vec![stage], layout);
         let registry = registry_with(&["openrouter", "anthropic"]);
-        let resolved = resolve_stages(
+        let resolved = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -2964,7 +2943,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_stages_applies_the_unattended_cut_per_stage() {
+    fn resolving_applies_the_unattended_cut_per_stage() {
         // Two stages, one opting out, resolved in a single unattended run: the
         // cut is per stage, not per run.
         let mut plan = st("plan".to_string(), model_cfg(vec![("anthropic", "m")]));
@@ -2975,7 +2954,7 @@ mod tests {
         let layout = crate::test_graph::layout(vec![], 1000);
         let bp = bp_new(vec![plan, build], layout);
 
-        let resolved = resolve_stages(
+        let resolved = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -3043,7 +3022,7 @@ mod tests {
         bp: &RunGraph,
         request: Option<&leviath_core::output::OutputSpec>,
     ) -> ResolvedStage {
-        resolve_stages(
+        resolve_graph(
             bp,
             None,
             &ModelDefaults::default(),
@@ -3163,7 +3142,7 @@ mod tests {
             format: Some("a2ui".to_string()),
             ..Default::default()
         }));
-        let resolved = resolve_stages(
+        let resolved = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -3288,7 +3267,7 @@ mod tests {
         stage.connectors = vec![crate::spec::names::McpServerName::new("github").unwrap()];
         let bp = bp_new(vec![stage], crate::test_graph::layout(vec![], 1000));
 
-        let resolved = resolve_stages(
+        let resolved = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),
@@ -3395,7 +3374,7 @@ mod tests {
         stage.connectors = vec![crate::spec::names::McpServerName::new("beta").unwrap()];
         let bp = bp_new(vec![stage], crate::test_graph::layout(vec![], 1000));
 
-        let resolved = resolve_stages(
+        let resolved = resolve_graph(
             &bp,
             None,
             &ModelDefaults::default(),

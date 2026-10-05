@@ -65,6 +65,9 @@ mod seeds;
 mod source;
 mod stages;
 
+#[cfg(test)]
+pub(crate) use stages::budgets;
+
 /// A resolved run and everything its run file stores beside the spec.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolved {

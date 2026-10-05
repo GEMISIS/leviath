@@ -4388,9 +4388,9 @@ fn world_with_provider() -> World {
 }
 
 #[test]
-fn spawn_agent_seeded_resolves_percent_region_against_provider_window() {
-    // Provider "p" (Cfg) reports a 100_000-token window; a 35% region must
-    // resolve to 35_000, and the window total becomes the model window.
+fn a_placed_run_sizes_a_percent_region_against_its_models_window() {
+    // Provider "p" (Cfg) reports a 100_000-token window; the resolver sizes a
+    // 35% region to 35_000, and the window total is the model window.
     let mut world = world_with_provider();
     let e = place_test_task(
         &mut world,
@@ -4407,31 +4407,9 @@ fn spawn_agent_seeded_resolves_percent_region_against_provider_window() {
 }
 
 #[test]
-fn spawn_agent_seeded_falls_back_when_provider_missing() {
-    // No Providers resource → percentage resolves against the 8192 default
-    // window (and warns). 35% of 8192 ≈ 2867.
-    crate::test_support::with_tracing(|| {
-        let mut world = World::new();
-        let e = place_test_task(
-            &mut world,
-            "run".to_string(),
-            percent_region_blueprint(0.35),
-            "task",
-            vec![resolved("m")],
-            hints(true),
-        )
-        .expect("spawn");
-        let w = world.get::<ContextWindow>(e).expect("window");
-        let expected = (8192f64 * 0.35).round() as usize;
-        assert_eq!(w.get_region("sys").unwrap().max_tokens, expected);
-        assert_eq!(w.max_tokens, DEFAULT_CONTEXT_WINDOW_TOKENS);
-    });
-}
-
-#[test]
-fn spawn_agent_seeded_absolute_blueprint_is_unchanged() {
-    // A pure-absolute blueprint resolves to itself: region max_tokens and the
-    // window total match the declared values, provider or not.
+fn a_placed_run_keeps_token_budgets_as_written() {
+    // A layout of token budgets resolves to itself: region max_tokens and the
+    // window total match the declared values.
     let mut world = world_with_provider();
     let bp = blueprint(vec![tg::stage("main")]);
     let e = place_test_task(
@@ -4444,16 +4422,16 @@ fn spawn_agent_seeded_absolute_blueprint_is_unchanged() {
     )
     .expect("spawn");
     let w = world.get::<ContextWindow>(e).expect("window");
-    // The `blueprint` helper declares total_budget_tokens = 12_000 (legacy sum
-    // behavior preserved for absolute layouts).
+    // The `blueprint` helper declares total_budget_tokens = 12_000.
     assert_eq!(w.max_tokens, 12_000);
     assert_eq!(w.get_region("conversation").unwrap().max_tokens, 10_000);
 }
 
 #[test]
-fn spawn_agent_seeded_resolves_per_stage_layout() {
-    // Stage 0 carries its own percentage layout; it must be resolved against
-    // that stage's model window and applied on entry (swapping the global one).
+fn a_placed_stage_with_its_own_layout_sizes_it_against_its_window() {
+    // Stage 0 carries its own percentage layout; the resolver sizes it against
+    // that stage's model window and it is applied on entry in place of the
+    // graph's.
     let mut world = world_with_provider();
     let global = tg::layout(vec![tg::region("sys", RegionKind::Pinned, 5000)], 5000);
     let mut stage = tg::stage("main");
@@ -4483,10 +4461,10 @@ fn spawn_agent_seeded_resolves_per_stage_layout() {
 }
 
 #[test]
-fn spawn_agent_seeded_errors_when_resolved_global_layout_is_invalid() {
+fn a_placed_run_whose_layout_starves_its_stage_is_refused() {
     // A pinned region at 95% of the 100_000 window resolves to 95_000, leaving
-    // only 5_000 working tokens (< MIN_WORKING_TOKENS). Post-resolution
-    // validation must fail the spawn with an actionable message.
+    // only 5_000 working tokens (under the resolver's 8000 floor), so the
+    // spawn is refused with an actionable message.
     let mut world = world_with_provider();
     let err = place_test_task(
         &mut world,
@@ -4501,7 +4479,7 @@ fn spawn_agent_seeded_errors_when_resolved_global_layout_is_invalid() {
 }
 
 #[test]
-fn spawn_agent_seeded_errors_when_resolved_per_stage_layout_is_invalid() {
+fn a_placed_run_whose_stage_layout_starves_it_is_refused() {
     // The global layout is valid, but stage 0's per-stage layout resolves to a
     // starved working budget → the per-stage validation branch fails the spawn.
     let mut world = world_with_provider();
@@ -4573,7 +4551,7 @@ impl Provider for FixedWindow {
 }
 
 /// Two stages, a wide entry model and a narrow later one, sharing the global
-/// layout. This is the world the two footgun tests below spawn into.
+/// layout. This is the world the two tests below spawn into.
 fn world_with_wide_and_narrow() -> World {
     let mut world = World::new();
     let mut reg = ProviderRegistry::new();
@@ -4614,7 +4592,7 @@ fn wide_then_narrow_stages() -> Vec<ResolvedStage> {
 
 #[test]
 fn spawn_sizes_a_region_against_the_smallest_window_that_actually_sees_it() {
-    // The footgun fix. A region only the wide stage reads (the narrow stage
+    // A region only the wide stage reads (the narrow stage
     // hides it) is sized against the wide window - not shrunk to the narrow
     // stage that never sees it - and the narrow stage's working-room floor is
     // judged over just the regions it does see, so the spawn succeeds.
@@ -10459,7 +10437,13 @@ fn spawn_agent_seeds_the_stage_log_with_each_stages_notes() {
 fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
     // A stage with model parameters, routing, and a system prompt should
     // produce a ready agent carrying all of them.
-    let layout = tg::layout(vec![tg::region("task", RegionKind::Pinned, 4000)], 8000);
+    let layout = tg::layout(
+        vec![
+            tg::region("task", RegionKind::Pinned, 4000),
+            tg::region("notes", RegionKind::Clearable, 2000),
+        ],
+        8000,
+    );
     let mut s = tg::stage("start");
     s.model.params.temperature = Some(0.5);
     s.model.params.max_output_tokens = Some(crate::spec::graph::OutputCap::Tokens(128));

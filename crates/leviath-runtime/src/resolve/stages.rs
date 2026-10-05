@@ -194,7 +194,11 @@ fn stage_tools(
 /// smallest of their windows: a region budgeted for a wide-window stage must
 /// not overflow a narrow one. A region no such stage sees takes the first
 /// stage's window, which nothing at run time consults.
-fn budgets(graph: &RunGraph, index: usize, windows: &[u32]) -> BTreeMap<RegionName, u32> {
+pub(crate) fn budgets(
+    graph: &RunGraph,
+    index: usize,
+    windows: &[u32],
+) -> BTreeMap<RegionName, u32> {
     let stage = &graph.stages[index];
     match &stage.layout {
         Some(layout) => layout
