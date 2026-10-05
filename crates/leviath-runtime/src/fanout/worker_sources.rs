@@ -277,7 +277,7 @@ mod tests {
             .iter()
             .filter(|n| got.contains(&format!("https://worker.example/{n}")))
             .count();
-        assert!(landed > 0, "a full region used to take none of them: {got}");
+        assert!(landed > 0, "a full region took none of them: {got}");
         assert!(
             landed < 4,
             "this fixture is only meaningful while the region is too small for \
@@ -334,7 +334,7 @@ mod tests {
         }
     }
 
-    // ─── worker bibliographies reaching the parent (#574) ──────────────────
+    // ─── worker bibliographies reaching the parent ─────────────────────────
 
     /// Merged lines carry the worker they came from and NO citation number.
     ///

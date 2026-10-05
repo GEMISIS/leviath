@@ -283,7 +283,7 @@ fn print_capabilities(name: &str, install_dir: &Path, config: Option<&crate::con
     for finding in &findings {
         println!("    - {finding}");
     }
-    println!("  Inspect it with:  lev validate {name}");
+    println!("  Inspect it with:  lev validate {}", install_dir.display());
 }
 
 /// The read-paths grant report for a just-installed graph, when there is a

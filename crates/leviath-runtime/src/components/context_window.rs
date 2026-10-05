@@ -207,11 +207,10 @@ pub struct ContextWindow {
 /// when it has one.
 ///
 /// The name is the part that earns its tokens. An agent writes to a region *by
-/// name* - `context_write { region: "sources_index", .. }` - but until now the
-/// prompt showed it the contents of every region with nothing saying which was
-/// which. It could read `sources_index` and it could write to `sources_index`,
-/// and it had no way to know they were the same place. Three tokens of heading
-/// closes that.
+/// name* - `context_write { region: "sources_index", .. }` - so the contents it
+/// reads must say which region they are, or it cannot tell that what it reads
+/// as `sources_index` is the place it writes to by that name. Three tokens of
+/// heading say it.
 ///
 /// The description is opt-in and usually absent, because most regions are named
 /// well enough that a sentence would only cost tokens. It is for the ones whose

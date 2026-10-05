@@ -305,8 +305,8 @@ pub(crate) fn window_overflow(
 
 /// Build the [`InferenceRequest`] for an agent from its context window + stage
 /// data. Pure; no `.await` - a custom region's render hook is a bounded,
-/// synchronous Rhai eval. (Ported from `AgentEngine::build_inference_request`,
-/// with provider resolution lifted into the caller so this stays query-friendly.)
+/// synchronous Rhai eval. The provider is resolved by the caller, so this
+/// stays query-friendly.
 ///
 /// `stage_name` / `stage_iterations` feed custom-region `render(ctx)` hooks;
 /// they change nothing when the window has no custom regions.

@@ -84,7 +84,7 @@ type MaxIterationQuery = (
 /// Max-iterations guard: for each `ReadyToInfer` agent whose per-stage inference
 /// count has reached the stage's `max_iterations`, end the stage (routing to a
 /// `max_iterations` edge if one exists, else a normal transition) instead of
-/// running another inference. Ported from the imperative `run_autonomous` cap.
+/// running another inference.
 pub(crate) fn enforce_max_iterations(
     mut agents: Query<MaxIterationQuery, With<ReadyToInfer>>,
     mut commands: Commands,

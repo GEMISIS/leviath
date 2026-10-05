@@ -3560,9 +3560,9 @@ mod tests {
         dash
     }
 
-    /// Enter breaks the line, the way it does in the new-run task; it used to
-    /// send, which made the response box the one text box on the dashboard
-    /// where a newline needed a chord. Ctrl+Enter is what sends.
+    /// Enter breaks the line, the way it does in the new-run task, so no text
+    /// box on the dashboard needs a chord for a newline. Ctrl+Enter is what
+    /// sends.
     #[test]
     fn response_box_enter_is_a_newline_and_ctrl_enter_sends() {
         let mut dash = dash_answering_free_text();

@@ -1698,9 +1698,9 @@ so a field that reads the disk costs the same whether it is first or last in the
 ## The schema
 
 The schema is generated from the server's own types, so it cannot describe something the server
-does not serve. It is the only one of Leviath's published schemas that is: the OpenAPI spec, the
-blueprint schema and the config schema are written by hand and held to the code by tests. Read it
-three ways:
+does not serve. The blueprint, spawn request and run file schemas are generated from their types
+too, while the OpenAPI spec and the config schema are written by hand and held to the code by
+tests. Read it three ways:
 
 * The published file, [`leviath.graphql`](https://leviath.dev/docs/stable/leviath.graphql). It is
   committed, so no command is needed to read it, and a test refuses a build whose schema has moved

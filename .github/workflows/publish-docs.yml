@@ -105,18 +105,17 @@ jobs:
             echo "no search index at docs-out/pagefind/pagefind.js"; exit 1;
           }
 
-      # The machine-readable half: JSON Schemas for agent.toml and
-      # config.toml, the OpenAPI spec and GraphQL schema for `lev serve`, and
-      # the commented example
-      # config that Configuration links beside the schema. llms.txt links these
-      # by name, and the sync below uses --delete, so anything not copied in
-      # here becomes a 404 that the index still advertises. The example is not
-      # a .json, which is exactly how it went missing: the glob did not reach it
-      # and the check below did not name it.
+      # The machine-readable half: JSON Schemas for agent.toml, config.toml,
+      # spawn requests and run files, the OpenAPI spec and GraphQL schema for
+      # `lev serve`, and the commented example configs that Configuration links
+      # beside the schema. llms.txt links these by name, and the sync below
+      # uses --delete, so anything not copied in here becomes a 404 that the
+      # index still advertises. The examples are not .json, so the glob does
+      # not reach them: each is copied and checked by name.
       - name: Add the machine-readable schemas
         run: |
           cp docs/schema/*.json docs/schema/leviath.graphql docs/schema/config.example.toml docs/schema/yolo.example.toml docs/schema/mime_types.example.toml docs-out/
-          for f in blueprint.schema.json config.schema.json openapi.json leviath.graphql config.example.toml yolo.example.toml mime_types.example.toml; do
+          for f in blueprint.schema.json config.schema.json openapi.json run-file.schema.json spawn-request.schema.json leviath.graphql config.example.toml yolo.example.toml mime_types.example.toml; do
             test -s "docs-out/$f" || { echo "missing docs-out/$f"; exit 1; }
           done
 

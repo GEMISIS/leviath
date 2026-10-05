@@ -1013,7 +1013,7 @@ async fn a_stage_record_carries_its_region_peaks() {
 }
 
 /// `stages` takes the same filter, `orderBy` and cursor every listing in this
-/// schema takes, not just the bare list it used to be.
+/// schema takes.
 #[tokio::test]
 async fn stages_are_filtered_ordered_and_paged_with_a_cursor() {
     crate::runstate::with_isolated_runs_dir_async("graphql-stages-listing", |_dir| async move {

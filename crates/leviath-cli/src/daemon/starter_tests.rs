@@ -84,22 +84,22 @@ fn test_world() -> (PipelineWorld, Arc<CliToolService>) {
     (world, cli)
 }
 
-/// [`spawn_args`] with a task, for a blueprint that takes one: a blank
+/// [`test_launch`] with a task, for a blueprint that takes one: a blank
 /// task with nothing else handed in is refused.
 fn tasked_args(path: &str) -> TestLaunch {
     TestLaunch {
         task: "do the work".to_string(),
-        ..spawn_args(path)
+        ..test_launch(path)
     }
 }
 
-fn spawn_args(path: &str) -> TestLaunch {
+fn test_launch(path: &str) -> TestLaunch {
     TestLaunch {
         run_id: "run-x".to_string(),
         blueprint_path: path.to_string(),
         // No task by default: most of these fixtures declare no region to
-        // receive one, and supplying a task a blueprint cannot hold is now
-        // refused. Tests that care about the task set it explicitly.
+        // receive one, and a task a blueprint cannot hold is refused. Tests
+        // that care about the task set it explicitly.
         task: String::new(),
         regions: HashMap::new(),
         model: None,
@@ -120,8 +120,8 @@ fn spawn_args(path: &str) -> TestLaunch {
 }
 
 #[tokio::test]
-async fn build_agent_fails_fast_on_a_broken_custom_region_script() {
-    // The resolve error propagates out of build_agent before any tokens
+async fn starting_fails_fast_on_a_broken_custom_region_script() {
+    // The resolve error stops the start before any tokens
     // are spent - a hook that silently never ran would change every
     // inference with no signal.
     let dir = tempfile::tempdir().unwrap();
@@ -131,7 +131,7 @@ async fn build_agent_fails_fast_on_a_broken_custom_region_script() {
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-    let args = spawn_args(&manifest.to_string_lossy());
+    let args = test_launch(&manifest.to_string_lossy());
     let err = start_run(
         world.world_mut(),
         TestDeps {
@@ -155,7 +155,7 @@ async fn build_agent_fails_fast_on_a_broken_custom_region_script() {
 /// A blueprint's mime check that cannot be loaded stops the spawn, the
 /// way its other scripts do, before any tokens are spent.
 #[tokio::test]
-async fn build_agent_fails_fast_on_a_mime_check_it_cannot_load() {
+async fn starting_fails_fast_on_a_mime_check_it_cannot_load() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -190,7 +190,7 @@ budget = 10000
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-    let args = spawn_args(&manifest.to_string_lossy());
+    let args = test_launch(&manifest.to_string_lossy());
     let err = start_run(
         world.world_mut(),
         TestDeps {
@@ -212,7 +212,7 @@ budget = 10000
 /// A required dependency that is not satisfied fails the spawn before any
 /// tokens are spent, with a message pointing at `lev deps`.
 #[tokio::test]
-async fn build_agent_fails_fast_on_an_unmet_dependency() {
+async fn starting_fails_fast_on_an_unmet_dependency() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -247,7 +247,7 @@ budget = 10000
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-    let args = spawn_args(&manifest.to_string_lossy());
+    let args = test_launch(&manifest.to_string_lossy());
     let err = start_run(
         world.world_mut(),
         TestDeps {
@@ -271,14 +271,14 @@ budget = 10000
 /// the seeds; a file aimed at a region the agent does not have is then
 /// refused by the spawn itself, and that refusal is what the caller hears.
 #[tokio::test]
-async fn build_agent_reports_a_part_for_a_region_the_agent_lacks() {
+async fn starting_reports_a_part_for_a_region_the_agent_lacks() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(&manifest, coder_manifest()).unwrap();
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-    let mut args = spawn_args(&manifest.to_string_lossy());
+    let mut args = test_launch(&manifest.to_string_lossy());
     args.parts.push(leviath_core::mime::InboundPart {
         region: Some("nowhere".to_string()),
         name: "sketch.png".to_string(),
@@ -305,7 +305,7 @@ async fn build_agent_reports_a_part_for_a_region_the_agent_lacks() {
 }
 
 #[tokio::test]
-async fn build_agent_rejects_a_workdir_that_is_missing_or_not_a_directory() {
+async fn starting_rejects_a_workdir_that_is_missing_or_not_a_directory() {
     // `ToolContext::new` silently keeps a path it can't canonicalize, so
     // without this check a bogus workdir spawns a healthy-looking agent
     // whose every tool call then fails with ENOENT.
@@ -350,7 +350,7 @@ budget = 10000
         let (mut world, cli) = test_world();
         let hub = InteractionHub::new();
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-        let mut args = spawn_args(&manifest.to_string_lossy());
+        let mut args = test_launch(&manifest.to_string_lossy());
         args.workdir = workdir.clone();
         let err = start_run(
             world.world_mut(),
@@ -383,7 +383,7 @@ budget = 10000
 /// Multi-thread because the seeded call is awaited on the ambient runtime -
 /// see `block_on_daemon`, which is what a daemon spawn does too.
 #[tokio::test(flavor = "multi_thread")]
-async fn build_agent_seeds_a_region_from_a_real_tool_call() {
+async fn starting_seeds_a_region_from_a_real_tool_call() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -478,7 +478,7 @@ binds = [{ region = "task" }]
 }
 
 #[tokio::test]
-async fn build_agent_attaches_taint_gate_when_security_enabled() {
+async fn starting_attaches_taint_gate_when_security_enabled() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -524,7 +524,7 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect("spawn succeeds");
 
@@ -567,7 +567,7 @@ budget = 10000
 /// `shell = "allow"` and a Private read still raised the leak prompt, and
 /// denying it kept the command from running.
 #[tokio::test]
-async fn build_agent_tool_permission_allow_does_not_waive_the_taint_gate() {
+async fn starting_tool_permission_allow_does_not_waive_the_taint_gate() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -618,7 +618,7 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect("spawn succeeds");
 
@@ -639,7 +639,7 @@ budget = 10000
 }
 
 #[tokio::test]
-async fn build_agent_marks_root_runs_for_titling_but_not_subagents() {
+async fn starting_marks_root_runs_for_titling_but_not_subagents() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -683,7 +683,7 @@ binds = [{ region = "task" }]
         },
         &TestLaunch {
             task: "title me".to_string(),
-            ..spawn_args(&manifest.to_string_lossy())
+            ..test_launch(&manifest.to_string_lossy())
         },
     )
     .expect("spawn succeeds");
@@ -753,7 +753,7 @@ binds = [{ region = "task" }]
 }
 
 #[tokio::test]
-async fn build_agent_applies_policy_mcp_overrides_to_the_gate() {
+async fn starting_applies_policy_mcp_overrides_to_the_gate() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -817,7 +817,7 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect("spawn succeeds");
 
@@ -834,9 +834,9 @@ budget = 10000
 }
 
 #[tokio::test]
-async fn build_agent_errors_when_required_caller_region_missing() {
+async fn starting_errors_when_required_caller_region_missing() {
     // A required caller-input region that the request doesn't provide makes
-    // build_agent fail (via resolve_seeds) before spawning - no inference.
+    // the start fail in resolution, before spawning - no inference.
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -875,7 +875,7 @@ binds = [{ region = "spec" }]
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-    // spawn_args() provides only the task, not the required `spec` region.
+    // test_launch() provides only the task, not the required `spec` region.
     let err = start_run(
         world.world_mut(),
         TestDeps {
@@ -887,14 +887,14 @@ binds = [{ region = "spec" }]
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .unwrap_err();
     assert!(err.contains("spec"), "got: {err}");
 }
 
 #[tokio::test]
-async fn build_agent_attaches_sandbox_when_configured() {
+async fn starting_attaches_sandbox_when_configured() {
     // A `namespace` sandbox with `on_unavailable = "warn"` builds on every
     // platform without running any external command, so this deterministically
     // exercises the spawn-side sandbox wiring (manager built + attached).
@@ -943,7 +943,7 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect("spawn succeeds");
     // The agent's tool state carries a sandbox manager.
@@ -957,7 +957,7 @@ budget = 10000
 /// before anything is compiled or written, so no tools directory is
 /// touched here.
 #[tokio::test]
-async fn build_agent_reserves_mcp_tool_names_for_install_tool() {
+async fn starting_reserves_mcp_tool_names_for_install_tool() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -1005,7 +1005,7 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect("spawn succeeds");
     let state = cli.take(entity).expect("state registered");
@@ -1026,9 +1026,9 @@ budget = 10000
 }
 
 #[tokio::test]
-async fn build_agent_errors_when_sandbox_runtime_unavailable() {
+async fn starting_errors_when_sandbox_runtime_unavailable() {
     // A container sandbox naming a nonexistent engine fails to start on every
-    // platform (no runtime needed), so build_agent surfaces the error - this
+    // platform (no runtime needed), so the start surfaces the error - this
     // covers the `?` on `SandboxManager::build` uniformly across OSes,
     // independent of which container runtimes happen to be installed.
     let dir = tempfile::tempdir().unwrap();
@@ -1076,14 +1076,14 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect_err("a nonexistent engine can't start the container");
     assert!(err.contains("sandbox unavailable"), "got: {err}");
 }
 
 #[tokio::test]
-async fn build_agent_yolo_attaches_gate_auto_approve_when_taint_on() {
+async fn starting_yolo_attaches_gate_auto_approve_when_taint_on() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -1118,7 +1118,7 @@ budget = 10000
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-    let mut args = spawn_args(&manifest.to_string_lossy());
+    let mut args = test_launch(&manifest.to_string_lossy());
     args.yolo = true;
     let entity = start_run(
         world.world_mut(),
@@ -1165,7 +1165,7 @@ budget = 10000
 /// The status a `--yolo` run reports is `active`, not `waiting`: nothing
 /// should be opening a prompt for it in the first place.
 #[tokio::test]
-async fn build_agent_yolo_leaves_the_run_active_and_unattended() {
+async fn starting_yolo_leaves_the_run_active_and_unattended() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -1195,7 +1195,7 @@ budget = 10000
     )
     .unwrap();
     let (mut world, cli) = test_world();
-    let mut args = spawn_args(&manifest.to_string_lossy());
+    let mut args = test_launch(&manifest.to_string_lossy());
     args.yolo = true;
     let entity = start_run(
         world.world_mut(),
@@ -1232,7 +1232,7 @@ budget = 10000
 /// which is the worst possible moment to learn the agent cannot hand back
 /// its work.
 #[tokio::test]
-async fn build_agent_refuses_a_validator_that_does_not_compile() {
+async fn starting_refuses_a_validator_that_does_not_compile() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(dir.path().join("shape.rhai"), "fn validate(a, b) { () }").unwrap();
@@ -1268,7 +1268,7 @@ budget = 10000
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-    let args = spawn_args(&manifest.to_string_lossy());
+    let args = test_launch(&manifest.to_string_lossy());
     let err = start_run(
         world.world_mut(),
         TestDeps {
@@ -1292,7 +1292,7 @@ budget = 10000
 /// entity, or the script is checked and then never runs, and the run hands
 /// back an answer nothing looked at.
 #[tokio::test]
-async fn build_agent_carries_output_validators_onto_the_entity() {
+async fn starting_carries_output_validators_onto_the_entity() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(dir.path().join("shape.rhai"), "fn validate(content) { () }").unwrap();
@@ -1328,7 +1328,7 @@ budget = 10000
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-    let args = spawn_args(&manifest.to_string_lossy());
+    let args = test_launch(&manifest.to_string_lossy());
     let entity = start_run(
         world.world_mut(),
         TestDeps {
@@ -1354,7 +1354,7 @@ budget = 10000
 /// And an agent that names none carries none, rather than an empty
 /// component every consumer then has to check.
 #[tokio::test]
-async fn build_agent_carries_no_validators_when_none_are_named() {
+async fn starting_carries_no_validators_when_none_are_named() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -1387,7 +1387,7 @@ budget = 10000
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-    let args = spawn_args(&manifest.to_string_lossy());
+    let args = test_launch(&manifest.to_string_lossy());
     let entity = start_run(
         world.world_mut(),
         TestDeps {
@@ -1412,7 +1412,7 @@ budget = 10000
 }
 
 #[tokio::test]
-async fn build_agent_carries_required_tools_into_the_tool_state() {
+async fn starting_carries_required_tools_into_the_tool_state() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -1448,7 +1448,7 @@ budget = 10000
     )
     .unwrap();
     let (mut world, cli) = test_world();
-    let mut args = spawn_args(&manifest.to_string_lossy());
+    let mut args = test_launch(&manifest.to_string_lossy());
     args.yolo = true;
     let entity = start_run(
         world.world_mut(),
@@ -1477,7 +1477,7 @@ budget = 10000
 }
 
 #[tokio::test]
-async fn build_agent_without_yolo_keeps_prompts_interactive() {
+async fn starting_without_yolo_keeps_prompts_interactive() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -1520,7 +1520,7 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect("spawn succeeds");
     assert!(
@@ -1591,21 +1591,21 @@ budget = 10000
     };
 
     let plain = Config::default();
-    assert!(!captured(&plain, &spawn_args(&path)));
+    assert!(!captured(&plain, &test_launch(&path)));
 
     let mut machine_wide = Config::default();
     machine_wide.observability.capture_model_input = true;
-    assert!(captured(&machine_wide, &spawn_args(&path)));
+    assert!(captured(&machine_wide, &test_launch(&path)));
 
     let asked = TestLaunch {
         capture_model_input: true,
-        ..spawn_args(&path)
+        ..test_launch(&path)
     };
     assert!(captured(&plain, &asked));
 }
 
 #[tokio::test]
-async fn build_agent_no_security_block_leaves_taint_off_by_default() {
+async fn starting_no_security_block_leaves_taint_off_by_default() {
     // A blueprint with no `[security]` block and a default (taint-off)
     // global config must NOT attach the taint gate - an
     // `unwrap_or_default()` on the resolved security forces it on for
@@ -1653,7 +1653,7 @@ budget = 10000
     hub: &hub,
     subagent_tx: sub_tx(),
 },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect("spawn succeeds");
     assert!(
@@ -1686,20 +1686,20 @@ async fn spawned_no_output_tools(manifest_body: &str, task: &str) -> bool {
         },
         &TestLaunch {
             task: task.to_string(),
-            ..spawn_args(&manifest.to_string_lossy())
+            ..test_launch(&manifest.to_string_lossy())
         },
     )
     .expect("spawn succeeds");
     world
         .world()
         .get::<leviath_runtime::persistence::RunOutcomeFlags>(entity)
-        .expect("build_agent attaches run outcome flags")
+        .expect("a started run carries its outcome flags")
         .0
         .no_output_tools
 }
 
 #[tokio::test]
-async fn build_agent_records_whether_the_blueprint_can_write_at_all() {
+async fn starting_records_whether_the_blueprint_can_write_at_all() {
     // A coding agent writes in `implement`, so silence from it is worth
     // reporting.
     assert!(!spawned_no_output_tools(&coder_manifest(), "do the work").await);
@@ -1741,7 +1741,7 @@ budget = 10000
 }
 
 #[tokio::test]
-async fn build_agent_spawns_registers_and_wires_tools() {
+async fn starting_spawns_registers_and_wires_tools() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(&manifest, coder_manifest()).unwrap();
@@ -1799,7 +1799,7 @@ async fn build_agent_spawns_registers_and_wires_tools() {
 /// that tagged too much would make every batch of an ordinary run pay for a
 /// mode it never asked for.
 #[tokio::test]
-async fn build_agent_tags_an_agent_with_the_rescan_it_asked_for() {
+async fn starting_tags_an_agent_with_the_rescan_it_asked_for() {
     use leviath_runtime::pipeline::{DynamicTools, RescanBeforeDispatch};
     for (word, polls, before_dispatch) in [
         ("at_spawn", false, false),
@@ -1853,7 +1853,7 @@ async fn build_agent_tags_an_agent_with_the_rescan_it_asked_for() {
 }
 
 #[tokio::test]
-async fn build_agent_applies_yolo_allow_and_max_depth() {
+async fn starting_applies_yolo_allow_and_max_depth() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(&manifest, coder_manifest()).unwrap();
@@ -1934,7 +1934,7 @@ async fn build_agent_applies_yolo_allow_and_max_depth() {
 }
 
 #[tokio::test]
-async fn build_agent_honors_agent_level_tool_permissions() {
+async fn starting_honors_agent_level_tool_permissions() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     // A top-level `[tool_permissions]` block denying a builtin - no stage
@@ -1984,7 +1984,7 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect("spawn succeeds");
 
@@ -2006,7 +2006,7 @@ budget = 10000
 }
 
 #[tokio::test]
-async fn build_agent_script_host_honors_agent_level_grants() {
+async fn starting_script_host_honors_agent_level_grants() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -2050,7 +2050,7 @@ budget = 10000
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-    let mut args = spawn_args(&manifest.to_string_lossy());
+    let mut args = test_launch(&manifest.to_string_lossy());
     args.workdir = dir.path().to_string_lossy().to_string();
     let entity = start_run(
         world.world_mut(),
@@ -2079,7 +2079,7 @@ budget = 10000
 }
 
 #[tokio::test]
-async fn build_agent_applies_default_max_iterations_only_when_stage_omits_it() {
+async fn starting_applies_default_max_iterations_only_when_stage_omits_it() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     // Two stages: one omits max_iterations, one sets it explicitly to 3.
@@ -2140,7 +2140,7 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect("spawn succeeds");
 
@@ -2164,7 +2164,7 @@ budget = 10000
 }
 
 #[tokio::test]
-async fn build_agent_leaves_max_iterations_unset_when_config_default_is_none() {
+async fn starting_leaves_max_iterations_unset_when_config_default_is_none() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -2216,7 +2216,7 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect("spawn succeeds");
 
@@ -2238,7 +2238,7 @@ async fn fake_provider_methods_are_exercised() {
 }
 
 #[tokio::test]
-async fn build_agent_read_error() {
+async fn starting_read_error() {
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
@@ -2253,14 +2253,14 @@ async fn build_agent_read_error() {
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args("/no/such/manifest.leviath"),
+        &test_launch("/no/such/manifest.leviath"),
     )
     .unwrap_err();
     assert!(err.contains("Could not find a blueprint"), "{err}");
 }
 
 #[tokio::test]
-async fn build_agent_propagates_spawn_error() {
+async fn starting_propagates_spawn_error() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     // A huge prompt that cannot fit the 20-token "task" region.
@@ -2281,13 +2281,13 @@ async fn build_agent_propagates_spawn_error() {
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     );
     assert!(result.is_err(), "expected spawn error, got {result:?}");
 }
 
 #[tokio::test]
-async fn build_agent_refuses_a_manifest_with_no_usable_provider() {
+async fn starting_refuses_a_manifest_with_no_usable_provider() {
     // End to end: without this an agent is built pointed at a provider
     // nothing answers to, and then sits at iteration 0 for the life of the
     // daemon.
@@ -2336,7 +2336,7 @@ binds = [{ region = "task" }]
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .unwrap_err();
     assert!(err.contains("main"), "names the stage: {err}");
@@ -2344,7 +2344,7 @@ binds = [{ region = "task" }]
 }
 
 #[tokio::test]
-async fn build_agent_invalid_blueprint() {
+async fn starting_invalid_blueprint() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     // The entry names a stage that does not exist, so the graph does not
@@ -2389,14 +2389,14 @@ binds = [{ region = "task" }]
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .unwrap_err();
     assert!(err.contains("ghost"), "{err}");
 }
 
 #[tokio::test]
-async fn build_agent_without_entry_stage_and_with_compaction() {
+async fn starting_without_entry_stage_and_with_compaction() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     // No entry_stage (falls back to the first stage) + a compaction section.
@@ -2482,7 +2482,7 @@ stages = [{{ name = "main", description = "d", model = {{ models = [{{ provider 
 /// A blueprint declaring a stage hook spawns with the compiled script
 /// attached - the branch that only runs when some stage declared one.
 #[tokio::test]
-async fn build_agent_attaches_declared_stage_hooks() {
+async fn starting_attaches_declared_stage_hooks() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("h.rhai"), "fn on_stage_enter(ctx) { () }").unwrap();
     let manifest = dir.path().join("agent.toml");
@@ -2528,7 +2528,7 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect("spawn succeeds");
 
@@ -2542,7 +2542,7 @@ budget = 10000
 /// A broken hook script fails the spawn rather than the run - the `?` on
 /// the resolver, which is the whole point of resolving at spawn.
 #[tokio::test]
-async fn build_agent_refuses_a_broken_stage_hook() {
+async fn starting_refuses_a_broken_stage_hook() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("h.rhai"), "fn on_stage_enter(ctx) {").unwrap();
     let manifest = dir.path().join("agent.toml");
@@ -2588,7 +2588,7 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .expect_err("a broken hook script must fail the spawn");
     assert!(err.contains("Script compilation failed"), "{err}");
@@ -2597,7 +2597,7 @@ budget = 10000
 /// A granted `[read_paths]` spawns cleanly, with taint on so the read-tool
 /// sensitivity bump path runs end to end.
 #[tokio::test]
-async fn build_agent_wires_granted_read_paths() {
+async fn starting_wires_granted_read_paths() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = write_read_paths_manifest(dir.path(), "\"/tmp\"");
     let (mut world, cli) = test_world();
@@ -2629,7 +2629,7 @@ async fn build_agent_wires_granted_read_paths() {
 /// A declared-but-ungranted `[read_paths]` still spawns; the warning-logging
 /// branch fires.
 #[tokio::test]
-async fn build_agent_wires_ungranted_read_paths() {
+async fn starting_wires_ungranted_read_paths() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = write_read_paths_manifest(dir.path(), "\"/tmp\"");
     let (mut world, cli) = test_world();
@@ -2658,7 +2658,7 @@ async fn build_agent_wires_ungranted_read_paths() {
 /// A malformed grant entry in the user's own config fails the spawn - the
 /// error propagates out of `build_read_path_policy`.
 #[tokio::test]
-async fn build_agent_rejects_a_malformed_config_grant() {
+async fn starting_rejects_a_malformed_config_grant() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = write_read_paths_manifest(dir.path(), "\"/tmp\"");
     let (mut world, cli) = test_world();
@@ -2684,7 +2684,7 @@ async fn build_agent_rejects_a_malformed_config_grant() {
 }
 
 #[tokio::test]
-async fn build_agent_parse_error() {
+async fn starting_parse_error() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(&manifest, "this is not valid toml : : :").unwrap();
@@ -2702,7 +2702,7 @@ async fn build_agent_parse_error() {
             hub: &hub,
             subagent_tx: sub_tx(),
         },
-        &spawn_args(&manifest.to_string_lossy()),
+        &test_launch(&manifest.to_string_lossy()),
     )
     .unwrap_err();
     assert!(err.contains("is not a valid blueprint"), "{err}");
@@ -2713,7 +2713,7 @@ async fn build_agent_parse_error() {
 /// checkpoint opens, the gate asks, and the model's questions are offered.
 /// One that keeps nothing is bare `--yolo` with a name on it.
 #[tokio::test]
-async fn build_agent_under_a_profile_keeps_what_the_profile_keeps() {
+async fn starting_under_a_profile_keeps_what_the_profile_keeps() {
     crate::config::with_isolated_config_path_async("spawn_profile_keeps", |cfg| async move {
         std::fs::write(cfg.join("yolo.toml"), PROFILES_TOML).unwrap();
         for (name, auto) in [("careful", false), ("loose", true)] {
@@ -2750,7 +2750,7 @@ budget = 10000
             .unwrap();
             let (mut world, cli) = test_world();
             let hub = InteractionHub::new();
-            let mut args = spawn_args(&manifest.to_string_lossy());
+            let mut args = test_launch(&manifest.to_string_lossy());
             args.yolo = true;
             args.yolo_profile = Some(name.to_string());
             let entity = start_run(
@@ -2807,7 +2807,7 @@ budget = 10000
 /// A name the file does not have stops the spawn and lists what it does
 /// have. Without `yolo`, a stray name is not even looked up.
 #[tokio::test]
-async fn build_agent_refuses_a_profile_the_file_does_not_have() {
+async fn starting_refuses_a_profile_the_file_does_not_have() {
     crate::config::with_isolated_config_path_async("spawn_profile_unknown", |cfg| async move {
         std::fs::write(cfg.join("yolo.toml"), PROFILES_TOML).unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -2851,7 +2851,7 @@ budget = 10000
             hub: &hub,
             subagent_tx: sub_tx(),
         };
-        let mut args = spawn_args(&manifest.to_string_lossy());
+        let mut args = test_launch(&manifest.to_string_lossy());
         args.yolo = true;
         args.yolo_profile = Some("nope".to_string());
         let err = start_run(world.world_mut(), deps(), &args).expect_err("unknown profile");

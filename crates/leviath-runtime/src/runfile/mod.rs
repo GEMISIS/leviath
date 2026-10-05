@@ -37,8 +37,9 @@ pub use writer::{CheckpointPolicy, RunFileWriter};
 
 /// The JSON Schemas of every type a run file stores, as one document.
 ///
-/// `cargo xtask schema` writes it to `docs/schema/run-file.schema.json`, and
-/// its hash is the fingerprint every run file's header carries.
+/// `cargo xtask schema` writes it to `docs/schema/run-file.schema.json` (a
+/// test holds the file to it), and its hash is the fingerprint every run
+/// file's header carries.
 pub fn frame_schemas() -> serde_json::Value {
     serde_json::json!({
         "spec": schemars::schema_for!(crate::spec::run_spec::RunSpec),

@@ -1004,9 +1004,8 @@ mod tests {
     /// Every tool that can carry bytes off the machine is outbound, which is
     /// the only direction the gate inspects. `web_search` counts: the *query*
     /// is model-written, so it is a channel out even though the results come
-    /// back in. Previously only `shell`/`bash` were outbound, so a Private
-    /// context could be exfiltrated through any of these with taint tracking
-    /// fully enabled.
+    /// back in. Were any of these inbound, a Private context could leave
+    /// through it with taint tracking fully enabled.
     #[test]
     fn network_capable_tools_are_outbound() {
         for name in ["web_search", "web_fetch", "http_get", "http_post", "fetch"] {

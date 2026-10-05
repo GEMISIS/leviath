@@ -103,7 +103,7 @@ pub(crate) struct RequiredReentries(pub usize);
 /// Required regions (from the stage's effective layout) still empty at stage end,
 /// as `(name, optional custom message)`. Empty when the stage has no
 /// context-writing tool (gating a stage that can't populate the region would loop
-/// pointlessly). Ported from the imperative `unmet_required_regions`.
+/// pointlessly).
 pub(crate) fn unmet_required_regions(
     graph: &crate::spec::graph::RunGraph,
     stage: &crate::spec::graph::StageDef,
@@ -172,7 +172,7 @@ type ContextRegionQuery = (
 /// the stage (loop back to `ReadyToInfer`) instead of transitioning - bounded by
 /// the stage's `max_revisits` (or a default cap), after which
 /// it proceeds with a warning. Skipped when the stage ended on an error / max-iter
-/// outcome (those transitions take precedence). Ported from the imperative gate.
+/// outcome (those transitions take precedence).
 pub(crate) fn require_context_regions(
     mut agents: Query<ContextRegionQuery, With<ResolveTransition>>,
     mut commands: Commands,

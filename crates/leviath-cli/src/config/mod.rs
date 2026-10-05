@@ -4067,10 +4067,9 @@ name = "broken"
     /// A server name goes into every one of that server's tool names, so a
     /// character a provider refuses has to be caught here.
     ///
-    /// It used to be rewritten instead: `my.tools` became the prefix
-    /// `my_tools`, which is also what a server actually named `my_tools`
-    /// produces. The two servers then fought over one set of tool names and
-    /// the loser's tools were handed a `_2` suffix nobody could predict.
+    /// Rewriting it instead would be ambiguous: `my.tools` as the prefix
+    /// `my_tools` is also what a server actually named `my_tools` produces,
+    /// and the two servers would then share one set of tool names.
     #[test]
     fn load_rejects_an_mcp_server_name_a_provider_would_refuse() {
         let dir = tempfile::tempdir().unwrap();

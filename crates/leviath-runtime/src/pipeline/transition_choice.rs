@@ -9,7 +9,7 @@ use spec_view::StageToolOverrides;
 
 /// A transition-choice inference is in flight (an LLM is picking the next stage);
 /// holds the choosable edges so the collect system can match the response back to
-/// one. (Ported from the async portion of `graph::prompt_llm_transition`.)
+/// one.
 #[derive(Component, Debug, Clone)]
 pub(crate) struct AwaitingTransitionResponse(pub Vec<EdgeDef>);
 
@@ -19,8 +19,7 @@ pub(crate) struct AwaitingTransitionResponse(pub Vec<EdgeDef>);
 #[derive(Resource)]
 pub(crate) struct TransitionResults(pub UnboundedReceiver<InferenceOutcome>);
 
-/// Build the LLM prompt that asks which stage to run next. (Ported from the
-/// prompt-building portion of `graph::prompt_llm_transition`.)
+/// Build the LLM prompt that asks which stage to run next.
 pub(crate) fn build_transition_prompt(stage: &StageDef, edges: &[EdgeDef]) -> String {
     let mut p = match &stage.transition_prompt {
         Some(custom) => {

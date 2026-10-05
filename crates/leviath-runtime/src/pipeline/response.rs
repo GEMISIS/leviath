@@ -13,7 +13,7 @@ pub(crate) struct ProcessResponse;
 pub(crate) struct InferenceResults(pub UnboundedReceiver<InferenceOutcome>);
 
 /// Convert a provider response into the stored `InferenceResult` component.
-/// (Ported from `AgentEngine::apply_inference_response`.) `parts` are the
+/// `parts` are the
 /// response's mime once stored, from [`store_model_parts`].
 pub(crate) fn to_inference_result(
     response: &leviath_providers::InferenceResponse,
@@ -920,8 +920,7 @@ type EmptyResponseQuery = (
 /// disabled, or it has been nudged its budgeted number of times, the text
 /// response is accepted and the agent advances to `ResolveTransition`.
 /// Otherwise (text only, no work yet) the response + the stage's nudge are
-/// added to context and the agent loops back to `ReadyToInfer`. Ported from
-/// `AgentEngine::loop_handle_empty_tool_calls`.
+/// added to context and the agent loops back to `ReadyToInfer`.
 ///
 /// The nudge is programmable per stage (`[stages.<name>.nudge]`), per agent
 /// (`[agent.nudge]`), and globally (config `[nudge]`), each field cascading

@@ -9,9 +9,10 @@
 
 use super::*;
 
-/// What `spawn_agent` and `validate_spawn` take. One schema for both, so a
-/// call that validates is the call that spawns.
-fn spawn_args_schema() -> Value {
+/// What `spawn_agent` and `validate_spawn` take: a spawn request, and whether
+/// to wait for the run. One schema for both, so a call that validates is the
+/// call that spawns.
+fn spawn_request_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -137,7 +138,7 @@ impl BuiltinTools {
             Tool {
                 name: "spawn_agent".to_string(),
                 description: "Start a sub-agent: an installed blueprint, or a run graph you write. Returns its id at once, or with wait=true its result once it finishes. A refused spawn comes back as a numbered list, one problem per line with where it is and how to fix it; fix them all and call again. `validate_spawn` checks the same arguments without starting anything.".to_string(),
-                parameters: spawn_args_schema(),
+                parameters: spawn_request_schema(),
             },
             Tool {
                 name: "check_agent".to_string(),
@@ -205,7 +206,7 @@ impl BuiltinTools {
             Tool {
                 name: "validate_spawn".to_string(),
                 description: "Check a spawn without starting anything: takes exactly what `spawn_agent` takes, and returns either a summary of the run it would start (its stages, models and tools, and the checked inputs) or every problem at once as a numbered list, each with where it is and how to fix it. `wait` has no effect here.".to_string(),
-                parameters: spawn_args_schema(),
+                parameters: spawn_request_schema(),
             },
             Tool {
                 name: "run_history".to_string(),

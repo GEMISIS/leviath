@@ -1,8 +1,9 @@
 //! The published schemas and the fingerprint. A sibling file, because the
 //! rewrite branch only runs when a person asks for it.
 
-/// The published schemas are the ones this build generates. Run with
-/// `LEVIATH_WRITE_SCHEMAS=1` to rewrite them after changing a type.
+/// The published schemas are the ones this build generates. `cargo xtask
+/// schema` runs this with `LEVIATH_WRITE_SCHEMAS=1` to rewrite them after a
+/// type changes.
 #[test]
 fn the_published_schemas_match_this_build() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/schema");
@@ -22,7 +23,7 @@ fn the_published_schemas_match_this_build() {
             .replace("\r\n", "\n");
         assert!(
             on_disk == text,
-            "{name} is out of date; rerun this test with LEVIATH_WRITE_SCHEMAS=1 and commit the file"
+            "{name} is out of date; run `cargo xtask schema` and commit the file"
         );
     }
 }

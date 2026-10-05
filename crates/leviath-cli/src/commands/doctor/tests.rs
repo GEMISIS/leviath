@@ -950,10 +950,9 @@ fn resolve_check_names_the_provider_order_when_none_of_it_is_configured() {
 fn resolve_check_passes_a_configured_provider_that_names_no_model() {
     // The fresh single-provider install: `default_provider = "stub"`, no
     // `override_model`, no `fallback_model`. The chain has nothing of the
-    // user's to send and falls to its placeholder, which used to be reported
-    // as "resolved to 'anthropic', which is not configured" and stopped the
-    // doctor before the checks that bill and spawn. Now it passes on the
-    // preference, and the model is left for the inference check to pick.
+    // user's to send and falls to its placeholder. The check passes on the
+    // preference rather than naming the placeholder's provider as not
+    // configured, and the model is left for the inference check to pick.
     let config = Config {
         default_provider: "stub".to_string(),
         ..Config::default()

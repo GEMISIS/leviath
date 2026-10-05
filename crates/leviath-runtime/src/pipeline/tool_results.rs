@@ -121,9 +121,8 @@ fn region_hint(window: &ContextWindow, path: &str) -> Option<String> {
 /// truncation) and, when a per-tool sensitivity is provided, tagging the result
 /// with that taint level. Tool results MUST be added (Anthropic requires a
 /// `tool_result` for every `tool_use`), so an over-budget region truncates or
-/// falls back to a placeholder rather than dropping. Ported from the core of
-/// `AgentEngine::loop_apply_tool_results` (repetition + message draining are
-/// separate systems).
+/// falls back to a placeholder rather than dropping. Repetition and message
+/// draining are separate systems.
 #[cfg(test)]
 pub(crate) fn apply_tool_results(
     window: &mut ContextWindow,

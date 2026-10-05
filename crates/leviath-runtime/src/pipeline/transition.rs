@@ -609,10 +609,10 @@ pub(crate) fn journal_transition(
 /// per-stage progress, bump the visit count, set `accepts_messages`, and apply the
 /// stage's context setup - swap to its layout (if any) and (re)inject its system
 /// prompt as pinned `[Stage instructions: …]` context, replacing the previous
-/// stage's. (Ported from the imperative loop's per-stage setup.)
+/// stage's.
 ///
-/// Returns `Err` only when the system prompt doesn't fit its region - the same
-/// hard failure the imperative loop raises; the caller marks the agent `Error`.
+/// Returns `Err` only when the system prompt doesn't fit its region, a hard
+/// failure: the caller marks the agent `Error`.
 /// `Ok` carries the stage's updated visit count (this entry included), which the
 /// transition systems stamp into the [`StageTransition`](crate::host::WorldEvent)
 /// event.

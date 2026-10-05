@@ -5,8 +5,7 @@ use super::*;
 // ─── Compaction (LLM context summarization) ──────────────────────────────────
 
 /// Per-agent compaction configuration; its presence opts the agent into
-/// automatic eviction + LLM compaction before each inference (mirrors the
-/// imperative loop's `Option<&CompactionConfig>`).
+/// automatic eviction + LLM compaction before each inference.
 #[derive(Component, Clone)]
 pub struct CompactionSettings(pub leviath_core::CompactionConfig);
 
@@ -20,8 +19,7 @@ pub(crate) struct AwaitingCompaction;
 #[derive(Resource)]
 pub(crate) struct CompactionResults(pub UnboundedReceiver<CompactionOutcome>);
 
-/// The eviction threshold (fraction of budget) at which compaction kicks in -
-/// the same 0.9 the imperative `evict_and_compact` uses.
+/// The eviction threshold (fraction of budget) at which compaction kicks in.
 pub(crate) const EVICTION_THRESHOLD: f32 = 0.9;
 
 /// Spawn a compaction job under the lane supervisor, so a job that dies without
@@ -218,8 +216,7 @@ type CollectCompactionQuery = (
 /// Compaction-collect system: drain finished compaction jobs and apply each
 /// summary into its paired `CompactHistory` region, clearing the summarized
 /// source region. A provider error leaves the context untouched (best-effort).
-/// Either way the agent returns to `ReadyToInfer`. (Ported from the storage tail
-/// of `AgentEngine::compact_region`.)
+/// Either way the agent returns to `ReadyToInfer`.
 pub(crate) fn collect_compaction(
     mut results: ResMut<CompactionResults>,
     mut agents: Query<CollectCompactionQuery, With<AwaitingCompaction>>,
@@ -408,9 +405,8 @@ pub fn is_stage_specific(kind: &leviath_core::RegionKind) -> bool {
 
 /// Apply an edge transform's **synchronous** effects to the outgoing window
 /// (clearing stage-specific / named regions) and return the names of regions the
-/// caller should hand to the LLM compaction lane. (Ported from the deleted
-/// `graph::apply_edge_transform`; `Direct` on a linear/chosen edge carries context
-/// as-is.)
+/// caller should hand to the LLM compaction lane. `Direct` on a linear or
+/// chosen edge carries context as it is.
 pub(crate) fn apply_edge_transform(
     window: &mut ContextWindow,
     transform: &crate::spec::graph::EdgeCarry,
