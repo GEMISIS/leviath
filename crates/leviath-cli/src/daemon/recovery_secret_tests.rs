@@ -128,7 +128,8 @@ async fn a_webhook_secret_is_kept_beside_the_runs_and_never_in_the_run_file() {
     let recovered = resume_all(&mut world, &starter, &home.runs);
     assert_eq!(recovered.reloaded.len(), 1);
     assert!(recovered.held.is_empty());
-    let (_, secret) = crate::runstate::run_file::meta_and_secret(&dir).unwrap();
+    let spec = crate::runstate::run_file::spec_in(&dir).unwrap();
+    let secret = crate::runstate::run_file::callback_secret(&dir, &spec);
     assert_eq!(secret, Some(Ok(Secret::new(SECRET))));
 }
 

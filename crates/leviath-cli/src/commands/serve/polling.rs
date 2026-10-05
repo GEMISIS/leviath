@@ -385,9 +385,11 @@ fn fire_completion_webhook(
     status: &str,
     final_output: Option<&leviath_core::output::FinalOutput>,
 ) {
-    let Ok((meta, secret)) = runstate::run_file::meta_and_secret(&runstate::run_dir(run_id)) else {
+    let dir = runstate::run_dir(run_id);
+    let Ok(tail) = runstate::run_file::tail_in(&dir) else {
         return; // metadata not yet persisted
     };
+    let meta = leviath_runtime::runfile::summary_of(&tail.spec, &tail.state, tail.updated_at);
     let Some(url) = meta.callback_url.clone() else {
         return; // no webhook configured
     };
@@ -396,7 +398,8 @@ fn fire_completion_webhook(
     // Serialize once so the signature covers the exact bytes we send. `Value`'s
     // `Display` is infallible and byte-identical to `to_vec`.
     let body = payload.to_string().into_bytes();
-    let signature = match secret {
+    // Read on its own, so nothing sent but the signature comes from it.
+    let signature = match runstate::run_file::callback_secret(&dir, &tail.spec) {
         None => None,
         Some(Ok(secret)) => Some(sign(secret.expose(), &body)),
         Some(Err(reference)) => {
@@ -1229,7 +1232,9 @@ mod tests {
                 meta.callback_url = Some(url);
                 // A finished run that wrote nothing and handed nothing back.
                 meta.status = leviath_core::run_meta::RunStatus::Complete;
-                crate::runstate::create_signed_run(&meta, "topsecret").unwrap();
+                // Made fresh for the test, so nothing can pass by knowing it.
+                let secret = format!("{:032x}", rand::random::<u128>());
+                crate::runstate::create_signed_run(&meta, &secret).unwrap();
 
                 fire_completion_webhook(
                     &reqwest::Client::new(),
@@ -1242,14 +1247,14 @@ mod tests {
                 // Signed with the secret the store holds for the run: the
                 // run file only names it.
                 let (_, body) = requests[0].split_once("\r\n\r\n").unwrap();
-                let expected = sign("topsecret", body.as_bytes());
+                let expected = sign(&secret, body.as_bytes());
                 assert!(
                     requests[0]
                         .to_lowercase()
                         .contains(&format!("x-leviath-signature: {expected}"))
                 );
                 let file = runstate::run_file::path_in(&runstate::run_dir("signed"));
-                assert!(!crate::test_support::run_file_holds(&file, "topsecret"));
+                assert!(!crate::test_support::run_file_holds(&file, &secret));
                 assert!(requests[0].contains("agent_completed"));
                 // The delivery id travels in the signed body and the header.
                 assert!(
@@ -1292,7 +1297,11 @@ mod tests {
                 );
                 meta.callback_url = Some(url.clone());
                 meta.status = leviath_core::run_meta::RunStatus::Complete;
-                crate::runstate::create_signed_run(&meta, "topsecret").unwrap();
+                crate::runstate::create_signed_run(
+                    &meta,
+                    &format!("{:032x}", rand::random::<u128>()),
+                )
+                .unwrap();
             }
             leviath_runtime::secret_store::SecretStore::of_runs(&runstate::runs_dir())
                 .forget_run("lost");

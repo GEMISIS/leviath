@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageRecord};
+use leviath_core::run_meta::{ContextSnapshot, StageRecord};
 use leviath_runtime::runfile::history::RunPoint;
 use leviath_runtime::runfile::{RunFileReader, RunFileTail};
 use leviath_runtime::secret_store::SecretStore;
@@ -42,14 +42,6 @@ pub(crate) fn callback_secret(dir: &Path, spec: &RunSpec) -> CallbackSecret {
     let reference = spec.delivery.callback_secret()?;
     let held = SecretStore::of_run_dir(dir).read(reference);
     Some(held.ok_or_else(|| reference.clone()))
-}
-
-/// The record of the run in `dir` as of its last step, and the secret its
-/// webhook is signed with, from one read of its run file.
-pub(crate) fn meta_and_secret(dir: &Path) -> anyhow::Result<(RunMeta, CallbackSecret)> {
-    let tail = tail_in(dir)?;
-    let meta = leviath_runtime::runfile::summary_of(&tail.spec, &tail.state, tail.updated_at);
-    Ok((meta, callback_secret(dir, &tail.spec)))
 }
 
 /// Whether `dir` holds a run file this build reads, told from its first few

@@ -391,7 +391,7 @@ impl SecretRef {
     /// is in its name, and every secret of a run can be found by the run's
     /// id alone.
     pub fn for_run(run: &RunId, bits: u128) -> Self {
-        Self(format!("{run}.{bits:0width$x}", width = SECRET_REF_HEX))
+        Self(format!("{}.{:0width$x}", run, bits, width = SECRET_REF_HEX))
     }
 
     /// The id of the run this secret belongs to, when it was named for one.
