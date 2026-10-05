@@ -144,7 +144,7 @@ pub struct RunFile {
     pub code: Vec<(Digest, Vec<u8>)>,
     pub states: Vec<RunState>,
     pub deltas: Vec<StateDelta>,
-    /// The last state, found walking backwards from the end.
+    /// The last state.
     pub last: RunState,
 }
 
@@ -155,26 +155,23 @@ impl RunFile {
         let (frames, end) = codec::frames(&bytes);
         assert_eq!(end, bytes.len());
         assert_eq!(frames[0].kind, FrameKind::Spec);
-        let mut file = Self {
-            spec: frames[0].decode(&bytes).unwrap(),
-            code: Vec::new(),
-            states: Vec::new(),
-            deltas: Vec::new(),
-            last: codec::last_of(&bytes, end, FrameKind::State)
-                .unwrap()
-                .unwrap()
-                .decode(&bytes)
-                .unwrap(),
-        };
+        let (mut code, mut states, mut deltas) = (Vec::new(), Vec::new(), Vec::new());
         for f in &frames[1..] {
             match f.kind {
-                FrameKind::Code => file.code.push(f.decode(&bytes).unwrap()),
-                FrameKind::State => file.states.push(f.decode(&bytes).unwrap()),
-                FrameKind::Delta => file.deltas.push(f.decode(&bytes).unwrap()),
+                FrameKind::Code => code.push(f.decode(&bytes).unwrap()),
+                FrameKind::State => states.push(f.decode(&bytes).unwrap()),
+                FrameKind::Delta => deltas.push(f.decode(&bytes).unwrap()),
                 other => panic!("unexpected frame {other:?}"),
             }
         }
-        file
+        let last: RunState = states.last().cloned().unwrap();
+        Self {
+            spec: frames[0].decode(&bytes).unwrap(),
+            code,
+            states,
+            deltas,
+            last,
+        }
     }
 
     /// The first state with every delta applied.

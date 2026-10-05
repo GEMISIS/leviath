@@ -126,15 +126,11 @@ fn a_long_file_is_read_from_its_end_further_back_as_needed() {
             every: 10,
             size_ratio: 1e9,
         };
-        let mut writer = super::super::writer::RunFileWriter::create(
-            &path,
-            &spec(),
-            &super::super::reader_tests::code(),
-            &states[0],
-            policy,
-        )
-        .unwrap();
-        writer.add_code(&Digest::of(&filler), &filler).unwrap();
+        let mut code = super::super::reader_tests::code();
+        code.insert(Digest::of(&filler), filler.clone());
+        let mut writer =
+            super::super::writer::RunFileWriter::create(&path, &spec(), &code, &states[0], policy)
+                .unwrap();
         for (i, state) in states.iter().enumerate().take(steps).skip(1) {
             writer
                 .record(state.clone(), i as i64, vec![RunEvent::Log(format!("{i}"))])

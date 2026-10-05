@@ -383,7 +383,6 @@ fn every_step_of_a_written_run_reads_back_as_the_state_it_was() {
     let r = RunFileReader::open(&path).unwrap();
     assert_eq!(r.len(), w.len());
     assert_eq!(r.code_files().unwrap(), code());
-    assert_eq!(r.code_digests().count(), 1);
     assert_eq!(r.last_seq(), states.len() as u64 - 1);
     for (seq, expected) in states.iter().enumerate() {
         let mut expected = expected.clone();

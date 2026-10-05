@@ -267,20 +267,6 @@ pub fn frame_before(bytes: &[u8], end: usize) -> Result<FrameRef, CodecError> {
     frame_at(bytes, start)
 }
 
-/// The last frame of `kind` in a file whose whole frames end at `end`,
-/// found walking backwards.
-pub fn last_of(bytes: &[u8], end: usize, kind: FrameKind) -> Result<Option<FrameRef>, CodecError> {
-    let mut at = end;
-    while at > HEADER_LEN {
-        let f = frame_before(bytes, at)?;
-        if f.kind == kind {
-            return Ok(Some(f));
-        }
-        at = f.offset;
-    }
-    Ok(None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,9 +303,7 @@ mod tests {
             ]
         );
         assert_eq!(all[0].decode::<String>(&f).unwrap(), "spec");
-        let state = last_of(&f, end, FrameKind::State).unwrap().unwrap();
-        assert_eq!(state.decode::<String>(&f).unwrap(), "s1");
-        assert_eq!(last_of(&f, end, FrameKind::Owner).unwrap(), None);
+        assert_eq!(all[2].decode::<String>(&f).unwrap(), "s1");
         assert_eq!(
             frame_before(&f, end).unwrap().decode::<String>(&f).unwrap(),
             "d2"
@@ -401,10 +385,6 @@ mod tests {
         let end = f.len();
         f[end - 4..].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(frame_before(&f, end), Err(CodecError::Corrupt(end as u64)));
-        assert_eq!(
-            last_of(&f, end, FrameKind::State),
-            Err(CodecError::Corrupt(end as u64))
-        );
     }
 
     /// A payload that refuses to serialize, and a body over the limit, are

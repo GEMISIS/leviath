@@ -1,12 +1,9 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use leviath_core::JsonDoc;
 use leviath_runtime::spec::graph::OutputDef;
-use leviath_runtime::spec::inputs::RawInput;
 use leviath_runtime::spec::issues::IssueCode;
 use leviath_runtime::spec::names::{BlueprintRef, Digest};
-use leviath_runtime::spec::request::SpawnSource;
 
 use super::*;
 
@@ -244,14 +241,4 @@ fn lint_findings_read_as_one_line_and_sort_worst_first() {
     assert_eq!(placed.fix.as_deref(), Some("fix it"));
     let json = toml::to_string(&placed).unwrap();
     assert!(json.contains("severity = \"error\""), "{json}");
-}
-
-#[test]
-fn expanding_names_the_blueprint_and_carries_the_inputs() {
-    let reference = BlueprintRef::parse("tiny").unwrap();
-    let inputs = BTreeMap::from([("task".to_string(), RawInput::Text("fix it".into()))]);
-    let req = expand(reference.clone(), inputs.clone());
-    assert_eq!(req.source, SpawnSource::Blueprint(reference));
-    assert_eq!(req.inputs, inputs);
-    assert!(req.attachments.is_empty());
 }

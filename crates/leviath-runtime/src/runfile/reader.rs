@@ -163,11 +163,6 @@ impl RunFileReader {
         Ok(out)
     }
 
-    /// The digests of the code the file holds.
-    pub fn code_digests(&self) -> impl Iterator<Item = &Digest> {
-        self.code.keys()
-    }
-
     /// The run's directory: where the file is, and the files it names.
     pub fn dir(&self) -> &Path {
         self.path.parent().unwrap_or(Path::new(""))

@@ -18,16 +18,13 @@
 //!
 //! - [`load`] and [`validate`] read one file; [`find`] finds an installed
 //!   blueprint by name, for a host's `ResolveEnv::blueprint`.
-//! - [`expand`] turns a blueprint reference and its inputs into a request.
 //! - [`lint`] is what the checks beyond validation report in.
 
-mod expand;
 mod file;
 pub mod lint;
 mod load;
 mod write;
 
-pub use expand::expand;
 pub use file::{BlueprintFile, BlueprintMeta, FILE_NAME, schema};
 pub use leviath_runtime::spec::env::LoadedBlueprint;
 pub use load::{BlueprintError, find, installed, load, validate};

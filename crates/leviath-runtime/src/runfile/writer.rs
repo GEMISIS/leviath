@@ -7,7 +7,6 @@
 //! off the file before the error is returned, so a later append never lands
 //! behind a torn frame.
 
-use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +17,6 @@ use super::error::{RunFileError, RunFileErrorKind};
 use super::frames::{CodeFrame, OwnerFrame};
 use super::reader::RunFileReader;
 use crate::spec::env::CodeFiles;
-use crate::spec::names::Digest;
 use crate::spec::run_spec::RunSpec;
 use crate::state::{RunEvent, RunState, RunStatus, StateDelta};
 
@@ -61,7 +59,6 @@ pub struct RunFileWriter {
     file: std::fs::File,
     len: u64,
     state: RunState,
-    code: BTreeSet<Digest>,
     policy: CheckpointPolicy,
     since_checkpoint: u32,
     delta_bytes: u64,
@@ -108,7 +105,6 @@ impl RunFileWriter {
             file,
             len: buf.len() as u64,
             state: initial.clone(),
-            code: code.keys().cloned().collect(),
             policy,
             since_checkpoint: 0,
             delta_bytes: 0,
@@ -133,7 +129,6 @@ impl RunFileWriter {
             checkpoint_bytes: checkpoint.1,
             delta_bytes: 0,
             state,
-            code: reader.code_digests().cloned().collect(),
             policy,
             owner: None,
         })
@@ -165,11 +160,6 @@ impl RunFileWriter {
         self.state.seq
     }
 
-    /// Whether the file holds the code `digest`.
-    pub fn has_code(&self, digest: &Digest) -> bool {
-        self.code.contains(digest)
-    }
-
     /// Append `bytes`, synced to disk when `sync` is set.
     fn append(&mut self, bytes: &[u8], sync: bool) -> Result<(), RunFileError> {
         let written = self.file.write_all(bytes).and_then(|()| match sync {
@@ -188,20 +178,6 @@ impl RunFileWriter {
                 Err(RunFileError::io(&self.path, &e))
             }
         }
-    }
-
-    /// Store some code, once. `false` when the file already held it.
-    pub fn add_code(&mut self, digest: &Digest, bytes: &[u8]) -> Result<bool, RunFileError> {
-        if self.code.contains(digest) {
-            return Ok(false);
-        }
-        let payload = CodeFrame {
-            digest: digest.clone(),
-            bytes: bytes.to_vec(),
-        };
-        self.append(&frame(FrameKind::Code, &payload), false)?;
-        self.code.insert(digest.clone());
-        Ok(true)
     }
 
     /// Append `delta`, with the pending owner change before it and, when
@@ -264,11 +240,6 @@ impl RunFileWriter {
         since > 0 && (since >= self.policy.every || over_size)
     }
 
-    /// Whether the policy asks for a checkpoint now.
-    pub fn checkpoint_due(&self) -> bool {
-        self.due(self.since_checkpoint, self.delta_bytes)
-    }
-
     /// Write `state` whole, as the checkpoint readers start from, and hold it
     /// as the state the next step is taken against.
     ///
@@ -289,11 +260,6 @@ impl RunFileWriter {
     /// the run leaves no trace in it.
     pub fn owner_on_next_step(&mut self, owner: OwnerFrame) {
         self.owner = Some(owner);
-    }
-
-    /// Record that a machine and daemon have taken the run over, now.
-    pub fn set_owner(&mut self, owner: &OwnerFrame) -> Result<(), RunFileError> {
-        self.append(&frame(FrameKind::Owner, owner), false)
     }
 
     /// Record the run reaching `next`: the delta from the last step, with

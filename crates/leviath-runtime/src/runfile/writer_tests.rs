@@ -1,5 +1,6 @@
 use super::*;
 use crate::runfile::reader_tests::{code, initial, scripted_run, spec, write_run};
+use crate::spec::names::Digest;
 
 fn temp() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
@@ -28,8 +29,6 @@ fn a_new_file_holds_the_spec_its_code_and_the_first_state() {
     assert_eq!(w.path(), path);
     assert!(!w.is_empty());
     assert_eq!(w.seq(), 0);
-    assert!(w.has_code(&Digest::of(b"code")));
-    assert!(!w.checkpoint_due());
     let r = RunFileReader::open(&path).unwrap();
     assert_eq!(r.spec(), &spec());
     assert_eq!(
@@ -172,34 +171,12 @@ fn a_reopened_writer_carries_on_counting_toward_its_next_checkpoint() {
     drop(w);
     let mut w = RunFileWriter::open(&path, policy).unwrap();
     assert_eq!(w.seq(), 2);
-    assert!(!w.checkpoint_due());
     w.record(states[3].clone(), 3, vec![]).unwrap();
     assert_eq!(RunFileReader::open(&path).unwrap().checkpoints(), 2);
 }
 
 #[test]
-fn code_is_stored_once() {
-    let (_dir, path) = temp();
-    let mut w = RunFileWriter::create(
-        &path,
-        &spec(),
-        &CodeFiles::new(),
-        &initial(),
-        Default::default(),
-    )
-    .unwrap();
-    let c = Digest::of(b"code");
-    assert!(w.add_code(&c, b"code").unwrap());
-    assert!(!w.add_code(&c, b"code").unwrap());
-    let r = RunFileReader::open(&path).unwrap();
-    assert_eq!(r.code_files().unwrap(), code());
-    // A reopened writer knows what the file already holds.
-    let w = RunFileWriter::open(&path, Default::default()).unwrap();
-    assert!(w.has_code(&c));
-}
-
-#[test]
-fn a_new_owner_is_written_with_the_next_step_or_at_once() {
+fn a_new_owner_is_written_with_the_next_step() {
     let (_dir, path) = temp();
     let mut w =
         RunFileWriter::create(&path, &spec(), &code(), &initial(), Default::default()).unwrap();
@@ -208,16 +185,15 @@ fn a_new_owner_is_written_with_the_next_step_or_at_once() {
         world_id: "w".into(),
         at,
     };
-    w.set_owner(&owner(1)).unwrap();
     w.owner_on_next_step(owner(2));
     assert_eq!(
         RunFileReader::open(&path).unwrap().owners().unwrap(),
-        vec![owner(1)]
+        Vec::new()
     );
     w.record(changed(&initial(), "x"), 3, vec![]).unwrap();
     assert_eq!(
         RunFileReader::open(&path).unwrap().owners().unwrap(),
-        vec![owner(1), owner(2)]
+        vec![owner(2)]
     );
 }
 
@@ -228,10 +204,6 @@ fn a_failed_write_leaves_the_file_as_it_was() {
         RunFileWriter::create(&path, &spec(), &code(), &initial(), Default::default()).unwrap();
     let before = w.len();
     break_writes(&mut w);
-    assert!(matches!(
-        w.add_code(&Digest::of(b"y"), b"y").unwrap_err().kind,
-        RunFileErrorKind::Io(_)
-    ));
     assert!(w.record(changed(&initial(), "t"), 1, vec![]).is_err());
     assert!(w.checkpoint(&initial()).is_err());
     assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
