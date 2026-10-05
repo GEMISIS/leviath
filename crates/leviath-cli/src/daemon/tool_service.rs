@@ -290,10 +290,10 @@ pub(crate) struct ConfigSource {
     pub blueprint_read_paths: Vec<String>,
     /// The run's workdir, which read-path entries compile relative to.
     pub workdir: std::path::PathBuf,
-    /// The yolo profile the run was launched under by name, so a resume reads
-    /// the current `yolo.toml` for it. `None` for an attended run and for the
-    /// bare flag, which reads no file.
-    pub yolo_profile: Option<String>,
+    /// The run's unattended setting. A named profile is read again from the
+    /// current `yolo.toml` on resume; an attended run and the bare flag read
+    /// no file.
+    pub launched: leviath_core::Unattended,
 }
 
 /// A minimal [`AgentToolState`] over `workdir`, for the daemon-level test of
@@ -364,8 +364,8 @@ impl AgentToolState {
         // run resumed with: dropping them would not be safer, it would be
         // whichever of "prompt for everything" and "refuse everything" the
         // code happened to fall into, and neither is what the person asked.
-        if let Some(name) = &source.yolo_profile {
-            match crate::yolo::resolve_for_spawn(true, Some(name)) {
+        if let Some(name) = source.launched.profile() {
+            match crate::yolo::resolve_for_spawn(&source.launched) {
                 Ok(profile) => self.yolo.set(profile),
                 Err(error) => {
                     let error = error.to_string();
@@ -1083,7 +1083,7 @@ pub(crate) mod tests {
             blueprint_safe: None,
             blueprint_read_paths: Vec::new(),
             workdir: std::env::temp_dir(),
-            yolo_profile: None,
+            launched: leviath_core::Unattended::Off,
         })
     }
 
@@ -1752,7 +1752,7 @@ pub(crate) mod tests {
                 blueprint_safe: None,
                 blueprint_read_paths: vec![outside.path().to_string_lossy().to_string()],
                 workdir: workdir.path().to_path_buf(),
-                yolo_profile: None,
+                launched: leviath_core::Unattended::Off,
             }),
             ..(*state_over(workdir.path(), allow)).clone()
         });
@@ -1803,7 +1803,7 @@ pub(crate) mod tests {
                 // a resume has to survive.
                 blueprint_read_paths: vec![String::new()],
                 workdir: workdir.path().to_path_buf(),
-                yolo_profile: None,
+                launched: leviath_core::Unattended::Off,
             }),
             ..(*state_over(workdir.path(), HashMap::new())).clone()
         });
@@ -3723,8 +3723,7 @@ pub(crate) mod tests {
             parent_run_id: "parent".to_string(),
             workdir: "/tmp".to_string(),
             no_seed_commands: false,
-            unattended: false,
-            yolo_profile: None,
+            unattended: leviath_core::Unattended::Off,
             allow: Vec::new(),
             model_override: None,
             offered_parts: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -4347,7 +4346,9 @@ pub(crate) mod tests {
                 blueprint_safe: None,
                 blueprint_read_paths: Vec::new(),
                 workdir: std::env::temp_dir(),
-                yolo_profile: Some("careful".to_string()),
+                launched: leviath_core::Unattended::Profile(
+                    leviath_core::names::ProfileName::new("careful").unwrap(),
+                ),
             });
             let default_of =
                 |state: &AgentToolState| state.yolo.get().as_ref().as_ref().map(|p| p.spec.default);

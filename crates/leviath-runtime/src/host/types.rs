@@ -39,9 +39,8 @@ pub struct RunListEntry {
     pub run_id: String,
     /// The generated one-line title, once there is one.
     ///
-    /// Absent from this listing until now, which meant `lev ps` could only ever
-    /// print a run id and an agent name while the dashboard - reading the same
-    /// runs off disk - had a title for them.
+    /// Carried here so `lev ps` names a run the way the dashboard, reading the
+    /// same run off disk, does.
     #[serde(default)]
     pub title: Option<String>,
     /// The agent's live status.
@@ -84,14 +83,12 @@ pub struct RunListEntry {
     /// working time rather than as zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<leviath_core::run_meta::ActiveClock>,
-    /// Whether this run is unattended (`--yolo`). An unattended run should never
-    /// be sitting on a prompt; if it is, something dropped the flag.
-    #[serde(default)]
-    pub unattended: bool,
-    /// The yolo profile the run was launched under, when it named one.
-    /// Omitted by a daemon older than profiles, and for the bare flag.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo_profile: Option<String>,
+    /// How much of this run goes ahead without a person. A run that is
+    /// unattended outright should never be sitting on a prompt; if it is,
+    /// something dropped the setting. Written as an `unattended` flag and a
+    /// `yolo_profile` beside it, which a daemon older than profiles omits.
+    #[serde(flatten, with = "unattended_keys")]
+    pub unattended: leviath_core::Unattended,
     /// Whether this run finished having modified nothing, when its blueprint
     /// gave it a way to. Only ever true for a run that has stopped.
     ///
@@ -574,4 +571,32 @@ pub enum ControlOp {
         /// Reply channel.
         reply: oneshot::Sender<bool>,
     },
+}
+
+/// A [`RunListEntry`]'s unattended setting on the wire: an `unattended` flag,
+/// and a `yolo_profile` beside it for a named profile. Read the way
+/// [`Unattended::from_keys`](leviath_core::Unattended::from_keys) reads them.
+mod unattended_keys {
+    use leviath_core::Unattended;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct Keys {
+        #[serde(default)]
+        unattended: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        yolo_profile: Option<String>,
+    }
+
+    pub(super) fn serialize<S: Serializer>(u: &Unattended, s: S) -> Result<S::Ok, S::Error> {
+        Keys {
+            unattended: u.is_on(),
+            yolo_profile: u.profile().map(|p| p.as_str().to_string()),
+        }
+        .serialize(s)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Unattended, D::Error> {
+        Keys::deserialize(d).map(|keys| Unattended::from_keys(keys.unattended, keys.yolo_profile))
+    }
 }

@@ -116,6 +116,7 @@ fn worker(stage: Option<&str>) -> Caller {
         policy: parent_policy(2),
         depth: 0,
         stage: stage.map(n::<StageName>),
+        item: "item-1".to_string(),
     }
 }
 

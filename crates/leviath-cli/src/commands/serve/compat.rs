@@ -166,7 +166,7 @@ pub(super) async fn spawn_agent(
     }
     left_out.sort();
     let request = launch_of(body, regions, parts)
-        .into_request_for(source)
+        .and_then(|launch| launch.into_request_for(source))
         .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
     match spawn_core::start(&state, request).await {
         Ok(Verdict::Accepted(started)) => Ok(Json(SpawnAgentResp {
@@ -183,11 +183,17 @@ pub(super) async fn spawn_agent(
 }
 
 /// The old body as a task launch, with its regions already named as inputs.
+/// `Err` names a yolo profile that is not a valid name.
 fn launch_of(
     body: SpawnAgentReq,
     regions: HashMap<String, String>,
     parts: Vec<leviath_core::mime::InboundPart>,
-) -> crate::daemon::requests::TaskLaunch {
+) -> Result<crate::daemon::requests::TaskLaunch, String> {
+    // A named profile is a kind of unattended run; an empty name is the bare
+    // flag.
+    let flag = (body.yolo || body.yolo_profile.is_some())
+        .then(|| body.yolo_profile.clone().unwrap_or_default());
+    let unattended = crate::daemon::requests::unattended_flag(flag.as_deref())?;
     let output = (body.output_format.is_some()
         || body.output_instructions.is_some()
         || body.output_schema.is_some())
@@ -197,16 +203,14 @@ fn launch_of(
         schema: body.output_schema,
         ..Default::default()
     });
-    crate::daemon::requests::TaskLaunch {
+    Ok(crate::daemon::requests::TaskLaunch {
         blueprint: body.blueprint,
         task: body.task,
         regions,
         parts,
         model: body.model,
         workdir: body.workdir,
-        // A named profile is a kind of unattended run.
-        unattended: body.yolo || body.yolo_profile.is_some(),
-        profile: body.yolo_profile,
+        unattended,
         allow: body.allow,
         max_depth: body.max_depth,
         no_seed_commands: body.no_seed_commands,
@@ -215,7 +219,7 @@ fn launch_of(
         metadata: body.metadata,
         callback_url: body.callback_url,
         callback_secret: body.callback_secret,
-    }
+    })
 }
 
 /// The input that takes an old request's text for `region`: the input of

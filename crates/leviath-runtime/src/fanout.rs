@@ -40,8 +40,8 @@ mod starts;
 mod worker_sources;
 pub use adopt::{UnrecordedWorker, settle_unrecorded_worker};
 pub(crate) use io::{FanOutIo, ReadingWorkerInputs};
+pub use items::WorkItem;
 pub(crate) use items::{FanOutRequest, config_for, is_fan_out_tool, parse_fan_out_call};
-pub use items::{WORK_ITEM_LABEL, WorkItem};
 use report::*;
 pub(crate) use starts::WorkerStarts;
 pub use starts::{PlaceWorker, WorkerPrep};
@@ -1052,8 +1052,8 @@ mod tests {
     }
 
     impl FanOutSpawner for TestSpawner {
-        fn prepare_worker(&self, request: SpawnRequest, _caller: Caller) -> WorkerPrep {
-            let item_id = request.delivery.metadata[WORK_ITEM_LABEL].clone();
+        fn prepare_worker(&self, _request: SpawnRequest, caller: Caller) -> WorkerPrep {
+            let item_id = caller.work_item().unwrap_or_default().to_string();
             let refused = self.fail.contains(&item_id);
             Box::pin(async move {
                 if refused {
@@ -1104,8 +1104,7 @@ mod tests {
                     title: None,
                     title_error: None,
                     blueprint_digest: None,
-                    unattended: false,
-                    yolo_profile: None,
+                    unattended: leviath_core::Unattended::Off,
                     read_paths: None,
                     output_request: None,
                     model_override: None,
@@ -3286,8 +3285,7 @@ mod tests {
             title: None,
             title_error: None,
             blueprint_digest: None,
-            unattended: false,
-            yolo_profile: None,
+            unattended: leviath_core::Unattended::Off,
             read_paths: None,
             output_request: None,
             model_override: None,

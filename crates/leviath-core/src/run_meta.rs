@@ -569,14 +569,11 @@ pub struct RunMeta {
     /// Why this run may have produced nothing useful - see [`RunFlags`].
     #[serde(default)]
     pub flags: RunFlags,
-    /// Whether the run was launched unattended (`--yolo`), as its spec's
-    /// launch policy says.
-    #[serde(default)]
-    pub yolo: bool,
-    /// The named yolo profile (`--yolo=<name>`) the run was launched under.
-    /// Absent for the bare flag and for an attended run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo_profile: Option<String>,
+    /// How much of the run goes ahead without a person, as its spec's launch
+    /// policy says. Written as `yolo`, and `yolo_profile` for a named
+    /// profile (see [`as_yolo_keys`](crate::unattended::as_yolo_keys)).
+    #[serde(flatten, with = "crate::unattended::as_yolo_keys")]
+    pub unattended: crate::Unattended,
     /// How much of the blueprint's `[read_paths]` the config granted, as
     /// resolved at spawn. `None` for a blueprint that declared none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -757,8 +754,8 @@ pub struct RunFlags {
     /// Rhai scripts this run needed that could not be used, by name.
     ///
     /// A script that will not compile, or that throws where the runtime has to
-    /// carry on regardless, is skipped rather than fatal - which is the right
-    /// call and used to be completely silent; this list is the trace. An
+    /// carry on regardless, is skipped rather than fatal, and this list is
+    /// the trace that it happened. An
     /// output validator that cannot run is the exception: by default the
     /// submission is rejected and the script's own error goes back to the
     /// model as retry feedback, while `on_validator_error = "accept"` records
@@ -884,8 +881,7 @@ impl RunMeta {
             model_override: None,
             blueprint_digest: None,
             flags: RunFlags::default(),
-            yolo: false,
-            yolo_profile: None,
+            unattended: crate::Unattended::Off,
             read_paths: None,
         }
     }

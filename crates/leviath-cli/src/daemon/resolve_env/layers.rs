@@ -135,18 +135,13 @@ impl Layers {
     }
 }
 
-/// The yolo profile a run decides its tool calls under, and its name when it
-/// names one: none for an attended run, the built-in one for `all`, and the
-/// named profile read from `yolo.toml` as it stands now.
+/// The yolo profile a run decides its tool calls under: none for an attended
+/// run, the built-in one for `all`, and the named profile read from
+/// `yolo.toml` as it stands now.
 pub(super) fn profile(
     unattended: &Unattended,
-) -> Result<(Option<Arc<YoloProfile>>, Option<String>), crate::yolo::YoloError> {
-    let (yolo, name) = match unattended {
-        Unattended::Off => (false, None),
-        Unattended::All => (true, None),
-        Unattended::Profile(name) => (true, Some(name.to_string())),
-    };
-    crate::yolo::resolve_for_spawn(yolo, name.as_deref()).map(|p| (p, name))
+) -> Result<Option<Arc<YoloProfile>>, crate::yolo::YoloError> {
+    crate::yolo::resolve_for_spawn(unattended)
 }
 
 /// A graph's sandbox as the sandbox layer reads it.

@@ -155,8 +155,8 @@ async fn the_fields_a_state_owns_are_set() {
     meta.title_error = Some("titling model unavailable".to_string());
     meta.last_progress_at = Some(1_788_924_590);
     meta.parent_run_id = Some("root-1788924000-aaa111".to_string());
-    meta.yolo = true;
-    meta.yolo_profile = Some("solo".to_string());
+    meta.unattended =
+        leviath_core::Unattended::Profile(leviath_core::names::ProfileName::new("solo").unwrap());
     meta.active = Some(leviath_core::run_meta::ActiveClock {
         banked_secs: 40,
         since: Some(1_788_924_900),

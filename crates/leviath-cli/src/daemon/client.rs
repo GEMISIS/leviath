@@ -28,10 +28,6 @@ pub struct LocalRun {
     pub manifest: std::path::PathBuf,
     /// The working directory, as given.
     pub workdir: String,
-    /// Whether the run is unattended.
-    pub yolo: bool,
-    /// The yolo profile, when one was named.
-    pub yolo_profile: Option<String>,
     /// The output shape asked for, for the warning about retired checks.
     pub output: Option<leviath_core::output::OutputSpec>,
     /// `--check`: ask the daemon what the run would be instead of starting it.
@@ -141,10 +137,9 @@ fn broken_config_warning(path: &std::path::Path) -> Vec<String> {
 /// with the same words. Failing here saves the round trip and the placeholder
 /// run directory. The bare flag and an attended run say nothing.
 pub(crate) fn yolo_profile_preflight(
-    yolo: bool,
-    yolo_profile: Option<&str>,
+    unattended: &leviath_core::Unattended,
 ) -> anyhow::Result<Vec<String>> {
-    let profile = crate::yolo::resolve_for_spawn(yolo, yolo_profile)?;
+    let profile = crate::yolo::resolve_for_spawn(unattended)?;
     let Some(profile) = profile.filter(|p| !p.is_builtin_default()) else {
         return Ok(Vec::new());
     };
@@ -196,7 +191,7 @@ fn held_checkpoint_warning_for_spawn(run: &LocalRun) -> Vec<String> {
     )
     .into_iter()
     .collect();
-    if run.yolo {
+    if run.request.launch.unattended.is_on() {
         let timeout = crate::config::Config::load()
             .ok()
             .and_then(|c| c.limits.interaction_timeout_secs);
@@ -314,7 +309,7 @@ fn warn_after(warnings: &leviath_runtime::spec::issues::SpawnIssues) {
 fn warn_before(run: &LocalRun) -> anyhow::Result<()> {
     warn_broken_config();
     warn_ungranted_read_paths(run);
-    for line in yolo_profile_preflight(run.yolo, run.yolo_profile.as_deref())? {
+    for line in yolo_profile_preflight(&run.request.launch.unattended)? {
         eprintln!("{line}");
     }
     warn_held_checkpoints(run);
@@ -382,7 +377,7 @@ async fn spawn_once(client: &ControlClient, run: &LocalRun) -> anyhow::Result<Sp
                 run_id,
                 blueprint_path: run.manifest.to_string_lossy().into_owned(),
                 workdir: run.workdir.clone(),
-                yolo: run.yolo,
+                yolo: run.request.launch.unattended.is_on(),
                 warnings: warnings.iter().map(ToString::to_string).collect(),
             })
         }
@@ -406,8 +401,6 @@ impl Default for LocalRun {
             )),
             manifest: std::path::PathBuf::new(),
             workdir: String::new(),
-            yolo: false,
-            yolo_profile: None,
             output: None,
             check: false,
             issues: Default::default(),
@@ -419,9 +412,19 @@ impl Default for LocalRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leviath_core::Unattended;
     use leviath_runtime::control_socket::{ControlId, bind_control_listener, control_id};
+    use leviath_runtime::spec::names::ProfileName;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::task::JoinHandle;
+
+    /// A run of a blueprint named `x`, launched with `unattended`.
+    fn launched(unattended: Unattended) -> LocalRun {
+        let mut run = LocalRun::default();
+        run.request.launch.unattended = unattended;
+        run
+    }
+
     /// Bind a control listener at a fresh id under `dir` and serve one canned
     /// response, returning the id clients connect to and the server task.
     fn fake_daemon(
@@ -873,8 +876,7 @@ regions = [
         crate::config::with_isolated_config_path("spawn-warn-held", |_fake| {
             let args = LocalRun {
                 manifest: std::path::PathBuf::from(blueprint_path.clone()),
-                yolo: true,
-                ..LocalRun::default()
+                ..launched(Unattended::All)
             };
             let joined = held_checkpoint_warning_for_spawn(&args).join("\n");
             assert!(joined.contains("plan: plan_approval"), "{joined}");
@@ -885,7 +887,6 @@ regions = [
             assert!(
                 held_checkpoint_warning_for_spawn(&LocalRun {
                     manifest: std::path::PathBuf::from(blueprint_path.clone()),
-                    yolo: false,
                     ..LocalRun::default()
                 })
                 .is_empty()
@@ -903,8 +904,7 @@ regions = [
         assert!(
             held_checkpoint_warning_for_spawn(&LocalRun {
                 manifest: std::path::PathBuf::from(missing.to_string_lossy().into_owned()),
-                yolo: true,
-                ..LocalRun::default()
+                ..launched(Unattended::All)
             })
             .is_empty()
         );
@@ -915,8 +915,7 @@ regions = [
         assert!(
             held_checkpoint_warning_for_spawn(&LocalRun {
                 manifest: std::path::PathBuf::from(unparseable.to_string_lossy().into_owned()),
-                yolo: true,
-                ..LocalRun::default()
+                ..launched(Unattended::All)
             })
             .is_empty()
         );
@@ -929,8 +928,7 @@ regions = [
             std::fs::write(fake_dir.join("config.toml"), "not = valid = toml").unwrap();
             let joined = held_checkpoint_warning_for_spawn(&LocalRun {
                 manifest: std::path::PathBuf::from(held.clone()),
-                yolo: true,
-                ..LocalRun::default()
+                ..launched(Unattended::All)
             })
             .join("\n");
             assert!(joined.contains("plan_approval"), "{joined}");
@@ -1090,33 +1088,30 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
                 "[careful]\ndefault = \"ask\"\nquestions = \"ask\"\n\n[loose]\ndefault = \"allow\"\n",
             )
             .unwrap();
-            let with = |yolo: bool, profile: Option<&str>| LocalRun {
-                yolo,
-                yolo_profile: profile.map(str::to_string),
-                ..LocalRun::default()
+            let with = |profile: Option<&str>| match profile {
+                None => launched(Unattended::All),
+                Some(name) => launched(Unattended::Profile(ProfileName::new(name).unwrap())),
             };
-            let preflight =
-                |run: &LocalRun| yolo_profile_preflight(run.yolo, run.yolo_profile.as_deref());
-            assert!(preflight(&with(false, None)).unwrap().is_empty());
-            assert!(preflight(&with(true, None)).unwrap().is_empty());
-            assert!(preflight(&with(false, Some("nope"))).unwrap().is_empty());
+            let preflight = |run: &LocalRun| yolo_profile_preflight(&run.request.launch.unattended);
+            assert!(preflight(&LocalRun::default()).unwrap().is_empty());
+            assert!(preflight(&with(None)).unwrap().is_empty());
 
-            let lines = preflight(&with(true, Some("careful"))).unwrap();
+            let lines = preflight(&with(Some("careful"))).unwrap();
             assert_eq!(lines[0], "--yolo=careful keeps these for you:");
             assert!(lines[1].contains("questions"), "{lines:?}");
             assert!(lines[2].contains("lists do not allow"), "{lines:?}");
 
-            let lines = preflight(&with(true, Some("loose"))).unwrap();
+            let lines = preflight(&with(Some("loose"))).unwrap();
             assert_eq!(lines.len(), 1);
             assert!(lines[0].contains("keeps nothing for you"), "{lines:?}");
 
-            let err = preflight(&with(true, Some("nope"))).unwrap_err();
+            let err = preflight(&with(Some("nope"))).unwrap_err();
             assert!(err.to_string().contains("careful, loose"), "{err}");
 
             // Through `send_spawn`: refused before any socket is dialled, so
             // the error is the profile's, not "daemon not reachable".
             let id = control_id(&cfg.join("nowhere"));
-            let err = send_spawn(&ControlClient::new(id), with(true, Some("nope")), false)
+            let err = send_spawn(&ControlClient::new(id), with(Some("nope")), false)
                 .await
                 .expect_err("an unknown profile stops the spawn");
             assert!(err.to_string().contains("no yolo profile"), "{err}");
@@ -1135,11 +1130,7 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
                 "[careful]\ndefault = \"ask\"\nquestions = \"ask\"\n",
             )
             .unwrap();
-            let args = LocalRun {
-                yolo: true,
-                yolo_profile: Some("careful".to_string()),
-                ..LocalRun::default()
-            };
+            let args = launched(Unattended::Profile(ProfileName::new("careful").unwrap()));
             let one = tempfile::tempdir().unwrap();
             let (id, server) = fake_daemon_serving(
                 one.path(),
@@ -1167,10 +1158,7 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
             let id = control_id(&none.path().join("no-daemon"));
             let err = send_spawn_batch(
                 &ControlClient::new(id),
-                LocalRun {
-                    yolo_profile: Some("nope".to_string()),
-                    ..args
-                },
+                launched(Unattended::Profile(ProfileName::new("nope").unwrap())),
                 2,
                 false,
             )

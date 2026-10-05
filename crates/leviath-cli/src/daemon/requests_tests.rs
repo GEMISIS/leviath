@@ -90,8 +90,7 @@ fn every_flag_reaches_the_request() {
         parts: vec![part],
         model: Some("anthropic/m".to_string()),
         workdir: Some("relative/dir".to_string()),
-        unattended: true,
-        profile: None,
+        unattended: Unattended::All,
         allow: vec!["write_file".to_string()],
         max_depth: Some(1000),
         no_seed_commands: true,
@@ -134,8 +133,7 @@ fn every_flag_reaches_the_request() {
 }
 
 /// A blank task, a blank model and no workdir are left out rather than sent
-/// empty; a profile names the unattended mode, and an attended run ignores
-/// one.
+/// empty, and the unattended setting is carried as given.
 #[test]
 fn blanks_are_left_out_and_a_profile_names_the_mode() {
     let source = SpawnSource::Blueprint(BlueprintRef::parse("coder").unwrap());
@@ -145,8 +143,7 @@ fn blanks_are_left_out_and_a_profile_names_the_mode() {
         task: "  ".to_string(),
         model: Some(" ".to_string()),
         workdir: Some(abs.to_string_lossy().into_owned()),
-        unattended: true,
-        profile: Some("careful".to_string()),
+        unattended: Unattended::Profile(leviath_core::names::ProfileName::new("careful").unwrap()),
         ..TaskLaunch::default()
     }
     .into_request_for(source.clone())
@@ -157,23 +154,27 @@ fn blanks_are_left_out_and_a_profile_names_the_mode() {
     assert!(matches!(request.launch.unattended, Unattended::Profile(p) if p.as_str() == "careful"));
     assert!(request.launch.seed_commands);
 
-    // An empty profile is no profile, and an attended run ignores one.
-    let all = TaskLaunch {
-        unattended: true,
-        profile: Some(String::new()),
-        ..TaskLaunch::default()
-    }
-    .into_request_for(source.clone())
-    .unwrap();
-    assert_eq!(all.launch.unattended, Unattended::All);
-    let off = TaskLaunch {
-        profile: Some("careful".to_string()),
-        ..TaskLaunch::default()
-    }
-    .into_request_for(source)
-    .unwrap();
+    let off = TaskLaunch::default().into_request_for(source).unwrap();
     assert_eq!(off.launch.unattended, Unattended::Off);
     assert!(off.workdir.is_none());
+}
+
+/// A `--yolo` flag given as text: absent is attended, empty is the bare
+/// flag, a name is that profile, and a name that is not one is refused by
+/// name.
+#[test]
+fn a_yolo_flag_reads_as_the_setting_it_spells() {
+    use super::unattended_flag;
+    assert_eq!(unattended_flag(None), Ok(Unattended::Off));
+    assert_eq!(unattended_flag(Some("")), Ok(Unattended::All));
+    assert!(
+        matches!(unattended_flag(Some("careful")), Ok(Unattended::Profile(p)) if p.as_str() == "careful")
+    );
+    assert!(
+        unattended_flag(Some("bad\nprofile"))
+            .unwrap_err()
+            .contains("yolo profile 'bad\nprofile'")
+    );
 }
 
 /// A flag that does not read is refused, naming the flag.
@@ -187,14 +188,6 @@ fn a_flag_that_does_not_read_is_refused_by_name() {
             ..TaskLaunch::default()
         })
         .contains("model 'bad model'")
-    );
-    assert!(
-        refused(TaskLaunch {
-            unattended: true,
-            profile: Some("bad\nprofile".to_string()),
-            ..TaskLaunch::default()
-        })
-        .contains("yolo profile 'bad\nprofile'")
     );
     assert!(
         refused(TaskLaunch {

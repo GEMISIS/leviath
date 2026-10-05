@@ -264,7 +264,7 @@ fn a_lookup_gives_each_stage_its_window_and_its_tools() {
 #[test]
 fn an_attended_run_keeps_the_tools_that_ask_a_person() {
     let run = two_stage_run();
-    run.meta(|m| m.yolo = false);
+    run.meta(|m| m.unattended = leviath_core::Unattended::Off);
     let (_, file) = convert_on(&run, &Machine::default());
     let main = file.spec.stage("main").unwrap();
     assert!(

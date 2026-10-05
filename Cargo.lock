@@ -2800,6 +2800,7 @@ dependencies = [
  "chrono",
  "dirs",
  "glob",
+ "hex",
  "leviath-testkit",
  "postcard",
  "regex",

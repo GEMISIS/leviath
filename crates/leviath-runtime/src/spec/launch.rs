@@ -14,32 +14,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::names::{HttpUrl, ProfileName, RunId, StageName, ToolName};
+use super::names::{HttpUrl, RunId, StageName, ToolName};
 
-/// How much of a run goes ahead without a person.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum Unattended {
-    /// A person answers every approval and question.
-    #[default]
-    Off,
-    /// Nothing waits for a person: every tool call is approved, the taint
-    /// gate is waived, and the run's own questions are answered for it.
-    All,
-    /// The named yolo profile says which of those still reach a person.
-    Profile(ProfileName),
-}
-
-impl Unattended {
-    /// How much this setting trusts the run, for comparing two settings.
-    fn rank(&self) -> u8 {
-        match self {
-            Self::Off => 0,
-            Self::Profile(_) => 1,
-            Self::All => 2,
-        }
-    }
-}
+pub use leviath_core::unattended::Unattended;
 
 /// What a caller asks for when launching a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -118,10 +95,7 @@ impl LaunchPolicy {
     /// - Seed commands: only when both allow them.
     /// - Capturing model input only records more; the child's own ask stands.
     pub fn narrow(request: &LaunchRequest, parent: &LaunchPolicy) -> Self {
-        let unattended = match request.unattended.rank() <= parent.unattended.rank() {
-            true => request.unattended.clone(),
-            false => parent.unattended.clone(),
-        };
+        let unattended = request.unattended.at_most(&parent.unattended);
         let headroom = parent.max_depth.saturating_sub(1);
         Self {
             unattended,
@@ -150,6 +124,9 @@ pub struct Placement {
     pub depth: u8,
     /// For a fan-out worker, the stage of the parent's graph it runs.
     pub worker_stage: Option<StageName>,
+    /// For a fan-out worker, the id of the work item it runs: what a restart
+    /// matches a worker its parent never recorded against.
+    pub work_item: Option<String>,
 }
 
 /// A secret that must never reach a log line. `Debug` and `Display` print
@@ -209,6 +186,7 @@ pub struct Delivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::names::ProfileName;
 
     fn tool(s: &str) -> ToolName {
         ToolName::new(s).unwrap()

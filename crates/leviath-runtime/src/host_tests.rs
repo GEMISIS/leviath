@@ -153,8 +153,7 @@ fn run_metadata(run_id: &str, started_at: i64) -> RunMetadata {
         title: None,
         title_error: None,
         blueprint_digest: None,
-        unattended: false,
-        yolo_profile: None,
+        unattended: leviath_core::Unattended::Off,
         read_paths: None,
         output_request: None,
         model_override: None,
@@ -2680,8 +2679,7 @@ async fn unregistered_world_agents_are_adopted_and_become_cancellable() {
             title: None,
             title_error: None,
             blueprint_digest: None,
-            unattended: false,
-            yolo_profile: None,
+            unattended: leviath_core::Unattended::Off,
             read_paths: None,
             output_request: None,
             model_override: None,
@@ -3379,8 +3377,7 @@ async fn emit_events_broadcasts_agent_changes() {
             title: None,
             title_error: None,
             blueprint_digest: None,
-            unattended: false,
-            yolo_profile: None,
+            unattended: leviath_core::Unattended::Off,
             read_paths: None,
             output_request: None,
             model_override: None,
@@ -3454,8 +3451,7 @@ async fn a_generated_title_is_announced_once_and_then_carried_on_status() {
             title: None,
             title_error: None,
             blueprint_digest: None,
-            unattended: false,
-            yolo_profile: None,
+            unattended: leviath_core::Unattended::Off,
             read_paths: None,
             output_request: None,
             model_override: None,
@@ -3934,8 +3930,7 @@ async fn a_run_is_listed_once_however_often_it_is_recorded() {
         iteration: 0,
         tool_calls: 0,
         last_progress_at: None,
-        unattended: false,
-        yolo_profile: None,
+        unattended: leviath_core::Unattended::Off,
         empty_output: false,
         read_paths: None,
         has_final_output: false,
@@ -3947,6 +3942,41 @@ async fn a_run_is_listed_once_however_often_it_is_recorded() {
     let finished = host.finished();
     assert_eq!(finished.len(), 1);
     assert_eq!(finished[0].status, AgentStatus::Complete);
+}
+
+/// A listed run's unattended setting is written as an `unattended` flag and a
+/// `yolo_profile` beside it, and read back the same, so `lev ps` and a
+/// daemon on either side of it agree on what a run is.
+#[test]
+fn a_listed_runs_unattended_setting_crosses_the_socket_as_two_keys() {
+    let careful =
+        leviath_core::Unattended::Profile(crate::spec::names::ProfileName::new("careful").unwrap());
+    let entry = RunListEntry {
+        started_at: None,
+        active: None,
+        splits_degraded: 0,
+        broken_scripts: Vec::new(),
+        run_id: "r".to_string(),
+        title: None,
+        status: AgentStatus::Active,
+        wait_reason: None,
+        stage: "work".to_string(),
+        stage_index: None,
+        num_stages: None,
+        iteration: 0,
+        tool_calls: 0,
+        last_progress_at: None,
+        unattended: careful.clone(),
+        empty_output: false,
+        read_paths: None,
+        has_final_output: false,
+        may_never_finish: Vec::new(),
+    };
+    let wire = serde_json::to_value(&entry).unwrap();
+    assert_eq!(wire["unattended"], true);
+    assert_eq!(wire["yolo_profile"], "careful");
+    let back: RunListEntry = serde_json::from_value(wire).unwrap();
+    assert_eq!(back.unattended, careful);
 }
 
 /// A factory that finishes runs faster than the window empties keeps the
@@ -3971,8 +4001,7 @@ async fn the_listing_of_finished_runs_is_capped() {
                 iteration: 0,
                 tool_calls: 0,
                 last_progress_at: None,
-                unattended: false,
-                yolo_profile: None,
+                unattended: leviath_core::Unattended::Off,
                 empty_output: false,
                 read_paths: None,
                 has_final_output: false,
@@ -4837,8 +4866,7 @@ async fn list_reports_blueprint_shape_and_unattended() {
             title: None,
             title_error: None,
             blueprint_digest: None,
-            unattended: true,
-            yolo_profile: None,
+            unattended: leviath_core::Unattended::All,
             read_paths: None,
             output_request: None,
             model_override: None,
@@ -4856,7 +4884,7 @@ async fn list_reports_blueprint_shape_and_unattended() {
     let list = ask(&mut host, |reply| ControlOp::List { reply }).await.runs;
     assert_eq!(list[0].num_stages, Some(3));
     assert_eq!(list[0].tool_calls, 9);
-    assert!(list[0].unattended);
+    assert!(list[0].unattended.is_on());
     assert_eq!(list[0].last_progress_at, Some(1_700));
     // No outcome flags on this agent at all, so there is nothing to
     // report and the listing does not invent a verdict.
@@ -4950,7 +4978,7 @@ async fn list_explains_a_waiting_run() {
     // No RunMetadata on this fixture, so there is nothing to claim about the
     // blueprint's shape or how it was launched.
     assert_eq!(list[0].num_stages, None);
-    assert!(!list[0].unattended);
+    assert!(!list[0].unattended.is_on());
 }
 
 #[test]
@@ -5340,8 +5368,7 @@ fn held_row(run_id: &str) -> RunListEntry {
         iteration: 0,
         tool_calls: 0,
         last_progress_at: None,
-        unattended: false,
-        yolo_profile: None,
+        unattended: leviath_core::Unattended::Off,
         empty_output: false,
         read_paths: None,
         has_final_output: false,

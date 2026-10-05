@@ -209,7 +209,7 @@ fn run_tools(env: &DaemonEnv, calls: &[SeedToolCall], cx: SeedCx<'_>) -> Result<
     let config = &env.config;
     let workdir = cx.workdir.to_path_buf();
     let layers = Layers::new(config, cx.graph, cx.launch, cx.agent);
-    let (profile, _) = layers::profile(&cx.launch.unattended).map_err(|e| e.to_string())?;
+    let profile = layers::profile(&cx.launch.unattended).map_err(|e| e.to_string())?;
     let sandbox = sandbox(env, &cx, &layers)?;
     let builtins = sandbox.iter().fold(
         leviath_tools::BuiltinTools::new(

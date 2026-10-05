@@ -555,6 +555,79 @@ async fn grants_and_writes_come_back_after_a_restart() {
     assert_eq!(state.grants.run, ["cargo test"]);
 }
 
+/// A run launched under a named yolo profile, and a child that asked for
+/// more than its parent has, come back from a restart under exactly the
+/// settings they started with: each run's record, the profile its tool calls
+/// answer to, and the setting a child of its own inherits.
+#[tokio::test]
+async fn a_profiled_run_and_its_narrowed_child_keep_their_settings_across_a_restart() {
+    use leviath_core::Unattended;
+    use leviath_runtime::spec::env::Caller;
+    crate::config::with_isolated_config_path_async("restart-yolo-profile", |cfg| async move {
+        std::fs::write(cfg.join("yolo.toml"), "[careful]\ndefault = \"ask\"\n").unwrap();
+        let careful =
+            Unattended::Profile(leviath_runtime::spec::names::ProfileName::new("careful").unwrap());
+        let agent = tempfile::tempdir().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let manifest = manifest_in(agent.path(), ASKER);
+        let starter = starter(Config::default(), registry(), runs.path());
+        let request = |unattended: Unattended| {
+            crate::daemon::requests::TaskLaunch {
+                blueprint: manifest.to_string_lossy().into_owned(),
+                task: "go".to_string(),
+                workdir: Some(work.path().to_string_lossy().into_owned()),
+                unattended,
+                ..Default::default()
+            }
+            .into_request()
+            .expect("the request reads")
+        };
+        let asked = request(careful.clone());
+        let env = starter.env_for(&asked, starter.config.current());
+        let parent = starter
+            .start_with(env, asked, Caller::TopLevel)
+            .await
+            .expect("the run starts")
+            .spec;
+        // Everything, asked for under a `careful` parent, is `careful`.
+        let asked = request(Unattended::All);
+        let env = starter.env_for(&asked, starter.config.current());
+        let caller = Caller::Child {
+            parent: parent.run_id.clone(),
+            policy: parent.launch.clone(),
+            depth: 0,
+        };
+        let child = starter
+            .start_with(env, asked, caller)
+            .await
+            .expect("the child starts")
+            .spec;
+        assert_eq!(child.launch.unattended, careful);
+
+        let mut world = world_for(&starter);
+        resume_all(&mut world, &starter, runs.path());
+        for run in [parent.run_id.as_str(), child.run_id.as_str()] {
+            let entity = entity_of(&mut world, run);
+            let md = world
+                .world()
+                .get::<leviath_runtime::persistence::RunMetadata>(entity)
+                .expect("the run's metadata");
+            assert_eq!(md.unattended, careful, "{run}: its record");
+            let tools = starter.tool_service.take(entity).expect("its tool state");
+            let profile = tools.yolo.get();
+            assert_eq!(
+                profile.as_ref().as_ref().map(|p| p.name.as_str()),
+                Some("careful"),
+                "{run}: the profile its calls answer to"
+            );
+            let handle = tools.subagent.as_ref().expect("a sub-agent handle");
+            assert_eq!(handle.unattended, careful, "{run}: what its children get");
+        }
+    })
+    .await;
+}
+
 /// Record a fan-out worker of `parent` for `item` the way a fan-out start
 /// does, and stop there: its run file is written and it is never placed, as
 /// when the daemon stops before the parent records it. Returns its run id.
@@ -570,15 +643,12 @@ async fn worker_on_disk(starter: &DaemonStarter, parent: &str, item: &str) -> St
         leviath_runtime::spec::inputs::RawInput::Text(format!("do {item}")),
     );
     request.workdir = Some(spec.placement.workdir.clone());
-    request.delivery.metadata.insert(
-        leviath_runtime::fanout::WORK_ITEM_LABEL.to_string(),
-        item.to_string(),
-    );
     let caller = Caller::Worker {
         parent: spec.run_id.clone(),
         policy: spec.launch.clone(),
         depth: 0,
         stage: Some(leviath_runtime::spec::names::StageName::new("work").unwrap()),
+        item: item.to_string(),
     };
     let env = starter.env_for(&request, starter.config.current());
     let prepared = starter
@@ -706,7 +776,7 @@ async fn a_call_running_at_a_clean_stop_is_not_started_again() {
         blueprint: manifest.to_string_lossy().into_owned(),
         task: "carry on".to_string(),
         workdir: Some(work.path().to_string_lossy().into_owned()),
-        unattended: true,
+        unattended: leviath_core::Unattended::All,
         ..Default::default()
     }
     .into_request()

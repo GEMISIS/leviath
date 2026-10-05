@@ -18,12 +18,10 @@ use std::path::Path;
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus, StageRecord};
 use leviath_runtime::runfile::{CheckpointPolicy, RunFileWriter};
 use leviath_runtime::spec::graph::{RegionDef, RunGraph};
-use leviath_runtime::spec::launch::{
-    Callback, Delivery, LaunchPolicy, Placement, Secret, Unattended,
-};
+use leviath_runtime::spec::launch::{Callback, Delivery, LaunchPolicy, Placement, Secret};
 use leviath_runtime::spec::names::{
-    BlueprintName, BlueprintRef, Digest, HttpUrl, ModelId, ModelRef, ProfileName, ProviderName,
-    RegionName, RunId, StageName,
+    BlueprintName, BlueprintRef, Digest, HttpUrl, ModelId, ModelRef, ProviderName, RegionName,
+    RunId, StageName,
 };
 use leviath_runtime::spec::run_spec::{
     AutoAnswers, EnvFingerprint, RunSpec, SeededContent, SpecOrigin, StagePlan,
@@ -163,13 +161,7 @@ fn spec_of(meta: &RunMeta, regions: Vec<RegionDef>) -> RunSpec {
             .as_deref()
             .and_then(|m| ModelRef::parse(m).ok()),
         launch: LaunchPolicy {
-            unattended: match (meta.yolo, meta.yolo_profile.as_deref()) {
-                (false, _) => Unattended::Off,
-                (true, Some(name)) => ProfileName::new(name)
-                    .map(Unattended::Profile)
-                    .unwrap_or(Unattended::All),
-                (true, None) => Unattended::All,
-            },
+            unattended: meta.unattended.clone(),
             allow: Vec::new(),
             max_depth: u8::try_from(meta.max_child_depth).unwrap_or(u8::MAX),
             seed_commands: true,
@@ -184,6 +176,7 @@ fn spec_of(meta: &RunMeta, regions: Vec<RegionDef>) -> RunSpec {
                 .and_then(|p| RunId::new(p).ok()),
             depth: u8::try_from(meta.depth).unwrap_or(u8::MAX),
             worker_stage: None,
+            work_item: None,
         },
         delivery: Delivery {
             callback: meta.callback_url.as_deref().and_then(|url| {

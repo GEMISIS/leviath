@@ -170,7 +170,7 @@ impl Dashboard {
                 // you are looking at when you press Enter, and a setting
                 // this consequential should not be one line further away
                 // than the thing it changes.
-                match self.new_run_yolo {
+                match self.new_run_unattended.is_on() {
                     true => Span::styled(
                         "[ unattended ] ",
                         Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
@@ -259,10 +259,10 @@ impl Dashboard {
     /// dialog declined by an Enter meant as "yes" left a person believing
     /// the opposite of what the next run would do.
     pub(in crate::commands::dashboard) fn new_run_help_bar_text(&self) -> String {
-        let unattended = match (self.new_run_yolo, &self.new_run_yolo_profile) {
-            (true, Some(profile)) => format!("unattended: on ({profile})"),
-            (true, None) => "unattended: on".to_string(),
-            (false, _) => "unattended: off".to_string(),
+        let unattended = match &self.new_run_unattended {
+            leviath_core::Unattended::Profile(profile) => format!("unattended: on ({profile})"),
+            leviath_core::Unattended::All => "unattended: on".to_string(),
+            leviath_core::Unattended::Off => "unattended: off".to_string(),
         };
         if self.new_run_picker_open() {
             return " ↑↓ move · Space select · Enter done · Esc cancel · type to filter "
@@ -525,7 +525,7 @@ mod tests {
         let quiet = rendered(&mut dash);
         assert!(!quiet.contains("[ unattended ]"), "{quiet}");
 
-        dash.new_run_yolo = true;
+        dash.new_run_unattended = leviath_core::Unattended::All;
         let loud = rendered(&mut dash);
         assert!(loud.contains("[ unattended ]"), "{loud}");
     }

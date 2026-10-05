@@ -402,8 +402,7 @@ struct SeenSpawn {
     task: String,
     inputs: std::collections::BTreeMap<String, leviath_runtime::spec::inputs::RawInput>,
     max_depth: Option<usize>,
-    yolo: bool,
-    yolo_profile: Option<String>,
+    unattended: leviath_core::Unattended,
     allow: Vec<String>,
     parts: Vec<leviath_runtime::spec::request::Attachment>,
     model: Option<String>,
@@ -412,18 +411,13 @@ struct SeenSpawn {
 
 impl SeenSpawn {
     fn of(request: &leviath_runtime::spec::request::SpawnRequest) -> Self {
-        use leviath_runtime::spec::launch::Unattended;
         Self {
             task: serde_json::to_value(&request.inputs).unwrap()["task"]
                 .as_str()
                 .unwrap_or_default()
                 .to_string(),
             max_depth: request.launch.max_depth.map(usize::from),
-            yolo: request.launch.unattended != Unattended::Off,
-            yolo_profile: match &request.launch.unattended {
-                Unattended::Profile(p) => Some(p.to_string()),
-                _ => None,
-            },
+            unattended: request.launch.unattended.clone(),
             allow: request
                 .launch
                 .allow
@@ -452,8 +446,7 @@ fn handle_with(sender: UnboundedSender<SubAgentOp>) -> SubAgentHandle {
         // `$TMPDIR` in `/var/folders`, so nothing local caught it.
         workdir: env!("CARGO_MANIFEST_DIR").to_string(),
         no_seed_commands: false,
-        unattended: false,
-        yolo_profile: None,
+        unattended: leviath_core::Unattended::Off,
         allow: Vec::new(),
         model_override: None,
         agents_dir: None,
@@ -745,15 +738,15 @@ async fn spawn_tells_the_agent_when_its_child_may_never_finish() {
 /// parent behind it for good.
 #[tokio::test]
 async fn spawn_hands_the_parents_unattended_setting_to_the_child() {
-    for unattended in [false, true] {
+    for unattended in [leviath_core::Unattended::Off, leviath_core::Unattended::All] {
         let bp = temp_blueprint();
         let (mut h, seen, _t) = fake_host(Ok("child-1".to_string()), vec![], false);
-        h.unattended = unattended;
+        h.unattended = unattended.clone();
         let out = handle(&h, &tc("spawn_agent", bp_args(&bp, "go"))).await;
         assert!(out.contains("Spawned sub-agent"), "{out}");
         let seen = seen.lock().unwrap();
         assert_eq!(
-            seen[0].yolo, unattended,
+            seen[0].unattended, unattended,
             "a child inherits the parent's unattended setting"
         );
     }
@@ -1197,9 +1190,9 @@ fn send_recording_host() -> SendRecordingHost {
     }
 }
 
-/// `target_region` was schema-advertised and documented but never read on
-/// this path; the host op now carries it. Absent and empty both mean the
-/// documented default (conversation), so they forward as `None`.
+/// `send_message` hands its `target_region` to the host op. Absent and empty
+/// both mean the documented default (conversation), so they forward as
+/// `None`.
 #[tokio::test]
 async fn send_forwards_target_region() {
     let SendRecordingHost {
@@ -1481,13 +1474,14 @@ async fn spawn_without_output_args_requests_no_shape() {
 async fn spawn_hands_the_parents_yolo_profile_to_the_child() {
     let bp = temp_blueprint();
     let (mut h, seen, _t) = fake_host(Ok("child-1".to_string()), vec![], false);
-    h.unattended = true;
-    h.yolo_profile = Some("careful".to_string());
+    let careful = leviath_core::Unattended::Profile(
+        leviath_core::names::ProfileName::new("careful").unwrap(),
+    );
+    h.unattended = careful.clone();
     let out = handle(&h, &tc("spawn_agent", bp_args(&bp, "go"))).await;
     assert!(out.contains("Spawned sub-agent"), "{out}");
     let seen = seen.lock().unwrap();
-    assert!(seen[0].yolo);
-    assert_eq!(seen[0].yolo_profile.as_deref(), Some("careful"));
+    assert_eq!(seen[0].unattended, careful);
 }
 
 /// A child asks for the tools its parent may call without asking, unless the

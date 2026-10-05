@@ -107,8 +107,7 @@ fn test_launch(path: &str) -> TestLaunch {
         metadata: HashMap::new(),
         callback_url: None,
         callback_secret: None,
-        yolo: false,
-        yolo_profile: None,
+        unattended: leviath_core::Unattended::Off,
         no_seed_commands: false,
         allow: Vec::new(),
         max_depth: None,
@@ -1119,7 +1118,7 @@ budget = 10000
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
     let mut args = test_launch(&manifest.to_string_lossy());
-    args.yolo = true;
+    args.unattended = leviath_core::Unattended::All;
     let entity = start_run(
         world.world_mut(),
         TestDeps {
@@ -1159,6 +1158,7 @@ budget = 10000
             .get::<RunMetadata>(entity)
             .expect("run metadata attached")
             .unattended
+            .is_on()
     );
 }
 
@@ -1196,7 +1196,7 @@ budget = 10000
     .unwrap();
     let (mut world, cli) = test_world();
     let mut args = test_launch(&manifest.to_string_lossy());
-    args.yolo = true;
+    args.unattended = leviath_core::Unattended::All;
     let entity = start_run(
         world.world_mut(),
         TestDeps {
@@ -1220,7 +1220,7 @@ budget = 10000
         .world()
         .get::<RunMetadata>(entity)
         .expect("run metadata attached");
-    assert!(meta.unattended);
+    assert!(meta.unattended.is_on());
 }
 
 /// A stage that kept a human tool through an unattended run has to reach the
@@ -1449,7 +1449,7 @@ budget = 10000
     .unwrap();
     let (mut world, cli) = test_world();
     let mut args = test_launch(&manifest.to_string_lossy());
-    args.yolo = true;
+    args.unattended = leviath_core::Unattended::All;
     let entity = start_run(
         world.world_mut(),
         TestDeps {
@@ -1872,7 +1872,7 @@ async fn starting_applies_yolo_allow_and_max_depth() {
         ..Default::default()
     };
     let mut args = tasked_args(&manifest.to_string_lossy());
-    args.yolo = true;
+    args.unattended = leviath_core::Unattended::All;
     args.allow = vec!["read_file".to_string()];
     args.max_depth = Some(7);
 
@@ -2751,8 +2751,9 @@ budget = 10000
             let (mut world, cli) = test_world();
             let hub = InteractionHub::new();
             let mut args = test_launch(&manifest.to_string_lossy());
-            args.yolo = true;
-            args.yolo_profile = Some(name.to_string());
+            args.unattended = leviath_core::Unattended::Profile(
+                leviath_core::names::ProfileName::new(name).unwrap(),
+            );
             let entity = start_run(
                 world.world_mut(),
                 TestDeps {
@@ -2787,8 +2788,7 @@ budget = 10000
                 .world()
                 .get::<RunMetadata>(entity)
                 .expect("run metadata attached");
-            assert!(meta.unattended, "{name}: still a yolo run");
-            assert_eq!(meta.yolo_profile.as_deref(), Some(name));
+            assert_eq!(meta.unattended, args.unattended, "{name}: still a yolo run");
             let state = cli.take(entity).expect("tool state registered");
             assert_eq!(state.unattended, auto, "{name}: questions routing");
             let profile = state.yolo.get();
@@ -2797,8 +2797,7 @@ budget = 10000
                 Some(name)
             );
             let handle = state.subagent.as_ref().expect("a sub-agent handle");
-            assert!(handle.unattended);
-            assert_eq!(handle.yolo_profile.as_deref(), Some(name));
+            assert_eq!(handle.unattended, args.unattended);
         }
     })
     .await;
@@ -2852,19 +2851,19 @@ budget = 10000
             subagent_tx: sub_tx(),
         };
         let mut args = test_launch(&manifest.to_string_lossy());
-        args.yolo = true;
-        args.yolo_profile = Some("nope".to_string());
+        args.unattended = leviath_core::Unattended::Profile(
+            leviath_core::names::ProfileName::new("nope").unwrap(),
+        );
         let err = start_run(world.world_mut(), deps(), &args).expect_err("unknown profile");
         assert!(err.contains("no yolo profile named \"nope\""), "{err}");
         assert!(err.contains("careful, loose"), "{err}");
 
         std::fs::remove_file(cfg.join("yolo.toml")).unwrap();
-        args.yolo = false;
+        args.unattended = leviath_core::Unattended::Off;
         let entity =
-            start_run(world.world_mut(), deps(), &args).expect("an attended run ignores the name");
+            start_run(world.world_mut(), deps(), &args).expect("an attended run reads no file");
         let meta = world.world().get::<RunMetadata>(entity).expect("metadata");
-        assert!(!meta.unattended);
-        assert!(meta.yolo_profile.is_none());
+        assert_eq!(meta.unattended, leviath_core::Unattended::Off);
         assert!(cli.take(entity).expect("state").yolo.get().is_none());
     })
     .await;
@@ -2922,8 +2921,11 @@ binds = [{ region = "task" }]
             let (mut world, cli) = test_world();
             let mut args = tasked_args(&manifest.to_string_lossy());
             args.workdir = dir.path().to_string_lossy().to_string();
-            args.yolo = true;
-            args.yolo_profile = profile.map(str::to_string);
+            args.unattended = profile.map_or(leviath_core::Unattended::All, |name| {
+                leviath_core::Unattended::Profile(
+                    leviath_core::names::ProfileName::new(name).unwrap(),
+                )
+            });
             let entity = start_run(
                 world.world_mut(),
                 TestDeps {

@@ -5,6 +5,7 @@ use leviath_legacy_runs::journal::JournalRecord;
 use leviath_legacy_runs::{BlueprintSource, ConvertEnv, ConvertError, convert};
 use leviath_runtime::spec::inputs::InputValue;
 use leviath_runtime::spec::launch::Unattended;
+use leviath_runtime::spec::names::ProfileName;
 use leviath_runtime::state::context::PartBody;
 use leviath_runtime::state::{EntryKind, EntryMeta, PipelinePhase, RunStatus, StageStatus};
 use serde_json::json;
@@ -117,7 +118,7 @@ fn a_rich_run_carries_its_scripts_inputs_and_stages() {
         m.stage_index = 1;
         m.model = None;
         m.blueprint_digest = Some("not a digest".into());
-        m.yolo_profile = Some("careful".into());
+        m.unattended = Unattended::Profile(ProfileName::new("careful").unwrap());
         m.model_override = Some("openai/gpt-mock".into());
         m.callback_url = Some("https://example.com/hook".into());
         m.callback_secret = Some("shh".into());
@@ -219,12 +220,12 @@ fn a_stage_with_a_bare_model_and_no_launch_model_is_named_unknown() {
 fn launch_settings_that_do_not_check_are_named() {
     let run = Run::fixture("finished");
     run.meta(|m| {
-        m.yolo_profile = Some(" bad".into());
         m.model_override = Some("has space/model".into());
         m.callback_url = Some("ftp://nope".into());
         m.children = vec!["ok-child".into(), "bad/child".into()];
         m.blueprint_digest = None;
     });
+    run.json("meta.json", |m| m["yolo_profile"] = " bad".into());
     let (report, file) = run.converted();
     assert_eq!(file.spec.launch.unattended, Unattended::Off);
     assert!(report.defaulted("launch.unattended").is_some());

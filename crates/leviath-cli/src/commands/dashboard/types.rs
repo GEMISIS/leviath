@@ -603,10 +603,8 @@ pub(super) struct NewRunCommand {
     pub(super) task: String,
     /// The working directory the run gets.
     pub(super) workdir: String,
-    /// Whether the run approves its own tool calls.
-    pub(super) yolo: bool,
-    /// The yolo profile it does that under, when one was picked.
-    pub(super) yolo_profile: Option<String>,
+    /// How much of the run goes ahead without a person.
+    pub(super) unattended: leviath_core::Unattended,
     /// The files the task named with `@path`, read from the workdir, and
     /// the files the Inputs pane's slots named.
     pub(super) parts: Vec<leviath_core::mime::InboundPart>,

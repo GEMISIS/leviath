@@ -49,7 +49,7 @@ pub(super) fn decide(
                 );
                 policy.max_depth = cap;
             }
-            return (policy, placement(None, 0, None));
+            return (policy, placement(None, 0, None, None));
         }
         Caller::Child {
             parent,
@@ -61,6 +61,7 @@ pub(super) fn decide(
             policy,
             depth,
             stage,
+            ..
         } => (parent, policy, *depth, stage.as_ref()),
     };
     let at = SpecPath::root().field("launch");
@@ -104,6 +105,7 @@ pub(super) fn decide(
         Some(parent.clone()),
         depth.saturating_add(1),
         worker_stage.cloned(),
+        caller.work_item().map(str::to_string),
     );
     (narrowed, placed)
 }
@@ -130,11 +132,13 @@ fn placement(
     parent: Option<crate::spec::names::RunId>,
     depth: u8,
     worker_stage: Option<crate::spec::names::StageName>,
+    work_item: Option<String>,
 ) -> Placement {
     Placement {
         workdir: PathBuf::new(),
         parent,
         depth,
         worker_stage,
+        work_item,
     }
 }

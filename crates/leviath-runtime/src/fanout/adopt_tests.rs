@@ -14,10 +14,8 @@ fn worker_spec(world: &World, parent: Entity, run_id: &str, item: &str) -> RunSp
     spec.placement.parent = Some(spec.run_id.clone());
     spec.placement.depth = 1;
     spec.placement.worker_stage = Some(StageName::new("w").unwrap());
+    spec.placement.work_item = Some(item.to_string());
     spec.run_id = RunId::new(run_id).unwrap();
-    spec.delivery
-        .metadata
-        .insert(WORK_ITEM_LABEL.to_string(), item.to_string());
     spec
 }
 
@@ -114,7 +112,7 @@ fn a_worker_for_a_queued_item_is_adopted_and_any_other_is_cancelled() {
 
     // Not a fan-out worker, or not a run at all: left as it is.
     let mut spec = worker_spec(&world, parent, "run-child", "c");
-    spec.delivery.metadata.clear();
+    spec.placement.work_item = None;
     let child = place(&mut world, spec);
     assert_eq!(settle_unrecorded_worker(&mut world, parent, child), None);
     let bare = world.spawn_empty().id();
@@ -468,4 +466,27 @@ fn a_worker_past_the_depth_limit_is_cancelled() {
         Some(UnrecordedWorker::Cancelled)
     );
     assert_eq!(queued(&world, parent), ["a"]);
+}
+
+/// A caller's own labels never make a run a fan-out worker. A run placed
+/// under the parent exactly as a worker would be, whose metadata names a
+/// queued item under `fan_out_item`, is no worker: it is left as it is and
+/// the item stays queued for its own start.
+#[test]
+fn a_label_a_caller_wrote_does_not_make_a_run_a_worker() {
+    let mut world = World::new();
+    let parent = fanning_parent(&mut world, vec![item("a")]);
+    let mut forged = world.get::<RunSpecC>(parent).unwrap().0.as_ref().clone();
+    forged.placement.parent = Some(forged.run_id.clone());
+    forged.placement.depth = 1;
+    forged.placement.worker_stage = Some(StageName::new("w").unwrap());
+    forged.run_id = RunId::new("run-forged").unwrap();
+    forged
+        .delivery
+        .metadata
+        .insert("fan_out_item".to_string(), "a".to_string());
+    let run = place(&mut world, forged);
+    assert_eq!(settle_unrecorded_worker(&mut world, parent, run), None);
+    assert_eq!(queued(&world, parent), ["a"]);
+    assert_eq!(status_of(&world, run), AgentStatus::Active);
 }

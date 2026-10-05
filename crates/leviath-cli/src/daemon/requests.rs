@@ -14,7 +14,7 @@ use leviath_runtime::spec::graph::OutputDef;
 use leviath_runtime::spec::inputs::RawInput;
 use leviath_runtime::spec::launch::{Callback, Delivery, LaunchRequest, Secret, Unattended};
 use leviath_runtime::spec::names::{
-    BlueprintName, BlueprintPath, BlueprintRef, HttpUrl, ModelRef, ProfileName, ToolName,
+    BlueprintName, BlueprintPath, BlueprintRef, HttpUrl, ModelRef, ToolName,
 };
 use leviath_runtime::spec::request::{Attachment, Bytes, SpawnRequest, SpawnSource};
 
@@ -35,11 +35,8 @@ pub(crate) struct TaskLaunch {
     /// Where the run's tools work. Made absolute against the current
     /// directory when relative.
     pub workdir: Option<String>,
-    /// Run without a person.
-    pub unattended: bool,
-    /// The yolo profile that says which parts of unattended a person keeps.
-    /// Ignored for an attended run.
-    pub profile: Option<String>,
+    /// How much of the run goes ahead without a person.
+    pub unattended: Unattended,
     /// Tools approved for this run without asking.
     pub allow: Vec<String>,
     /// How deep the run's tree of child runs may grow.
@@ -110,6 +107,14 @@ pub(crate) fn attachment(part: leviath_core::mime::InboundPart) -> Attachment {
     }
 }
 
+/// The setting a `--yolo` flag spells, as a front door that takes one as text
+/// reads it: absent is attended, empty is the bare flag, and anything else
+/// names a profile. `Err` names the profile that is not a valid name.
+pub(crate) fn unattended_flag(flag: Option<&str>) -> Result<Unattended, String> {
+    Unattended::from_flag(flag)
+        .map_err(|e| format!("yolo profile '{}': {e}", flag.unwrap_or_default()))
+}
+
 /// `dir` made absolute against the current directory.
 fn absolute(dir: &str) -> PathBuf {
     let path = PathBuf::from(dir);
@@ -149,18 +154,8 @@ impl TaskLaunch {
             .transpose()
             .map_err(|issues| issues.to_string())?;
         request.workdir = self.workdir.as_deref().map(absolute);
-        // A profile says which parts of an unattended run a person keeps; an
-        // attended run keeps them all, so it ignores one.
-        let unattended = match (self.unattended, self.profile) {
-            (false, _) => Unattended::Off,
-            (true, Some(profile)) if !profile.is_empty() => Unattended::Profile(
-                ProfileName::new(profile.as_str())
-                    .map_err(|e| format!("yolo profile '{profile}': {e}"))?,
-            ),
-            (true, _) => Unattended::All,
-        };
         request.launch = LaunchRequest {
-            unattended,
+            unattended: self.unattended,
             allow: self
                 .allow
                 .iter()

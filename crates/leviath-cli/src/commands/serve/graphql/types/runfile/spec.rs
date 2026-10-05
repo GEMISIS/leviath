@@ -479,6 +479,8 @@ pub(crate) struct RunPlacement {
     pub(crate) depth: i32,
     /// For a fan-out worker, the stage of the parent's graph it runs.
     pub(crate) worker_stage: Option<String>,
+    /// For a fan-out worker, the id of the work item it runs.
+    pub(crate) work_item: Option<String>,
 }
 
 impl From<&Placement> for RunPlacement {
@@ -488,6 +490,7 @@ impl From<&Placement> for RunPlacement {
             parent_id: placement.parent.as_ref().map(|id| ID(id.to_string())),
             depth: i32::from(placement.depth),
             worker_stage: placement.worker_stage.as_ref().map(ToString::to_string),
+            work_item: placement.work_item.clone(),
         }
     }
 }

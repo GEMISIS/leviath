@@ -14,7 +14,6 @@ use crate::components::{AgentMessage, AgentState, AgentStatus, ContextWindow, Me
 use crate::persistence::{FinalOutput, RunClock, RunMetadata, RunOutcomeFlags, TokenTotals};
 use crate::pipeline::spec_view;
 use crate::pipeline::{LastTransition, StageLedger, VisitCounts};
-use crate::spec::launch::Unattended;
 use crate::spec::names::StageName;
 use crate::spec::run_spec::RunSpec;
 use crate::state::{
@@ -394,11 +393,7 @@ pub(crate) fn run_metadata(spec: &RunSpec, state: &RunState) -> RunMetadata {
         title: state.title.clone(),
         blueprint_digest: digest,
         title_error: state.title_error.clone(),
-        unattended: spec.launch.unattended != Unattended::Off,
-        yolo_profile: match &spec.launch.unattended {
-            Unattended::Profile(name) => Some(name.to_string()),
-            _ => None,
-        },
+        unattended: spec.launch.unattended.clone(),
         read_paths: state
             .read_paths
             .map(|r| leviath_core::run_meta::ReadPathGrantCounts {

@@ -118,8 +118,7 @@ impl WorldHost {
             active: world
                 .get::<crate::persistence::RunClock>(entity)
                 .map(|c| c.0),
-            unattended: metadata.is_some_and(|m| m.unattended),
-            yolo_profile: metadata.and_then(|m| m.yolo_profile.clone()),
+            unattended: metadata.map(|m| m.unattended.clone()).unwrap_or_default(),
             splits_degraded: world
                 .get::<crate::persistence::RunOutcomeFlags>(entity)
                 .map_or(0, |f| f.0.splits_degraded),

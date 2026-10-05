@@ -195,12 +195,12 @@ impl Run {
     /// Whether the run was spawned unattended, so approvals resolve without
     /// a person.
     async fn unattended(&self) -> bool {
-        self.meta.yolo
+        self.meta.unattended.is_on()
     }
 
     /// The yolo profile this run was spawned with, when it named one.
     async fn yolo_profile_name(&self) -> Option<&str> {
-        self.meta.yolo_profile.as_deref()
+        self.meta.unattended.profile().map(|p| p.as_str())
     }
 
     /// The working directory the run executes in.

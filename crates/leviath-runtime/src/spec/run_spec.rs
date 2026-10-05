@@ -434,6 +434,7 @@ pub(crate) mod tests {
                 parent: None,
                 depth: 0,
                 worker_stage: None,
+                work_item: None,
             },
             delivery: Delivery {
                 callback: Some(Callback {

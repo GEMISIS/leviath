@@ -437,6 +437,7 @@ fn spec() -> CoreSpec {
             parent: Some(named!(RunId, "parent-1")),
             depth: 1,
             worker_stage: Some(stage("analyze")),
+            work_item: Some("item-1".to_string()),
         },
         delivery: Delivery {
             callback: Some(Callback {

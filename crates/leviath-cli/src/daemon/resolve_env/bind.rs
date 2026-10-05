@@ -278,7 +278,7 @@ impl DaemonEnv {
         );
         let scripts = issues.take(self.script_tools(spec, code));
         let (
-            Some((profile, profile_name)),
+            Some(profile),
             Some(sandbox),
             Some((reads, warning)),
             Some((script_tools, script_names)),
@@ -378,8 +378,7 @@ impl DaemonEnv {
             parent_run_id: run_id.to_string(),
             workdir: workdir.to_string_lossy().into_owned(),
             no_seed_commands: !spec.launch.seed_commands,
-            unattended: profile.is_some(),
-            yolo_profile: profile_name.clone(),
+            unattended: spec.launch.unattended.clone(),
             allow: spec.launch.allow.iter().map(ToString::to_string).collect(),
             model_override: spec.requested_model.as_ref().map(ToString::to_string),
             offered_parts: offered_parts.clone(),
@@ -420,7 +419,7 @@ impl DaemonEnv {
             dynamic,
             unattended: spec.auto_answers.questions,
             yolo: profile,
-            yolo_profile: profile_name,
+            launched: spec.launch.unattended.clone(),
             protected: crate::tools::permission_files(config),
             blueprint_safe: safe.as_ref(),
             blueprint_read_paths: &graph.read_paths,

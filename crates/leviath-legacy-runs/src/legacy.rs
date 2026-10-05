@@ -59,6 +59,14 @@ pub(crate) fn meta(run_dir: &Path) -> Option<RunMeta> {
     json_file(&run_dir.join(META_FILE)).ok().flatten()
 }
 
+/// The one key of an old `meta.json` read as written rather than through
+/// the run's record.
+#[derive(Debug, Deserialize)]
+struct YoloProfileKey {
+    #[serde(default)]
+    yolo_profile: Option<String>,
+}
+
 /// A fan-out parent's waiting state, as `fanout.json` holds it.
 #[derive(Debug, Deserialize)]
 pub(crate) struct FanOutFile {
@@ -127,6 +135,9 @@ pub(crate) struct LegacyRun {
     /// The run as every earlier release listed it: its `meta.json` (see
     /// [`listed`]).
     pub(crate) listed: RunMeta,
+    /// The `yolo_profile` its `meta.json` names, as written, which the run's
+    /// record reads as attended when it is not a valid profile name.
+    pub(crate) yolo_profile: Option<String>,
     /// The stored parts under `blobs/`, by digest, with their sizes. They
     /// stay where they are, and the run file names them.
     pub(crate) blobs: Vec<(Digest, u64)>,
@@ -192,6 +203,10 @@ impl LegacyRun {
             final_output: std::fs::read_to_string(dir.join(leviath_core::FINAL_OUTPUT_FILE)).ok(),
             blueprint: blueprint(dir, &meta, env),
             listed: listed(meta, &folded.meta),
+            yolo_profile: json_file::<YoloProfileKey>(&meta_path)
+                .ok()
+                .flatten()
+                .and_then(|k| k.yolo_profile),
             dir: dir.to_path_buf(),
             header,
             records,

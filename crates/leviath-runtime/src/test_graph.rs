@@ -338,6 +338,7 @@ fn spec_from(graph: RunGraph, agent_id: &str, stages: &[StageInference], window:
             parent: None,
             depth: 0,
             worker_stage: None,
+            work_item: None,
         },
         delivery: Delivery::default(),
         env: EnvFingerprint::default(),

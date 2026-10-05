@@ -249,7 +249,9 @@ fn probe_meta() -> RunMeta {
     probe.waiting_on = Some(leviath_core::run_meta::WaitReason::ToolApproval);
     probe.output_request = Some(Default::default());
     probe.model_override = Some(String::new());
-    probe.yolo_profile = Some(String::new());
+    probe.unattended = leviath_core::Unattended::Profile(
+        leviath_core::names::ProfileName::new("probe").expect("a profile name"),
+    );
     probe.blueprint_digest = Some(String::new());
     probe.stage_models = vec![leviath_core::run_meta::StageModelUse {
         provider: String::new(),

@@ -6421,6 +6421,13 @@
               "null"
             ]
           },
+          "work_item": {
+            "description": "For a fan-out worker, the id of the work item it runs: what a restart\nmatches a worker its parent never recorded against.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "workdir": {
             "description": "The directory tools work in. Absolute.",
             "type": "string"

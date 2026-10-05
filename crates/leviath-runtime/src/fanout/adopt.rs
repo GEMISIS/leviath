@@ -42,7 +42,7 @@ pub fn settle_unrecorded_worker(
     worker: Entity,
 ) -> Option<UnrecordedWorker> {
     let spec = world.get::<RunSpecC>(worker)?.0.clone();
-    let item_id = spec.delivery.metadata.get(WORK_ITEM_LABEL)?.clone();
+    let item_id = spec.placement.work_item.clone()?;
     let worker_id = spec.run_id.to_string();
     let depths = match proven_worker(world, parent, &spec, &item_id) {
         Ok(depths) => depths,

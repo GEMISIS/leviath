@@ -682,7 +682,7 @@ pub(crate) fn dispatch_tools(
                     total_iterations: state.iteration,
                     provider_model: (&stage_inf.provider_name, &stage_inf.model),
                     tools: stage_inf.tools.iter().map(|t| t.name.as_str()).collect(),
-                    unattended: metadata.is_some_and(|m| m.unattended),
+                    unattended: metadata.is_some_and(|m| m.unattended.is_on()),
                     workdir: metadata.map(|m| m.workdir.as_str()),
                 };
                 let text = crate::runtime_info_tool::handle_runtime_info(&facts, &window);

@@ -164,7 +164,7 @@ pub(crate) fn build(
     let requested_model = requested_model(meta, report);
     // Bare `--yolo` answered everything; what a named profile answered was
     // never recorded, so such a run asks.
-    let auto_answers = match meta.yolo && meta.yolo_profile.is_none() {
+    let auto_answers = match meta.unattended == Unattended::All {
         true => leviath_runtime::spec::run_spec::AutoAnswers::all(),
         false => Default::default(),
     };
@@ -203,7 +203,7 @@ pub(crate) fn build(
         code,
         requested_output: meta.output_request.as_ref().map(|o| output(o, report)),
         requested_model,
-        launch: launch(&graph, meta, lookup, report),
+        launch: launch(&graph, meta, old.yolo_profile.as_deref(), lookup, report),
         auto_answers,
         placement: placement(meta, report)?,
         delivery: delivery(meta, report),
@@ -531,27 +531,24 @@ fn requested_model(meta: &RunMeta, report: &mut Report) -> Option<ModelRef> {
         .ok()
 }
 
+/// The run's launch policy. `written_profile` is the `yolo_profile` its
+/// `meta.json` names, as written: the run's record reads a name that is not a
+/// valid profile name as attended, and the report says why.
 fn launch(
     graph: &RunGraph,
     meta: &RunMeta,
+    written_profile: Option<&str>,
     lookup: Option<&dyn StageLookup>,
     report: &mut Report,
 ) -> LaunchPolicy {
-    let unattended = match (&meta.yolo_profile, meta.yolo) {
-        (Some(p), _) => match ProfileName::new(p.as_str()) {
-            Ok(p) => Unattended::Profile(p),
-            Err(_) => {
-                report.fill(
-                    "launch.unattended",
-                    "Off",
-                    format!("the yolo profile {p:?} is not a valid profile name"),
-                );
-                Unattended::Off
-            }
-        },
-        (None, true) => Unattended::All,
-        (None, false) => Unattended::Off,
-    };
+    let unattended = meta.unattended.clone();
+    if let Some(p) = written_profile.filter(|p| ProfileName::new(*p).is_err()) {
+        report.fill(
+            "launch.unattended",
+            "Off",
+            format!("the yolo profile {p:?} is not a valid profile name"),
+        );
+    }
     // A run that recorded no limit ran under its graph's, else the
     // operator's default.
     let tree = match meta.max_child_depth {
@@ -603,11 +600,17 @@ fn placement(meta: &RunMeta, report: &mut Report) -> Result<Placement, ConvertEr
         "None",
         "an old run did not record the parent stage a fan-out worker ran",
     );
+    report.fill(
+        "placement.work_item",
+        "None",
+        "an old run did not record the work item a fan-out worker ran",
+    );
     Ok(Placement {
         workdir: meta.workdir.clone().into(),
         parent,
         depth: u8::try_from(meta.depth).unwrap_or(u8::MAX),
         worker_stage: None,
+        work_item: None,
     })
 }
 

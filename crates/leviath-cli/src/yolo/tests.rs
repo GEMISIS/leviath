@@ -1048,19 +1048,17 @@ fn matchable_segments_read_a_line_the_way_the_keys_do() {
 
 #[test]
 fn resolve_for_spawn_reads_the_file_only_for_a_named_profile() {
+    use leviath_core::Unattended;
+    let named =
+        |name: &str| Unattended::Profile(leviath_core::names::ProfileName::new(name).unwrap());
     crate::config::with_isolated_config_path("yolo_resolve_for_spawn", |dir| {
-        assert_eq!(
-            resolve_for_spawn(false, Some("careful")).expect("attended"),
-            None
-        );
-        for bare in [None, Some("")] {
-            let p = resolve_for_spawn(true, bare)
-                .expect("bare")
-                .expect("a profile");
-            assert!(p.is_builtin_default());
-        }
+        assert_eq!(resolve_for_spawn(&Unattended::Off).expect("attended"), None);
+        let p = resolve_for_spawn(&Unattended::All)
+            .expect("bare")
+            .expect("a profile");
+        assert!(p.is_builtin_default());
         // No file yet: a name has nothing to resolve against.
-        let err = resolve_for_spawn(true, Some("careful")).expect_err("no file");
+        let err = resolve_for_spawn(&named("careful")).expect_err("no file");
         assert!(matches!(err, YoloError::NoFile { .. }), "{err:?}");
         assert!(
             !load_current()
@@ -1069,16 +1067,16 @@ fn resolve_for_spawn_reads_the_file_only_for_a_named_profile() {
         );
 
         std::fs::write(dir.join(FILE_NAME), EXAMPLE).unwrap();
-        let named = resolve_for_spawn(true, Some("careful"))
+        let careful = resolve_for_spawn(&named("careful"))
             .expect("named")
             .expect("a profile");
-        assert_eq!(named.name, "careful");
-        let err = resolve_for_spawn(true, Some("nope")).expect_err("unknown");
+        assert_eq!(careful.name, "careful");
+        let err = resolve_for_spawn(&named("nope")).expect_err("unknown");
         assert!(matches!(err, YoloError::UnknownProfile { .. }), "{err:?}");
         assert_eq!(load_current().expect("loads").names().len(), 2);
 
         std::fs::write(dir.join(FILE_NAME), "[").unwrap();
-        let err = resolve_for_spawn(true, Some("careful")).expect_err("broken file");
+        let err = resolve_for_spawn(&named("careful")).expect_err("broken file");
         assert!(matches!(err, YoloError::Parse(_)), "{err:?}");
     });
 }

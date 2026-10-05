@@ -330,7 +330,7 @@ impl ResolveEnv for DaemonEnv {
     }
 
     fn auto_answers(&self, unattended: &Unattended) -> Result<AutoAnswers, Box<SpawnIssue>> {
-        let (profile, _) = layers::profile(unattended)
+        let profile = layers::profile(unattended)
             .map_err(|e| {
                 let known = match &e {
                     crate::yolo::YoloError::UnknownProfile { known, .. } => known.clone(),

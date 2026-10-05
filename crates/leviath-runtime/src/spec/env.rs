@@ -48,7 +48,19 @@ pub enum Caller {
         depth: u8,
         /// The stage the worker runs, for a same-graph worker.
         stage: Option<StageName>,
+        /// The id of the work item the worker runs.
+        item: String,
     },
+}
+
+impl Caller {
+    /// The work item a fan-out worker runs. `None` for any other caller.
+    pub fn work_item(&self) -> Option<&str> {
+        match self {
+            Self::Worker { item, .. } => Some(item),
+            Self::TopLevel | Self::Child { .. } => None,
+        }
+    }
 }
 
 /// An installed blueprint, loaded.

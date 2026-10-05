@@ -26,10 +26,6 @@ use std::path::Path;
 /// own: the conventional `task` text.
 pub(crate) const TASK_INPUT: &str = "task";
 
-/// The label a worker's request carries its work item's id under, so the
-/// host can name the worker after the item it runs.
-pub const WORK_ITEM_LABEL: &str = "fan_out_item";
-
 /// One unit of work produced by a fan-out call.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct WorkItem {
@@ -264,10 +260,6 @@ pub(crate) fn worker_request(
             seed_commands: false,
             ..LaunchRequest::default()
         },
-        delivery: crate::spec::launch::Delivery {
-            callback: None,
-            metadata: BTreeMap::from([(WORK_ITEM_LABEL.to_string(), item.id.clone())]),
-        },
         ..SpawnRequest::new(source)
     };
     let caller = Caller::Worker {
@@ -280,6 +272,7 @@ pub(crate) fn worker_request(
             | WorkerSource::BlueprintFile(_)
             | WorkerSource::Query(_) => None,
         },
+        item: item.id.clone(),
     };
     (request, caller)
 }
@@ -332,9 +325,9 @@ mod tests {
         }
     }
 
-    /// Typed inputs travel as the call wrote them. A `context` is no longer
-    /// read as the worker's task text: it is an unknown key like any other,
-    /// and an item with no id is refused at its index.
+    /// Typed inputs travel as the call wrote them. A `context` is not the
+    /// worker's task text: it is an unknown key like any other, and an item
+    /// with no id is refused at its index.
     #[test]
     fn items_carry_typed_inputs_and_nothing_else() {
         let request = parse_fan_out_call(&serde_json::json!({
@@ -539,7 +532,10 @@ mod tests {
             1,
         );
         assert_eq!(req.inputs, work.inputs);
-        assert_eq!(req.delivery.metadata[WORK_ITEM_LABEL], "a");
+        assert!(
+            req.delivery.metadata.is_empty(),
+            "the item is the host's, not a label"
+        );
         assert_eq!(req.model, parent.requested_model);
         assert_eq!(req.launch.unattended, parent.launch.unattended);
         assert_eq!(req.launch.allow, parent.launch.allow);
@@ -555,6 +551,7 @@ mod tests {
                 policy: parent.launch.clone(),
                 depth: 1,
                 stage: Some(StageName::new("w").unwrap()),
+                item: "a".to_string(),
             }
         );
         let mut named = stage_def(2);
@@ -573,6 +570,7 @@ mod tests {
                 policy: parent.launch.clone(),
                 depth: u8::MAX,
                 stage: None,
+                item: "a".to_string(),
             }
         );
     }

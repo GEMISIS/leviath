@@ -23,6 +23,7 @@ pub mod json_doc;
 pub mod lifecycle;
 pub mod mcp_names;
 pub mod mime;
+pub mod names;
 pub mod output;
 pub mod panic_payload;
 pub mod paths;
@@ -37,6 +38,7 @@ pub mod sync;
 pub mod taint;
 pub mod telemetry;
 pub mod text;
+pub mod unattended;
 pub mod write_limits;
 
 pub use cache::CacheHint;
@@ -74,6 +76,7 @@ pub use taint::{
     ToolClassification, ToolDirection,
 };
 pub use text::{estimate_tokens, floor_char_boundary, truncate_at_boundary, truncate_chars};
+pub use unattended::Unattended;
 
 /// Serde default for a flag that is on unless a file turns it off.
 ///

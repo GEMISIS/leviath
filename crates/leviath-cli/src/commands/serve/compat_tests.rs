@@ -189,6 +189,25 @@ async fn a_plain_body_asks_for_nothing_it_did_not_name() {
     assert!(request.output.is_none());
 }
 
+/// A profile name that is not one is refused by name, before the daemon is
+/// asked anything.
+#[tokio::test]
+async fn a_yolo_profile_that_is_not_a_name_is_refused() {
+    let (state, seen, _bp, _sock) = served(None);
+    let (status, answer) = send(
+        state,
+        spawn(serde_json::json!({
+            "blueprint": "compat-probe",
+            "task": "go",
+            "yolo_profile": "bad\nname",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert!(answer.to_string().contains("yolo profile"), "{answer}");
+    assert!(seen.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn a_refusal_is_one_message_under_the_old_statuses() {
     let missing = ControlResponse::Rejected {

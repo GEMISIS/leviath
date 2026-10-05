@@ -21,7 +21,7 @@ use leviath_runtime::spec::graph::OutputDef;
 use leviath_runtime::spec::inputs::{InputDecl, RawInput};
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use leviath_runtime::spec::launch::Unattended;
-use leviath_runtime::spec::names::{ModelRef, ProfileName, ToolName};
+use leviath_runtime::spec::names::{ModelRef, ToolName};
 use leviath_runtime::spec::request::{SpawnRequest, SpawnSource};
 
 use super::attach;
@@ -70,11 +70,9 @@ pub struct RunLine<'a> {
     /// Whether `workdir` was asked for (`--workdir`) rather than defaulted.
     /// A `--request` file's own workdir gives way only to one asked for.
     pub workdir_given: bool,
-    /// `--yolo`: run unattended.
-    pub yolo: bool,
-    /// `--yolo=<name>`: the profile that says which parts of unattended a
-    /// person still wants. `None` is the bare flag.
-    pub yolo_profile: Option<String>,
+    /// `--yolo` as typed: `None` without the flag, empty for the bare flag,
+    /// and the profile's name for `--yolo=<name>`.
+    pub yolo: Option<String>,
     /// `--allow`: tools permitted outright.
     pub allow: Vec<String>,
     /// `--max-depth`: sub-agent tree cap.
@@ -103,8 +101,7 @@ impl<'a> RunLine<'a> {
             model: None,
             workdir,
             workdir_given: false,
-            yolo: false,
-            yolo_profile: None,
+            yolo: None,
             allow: Vec::new(),
             max_depth: None,
             no_seed_commands: false,
@@ -126,11 +123,9 @@ pub struct RunFlags<'a> {
     pub model: Option<String>,
     /// The working directory tools run in.
     pub workdir: &'a str,
-    /// `--yolo`: run unattended.
-    pub yolo: bool,
-    /// `--yolo=<name>`: the profile that says which parts of unattended a
-    /// person still wants. `None` is the bare flag.
-    pub yolo_profile: Option<String>,
+    /// `--yolo` as typed: `None` without the flag, empty for the bare flag,
+    /// and the profile's name for `--yolo=<name>`.
+    pub yolo: Option<String>,
     /// `--allow`: tools permitted outright.
     pub allow: Vec<String>,
     /// `--max-depth`: sub-agent tree cap.
@@ -169,7 +164,6 @@ pub fn read_run_flags(req: RunFlags<'_>) -> anyhow::Result<LocalRun> {
         workdir: req.workdir,
         workdir_given: regions.workdir_given,
         yolo: req.yolo,
-        yolo_profile: req.yolo_profile,
         allow: req.allow,
         max_depth: req.max_depth,
         no_seed_commands: req.no_seed_commands,
@@ -329,17 +323,10 @@ pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
         .as_deref()
         .map(|dir| dir.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let (yolo, yolo_profile) = match &request.launch.unattended {
-        Unattended::Off => (false, None),
-        Unattended::All => (true, None),
-        Unattended::Profile(name) => (true, Some(name.to_string())),
-    };
     Ok(LocalRun {
         request,
         manifest: source.manifest,
         workdir,
-        yolo,
-        yolo_profile,
         output: line.output_request,
         check: line.check,
         issues,
@@ -480,23 +467,20 @@ fn apply_flags(request: &mut SpawnRequest, line: &RunLine<'_>) -> SpawnIssues {
         request.workdir = Some(PathBuf::from(line.workdir));
     }
     let launch = root.field("launch");
-    if line.yolo {
-        request.launch.unattended = match line.yolo_profile.as_deref() {
-            Some(profile) if !profile.is_empty() => match ProfileName::new(profile) {
-                Ok(name) => Unattended::Profile(name),
-                Err(e) => {
-                    issues.push(
-                        SpawnIssue::new(
-                            launch.field("unattended"),
-                            IssueCode::Invalid,
-                            e.to_string(),
-                        )
-                        .got(format!("{profile:?}")),
-                    );
-                    Unattended::All
-                }
-            },
-            _ => Unattended::All,
+    if let Some(flag) = line.yolo.as_deref() {
+        request.launch.unattended = match Unattended::from_flag(Some(flag)) {
+            Ok(unattended) => unattended,
+            Err(e) => {
+                issues.push(
+                    SpawnIssue::new(
+                        launch.field("unattended"),
+                        IssueCode::Invalid,
+                        e.to_string(),
+                    )
+                    .got(format!("{flag:?}")),
+                );
+                Unattended::All
+            }
         };
     }
     let first = request.launch.allow.len();

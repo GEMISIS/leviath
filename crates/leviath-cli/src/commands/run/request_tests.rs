@@ -382,8 +382,7 @@ fn launch_flags_that_do_not_read_are_refused_together() {
     let err = refused(run_request(RunLine {
         task: Some("t"),
         model: Some("not a model".to_string()),
-        yolo: true,
-        yolo_profile: Some("bad\nname".to_string()),
+        yolo: Some("bad\nname".to_string()),
         allow: vec!["ok_tool".to_string(), "bad tool".to_string()],
         output_request: Some(leviath_core::output::OutputSpec {
             format: Some("json".to_string()),
@@ -418,8 +417,7 @@ fn launch_flags_land_on_the_request() {
     let manifest = write_manifest(&dir.path().join("a"));
     let run = run_request(RunLine {
         task: Some("t"),
-        yolo: true,
-        yolo_profile: Some("careful".to_string()),
+        yolo: Some("careful".to_string()),
         allow: vec!["read_file".to_string()],
         max_depth: Some(1000),
         no_seed_commands: true,
@@ -439,11 +437,9 @@ fn launch_flags_land_on_the_request() {
     assert!(!launch.seed_commands);
     assert!(run.request.output.is_some());
     assert!(run.request.model.is_none(), "a blank model is no model");
-    assert!(run.yolo);
-    assert_eq!(run.yolo_profile.as_deref(), Some("careful"));
     let run = run_request(RunLine {
         task: Some("t"),
-        yolo: true,
+        yolo: Some(String::new()),
         ..line(&manifest, dir.path())
     })
     .unwrap();
@@ -536,8 +532,10 @@ fn a_request_file_is_sent_with_the_flags_over_it() {
     // What the run says about itself is what the file asked for, not the
     // command line's own defaults.
     assert_eq!(run.workdir, "/theirs");
-    assert!(run.yolo);
-    assert_eq!(run.yolo_profile.as_deref(), Some("careful"));
+    assert_eq!(
+        run.request.launch.unattended,
+        Unattended::Profile(leviath_runtime::spec::names::ProfileName::new("careful").unwrap())
+    );
     assert_eq!(run.manifest, PathBuf::new(), "a raw graph has no manifest");
     let run = run_request(RunLine {
         request_file: Some(&json_file),
@@ -551,12 +549,13 @@ fn a_request_file_is_sent_with_the_flags_over_it() {
     let run = run_request(RunLine {
         request_file: Some(&json_file),
         task: Some("t"),
-        yolo: true,
+        yolo: Some(String::new()),
         ..RunLine::new(None, "/mine", dir.path())
     })
     .unwrap();
-    assert!(
-        run.yolo && run.yolo_profile.is_none(),
+    assert_eq!(
+        run.request.launch.unattended,
+        Unattended::All,
         "the bare flag is over it"
     );
 
@@ -638,8 +637,7 @@ fn launch(path: &str, regions: super::super::RunInputs) -> RunFlags<'_> {
         stdin_is_terminal: &crate::daemon::client::never_interactive,
         model: None,
         workdir: "/mine",
-        yolo: false,
-        yolo_profile: None,
+        yolo: None,
         allow: Vec::new(),
         max_depth: None,
         regions,

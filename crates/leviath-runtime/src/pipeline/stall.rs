@@ -361,7 +361,7 @@ pub(crate) fn fail_stalled_dispatch(
             provider = %si.provider_name,
             reason = stall.reason.label(),
             stalled_secs = now.saturating_sub(stall.since),
-            unattended = md.is_some_and(|m| m.unattended),
+            unattended = md.is_some_and(|m| m.unattended.is_on()),
             "pausing a run until the machine is fixed"
         );
         // Paused, so resume is the truthful next step and is worth naming.
@@ -444,12 +444,14 @@ mod tests {
     /// The same, launched by something that is not watching.
     fn spawn_stalled_unattended(world: &mut World, reason: StallReason, age: i64) -> Entity {
         let e = spawn_stalled(world, reason, age);
-        world.entity_mut(e).insert(run_metadata(true));
+        world
+            .entity_mut(e)
+            .insert(run_metadata(leviath_core::Unattended::All));
         e
     }
 
     /// Run metadata carrying only the field the watchdog reads.
-    fn run_metadata(unattended: bool) -> crate::persistence::RunMetadata {
+    fn run_metadata(unattended: leviath_core::Unattended) -> crate::persistence::RunMetadata {
         crate::persistence::RunMetadata {
             run_id: "r".to_string(),
             agent_name: "a".to_string(),
@@ -467,7 +469,6 @@ mod tests {
             title_error: None,
             blueprint_digest: None,
             unattended,
-            yolo_profile: None,
             read_paths: None,
             output_request: None,
             model_override: None,
@@ -944,7 +945,7 @@ mod tests {
                 agent_state(),
                 stage_inference(),
                 stalled_for(StallReason::ProviderMissing, 61),
-                run_metadata(true),
+                run_metadata(leviath_core::Unattended::All),
                 ReadyToInfer,
             ))
             .id();

@@ -64,9 +64,9 @@ pub(crate) struct ToolStateParts<'a> {
     /// The yolo profile this run decides tool calls under, if it is a yolo
     /// run at all.
     pub(crate) yolo: Option<Arc<crate::yolo::YoloProfile>>,
-    /// The profile's name when `--yolo=<name>` named one, so a resume can read
-    /// it again. `None` for an attended run and for the bare flag.
-    pub(crate) yolo_profile: Option<String>,
+    /// The run's unattended setting, so a resume can read a named profile
+    /// again.
+    pub(crate) launched: leviath_core::Unattended,
     /// The files this run may not change, shared with the seeds that ran
     /// before the tool lane existed.
     pub(crate) protected: Vec<crate::tools::ProtectedPath>,
@@ -140,7 +140,7 @@ pub(crate) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
             blueprint_safe: parts.blueprint_safe.cloned(),
             blueprint_read_paths: parts.blueprint_read_paths.to_vec(),
             workdir: parts.workdir,
-            yolo_profile: parts.yolo_profile,
+            launched: parts.launched,
         }),
     })
 }

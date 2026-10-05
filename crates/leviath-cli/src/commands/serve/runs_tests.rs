@@ -222,10 +222,12 @@ fn every_skip_if_none_option_on_run_meta_is_filled_by_the_probe() {
     assert!(declared.len() > 30, "found only {declared:?}");
 
     let known = known_fields();
+    // The one flattened field is written as the keys it spells.
+    assert!(known.contains("yolo") && known.contains("yolo_profile"));
     let missing: Vec<&str> = declared
         .iter()
         .copied()
-        .filter(|name| !known.contains(*name))
+        .filter(|name| *name != "unattended" && !known.contains(*name))
         .collect();
     assert!(
         missing.is_empty(),

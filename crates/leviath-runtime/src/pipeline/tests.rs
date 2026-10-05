@@ -2179,7 +2179,7 @@ fn an_unattended_run_out_of_credits_parks_instead_of_losing_its_work() {
     let mut si = stage_with_fallback();
     si.fallbacks.clear();
     let mut md = run_metadata();
-    md.unattended = true;
+    md.unattended = leviath_core::Unattended::All;
     let e = world.spawn((agent_state(), AwaitingInference, si, md)).id();
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
@@ -6764,7 +6764,7 @@ fn runtime_info_is_answered_from_the_world_and_never_reaches_the_lane() {
     world.insert_resource(ToolStage::detached(jtx));
     let (offers, result) = infer_with(vec![tc("c1", "runtime_info")]);
     let mut metadata = run_metadata();
-    metadata.unattended = true;
+    metadata.unattended = leviath_core::Unattended::All;
     metadata.num_stages = 4;
     // Four stages, and the one under the cursor caps its iterations. The cap is
     // read from the blueprint at the cursor's index rather than from the agent,
@@ -14472,8 +14472,7 @@ fn run_metadata() -> RunMetadata {
         title: None,
         title_error: None,
         blueprint_digest: None,
-        unattended: false,
-        yolo_profile: None,
+        unattended: leviath_core::Unattended::Off,
         read_paths: None,
         output_request: None,
         model_override: None,

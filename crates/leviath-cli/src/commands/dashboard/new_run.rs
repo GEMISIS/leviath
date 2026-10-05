@@ -14,7 +14,9 @@
 
 use std::path::Path;
 
+use leviath_core::Unattended;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
+use leviath_runtime::spec::names::ProfileName;
 use tokio::sync::mpsc;
 
 use super::state::Dashboard;
@@ -61,8 +63,7 @@ impl Dashboard {
         // Unattended is off every time the screen opens. It is a consequential
         // setting, and one that survived out of sight is one somebody can
         // leave on and forget.
-        self.new_run_yolo = false;
-        self.new_run_yolo_profile = None;
+        self.new_run_unattended = Unattended::Off;
         // The profiles as the file stands now, so a profile added since the
         // dashboard started is on the cycle. A file that will not load offers
         // none: a spawn naming one would be refused anyway.
@@ -252,20 +253,19 @@ impl Dashboard {
             agent_path: agent.path.clone(),
             task,
             workdir: self.new_run_ctx.workdir.display().to_string(),
-            yolo: self.new_run_yolo,
-            yolo_profile: self.new_run_yolo_profile.clone(),
+            unattended: self.new_run_unattended.clone(),
             parts,
             values: inputs.values,
         });
         // An unattended start is the warning the toggle gave, restated at the
         // moment it takes effect; an attended one is work in flight, not done.
-        let (how, level) = match (self.new_run_yolo, &self.new_run_yolo_profile) {
-            (true, Some(profile)) => (
+        let (how, level) = match &self.new_run_unattended {
+            Unattended::Profile(profile) => (
                 format!(" unattended under '{profile}'"),
                 ToastLevel::Warning,
             ),
-            (true, None) => (" unattended".to_string(), ToastLevel::Warning),
-            (false, _) => (String::new(), ToastLevel::Progress),
+            Unattended::All => (" unattended".to_string(), ToastLevel::Warning),
+            Unattended::Off => (String::new(), ToastLevel::Progress),
         };
         self.toast(
             format!("Starting '{}'{how}{with_files}…", agent.name),
@@ -417,22 +417,29 @@ impl Dashboard {
     /// off, on, `careful`, `build-only`, off. Every step past the first is a
     /// step toward asking more, so none of them asks first.
     pub(super) fn toggle_new_run_yolo(&mut self) {
-        if !self.new_run_yolo {
+        if !self.new_run_unattended.is_on() {
             self.pending_confirm = Some((ConfirmAction::EnableYolo, yolo_warning()));
             return;
         }
         let position = self
-            .new_run_yolo_profile
-            .as_ref()
+            .new_run_unattended
+            .profile()
             .and_then(|current| {
                 self.new_run_profiles
                     .iter()
-                    .position(|p| &p.name == current)
+                    .position(|p| p.name == current.as_str())
             })
             .map_or(0, |i| i + 1);
-        match self.new_run_profiles.get(position).cloned() {
-            Some(profile) => {
-                self.new_run_yolo_profile = Some(profile.name.clone());
+        // A profile `yolo.toml` loaded with has a name `--yolo=<name>` can
+        // spell, which is always a valid profile name.
+        let next = self
+            .new_run_profiles
+            .get(position)
+            .cloned()
+            .and_then(|p| ProfileName::new(p.name.as_str()).ok().map(|name| (p, name)));
+        match next {
+            Some((profile, name)) => {
+                self.new_run_unattended = Unattended::Profile(name);
                 let keeps = match profile.holds().first() {
                     Some(first) => format!("keeps for you: {first}"),
                     None => "keeps nothing for you".to_string(),
@@ -443,8 +450,7 @@ impl Dashboard {
                 );
             }
             None => {
-                self.new_run_yolo = false;
-                self.new_run_yolo_profile = None;
+                self.new_run_unattended = Unattended::Off;
                 self.toast(
                     "Unattended OFF: runs will ask you before each tool call",
                     ToastLevel::Info,
@@ -455,7 +461,7 @@ impl Dashboard {
 
     /// Apply a yes to that warning.
     pub(super) fn accept_yolo_warning(&mut self) {
-        self.new_run_yolo = true;
+        self.new_run_unattended = Unattended::All;
         self.toast(
             "Unattended ON: runs approve their own tool calls",
             ToastLevel::Warning,
@@ -743,11 +749,13 @@ async fn run_spawn(control: &ControlClient, cmd: NewRunCommand) -> SpawnOutcome 
         task: Some(&cmd.task),
         values: cmd.values,
         parts: cmd.parts,
-        yolo: cmd.yolo,
-        yolo_profile: cmd.yolo_profile.clone(),
         ..RunLine::new(Some(&cmd.agent_path), &cmd.workdir, &workdir)
     }) {
-        Ok(run) => run,
+        // The screen's setting is already typed; it is not a flag to read.
+        Ok(mut run) => {
+            run.request.launch.unattended = cmd.unattended.clone();
+            run
+        }
         Err(e) => return failed(format!("Could not start '{}': {e}", cmd.agent_path)),
     };
     // A value the form could not read refuses the run; the daemon only
@@ -823,6 +831,10 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn profile(name: &str) -> Unattended {
+        Unattended::Profile(ProfileName::new(name).unwrap())
+    }
     use crate::commands::dashboard::test_support::make_test_dashboard;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -1472,7 +1484,7 @@ binds = [{{ region = "task" }}]
 
         // Ctrl-Y still toggles unattended rather than pasting: the screen's
         // own chords are matched first, and formatting does not claim `y`.
-        assert!(!dash.new_run_yolo);
+        assert!(!dash.new_run_unattended.is_on());
         dash.handle_new_run_key(ctrl(KeyCode::Char('y')));
         assert_eq!(dash.new_run_task.text(), "**ship it**");
     }
@@ -1748,8 +1760,7 @@ binds = [{{ region = "task" }}]
                 agent_path: dir.path().join("alpha").display().to_string(),
                 task: "ship it".to_string(),
                 workdir: dir.path().display().to_string(),
-                yolo: false,
-                yolo_profile: None,
+                unattended: Unattended::Off,
                 parts: Vec::new(),
                 values: Default::default(),
             })
@@ -1812,16 +1823,22 @@ binds = [{{ region = "task" }}]
             (None, "Could not check the run"),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            write_agent(&dir.path().join("alpha"), "alpha", "first");
+            // A blueprint that takes no task, handed one: refused on the
+            // dashboard's side before the daemon is asked to start it.
+            let agent = dir.path().join("alpha");
+            write_agent(&agent, "alpha", "first");
+            let manifest = agent.join("agent.toml");
+            let text = std::fs::read_to_string(&manifest).unwrap();
+            let without_inputs = text.split("[[graph.inputs]]").next().unwrap().to_string();
+            std::fs::write(&manifest, without_inputs).unwrap();
             let (control, server) = replying_daemon(dir.path(), reply);
             let outcome = run_spawn(
                 &control,
                 NewRunCommand {
-                    agent_path: dir.path().join("alpha").display().to_string(),
+                    agent_path: agent.display().to_string(),
                     task: "ship it".to_string(),
                     workdir: dir.path().display().to_string(),
-                    yolo: true,
-                    yolo_profile: Some("bad\nname".to_string()),
+                    unattended: Unattended::All,
                     parts: Vec::new(),
                     values: Default::default(),
                 },
@@ -1832,7 +1849,7 @@ binds = [{{ region = "task" }}]
             assert!(outcome.message.contains(expected), "{}", outcome.message);
             if reply.is_some() {
                 assert!(
-                    outcome.message.contains("launch.unattended"),
+                    outcome.message.contains("takes no task"),
                     "{}",
                     outcome.message
                 );
@@ -1850,8 +1867,7 @@ binds = [{{ region = "task" }}]
                 agent_path: dir.path().join("nope").display().to_string(),
                 task: "ship it".to_string(),
                 workdir: dir.path().display().to_string(),
-                yolo: false,
-                yolo_profile: None,
+                unattended: Unattended::Off,
                 parts: Vec::new(),
                 values: Default::default(),
             },
@@ -1878,8 +1894,7 @@ binds = [{{ region = "task" }}]
                 agent_path: dir.path().join("nope").display().to_string(),
                 task: "t".to_string(),
                 workdir: dir.path().display().to_string(),
-                yolo: false,
-                yolo_profile: None,
+                unattended: Unattended::Off,
                 parts: Vec::new(),
                 values: Default::default(),
             })
@@ -1909,27 +1924,33 @@ binds = [{{ region = "task" }}]
     fn the_unattended_toggle_asks_before_it_arms() {
         let mut dash = make_test_dashboard();
         dash.new_run_screen = true;
-        assert!(!dash.new_run_yolo, "off until somebody says otherwise");
+        assert!(
+            !dash.new_run_unattended.is_on(),
+            "off until somebody says otherwise"
+        );
 
         dash.handle_key(ctrl(KeyCode::Char('y')));
         assert!(dash.pending_confirm.is_some(), "it asks first");
-        assert!(!dash.new_run_yolo, "and arms nothing until answered");
+        assert!(
+            !dash.new_run_unattended.is_on(),
+            "and arms nothing until answered"
+        );
 
         // Declining leaves it off.
         dash.handle_key(key(KeyCode::Esc));
         assert!(dash.pending_confirm.is_none());
-        assert!(!dash.new_run_yolo);
+        assert!(!dash.new_run_unattended.is_on());
 
         // Accepting turns it on.
         dash.handle_key(ctrl(KeyCode::Char('y')));
         dash.handle_key(key(KeyCode::Char('y')));
-        assert!(dash.new_run_yolo);
+        assert!(dash.new_run_unattended.is_on());
 
         // Turning it back off never asks: nothing needs confirming about
         // choosing to be asked more.
         dash.handle_key(ctrl(KeyCode::Char('y')));
         assert!(dash.pending_confirm.is_none());
-        assert!(!dash.new_run_yolo);
+        assert!(!dash.new_run_unattended.is_on());
     }
 
     /// The sequence that lost a six-hour run its file writes: unattended on
@@ -1945,9 +1966,9 @@ binds = [{{ region = "task" }}]
 
         dash.handle_key(ctrl(KeyCode::Char('y')));
         dash.handle_key(key(KeyCode::Char('y')));
-        assert!(dash.new_run_yolo, "on, confirmed");
+        assert!(dash.new_run_unattended.is_on(), "on, confirmed");
         dash.handle_key(ctrl(KeyCode::Char('y')));
-        assert!(!dash.new_run_yolo, "off again");
+        assert!(!dash.new_run_unattended.is_on(), "off again");
 
         dash.toasts.clear();
         dash.handle_key(ctrl(KeyCode::Char('y')));
@@ -1955,7 +1976,7 @@ binds = [{{ region = "task" }}]
         dash.handle_key(key(KeyCode::Enter));
         assert!(dash.pending_confirm.is_none());
         assert!(
-            !dash.new_run_yolo,
+            !dash.new_run_unattended.is_on(),
             "Enter on the focused Keep-asking button declines"
         );
         let toast = dash
@@ -1972,7 +1993,7 @@ binds = [{{ region = "task" }}]
 
         dash.handle_key(ctrl(KeyCode::Char('y')));
         dash.handle_key(key(KeyCode::Char('y')));
-        assert!(dash.new_run_yolo);
+        assert!(dash.new_run_unattended.is_on());
         assert!(dash.new_run_help_bar_text().contains("unattended: on"));
     }
 
@@ -1984,10 +2005,10 @@ binds = [{{ region = "task" }}]
         dash.new_run_screen = true;
         dash.handle_key(ctrl(KeyCode::Char('y')));
         dash.handle_key(key(KeyCode::Char('y')));
-        assert!(dash.new_run_yolo);
+        assert!(dash.new_run_unattended.is_on());
 
         dash.open_new_run_screen();
-        assert!(!dash.new_run_yolo);
+        assert!(!dash.new_run_unattended.is_on());
     }
 
     /// Every switch to ON asks. Turning unattended off and on again is the
@@ -2003,20 +2024,23 @@ binds = [{{ region = "task" }}]
         assert!(dash.pending_confirm.is_some(), "first on: asks");
         dash.handle_key(key(KeyCode::Char(' ')));
         dash.handle_key(key(KeyCode::Char('y')));
-        assert!(dash.new_run_yolo, "on");
+        assert!(dash.new_run_unattended.is_on(), "on");
 
         dash.handle_key(ctrl(KeyCode::Char('y')));
         assert!(dash.pending_confirm.is_none(), "off never asks");
-        assert!(!dash.new_run_yolo, "off");
+        assert!(!dash.new_run_unattended.is_on(), "off");
 
         dash.handle_key(ctrl(KeyCode::Char('y')));
         assert!(
             dash.pending_confirm.is_some(),
             "second on: asks again, whatever was pressed on the first dialog"
         );
-        assert!(!dash.new_run_yolo, "and arms nothing until answered");
+        assert!(
+            !dash.new_run_unattended.is_on(),
+            "and arms nothing until answered"
+        );
         dash.handle_key(key(KeyCode::Char('y')));
-        assert!(dash.new_run_yolo);
+        assert!(dash.new_run_unattended.is_on());
     }
 
     /// The setting reaches the spawn rather than only the screen.
@@ -2028,7 +2052,7 @@ binds = [{{ region = "task" }}]
         dash.open_new_run_screen();
         dash.new_run_focus = NewRunPane::Task;
         dash.new_run_task.area_mut().insert_str("do the thing");
-        dash.new_run_yolo = true;
+        dash.new_run_unattended = Unattended::All;
 
         dash.submit_new_run();
 
@@ -2036,7 +2060,11 @@ binds = [{{ region = "task" }}]
             .spawn_cmd_rx_for_test()
             .try_recv()
             .expect("a run was sent");
-        assert!(cmd.yolo, "the run carries what the screen was set to");
+        assert_eq!(
+            cmd.unattended,
+            Unattended::All,
+            "the run carries what the screen was set to"
+        );
         assert_eq!(cmd.task, "do the thing");
         // The toast restates the warning the toggle gave, not a green check.
         let start = dash
@@ -2086,12 +2114,11 @@ binds = [{{ region = "task" }}]
 
             dash.handle_key(ctrl(KeyCode::Char('y')));
             dash.handle_key(key(KeyCode::Char('y')));
-            assert!(dash.new_run_yolo);
-            assert!(dash.new_run_yolo_profile.is_none(), "plain yolo first");
+            assert_eq!(dash.new_run_unattended, Unattended::All, "plain yolo first");
 
             dash.handle_key(ctrl(KeyCode::Char('y')));
             assert!(dash.pending_confirm.is_none(), "a narrower step never asks");
-            assert_eq!(dash.new_run_yolo_profile.as_deref(), Some("careful"));
+            assert_eq!(dash.new_run_unattended, profile("careful"));
             assert!(
                 dash.new_run_help_bar_text()
                     .contains("unattended: on (careful)")
@@ -2107,7 +2134,7 @@ binds = [{{ region = "task" }}]
             );
 
             dash.handle_key(ctrl(KeyCode::Char('y')));
-            assert_eq!(dash.new_run_yolo_profile.as_deref(), Some("loose"));
+            assert_eq!(dash.new_run_unattended, profile("loose"));
             let toast = dash
                 .toasts
                 .last()
@@ -2123,8 +2150,7 @@ binds = [{{ region = "task" }}]
                 .spawn_cmd_rx_for_test()
                 .try_recv()
                 .expect("a run was sent");
-            assert!(cmd.yolo);
-            assert_eq!(cmd.yolo_profile.as_deref(), Some("loose"));
+            assert_eq!(cmd.unattended, profile("loose"));
             let start = dash
                 .toasts
                 .iter()
@@ -2134,18 +2160,14 @@ binds = [{{ region = "task" }}]
 
             // Past the last profile is off, with nothing remembered.
             dash.new_run_screen = true;
-            dash.new_run_yolo = true;
-            dash.new_run_yolo_profile = Some("loose".to_string());
+            dash.new_run_unattended = profile("loose");
             dash.handle_key(ctrl(KeyCode::Char('y')));
-            assert!(!dash.new_run_yolo);
-            assert!(dash.new_run_yolo_profile.is_none());
+            assert_eq!(dash.new_run_unattended, Unattended::Off);
 
             // Re-opening forgets the profile with the switch.
-            dash.new_run_yolo = true;
-            dash.new_run_yolo_profile = Some("careful".to_string());
+            dash.new_run_unattended = profile("careful");
             dash.open_new_run_screen();
-            assert!(!dash.new_run_yolo);
-            assert!(dash.new_run_yolo_profile.is_none());
+            assert_eq!(dash.new_run_unattended, Unattended::Off);
         });
     }
 }

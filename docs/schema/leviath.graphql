@@ -12360,6 +12360,8 @@ type RunPlacementOutput {
 	depth: Int!
 	"For a fan-out worker, the stage of the parent's graph it runs."
 	workerStage: String
+	"For a fan-out worker, the id of the work item it runs."
+	workItem: String
 }
 
 "A run acquired a title, or had the one it was showing replaced."

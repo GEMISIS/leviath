@@ -68,8 +68,7 @@ pub(super) fn spawn_request(
         task: task.to_string(),
         parts,
         workdir: Some(cwd.to_string()),
-        unattended: args.yolo.is_some(),
-        profile: args.yolo.clone().filter(|name| !name.is_empty()),
+        unattended: crate::daemon::requests::unattended_flag(args.yolo.as_deref())?,
         allow: args.allow.clone(),
         max_depth: args.max_depth,
         no_seed_commands: args.no_seed_commands,
@@ -247,5 +246,8 @@ layout = {{ total_budget_tokens = 1000, regions = [{{ name = "task", kind = "pin
         args.yolo = Some(String::new());
         let spawn = spawn_request(&resolved, "t", "/work", &args, Vec::new()).unwrap();
         assert_eq!(spawn.launch.unattended, Unattended::All);
+        args.yolo = Some("bad\nname".to_string());
+        let err = spawn_request(&resolved, "t", "/work", &args, Vec::new()).unwrap_err();
+        assert!(err.contains("yolo profile"), "{err}");
     }
 }

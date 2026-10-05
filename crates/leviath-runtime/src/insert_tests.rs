@@ -1107,8 +1107,10 @@ fn the_spec_decides_compaction_loops_capture_rescans_and_the_record() {
     assert_eq!(md.parent_run_id.as_deref(), Some("parent-1"));
     assert_eq!(md.callback_url.as_deref(), Some("https://x.dev/h"));
     assert_eq!(md.callback_secret.as_deref(), Some("s"));
-    assert!(md.unattended);
-    assert_eq!(md.yolo_profile.as_deref(), Some("ci"));
+    assert_eq!(
+        md.unattended,
+        Unattended::Profile(crate::spec::names::ProfileName::new("ci").unwrap())
+    );
     assert!(md.output_request.is_some());
     assert_eq!(md.model_override.as_deref(), Some("mock/gpt-mock"));
     assert_eq!(md.metadata["team"], "a");
@@ -1136,7 +1138,7 @@ fn the_spec_decides_compaction_loops_capture_rescans_and_the_record() {
         (md.agent_name.as_str(), md.blueprint_digest.clone()),
         ("t", None)
     );
-    assert!(!md.unattended && md.yolo_profile.is_none());
+    assert_eq!(md.unattended, Unattended::Off);
     assert!(md.callback_secret.is_none());
     assert!(world.get::<crate::pipeline::DynamicTools>(e).is_some());
     assert!(
@@ -1162,7 +1164,7 @@ fn the_spec_decides_compaction_loops_capture_rescans_and_the_record() {
     );
     let md = world.get::<crate::persistence::RunMetadata>(e).unwrap();
     assert_eq!(md.agent_name, "");
-    assert!(md.unattended && md.yolo_profile.is_none());
+    assert_eq!(md.unattended, Unattended::All);
 }
 
 /// A new run starts at its graph's entry stage, with its seeds in, its parts

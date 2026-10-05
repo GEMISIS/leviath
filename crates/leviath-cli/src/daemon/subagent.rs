@@ -43,16 +43,14 @@ pub(crate) struct SubAgentHandle {
     /// per-run opt-out can't be side-stepped by spawning a sub-agent whose
     /// blueprint declares command seeds.
     pub no_seed_commands: bool,
-    /// The parent run's `--yolo` setting, inherited by children.
+    /// The parent run's unattended setting, inherited by children: a child
+    /// of a `careful` run is a `careful` run, not a bare `--yolo` one.
     ///
     /// A child spawned attended under an unattended parent stops at its first
     /// approval prompt with nobody there to answer, and takes the parent down
     /// with it whenever the parent is waiting on it. The operator asked for an
     /// unattended run; the tree is the run.
-    pub unattended: bool,
-    /// The parent run's yolo profile, inherited with `unattended`: a child of
-    /// a `careful` run is a `careful` run, not a bare `--yolo` one.
-    pub yolo_profile: Option<String>,
+    pub unattended: leviath_core::Unattended,
     /// The tools the parent run may call without asking: what a child asks
     /// for when its call names none, narrowed by the host as always.
     pub allow: Vec<String>,

@@ -241,6 +241,7 @@ binds = [{ region = "task" }]
             policy: spec.launch.clone(),
             depth: 0,
             stage: stage.map(|s| leviath_runtime::spec::names::StageName::new(s).unwrap()),
+            item: "item-1".to_string(),
         };
         (request, caller)
     }
@@ -527,10 +528,10 @@ budget = 10000
     /// and parks the parent behind it.
     #[tokio::test]
     async fn spawn_worker_inherits_the_parents_unattended_setting() {
-        for unattended in [false, true] {
+        for unattended in [leviath_core::Unattended::Off, leviath_core::Unattended::All] {
             let dir = tempfile::tempdir().unwrap();
             let (mut world, spawner, parent) = world_with(TestLaunch {
-                yolo: unattended,
+                unattended: unattended.clone(),
                 ..launch(&two_stage_in(dir.path()))
             });
 
@@ -783,8 +784,9 @@ binds = [{ region = "task" }]
             std::fs::write(home.join("yolo.toml"), "[careful]\ndefault = \"ask\"\n").unwrap();
             let dir = tempfile::tempdir().unwrap();
             let (mut world, spawner, parent) = world_with(TestLaunch {
-                yolo: true,
-                yolo_profile: Some("careful".to_string()),
+                unattended: leviath_core::Unattended::Profile(
+                    leviath_core::names::ProfileName::new("careful").unwrap(),
+                ),
                 ..launch(&two_stage_in(dir.path()))
             });
 
@@ -794,8 +796,12 @@ binds = [{ region = "task" }]
                 .world()
                 .get::<RunMetadata>(child)
                 .expect("worker has run metadata");
-            assert!(md.unattended);
-            assert_eq!(md.yolo_profile.as_deref(), Some("careful"));
+            assert_eq!(
+                md.unattended,
+                leviath_core::Unattended::Profile(
+                    leviath_core::names::ProfileName::new("careful").unwrap()
+                )
+            );
         })
         .await;
     }

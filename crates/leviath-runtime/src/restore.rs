@@ -401,7 +401,6 @@ pub fn held_entry(
         started_at: Some(md.started_at),
         active: Some(place::run_clock(state).0),
         unattended: md.unattended,
-        yolo_profile: md.yolo_profile,
         empty_output: false,
         splits_degraded: flags.splits_degraded,
         broken_scripts: flags.broken_scripts,

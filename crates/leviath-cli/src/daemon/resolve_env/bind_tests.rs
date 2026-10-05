@@ -63,6 +63,7 @@ fn spec(workdir: &Path) -> RunSpec {
             parent: None,
             depth: 0,
             worker_stage: None,
+            work_item: None,
         },
         delivery: Delivery::default(),
         env: Default::default(),

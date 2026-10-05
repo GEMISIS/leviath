@@ -254,11 +254,10 @@ pub(crate) struct Dashboard {
     /// Off every time the screen opens is deliberate: the state carries real
     /// consequences, and a toggle that survives out of sight is one a user can
     /// leave on and forget.
-    pub(super) new_run_yolo: bool,
-    /// The yolo profile runs started from this screen run under, when
-    /// unattended is on and `Ctrl-Y` has stepped past plain yolo. `None` with
-    /// `new_run_yolo` set is the bare flag.
-    pub(super) new_run_yolo_profile: Option<String>,
+    ///
+    /// `Ctrl-Y` steps from off to plain yolo, then through the profiles in
+    /// `yolo.toml`, then back to off.
+    pub(super) new_run_unattended: leviath_core::Unattended,
     /// The profiles `yolo.toml` defined when the screen opened, in file
     /// order, which `Ctrl-Y` steps through after plain yolo.
     pub(super) new_run_profiles: Vec<std::sync::Arc<crate::yolo::YoloProfile>>,

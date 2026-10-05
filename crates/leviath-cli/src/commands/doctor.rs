@@ -782,7 +782,7 @@ fn probe_request(
         blueprint: manifest.to_string_lossy().into_owned(),
         task: PROBE_PROMPT.to_string(),
         workdir: Some(workdir.to_string_lossy().into_owned()),
-        unattended: true,
+        unattended: leviath_core::Unattended::All,
         ..Default::default()
     }
     .into_request()

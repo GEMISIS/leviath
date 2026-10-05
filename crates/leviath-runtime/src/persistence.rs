@@ -50,32 +50,23 @@ pub struct RunMetadata {
     /// The SHA-256 of the manifest this run executed, in lowercase hex.
     ///
     /// Carried on the run rather than recomputed on read, because the file it
-    /// came from may have been edited or deleted since. It identifies the
-    /// snapshot in the run's own directory, which is the copy a reader should
-    /// trust about what ran. `None` for a run whose manifest could not be read
-    /// back at spawn.
+    /// came from may have been edited or deleted since. It names the revision
+    /// the run's spec was resolved from. `None` for a run whose manifest could
+    /// not be read back at spawn.
     pub blueprint_digest: Option<String>,
     /// Why [`Self::title`] is still `None`, once titling has given up.
     ///
     /// `None` means titling has not finished (or was never asked for), which is
-    /// a different state from "it ran and could not produce a name" - and one
-    /// nothing outside the daemon could tell apart before this, because the
-    /// reason only ever reached a debug log.
+    /// a different state from "it ran and could not produce a name". This is
+    /// where a reader outside the daemon finds the reason.
     pub title_error: Option<String>,
-    /// Whether this run is unattended (launched with `--yolo`).
+    /// How much of this run goes ahead without a person, as its launch
+    /// policy says.
     ///
-    /// Recorded on the agent so anything holding the world can ask. Two things
-    /// need it: the sub-agent and fan-out spawners, which pass it down so a
-    /// child of an unattended run is unattended too, and the run's record, so a
-    /// daemon restart resumes the run the way it was launched. Hardcoding
-    /// "attended" in either would strand unattended runs on prompts no one is
-    /// there to answer.
-    pub unattended: bool,
-    /// The named yolo profile the run was launched under (`--yolo=<name>`),
-    /// carried beside `unattended` for the same two readers: a child of a
-    /// profiled run is spawned under the same profile, not under bare
-    /// `--yolo`, and a daemon restart resumes it under the same rules.
-    pub yolo_profile: Option<String>,
+    /// Recorded on the agent so anything holding the world can ask: the
+    /// sub-agent and fan-out spawners narrow a child's setting against it, and
+    /// the run's record lists it.
+    pub unattended: leviath_core::Unattended,
     /// How much of the blueprint's `[read_paths]` the config granted, resolved
     /// once at spawn (see [`ReadPathGrantCounts`]). `None` when the blueprint
     /// declares none, which is nearly every agent.
@@ -264,7 +255,7 @@ pub fn region_kind_str(kind: &RegionKind) -> &'static str {
 }
 
 /// Build the full context snapshot from a window. Pure over the
-/// window - no engine/entity. (Ported from the CLI's `build_context_snapshot`.)
+/// window - no engine/entity.
 pub(crate) fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> ContextSnapshot {
     snapshot_of(
         window.regions.iter().cloned(),
@@ -459,8 +450,7 @@ pub(crate) fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> Ru
         depth,
         max_child_depth,
         flags,
-        yolo: md.unattended,
-        yolo_profile: md.yolo_profile.clone(),
+        unattended: md.unattended.clone(),
         read_paths: md.read_paths,
         final_output: final_output.map(|o| o.0.descriptor()),
         // Paused counts as parked here, not just Waiting: a run held until the
@@ -513,8 +503,7 @@ mod tests {
             title: Some("Do It".to_string()),
             title_error: None,
             blueprint_digest: None,
-            unattended: false,
-            yolo_profile: None,
+            unattended: leviath_core::Unattended::Off,
             read_paths: None,
             output_request: None,
             model_override: None,
@@ -822,7 +811,7 @@ mod tests {
         assert_eq!(meta.depth, 1);
         assert_eq!(meta.max_child_depth, 4);
         // Attended by default, so an ordinary run is never written as unattended.
-        assert!(!meta.yolo);
+        assert_eq!(meta.unattended, leviath_core::Unattended::Off);
     }
 
     /// The roll-up of what the run's stages ran on reaches the run's record,
@@ -855,12 +844,13 @@ mod tests {
         assert_eq!(meta.stage_models, used);
     }
 
-    /// The snapshot carries `unattended` through to the run's record, which is what a
-    /// daemon restart reads back to resume the run the way it was launched.
+    /// The snapshot carries the run's unattended setting, profile and all,
+    /// through to the run's record.
     #[test]
     fn build_run_meta_records_an_unattended_run() {
         let mut md = metadata();
-        md.unattended = true;
+        let careful = leviath_core::names::ProfileName::new("careful").unwrap();
+        md.unattended = leviath_core::Unattended::Profile(careful.clone());
         let meta = build_run_meta(
             RunMetaSources {
                 md: &md,
@@ -880,7 +870,7 @@ mod tests {
                 active: Default::default(),
             },
         );
-        assert!(meta.yolo);
+        assert_eq!(meta.unattended, leviath_core::Unattended::Profile(careful));
     }
 
     #[test]

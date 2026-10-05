@@ -26,6 +26,8 @@ glob = { workspace = true }
 regex = { workspace = true }
 # Content addressing for stored mime parts (`leviath_core::mime::store`).
 sha2 = { workspace = true }
+# A digest's text (`leviath_core::names::Digest`).
+hex = { workspace = true }
 # A part's bytes on the control socket and in a JSON request
 # (`leviath_core::mime::inbound`), which are text transports.
 base64 = { workspace = true }
