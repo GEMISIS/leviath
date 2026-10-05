@@ -39,6 +39,10 @@ pub struct TaintGate {
     tool_overrides: HashMap<String, ToolClassification>,
     /// Audit log of gate events.
     audit_log: Vec<GateEvent>,
+    /// The stage each event in `audit_log` was decided in, by position.
+    audit_stages: Vec<usize>,
+    /// The stage the run is in, which the next event is decided in.
+    stage: usize,
     /// Tools a person cleared for the rest of the run ("Allow for this
     /// session"), kept so a run placed again clears them again.
     cleared: BTreeSet<String>,
@@ -51,6 +55,8 @@ impl TaintGate {
             config,
             tool_overrides: HashMap::new(),
             audit_log: Vec::new(),
+            audit_stages: Vec::new(),
+            stage: 0,
             cleared: BTreeSet::new(),
         }
     }
@@ -64,6 +70,8 @@ impl TaintGate {
             },
             tool_overrides: HashMap::new(),
             audit_log: Vec::new(),
+            audit_stages: Vec::new(),
+            stage: 0,
             cleared: BTreeSet::new(),
         }
     }
@@ -367,6 +375,43 @@ impl TaintGate {
         &self.audit_log
     }
 
+    /// Decide what follows in `stage`, the stage the run is in.
+    pub(crate) fn at_stage(&mut self, stage: usize) {
+        self.stage = stage;
+    }
+
+    /// The events decided in `stage`, oldest first: what its audit file
+    /// holds.
+    pub(crate) fn stage_audit(&self, stage: usize) -> Vec<&GateEvent> {
+        self.audit_log
+            .iter()
+            .zip(&self.audit_stages)
+            .filter(|(_, s)| **s == stage)
+            .map(|(event, _)| event)
+            .collect()
+    }
+
+    /// The stages the events from position `from` on were decided in.
+    pub(crate) fn stages_from(&self, from: usize) -> BTreeSet<usize> {
+        self.audit_stages.iter().skip(from).copied().collect()
+    }
+
+    /// Put back what a run's audit file for `stage` held before the run
+    /// stopped, so what the gate decides next is added to it.
+    pub(crate) fn restore_audit(&mut self, stage: usize, events: Vec<GateEvent>) {
+        self.audit_stages
+            .extend(std::iter::repeat_n(stage, events.len()));
+        self.audit_log.extend(events);
+    }
+
+    /// Forget the last event: a call asked about before a restart is checked
+    /// again when its batch comes back, and the block it meets is the one
+    /// already recorded.
+    pub(crate) fn forget_repeat(&mut self) {
+        self.audit_log.pop();
+        self.audit_stages.pop();
+    }
+
     fn log_event(
         &mut self,
         agent_id: &str,
@@ -376,6 +421,7 @@ impl TaintGate {
         allowed: bool,
         decision_source: GateDecisionSource,
     ) {
+        self.audit_stages.push(self.stage);
         self.audit_log.push(GateEvent {
             timestamp: chrono::Utc::now().timestamp(),
             agent_id: agent_id.to_string(),

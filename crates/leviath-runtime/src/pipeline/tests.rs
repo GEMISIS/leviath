@@ -4216,9 +4216,67 @@ fn dispatch_persistence_persists_taint_audit_when_the_gate_has_events() {
     run_dispatch_persistence(&mut world);
 
     let job = next_snapshot(&mut prx);
-    let (idx, json) = job.taint_audit.expect("taint audit persisted");
-    assert_eq!(idx, 1);
+    let [(idx, json)] = &job.taint_audit[..] else {
+        panic!("one stage's audit: {:?}", job.taint_audit);
+    };
+    assert_eq!(*idx, 1);
     assert!(json.contains("shell"));
+}
+
+/// Each stage's audit file holds what the gate decided in that stage, and
+/// a snapshot carries only the files of the stages that gained events.
+#[test]
+fn dispatch_persistence_writes_each_stage_its_own_audit() {
+    let (mut world, mut prx) = world_with_persistence();
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            infer_with(vec![tc("c_shell", "shell")]),
+            tainted_conv_window(),
+            ReadyForTools,
+            enabled_gate(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
+    s.run(&mut world);
+    run_dispatch_persistence(&mut world);
+    let first = next_snapshot(&mut prx);
+    assert_eq!(
+        first
+            .taint_audit
+            .iter()
+            .map(|(i, _)| *i)
+            .collect::<Vec<_>>(),
+        [0]
+    );
+
+    // The run moves on to stage 1 and the gate decides again there.
+    world.entity_mut(e).insert((
+        StageCursor { index: 1 },
+        infer_with(vec![tc("c_shell2", "shell")]),
+        ReadyForTools,
+    ));
+    world.get_mut::<AgentState>(e).unwrap().iteration += 1;
+    s.run(&mut world);
+    run_dispatch_persistence(&mut world);
+    let second = next_snapshot(&mut prx);
+    let [(idx, json)] = &second.taint_audit[..] else {
+        panic!("only stage 1's audit: {:?}", second.taint_audit);
+    };
+    assert_eq!(*idx, 1);
+    let events: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+    assert_eq!(events.len(), 1, "stage 1 holds only its own: {json}");
+    let gate = world.get::<crate::taint::TaintGate>(e).unwrap();
+    assert_eq!(gate.stage_audit(0).len(), 1);
+    assert_eq!(gate.audit_log().len(), 2);
 }
 
 /// An unchanged audit log is not re-serialized on the next snapshot: the file
@@ -4248,7 +4306,10 @@ fn dispatch_persistence_taint_audit_is_not_rewritten_when_unchanged() {
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
     let first = next_snapshot(&mut prx);
-    assert!(first.taint_audit.is_some(), "first write carries the audit");
+    assert!(
+        !first.taint_audit.is_empty(),
+        "first write carries the audit"
+    );
 
     // Force a heartbeat snapshot with no new gate events: the audit rides
     // along exactly once.
@@ -4260,7 +4321,7 @@ fn dispatch_persistence_taint_audit_is_not_rewritten_when_unchanged() {
     run_dispatch_persistence(&mut world);
     let second = snapshot_job(prx.try_recv().expect("heartbeat job"));
     assert!(
-        second.taint_audit.is_none(),
+        second.taint_audit.is_empty(),
         "an unchanged audit log is not re-serialized"
     );
 }
@@ -4301,17 +4362,17 @@ fn dispatch_persistence_resends_the_taint_audit_on_the_terminal_snapshot() {
     // This is the snapshot the lane would coalesce away: it carried the audit,
     // and it advanced the watermark past it.
     let coalesced = next_snapshot(&mut prx);
-    assert!(coalesced.taint_audit.is_some());
+    assert!(!coalesced.taint_audit.is_empty());
 
     // The run finishes with no further gate events.
     world.get_mut::<AgentState>(e).unwrap().status = AgentStatus::Complete;
     run_dispatch_persistence(&mut world);
 
     let terminal = snapshot_job(prx.try_recv().expect("terminal job"));
-    let (idx, json) = terminal
-        .taint_audit
-        .expect("the terminal snapshot re-sends the audit");
-    assert_eq!(idx, 0);
+    let [(idx, json)] = &terminal.taint_audit[..] else {
+        panic!("the terminal snapshot re-sends the audit");
+    };
+    assert_eq!(*idx, 0);
     assert!(json.contains("shell"), "{json}");
 }
 
@@ -4329,7 +4390,7 @@ fn dispatch_persistence_skips_taint_audit_when_the_gate_is_empty() {
     ));
     run_dispatch_persistence(&mut world);
     let job = snapshot_job(prx.try_recv().expect("persist job"));
-    assert!(job.taint_audit.is_none());
+    assert!(job.taint_audit.is_empty());
 }
 
 #[test]
@@ -8111,6 +8172,12 @@ async fn a_batch_held_on_the_gate_comes_back_asking_under_the_same_ids() {
         .unwrap();
     assert_eq!(reasked.asked["c_shell"], asked["c_shell"]);
     assert_eq!(reasked.asked.len(), 1, "a cleared call is not asked again");
+    let gate = again.get::<crate::taint::TaintGate>(placed).unwrap();
+    assert_eq!(
+        gate.audit_log().len(),
+        0,
+        "the block it is asked over again is already in its audit"
+    );
     for _ in 0..20 {
         tokio::task::yield_now().await;
     }

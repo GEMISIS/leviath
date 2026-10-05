@@ -15,16 +15,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::spec::env::Caller;
 use crate::spec::graph::{FanOutDef, WorkerFailure, WorkerSource};
-use crate::spec::inputs::{CheckCtx, InputDecl, RawInput};
-use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+use crate::spec::inputs::{InputDecl, RawInput, check_inputs_at, worker_decls};
+use crate::spec::issues::{SpawnIssues, SpecPath};
 use crate::spec::launch::LaunchRequest;
 use crate::spec::request::{SpawnRequest, SpawnSource};
 use crate::spec::run_spec::RunSpec;
 use std::path::Path;
-
-/// The input a worker's work item fills when a graph declares none of its
-/// own: the conventional `task` text.
-pub(crate) const TASK_INPUT: &str = "task";
 
 /// One unit of work produced by a fan-out call.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -197,40 +193,25 @@ pub(crate) fn worker_cap(config: &FanOutDef) -> Option<usize> {
     config.max_workers.map(|n| n as usize)
 }
 
-/// Check every item's inputs against the worker graph's declarations.
+/// Check every item's inputs against the worker graph's declarations, as
+/// the worker's own spawn checks them: a name the graph does not declare, a
+/// required input with no value and no default, and a value of the wrong
+/// type.
 ///
 /// Reports every problem at once, each at its item's path
-/// (`items[2].inputs.topic`): a value of the wrong type, and a name the graph
-/// does not declare. The conventional `task` text is always accepted, as the
-/// work item's own description. A required input is not demanded here: a
-/// same-graph worker enters partway through a run whose caller already
-/// supplied it.
-pub(crate) fn check_items(decls: &[InputDecl], items: &[WorkItem]) -> Result<(), SpawnIssues> {
+/// (`items[2].inputs.topic`). A worker that runs a stage of its parent's own
+/// graph (`same_graph`) is not asked for the graph's required inputs: it
+/// enters partway through a run whose caller already gave them.
+pub(crate) fn check_items(
+    decls: &[InputDecl],
+    items: &[WorkItem],
+    same_graph: bool,
+) -> Result<(), SpawnIssues> {
+    let decls = worker_decls(decls, same_graph);
     let mut issues = SpawnIssues::new();
-    let cx = CheckCtx::default();
-    let mut known: Vec<&str> = decls.iter().map(|d| d.name.as_str()).collect();
-    if !known.contains(&TASK_INPUT) {
-        known.push(TASK_INPUT);
-    }
     for (i, item) in items.iter().enumerate() {
         let at = SpecPath::root().field("items").index(i).field("inputs");
-        for (name, raw) in &item.inputs {
-            let path = at.key(name);
-            match decls.iter().find(|d| d.name.as_str() == name) {
-                Some(decl) => {
-                    let _ = decl.ty.check(raw, &path, &cx, &mut issues);
-                }
-                None if name == TASK_INPUT => {}
-                None => issues.push(
-                    SpawnIssue::new(
-                        path,
-                        IssueCode::Unknown,
-                        "the worker declares no such input",
-                    )
-                    .known(known.iter()),
-                ),
-            }
-        }
+        check_inputs_at(&decls, &item.inputs, &at, &mut issues);
     }
     issues.into_result(())
 }
@@ -414,19 +395,20 @@ mod tests {
         assert!(err.contains("absolute directory"), "{err}");
     }
 
+    fn text() -> InputType {
+        InputType::Text {
+            multiline: false,
+            min_len: None,
+            max_len: None,
+        }
+    }
+
     /// A mistyped item is refused at its own path, every problem at once, and
     /// an input the worker does not declare names the ones it does.
     #[test]
     fn a_mistyped_item_is_refused_at_its_path() {
         let decls = vec![
-            decl(
-                "topic",
-                InputType::Text {
-                    multiline: false,
-                    min_len: None,
-                    max_len: None,
-                },
-            ),
+            decl("topic", text()),
             decl(
                 "depth",
                 InputType::Int {
@@ -437,7 +419,6 @@ mod tests {
         ];
         let items = vec![
             item("a", &[("topic", RawInput::Text("rust".into()))]),
-            item("b", &[("task", RawInput::Text("free text".into()))]),
             item(
                 "c",
                 &[
@@ -447,7 +428,7 @@ mod tests {
                 ],
             ),
         ];
-        let issues = check_items(&decls, &items).unwrap_err();
+        let issues = check_items(&decls, &items, true).unwrap_err();
         let lines: Vec<String> = issues
             .iter()
             .map(|i| format!("{} {:?}", i.path, i.code))
@@ -455,32 +436,52 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "items[2].inputs.colour Unknown",
-                "items[2].inputs.depth OutOfRange",
-                "items[2].inputs.topic WrongType",
+                "items[1].inputs.colour Unknown",
+                "items[1].inputs.topic WrongType",
+                "items[1].inputs.depth OutOfRange",
             ]
         );
-        assert_eq!(
-            issues.iter().next().unwrap().known,
-            vec!["topic", "depth", "task"]
-        );
-        assert!(check_items(&decls, &items[..2]).is_ok());
+        assert_eq!(issues.iter().next().unwrap().known, vec!["topic", "depth"]);
+        assert!(check_items(&decls, &items[..1], true).is_ok());
+    }
 
-        // A worker that declares `task` itself has it listed once.
-        let mut with_task = decls.clone();
-        with_task.push(decl(
-            "task",
-            InputType::Text {
-                multiline: false,
-                min_len: None,
-                max_len: None,
+    /// A worker running a blueprint of its own is checked as `spawn_agent`
+    /// checks a child: a required input with no value and no default is
+    /// missing, at its item's path, and a default fills one left out. A
+    /// worker running a stage of its parent's graph is not asked for it.
+    #[test]
+    fn a_blueprint_workers_item_is_held_to_its_required_inputs() {
+        let decls = vec![
+            decl("task", text()),
+            InputDecl {
+                default: Some(crate::spec::inputs::InputValue::Int(1)),
+                ..decl(
+                    "count",
+                    InputType::Int {
+                        min: None,
+                        max: None,
+                    },
+                )
             },
-        ));
-        let issues = check_items(&with_task, &items[2..]).unwrap_err();
+        ];
+        let items = vec![
+            item("x0", &[("task", RawInput::Text("go".into()))]),
+            item("x1", &[("count", RawInput::Int(1))]),
+            item("x2", &[]),
+        ];
+        let issues = check_items(&decls, &items, false).unwrap_err();
+        let lines: Vec<String> = issues
+            .iter()
+            .map(|i| format!("{} {:?}", i.path, i.code))
+            .collect();
         assert_eq!(
-            issues.iter().next().unwrap().known,
-            vec!["topic", "depth", "task"]
+            lines,
+            vec![
+                "items[1].inputs.task Missing",
+                "items[2].inputs.task Missing"
+            ]
         );
+        assert!(check_items(&decls, &items, true).is_ok());
     }
 
     #[test]

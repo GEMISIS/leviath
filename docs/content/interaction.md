@@ -374,12 +374,15 @@ coder-1788924523-abc123-ask-1  [held]  agent=coder-1788924523-abc123
   What colour?
   held: 'coder-1788924523-abc123-ask-1' was asked by run 'coder-1788924523-abc123', which this
   machine cannot take back as it stands, so nothing can answer it yet: configure 'openai' again,
-  then `lev resume` this run. Once the run is back, the question reopens under a new id
+  then `lev resume` this run. Once the run is back, the question is open again, under the same id
+  unless the model asked it with a tool such as ask_user_text, which asks it again under a new one
 ```
 
 `lev respond` and `lev interactions <id>` on it give that same reason instead of `no such open
-interaction`. Put back what it names and resume the run, or restart the daemon. The run asks the
-question again under a new id, and that one is answered as usual. `lev interactions --json` lists
+interaction`. Put back what it names and resume the run, or restart the daemon. The question is
+open again and is answered as usual. A tool approval, a taint gate or a stage checkpoint keeps its
+id. A question the model asked with a tool (`ask_user_*`, `present_for_review`, `edit_document`)
+comes back under a new id, because the run dispatches that call again. `lev interactions --json` lists
 only questions that can be answered, so a held one is not in it.
 
 The API and GraphQL say the same. Reading or answering it over REST is a `409` whose `error` is

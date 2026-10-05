@@ -28,7 +28,7 @@ fn job(run_id: &str) -> PersistJob {
         meta: meta(run_id),
         output_appends: vec![],
         log_appends: vec![],
-        taint_audit: None,
+        taint_audit: Vec::new(),
         final_output: None,
         run_file: None,
     }
@@ -167,6 +167,32 @@ async fn a_superseded_snapshots_stage_lines_still_reach_the_stage_log() {
     assert_eq!(logs.lines().collect::<Vec<_>>(), ["[a]", "[b]"]);
 }
 
+/// A snapshot superseded in its batch still has its stages' audit files
+/// written: a stage the newer one does not carry keeps the superseded one's,
+/// and a stage both carry gets the newer, whole audit.
+#[tokio::test]
+async fn a_superseded_snapshots_audit_files_still_reach_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let audits = |audits: &[(usize, &str)]| {
+        PersistMsg::Snapshot(Box::new(PersistJob {
+            taint_audit: audits.iter().map(|(i, a)| (*i, a.to_string())).collect(),
+            ..job("run-gated")
+        }))
+    };
+    run_lane(
+        dir.path(),
+        vec![
+            audits(&[(0, "[\"zero\"]"), (1, "[\"one\"]")]),
+            audits(&[(1, "[\"one\",\"two\"]")]),
+        ],
+    )
+    .await;
+    let stages = dir.path().join("run-gated").join("stages");
+    let read = |i: &str| std::fs::read_to_string(stages.join(i).join("taint_audit.json")).unwrap();
+    assert_eq!(read("0"), "[\"zero\"]");
+    assert_eq!(read("1"), "[\"one\",\"two\"]");
+}
+
 /// A snapshot writes its run's step into the run file, and the run file is
 /// the only file it writes.
 #[tokio::test]
@@ -195,7 +221,7 @@ async fn every_file_beside_the_run_file_is_private_to_this_user() {
     let dir = tempfile::tempdir().unwrap();
     let mut j = job("run-perms");
     j.final_output = Some("the answer".to_string());
-    j.taint_audit = Some((0, "[]".to_string()));
+    j.taint_audit = vec![(0, "[]".to_string())];
     j.log_appends = vec![(0, "a line".to_string())];
     j.output_appends = vec![(0, "said".to_string())];
     let outcome = write_snapshot(dir.path(), &j, None).await;
@@ -530,7 +556,7 @@ async fn a_lost_write_keeps_the_first_loss() {
     .unwrap();
     let mut j = job("r");
     j.final_output = Some("x".to_string());
-    j.taint_audit = Some((0, "[]".to_string()));
+    j.taint_audit = vec![(0, "[]".to_string())];
     let outcome = write_snapshot(dir.path(), &j, None).await;
     // A file that was not placed is not named.
     assert_eq!(outcome.named, RunFiles::default());
@@ -551,7 +577,7 @@ async fn the_files_beside_a_run_are_named_by_its_step_and_never_copied_in() {
     let answer = "an answer long enough to find in the run file ".repeat(40);
     let mut first = *stepped("run-1");
     first.final_output = Some(answer.clone());
-    first.taint_audit = Some((1, "[\"audit\"]".to_string()));
+    first.taint_audit = vec![(1, "[\"audit\"]".to_string())];
     first.output_appends = vec![(0, "said".to_string())];
     first.log_appends = vec![(0, "a line".to_string()), (0, "another".to_string())];
     run_lane(

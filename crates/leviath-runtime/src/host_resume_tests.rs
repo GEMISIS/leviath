@@ -48,6 +48,7 @@ fn resumable(priced_usd: f64, status: RunStatus) -> Resumable {
         code: Default::default(),
         answer: None,
         asked: 0,
+        audit: Vec::new(),
     }
 }
 

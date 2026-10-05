@@ -51,6 +51,50 @@ fn a_run_comes_back_from_its_file_at_its_last_step() {
     assert_eq!(placed.0.run_id, spec().run_id);
 }
 
+/// What the taint gate decided before the run stopped comes back with it,
+/// stage by stage, read from each stage's audit file whatever the run file
+/// last named, so what the gate decides next is added to it. A file that
+/// does not read is left out.
+#[test]
+fn a_run_comes_back_with_its_taint_audit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(leviath_core::files::RUN_FILE);
+    write_run(&path, &scripted_run(2), Default::default());
+    let event = leviath_core::taint::GateEvent {
+        timestamp: 1,
+        agent_id: "run".into(),
+        tool_name: "shell".into(),
+        taint_level: leviath_core::TaintLevel::Private,
+        clearance: leviath_core::TaintLevel::Public,
+        allowed: false,
+        decision_source: leviath_core::taint::GateDecisionSource::AutoBlock,
+    };
+    let stages = dir.path().join("stages");
+    std::fs::create_dir_all(stages.join("0")).unwrap();
+    std::fs::write(
+        stages.join("0/taint_audit.json"),
+        serde_json::to_vec(&[&event]).unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(stages.join("1")).unwrap();
+    std::fs::write(stages.join("1/taint_audit.json"), b"not json").unwrap();
+    let run = read_for_resume(dir.path()).unwrap().expect("a run file");
+    let read: Vec<(usize, usize)> = run.audit.iter().map(|(s, e)| (*s, e.len())).collect();
+    assert_eq!(read, [(0, 1)]);
+    let mut world = World::new();
+    let gate = crate::taint::TaintGate::new(leviath_core::SecurityConfig {
+        taint_tracking: true,
+    });
+    let entity = resume(
+        &mut world,
+        run,
+        crate::spec::env::Bindings::new().with(gate),
+    );
+    let gate = world.get::<crate::taint::TaintGate>(entity).unwrap();
+    assert_eq!(gate.stage_audit(0).len(), 1);
+    assert_eq!(gate.stages_from(0).into_iter().collect::<Vec<_>>(), [0]);
+}
+
 /// The issues a run was held for, as a held run's file records them.
 fn held_issues() -> crate::spec::issues::SpawnIssues {
     crate::spec::issues::SpawnIssue::new(
@@ -147,6 +191,7 @@ fn resumable(depth: u8, created_at: i64, status: RunStatus, phase: PipelinePhase
         code: Default::default(),
         answer: None,
         asked: 0,
+        audit: Vec::new(),
     }
 }
 

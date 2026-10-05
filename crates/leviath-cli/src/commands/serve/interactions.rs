@@ -1016,7 +1016,7 @@ mod tests {
                         .to_string();
                     assert!(error.contains("run 'held-1'"), "{error}");
                     assert!(error.contains("configure 'openai' again"), "{error}");
-                    assert!(error.contains("new id"), "{error}");
+                    assert!(error.contains("open again"), "{error}");
                 }
             }
             // Any other run, and any other question, is still not found.

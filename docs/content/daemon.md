@@ -121,8 +121,10 @@ it arrives. On reload the daemon uses the journal to work out what actually happ
   asked again. A question has no effect to check, and nothing after it in the batch had started, so
   the batch is dispatched again with its finished calls' results carried over. The question comes
   back in `lev interactions` under a new request id, and the run shows as waiting on it, as it did
-  before the restart. A taint-gate prompt is not yet among these: its call is not journaled until
-  you answer, so the run asks the model again instead.
+  before the restart.
+- **A call held for a tool approval or at the taint gate** had not been sent, so it is put to you
+  again under the same id, and the model is not asked for the turn again. The taint gate's audit
+  in `stages/<n>/taint_audit.json` keeps what it decided before the restart, once.
 - **A crash in the instant between an effect landing and the journal recording it** is the one gap
   this cannot close, because no journal can watch an external side effect happen atomically. Those
   calls come back as the same check-first error rather than being quietly re-run.
@@ -166,6 +168,11 @@ A run's files are hard links rather than copies, so the backup costs no extra di
 run's own `legacy/` folder holds the same files. Its stage logs are copied instead, because they
 stay in the run's directory, where a resumed run adds to them. One backup is kept per release, and Leviath never
 deletes anything in it. An item that cannot be saved is left exactly as it was.
+
+The backup is the old home as it was, secrets included. A run whose webhook was signed keeps its
+secret there in plain text, in `meta.json` and the old journal, while the converted run keeps it
+only in the secret store. Guard the backup as you guarded the old home, and delete it once you no
+longer need to go back.
 
 On a large home this takes a while: about 18 seconds for a thousand runs. The daemon answers
 meanwhile, so any `lev` command waiting on it shows what it is doing and how far along it is.

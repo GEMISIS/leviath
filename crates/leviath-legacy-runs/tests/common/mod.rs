@@ -140,6 +140,45 @@ impl Run {
         self.json("meta.json", |v| v["callback_secret"] = secret.into());
     }
 
+    /// Write `secret` into every journal record that carries the run's
+    /// metadata, as an earlier release's journal held it.
+    pub fn sign_journal(&self, secret: &str) {
+        let frames: Vec<Vec<u8>> = raw_frames(&std::fs::read(self.path("run.lvr")).unwrap())
+            .into_iter()
+            .map(|frame| {
+                let mut v: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+                for (_, record) in v.as_object_mut().unwrap() {
+                    if let Some(meta) = record.get_mut("meta") {
+                        meta["callback_secret"] = secret.into();
+                    }
+                }
+                serde_json::to_vec(&v).unwrap()
+            })
+            .collect();
+        std::fs::write(self.path("run.lvr"), journal_bytes(&frames)).unwrap();
+    }
+
+    /// Every file under the run's directory that holds `needle`: read raw,
+    /// and a run file also frame by frame once decompressed.
+    pub fn files_holding(&self, needle: &str) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        walk(&self.dir, &mut |path| {
+            let bytes = std::fs::read(path).unwrap();
+            let mut held = contains(&bytes, needle);
+            if codec::check_header(&bytes, leviath_runtime::runfile::fingerprint()).is_ok() {
+                let (frames, _) = codec::frames(&bytes);
+                held |= frames.iter().any(|f| {
+                    let plain = zstd::stream::decode_all(&bytes[f.body..f.body + f.len]).unwrap();
+                    contains(&plain, needle)
+                });
+            }
+            if held {
+                found.push(path.to_path_buf());
+            }
+        });
+        found
+    }
+
     /// The secret store beside the runs this run is converted among.
     pub fn store(&self) -> leviath_runtime::secret_store::SecretStore {
         leviath_runtime::secret_store::SecretStore::of_run_dir(&self.dir)
@@ -206,4 +245,45 @@ impl RunFile {
         }
         state
     }
+}
+
+/// Whether `needle` is in `bytes`.
+pub fn contains(bytes: &[u8], needle: &str) -> bool {
+    bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
+fn walk(dir: &Path, each: &mut dyn FnMut(&Path)) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        match path.is_dir() {
+            true => walk(&path, each),
+            false => each(&path),
+        }
+    }
+}
+
+/// The payload of each whole frame of an old journal.
+pub fn raw_frames(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut rest = &bytes[journal::MAGIC.len() + 2..];
+    let mut out = Vec::new();
+    while rest.len() >= 8 {
+        let len = u64::from_be_bytes(rest[..8].try_into().unwrap()) as usize;
+        if rest.len() < 8 + len {
+            break;
+        }
+        out.push(rest[8..8 + len].to_vec());
+        rest = &rest[8 + len..];
+    }
+    out
+}
+
+/// An old journal holding `frames`.
+pub fn journal_bytes(frames: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = journal::MAGIC.to_vec();
+    out.extend(1u16.to_be_bytes());
+    for f in frames {
+        out.extend((f.len() as u64).to_be_bytes());
+        out.extend(f);
+    }
+    out
 }

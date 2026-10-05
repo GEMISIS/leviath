@@ -141,9 +141,10 @@ workspace. Every item starts one worker, they all run at once, and the call retu
 report covering all of them. Three things are worth knowing:
 
 **Each item's `inputs` are everything its worker gets.** They are the inputs the worker's blueprint
-declares, each checked against its type before any worker starts. That is this blueprint's inputs
-for a stage worker, and the named blueprint's otherwise. One item that does not fit refuses the
-whole call, with every problem at its item's path, and nothing starts. A worker is a separate agent
+declares, checked before any worker starts the way `spawn_agent` checks them. That is this
+blueprint's inputs for a stage worker, and the named blueprint's otherwise. One item that does not
+fit refuses the whole call, with every problem at its item's path (`items[0].inputs.task: missing`),
+and nothing starts. A worker is a separate agent
 with a clean context window and never sees the caller's conversation, so a reference to "the topic
 above" reaches nobody.
 
@@ -267,13 +268,15 @@ ended a `deep-researcher` run whose four workers had already finished.
 A worker is spawned from its work item's `inputs`, the way `lev run --input` hands them in. So the
 worker's blueprint must declare every input its items carry, usually `task`, bound to a region that
 receives it. For a `{ stage = "x" }` worker, that is this blueprint's own `[[graph.inputs]]`. Every
-item is checked against them before any worker starts, and a name nothing declares is refused at
-its item's path. `task` is the one exception: it passes that check undeclared, and then every
-worker is refused as it starts. Declare it.
+item is checked against them before any worker starts: a name nothing declares, a value of the wrong
+type, and an input the worker requires that the item leaves out with no default to fall back on.
+Each is refused at its item's path.
 
-The inputs the blueprint requires of a run started from the outside, a `--diff` say, are not
-demanded of the worker. The parent met that contract, and the worker's share of the diff travels
-inside its work item.
+A `{ stage = "x" }` worker is the one exception to the last of these. The inputs this blueprint
+requires of a run started from the outside, a `--diff` say, are not demanded of its own workers.
+The parent met that contract, and the worker's share of the diff travels inside its work item. A
+worker that runs another blueprint is held to that blueprint's required inputs, as a child started
+with `spawn_agent` is.
 
 ### A worker that is a whole other agent
 

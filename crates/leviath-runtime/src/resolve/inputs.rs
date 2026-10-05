@@ -7,6 +7,7 @@ use crate::spec::env::{Caller, ResolveEnv};
 use crate::spec::graph::{OutputDef, RunGraph, StageMode};
 use crate::spec::inputs::{
     CheckCtx, InputDecl, InputSlot, InputType, InputValue, InputValues, PathKind, check_inputs,
+    worker_decls,
 };
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::names::ModelRef;
@@ -30,9 +31,9 @@ pub(super) struct Checked {
 /// against the attached file's real type, and a `path` input that must exist
 /// against the workdir.
 ///
-/// A fan-out worker is not held to the inputs the graph requires: its work
-/// item is its input, and its parent's caller gave the ones the graph asks
-/// for.
+/// A fan-out worker that runs a stage of its parent's graph is not held to
+/// the inputs the graph requires: its parent's caller gave them. A worker
+/// running a blueprint of its own is held to them, as a child is.
 pub(super) fn check(
     graph: &RunGraph,
     request: &SpawnRequest,
@@ -46,16 +47,8 @@ pub(super) fn check(
     let cx = CheckCtx {
         attachments: &names,
     };
-    let decls: Vec<InputDecl> = match caller {
-        Caller::Worker { .. } => graph
-            .inputs
-            .iter()
-            .cloned()
-            .map(|decl| InputDecl {
-                required: false,
-                ..decl
-            })
-            .collect(),
+    let decls = match caller {
+        Caller::Worker { stage, .. } => worker_decls(&graph.inputs, stage.is_some()),
         Caller::TopLevel | Caller::Child { .. } => graph.inputs.clone(),
     };
     let mut checked = match check_inputs(&decls, &request.inputs, &cx) {

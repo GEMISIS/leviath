@@ -1224,7 +1224,8 @@ with the same fields, and `held` says what to put back:
 ```
 
 `answerInteraction` on a held question fails with the code `RUN_HELD`, and the message is the same
-reason. Once the run is back it asks again under a new id, which `openInteractions` lists as usual.
+reason. Once the run is back, `openInteractions` lists the question as usual. It keeps its id unless
+the model asked it with a tool such as `ask_user_text`, which asks it again under a new one.
 `held` is null on every question that is not held.
 
 ### Blueprint writes

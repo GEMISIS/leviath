@@ -44,8 +44,10 @@ pub(crate) struct PersistJob {
     /// Operational log lines to append to `stages/<idx>/logs.log`.
     pub log_appends: Vec<(usize, String)>,
     /// `(stage_index, serialized GateEvent log)` to write to
-    /// `stages/<idx>/taint_audit.json`. `None` ⇒ no audit to persist.
-    pub taint_audit: Option<(usize, String)>,
+    /// Each stage's taint audit to write whole, as `(stage index, JSON)`,
+    /// to `stages/<idx>/taint_audit.json`. Empty when no stage's audit
+    /// changed.
+    pub taint_audit: Vec<(usize, String)>,
     /// The run's answer, to write to its `final_output` sidecar. `None` ⇒
     /// nothing to write this job, either because the run has no answer or
     /// because the one it has is already on disk.
@@ -60,9 +62,13 @@ pub(crate) struct PersistJob {
     pub run_file: Option<Box<crate::runfile::lane::RunFileStep>>,
 }
 
-/// Output lines and log lines for a run's stage logs, each tagged with its
-/// stage index.
-type StageLineSet = (Vec<(usize, String)>, Vec<(usize, String)>);
+/// Output lines and log lines for a run's stage logs, and its stages' taint
+/// audit files, each tagged with its stage index.
+type StageLineSet = (
+    Vec<(usize, String)>,
+    Vec<(usize, String)>,
+    Vec<(usize, String)>,
+);
 
 /// What became of one append.
 ///
@@ -199,9 +205,9 @@ pub(crate) async fn persistence_worker(
             }
         }
         // What a superseded snapshot carried besides its state, kept for the
-        // run's next message: its stage lines for the newest snapshot, which
-        // writes them first, and its events and waiters for the next step.
-        // The state is replaced; what happened is not.
+        // run's next message: its stage lines and audit files for the newest
+        // snapshot, which writes them first, and its events and waiters for
+        // the next step. The state is replaced; what happened is not.
         let mut carried: std::collections::HashMap<String, StageLineSet> =
             std::collections::HashMap::new();
         let mut happened = Happened::default();
@@ -213,15 +219,20 @@ pub(crate) async fn persistence_worker(
                         let kept = carried.entry(job.run_id.clone()).or_default();
                         kept.0.append(&mut job.output_appends);
                         kept.1.append(&mut job.log_appends);
+                        kept.2.append(&mut job.taint_audit);
                         if let Some(step) = job.run_file.take() {
                             happened.keep(*step);
                         }
                         continue;
                     }
-                    if let Some((mut output, mut logs)) = carried.remove(&job.run_id) {
+                    if let Some((mut output, mut logs, audits)) = carried.remove(&job.run_id) {
                         output.append(&mut job.output_appends);
                         logs.append(&mut job.log_appends);
                         (job.output_appends, job.log_appends) = (output, logs);
+                        // The newest audit of each stage is the whole of it.
+                        let newest: std::collections::BTreeMap<usize, String> =
+                            audits.into_iter().chain(job.taint_audit).collect();
+                        job.taint_audit = newest.into_iter().collect();
                     }
                     let step = happened.onto(&job.run_id, job.run_file.take());
                     if !may_write(&runs_dir, &job.run_id, &mut staked, true) {
@@ -622,7 +633,7 @@ async fn write_snapshot(
     )
     .await;
     // Per-stage taint audit (whole-file, atomic).
-    if let Some((idx, json)) = &job.taint_audit {
+    for (idx, json) in &job.taint_audit {
         let index = u32::try_from(*idx).unwrap_or(u32::MAX);
         let path = StageFile::TaintAudit.path(index);
         let target = dir.join(&path);

@@ -554,7 +554,11 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
             }
         };
         if let Some(decls) = decls
-            && let Err(issues) = items::check_items(&decls, &request.items)
+            && let Err(issues) = items::check_items(
+                &decls,
+                &request.items,
+                matches!(config.worker, WorkerSource::Stage(_)),
+            )
         {
             answer_call(
                 world,

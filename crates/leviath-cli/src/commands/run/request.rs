@@ -271,8 +271,11 @@ pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
     }
     // With problems already found, nobody is asked for a task: the run is
     // refused whatever they type, so the request goes on without it and the
-    // daemon says what else is wrong.
-    let ask_for_task = !line.check && issues.is_empty();
+    // daemon says what else is wrong. A `--request` file is the whole
+    // request, so a task it leaves out is not asked for either: the daemon
+    // reports it with every other problem in the file, as `--check` does.
+    let whole_request = line.request_file.is_some();
+    let ask_for_task = !line.check && !whole_request && issues.is_empty();
     let mut parts = line.parts;
     parts.extend(read.parts);
     let mut unresolved = read.unresolved;
@@ -287,7 +290,7 @@ pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
         && !source.request.inputs.contains_key(TASK_INPUT)
     {
         let handed_in = !source.request.inputs.is_empty() || !parts.is_empty();
-        task_unasked = !line.check && !ask_for_task && given_task.is_none();
+        task_unasked = !line.check && !whole_request && !ask_for_task && given_task.is_none();
         let waived = (handed_in && !decl.required) || !ask_for_task;
         let task = match (given_task, waived) {
             (None, true) => String::new(),

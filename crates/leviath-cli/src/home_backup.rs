@@ -176,6 +176,9 @@ impl Backup {
              read, so it leaves them out of lev ps. An earlier release started without these \
              steps changes nothing, but lists no runs and no installed blueprints: every run is \
              a run file and every blueprint an agent.toml, and it reads neither.\n\n\
+             This folder holds the old home as it was, secrets included: a run whose webhook \
+             was signed keeps its secret here in plain text, in meta.json and run.lvr. Guard \
+             it as you guarded the old home.\n\n\
              Leviath never deletes anything here. Delete it yourself once you no longer need it.\n",
             env!("CARGO_PKG_VERSION")
         );

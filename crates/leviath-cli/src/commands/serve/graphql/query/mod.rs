@@ -564,7 +564,9 @@ impl Query {
     /// None of these can be answered yet, which is why they are not in
     /// `openInteractions`. Each says what to put back in `held`; answering
     /// one is refused with `RUN_HELD`, and once its run is back the question
-    /// reopens under a new id and is listed in `openInteractions`.
+    /// is listed in `openInteractions`: under the same id, unless the model
+    /// asked it with a tool such as `ask_user_text`, which asks it again under
+    /// a new one.
     #[graphql(complexity = "weight(first, child_complexity)")]
     async fn held_interactions(
         &self,

@@ -52,12 +52,13 @@ pub struct PersistWatermark {
     /// run keeps a fresh one. This is the timestamp `lev ps` ages its
     /// rows against.
     last_progress_at: Option<i64>,
-    /// The taint audit already on disk, as `(stage index, event count)`.
+    /// How many of the taint gate's events a snapshot has already carried.
     ///
-    /// The audit file is only rewritten when the gate recorded a new event.
-    /// Without it every snapshot re-serializes the whole (append-only) log,
-    /// an O(events) allocation per tick that grows with the run.
-    last_taint: Option<(usize, usize)>,
+    /// A stage's audit file is only rewritten when the gate recorded a new
+    /// event in that stage. Without it every snapshot re-serializes the whole
+    /// (append-only) log, an O(events) allocation per tick that grows with
+    /// the run.
+    taint_carried: usize,
     /// The run's `(title, title_error)` as of the last snapshot.
     ///
     /// A title arrives on its own schedule: it is generated beside the run's
@@ -703,40 +704,35 @@ fn build_snapshots(
                 active,
             },
         );
-        // Persist the taint gate's audit log (per-stage) when it gained events
-        // since the last write, so security decisions are inspectable after
-        // the fact. The log is append-only, so an unchanged (stage, count)
-        // means the file on disk is already current - re-serializing the whole
-        // log every heartbeat was an O(events) allocation that grew with the
-        // run.
+        // Persist the taint gate's audit, one file per stage holding the events
+        // decided in that stage, for each stage that gained events since the
+        // last snapshot, so security decisions are inspectable after the fact.
+        // The log is append-only, so a stage with no new events has its file
+        // current already. The lane carries a superseded snapshot's audit files
+        // over to the snapshot that replaces it, so none is lost to coalescing.
         //
-        // ...except on the snapshot that records the run going terminal, which
-        // always carries the whole log. The watermark advances when the job is
-        // *built*, but the lane coalesces superseded snapshots away (keeping
-        // only the newest per run), so a job whose audit was dropped there
-        // leaves the watermark claiming a write that never happened. Mid-run
-        // that self-heals: the next gate event makes the count differ again and
-        // the whole log is rewritten. The last events before the run ends have
-        // no "next event", so without this they were lost for good - which is
-        // how a `--yolo` run's waived block (`YoloAutoApprove`) reached disk
-        // after a `shell` call and not after an inline `submit_output`, the one
-        // finishing fast enough to be coalesced. Same failure shape as issue
-        // #276, which fixed it for the `final_output` sidecar.
+        // The snapshot that records the run going terminal carries every
+        // stage's file whatever the count says, so the run's last word on disk
+        // is the whole audit.
         let final_snapshot = is_terminal_status(&state.status) && watermark_changed;
         let taint_audit = taint_gate
-            .filter(|g| !g.audit_log().is_empty())
-            .and_then(|g| {
-                let key = (cursor.index, g.audit_log().len());
-                if watermark.last_taint == Some(key) && !final_snapshot {
-                    return None;
-                }
-                watermark.last_taint = Some(key);
-                Some((
-                    cursor.index,
-                    serde_json::to_string(g.audit_log())
-                        .expect("GateEvent slice always serializes"),
-                ))
-            });
+            .map(|g| {
+                let from = match final_snapshot {
+                    true => 0,
+                    false => watermark.taint_carried,
+                };
+                watermark.taint_carried = g.audit_log().len();
+                g.stages_from(from)
+                    .into_iter()
+                    .map(|stage| {
+                        let events = g.stage_audit(stage);
+                        let json = serde_json::to_string(&events)
+                            .expect("GateEvent slice always serializes");
+                        (stage, json)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         // Always carry the answer's bytes when the agent holds them; the
         // persistence lane decides whether they still need writing.
         //

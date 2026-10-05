@@ -183,6 +183,8 @@ while a task is usually a sentence.
 of naming a blueprint. Its `source` names an installed blueprint, a blueprint directory, or a whole
 raw graph. Any input or launch flag given beside it lands on the request too, over what the file
 says. `lev schema spawn-request` prints what a request may hold, and unknown keys are refused.
+The file is the whole request, so `lev run` asks for no task it leaves out. A run it cannot start
+is refused with every problem in it, the same list `--check` prints.
 
 ```toml
 # nightly.toml

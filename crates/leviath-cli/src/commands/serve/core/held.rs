@@ -4,8 +4,11 @@
 //! the hub has nothing open for it and its question is in no listing the
 //! daemon keeps. The question is still on the run's file, and the daemon
 //! lists the run as held with what to put back. Nothing can answer such a
-//! question while the run is held: once the run is placed again, its
-//! question is asked anew under a new id.
+//! question while the run is held. Once the run is placed again, its
+//! question is open again: a tool approval, a taint gate or a stage
+//! checkpoint under the same id, and a question the model asked with a tool
+//! (`ask_user_*`, `present_for_review`, `edit_document`) under a new one,
+//! because that tool call is dispatched again.
 //!
 //! Every surface reads them here and says the same thing about them: the CLI
 //! lists them marked held, GraphQL as `heldInteractions`, and an answer or a
@@ -36,8 +39,9 @@ impl HeldQuestion {
     pub(crate) fn refusal(&self) -> String {
         format!(
             "'{}' was asked by run '{}', which this machine cannot take back as it stands, so \
-             nothing can answer it yet: {}. Once the run is back, the question reopens under a \
-             new id",
+             nothing can answer it yet: {}. Once the run is back, the question is open again, \
+             under the same id unless the model asked it with a tool such as ask_user_text, \
+             which asks it again under a new one",
             self.question.id, self.run_id, self.remedy
         )
     }

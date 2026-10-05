@@ -34,8 +34,8 @@ pub(crate) enum ServeError {
 
     /// The question named was asked by a run the daemon holds off this
     /// machine: its provider was taken away, say. Nothing can answer it until
-    /// the run is back, and then it is asked anew under a new id, so the
-    /// remedy is to put back what the message names, not to answer again.
+    /// the run is back, so the remedy is to put back what the message names,
+    /// not to answer again.
     #[error("{0}")]
     Held(String),
 

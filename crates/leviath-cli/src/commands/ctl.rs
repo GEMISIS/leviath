@@ -573,7 +573,7 @@ fn held_refusal(typed: &str, held: &[HeldQuestion]) -> Option<String> {
     let h = held
         .iter()
         .find(|h| !typed.is_empty() && h.question.id.starts_with(typed))?;
-    Some(format!("{}, which `lev interactions` lists", h.refusal()))
+    Some(format!("{}. `lev interactions` lists it then", h.refusal()))
 }
 
 /// `err`, or why `typed` cannot be answered when a held run asked it.

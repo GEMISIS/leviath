@@ -579,6 +579,49 @@ fn a_request_file_is_sent_with_the_flags_over_it() {
     assert!(err.contains("[[graph.inputs]]"), "{err}");
 }
 
+/// A request file is the whole request: a task it leaves out is not asked
+/// for, so the daemon reports it with every other problem in the file, the
+/// same list `--check` prints.
+#[test]
+fn a_request_file_without_a_task_is_not_asked_for_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut graph =
+        leviath_blueprint::BlueprintFile::parse(&crate::test_support::inline_coder_manifest())
+            .unwrap()
+            .graph;
+    for decl in &mut graph.inputs {
+        decl.required = true;
+    }
+    let mut request = SpawnRequest::new(SpawnSource::Raw(Box::new(graph)));
+    request
+        .inputs
+        .insert("bogus".to_string(), RawInput::Text("x".into()));
+    let file = dir.path().join("run.json");
+    std::fs::write(&file, serde_json::to_string(&request).unwrap()).unwrap();
+    for check in [false, true] {
+        let run = run_request(RunLine {
+            request_file: Some(&file),
+            check,
+            ..RunLine::new(None, "/mine", dir.path())
+        })
+        .expect("nobody is asked for a task");
+        assert!(run.issues.is_empty());
+        assert!(!run.task_unasked);
+        assert!(!run.request.inputs.contains_key(TASK_INPUT));
+        // The daemon's word on the missing task is reported with the rest.
+        let task = SpecPath::root().field("inputs").key(TASK_INPUT);
+        let daemon = SpawnIssues(vec![
+            SpawnIssue::new(
+                SpecPath::root().field("inputs").key("bogus"),
+                IssueCode::Unknown,
+                "nothing declares this input",
+            ),
+            SpawnIssue::new(task.clone(), IssueCode::Missing, "this input is required"),
+        ]);
+        assert_eq!(merged_issues(&run, daemon).iter().count(), 2);
+    }
+}
+
 /// A request file names what it runs, so naming a blueprint as well is
 /// refused; one that is not there, or not a request, says so.
 #[test]

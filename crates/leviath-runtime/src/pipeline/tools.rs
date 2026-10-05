@@ -754,6 +754,7 @@ pub(crate) fn dispatch_tools(
             if let Some(gate) = gate.as_deref_mut()
                 && !cleared
             {
+                gate.at_stage(cursor.map_or(0, |c| c.index));
                 let decision = gate.check_with_policy(
                     &state.agent_id,
                     &c.name,
@@ -762,6 +763,12 @@ pub(crate) fn dispatch_tools(
                     policy_ref,
                     script_checker,
                 );
+                // A call put to a person before a restart meets the block it
+                // was put to them over, which its audit already holds.
+                let asked_before = hold.is_some_and(|h| h.0.asked.contains_key(&c.tool_id));
+                if asked_before && !decision.is_allowed() {
+                    gate.forget_repeat();
+                }
                 if !decision.is_allowed() {
                     if auto_approve_gates {
                         // `--yolo`: waive enforcement but record the override in

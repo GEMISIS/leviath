@@ -24,7 +24,7 @@ async fn the_questions_of_held_runs_are_read_off_their_files() {
             "{why}"
         );
         assert!(why.contains("configure 'openai' again"), "{why}");
-        assert!(why.ends_with("reopens under a new id"), "{why}");
+        assert!(why.ends_with("asks it again under a new one"), "{why}");
     })
     .await;
 }

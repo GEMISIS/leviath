@@ -469,7 +469,9 @@ impl Interaction {
     /// Why nothing can answer this yet, and what to put back, for a question
     /// asked by a run the daemon holds off this machine (`heldInteractions`
     /// lists them). Answering one is refused with `RUN_HELD`; once the run is
-    /// back, the question reopens under a new id. Null for every other.
+    /// back, the question is open again, under the same id unless the model
+    /// asked it with a tool such as `ask_user_text`, which asks it again
+    /// under a new one. Null for every other.
     #[filter(skip)]
     async fn held(&self) -> Option<String> {
         self.held.as_ref().map(|held| held.refusal())

@@ -366,8 +366,9 @@ once the daemon has it and `404` when nothing with that id is open.
 A run the daemon holds off the machine, because its provider was taken out of the config say, keeps
 the question it was waiting on and nothing can answer it. Both the `GET` and the `POST` on that
 question answer `409`, on these routes and on their `/api/agents` twins. The `error` names the run
-and what to put back. Once the run is back it asks again under a new id, and that one is answered
-as usual. See [a question on a held run](/docs/interaction#a-question-on-a-held-run).
+and what to put back. Once the run is back, the question is open again and is answered as usual. It
+keeps its id unless the model asked it with a tool such as `ask_user_text`, which asks it again under
+a new one. See [a question on a held run](/docs/interaction#a-question-on-a-held-run).
 
 ```json
 {"request_id": "coder-1788924523-abc123-approve-1", "option": "allow-run"}

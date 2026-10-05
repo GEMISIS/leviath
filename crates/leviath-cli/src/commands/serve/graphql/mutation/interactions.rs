@@ -156,7 +156,7 @@ impl AnswerInteractionRequest {
 /// on the client's part: two people clicking one prompt is ordinary, and it
 /// reads as `ALREADY_SETTLED` rather than as a failure. A question a held run
 /// asked is an error coded `RUN_HELD`, saying what to put back: nothing can
-/// answer it until the run is back, and then it reopens under a new id. An id
+/// answer it until the run is back, and then it is open again. An id
 /// that no run on this machine asked is an error coded `NOT_FOUND`, the miss
 /// REST answers 404 to.
 pub(crate) async fn answer_interaction(

@@ -1100,9 +1100,8 @@ async fn an_id_no_run_asked_is_not_found() {
 }
 
 /// Answering a question a held run asked is an error coded `RUN_HELD` saying
-/// what to put back, not `ALREADY_SETTLED`: nothing settled it, and it
-/// reopens under a new id once the run is back. Named by its option's word
-/// too.
+/// what to put back, not `ALREADY_SETTLED`: nothing settled it, and it is
+/// open again once the run is back. Named by its option's word too.
 #[tokio::test]
 async fn answering_a_held_runs_question_is_run_held() {
     use crate::commands::serve::core::held::{listing, seed_held};
@@ -1130,7 +1129,7 @@ async fn answering_a_held_runs_question_is_run_held() {
             let message = &refused.errors[0].message;
             assert!(message.contains("run 'held-1'"), "{message}");
             assert!(message.contains("configure 'openai' again"), "{message}");
-            assert!(message.contains("new id"), "{message}");
+            assert!(message.contains("open again"), "{message}");
         }
     })
     .await;

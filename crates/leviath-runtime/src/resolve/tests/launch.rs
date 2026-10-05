@@ -165,10 +165,12 @@ async fn a_worker_is_not_held_to_required_regions_or_a_task() {
     assert_eq!(found(&issues), ["inputs.task Missing"]);
 }
 
-/// The inputs a graph requires of its caller were given to a worker's
-/// parent, so a worker is not asked for them again; anyone else is.
+/// The inputs a graph requires of its caller were given to the parent of a
+/// worker that runs a stage of the same graph, so that worker is not asked
+/// for them again. A worker running a blueprint of its own is asked, as
+/// `spawn_agent` would be, and so is anyone else.
 #[tokio::test]
-async fn a_worker_is_not_held_to_the_graphs_required_inputs() {
+async fn only_a_same_graph_worker_is_spared_the_graphs_required_inputs() {
     let mut g = graph();
     g.inputs.push(crate::spec::inputs::InputDecl {
         required: true,
@@ -177,12 +179,21 @@ async fn a_worker_is_not_held_to_the_graphs_required_inputs() {
     let request = raw(g);
     resolve(
         &request,
+        &worker(Some("build")),
+        &Fake::default(),
+        ResolveMode::Spawn,
+    )
+    .await
+    .expect("a same-graph worker is not asked for the diff");
+    let issues = resolve(
+        &request,
         &worker(None),
         &Fake::default(),
         ResolveMode::Spawn,
     )
     .await
-    .expect("a worker is not asked for the diff");
+    .unwrap_err();
+    assert_eq!(found(&issues), ["inputs.diff Missing"]);
     let issues = spawn(&request, &Fake::default()).await.unwrap_err();
     assert!(found(&issues).contains(&"inputs.diff Missing".to_string()));
 }

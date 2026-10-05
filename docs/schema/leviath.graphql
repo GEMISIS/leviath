@@ -5833,7 +5833,9 @@ type InteractionOutput {
 	Why nothing can answer this yet, and what to put back, for a question
 	asked by a run the daemon holds off this machine (`heldInteractions`
 	lists them). Answering one is refused with `RUN_HELD`; once the run is
-	back, the question reopens under a new id. Null for every other.
+	back, the question is open again, under the same id unless the model
+	asked it with a tool such as `ask_user_text`, which asks it again
+	under a new one. Null for every other.
 	"""
 	held: String
 }
@@ -8029,7 +8031,7 @@ type Mutation {
 	error on the client's part: two people clicking one prompt is ordinary,
 	and it reads as `ALREADY_SETTLED` rather than as a failure. A question
 	a held run asked (see `heldInteractions`) is an error coded `RUN_HELD`,
-	saying what to put back: it reopens under a new id once the run is back.
+	saying what to put back: it is open again once the run is back.
 	An id no run on this machine asked is an error coded `NOT_FOUND`.
 	"""
 	answerInteraction(
@@ -9695,7 +9697,9 @@ type Query {
 	None of these can be answered yet, which is why they are not in
 	`openInteractions`. Each says what to put back in `held`; answering
 	one is refused with `RUN_HELD`, and once its run is back the question
-	reopens under a new id and is listed in `openInteractions`.
+	is listed in `openInteractions`: under the same id, unless the model
+	asked it with a tool such as `ask_user_text`, which asks it again under
+	a new one.
 	"""
 	heldInteractions(
 		"Which held questions to include. Omitted means all of them."

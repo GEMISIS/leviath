@@ -18,6 +18,8 @@ mod journal;
 mod lookup;
 #[path = "convert/recorded.rs"]
 mod recorded;
+#[path = "convert/secret.rs"]
+mod secret;
 
 use common::{FIXTURES, Run, RunFile};
 use leviath_legacy_runs::{BlueprintSource, ConvertError, is_legacy, meta};

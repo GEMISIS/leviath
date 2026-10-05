@@ -1270,11 +1270,32 @@ tool_permissions = { list_dir = "allow", shell = "allow" }
 system_prompt = "Work."
 "#;
 
+/// The taint gate's decisions in stage `stage`'s audit file, as
+/// `"<tool> <decision>"`, oldest first.
+fn audit_on_disk(runs: &Path, run_id: &str, stage: usize) -> Vec<String> {
+    let path = runs
+        .join(run_id)
+        .join(format!("stages/{stage}/taint_audit.json"));
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let events: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap_or_default();
+    events
+        .iter()
+        .map(|e| {
+            let source = match &e["decision_source"] {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            format!("{} {source}", e["tool_name"].as_str().unwrap_or_default())
+        })
+        .collect()
+}
+
 /// A run waiting on a person at the taint gate when the daemon stops,
 /// cleanly or not, comes back asking the same question under the same id,
 /// without asking its model for the turn again; allowing it runs the call
 /// once, as the execution it was recorded as, still named as asked for by
-/// the model call that asked for it.
+/// the model call that asked for it. The gate's audit keeps what it decided
+/// before the restart, once, and adds what it decides after.
 #[tokio::test]
 async fn a_taint_gate_question_waiting_at_a_restart_is_asked_again_without_a_new_turn() {
     use std::sync::atomic::Ordering;
@@ -1298,6 +1319,17 @@ async fn a_taint_gate_question_waiting_at_a_restart_is_asked_again_without_a_new
             question,
         } = held_on_person(GATED, model, "c2", WaitState::TaintGate).await;
         assert_eq!(model.asked.load(Ordering::SeqCst), 2);
+        let before = ["list_dir AutoAllow", "shell AutoBlock"];
+        let mut world = world;
+        let audited = drive_until(&mut world, |_| {
+            audit_on_disk(runs.path(), &run, 0) == before
+        })
+        .await;
+        assert!(
+            audited,
+            "the audit so far is on disk: {:?}",
+            audit_on_disk(runs.path(), &run, 0)
+        );
         stop(world, &first, crashed).await;
 
         let second = starter(Config::default(), registry_of(&model), runs.path());
@@ -1331,8 +1363,18 @@ async fn a_taint_gate_question_waiting_at_a_restart_is_asked_again_without_a_new
             told_in_file(runs.path(), &run)
                 .iter()
                 .any(|t| t.starts_with("ended c2"))
+                && audit_on_disk(runs.path(), &run, 0).len() >= 3
         })
         .await;
+        assert_eq!(
+            audit_on_disk(runs.path(), &run, 0),
+            [
+                "list_dir AutoAllow",
+                "shell AutoBlock",
+                "shell UserAllowOnce"
+            ],
+            "crashed: {crashed}"
+        );
         assert!(ended, "the call's end reaches the run's file");
         let told = told_in_file(runs.path(), &run);
         let ended = told.iter().filter(|t| t.starts_with("ended c2")).count();

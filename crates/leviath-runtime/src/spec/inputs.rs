@@ -706,6 +706,33 @@ pub fn check_inputs(
     }
 }
 
+/// [`check_inputs`] for inputs that sit at `path` in a larger request, such
+/// as one work item of a `fan_out` call (`items[2].inputs`), adding every
+/// problem to `issues`.
+pub(crate) fn check_inputs_at(
+    decls: &[InputDecl],
+    given: &BTreeMap<String, RawInput>,
+    path: &SpecPath,
+    issues: &mut SpawnIssues,
+) {
+    let _ = check_decls(decls, given, path, &CheckCtx::default(), issues);
+}
+
+/// The declarations a fan-out worker is checked against. A worker that runs
+/// a stage of its parent's own graph (`same_graph`) is not asked for the
+/// inputs the graph requires, because its parent's caller gave them; a
+/// worker running a blueprint of its own is asked, as a child would be.
+pub(crate) fn worker_decls(decls: &[InputDecl], same_graph: bool) -> Vec<InputDecl> {
+    decls
+        .iter()
+        .cloned()
+        .map(|decl| InputDecl {
+            required: decl.required && !same_graph,
+            ..decl
+        })
+        .collect()
+}
+
 fn check_decls(
     decls: &[InputDecl],
     given: &BTreeMap<String, RawInput>,

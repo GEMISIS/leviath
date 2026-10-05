@@ -4637,7 +4637,7 @@ async fn a_held_runs_question_is_listed_as_held_and_not_as_open() {
         let why = first["held"].as_str().expect("held says why");
         assert!(why.contains("run 'held-1'"), "{why}");
         assert!(why.contains("configure 'openai' again"), "{why}");
-        assert!(why.contains("new id"), "{why}");
+        assert!(why.contains("open again"), "{why}");
         assert_eq!(listed["results"][1]["kind"], "FREE_TEXT");
 
         // A page over the cap is refused like every listing's.

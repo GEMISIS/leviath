@@ -168,7 +168,8 @@ What the run was doing comes back with it:
 | Running a batch of tool calls | It carries the batch on; no call that finished or was running is run again |
 | Choosing its next stage | It is asked again, among the same edges |
 | Running a fan-out | It picks its workers back up by run id |
-| Asking a person a question | It asks again, under a new id |
+| Asking a person a question with a tool | It asks again, under a new id |
+| Holding a call for an approval or at the taint gate | It asks again, under the same id |
 | Stopped at a stage checkpoint | It asks again, under the same id and over the same document |
 | Paused | It stays paused, and runs a batch it had in flight once resumed |
 
@@ -239,7 +240,7 @@ asks for the run:
 - each journal step that maps onto a delta becomes one;
 - the state it was last in becomes the last checkpoint, naming the files beside it;
 - a webhook secret in its `meta.json` moves to the [secret store](#the-webhooks-secret), and the
-  spec names it there.
+  spec names it there. The old files kept in `legacy/` are written again without it.
 
 The old files move into `legacy/` inside the run's directory rather than being deleted, and a
 directory that already holds a run file is never converted twice. Three stay where they are,

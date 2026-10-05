@@ -44,6 +44,9 @@ pub struct Resumable {
     /// How many questions it has put to a person, answered or still open,
     /// so a question it asks again gets an id of its own.
     pub asked: u64,
+    /// What its taint gate decided in each stage, as the stage's audit file
+    /// holds it, so what the gate decides next is added to it.
+    pub audit: Vec<(usize, Vec<leviath_core::taint::GateEvent>)>,
 }
 
 /// Read the run in `run_dir` back from its run file.
@@ -91,13 +94,34 @@ pub fn read_for_resume(
         .filter(|e| matches!(e, crate::state::RunEvent::Answered { .. }))
         .count();
     let open = state.interactions.len() + state.pending.as_ref().map_or(0, |b| b.calls.len());
+    let audit = audit_files(run_dir, reader.spec().graph.stages.len());
     Ok(Some(Resumable {
+        audit,
         asked: u64::try_from(answered + open).unwrap_or(u64::MAX),
         code: reader.code_files()?,
         answer,
         state,
         spec: std::sync::Arc::new(reader.spec().clone()),
     }))
+}
+
+/// The taint gate's audit of each of a run's `stages` that has one in
+/// `run_dir`, read as written. Each is read whatever the run file last named,
+/// since a file rewritten whole after the run's last step holds more.
+fn audit_files(
+    run_dir: &std::path::Path,
+    stages: usize,
+) -> Vec<(usize, Vec<leviath_core::taint::GateEvent>)> {
+    (0..stages)
+        .filter_map(|stage| {
+            let index = u32::try_from(stage).unwrap_or(u32::MAX);
+            let path = run_dir.join(crate::state::StageFile::TaintAudit.path(index));
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .map(|events| (stage, events))
+        })
+        .collect()
 }
 
 /// Take each fan-out worker that finished out of the running ones, with what
@@ -316,6 +340,11 @@ pub fn resume(
         world.get_mut::<crate::persistence::FinalOutput>(entity),
     ) {
         out.0.content = content;
+    }
+    if let Some(mut gate) = world.get_mut::<crate::taint::TaintGate>(entity) {
+        for (stage, events) in run.audit {
+            gate.restore_audit(stage, events);
+        }
     }
     let announced = Announced {
         title: run.state.title.clone(),

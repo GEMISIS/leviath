@@ -1377,7 +1377,7 @@ async fn answering_a_held_runs_question_says_the_run_is_held() {
             assert!(err.contains("run 'held-1'"), "{err}");
             assert!(err.contains("configure 'openai' again"), "{err}");
             assert!(
-                err.ends_with("reopens under a new id, which `lev interactions` lists"),
+                err.ends_with("under a new one. `lev interactions` lists it then"),
                 "{err}"
             );
             assert!(answered_ids(&requests).is_empty());

@@ -2931,6 +2931,7 @@ mod tests {
                 code: Default::default(),
                 answer: None,
                 asked: 0,
+                audit: Vec::new(),
             },
             crate::spec::env::Bindings::new(),
         );

@@ -48,6 +48,7 @@ mod old;
 mod plan;
 mod recorded;
 mod report;
+mod scrub;
 mod spec;
 mod state;
 mod write;
@@ -146,7 +147,9 @@ pub fn graph(run_dir: &Path, env: &ConvertEnv<'_>) -> Result<RunGraph, ConvertEr
 
 /// Convert the run in `run_dir` into a single run file at
 /// `<run_dir>/run.lvr`, moving the old files into `<run_dir>/legacy/` (all
-/// but the per-stage logs and the answer, which stay where they are).
+/// but the per-stage logs and the answer, which stay where they are). A
+/// webhook secret moves into the secret store, and the old files in
+/// `legacy/` no longer hold it.
 ///
 /// A directory that already holds a run file is refused with
 /// [`ConvertError::AlreadyConverted`], so converting twice is harmless.
@@ -170,5 +173,13 @@ pub fn convert(run_dir: &Path, env: &ConvertEnv<'_>) -> Result<ConvertReport, Co
     let source = old.blueprint.source;
     let mut done = report.finish(built.spec.run_id, source, deltas.len(), written);
     done.blueprint_name = blueprint_name;
+    // With the secret safe in the store, the old files kept beside the run
+    // file give up their copies of it.
+    if let Some(Err(e)) = (!built.secrets.is_empty()).then(|| scrub::secrets(&done.legacy_dir)) {
+        done.notes.push(format!(
+            "the old files in {} still hold the webhook's secret: {e}",
+            done.legacy_dir.display()
+        ));
+    }
     Ok(done)
 }
