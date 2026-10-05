@@ -115,7 +115,6 @@ fn metadata(run_id: &str) -> crate::persistence::RunMetadata {
         parent_run_id: None,
         metadata: HashMap::new(),
         callback_url: None,
-        callback_secret: None,
         title: None,
         title_error: None,
         blueprint_digest: None,

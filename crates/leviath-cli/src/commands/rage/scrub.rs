@@ -94,8 +94,8 @@ impl Scrubber {
     }
 
     /// Scrub every string in a JSON value, and blank any `callback_secret`
-    /// (a run's webhook signing key, which `RunMeta::redacted` drops the same
-    /// way). Returns how many replacements were made.
+    /// (the webhook signing key an earlier release's run record held).
+    /// Returns how many replacements were made.
     pub(crate) fn scrub_json(&self, value: &mut serde_json::Value) -> usize {
         match value {
             serde_json::Value::String(text) => {

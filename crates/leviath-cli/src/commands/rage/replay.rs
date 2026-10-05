@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// Everything a run file holds that a reader needs, as `run.json` writes it.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct RunJson {
-    /// What the run was resolved to, the webhook's secret taken out.
+    /// What the run was resolved to.
     pub(super) spec: RunSpec,
     /// The state it started in.
     pub(super) start: RunState,
@@ -31,7 +31,7 @@ pub(super) struct RunJson {
 impl RunJson {
     /// The values in `reader`, or why they do not read.
     pub(super) fn read(reader: &RunFileReader) -> Result<Self, String> {
-        let spec = crate::runstate::run_file::redacted_spec(reader.spec().clone());
+        let spec = reader.spec().clone();
         reader
             .state_at(0)
             .and_then(|start| {

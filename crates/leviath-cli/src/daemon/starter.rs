@@ -27,6 +27,7 @@ use leviath_mcp::MCPServerConfig;
 use leviath_runtime::host::{PreparedRun, RunStarter, SubAgentOp};
 use leviath_runtime::interaction_hub::InteractionHub;
 use leviath_runtime::resolve::{ResolveMode, Resolved, resolve};
+use leviath_runtime::secret_store::SecretStore;
 use leviath_runtime::spec::env::Caller;
 use leviath_runtime::spec::graph::{RunGraph, StageMode, WorkerSource};
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
@@ -237,17 +238,25 @@ impl DaemonStarter {
             subagent_tx: self.subagent_tx.clone(),
             blob_store: self.blob_store.clone(),
             mcp_overrides: self.policy.current().mcp_overrides,
+            secrets: Some(self.secrets()),
         }
     }
 
-    /// Put a resolved run's attached files in its blob directory, then write
-    /// its file, holding its spec, its code and the state it starts in. The
-    /// file names the attached files and never holds their bytes, so a file
-    /// that cannot be stored refuses the run.
+    /// The secret store this daemon keeps its runs' secrets in.
+    pub(crate) fn secrets(&self) -> SecretStore {
+        SecretStore::of_runs(&self.runs_dir)
+    }
+
+    /// Put a resolved run's attached files in its blob directory and its
+    /// secrets in the secret store, then write its file, holding its spec,
+    /// its code and the state it starts in. The file names the attached
+    /// files and the secrets and never holds either, so one that cannot be
+    /// stored refuses the run.
     fn record(&self, resolved: &Resolved, state: &RunState) -> Result<(), SpawnIssues> {
         let spec = &resolved.spec;
         let dir = self.runs_dir.join(spec.run_id.as_str());
         let path = dir.join(leviath_core::files::RUN_FILE);
+        let secrets = self.secrets();
         leviath_sys::perms::create_private_dir_all(&dir)
             .and_then(|()| {
                 store_blobs(
@@ -256,6 +265,7 @@ impl DaemonStarter {
                     &resolved.blobs,
                 )
             })
+            .and_then(|()| secrets.keep_all(&resolved.secrets))
             .map_err(text)
             .and_then(|()| {
                 leviath_runtime::runfile::RunFileWriter::create(
@@ -269,6 +279,9 @@ impl DaemonStarter {
                 .map_err(text)
             })
             .map_err(|e| {
+                // A run that is refused here never runs, so nothing will
+                // ever sign with its secrets.
+                secrets.forget_run(spec.run_id.as_str());
                 refusal(
                     IssueCode::Unavailable,
                     format!("the run's file could not be written: {e}"),

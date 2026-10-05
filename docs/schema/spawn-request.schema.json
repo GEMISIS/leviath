@@ -2655,7 +2655,7 @@
       "type": "object"
     },
     "Secret": {
-      "description": "A secret that must never reach a log line. `Debug` and `Display` print\n`[redacted]`; serialization keeps the value, because the run file is how a\nresumed run gets it back (the file is written owner-only).",
+      "description": "A secret that must never reach a log line. `Debug` and `Display` print\n`[redacted]`. Serialization keeps the value, so a caller's request can\ncarry it to the daemon; a resolved run never holds one, only the\n[`SecretRef`] it was kept under in the machine's secret store.",
       "type": "string"
     },
     "Seed": {

@@ -41,7 +41,8 @@
 //! 10. The run's id, the spawn-time seeds, then what each region holds at
 //!     spawn.
 //! 11. The fingerprint of what the run relies on from this machine.
-//! 12. The run's creation time.
+//! 12. The webhook's signing secret, given a reference the spec holds in its
+//!     place, and the run's creation time.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -49,8 +50,8 @@ use std::path::PathBuf;
 use crate::spec::env::{Caller, CodeFiles, ResolveEnv};
 use crate::spec::graph::RunGraph;
 use crate::spec::issues::{SpawnIssue, SpawnIssues, SpecPath};
-use crate::spec::launch::Placement;
-use crate::spec::names::Digest;
+use crate::spec::launch::{DeliveryPlan, Placement, Secret};
+use crate::spec::names::{Digest, SecretRef};
 use crate::spec::request::SpawnRequest;
 use crate::spec::run_spec::{RunSpec, SpecOrigin};
 
@@ -77,6 +78,10 @@ pub struct Resolved {
     pub code: CodeFiles,
     /// The attached files' bytes, by digest.
     pub blobs: BTreeMap<Digest, Vec<u8>>,
+    /// The secrets the request carried, each under the reference the spec
+    /// names it by, for the host to keep in its secret store. The spec never
+    /// holds them.
+    pub secrets: Vec<(SecretRef, Secret)>,
 }
 
 /// How far resolution goes.
@@ -227,6 +232,7 @@ pub async fn resolve(
         .unwrap_or(0);
     stages[entry].notes.extend(notes);
     let env_fingerprint = stages::fingerprint(&graph, &stages, env);
+    let (delivery, secrets) = DeliveryPlan::of(&request.delivery, &run_id);
     let spec = RunSpec {
         run_id,
         origin: src.origin,
@@ -243,7 +249,7 @@ pub async fn resolve(
             workdir: workdir.unwrap_or_default(),
             ..placement
         },
-        delivery: request.delivery.clone(),
+        delivery,
         env: env_fingerprint,
         created_at: now_secs(),
         listed: None,
@@ -252,6 +258,7 @@ pub async fn resolve(
         spec,
         code: code.files,
         blobs: files.blobs(),
+        secrets,
     })
 }
 

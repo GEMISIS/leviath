@@ -140,6 +140,18 @@ fn run_id(what: &'static str, s: &str) -> Result<(), NameError> {
     )
 }
 
+/// A secret's name in the machine's secret store: one safe path component,
+/// since it names a file there.
+fn secret_ref(what: &'static str, s: &str) -> Result<(), NameError> {
+    check_len(what, s, 256)?;
+    shape(
+        what,
+        "uses only letters, digits, `.`, `_` and `-`, and is not `.` or `..`",
+        s,
+        crate::is_safe_path_component(s),
+    )
+}
+
 /// 64 lowercase hex digits: a sha256.
 fn sha256_hex(what: &'static str, s: &str) -> Result<(), NameError> {
     let ok = s.len() == 64
@@ -364,6 +376,32 @@ name_type!(
     McpServerName, "MCP server name", mcp_server
 );
 
+name_type!(
+    /// Where a secret is kept: its name in the machine's secret store. A run
+    /// file holds this and never the secret.
+    SecretRef, "secret reference", secret_ref
+);
+
+/// How many hex digits of random bits end a [`SecretRef`].
+const SECRET_REF_HEX: usize = 32;
+
+impl SecretRef {
+    /// The reference for a secret of the run `run` under the random `bits`:
+    /// the run's id, a `.`, then the bits in hex. Nothing about the secret
+    /// is in its name, and every secret of a run can be found by the run's
+    /// id alone.
+    pub fn for_run(run: &RunId, bits: u128) -> Self {
+        Self(format!("{run}.{bits:0width$x}", width = SECRET_REF_HEX))
+    }
+
+    /// The id of the run this secret belongs to, when it was named for one.
+    pub fn run(&self) -> Option<&str> {
+        let (run, bits) = self.0.rsplit_once('.')?;
+        let named = bits.len() == SECRET_REF_HEX && bits.bytes().all(|b| b.is_ascii_hexdigit());
+        named.then_some(run)
+    }
+}
+
 impl Digest {
     /// The digest of `bytes`.
     pub fn of(bytes: &[u8]) -> Self {
@@ -547,6 +585,25 @@ mod tests {
         for bad in ["../x", "a/b", "..", "a b"] {
             let err = RunId::new(bad).unwrap_err();
             assert!(err.to_string().contains("is not `.` or `..`"), "{err}");
+        }
+    }
+
+    /// A secret's reference names a file in the store: it never climbs out
+    /// of it, and it says whose secret it is.
+    #[test]
+    fn secret_refs_name_one_file_and_the_run_they_belong_to() {
+        let run = RunId::new("coder-1-abc").unwrap();
+        let named = SecretRef::for_run(&run, 0xabc);
+        assert_eq!(named.run(), Some("coder-1-abc"));
+        assert_eq!(named.as_str(), format!("coder-1-abc.{}abc", "0".repeat(29)));
+        assert_ne!(named, SecretRef::for_run(&run, 1));
+        for bad in ["../x", "a/b", "..", ""] {
+            assert!(SecretRef::new(bad).is_err(), "{bad}");
+        }
+        assert!(SecretRef::new("x".repeat(257)).is_err());
+        // Not named for a run: no dot, a short tail, or a tail that is not hex.
+        for odd in ["plain", "run.abc", &format!("run.{}", "g".repeat(32))] {
+            assert_eq!(SecretRef::new(odd).unwrap().run(), None, "{odd}");
         }
     }
 

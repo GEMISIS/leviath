@@ -87,13 +87,13 @@ pub(crate) fn render(args: &ShowArgs) -> anyhow::Result<String> {
             false => view::state_toml(&state),
         });
     }
-    let spec = runstate::run_file::redacted_spec(reader.spec().clone());
+    let spec = reader.spec();
     Ok(match args.json {
         true => to_json(&SpecJson {
             warnings: spec.warnings().iter().map(ToString::to_string).collect(),
-            spec: &spec,
+            spec,
         }),
-        false => view::spec_toml(&spec),
+        false => view::spec_toml(spec),
     })
 }
 

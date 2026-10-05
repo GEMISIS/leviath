@@ -369,3 +369,7 @@ mod tests;
 #[cfg(test)]
 #[path = "recovery_resume_tests.rs"]
 mod resume_tests;
+
+#[cfg(test)]
+#[path = "recovery_secret_tests.rs"]
+mod secret_tests;

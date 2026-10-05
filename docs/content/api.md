@@ -2300,7 +2300,9 @@ learns what the run concluded without a second request. The `result` field besid
 error. See [Final outputs](/docs/outputs).
 
 **It is signed.** Verify the `X-Leviath-Signature: sha256=<hex>` header against your callback's
-`secret` before trusting the body.
+`secret` before trusting the body. The secret never goes into the run's file. The daemon keeps it
+in the [secret store](/docs/run-file#the-webhooks-secret) beside the runs. The run's spec names it
+there as `delivery.callback.signed_with`, and nothing that reads a run can return it.
 
 **It carries a stable `delivery_id`**, of the form `agent_completed:<run_id>`, in both the signed
 body and the `X-Leviath-Delivery` header. Stable is the important word: a retried attempt, and a

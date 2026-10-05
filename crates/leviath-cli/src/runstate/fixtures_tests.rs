@@ -18,10 +18,10 @@ use std::path::Path;
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus, StageRecord};
 use leviath_runtime::runfile::{CheckpointPolicy, RunFileWriter};
 use leviath_runtime::spec::graph::{RegionDef, RunGraph};
-use leviath_runtime::spec::launch::{Callback, Delivery, LaunchPolicy, Placement, Secret};
+use leviath_runtime::spec::launch::{CallbackPlan, DeliveryPlan, LaunchPolicy, Placement, Secret};
 use leviath_runtime::spec::names::{
     BlueprintName, BlueprintRef, Digest, HttpUrl, ModelId, ModelRef, ProviderName, RegionName,
-    RunId, StageName,
+    RunId, SecretRef, StageName,
 };
 use leviath_runtime::spec::run_spec::{
     AutoAnswers, EnvFingerprint, RunSpec, SeededContent, SpecOrigin, StagePlan,
@@ -178,11 +178,11 @@ fn spec_of(meta: &RunMeta, regions: Vec<RegionDef>) -> RunSpec {
             worker_stage: None,
             work_item: None,
         },
-        delivery: Delivery {
+        delivery: DeliveryPlan {
             callback: meta.callback_url.as_deref().and_then(|url| {
-                Some(Callback {
+                Some(CallbackPlan {
                     url: HttpUrl::new(url).ok()?,
-                    secret: meta.callback_secret.clone().map(Secret::new),
+                    signed_with: None,
                 })
             }),
             metadata: meta
@@ -195,6 +195,12 @@ fn spec_of(meta: &RunMeta, regions: Vec<RegionDef>) -> RunSpec {
         created_at: meta.started_at,
         listed: None,
     }
+}
+
+/// Where a run's webhook secret is kept: named as the daemon names one, and
+/// the same every time, so writing the record again keeps its spec.
+fn secret_ref(run_id: &str) -> SecretRef {
+    SecretRef::new(format!("{run_id}.{}", "0".repeat(32))).expect("a secret reference")
 }
 
 /// The state a record describes, on top of `base` (what an earlier write
@@ -391,6 +397,29 @@ pub(crate) fn create_run_in(dir: &Path, meta: &RunMeta) -> anyhow::Result<()> {
     write_meta_to(dir, meta)
 }
 
+/// [`create_run`] for a run whose webhook (`meta.callback_url`) is signed
+/// with `secret`, kept where the daemon keeps it: in the store beside the
+/// runs, named in the spec.
+pub(crate) fn create_signed_run(meta: &RunMeta, secret: &str) -> anyhow::Result<()> {
+    create_signed_run_in(&run_dir(&meta.run_id), meta, secret)
+}
+
+/// [`create_signed_run`] into an explicit run directory.
+pub(crate) fn create_signed_run_in(dir: &Path, meta: &RunMeta, secret: &str) -> anyhow::Result<()> {
+    let _ = std::fs::remove_file(super::run_file::path_in(dir));
+    let reference = secret_ref(&meta.run_id);
+    leviath_runtime::secret_store::SecretStore::of_run_dir(dir)
+        .keep(&reference, &Secret::new(secret))?;
+    let mut spec = spec_of(meta, Vec::new());
+    spec.delivery
+        .callback
+        .as_mut()
+        .expect("a signed run has a webhook")
+        .signed_with = Some(reference);
+    let state = state_of(meta, &spec, None);
+    write(dir, &spec, state, meta.updated_at)
+}
+
 /// Record the run `meta` describes, over what its file already holds.
 pub(crate) fn write_meta(meta: &RunMeta) -> anyhow::Result<()> {
     write_meta_to(&run_dir(&meta.run_id), meta)
@@ -403,7 +432,14 @@ pub(crate) fn write_meta_to(dir: &Path, meta: &RunMeta) -> anyhow::Result<()> {
         .as_ref()
         .map(|(spec, _)| spec.graph.layout.regions.clone())
         .unwrap_or_default();
-    let spec = spec_of(meta, regions);
+    let mut spec = spec_of(meta, regions);
+    // A webhook signed when the run was created stays signed.
+    let signed = before
+        .as_ref()
+        .and_then(|(old, _)| old.delivery.callback_secret().cloned());
+    if let Some(callback) = spec.delivery.callback.as_mut() {
+        callback.signed_with = signed;
+    }
     let state = state_of(meta, &spec, before.map(|(_, state)| state));
     write(dir, &spec, state, meta.updated_at)
 }

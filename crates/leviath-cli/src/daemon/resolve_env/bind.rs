@@ -68,6 +68,12 @@ impl BindEnv for DaemonEnv {
         names.into_iter().collect()
     }
 
+    fn holds_secret(&self, secret: &leviath_runtime::spec::names::SecretRef) -> bool {
+        self.secrets
+            .as_ref()
+            .is_some_and(|store| store.read(secret).is_some())
+    }
+
     async fn bind(&self, spec: &RunSpec, code: &CodeFiles) -> Result<Bindings, SpawnIssues> {
         let mut issues = SpawnIssues::new();
         let compiled = issues.take(leviath_runtime::bind::scripts::compile(spec, code));

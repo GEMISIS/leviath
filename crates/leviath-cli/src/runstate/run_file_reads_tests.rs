@@ -128,12 +128,6 @@ async fn a_history_holds_every_window_change_and_every_edge_taken() {
             ("analyze".to_string(), "implement".to_string()),
         ])
     );
-    assert!(
-        history
-            .points
-            .iter()
-            .all(|p| p.meta.callback_secret.is_none())
-    );
 }
 
 #[tokio::test]

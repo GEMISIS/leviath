@@ -384,12 +384,6 @@ pub(crate) fn run_metadata(spec: &RunSpec, state: &RunState) -> RunMetadata {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
         callback_url: spec.delivery.callback.as_ref().map(|c| c.url.to_string()),
-        callback_secret: spec
-            .delivery
-            .callback
-            .as_ref()
-            .and_then(|c| c.secret.as_ref())
-            .map(|s| s.expose().to_string()),
         title: state.title.clone(),
         blueprint_digest: digest,
         title_error: state.title_error.clone(),

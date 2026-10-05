@@ -19,7 +19,7 @@ use crate::spec::graph::{
     OutputDef, RegionDef, RegionKind, RegionLayoutDef, RunGraph, StageDef, ToolGroup, ToolSelector,
 };
 use crate::spec::inputs::InputValues;
-use crate::spec::launch::{Delivery, LaunchPolicy, Placement, Unattended};
+use crate::spec::launch::{DeliveryPlan, LaunchPolicy, Placement, Unattended};
 use crate::spec::names::{
     BlueprintName, BlueprintRef, EdgeName, ModelId, ModelRef, ProviderName, RegionName, RunId,
     StageName, ToolName,
@@ -340,7 +340,7 @@ fn spec_from(graph: RunGraph, agent_id: &str, stages: &[StageInference], window:
             worker_stage: None,
             work_item: None,
         },
-        delivery: Delivery::default(),
+        delivery: DeliveryPlan::default(),
         env: EnvFingerprint::default(),
         created_at: chrono::Utc::now().timestamp(),
         listed: None,

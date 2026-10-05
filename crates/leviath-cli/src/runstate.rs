@@ -52,8 +52,8 @@ use dashboard_log::*;
 pub(crate) use dashboard_log::{append_dashboard_log_to, dashboard_log_path};
 #[cfg(test)]
 pub(crate) use fixtures_tests::{
-    create_run, create_run_in, write_context_snapshot, write_meta, write_meta_to,
-    write_stages_index,
+    create_run, create_run_in, create_signed_run, create_signed_run_in, write_context_snapshot,
+    write_meta, write_meta_to, write_stages_index,
 };
 pub(crate) use force::{ForceCancelOutcome, force_cancel, force_cancel_in};
 
@@ -211,10 +211,7 @@ pub(crate) fn answer_stamps(run_id: &str) -> (Option<FileStamp>, Option<FileStam
 
 /// A run's context-window history: the full window (+ metadata) at each recorded
 /// point over time, oldest first. Empty when there's no readable run file.
-///
-/// Every point's `meta` is [`RunMeta::redacted`]: nothing that shows a
-/// history has a use for the webhook's signing secret. See
-/// [`run_file::history_in`].
+/// See [`run_file::history_in`].
 pub(crate) fn context_history(run_id: &str) -> Vec<leviath_runtime::runfile::history::RunPoint> {
     run_history(run_id).points
 }
@@ -274,6 +271,12 @@ pub(crate) fn run_dir(run_id: &str) -> PathBuf {
         return runs_dir().join("<invalid>");
     }
     runs_dir().join(run_id)
+}
+
+/// Forget the secrets the run `run_id` keeps in the secret store, as the run
+/// is deleted: nothing signs with them once it is gone.
+pub(crate) fn forget_secrets(run_id: &str) {
+    leviath_runtime::secret_store::SecretStore::of_runs(&runs_dir()).forget_run(run_id);
 }
 
 /// Delete what the run `run_id` put in providers' file storage, reading its

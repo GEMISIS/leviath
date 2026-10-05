@@ -1041,7 +1041,7 @@ fn every_run_status_reads_as_the_agent_status_it_names() {
 /// input capture, re-scan markers, and the run's record of who and where it is.
 #[test]
 fn the_spec_decides_compaction_loops_capture_rescans_and_the_record() {
-    use crate::spec::launch::{Callback, Unattended};
+    use crate::spec::launch::{CallbackPlan, Unattended};
     let mut spec = two_stage_spec();
     spec.graph.compaction = Some(crate::spec::graph::CompactionDef {
         model: crate::spec::names::ModelRef::parse("p/summarizer").unwrap(),
@@ -1106,7 +1106,8 @@ fn the_spec_decides_compaction_loops_capture_rescans_and_the_record() {
     assert_eq!(md.workdir, "/tmp/w");
     assert_eq!(md.parent_run_id.as_deref(), Some("parent-1"));
     assert_eq!(md.callback_url.as_deref(), Some("https://x.dev/h"));
-    assert_eq!(md.callback_secret.as_deref(), Some("s"));
+    // The spec names a secret, and the record never carries it.
+    assert!(spec.delivery.callback_secret().is_some());
     assert_eq!(
         md.unattended,
         Unattended::Profile(crate::spec::names::ProfileName::new("ci").unwrap())
@@ -1120,9 +1121,9 @@ fn the_spec_decides_compaction_loops_capture_rescans_and_the_record() {
     let mut raw = two_stage_spec();
     raw.origin = crate::spec::run_spec::SpecOrigin::Raw;
     raw.launch.unattended = Unattended::Off;
-    raw.delivery.callback = Some(Callback {
+    raw.delivery.callback = Some(CallbackPlan {
         url: crate::spec::names::HttpUrl::new("https://y.dev").unwrap(),
-        secret: None,
+        signed_with: None,
     });
     raw.graph.tool_rescan = ToolRescan::AfterWrites;
     let raw = Arc::new(raw);
@@ -1139,7 +1140,6 @@ fn the_spec_decides_compaction_loops_capture_rescans_and_the_record() {
         ("t", None)
     );
     assert_eq!(md.unattended, Unattended::Off);
-    assert!(md.callback_secret.is_none());
     assert!(world.get::<crate::pipeline::DynamicTools>(e).is_some());
     assert!(
         world

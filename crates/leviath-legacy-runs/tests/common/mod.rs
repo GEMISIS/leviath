@@ -56,7 +56,9 @@ pub struct Run {
 impl Run {
     pub fn fixture(name: &str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join(name);
+        // Under a runs directory of its own, so the secret store beside
+        // the runs is the test's too.
+        let dir = tmp.path().join("runs").join(name);
         copy_dir(&fixtures_dir().join(name), &dir);
         Self { _tmp: tmp, dir }
     }
@@ -130,6 +132,28 @@ impl Run {
 
     pub fn convert(&self) -> Result<ConvertReport, ConvertError> {
         convert(&self.dir, &env())
+    }
+
+    /// Sign the run's webhook with `secret`, as an earlier release wrote it
+    /// into `meta.json`.
+    pub fn sign(&self, secret: &str) {
+        self.json("meta.json", |v| v["callback_secret"] = secret.into());
+    }
+
+    /// The secret store beside the runs this run is converted among.
+    pub fn store(&self) -> leviath_runtime::secret_store::SecretStore {
+        leviath_runtime::secret_store::SecretStore::of_run_dir(&self.dir)
+    }
+
+    /// Whether `needle` is anywhere in the converted run file once every
+    /// frame is decompressed.
+    pub fn file_holds(&self, needle: &str) -> bool {
+        let bytes = std::fs::read(self.path("run.lvr")).unwrap();
+        let (frames, _) = codec::frames(&bytes);
+        frames.iter().any(|f| {
+            let plain = zstd::stream::decode_all(&bytes[f.body..f.body + f.len]).unwrap();
+            plain.windows(needle.len()).any(|w| w == needle.as_bytes())
+        })
     }
 
     pub fn converted(&self) -> (ConvertReport, RunFile) {

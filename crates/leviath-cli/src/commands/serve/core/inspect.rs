@@ -21,14 +21,10 @@ use super::error::ServeError;
 use super::run_file;
 
 /// The spec a run was resolved to: the graph it runs, its inputs, the models
-/// and tools each stage got, and its launch policy.
-///
-/// The webhook's signing secret is replaced with a marker. The run file keeps
-/// it so a resumed run can still sign, and nothing that reads a spec back has
-/// any use for it.
+/// and tools each stage got, and its launch policy. The webhook's signing
+/// secret is named by where the machine keeps it, never held in the spec.
 pub(crate) fn spec(run_id: &str) -> Result<RunSpec, ServeError> {
-    let spec = run_file::require(run_id)?.spec().clone();
-    Ok(crate::runstate::run_file::redacted_spec(spec))
+    Ok(run_file::require(run_id)?.spec().clone())
 }
 
 /// A run's state at step `at`, or as it is now.

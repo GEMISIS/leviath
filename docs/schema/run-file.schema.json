@@ -4347,21 +4347,15 @@
           }
         ]
       },
-      "Callback": {
-        "additionalProperties": false,
-        "description": "A webhook called when the run finishes.",
+      "CallbackPlan": {
+        "description": "A webhook as a resolved run holds it: the signing secret by the\nreference it is kept under in the machine's secret store.",
         "properties": {
-          "secret": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/Secret"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "The shared secret the body is signed with (HMAC-SHA256), when there is one."
+          "signed_with": {
+            "description": "Where the secret the body is signed with is kept, when there is one.\nNot called `secret`: it is the name of one, and a reader that looks\nfor secrets by their key (a bug report's scrubber, say) must not take\nit for the secret itself.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "url": {
             "description": "Where to POST.",
@@ -4580,31 +4574,31 @@
           }
         ]
       },
-      "Delivery2": {
-        "additionalProperties": false,
-        "description": "Who hears about the run, and the caller's own labels for it.",
+      "DeliveryPlan": {
+        "description": "Who hears about a resolved run, and the caller's labels for it.",
         "properties": {
           "callback": {
             "anyOf": [
               {
-                "$ref": "#/$defs/Callback"
+                "$ref": "#/$defs/CallbackPlan"
               },
               {
                 "type": "null"
               }
             ],
-            "default": null,
             "description": "The webhook to call when the run finishes."
           },
           "metadata": {
             "additionalProperties": {
               "type": "string"
             },
-            "default": {},
-            "description": "The caller's labels, carried through untouched and shown with the run.",
+            "description": "The caller's labels.",
             "type": "object"
           }
         },
+        "required": [
+          "metadata"
+        ],
         "type": "object"
       },
       "DependencyDef": {
@@ -7109,10 +7103,6 @@
         },
         "type": "object"
       },
-      "Secret": {
-        "description": "A secret that must never reach a log line. `Debug` and `Display` print\n`[redacted]`; serialization keeps the value, because the run file is how a\nresumed run gets it back (the file is written owner-only).",
-        "type": "string"
-      },
       "Seed": {
         "description": "What fills a region at spawn.",
         "oneOf": [
@@ -8561,8 +8551,8 @@
         "type": "integer"
       },
       "delivery": {
-        "$ref": "#/$defs/Delivery2",
-        "description": "Who hears about it."
+        "$ref": "#/$defs/DeliveryPlan",
+        "description": "Who hears about it. A secret its webhook is signed with is named by\nwhere the machine keeps it, never held here."
       },
       "env": {
         "$ref": "#/$defs/EnvFingerprint",

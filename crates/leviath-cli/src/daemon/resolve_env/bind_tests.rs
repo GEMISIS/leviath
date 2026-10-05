@@ -1,7 +1,7 @@
 use leviath_core::JsonDoc;
 use leviath_core::policy::ToolPolicy;
 use leviath_runtime::spec::graph::{CodeRef, StageHooks};
-use leviath_runtime::spec::launch::{Delivery, LaunchPolicy, Placement};
+use leviath_runtime::spec::launch::{DeliveryPlan, LaunchPolicy, Placement};
 use leviath_runtime::spec::names::{ModelId, ProfileName, RunId, StageName, ToolName};
 use leviath_runtime::spec::run_spec::StagePlan;
 
@@ -65,7 +65,7 @@ fn spec(workdir: &Path) -> RunSpec {
             worker_stage: None,
             work_item: None,
         },
-        delivery: Delivery::default(),
+        delivery: DeliveryPlan::default(),
         env: Default::default(),
         created_at: 0,
         listed: None,

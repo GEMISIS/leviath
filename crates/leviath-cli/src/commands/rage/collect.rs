@@ -267,8 +267,9 @@ pub(crate) async fn collect(env: &RageEnv, sel: &Selection, created_at: &str) ->
 
 /// A scrubber that knows every secret this machine holds: what the loaded
 /// config carries (including keys that come from the environment and are in
-/// no file), every credential-shaped environment variable, and the tokens in
-/// the two auth stores. The stores are read for this alone and never copied.
+/// no file), every credential-shaped environment variable, the tokens in
+/// the two auth stores, and the runs' webhook secrets in the secret store.
+/// The stores are read for this alone and never copied.
 fn scrubber_for(env: &RageEnv, bundle: &mut Bundle) -> Scrubber {
     let mut known = Vec::new();
     match crate::config::Config::load() {
@@ -286,6 +287,8 @@ fn scrubber_for(env: &RageEnv, bundle: &mut Bundle) -> Scrubber {
             scrub::secret_strings_in(&value, &mut known);
         }
     }
+    let kept = leviath_runtime::secret_store::SecretStore::of_runs(&env.runs_dir).secrets();
+    known.extend(kept.iter().map(|s| s.expose().to_string()));
     Scrubber::new(known)
 }
 
@@ -461,7 +464,7 @@ fn copy_run(
 
     match crate::runstate::read_meta_from(&dir) {
         Ok(meta) => {
-            let value = serde_json::to_value(meta.redacted()).unwrap_or_default();
+            let value = serde_json::to_value(&meta).unwrap_or_default();
             bundle.json(format!("{dest}/{SUMMARY_FILE}"), scrubber, value);
             // A run of an installed blueprint names it, not a path.
             let blueprint = match meta.agent_path.is_empty() {
@@ -555,8 +558,9 @@ fn copy_named(
 
 /// `run.lvr` rewritten with its secrets out, the same values as `run.json`,
 /// and `request.json`, the request that starts the run again. The webhook's
-/// signing secret is replaced before anything is read, and the rewritten file
-/// is built from the scrubbed values, so it holds nothing `run.json` does not.
+/// signing secret is never in the run file (the spec names where it is kept),
+/// and the rewritten file is built from the scrubbed values, so it holds
+/// nothing `run.json` does not.
 /// Its stored parts are not in it: they go in beside it, under `blobs/`.
 /// `scratch` is where the file is rewritten before it is read into the
 /// bundle.

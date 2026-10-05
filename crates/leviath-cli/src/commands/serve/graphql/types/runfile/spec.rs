@@ -7,7 +7,9 @@
 use async_graphql::{Enum, ID, SimpleObject};
 use leviath_graphql_derive::mirror;
 use leviath_runtime::spec::graph::{CodeRef as CoreCodeRef, OutputDef};
-use leviath_runtime::spec::launch::{Delivery, LaunchPolicy as CorePolicy, Placement, Unattended};
+use leviath_runtime::spec::launch::{
+    DeliveryPlan, LaunchPolicy as CorePolicy, Placement, Unattended,
+};
 use leviath_runtime::spec::run_spec::{
     AutoAnswers as CoreAnswers, EnvFingerprint as CoreEnv, RunSpec as CoreSpec, SpecOrigin,
     StagePlan as CorePlan, ToolDef as CoreTool, ToolSource,
@@ -507,14 +509,11 @@ pub(crate) struct RunDelivery {
     pub(crate) metadata: Vec<MetadataEntry>,
 }
 
-impl From<&Delivery> for RunDelivery {
-    fn from(delivery: &Delivery) -> Self {
+impl From<&DeliveryPlan> for RunDelivery {
+    fn from(delivery: &DeliveryPlan) -> Self {
         Self {
             callback_url: delivery.callback.as_ref().map(|c| c.url.to_string()),
-            callback_signed: delivery
-                .callback
-                .as_ref()
-                .is_some_and(|c| c.secret.is_some()),
+            callback_signed: delivery.callback_secret().is_some(),
             metadata: delivery
                 .metadata
                 .iter()

@@ -777,6 +777,7 @@ pub(crate) fn deletable(id: &str, force: bool) -> Result<(), super::error::Serve
 /// Remove a run's directory, having already decided it may go.
 pub(crate) fn remove_run(id: &str) -> Result<(), super::error::ServeError> {
     runstate::forget_provider_files(id);
+    runstate::forget_secrets(id);
     std::fs::remove_dir_all(runstate::run_dir(id)).map_err(|e| {
         super::error::ServeError::Internal(format!("Failed to delete run '{id}': {e}"))
     })

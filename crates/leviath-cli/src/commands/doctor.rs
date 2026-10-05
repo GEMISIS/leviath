@@ -717,6 +717,7 @@ regions = [
 fn cleanup_run(run_id: &str) {
     let _ = crate::runstate::force_cancel(run_id);
     crate::runstate::forget_provider_files(run_id);
+    crate::runstate::forget_secrets(run_id);
     let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     let _ = leviath_core::paths::data_dir().map(|d| {
         let _ = std::fs::remove_dir_all(d.join("state").join(run_id));

@@ -574,21 +574,6 @@ fn fields_narrows_the_item_but_never_drops_the_id() {
     assert!(!map.contains_key("task"));
 }
 
-/// `redacted()` is what strips the webhook signing key, and it is applied at
-/// the one place a `RunMeta` becomes JSON on this route.
-#[test]
-fn an_item_never_carries_the_webhook_secret() {
-    let mut meta = meta_at("a", 1);
-    meta.callback_url = Some("https://example.invalid/hook".to_string());
-    meta.callback_secret = Some("super-secret-signing-key".to_string());
-
-    for resolved in [resolve_ok(&[]), resolve_ok(&[("fields", "status")])] {
-        let item = build_item(&meta, &resolved, None);
-        let rendered = serde_json::to_string(&item).unwrap();
-        assert!(!rendered.contains("super-secret-signing-key"));
-    }
-}
-
 #[test]
 fn highlights_are_omitted_from_the_wire_when_there_are_none() {
     let item = build_item(&meta_at("a", 1), &resolve_ok(&[]), Some(Vec::new()));
@@ -620,15 +605,6 @@ fn the_meta_source_matches_the_fields_a_user_would_search_for() {
         );
     }
     assert!(!matches_query(&meta, "nothing-like-this", &sources));
-}
-
-/// The signing secret must not be reachable through search either - otherwise
-/// it could be confirmed a character at a time.
-#[test]
-fn the_meta_source_does_not_search_the_webhook_secret() {
-    let mut meta = meta_at("a", 1);
-    meta.callback_secret = Some("super-secret-signing-key".to_string());
-    assert!(!matches_query(&meta, "super-secret", &[Source::Meta]));
 }
 
 #[test]
@@ -1153,8 +1129,10 @@ fn window_of(run_id: &str, regions: Vec<leviath_core::run_meta::RegionSnapshot>)
 fn plant_journal(run_id: &str, content: &str, secret: Option<&str>) {
     let mut meta = meta_at(run_id, 1);
     meta.callback_url = Some("https://example.com/hook".to_string());
-    meta.callback_secret = secret.map(str::to_string);
-    create_run(&meta).unwrap();
+    match secret {
+        Some(secret) => crate::runstate::create_signed_run(&meta, secret).unwrap(),
+        None => create_run(&meta).unwrap(),
+    }
     window_of(run_id, vec![region_of("system", content)]);
 }
 
@@ -1800,8 +1778,16 @@ async fn a_bulk_sweep_never_forces_an_unreadable_run() {
 #[tokio::test]
 async fn a_bulk_delete_by_age_takes_the_old_finished_runs_and_leaves_the_rest() {
     crate::runstate::with_isolated_runs_dir_async("runs-delete-before", |_d| async move {
-        create_run(&finished("run-ancient", 100)).unwrap();
-        create_run(&finished("run-recent", 300)).unwrap();
+        // Both finished runs have signed webhooks, whose secrets are kept
+        // beside the runs.
+        for (id, at) in [("run-ancient", 100), ("run-recent", 300)] {
+            let mut meta = finished(id, at);
+            meta.callback_url = Some("https://example.com/hook".to_string());
+            crate::runstate::create_signed_run(&meta, &format!("{id}-signing-key")).unwrap();
+        }
+        let store =
+            leviath_runtime::secret_store::SecretStore::of_runs(&crate::runstate::runs_dir());
+        assert_eq!(store.secrets().len(), 2);
         let mut live = meta_at("run-live", 100);
         live.status = RunStatus::Running;
         create_run(&live).unwrap();
@@ -1819,6 +1805,13 @@ async fn a_bulk_delete_by_age_takes_the_old_finished_runs_and_leaves_the_rest() 
         assert!(resp.skipped.is_empty());
         assert!(crate::runstate::run_dir("run-live").exists());
         assert!(crate::runstate::run_dir("run-recent").exists());
+        // The deleted run's secret went with it; the kept run's is still there.
+        let kept: Vec<String> = store
+            .secrets()
+            .iter()
+            .map(|s| s.expose().to_string())
+            .collect();
+        assert_eq!(kept, ["run-recent-signing-key"]);
     })
     .await;
 }

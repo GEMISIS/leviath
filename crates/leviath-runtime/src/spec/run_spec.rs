@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::graph::{CodeRef, OutputDef, RunGraph};
 use super::inputs::InputValues;
-use super::launch::{Delivery, LaunchPolicy, Placement};
+use super::launch::{DeliveryPlan, LaunchPolicy, Placement};
 use super::names::{
     BlueprintName, BlueprintPath, BlueprintRef, Digest, McpServerName, ModelId, ModelRef,
     ProviderName, RegionName, RunId, StageName, ToolName,
@@ -51,8 +51,9 @@ pub struct RunSpec {
     pub auto_answers: AutoAnswers,
     /// Where it runs.
     pub placement: Placement,
-    /// Who hears about it.
-    pub delivery: Delivery,
+    /// Who hears about it. A secret its webhook is signed with is named by
+    /// where the machine keeps it, never held here.
+    pub delivery: DeliveryPlan,
     /// What the run relied on from this machine, so a resume can tell when
     /// that has changed.
     pub env: EnvFingerprint,
@@ -360,7 +361,7 @@ pub struct EnvFingerprint {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::spec::launch::{Callback, Secret, Unattended};
+    use crate::spec::launch::{CallbackPlan, Unattended};
     use crate::spec::names::HttpUrl;
 
     /// A spec with every field set, for codec and insertion tests.
@@ -436,10 +437,10 @@ pub(crate) mod tests {
                 worker_stage: None,
                 work_item: None,
             },
-            delivery: Delivery {
-                callback: Some(Callback {
+            delivery: DeliveryPlan {
+                callback: Some(CallbackPlan {
                     url: HttpUrl::new("https://x.dev/h").unwrap(),
-                    secret: Some(Secret::new("s")),
+                    signed_with: Some(crate::spec::names::SecretRef::new("t-1.secret").unwrap()),
                 }),
                 metadata: [("team".to_string(), "a".to_string())].into(),
             },

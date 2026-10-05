@@ -545,13 +545,6 @@ pub struct RunMeta {
     /// Webhook URL to POST on agent completion/error.
     #[serde(default)]
     pub callback_url: Option<String>,
-    /// Optional shared secret used to HMAC-SHA256 sign the webhook body
-    /// (`X-Leviath-Signature` header) so the receiver can verify authenticity.
-    ///
-    /// **Never serve it**: strip it with [`RunMeta::redacted`] before any of
-    /// this struct leaves the process.
-    #[serde(default)]
-    pub callback_secret: Option<String>,
     /// Links sub-agent runs to their parent run.
     #[serde(default)]
     pub parent_run_id: Option<String>,
@@ -801,25 +794,6 @@ impl RunFlags {
 }
 
 impl RunMeta {
-    /// This run's metadata with the webhook signing secret removed, for anything
-    /// that leaves the process.
-    ///
-    /// `GET /api/runs`, `/api/runs/{id}` and `/api/runs/{id}/children`
-    /// all serialize `RunMeta` whole, so without this any holder of the API
-    /// token reads every run's `callback_secret` - the key that authenticates
-    /// Leviath's webhooks to their receivers. Mirrors the `RedactedConfig`
-    /// pattern the `/api/config` handler uses.
-    ///
-    /// Returns an owned copy rather than mutating in place so a caller cannot
-    /// accidentally redact the record the daemon still needs for signing.
-    #[must_use]
-    pub fn redacted(&self) -> Self {
-        Self {
-            callback_secret: None,
-            ..self.clone()
-        }
-    }
-
     /// A newly accepted run: [`RunStatus::Starting`], both timestamps now, every
     /// counter at zero and every optional field unset.
     ///
@@ -870,7 +844,6 @@ impl RunMeta {
             title_error: None,
             metadata: HashMap::new(),
             callback_url: None,
-            callback_secret: None,
             parent_run_id: None,
             children: Vec::new(),
             depth: 0,
@@ -1205,34 +1178,6 @@ mod tests {
         }
     }
 
-    /// The webhook signing secret must not survive into anything served over
-    /// the API - an unredacted meta lets `GET /api/runs` hand it to any
-    /// token holder.
-    #[test]
-    fn redacted_drops_the_callback_secret_and_keeps_everything_else() {
-        let mut m = sample_meta();
-        m.callback_secret = Some("shhh".to_string());
-        m.callback_url = Some("https://example.com/hook".to_string());
-
-        let r = m.redacted();
-        assert_eq!(r.callback_secret, None);
-        // The URL is not a secret and stays: a caller needs to see where its own
-        // webhook was pointed.
-        assert_eq!(r.callback_url.as_deref(), Some("https://example.com/hook"));
-        assert_eq!(r.run_id, m.run_id);
-        assert_eq!(r.task, m.task);
-
-        // Serializing the redacted form must not mention it at all - a `None`
-        // that still emitted `"callback_secret": null` would be fine, but an
-        // assertion on the wire format is what a reviewer actually checks.
-        let json = serde_json::to_string(&r).unwrap();
-        assert!(!json.contains("shhh"), "{json}");
-
-        // ...and the original is untouched, because the daemon still needs it to
-        // sign the webhook for a run it reloaded after a restart.
-        assert_eq!(m.callback_secret.as_deref(), Some("shhh"));
-    }
-
     #[test]
     fn run_meta_new_sets_defaults() {
         let m = sample_meta();
@@ -1256,7 +1201,6 @@ mod tests {
         assert!(m.title.is_none());
         assert!(m.metadata.is_empty());
         assert!(m.callback_url.is_none());
-        assert!(m.callback_secret.is_none());
         assert!(m.parent_run_id.is_none());
         assert!(m.children.is_empty());
         assert_eq!(m.depth, 0);
@@ -1581,7 +1525,6 @@ mod tests {
         m.status = RunStatus::Running;
         m.metadata.insert("k".to_string(), "v".to_string());
         m.title = Some("A title".to_string());
-        m.callback_secret = Some("shh".to_string());
         m.parent_run_id = Some("parent-1".to_string());
         m.children = vec!["child-a".to_string(), "child-b".to_string()];
         m.depth = 2;
@@ -1592,7 +1535,6 @@ mod tests {
         assert_eq!(back.status, RunStatus::Running);
         assert_eq!(back.metadata.get("k").map(String::as_str), Some("v"));
         assert_eq!(back.title.as_deref(), Some("A title"));
-        assert_eq!(back.callback_secret.as_deref(), Some("shh"));
         assert_eq!(back.parent_run_id.as_deref(), Some("parent-1"));
         assert_eq!(
             back.children,

@@ -43,6 +43,7 @@ pub async fn bind(
     check_providers(spec, env, &mut issues);
     check_mcp_servers(spec, env, &mut issues);
     check_code(spec, code, &mut issues);
+    check_secret(spec, env, &mut issues);
     if !issues.is_empty() {
         return Err(issues);
     }
@@ -254,6 +255,32 @@ fn check_code(spec: &RunSpec, code: &CodeFiles, issues: &mut SpawnIssues) {
             ),
             Some(_) => {}
         }
+    }
+}
+
+/// The webhook's signing secret, which the spec names by where the machine
+/// keeps it: a run whose secret is gone would post its webhook unsigned, or
+/// not at all, so it is not taken back until the secret is.
+fn check_secret(spec: &RunSpec, env: &dyn BindEnv, issues: &mut SpawnIssues) {
+    if let Some(secret) = spec.delivery.callback_secret()
+        && !env.holds_secret(secret)
+    {
+        issues.push(
+            SpawnIssue::new(
+                SpecPath::root()
+                    .field("delivery")
+                    .field("callback")
+                    .field("signed_with"),
+                IssueCode::Unavailable,
+                "the webhook's signing secret is no longer in this machine's secret store",
+            )
+            .expected(format!("the secret kept as '{secret}'"))
+            .hint(format!(
+                "put the file '{secret}' back in the secret store (the `{}` directory beside \
+                 the runs directory), or cancel the run and start a new one",
+                crate::secret_store::SECRETS_DIR
+            )),
+        );
     }
 }
 

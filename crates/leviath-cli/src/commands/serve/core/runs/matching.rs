@@ -87,8 +87,8 @@ pub(crate) fn meta_fields(meta: &RunMeta) -> Vec<(String, String)> {
     if let Some(ref error) = meta.error {
         out.push(("error".to_string(), error.clone()));
     }
-    // `callback_url` and `callback_secret` are deliberately absent. The secret
-    // never leaves the process, and neither is something a user searches for.
+    // `callback_url` is deliberately absent: it is not something a user
+    // searches for.
     // Sorted so the highlight a search reports for a metadata match does not
     // depend on hash order.
     let mut entries: Vec<(&String, &String)> = meta.metadata.iter().collect();

@@ -21,6 +21,18 @@ impl serde::Serialize for PoisonSerialize {
     }
 }
 
+/// Whether `needle` appears anywhere in the run file at `path` once every
+/// frame is decompressed: what a reader of the file could get out of it.
+pub(crate) fn run_file_holds(path: &std::path::Path, needle: &str) -> bool {
+    let bytes = std::fs::read(path).expect("the run file reads");
+    let (frames, _) = leviath_runtime::runfile::codec::frames(&bytes);
+    assert!(!frames.is_empty(), "a run file has frames");
+    frames.iter().any(|f| {
+        let plain = zstd::stream::decode_all(&bytes[f.body..f.body + f.len]).expect("a frame");
+        plain.windows(needle.len()).any(|w| w == needle.as_bytes())
+    })
+}
+
 /// Write an `agent.toml` blueprint into `dir` and return its path.
 ///
 /// Consolidates the `std::fs::write(dir.join("agent.toml"), ...).unwrap()`

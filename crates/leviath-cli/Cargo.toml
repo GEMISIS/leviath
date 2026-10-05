@@ -113,6 +113,8 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }
+# Decompressing a run file's frames, to prove a secret is in none of them.
+zstd = { workspace = true }
 # `SO_LINGER(0)` on one websocket test's socket, to force an RST rather than a
 # FIN. Tokio deprecates its own `set_linger` because the option blocks a runtime
 # thread on drop - a real hazard, and irrelevant to a socket the test closes

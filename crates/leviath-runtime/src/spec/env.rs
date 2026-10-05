@@ -20,7 +20,7 @@ use super::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use super::launch::{LaunchPolicy, Unattended};
 use super::names::{
     BlueprintPath, BlueprintRef, Digest, McpServerName, MimePattern, ModelId, ModelRef,
-    ProviderName, RunId, StageName, WorkdirPath,
+    ProviderName, RunId, SecretRef, StageName, WorkdirPath,
 };
 use super::run_spec::{AutoAnswers, RunSpec, SeededContent, ToolDef};
 
@@ -341,6 +341,13 @@ pub trait BindEnv: Send + Sync {
     /// same. Empty (the default) when the host cannot say.
     fn mcp_servers_now(&self) -> Vec<String> {
         Vec::new()
+    }
+    /// Whether this machine holds the secret kept under `secret`, for a host
+    /// that signs the run's webhook with it. A host that posts no webhooks
+    /// (an embedding program's world) needs no secret and answers `true`,
+    /// the default.
+    fn holds_secret(&self, _secret: &SecretRef) -> bool {
+        true
     }
     /// Build the host's own live components for the run (compiled code, tool
     /// service state, connections).

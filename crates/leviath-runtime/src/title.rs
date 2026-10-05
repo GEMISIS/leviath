@@ -957,7 +957,6 @@ mod tests {
             parent_run_id: None,
             metadata: Default::default(),
             callback_url: None,
-            callback_secret: None,
             title: None,
             title_error: None,
             blueprint_digest: None,

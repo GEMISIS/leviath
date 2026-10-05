@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::names::{HttpUrl, RunId, StageName, ToolName};
+use super::names::{HttpUrl, RunId, SecretRef, StageName, ToolName};
 
 pub use leviath_core::unattended::Unattended;
 
@@ -130,8 +130,9 @@ pub struct Placement {
 }
 
 /// A secret that must never reach a log line. `Debug` and `Display` print
-/// `[redacted]`; serialization keeps the value, because the run file is how a
-/// resumed run gets it back (the file is written owner-only).
+/// `[redacted]`. Serialization keeps the value, so a caller's request can
+/// carry it to the daemon; a resolved run never holds one, only the
+/// [`SecretRef`] it was kept under in the machine's secret store.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct Secret(String);
@@ -181,6 +182,55 @@ pub struct Delivery {
     /// The caller's labels, carried through untouched and shown with the run.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+}
+
+/// A webhook as a resolved run holds it: the signing secret by the
+/// reference it is kept under in the machine's secret store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CallbackPlan {
+    /// Where to POST.
+    pub url: HttpUrl,
+    /// Where the secret the body is signed with is kept, when there is one.
+    /// Not called `secret`: it is the name of one, and a reader that looks
+    /// for secrets by their key (a bug report's scrubber, say) must not take
+    /// it for the secret itself.
+    pub signed_with: Option<SecretRef>,
+}
+
+/// Who hears about a resolved run, and the caller's labels for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DeliveryPlan {
+    /// The webhook to call when the run finishes.
+    pub callback: Option<CallbackPlan>,
+    /// The caller's labels.
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl DeliveryPlan {
+    /// `delivery` for the run `run`: each secret it carries given a new
+    /// reference, and the secrets themselves under those references, for the
+    /// host to keep in its secret store.
+    pub fn of(delivery: &Delivery, run: &RunId) -> (Self, Vec<(SecretRef, Secret)>) {
+        let mut kept = Vec::new();
+        let callback = delivery.callback.as_ref().map(|callback| CallbackPlan {
+            url: callback.url.clone(),
+            signed_with: callback.secret.as_ref().map(|secret| {
+                let reference = crate::secret_store::mint(run);
+                kept.push((reference.clone(), secret.clone()));
+                reference
+            }),
+        });
+        let plan = Self {
+            callback,
+            metadata: delivery.metadata.clone(),
+        };
+        (plan, kept)
+    }
+
+    /// Where the webhook's signing secret is kept, when it has one.
+    pub fn callback_secret(&self) -> Option<&SecretRef> {
+        self.callback.as_ref().and_then(|c| c.signed_with.as_ref())
+    }
 }
 
 #[cfg(test)]
@@ -272,6 +322,40 @@ mod tests {
         assert!(!format!("{cb:?}").contains("hunter2"));
         let bin = postcard::to_stdvec(&cb).unwrap();
         assert_eq!(postcard::from_bytes::<Callback>(&bin).unwrap(), cb);
+    }
+
+    /// A resolved delivery holds a reference where the request held the
+    /// secret, and hands the secret back beside it for the store.
+    #[test]
+    fn a_planned_delivery_holds_a_reference_and_never_the_secret() {
+        let run = RunId::new("r-1").unwrap();
+        let asked = Delivery {
+            callback: Some(Callback {
+                url: HttpUrl::new("https://x.dev/hook").unwrap(),
+                secret: Some(Secret::new("hunter2")),
+            }),
+            metadata: [("team".to_string(), "a".to_string())].into(),
+        };
+        let (plan, kept) = DeliveryPlan::of(&asked, &run);
+        let reference = plan.callback_secret().unwrap().clone();
+        assert_eq!(reference.run(), Some("r-1"));
+        assert_eq!(kept, vec![(reference, Secret::new("hunter2"))]);
+        assert_eq!(plan.metadata["team"], "a");
+        let bin = postcard::to_stdvec(&plan).unwrap();
+        assert!(!String::from_utf8_lossy(&bin).contains("hunter2"));
+        assert_eq!(postcard::from_bytes::<DeliveryPlan>(&bin).unwrap(), plan);
+        // A webhook with no secret, and no webhook at all, keep nothing.
+        let unsigned = Delivery {
+            callback: Some(Callback {
+                url: HttpUrl::new("https://x.dev/hook").unwrap(),
+                secret: None,
+            }),
+            metadata: BTreeMap::new(),
+        };
+        let (plan, kept) = DeliveryPlan::of(&unsigned, &run);
+        assert!(plan.callback.is_some() && plan.callback_secret().is_none() && kept.is_empty());
+        let (plan, kept) = DeliveryPlan::of(&Delivery::default(), &run);
+        assert_eq!((plan, kept.len()), (DeliveryPlan::default(), 0));
     }
 
     #[test]

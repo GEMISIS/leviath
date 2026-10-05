@@ -82,6 +82,9 @@ pub struct DaemonEnv {
     /// The operator's reclassified MCP tools (`policy.toml`), which every
     /// taint gate applies.
     pub(crate) mcp_overrides: HashMap<String, leviath_core::policy::McpToolOverride>,
+    /// The secret store a resumed run's webhook secret is looked for in.
+    /// `None` for an env that only looks stages up and binds no run.
+    pub(crate) secrets: Option<leviath_runtime::secret_store::SecretStore>,
 }
 
 impl DaemonEnv {

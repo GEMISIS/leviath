@@ -4,8 +4,8 @@
 use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
 use leviath_runtime::runfile::{CheckpointPolicy, RunFileReader, RunFileWriter};
 use leviath_runtime::spec::env::CodeFiles;
-use leviath_runtime::spec::launch::{Callback, Secret};
-use leviath_runtime::spec::names::{Digest, HttpUrl};
+use leviath_runtime::spec::launch::CallbackPlan;
+use leviath_runtime::spec::names::{Digest, HttpUrl, SecretRef};
 use leviath_runtime::state::context::{BlobState, PartBody, PartState};
 use leviath_runtime::state::{
     EntryKind, EntryMeta, EntryState, TransitionReason, TransitionRecord,
@@ -40,32 +40,24 @@ fn respec(run_id: &str, edit: impl FnOnce(&mut RunSpec)) {
     .unwrap();
 }
 
+/// A spec is served as the run file holds it: a signed webhook names where
+/// its secret is kept, and the secret itself is in no spec to serve.
 #[tokio::test]
-async fn a_spec_is_served_with_its_webhook_secret_hidden() {
+async fn a_spec_is_served_with_its_webhook_secret_named_by_reference() {
     crate::runstate::with_isolated_runs_dir_async("inspect-spec", |_d| async move {
         let run_id = recorded();
         assert!(spec(&run_id).unwrap().delivery.callback.is_none());
+        let reference = SecretRef::new(format!("{run_id}.{}", "0".repeat(32))).unwrap();
         respec(&run_id, |spec| {
-            spec.delivery.callback = Some(Callback {
+            spec.delivery.callback = Some(CallbackPlan {
                 url: HttpUrl::new("https://example.com/hook").unwrap(),
-                secret: Some(Secret::new("hunter2")),
+                signed_with: Some(reference.clone()),
             });
         });
         let served = spec(&run_id).unwrap();
         let callback = served.delivery.callback.unwrap();
-        assert_eq!(callback.secret.unwrap().expose(), "[redacted]");
+        assert_eq!(callback.signed_with, Some(reference));
         assert_eq!(callback.url.as_str(), "https://example.com/hook");
-
-        // A webhook with no secret has none to hide.
-        respec(&run_id, |spec| {
-            spec.delivery.callback = Some(Callback {
-                url: HttpUrl::new("https://example.com/hook").unwrap(),
-                secret: None,
-            });
-        });
-        let plain = spec(&run_id).unwrap().delivery.callback.unwrap();
-        assert!(plain.secret.is_none());
-
         assert_eq!(spec("ghost").unwrap_err().code(), "NOT_FOUND");
     })
     .await;

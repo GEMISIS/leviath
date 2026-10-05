@@ -14,6 +14,8 @@ use crate::spec::run_spec::tests::spec;
 struct Plain {
     providers: BTreeMap<String, Digest>,
     mcp: BTreeMap<String, Digest>,
+    /// Whether the secret store has lost the run's webhook secret.
+    secret_gone: bool,
 }
 
 #[async_trait]
@@ -29,6 +31,10 @@ impl BindEnv for Plain {
     }
     fn mcp_servers_now(&self) -> Vec<String> {
         self.mcp.keys().cloned().collect()
+    }
+    fn holds_secret(&self, secret: &crate::spec::names::SecretRef) -> bool {
+        assert_eq!(secret.as_str(), "t-1.secret");
+        !self.secret_gone
     }
     async fn bind(&self, spec: &RunSpec, code: &CodeFiles) -> Result<Bindings, SpawnIssues> {
         assert!(code.contains_key(&Digest::of(b"code")));
@@ -70,6 +76,7 @@ fn same() -> Plain {
     Plain {
         providers: [("mock".to_string(), d())].into(),
         mcp: [("gh".to_string(), d())].into(),
+        secret_gone: false,
     }
 }
 
@@ -322,4 +329,23 @@ async fn every_problem_is_reported_at_once() {
         paths(&issues),
         ["stages.plan.provider", "stages.plan.tools", "code[0]"]
     );
+}
+
+/// A resume whose webhook secret has gone from the store is held with an
+/// issue at the secret, saying where it was kept; a run with no secret never
+/// asks.
+#[tokio::test]
+async fn a_lost_webhook_secret_holds_the_run_at_the_secret() {
+    let gone = Plain {
+        secret_gone: true,
+        ..same()
+    };
+    let issues = refused(&spec(), &code(), &gone).await;
+    assert_eq!(paths(&issues), ["delivery.callback.signed_with"]);
+    let issue = &issues.0[0];
+    assert_eq!(issue.code, IssueCode::Unavailable);
+    assert!(issue.to_string().contains("t-1.secret"), "{issue}");
+    let mut unsigned = spec();
+    unsigned.delivery.callback = None;
+    assert!(bind(&unsigned, &code(), &gone).await.is_ok());
 }

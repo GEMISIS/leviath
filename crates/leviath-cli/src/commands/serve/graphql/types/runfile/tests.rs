@@ -21,12 +21,12 @@ use leviath_runtime::spec::inputs::{
     InputValues, PathKind, RegionBinding, Template,
 };
 use leviath_runtime::spec::launch::{
-    Callback, Delivery, LaunchPolicy, Placement, Secret, Unattended,
+    CallbackPlan, DeliveryPlan, LaunchPolicy, Placement, Unattended,
 };
 use leviath_runtime::spec::names::{
     BlueprintName, BlueprintPath, BlueprintRef, ChoiceName, Digest, EdgeName, HttpUrl, InputName,
     McpServerName, MimePattern, ModelId, ModelRef, ProfileName, ProviderName, RegionName, RunId,
-    StageName, ToolName, WorkdirPath,
+    SecretRef, StageName, ToolName, WorkdirPath,
 };
 use leviath_runtime::spec::run_spec::{
     AutoAnswers, EnvFingerprint, RunSpec as CoreSpec, SeededContent, SpecOrigin, StagePlan,
@@ -439,10 +439,10 @@ fn spec() -> CoreSpec {
             worker_stage: Some(stage("analyze")),
             work_item: Some("item-1".to_string()),
         },
-        delivery: Delivery {
-            callback: Some(Callback {
+        delivery: DeliveryPlan {
+            callback: Some(CallbackPlan {
                 url: named!(HttpUrl, "https://example.com/hook"),
-                secret: Some(Secret::new("shh")),
+                signed_with: Some(named!(SecretRef, "run-1.secret")),
             }),
             metadata: [("ticket".to_string(), "42".to_string())].into(),
         },

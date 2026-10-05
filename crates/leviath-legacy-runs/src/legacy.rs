@@ -59,12 +59,15 @@ pub(crate) fn meta(run_dir: &Path) -> Option<RunMeta> {
     json_file(&run_dir.join(META_FILE)).ok().flatten()
 }
 
-/// The one key of an old `meta.json` read as written rather than through
-/// the run's record.
-#[derive(Debug, Deserialize)]
-struct YoloProfileKey {
+/// The keys of an old `meta.json` read as written rather than through the
+/// run's record: a profile name the record would refuse, and the webhook's
+/// signing secret, which this build's record does not carry.
+#[derive(Debug, Default, Deserialize)]
+struct WrittenKeys {
     #[serde(default)]
     yolo_profile: Option<String>,
+    #[serde(default)]
+    callback_secret: Option<String>,
 }
 
 /// A fan-out parent's waiting state, as `fanout.json` holds it.
@@ -138,6 +141,8 @@ pub(crate) struct LegacyRun {
     /// The `yolo_profile` its `meta.json` names, as written, which the run's
     /// record reads as attended when it is not a valid profile name.
     pub(crate) yolo_profile: Option<String>,
+    /// The secret its webhook was signed with, as its `meta.json` holds it.
+    pub(crate) callback_secret: Option<String>,
     /// The stored parts under `blobs/`, by digest, with their sizes. They
     /// stay where they are, and the run file names them.
     pub(crate) blobs: Vec<(Digest, u64)>,
@@ -178,6 +183,10 @@ impl LegacyRun {
             path: dir.to_path_buf(),
             why: format!("it has no {META_FILE}"),
         })?;
+        let written = json_file::<WrittenKeys>(&meta_path)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let journaled = journal.is_some();
         let records = match journal {
             Some(bytes) => journal_records(&journal_path, &bytes)?,
@@ -203,10 +212,8 @@ impl LegacyRun {
             final_output: std::fs::read_to_string(dir.join(leviath_core::FINAL_OUTPUT_FILE)).ok(),
             blueprint: blueprint(dir, &meta, env),
             listed: listed(meta, &folded.meta),
-            yolo_profile: json_file::<YoloProfileKey>(&meta_path)
-                .ok()
-                .flatten()
-                .and_then(|k| k.yolo_profile),
+            yolo_profile: written.yolo_profile,
+            callback_secret: written.callback_secret,
             dir: dir.to_path_buf(),
             header,
             records,

@@ -136,6 +136,7 @@ pub(crate) fn env_for(world: &World, deps: TestDeps<'_>) -> DaemonEnv {
         mime,
         blob_store,
         mcp_overrides,
+        secrets: None,
     }
 }
 

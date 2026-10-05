@@ -63,6 +63,7 @@ pub(crate) fn env_with(config: Config) -> (DaemonEnv, tempfile::TempDir) {
         mime: Arc::new(leviath_core::mime::MimeRegistry::builtin()),
         blob_store: Arc::new(leviath_core::mime::MemoryBlobStore::new()),
         mcp_overrides: HashMap::new(),
+        secrets: None,
     };
     (env, agents)
 }

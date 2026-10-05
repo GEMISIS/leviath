@@ -115,8 +115,10 @@ pub(crate) fn readme(
         "Every key the config held, every credential-shaped environment variable, and every \
          token-shaped string (`sk-...`, `AKIA...`, bearer headers, private-key blocks, JWTs) was \
          replaced with `[REDACTED]` or `[REDACTED:<kind>]`. `manifest.json` counts them per file. \
-         A run's `callback_secret` is blanked. `control.token`, `mcp-auth.json`, \
-         `provider-auth.json`, `.env` files and other tools' configs are never copied.\n",
+         A run's webhook secret is in no run file: the `secrets/` store it is kept in is never \
+         copied, its values are scrubbed wherever they appear, and a `callback_secret` an \
+         earlier release recorded is blanked. `control.token`, `mcp-auth.json`, `provider-auth.json`, `.env` files and \
+         other tools' configs are never copied.\n",
     );
     out
 }

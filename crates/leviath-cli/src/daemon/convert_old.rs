@@ -596,6 +596,7 @@ impl AtStart<'_> {
             subagent_tx: tokio::sync::mpsc::unbounded_channel().0,
             blob_store: std::sync::Arc::new(leviath_core::mime::MemoryBlobStore::new()),
             mcp_overrides: Default::default(),
+            secrets: None,
         }
     }
 }

@@ -157,7 +157,15 @@ pub fn convert(run_dir: &Path, env: &ConvertEnv<'_>) -> Result<ConvertReport, Co
     let (start, deltas, last) = history::build(&old, &built.spec, &mut report);
     built.spec.listed = Some(spec::listed(&old, last.seq));
     let bytes = write::encode(&built, &start, &deltas, &last);
-    let written = write::install(run_dir, &bytes)?;
+    // The webhook's secret goes to the store beside the runs before the run
+    // file names it there; a run that is not converted keeps none.
+    let secrets = leviath_runtime::secret_store::SecretStore::of_run_dir(run_dir);
+    secrets
+        .keep_all(&built.secrets)
+        .map_err(ConvertError::io(secrets.dir()))?;
+    let written = write::install(run_dir, &bytes).inspect_err(|_| {
+        secrets.forget_run(built.spec.run_id.as_str());
+    })?;
     let blueprint_name = old.meta().agent_name.clone();
     let source = old.blueprint.source;
     let mut done = report.finish(built.spec.run_id, source, deltas.len(), written);

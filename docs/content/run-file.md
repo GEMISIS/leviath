@@ -56,12 +56,27 @@ this machine. It is the run's starting point, and nothing in it is decided again
 | `code` | The digest of every script the graph names |
 | `launch` | The [launch policy](/docs/starting-a-run#launch-policy) the run got |
 | `placement` | Its workdir, the run that started it, and its depth in the tree |
-| `delivery` | Its webhook and your labels |
+| `delivery` | Its webhook and your labels; a signing secret is named by where it is kept, never held |
 | `env` | A fingerprint of the providers and MCP servers it used |
 | `origin` | Where its graph came from: a blueprint and its digest, or a raw request |
 
 Because tool definitions and seeded contents are stored, a run does not change underneath you
 when someone edits the blueprint, a script or an MCP server's tool list later.
+
+### The webhook's secret
+
+A run file never holds the secret its webhook is signed with. When a run is spawned, the daemon
+keeps the secret in the **secret store**: `secrets/` in the data root, beside `runs/`. It is one
+file per secret, readable by you alone. The spec's `delivery.callback.signed_with` holds only the
+file's name, the run's id followed by random hex.
+
+So a copy of `run.lvr` carries no secret, wherever it goes: an upgrade backup, a bug report, another
+machine, an agent reading the run's history. The server reads the secret from the store when it
+signs the webhook.
+
+The secret is kept as long as its run is, because a finished run's webhook can still be sent:
+after a restart, or when the run finishes again. Deleting the run deletes its secret. When the
+daemon starts, it removes any secret whose run directory is gone.
 
 ### Deltas
 
@@ -201,6 +216,7 @@ comes back.
 | An MCP server is gone or disconnected | `unavailable` | `stages.<stage>.tools` |
 | An MCP server's tools changed | `changed` | `stages.<stage>.tools`, naming tools removed, changed and added |
 | A script's bytes are missing from the file | `missing` | `code[<n>]` |
+| The webhook's secret is gone from the secret store | `unavailable` | `delivery.callback.signed_with` |
 
 Put the provider or server back the way it was, then restart the daemon, and the run carries on
 from where it stopped. `lev resume` tries again without a restart, against the providers
@@ -219,7 +235,9 @@ asks for the run:
 - the spec is rebuilt from the run's metadata and the blueprint it ran;
 - its code is copied in;
 - each journal step that maps onto a delta becomes one;
-- the state it was last in becomes the last checkpoint, naming the files beside it.
+- the state it was last in becomes the last checkpoint, naming the files beside it;
+- a webhook secret in its `meta.json` moves to the [secret store](#the-webhooks-secret), and the
+  spec names it there.
 
 The old files move into `legacy/` inside the run's directory rather than being deleted, and a
 directory that already holds a run file is never converted twice. Three stay where they are,

@@ -121,7 +121,6 @@ fn a_rich_run_carries_its_scripts_inputs_and_stages() {
         m.unattended = Unattended::Profile(ProfileName::new("careful").unwrap());
         m.model_override = Some("openai/gpt-mock".into());
         m.callback_url = Some("https://example.com/hook".into());
-        m.callback_secret = Some("shh".into());
         m.metadata.insert("team".into(), "a".into());
         m.max_child_depth = 3;
         m.output_request = Some(
@@ -143,6 +142,7 @@ fn a_rich_run_carries_its_scripts_inputs_and_stages() {
         };
         meta.current_stage = "main".into();
     });
+    run.sign("shh-legacy-webhook-key");
     let (report, file) = run.converted();
     assert!(matches!(report.blueprint, BlueprintSource::Installed(_)));
     let spec = &file.spec;
@@ -194,8 +194,15 @@ fn a_rich_run_carries_its_scripts_inputs_and_stages() {
     let out = spec.requested_output.as_ref().unwrap();
     assert_eq!(out.artifacts.len(), 1);
     assert!(out.validator.is_some());
-    let cb = spec.delivery.callback.as_ref().unwrap();
-    assert_eq!(cb.secret.as_ref().unwrap().expose(), "shh");
+    // The secret moved into the store beside the runs; the run file only
+    // names where.
+    let kept = spec.delivery.callback_secret().unwrap();
+    assert_eq!(kept.run(), Some(spec.run_id.as_str()));
+    assert_eq!(
+        run.store().read(kept).unwrap().expose(),
+        "shh-legacy-webhook-key"
+    );
+    assert!(!run.file_holds("shh-legacy-webhook-key"));
     assert_eq!(spec.delivery.metadata["team"], "a");
     assert_eq!(file.last.cursor.stage.as_str(), "second");
     assert_eq!(file.fold(), file.last);
@@ -854,12 +861,32 @@ fn files_that_cannot_be_read_or_moved_are_named() {
         report.notes
     );
 
+    // A run that cannot be put in place keeps no secret in the store.
     let run = Run::fixture("finished");
+    run.meta(|m| {
+        m.callback_url = Some("https://example.com/hook".into());
+    });
+    run.sign("shh-legacy-webhook-key");
     run.write("legacy", "in the way");
     assert!(matches!(
         run.convert().unwrap_err(),
         ConvertError::Io { .. }
     ));
+    assert!(run.store().secrets().is_empty());
+
+    // Nor does one whose secret cannot be kept: a file where the store
+    // would be refuses the conversion before the run file is written.
+    let run = Run::fixture("finished");
+    run.meta(|m| {
+        m.callback_url = Some("https://example.com/hook".into());
+    });
+    run.sign("shh-legacy-webhook-key");
+    std::fs::write(run.store().dir(), b"in the way").unwrap();
+    assert!(matches!(
+        run.convert().unwrap_err(),
+        ConvertError::Io { .. }
+    ));
+    assert!(leviath_legacy_runs::is_legacy(&run.dir));
 }
 
 #[test]

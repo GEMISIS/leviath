@@ -190,37 +190,43 @@ fn respec(dir: &std::path::Path, edit: impl FnOnce(&mut leviath_runtime::spec::r
     .unwrap();
 }
 
-/// The webhook's signing secret is in the run file, so a resumed run can
-/// sign, and is never printed: the REST and GraphQL spec and `lev rage` hide
-/// it the same way.
+/// The webhook's signing secret is never in the run file: the spec names
+/// where the store beside the runs keeps it, and that name is all a reader
+/// of the spec ever sees.
 #[tokio::test]
 async fn the_webhook_secret_is_never_shown() {
-    use leviath_runtime::spec::launch::{Callback, Secret};
+    use leviath_runtime::secret_store::SecretStore;
+    use leviath_runtime::spec::launch::{CallbackPlan, Secret};
+    use leviath_runtime::spec::names::RunId;
     runstate::with_isolated_runs_dir_async("run-show-secret", |_d| async move {
         let dir = recorded(&runstate::runs_dir());
+        let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let reference = leviath_runtime::secret_store::mint(&RunId::new(id.as_str()).unwrap());
+        let store = SecretStore::of_runs(&runstate::runs_dir());
+        store
+            .keep(&reference, &Secret::new("hunter2-signing-key"))
+            .unwrap();
         respec(&dir, |spec| {
-            spec.delivery.callback = Some(Callback {
+            spec.delivery.callback = Some(CallbackPlan {
                 url: leviath_runtime::spec::names::HttpUrl::new("https://example.com/hook")
                     .unwrap(),
-                secret: Some(Secret::new("hunter2-signing-key")),
+                signed_with: Some(reference.clone()),
             });
         });
-        let id = dir.file_name().unwrap().to_string_lossy().into_owned();
         for json in [false, true] {
             let shown = render(&ShowArgs { json, ..args(&id) }).unwrap();
             assert!(!shown.contains("hunter2"), "{shown}");
-            assert!(shown.contains("[redacted]"), "{shown}");
+            assert!(shown.contains(reference.as_str()), "{shown}");
         }
-        let kept = runstate::run_file::open_in(&dir).unwrap();
-        let secret = kept
-            .spec()
-            .delivery
-            .callback
-            .as_ref()
-            .unwrap()
-            .secret
-            .as_ref();
-        assert_eq!(secret.map(Secret::expose), Some("hunter2-signing-key"));
+        let file = runstate::run_file::path_in(&dir);
+        assert!(!crate::test_support::run_file_holds(
+            &file,
+            "hunter2-signing-key"
+        ));
+        assert_eq!(
+            store.read(&reference).map(|s| s.expose().to_string()),
+            Some("hunter2-signing-key".to_string())
+        );
     })
     .await;
 }

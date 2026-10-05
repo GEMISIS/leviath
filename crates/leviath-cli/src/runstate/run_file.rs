@@ -17,9 +17,12 @@
 
 use std::path::{Path, PathBuf};
 
-use leviath_core::run_meta::{ContextSnapshot, StageRecord};
+use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageRecord};
 use leviath_runtime::runfile::history::RunPoint;
 use leviath_runtime::runfile::{RunFileReader, RunFileTail};
+use leviath_runtime::secret_store::SecretStore;
+use leviath_runtime::spec::launch::Secret;
+use leviath_runtime::spec::names::SecretRef;
 use leviath_runtime::spec::run_spec::RunSpec;
 use leviath_runtime::state::{Change, RunState};
 
@@ -28,17 +31,25 @@ pub(crate) fn path_in(dir: &Path) -> PathBuf {
     dir.join(leviath_core::files::RUN_FILE)
 }
 
-/// `spec` as it is shown to a person or a client: the webhook's signing
-/// secret replaced with a marker. The run file keeps the secret so a resumed
-/// run can still sign, and nothing that reads a spec back has any use for it.
-pub(crate) fn redacted_spec(mut spec: RunSpec) -> RunSpec {
-    if let Some(callback) = spec.delivery.callback.as_mut() {
-        callback.secret = callback
-            .secret
-            .as_ref()
-            .map(|_| leviath_runtime::spec::launch::Secret::new("[redacted]"));
-    }
-    spec
+/// What a run's webhook is signed with: `None` for a webhook with no
+/// secret, the secret as the store beside the runs holds it, or the
+/// reference the spec names it by when the store no longer holds it.
+pub(crate) type CallbackSecret = Option<Result<Secret, SecretRef>>;
+
+/// The secret the webhook of the run in `dir`, resolved to `spec`, is signed
+/// with. The spec only names it; the secret is read from the store.
+pub(crate) fn callback_secret(dir: &Path, spec: &RunSpec) -> CallbackSecret {
+    let reference = spec.delivery.callback_secret()?;
+    let held = SecretStore::of_run_dir(dir).read(reference);
+    Some(held.ok_or_else(|| reference.clone()))
+}
+
+/// The record of the run in `dir` as of its last step, and the secret its
+/// webhook is signed with, from one read of its run file.
+pub(crate) fn meta_and_secret(dir: &Path) -> anyhow::Result<(RunMeta, CallbackSecret)> {
+    let tail = tail_in(dir)?;
+    let meta = leviath_runtime::runfile::summary_of(&tail.spec, &tail.state, tail.updated_at);
+    Ok((meta, callback_secret(dir, &tail.spec)))
 }
 
 /// Whether `dir` holds a run file this build reads, told from its first few
@@ -105,8 +116,7 @@ pub(crate) fn stages_in(dir: &Path) -> Option<Vec<StageRecord>> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct RunHistory {
     /// The window as the run started, then after each step that changed it,
-    /// oldest first. Every record is redacted: a run's record names its
-    /// webhook's secret, and nothing that shows a history has a use for it.
+    /// oldest first.
     pub(crate) points: Vec<RunPoint>,
     /// Each edge the run took, as `(from, to)`, in the order it took them.
     /// `None` when nothing says which edge a move followed.
@@ -116,7 +126,7 @@ pub(crate) struct RunHistory {
 /// One point of a run's history.
 fn point(spec: &RunSpec, state: &RunState, at: i64) -> RunPoint {
     RunPoint {
-        meta: leviath_runtime::runfile::summary_of(spec, state, at).redacted(),
+        meta: leviath_runtime::runfile::summary_of(spec, state, at),
         context: leviath_runtime::runfile::context_snapshot(spec, state),
         at,
     }

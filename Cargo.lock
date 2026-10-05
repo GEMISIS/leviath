@@ -2790,6 +2790,7 @@ dependencies = [
  "url",
  "winresource",
  "zip",
+ "zstd",
 ]
 
 [[package]]
@@ -2844,6 +2845,7 @@ dependencies = [
  "thiserror 2.0.20",
  "toml",
  "tracing",
+ "zstd",
 ]
 
 [[package]]

@@ -162,11 +162,10 @@ fn visit_points(
     .ok()
 }
 
-/// One point, window and all. Its record is redacted: a run's record names
-/// its webhook's secret, and nothing that shows a history has any use for it.
+/// One point, window and all.
 fn point(spec: &RunSpec, state: &RunState, at: i64) -> RunPoint {
     RunPoint {
-        meta: leviath_runtime::runfile::summary_of(spec, state, at).redacted(),
+        meta: leviath_runtime::runfile::summary_of(spec, state, at),
         context: leviath_runtime::runfile::context_snapshot(spec, state),
         at,
     }

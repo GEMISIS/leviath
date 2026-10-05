@@ -370,9 +370,12 @@ fn delivery_id(event: &str, run_id: &str) -> String {
     format!("{event}:{run_id}")
 }
 
-/// POST a completion webhook for `run_id` if its persisted metadata carries a
-/// `callback_url`. When the metadata also carries a `callback_secret`, the body
-/// is signed with HMAC-SHA256 and the signature travels in `X-Leviath-Signature`.
+/// POST a completion webhook for `run_id` if its run file names a callback
+/// URL. When the webhook has a signing secret, the body is signed with
+/// HMAC-SHA256 and the signature travels in `X-Leviath-Signature`. The run
+/// file names the secret by where it is kept; the secret is read from the
+/// store beside the runs, and a webhook whose secret is no longer there is
+/// not posted unsigned.
 /// Every delivery carries a deterministic [`delivery_id`] for receiver-side
 /// dedupe (in the signed body and the `X-Leviath-Delivery` header).
 fn fire_completion_webhook(
@@ -382,7 +385,7 @@ fn fire_completion_webhook(
     status: &str,
     final_output: Option<&leviath_core::output::FinalOutput>,
 ) {
-    let Ok(meta) = runstate::read_meta(run_id) else {
+    let Ok((meta, secret)) = runstate::run_file::meta_and_secret(&runstate::run_dir(run_id)) else {
         return; // metadata not yet persisted
     };
     let Some(url) = meta.callback_url.clone() else {
@@ -393,7 +396,15 @@ fn fire_completion_webhook(
     // Serialize once so the signature covers the exact bytes we send. `Value`'s
     // `Display` is infallible and byte-identical to `to_vec`.
     let body = payload.to_string().into_bytes();
-    let signature = meta.callback_secret.as_deref().map(|s| sign(s, &body));
+    let signature = match secret {
+        None => None,
+        Some(Ok(secret)) => Some(sign(secret.expose(), &body)),
+        Some(Err(reference)) => {
+            let reference = reference.to_string();
+            tracing::warn!(run_id = %run_id, secret = %reference, "the run's webhook was not posted: its signing secret is not in the secret store");
+            return;
+        }
+    };
     tokio::spawn(fire_webhook(
         client.clone(),
         url,
@@ -1216,10 +1227,9 @@ mod tests {
                     1,
                 );
                 meta.callback_url = Some(url);
-                meta.callback_secret = Some("topsecret".into());
                 // A finished run that wrote nothing and handed nothing back.
                 meta.status = leviath_core::run_meta::RunStatus::Complete;
-                create_run(&meta).unwrap();
+                crate::runstate::create_signed_run(&meta, "topsecret").unwrap();
 
                 fire_completion_webhook(
                     &reqwest::Client::new(),
@@ -1229,11 +1239,17 @@ mod tests {
                     None,
                 );
                 let requests = server.await.unwrap();
+                // Signed with the secret the store holds for the run: the
+                // run file only names it.
+                let (_, body) = requests[0].split_once("\r\n\r\n").unwrap();
+                let expected = sign("topsecret", body.as_bytes());
                 assert!(
                     requests[0]
                         .to_lowercase()
-                        .contains("x-leviath-signature: sha256=")
+                        .contains(&format!("x-leviath-signature: {expected}"))
                 );
+                let file = runstate::run_file::path_in(&runstate::run_dir("signed"));
+                assert!(!crate::test_support::run_file_holds(&file, "topsecret"));
                 assert!(requests[0].contains("agent_completed"));
                 // The delivery id travels in the signed body and the header.
                 assert!(
@@ -1254,6 +1270,40 @@ mod tests {
                 );
             },
         )
+        .await;
+    }
+
+    /// A webhook whose signing secret has gone from the store is not posted
+    /// at all: posted unsigned, a receiver that checks would refuse it and
+    /// one that does not would trust a body nobody signed.
+    #[tokio::test]
+    async fn a_webhook_whose_secret_is_lost_is_not_posted_unsigned() {
+        crate::runstate::with_isolated_runs_dir_async("webhook_secret_lost", |_d| async move {
+            let (url, server) = fake_receiver(vec![200]).await;
+            for id in ["lost", "kept"] {
+                let mut meta = RunMeta::new(
+                    id.into(),
+                    "coder".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/w".into(),
+                    1,
+                );
+                meta.callback_url = Some(url.clone());
+                meta.status = leviath_core::run_meta::RunStatus::Complete;
+                crate::runstate::create_signed_run(&meta, "topsecret").unwrap();
+            }
+            leviath_runtime::secret_store::SecretStore::of_runs(&runstate::runs_dir())
+                .forget_run("lost");
+            let client = reqwest::Client::new();
+            fire_completion_webhook(&client, &fast_cfg(), "lost", "complete", None);
+            fire_completion_webhook(&client, &fast_cfg(), "kept", "complete", None);
+            // The one request the receiver took is the run whose secret is
+            // still there.
+            let requests = server.await.unwrap();
+            assert!(requests[0].contains("agent_completed:kept"));
+        })
         .await;
     }
 

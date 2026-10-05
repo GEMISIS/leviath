@@ -13,11 +13,11 @@ use leviath_runtime::spec::env::CodeFiles;
 use leviath_runtime::spec::graph::{ArtifactDef, CodeRef, OutputDef, RunGraph};
 use leviath_runtime::spec::inputs::{InputValue, InputValues};
 use leviath_runtime::spec::launch::{
-    Callback, Delivery, LaunchPolicy, Placement, Secret, Unattended,
+    Callback, Delivery, DeliveryPlan, LaunchPolicy, Placement, Secret, Unattended,
 };
 use leviath_runtime::spec::names::{
     BlueprintName, BlueprintRef, Digest, HttpUrl, MimePattern, ModelRef, ProfileName, RegionName,
-    RunId,
+    RunId, SecretRef,
 };
 use leviath_runtime::spec::run_spec::{
     EnvFingerprint, ListedAs, ListedStage, RunSpec, SeededContent, SpecOrigin,
@@ -33,6 +33,9 @@ use crate::{ConvertError, StageLookup};
 pub(crate) struct Built {
     pub(crate) spec: RunSpec,
     pub(crate) code: Vec<(Digest, Vec<u8>)>,
+    /// The old run's webhook secret, under the reference the spec names it
+    /// by, for the secret store.
+    pub(crate) secrets: Vec<(SecretRef, Secret)>,
 }
 
 /// Where the run's graph was read from.
@@ -194,8 +197,13 @@ pub(crate) fn build(
             code.push((reference, digest));
         }
     }
+    let run_id = RunId::new(meta.run_id.as_str()).map_err(ConvertError::name("run_id"))?;
+    let (delivery, secrets) = DeliveryPlan::of(
+        &delivery(meta, old.callback_secret.as_deref(), report),
+        &run_id,
+    );
     let spec = RunSpec {
-        run_id: RunId::new(meta.run_id.as_str()).map_err(ConvertError::name("run_id"))?,
+        run_id,
         origin,
         inputs,
         stages,
@@ -206,7 +214,7 @@ pub(crate) fn build(
         launch: launch(&graph, meta, old.yolo_profile.as_deref(), lookup, report),
         auto_answers,
         placement: placement(meta, report)?,
-        delivery: delivery(meta, report),
+        delivery,
         env: EnvFingerprint::default(),
         created_at: meta.started_at,
         graph,
@@ -220,6 +228,7 @@ pub(crate) fn build(
     Ok(Built {
         spec,
         code: code_frames,
+        secrets,
     })
 }
 
@@ -614,14 +623,16 @@ fn placement(meta: &RunMeta, report: &mut Report) -> Result<Placement, ConvertEr
     })
 }
 
-fn delivery(meta: &RunMeta, report: &mut Report) -> Delivery {
+/// Who heard about the run. `secret` is the one its `meta.json` signed the
+/// webhook with.
+fn delivery(meta: &RunMeta, secret: Option<&str>, report: &mut Report) -> Delivery {
     let callback = meta
         .callback_url
         .as_deref()
         .and_then(|url| match HttpUrl::new(url) {
             Ok(url) => Some(Callback {
                 url,
-                secret: meta.callback_secret.clone().map(Secret::new),
+                secret: secret.map(Secret::new),
             }),
             Err(e) => {
                 report.note(format!("the callback {url:?} was left out: {e}"));

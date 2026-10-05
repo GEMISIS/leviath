@@ -33,6 +33,8 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Decompressing a converted run file's frames, to prove a secret is in none.
+zstd = { workspace = true }
 
 [lints]
 workspace = true

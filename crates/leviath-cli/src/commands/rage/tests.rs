@@ -146,7 +146,6 @@ fn meta(id: &str, blueprint: &Path) -> RunMeta {
     );
     meta.status = RunStatus::Error;
     meta.error = Some("the tool failed".to_string());
-    meta.callback_secret = Some(CALLBACK_SECRET.to_string());
     meta
 }
 
@@ -210,7 +209,7 @@ api_token = "{EXTRA_VALUE}"
     );
     write(
         &data.join("daemon.log"),
-        format!("info daemon up\nkey {CONFIG_KEY} leaked\n{SLACK_TOKEN}\n"),
+        format!("info daemon up\nkey {CONFIG_KEY} leaked\n{SLACK_TOKEN}\nhook {CALLBACK_SECRET}\n"),
     );
     write(&data.join("daemon.log.1"), "older\n");
     write(
@@ -252,6 +251,8 @@ api_token = "{EXTRA_VALUE}"
     // list, a ghost in that list, and an unrelated run.
     let runs = root.join("runs");
     let mut root_meta = meta(ROOT_RUN, &blueprint);
+    // A signed webhook: its secret goes to the store beside the runs.
+    root_meta.callback_url = Some("https://example.com/hook".to_string());
     // One child listed here and by its own parent id, one listed here only,
     // and one that no longer exists.
     root_meta.children = vec![
@@ -259,7 +260,8 @@ api_token = "{EXTRA_VALUE}"
         LISTED_CHILD.to_string(),
         "run-ghost-99999".to_string(),
     ];
-    write_meta(&runs, &root_meta);
+    crate::runstate::create_signed_run_in(&runs.join(ROOT_RUN), &root_meta, CALLBACK_SECRET)
+        .unwrap();
     let mut child = meta(CHILD_RUN, &blueprint);
     child.parent_run_id = Some(ROOT_RUN.to_string());
     child.agent_path = root.join("missing-blueprint").display().to_string();
@@ -442,6 +444,10 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
 async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
     with_env(|root| async move {
         plant(&root);
+        // The runs' webhook secret is in the store beside them, which the
+        // bundle never copies, and its value is scrubbed where it leaked.
+        let kept = leviath_runtime::secret_store::SecretStore::of_runs(&root.join("runs"));
+        assert!(kept.secrets().iter().any(|s| s.expose() == CALLBACK_SECRET));
         let env = env_for(&root);
         let out = root.join("bundle.zip");
         let outcome = build(&env, &selection(About::Run), Some(&out))
@@ -462,6 +468,7 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
                 );
             }
         }
+        assert!(!member_names.iter().any(|n| n.contains("secrets/")));
         for forbidden in [
             "control.token",
             "mcp-auth.json",
@@ -531,11 +538,10 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             config.contains("default_provider = \"anthropic\""),
             "{config}"
         );
-        // The run's metadata lost its signing key and kept its task.
+        // The run's metadata kept its task.
         let meta: serde_json::Value =
             serde_json::from_slice(member(&members, &format!("runs/{ROOT_RUN}/summary.json")))
                 .unwrap();
-        assert_eq!(meta["callback_secret"], serde_json::Value::Null);
         assert_eq!(meta["task"], "fix the planted bug");
         // The run file reads back as its spec, its state and its steps, the
         // tool call among them.
@@ -819,7 +825,12 @@ async fn each_run_says_what_of_it_could_not_be_copied() {
         let mut installed = meta("r-installed", Path::new(""));
         installed.agent_name = "not-installed".to_string();
         installed.callback_url = Some("https://example.com/hook".to_string());
-        write_meta(&runs, &installed);
+        crate::runstate::create_signed_run_in(
+            &runs.join("r-installed"),
+            &installed,
+            CALLBACK_SECRET,
+        )
+        .unwrap();
         let gone = root.join("gone-blueprint");
         write(&gone.join("agent.toml"), manifest_text());
         write_meta(&runs, &meta("r-gone", &gone.join("agent.toml")));

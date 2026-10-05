@@ -269,6 +269,9 @@ pub(crate) async fn setup_daemon_host_with(
     .await;
     upgrade.add_runs(runs);
     upgrade.finish(&crate::home_backup::Backup::of_runs(&runs_dir));
+    // A secret whose run has no directory any more (one deleted by hand, or
+    // a spawn stopped before its run file) is not kept for nothing.
+    leviath_runtime::secret_store::SecretStore::of_runs(&runs_dir).sweep(&runs_dir);
     board.begin("bringing back unfinished runs", 0);
     mcp_pool.warm_recovered(&runs_dir).await;
     // The index `lev ps` and the dashboard list runs from follows the runs
@@ -774,7 +777,6 @@ mod tests {
                 parent_run_id: None,
                 metadata: std::collections::HashMap::new(),
                 callback_url: None,
-                callback_secret: None,
                 title: None,
                 title_error: None,
                 blueprint_digest: None,
