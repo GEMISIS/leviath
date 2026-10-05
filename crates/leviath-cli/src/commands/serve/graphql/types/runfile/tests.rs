@@ -449,6 +449,11 @@ fn spec() -> CoreSpec {
         env: EnvFingerprint {
             providers: [(named!(ProviderName, "mock"), digest.clone())].into(),
             mcp_servers: [(named!(McpServerName, "gh"), digest)].into(),
+            sandbox: [(
+                named!(StageName, "analyze"),
+                leviath_core::sandbox::SandboxKind::Container,
+            )]
+            .into(),
             leviath_version: "0.6.4".into(),
         },
         created_at: 1_000,
@@ -522,6 +527,7 @@ fn pending() -> PendingBatch {
         )]
         .into(),
         executions: [("call-1".to_string(), "exec-1".to_string())].into(),
+        requested_by: "a1".into(),
         held: None,
     }
 }

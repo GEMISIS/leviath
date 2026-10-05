@@ -220,19 +220,103 @@ fn a_refresh_reads_the_index_only_when_a_run_file_changed() {
     );
     // An index this cannot read would be rebuilt by any read of it.
     std::fs::write(path_for(&dir), b"left alone").unwrap();
-    assert_eq!(refresh(&dir, seen), seen);
+    assert_eq!(refresh(&dir, seen.clone()), seen);
     assert_eq!(std::fs::read(path_for(&dir)).unwrap(), b"left alone");
 
+    // Once a run file changes, an index that does not read is built again.
     create_run_in(&dir.join("third-run"), &meta("third-run", "third", 300)).unwrap();
-    let now = refresh(&dir, seen);
+    let now = refresh(&dir, seen.clone());
     assert_ne!(now, seen);
     let saved: IndexFile = serde_json::from_slice(&std::fs::read(path_for(&dir)).unwrap()).unwrap();
     assert_eq!(saved.runs.len(), 3);
-    assert_eq!(look_of(&home.path().join("gone")), 0);
+    assert!(look_of(&home.path().join("gone")).is_empty());
+}
+
+/// A refresh after a run file changed reads that run alone: the entry of a
+/// run whose file is as it was is left as the index holds it, never read.
+/// A summary without its run id does not read whole, so a refresh that read
+/// every entry would take the index as unreadable and rebuild it.
+#[test]
+fn a_refresh_reads_only_the_runs_whose_files_changed() {
+    let home = runs();
+    let dir = home.path().join("runs");
+    list(&dir);
+    let seen = look_of(&dir);
+    edit_index(&dir, |v| {
+        v["runs"]["old-run"]["run"]
+            .as_object_mut()
+            .unwrap()
+            .remove("run_id");
+    });
+    std::thread::sleep(Duration::from_millis(5));
+    create_run_in(&dir.join("new-run"), &meta("new-run", "rewritten", 200)).unwrap();
+    let seen = refresh(&dir, seen);
+    assert!(!has_run_id(&dir, "old-run"), "the unchanged entry was read");
+    let saved = || -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(path_for(&dir)).unwrap()).unwrap()
+    };
+    assert_eq!(saved()["runs"]["new-run"]["run"]["title"], "rewritten");
+
+    // A run added is read and added; a run gone, or whose file no longer
+    // reads, is dropped.
+    create_run_in(&dir.join("third-run"), &meta("third-run", "third", 300)).unwrap();
+    let seen = refresh(&dir, seen);
+    assert_eq!(saved()["runs"]["third-run"]["run"]["title"], "third");
+    std::fs::remove_dir_all(dir.join("third-run")).unwrap();
+    std::fs::write(
+        dir.join("new-run").join(leviath_core::files::RUN_FILE),
+        b"not a run file",
+    )
+    .unwrap();
+    let seen = refresh(&dir, seen);
+    let runs = saved()["runs"].clone();
+    assert!(
+        runs["third-run"].is_null() && runs["new-run"].is_null(),
+        "{runs}"
+    );
+    assert!(runs["old-run"].is_object());
+
+    // An entry another listing already brought up to date is left as it is.
+    std::thread::sleep(Duration::from_millis(5));
+    create_run_in(&dir.join("new-run"), &meta("new-run", "back", 200)).unwrap();
+    list(&dir);
+    edit_index(&dir, |v| {
+        v["runs"]["new-run"]["run"]["title"] = "listed".into()
+    });
+    refresh(&dir, seen);
+    assert_eq!(saved()["runs"]["new-run"]["run"]["title"], "listed");
+}
+
+/// What a refresh leaves in the index is what a listing would have written:
+/// the same entries, byte for byte.
+#[test]
+fn a_refresh_writes_what_a_listing_would() {
+    let home = runs();
+    let dir = home.path().join("runs");
+    list(&dir);
+    let seen = look_of(&dir);
+    std::thread::sleep(Duration::from_millis(5));
+    create_run_in(&dir.join("new-run"), &meta("new-run", "rewritten", 200)).unwrap();
+    create_run_in(&dir.join("third-run"), &meta("third-run", "third", 300)).unwrap();
+    refresh(&dir, seen);
+    let refreshed = std::fs::read(path_for(&dir)).unwrap();
+    std::fs::remove_file(path_for(&dir)).unwrap();
+    list(&dir);
+    assert_eq!(std::fs::read(path_for(&dir)).unwrap(), refreshed);
+}
+
+/// A refresh off the runtime's threads answers how the run files look now.
+#[tokio::test]
+async fn a_refresh_off_thread_answers_the_look_now() {
+    let home = runs();
+    let dir = home.path().join("runs");
+    list(&dir);
+    let now = refresh_off_thread(dir.clone(), Looks::new()).await;
+    assert_eq!(now, look_of(&dir));
 }
 
 /// The daemon keeps the index up to date on its own: a run added while it
-/// runs is in the index a moment later.
+/// runs is in the index a moment later, and so is one added after that.
 #[tokio::test]
 async fn the_daemon_keeps_the_index_fresh() {
     let home = runs();
@@ -243,16 +327,20 @@ async fn the_daemon_keeps_the_index_fresh() {
         dir.clone(),
         Duration::from_millis(10),
     );
-    create_run_in(&dir.join("third-run"), &meta("third-run", "third", 300)).unwrap();
     let indexed = || -> usize {
         serde_json::from_slice::<IndexFile>(&std::fs::read(path_for(&dir)).unwrap())
             .map_or(0, |saved| saved.runs.len())
     };
-    for _ in 0..500 {
-        if indexed() == 3 {
-            break;
+    // The second run is indexed only by a tick after the one that indexed
+    // the first, so the refresher has come back from that one.
+    for (name, runs) in [("third-run", 3), ("fourth-run", 4)] {
+        create_run_in(&dir.join(name), &meta(name, name, 300)).unwrap();
+        for _ in 0..500 {
+            if indexed() == runs {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(indexed(), runs);
     }
-    assert_eq!(indexed(), 3);
 }

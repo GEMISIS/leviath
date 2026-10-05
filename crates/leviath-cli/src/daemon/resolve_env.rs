@@ -491,6 +491,14 @@ impl ResolveEnv for DaemonEnv {
     fn mcp_fingerprint(&self, server: &McpServerName) -> Option<Digest> {
         self.mcp_print(server)
     }
+
+    fn sandbox_kind(
+        &self,
+        graph: &RunGraph,
+        stage: &StageDef,
+    ) -> Option<leviath_core::sandbox::SandboxKind> {
+        Some(layers::stage_sandbox(&self.config, graph, stage).kind)
+    }
 }
 
 #[cfg(test)]

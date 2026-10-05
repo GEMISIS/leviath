@@ -110,19 +110,6 @@ fn every_inference_kind_has_a_distinct_label_and_serialized_name() {
     assert_eq!(labels.len(), all.len(), "labels must not collide");
 }
 
-/// Only stage turns are work the agent asked for. The other three are
-/// machinery the runtime ran on its behalf.
-#[test]
-fn only_a_stage_turn_counts_as_stage_work() {
-    assert!(InferenceKind::Stage.is_stage_work());
-    let machinery = [
-        InferenceKind::Compaction,
-        InferenceKind::Title,
-        InferenceKind::Routing,
-    ];
-    assert_eq!(machinery.iter().filter(|k| k.is_stage_work()).count(), 0);
-}
-
 /// An attempt that answered records how the answer ended, and one that did
 /// not reads back with nothing there. The two keys are left off the wire when
 /// empty.

@@ -354,6 +354,11 @@ pub struct EnvFingerprint {
     pub providers: BTreeMap<ProviderName, Digest>,
     /// Each MCP server the run uses, by a digest of its tool list.
     pub mcp_servers: BTreeMap<McpServerName, Digest>,
+    /// The kind of sandbox each stage's tools run in, by stage, as the
+    /// operator's settings, the graph and the stage decided it. Empty where
+    /// the run did not record it: a run converted from an older format, or
+    /// one resolved by a host that runs no sandboxes.
+    pub sandbox: BTreeMap<StageName, leviath_core::sandbox::SandboxKind>,
     /// The Leviath version that resolved it.
     pub leviath_version: String,
 }
@@ -447,6 +452,11 @@ pub(crate) mod tests {
             env: EnvFingerprint {
                 providers: [(ProviderName::new("mock").unwrap(), d.clone())].into(),
                 mcp_servers: [(McpServerName::new("gh").unwrap(), d)].into(),
+                sandbox: [(
+                    StageName::new("plan").unwrap(),
+                    leviath_core::sandbox::SandboxKind::Container,
+                )]
+                .into(),
                 leviath_version: "0.6.4".into(),
             },
             created_at: 1,

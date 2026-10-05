@@ -199,7 +199,7 @@ impl WorldHost {
             // "highest seen", so a threshold is announced once and a run that
             // jumps several in one pass announces each of them.
             for threshold in spend_notify.iter() {
-                let crossing = super::events::usd_to_micros(*threshold);
+                let crossing = super::events::threshold_micros(*threshold);
                 if spent_before < crossing && cur.cost_micros >= crossing {
                     let _ = self.events.send(WorldEvent::Spend {
                         run_id: run_id.clone(),

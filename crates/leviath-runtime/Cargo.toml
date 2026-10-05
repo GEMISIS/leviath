@@ -59,6 +59,8 @@ leviath-testkit = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 temp-env = { workspace = true, features = ["async_closure"] }
 tempfile = { workspace = true }
+# `apply(diff(a, b), a) == b` over generated run states.
+proptest = { workspace = true }
 
 [lints]
 workspace = true

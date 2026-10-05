@@ -354,6 +354,7 @@ fn an_empty_batch_matches_no_turn() {
     let batch = PendingToolBatch {
         iteration: 0,
         calls: Vec::new(),
+        requested_by: String::new(),
     };
     let snapshot = window(vec![region("conv", vec![turn(&["c1"])])]);
     assert!(!context_contains_batch(&snapshot, &batch));

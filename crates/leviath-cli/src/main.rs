@@ -102,7 +102,8 @@ async fn async_main() -> anyhow::Result<()> {
     // stdout, and a stray log line there would corrupt the host's stream.
     leviath_cli::logging::init(cli.verbose);
 
-    info!("Leviath CLI v{}", env!("CARGO_PKG_VERSION"));
+    let banner = leviath_cli::dispatch::banner(&cli.command);
+    banner.into_iter().for_each(|line| info!("{line}"));
     if leviath_cli::dispatch::reaches_daemon(&cli.command) {
         let notice = leviath_cli::daemon::build::mixed_notice_here();
         notice.into_iter().for_each(|line| eprintln!("{line}"));

@@ -2314,12 +2314,17 @@
               }
             ],
             "description": "Where the batch stands while it waits on a person before any of its\ncalls is sent to run: `None` once it is sent."
+          },
+          "requested_by": {
+            "description": "The model call whose answer asked for the calls, by its attempt id,\nso a batch sent again after a restart still names it. Empty where\nthe run recorded none: a run converted from an old journal that\nnamed no attempt.",
+            "type": "string"
           }
         },
         "required": [
           "calls",
           "done",
-          "executions"
+          "executions",
+          "requested_by"
         ],
         "type": "object"
       },
@@ -4864,11 +4869,19 @@
             },
             "description": "Each provider the run uses, by a digest of its configuration (never\nits credentials).",
             "type": "object"
+          },
+          "sandbox": {
+            "additionalProperties": {
+              "$ref": "#/$defs/SandboxKind"
+            },
+            "description": "The kind of sandbox each stage's tools run in, by stage, as the\noperator's settings, the graph and the stage decided it. Empty where\nthe run did not record it: a run converted from an older format, or\none resolved by a host that runs no sandboxes.",
+            "type": "object"
           }
         },
         "required": [
           "providers",
           "mcp_servers",
+          "sandbox",
           "leviath_version"
         ],
         "type": "object"
@@ -10020,12 +10033,17 @@
               }
             ],
             "description": "Where the batch stands while it waits on a person before any of its\ncalls is sent to run: `None` once it is sent."
+          },
+          "requested_by": {
+            "description": "The model call whose answer asked for the calls, by its attempt id,\nso a batch sent again after a restart still names it. Empty where\nthe run recorded none: a run converted from an old journal that\nnamed no attempt.",
+            "type": "string"
           }
         },
         "required": [
           "calls",
           "done",
-          "executions"
+          "executions",
+          "requested_by"
         ],
         "type": "object"
       },

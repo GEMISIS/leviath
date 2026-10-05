@@ -3350,6 +3350,34 @@ async fn a_single_jump_past_several_thresholds_announces_all_of_them() {
     );
 }
 
+/// A threshold smaller than a millionth of a dollar, the unit spend is
+/// counted in, is passed by the first micro a run spends, and announced.
+#[tokio::test]
+async fn a_threshold_below_a_micro_is_passed_by_the_first_micro() {
+    let mut host = host_with(vec![text("done")]);
+    host.set_spend_notify_usd(vec![0.000_000_4]);
+    let mut rx = host.subscribe();
+    let agent = spawn(&mut host, "run-tiny", "agent-tiny");
+    let spent = |host: &mut WorldHost, rx: &mut tokio::sync::broadcast::Receiver<WorldEvent>| {
+        host.emit_events();
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|e| match e {
+                WorldEvent::Spend { threshold_usd, .. } => Some(threshold_usd),
+                _ => None,
+            })
+            .collect::<Vec<f64>>()
+    };
+    assert!(spent(&mut host, &mut rx).is_empty(), "nothing spent yet");
+
+    let mut totals = crate::persistence::TokenTotals::default();
+    totals.cost.priced_usd = 0.000_002;
+    host.world_mut()
+        .world_mut()
+        .entity_mut(agent.entity())
+        .insert(totals);
+    assert_eq!(spent(&mut host, &mut rx), vec![0.000_000_4]);
+}
+
 #[tokio::test]
 async fn emit_events_broadcasts_agent_changes() {
     let mut host = host_with(vec![text("done")]);

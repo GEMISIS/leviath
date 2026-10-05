@@ -308,7 +308,8 @@ fn output_cap(
 }
 
 /// What the run relies on from this machine: every provider its stages,
-/// fallbacks and compaction use, and every MCP server its stages connect to.
+/// fallbacks and compaction use, every MCP server its stages connect to, and
+/// the kind of sandbox each stage's tools run in.
 pub(super) fn fingerprint(
     graph: &RunGraph,
     plans: &[StagePlan],
@@ -345,6 +346,11 @@ pub(super) fn fingerprint(
         mcp_servers: servers
             .into_iter()
             .filter_map(|s| env.mcp_fingerprint(&s).map(|d| (s, d)))
+            .collect(),
+        sandbox: graph
+            .stages
+            .iter()
+            .filter_map(|s| env.sandbox_kind(graph, s).map(|k| (s.name.clone(), k)))
             .collect(),
         leviath_version: env!("CARGO_PKG_VERSION").to_string(),
     }

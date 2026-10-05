@@ -232,6 +232,9 @@ dotenvy = "0.15"
 # from driving the daemon.
 nix = { version = "0.31", default-features = false, features = ["signal", "process", "user", "socket", "hostname"] }
 temp-env = "0.3"
+# Property tests (a test dependency only). The default features fork each
+# case into a process of its own and time it out, which these tests need not.
+proptest = { version = "1", default-features = false, features = ["std"] }
 # Randomly named, owner-only temp files. A production dependency of the CLI
 # (the task editor) and a test dependency elsewhere, so one floor here rather
 # than ten copies that could drift.

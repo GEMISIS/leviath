@@ -249,6 +249,46 @@ async fn everything_that_stops_a_run_binding_is_reported_at_once() {
     );
 }
 
+/// Each stage's sandbox is the operator's, the graph's or the stage's own,
+/// the same answer at resolve and at bind; a run resumed where its stage's
+/// sandbox has changed since is held, naming the stage's sandbox.
+#[tokio::test]
+async fn a_resume_whose_sandbox_changed_is_held() {
+    use leviath_core::sandbox::SandboxKind;
+    use leviath_runtime::spec::env::ResolveEnv;
+    let config = crate::config::Config {
+        sandbox: Some(leviath_core::ToolSandboxConfig {
+            kind: SandboxKind::Container,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let (sandboxed, _agents) = crate::daemon::resolve_env::tests::env_with(config);
+    let (plain, _plain_agents) = env();
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = spec(dir.path());
+    let plan = s.graph.stages[0].clone();
+    assert_eq!(
+        ResolveEnv::sandbox_kind(&sandboxed, &s.graph, &plan),
+        Some(SandboxKind::Container)
+    );
+    assert_eq!(
+        BindEnv::sandbox_kind(&plain, &s.graph, &plan),
+        Some(SandboxKind::None)
+    );
+    s.env.sandbox = [(plan.name.clone(), SandboxKind::Container)].into();
+    let issues = leviath_runtime::bind::bind(&s, &CodeFiles::new(), &plain)
+        .await
+        .unwrap_err();
+    let held: Vec<String> = issues.iter().map(|i| i.path.to_string()).collect();
+    assert_eq!(held, ["env.sandbox.plan"]);
+    assert!(
+        issues.0[0].message.contains("'container' sandbox"),
+        "{}",
+        issues.0[0]
+    );
+}
+
 #[test]
 fn a_run_is_named_by_its_blueprint_or_its_title() {
     let dir = tempfile::tempdir().unwrap();

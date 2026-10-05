@@ -298,13 +298,19 @@ async fn the_fingerprint_covers_every_provider_and_server_the_run_uses() {
     let env = Fake {
         models: [("plan".to_string(), Ok(chosen))].into(),
         tools: [("build".to_string(), Ok(vec![mcp, tool("read_file")]))].into(),
-        printed: ["mock", "backup", "summer", "gh", "linear"]
+        printed: ["mock", "backup", "summer", "gh", "linear", "sandbox:plan"]
             .map(String::from)
             .into(),
         ..Fake::default()
     };
     let resolved = spawn(&raw(g), &env).await.unwrap();
     let fp = &resolved.spec.env;
+    let sandboxed: Vec<(&str, _)> = fp.sandbox.iter().map(|(s, k)| (s.as_str(), *k)).collect();
+    assert_eq!(
+        sandboxed,
+        [("plan", leviath_core::sandbox::SandboxKind::Container)],
+        "the sandbox of each stage the host runs one for"
+    );
     let providers: Vec<&str> = fp.providers.keys().map(|p| p.as_str()).collect();
     assert_eq!(providers, ["backup", "mock", "summer"]);
     let servers: Vec<&str> = fp.mcp_servers.keys().map(|s| s.as_str()).collect();

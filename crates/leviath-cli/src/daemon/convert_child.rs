@@ -134,16 +134,19 @@ impl Tally {
 }
 
 /// What a child that stopped part way had done, and the runs the daemon
-/// converted after it, as one upgrade. The daemon tries again every run the
-/// child did not convert, so its count of the ones that failed is the one
-/// that stands.
-pub(crate) fn then(child: Upgrade, rest: Upgrade) -> Upgrade {
+/// converted after it, as one upgrade of `converted` runs: the runs that
+/// were waiting and are run files now, which counts a run the child
+/// converted and stopped before it reported. The daemon tries again every
+/// run the child did not convert, so its count of the ones that failed is
+/// the one that stands. A key dropped from a run the child did not report
+/// is in that run's own log only.
+pub(crate) fn then(child: Upgrade, rest: Upgrade, converted: usize) -> Upgrade {
     let mut dropped = child.dropped_in_runs;
     for (key, runs) in rest.dropped_in_runs {
         *dropped.entry(key).or_default() += runs;
     }
     Upgrade {
-        converted: child.converted + rest.converted,
+        converted,
         dropped_in_runs: dropped,
         ..rest
     }

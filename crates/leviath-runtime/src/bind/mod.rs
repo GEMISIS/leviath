@@ -4,19 +4,22 @@
 //! A [`RunSpec`] was decided once, when the run was resolved, and it records
 //! what it relied on from the machine in its [`EnvFingerprint`]. Binding
 //! never decides anything again. It asks the host whether every provider and
-//! MCP server the run used is still there and still the same, checks that the
-//! run file holds every piece of code the spec names, and only then asks the
-//! host ([`BindEnv::bind`]) for the live components.
+//! MCP server the run used is still there and still the same, and whether
+//! each stage's tools still run in the kind of sandbox they ran in, checks
+//! that the run file holds every piece of code the spec names, and only then
+//! asks the host ([`BindEnv::bind`]) for the live components.
 //!
 //! Every problem is reported at once, each at the place in the spec that
 //! depends on it, so a resume that cannot go ahead says everything that
 //! changed in one answer.
 //!
-//! An empty fingerprint map means the run did not record that half of its
+//! An empty fingerprint map means the run did not record that part of its
 //! machine (a run converted from an older format), so there is nothing to
 //! compare and the check is skipped. A run that uses no provider or no MCP
 //! server records an empty map too, and skipping is the right answer there as
-//! well.
+//! well. A run's sandboxes are recorded by a host that runs them; one with a
+//! sandbox on a host that runs none now is held, and one that ran on the
+//! machine itself carries on there.
 //!
 //! [`EnvFingerprint`]: crate::spec::run_spec::EnvFingerprint
 
@@ -26,6 +29,7 @@ use crate::spec::env::{BindEnv, Bindings, CodeFiles};
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::names::{Digest, McpServerName, ProviderName};
 use crate::spec::run_spec::{RunSpec, ToolDef, ToolSource};
+use leviath_core::sandbox::SandboxKind;
 
 pub mod host;
 pub mod scripts;
@@ -42,6 +46,7 @@ pub async fn bind(
     let mut issues = SpawnIssues::new();
     check_providers(spec, env, &mut issues);
     check_mcp_servers(spec, env, &mut issues);
+    check_sandbox(spec, env, &mut issues);
     check_code(spec, code, &mut issues);
     check_secret(spec, env, &mut issues);
     if !issues.is_empty() {
@@ -223,6 +228,47 @@ fn check_mcp_servers(spec: &RunSpec, env: &dyn BindEnv, issues: &mut SpawnIssues
                     .known(configured.iter()),
             );
         }
+    }
+}
+
+/// How a sandbox kind is written in settings.
+fn kind_name(kind: SandboxKind) -> &'static str {
+    match kind {
+        SandboxKind::None => "none",
+        SandboxKind::Namespace => "namespace",
+        SandboxKind::Container => "container",
+    }
+}
+
+/// Each stage's tools run in the kind of sandbox they ran in when the run
+/// was resolved: a run never carries on less isolated, or isolated another
+/// way, than it started without a person saying so.
+fn check_sandbox(spec: &RunSpec, env: &dyn BindEnv, issues: &mut SpawnIssues) {
+    for (stage, recorded) in &spec.env.sandbox {
+        let Some(def) = spec.graph.stages.iter().find(|s| s.name == *stage) else {
+            continue;
+        };
+        let (code, now) = match env.sandbox_kind(&spec.graph, def) {
+            Some(now) if now == *recorded => continue,
+            None if *recorded == SandboxKind::None => continue,
+            Some(now) => (IssueCode::Changed, kind_name(now)),
+            None => (
+                IssueCode::Unavailable,
+                "none, on a host that runs no sandboxes",
+            ),
+        };
+        let message = format!(
+            "stage '{stage}' ran its tools in a '{}' sandbox, and its sandbox here is {now}",
+            kind_name(*recorded)
+        );
+        let path = SpecPath::root()
+            .field("env")
+            .field("sandbox")
+            .key(stage.as_str());
+        issues.push(SpawnIssue::new(path, code, message).hint(format!(
+            "set the sandbox back to '{}' (the `[sandbox]` settings), or start a new run",
+            kind_name(*recorded)
+        )));
     }
 }
 

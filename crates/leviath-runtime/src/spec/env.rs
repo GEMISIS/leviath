@@ -316,6 +316,16 @@ pub trait ResolveEnv: Send + Sync {
     fn provider_fingerprint(&self, provider: &ProviderName) -> Option<Digest>;
     /// A digest of an MCP server's tool list.
     fn mcp_fingerprint(&self, server: &McpServerName) -> Option<Digest>;
+    /// The kind of sandbox `stage`'s tools run in on this machine. `None`
+    /// (the default) for a host that runs no sandboxes, whose runs record
+    /// none.
+    fn sandbox_kind(
+        &self,
+        _graph: &RunGraph,
+        _stage: &StageDef,
+    ) -> Option<leviath_core::sandbox::SandboxKind> {
+        None
+    }
 }
 
 /// The live handles a resolved run needs.
@@ -325,6 +335,15 @@ pub trait BindEnv: Send + Sync {
     fn provider_fingerprint(&self, provider: &ProviderName) -> Option<Digest>;
     /// A digest of an MCP server's tool list now.
     fn mcp_fingerprint(&self, server: &McpServerName) -> Option<Digest>;
+    /// The kind of sandbox `stage`'s tools would run in on this machine now.
+    /// `None` (the default) for a host that runs no sandboxes.
+    fn sandbox_kind(
+        &self,
+        _graph: &RunGraph,
+        _stage: &StageDef,
+    ) -> Option<leviath_core::sandbox::SandboxKind> {
+        None
+    }
     /// The tools an MCP server offers now, when the host can list them, so a
     /// changed tool list can be reported tool by tool. `None` (the default)
     /// reports the change for the server as a whole.

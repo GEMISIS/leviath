@@ -57,7 +57,7 @@ this machine. It is the run's starting point, and nothing in it is decided again
 | `launch` | The [launch policy](/docs/starting-a-run#launch-policy) the run got |
 | `placement` | Its workdir, the run that started it, and its depth in the tree |
 | `delivery` | Its webhook and your labels; a signing secret is named by where it is kept, never held |
-| `env` | A fingerprint of the providers and MCP servers it used |
+| `env` | A fingerprint of the providers and MCP servers it used, and each stage's sandbox |
 | `origin` | Where its graph came from: a blueprint and its digest, or a raw request |
 
 Because tool definitions and seeded contents are stored, a run does not change underneath you
@@ -189,9 +189,11 @@ cancelled stays stopped through a restart, and comes back paused only when somet
 ## When the machine changed
 
 The spec records a fingerprint of each provider's configuration (its kind, base URL and model
-list) and each MCP server's tool list. On resume the daemon compares them with this machine. If a
-provider is gone or configured differently, or an MCP server offers different tools, the run does
-not go ahead on something it was never checked against.
+list), each MCP server's tool list, and the kind of sandbox each stage's tools run in. On resume
+the daemon compares them with this machine. If a provider is gone or configured differently, an
+MCP server offers different tools, or a stage's sandbox is no longer the one it ran in, the run
+does not go ahead on something it was never checked against. A changed sandbox is reported at
+`env.sandbox.<stage>`, naming the kind the stage ran in and the kind it would get now.
 
 Instead the resume is refused with typed [issues](/docs/starting-a-run#reading-the-problems), the
 same kind a spawn gets. Each one is at the place in the spec that depends on what changed. Here a
@@ -254,7 +256,8 @@ it took and its regions. That is enough for `lev ps`, `lev run show`, `lev stage
 and `lev result`, but not to run it, so it never resumes.
 
 An old run never recorded a machine fingerprint, so its resume does not compare one. It comes back
-on whatever providers this machine has under the same names.
+on whatever providers this machine has under the same names, in whatever sandbox the settings give
+its stages now: that is the sandbox the old release would have run it in after a restart too.
 
 ## Reading a run file
 

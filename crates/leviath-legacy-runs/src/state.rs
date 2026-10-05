@@ -518,6 +518,7 @@ fn pending(b: &PendingToolBatch, report: &mut Report) -> PendingBatch {
         calls,
         done,
         executions,
+        requested_by: b.requested_by.clone(),
         held: None,
     }
 }

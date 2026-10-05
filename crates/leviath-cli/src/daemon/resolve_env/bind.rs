@@ -40,6 +40,14 @@ impl BindEnv for DaemonEnv {
         self.mcp_print(server)
     }
 
+    fn sandbox_kind(
+        &self,
+        graph: &RunGraph,
+        stage: &StageDef,
+    ) -> Option<leviath_core::sandbox::SandboxKind> {
+        Some(layers::stage_sandbox(&self.config, graph, stage).kind)
+    }
+
     fn mcp_tools(&self, server: &McpServerName) -> Option<Vec<ToolDef>> {
         self.server_tools(server)
     }

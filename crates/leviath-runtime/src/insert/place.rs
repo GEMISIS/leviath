@@ -700,9 +700,9 @@ fn open_point(entity: &mut EntityWorldMut<'_>, body: &str) {
     ));
 }
 
-/// `pending`: the batch's calls as the model made them, the results already
-/// in, the executions a dispatched batch's calls were recorded as, and the
-/// marker that dispatches the rest.
+/// `pending`: the batch's calls as the model made them, under the model call
+/// that asked for them, the results already in, the executions a dispatched
+/// batch's calls were recorded as, and the marker that dispatches the rest.
 pub(crate) fn pending_batch(entity: &mut EntityWorldMut<'_>, batch: &crate::state::PendingBatch) {
     let calls = batch
         .calls
@@ -729,7 +729,7 @@ pub(crate) fn pending_batch(entity: &mut EntityWorldMut<'_>, batch: &crate::stat
         .collect();
     entity.insert((
         crate::components::InferenceResult {
-            attempt_id: String::new(),
+            attempt_id: batch.requested_by.clone(),
             response: String::new(),
             tool_calls: calls,
             tokens_used: 0,

@@ -407,8 +407,9 @@ async fn the_daemon_stops_on_a_child_that_ends_goes_quiet_or_cannot_be_answered(
     assert!(why.contains("could not be answered"), "{why}");
 }
 
-/// A child that stopped part way counts what it converted, and the runs the
-/// daemon converted after it count the rest.
+/// A child that stopped part way adds the keys its runs dropped to those of
+/// the runs the daemon converted after it, and the runs converted are those
+/// on disk.
 #[test]
 fn what_a_stopped_child_did_adds_to_what_the_daemon_did_after_it() {
     let runs = Path::new("/runs");
@@ -426,8 +427,8 @@ fn what_a_stopped_child_did_adds_to_what_the_daemon_did_after_it() {
     };
     rest.dropped_in_run("probe", "a line".into());
     rest.dropped_in_run("other", "b line".into());
-    let all = then(child, rest);
-    assert_eq!((all.converted, all.failed), (5, 2));
+    let all = then(child, rest, 6);
+    assert_eq!((all.converted, all.failed), (6, 2));
     assert_eq!(
         all.dropped_in_runs
             .get(&("probe".to_string(), "a line".to_string())),
@@ -491,20 +492,21 @@ fn stub(runs: &Path, agents: &Path, home: &Path, mode: &str) -> ChildCmd {
     }
 }
 
-/// Writes through to stdout until it is asked a question about a model,
-/// then dies as a crashed child does.
-struct DiesAtAQuestion(std::io::Stdout);
+/// Writes through to stdout until it is about to say a line that starts
+/// with its prefix (a question about a model, or a run done), then dies as
+/// a crashed child does.
+struct DiesAt(&'static [u8], std::io::Stdout);
 
-impl Write for DiesAtAQuestion {
+impl Write for DiesAt {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if buf.starts_with(b"{\"model\":") {
+        if buf.starts_with(self.0) {
             std::process::abort();
         }
-        self.0.write(buf)
+        self.1.write(buf)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.0.flush()
+        self.1.flush()
     }
 }
 
@@ -522,7 +524,8 @@ fn child_stub() {
             std::thread::sleep(Duration::from_secs(60));
             std::process::exit(0);
         }
-        "die" => Box::new(DiesAtAQuestion(std::io::stdout())),
+        "die" => Box::new(DiesAt(b"{\"model\":", std::io::stdout())),
+        "die-at-done" => Box::new(DiesAt(b"{\"done\":", std::io::stdout())),
         _ => Box::new(std::io::stdout()),
     };
     let input = Box::new(BufReader::new(std::io::stdin()));
@@ -532,12 +535,21 @@ fn child_stub() {
 
 /// A daemon converts its old runs in a child process, and shows its
 /// progress; one that cannot start a child, or whose child dies part way or
-/// goes quiet, converts what is left itself, and nothing is lost.
+/// goes quiet, converts what is left itself, and nothing is lost. The
+/// summary counts every run converted, also one the child converted and
+/// died before it reported (`die-at-done`).
 #[tokio::test]
 async fn the_daemon_converts_in_a_child_and_takes_over_from_one_that_fails() {
     let config = crate::config::Config::default();
     let agents = fixture("agents");
-    for (mode, quiet) in [("serve", 60), ("die", 60), ("hang", 1), ("missing", 60)] {
+    let modes = [
+        ("serve", 60),
+        ("die", 60),
+        ("die-at-done", 60),
+        ("hang", 1),
+        ("missing", 60),
+    ];
+    for (mode, quiet) in modes {
         let home = Home::new();
         let runs = home.runs();
         let pool = pool();
@@ -552,7 +564,9 @@ async fn the_daemon_converts_in_a_child_and_takes_over_from_one_that_fails() {
         })
         .await;
         assert_eq!(upgrade.converted, 2, "{mode}");
-        assert_eq!(upgrade.dropped_in_runs.len(), 1, "{mode}");
+        // A run the child did not report keeps what it dropped in its own log.
+        let dropped = usize::from(mode != "die-at-done");
+        assert_eq!(upgrade.dropped_in_runs.len(), dropped, "{mode}");
         let specs = home.specs();
         let main = specs[1].1.stage("main").unwrap();
         assert_eq!(main.context_window, 64_000, "{mode}");

@@ -242,6 +242,23 @@ fn a_batch_with_some_results_back_keeps_them() {
     assert_eq!(batch.done["call_1"].text, "slept");
     assert!(report.defaulted("pending.done.*.is_error").is_some());
     assert_eq!(file.last.status, RunStatus::Active);
+    assert_eq!(batch.requested_by, "a18da3dfb8805f190-00000002");
+}
+
+/// A batch keeps the model call that asked for it, as its batch record
+/// named it; one from before releases named it asks under none.
+#[test]
+fn a_batch_keeps_the_model_call_that_asked_for_it_when_named() {
+    let run = Run::fixture("mid-tool-batch");
+    run.journal(|records| {
+        for r in records.iter_mut() {
+            if let JournalRecord::ToolBatch { requested_by, .. } = r {
+                requested_by.clear();
+            }
+        }
+    });
+    let (_, file) = run.converted();
+    assert_eq!(file.last.pending.as_ref().unwrap().requested_by, "");
 }
 
 /// Every step is stamped no earlier than the one before it, the last one

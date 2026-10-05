@@ -350,6 +350,17 @@ impl ResolveEnv for Fake {
             .contains(server.as_str())
             .then(|| Digest::of(server.as_str().as_bytes()))
     }
+
+    /// A container for each stage `printed` names as `sandbox:<stage>`.
+    fn sandbox_kind(
+        &self,
+        _graph: &RunGraph,
+        stage: &crate::spec::graph::StageDef,
+    ) -> Option<leviath_core::sandbox::SandboxKind> {
+        self.printed
+            .contains(&format!("sandbox:{}", stage.name))
+            .then_some(leviath_core::sandbox::SandboxKind::Container)
+    }
 }
 
 /// A checked name, for tests.

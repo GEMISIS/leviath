@@ -175,6 +175,44 @@ fn told_in_file(runs: &Path, run_id: &str) -> Vec<String> {
         .collect()
 }
 
+/// The model call each time `call` was sent as an execution, as `run_id`'s
+/// file names it, and the attempt ids of the run's own model calls, oldest
+/// first.
+fn asked_by_in_file(runs: &Path, run_id: &str, call: &str) -> (Vec<String>, Vec<String>) {
+    use leviath_runtime::state::journal::CallKind;
+    let file = leviath_runtime::runfile::RunFileReader::open(&run_file(runs, run_id))
+        .expect("the run file reads");
+    let events: Vec<RunEvent> = file
+        .deltas(1, file.last_seq())
+        .expect("the steps read")
+        .into_iter()
+        .flat_map(|d| d.events)
+        .collect();
+    let asked = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Dispatched {
+                call_id,
+                requested_by,
+                ..
+            } if call_id == call => Some(requested_by.clone()),
+            _ => None,
+        })
+        .collect();
+    let attempts = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Inference {
+                attempt,
+                kind: CallKind::Stage,
+                ..
+            } => Some(attempt.clone()),
+            _ => None,
+        })
+        .collect();
+    (asked, attempts)
+}
+
 /// A run stopped on an `ask_user_text` call comes back asking it again,
 /// under an id of its own, waiting on a person as it was; answering it lets
 /// the batch finish.
@@ -197,6 +235,7 @@ async fn a_question_put_to_a_person_is_asked_again_after_a_restart() {
             }],
             done: Default::default(),
             executions: [("call_1".to_string(), "exec-1".to_string())].into(),
+            requested_by: String::new(),
             held: None,
         });
         s.interactions = vec![OpenInteraction {
@@ -478,6 +517,7 @@ async fn a_call_running_when_the_daemon_died_comes_back_interrupted() {
                 )]
                 .into(),
                 executions: Default::default(),
+                requested_by: String::new(),
                 held: None,
             });
         });
@@ -487,6 +527,7 @@ async fn a_call_running_when_the_daemon_died_comes_back_interrupted() {
                 calls: vec![call("q", "ask_user_text"), call("c2", "shell")],
                 done: Default::default(),
                 executions: Default::default(),
+                requested_by: String::new(),
                 held: None,
             });
         });
@@ -804,6 +845,7 @@ async fn a_call_running_at_a_clean_stop_is_not_started_again() {
             }],
             done: Default::default(),
             executions: Default::default(),
+            requested_by: String::new(),
             held: None,
         });
     });
@@ -842,8 +884,8 @@ fn held_on_disk(runs: &Path, run_id: &str) -> Option<leviath_runtime::state::Hel
         .held
 }
 
-/// A run of [`APPROVER`] whose call waits on a person's approval, with the
-/// step that holds the question in its run file.
+/// A run whose call waits on a person (an approval, or the taint gate), with
+/// the step that holds the question in its run file.
 struct Approving {
     /// The blueprint's and the workdir's directories, kept while the run is.
     _dirs: [tempfile::TempDir; 2],
@@ -857,20 +899,33 @@ struct Approving {
     first: DaemonStarter,
     /// The world it is in.
     world: PipelineWorld,
-    /// The approval it waits on.
+    /// The question it waits on.
     question: leviath_core::interaction::InteractionRequest,
 }
 
 /// Start a run of [`APPROVER`] and drive it until its call waits on a
 /// person's approval and its run file holds the question.
 async fn approving() -> Approving {
-    use leviath_runtime::spec::env::Caller;
     use std::sync::atomic::Ordering;
+    let model = Arc::new(ListsThenDone::default());
+    let held = held_on_person(APPROVER, model, "c1", WaitState::ToolApproval).await;
+    assert_eq!(held.model.asked.load(Ordering::SeqCst), 1);
+    held
+}
+
+/// Start a run of `blueprint` on `model` and drive it until its call `call`
+/// waits on a person for `wait` and its run file holds the question.
+async fn held_on_person(
+    blueprint: &str,
+    model: Arc<ListsThenDone>,
+    call: &str,
+    wait: WaitState,
+) -> Approving {
+    use leviath_runtime::spec::env::Caller;
     let agent = tempfile::tempdir().unwrap();
     let runs = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
-    let manifest = manifest_in(agent.path(), APPROVER);
-    let model = Arc::new(ListsThenDone::default());
+    let manifest = manifest_in(agent.path(), blueprint);
     let first = starter(Config::default(), registry_of(&model), runs.path());
     let request = crate::daemon::requests::TaskLaunch {
         blueprint: manifest.to_string_lossy().into_owned(),
@@ -891,19 +946,17 @@ async fn approving() -> Approving {
     let mut world = world_for(&first);
     resume_all(&mut world, &first, runs.path());
     let asked = drive_until(&mut world, |w| {
-        open_for(&first, &run).len() == 1
-            && live(w, &run).wait_reason == Some(WaitState::ToolApproval)
+        open_for(&first, &run).len() == 1 && live(w, &run).wait_reason.as_ref() == Some(&wait)
     })
     .await;
     assert!(asked, "the call is put to a person");
     let question = open_for(&first, &run).remove(0);
-    assert_eq!(model.asked.load(Ordering::SeqCst), 1);
     // The run's file is written off the tick, so the step that holds the
     // question lands a moment after it is asked. A daemon that died before
     // then never recorded it, and asks its model again; one that died after
     // comes back asking the same question.
     let recorded = drive_until(&mut world, |_| {
-        held_on_disk(runs.path(), &run).is_some_and(|h| h.asked.contains_key("c1"))
+        held_on_disk(runs.path(), &run).is_some_and(|h| h.asked.contains_key(call))
     })
     .await;
     assert!(recorded, "the run's file holds the question");
@@ -1056,12 +1109,14 @@ tool_permissions = { list_dir = "ask" }
 system_prompt = "Work."
 "#;
 
-/// A model that lists the working directory on its first turn and says
-/// `done` on every turn after, counting the turns it is asked for. A
-/// request offering no tools (a run's title) is answered and not counted.
+/// A model that lists the working directory on its first turn, makes the
+/// call `then` on its second when it has one, and says `done` on every turn
+/// after, counting the turns it is asked for. A request offering no tools (a
+/// run's title) is answered and not counted.
 #[derive(Debug, Default)]
 struct ListsThenDone {
     asked: std::sync::atomic::AtomicUsize,
+    then: Option<leviath_providers::ToolCall>,
 }
 
 #[async_trait::async_trait]
@@ -1082,6 +1137,9 @@ impl leviath_providers::Provider for ListsThenDone {
                 arguments: serde_json::json!({ "path": "." }),
                 thought_signature: None,
             }];
+        }
+        if turn == 1 {
+            reply.tool_calls = self.then.iter().cloned().collect();
         }
         Ok(reply)
     }
@@ -1171,6 +1229,124 @@ async fn an_approval_waiting_at_a_restart_is_asked_again_without_a_new_turn() {
         assert!(
             sent.windows(2).all(|w| w[0] == w[1]),
             "one execution throughout: {told:?}"
+        );
+        // Sent after the restart, the call still names the model call that
+        // asked for it.
+        let (asked, attempts) = asked_by_in_file(runs.path(), &run, "c1");
+        assert!(!asked.is_empty(), "the call was sent");
+        assert!(
+            asked.iter().all(|a| *a == attempts[0]),
+            "asked by the first model call {attempts:?}: {asked:?}"
+        );
+    }
+}
+
+/// A blueprint with taint tracking on whose one stage lists a directory,
+/// which brings data from the machine into the context, and then runs a
+/// command, which could send it off the machine: the taint gate asks a
+/// person first.
+const GATED: &str = r#"[blueprint]
+name = "gated"
+version = "0.0.0"
+description = "Lists a directory, then runs a command the taint gate holds."
+
+[graph]
+entry = "work"
+taint_tracking = true
+inputs = [{ name = "task", type = { kind = "text", multiline = true }, binds = [{ region = "task" }] }]
+
+[graph.layout]
+total_budget_tokens = 50000
+regions = [
+    { name = "task", kind = "pinned", budget = 2000 },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 40 }, budget = 20000 },
+]
+
+[[graph.stages]]
+name = "work"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+tools = ["list_dir", "shell"]
+tool_permissions = { list_dir = "allow", shell = "allow" }
+system_prompt = "Work."
+"#;
+
+/// A run waiting on a person at the taint gate when the daemon stops,
+/// cleanly or not, comes back asking the same question under the same id,
+/// without asking its model for the turn again; allowing it runs the call
+/// once, as the execution it was recorded as, still named as asked for by
+/// the model call that asked for it.
+#[tokio::test]
+async fn a_taint_gate_question_waiting_at_a_restart_is_asked_again_without_a_new_turn() {
+    use std::sync::atomic::Ordering;
+    for crashed in [false, true] {
+        let model = Arc::new(ListsThenDone {
+            then: Some(leviath_providers::ToolCall {
+                id: "c2".to_string(),
+                name: "shell".to_string(),
+                arguments: serde_json::json!({ "command": "echo gated" }),
+                thought_signature: None,
+            }),
+            ..ListsThenDone::default()
+        });
+        let Approving {
+            _dirs,
+            runs,
+            model,
+            run,
+            first,
+            world,
+            question,
+        } = held_on_person(GATED, model, "c2", WaitState::TaintGate).await;
+        assert_eq!(model.asked.load(Ordering::SeqCst), 2);
+        stop(world, &first, crashed).await;
+
+        let second = starter(Config::default(), registry_of(&model), runs.path());
+        let mut world = world_for(&second);
+        resume_all(&mut world, &second, runs.path());
+        let reopened = drive_until(&mut world, |w| {
+            open_for(&second, &run).len() == 1
+                && live(w, &run).wait_reason == Some(WaitState::TaintGate)
+        })
+        .await;
+        assert!(reopened, "the gate asks again (crashed: {crashed})");
+        let again = open_for(&second, &run).remove(0);
+        assert_eq!(again.id, question.id, "the same question, under its id");
+        assert_eq!(again.prompt, question.prompt);
+        assert_eq!(
+            model.asked.load(Ordering::SeqCst),
+            2,
+            "the model is not asked for the turn again (crashed: {crashed})"
+        );
+
+        assert!(
+            second
+                .hub
+                .answer(InteractionResponse::choice(again.id.clone(), 0))
+        );
+        let finished =
+            drive_until(&mut world, |w| live(w, &run).status == RunStatus::Complete).await;
+        assert!(finished, "the cleared call runs and the run finishes");
+        assert_eq!(model.asked.load(Ordering::SeqCst), 3);
+        let ended = drive_until(&mut world, |_| {
+            told_in_file(runs.path(), &run)
+                .iter()
+                .any(|t| t.starts_with("ended c2"))
+        })
+        .await;
+        assert!(ended, "the call's end reaches the run's file");
+        let told = told_in_file(runs.path(), &run);
+        let ended = told.iter().filter(|t| t.starts_with("ended c2")).count();
+        assert_eq!(ended, 1, "the call ran once: {told:?}");
+        let sent: Vec<&String> = told.iter().filter(|t| t.starts_with("sent c2")).collect();
+        assert!(
+            sent.windows(2).all(|w| w[0] == w[1]),
+            "one execution throughout: {told:?}"
+        );
+        let (asked, attempts) = asked_by_in_file(runs.path(), &run, "c2");
+        assert!(!asked.is_empty(), "the call was sent");
+        assert!(
+            asked.iter().all(|a| *a == attempts[1]),
+            "asked by the second model call {attempts:?}: {asked:?}"
         );
     }
 }

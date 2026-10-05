@@ -569,8 +569,9 @@ pub(crate) fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> 
     if !dispatched && !to_dispatch && lane_held.is_none() && !gate_held {
         return None;
     }
-    let calls: Vec<ToolCallState> = world
-        .get::<crate::components::InferenceResult>(entity)?
+    let reply = world.get::<crate::components::InferenceResult>(entity)?;
+    let requested_by = reply.attempt_id.clone();
+    let calls: Vec<ToolCallState> = reply
         .tool_calls
         .iter()
         .map(|c| ToolCallState {
@@ -609,6 +610,7 @@ pub(crate) fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> 
             calls,
             done,
             executions: view.executions.into_iter().collect(),
+            requested_by: requested_by.clone(),
             held: Some(view.hold),
         });
     }
@@ -637,6 +639,7 @@ pub(crate) fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> 
         calls,
         done,
         executions,
+        requested_by: requested_by.clone(),
         held,
     })
 }

@@ -362,14 +362,24 @@ pub(crate) fn convert_one(dir: &Path, agents_dir: Option<&Path>, envs: Option<&E
     upgrade.finish(&backup);
 }
 
-/// Whether an old run under `runs_dir` is waiting to be converted: one that
-/// did not fail to convert before.
+/// The old runs under `runs_dir` waiting to be converted: those that did
+/// not fail to convert before.
 #[cfg(feature = "legacy-runs")]
-fn any_to_convert(runs_dir: &Path) -> bool {
+fn to_convert(runs_dir: &Path) -> Vec<PathBuf> {
     let held = Unconverted::load(runs_dir);
     old_runs(runs_dir)
+        .into_iter()
+        .filter(|dir| held.why(&dir_name(dir)).is_none())
+        .collect()
+}
+
+/// How many of `waiting` are run files now, whoever converted them.
+#[cfg(feature = "legacy-runs")]
+fn converted_of(waiting: &[PathBuf]) -> usize {
+    waiting
         .iter()
-        .any(|dir| held.why(&dir_name(dir)).is_none())
+        .filter(|dir| crate::runstate::run_file::is_run_file(dir))
+        .count()
 }
 
 /// The name of the run directory `dir`, as the list of runs that did not
@@ -612,12 +622,18 @@ pub(crate) async fn convert_at_start(
     board: &StartupBoard,
 ) -> Upgrade {
     #[cfg(feature = "legacy-runs")]
-    if let Some(cmd) = start.child.as_ref().filter(|_| any_to_convert(runs_dir)) {
+    let waiting = to_convert(runs_dir);
+    #[cfg(feature = "legacy-runs")]
+    if let Some(cmd) = start.child.as_ref().filter(|_| !waiting.is_empty()) {
         match crate::daemon::convert_child::convert(cmd, runs_dir, &start, board).await {
             Ok(upgrade) => return upgrade,
             Err(so_far) => {
+                // A run the child converted and died before it reported is
+                // a run file now, and the daemon's pass skips it: what is on
+                // disk counts the runs converted, whoever converted them.
                 let rest = in_daemon(runs_dir, &start, board).await;
-                return crate::daemon::convert_child::then(so_far, rest);
+                let converted = converted_of(&waiting);
+                return crate::daemon::convert_child::then(so_far, rest, converted);
             }
         }
     }

@@ -567,7 +567,8 @@ not which stay it belonged to: a stage entered three times has one index and thr
 
 `requestedBy` is the trip to the provider whose answer asked for the call. You cannot work it out
 from the timeline, because a failover means the answer came from a different provider than the
-attempt before it went to.
+attempt before it went to. A call sent again after a restart still names that trip. It is null on a
+run converted from a release whose journal did not record which trip asked.
 
 `contextChanges` is what this execution committed to the window, and it is independent of
 `outcome`. A call that succeeded may have committed nothing, and a call that failed may have

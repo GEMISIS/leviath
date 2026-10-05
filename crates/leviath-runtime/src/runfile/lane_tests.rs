@@ -134,6 +134,7 @@ async fn a_step_records_the_state_it_is_handed() {
         }],
         done: Default::default(),
         executions: Default::default(),
+        requested_by: String::new(),
         held: None,
     });
     let mut lane = RunFileLane::new("m", "w");

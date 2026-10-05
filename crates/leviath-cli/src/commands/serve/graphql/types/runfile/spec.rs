@@ -18,6 +18,7 @@ use leviath_runtime::spec::summary::{SpawnSummary as CoreSummary, StageSummary a
 
 use super::super::super::scalars::{Json, Timestamp};
 use super::super::manifest::output::ValidatorErrorPolicy;
+use super::super::manifest::runtime::SandboxKind;
 use super::super::run::MetadataEntry;
 use super::state::StatePart;
 use super::values::{InputEntry, entries};
@@ -536,6 +537,16 @@ pub(crate) struct NamedDigest {
     pub(crate) digest: String,
 }
 
+/// The kind of sandbox one stage's tools run in.
+#[mirror(no_filter)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct StageSandbox {
+    /// The stage.
+    pub(crate) stage: String,
+    /// Where its tools run.
+    pub(crate) kind: SandboxKind,
+}
+
 /// What a run relied on from the machine it was resolved on, so a resume can
 /// tell when that has changed.
 #[mirror(no_filter)]
@@ -545,6 +556,10 @@ pub(crate) struct EnvFingerprint {
     pub(crate) providers: Vec<NamedDigest>,
     /// Each MCP server the run uses, by the digest of its tool list.
     pub(crate) mcp_servers: Vec<NamedDigest>,
+    /// The kind of sandbox each stage's tools run in. Empty where the run
+    /// recorded none: a run converted from an older format, or one resolved
+    /// by a host that runs no sandboxes.
+    pub(crate) sandbox: Vec<StageSandbox>,
     /// The Leviath version that resolved the run.
     pub(crate) leviath_version: String,
 }
@@ -566,6 +581,14 @@ impl From<&CoreEnv> for EnvFingerprint {
                 .map(|(name, digest)| NamedDigest {
                     name: name.to_string(),
                     digest: digest.to_string(),
+                })
+                .collect(),
+            sandbox: env
+                .sandbox
+                .iter()
+                .map(|(stage, kind)| StageSandbox {
+                    stage: stage.to_string(),
+                    kind: SandboxKind::from(*kind),
                 })
                 .collect(),
             leviath_version: env.leviath_version.clone(),

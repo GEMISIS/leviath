@@ -165,6 +165,7 @@ pub(crate) fn busy() -> RunState {
         )]
         .into(),
         executions: Default::default(),
+        requested_by: "a7".into(),
         held: Some(HeldBatch {
             asked: [("c1".to_string(), "r-approve-1".to_string())].into(),
             allowed: vec!["c0".into()],
@@ -278,6 +279,12 @@ pub(crate) fn busy() -> RunState {
     };
     s.written = 600;
     s.last_progress_at = Some(1_700);
+    s.title_error = Some("no title model".into());
+    s.read_paths = Some(super::ReadPathCounts {
+        declared: 2,
+        granted: 1,
+    });
+    s.remote_jobs = [("job-1".to_string(), "c4".to_string())].into();
     s
 }
 

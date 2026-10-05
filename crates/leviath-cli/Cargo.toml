@@ -63,7 +63,9 @@ leviath-scripting = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value`: the run index's refresher carries the summaries of runs that
+# did not change as the index holds them, never read.
+serde_json = { workspace = true, features = ["raw_value"] }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 # `lev rage`: the token-shaped patterns its scrubber replaces.

@@ -3959,6 +3959,12 @@ type EnvFingerprintOutput {
 	providers: [NamedDigestOutput!]!
 	"Each MCP server the run uses, by the digest of its tool list."
 	mcpServers: [NamedDigestOutput!]!
+	"""
+	The kind of sandbox each stage's tools run in. Empty where the run
+	recorded none: a run converted from an older format, or one resolved
+	by a host that runs no sandboxes.
+	"""
+	sandbox: [StageSandboxOutput!]!
 	"The Leviath version that resolved the run."
 	leviathVersion: String!
 }
@@ -15494,6 +15500,14 @@ type StageRecordOutput {
 	endedAt: Timestamp
 	"The working span in progress; null while the clock is stopped."
 	active: WorkingClockOutput
+}
+
+"The kind of sandbox one stage's tools run in."
+type StageSandboxOutput {
+	"The stage."
+	stage: String!
+	"Where its tools run."
+	kind: SandboxKind!
 }
 
 "A stage's own lifecycle state within a run."

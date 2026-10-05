@@ -259,6 +259,14 @@ pub(super) fn usd_to_micros(usd: f64) -> u64 {
     (usd * 1_000_000.0).round() as u64
 }
 
+/// The spend, in millionths of a dollar, at which a run has passed the
+/// threshold `usd`: [`usd_to_micros`], and at least one micro, so that a
+/// positive threshold below a micro is passed by the first micro spent
+/// rather than rounding to a zero no total is ever below.
+pub(super) fn threshold_micros(usd: f64) -> u64 {
+    usd_to_micros(usd).max(1)
+}
+
 impl WorldEvent {
     /// The run id this event belongs to. Every variant carries one; this saves
     /// consumers an exhaustive match (which, with the enum non-exhaustive,
@@ -352,6 +360,14 @@ mod spend_tests {
         assert_eq!(usd_to_micros(f64::NAN), 0);
         assert_eq!(usd_to_micros(f64::INFINITY), 0);
         assert_eq!(usd_to_micros(0.0), 0);
+    }
+
+    /// A threshold is at least one micro, and otherwise what its dollars are.
+    #[test]
+    fn a_threshold_is_at_least_one_micro() {
+        assert_eq!(threshold_micros(0.000_000_4), 1);
+        assert_eq!(threshold_micros(0.000_001), 1);
+        assert_eq!(threshold_micros(5.0), 5_000_000);
     }
 
     /// Every event names the run it is about, which is what a per-run

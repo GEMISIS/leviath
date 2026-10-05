@@ -157,8 +157,21 @@ pub(super) fn sandbox_config(def: &SandboxDef) -> leviath_core::ToolSandboxConfi
     }
 }
 
-/// The sandbox each stage's shell runs in, cascading stage, graph, operator,
-/// starting at the entry stage. `None` when no stage is sandboxed.
+/// The sandbox `stage`'s shell runs in, cascading stage, graph, operator.
+pub(super) fn stage_sandbox(
+    config: &Config,
+    graph: &RunGraph,
+    stage: &StageDef,
+) -> leviath_core::ToolSandboxConfig {
+    leviath_core::resolve_sandbox(
+        config.sandbox.as_ref(),
+        graph.sandbox.as_ref().map(sandbox_config).as_ref(),
+        stage.sandbox.as_ref().map(sandbox_config).as_ref(),
+    )
+}
+
+/// The sandbox each stage's shell runs in (see [`stage_sandbox`]), starting
+/// at the entry stage. `None` when no stage is sandboxed.
 pub(super) fn sandbox(
     config: &Config,
     graph: &RunGraph,
@@ -166,17 +179,10 @@ pub(super) fn sandbox(
     workdir: &Path,
     entry_index: usize,
 ) -> Result<Option<SandboxManager>, String> {
-    let graph_sandbox = graph.sandbox.as_ref().map(sandbox_config);
     let by_index = graph
         .stages
         .iter()
-        .map(|s| {
-            leviath_core::resolve_sandbox(
-                config.sandbox.as_ref(),
-                graph_sandbox.as_ref(),
-                s.sandbox.as_ref().map(sandbox_config).as_ref(),
-            )
-        })
+        .map(|s| stage_sandbox(config, graph, s))
         .collect();
     SandboxManager::build(run_id, by_index, &workdir.to_string_lossy(), entry_index)
 }

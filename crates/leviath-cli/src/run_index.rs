@@ -12,11 +12,12 @@
 //! summary.
 //!
 //! Whoever lists the runs saves what changed. The daemon also looks at the
-//! run files every couple of seconds while it runs, and brings the index up
-//! to date when one changed, so a listing usually finds every entry current
-//! and only stats.
+//! run files every couple of seconds while it runs, and brings the entries of
+//! the ones that changed up to date, reading those run files alone and
+//! leaving every other entry as the index holds it, so a listing usually
+//! finds every entry current and only stats.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -119,12 +120,7 @@ impl RunIndex {
         if let Some(entry) = self.runs.get(&name).filter(|e| e.stamp == stamp) {
             return Some(entry.run.clone());
         }
-        // A file an earlier release wrote under the same name is told apart
-        // by its first bytes, not read whole.
-        let read = runstate::run_file::is_run_file(dir)
-            .then(|| runstate::read_meta_from(dir).ok())
-            .flatten();
-        let Some(run) = read else {
+        let Some(run) = read_run(dir) else {
             self.forget(&name);
             return None;
         };
@@ -163,13 +159,28 @@ impl RunIndex {
             version: VERSION,
             runs: self.runs,
         };
-        let bytes = serde_json::to_vec(&file).expect("a run summary is plain data");
-        if let Err(e) = leviath_sys::perms::write_private(&self.path, &bytes) {
-            // Formatted outside the macro, so the text is made whether or not
-            // a subscriber reads the fields.
-            let (shown, why) = (self.path.display().to_string(), e.to_string());
-            tracing::debug!(path = %shown, error = %why, "the run index could not be saved");
-        }
+        write_index(&self.path, &file);
+    }
+}
+
+/// The summary of the run in `dir`, read from its run file, or `None` when
+/// it holds none that reads. A file an earlier release wrote under the same
+/// name is told apart by its first bytes, not read whole.
+fn read_run(dir: &Path) -> Option<RunMeta> {
+    runstate::run_file::is_run_file(dir)
+        .then(|| runstate::read_meta_from(dir).ok())
+        .flatten()
+}
+
+/// Write `index` to `path`. Best effort: an index that cannot be written is
+/// built again by the next listing.
+fn write_index(path: &Path, index: &impl Serialize) {
+    let bytes = serde_json::to_vec(index).expect("a run summary is plain data");
+    if let Err(e) = leviath_sys::perms::write_private(path, &bytes) {
+        // Formatted outside the macro, so the text is made whether or not a
+        // subscriber reads the fields.
+        let (shown, why) = (path.display().to_string(), e.to_string());
+        tracing::debug!(path = %shown, error = %why, "the run index could not be saved");
     }
 }
 
@@ -266,47 +277,107 @@ fn unfinished_at_a_glance(runs_dir: &Path) -> Option<Vec<PathBuf>> {
     (indexed == file.runs.len()).then_some(open)
 }
 
-/// How the run files under `runs_dir` look from outside: one number made
-/// from the directory name, size and modification time of each. It changes
-/// whenever a run file is added, removed or written, and costs a stat per
-/// run to make.
-fn look_of(runs_dir: &Path) -> u64 {
-    use std::hash::{DefaultHasher, Hash, Hasher};
+/// How the run files under `runs_dir` look from outside: the size and
+/// modification time of each, by directory name. It changes whenever a run
+/// file is added, removed or written, and costs a stat per run to make.
+type Looks = BTreeMap<String, Stamp>;
+
+/// [`Looks`] of the run files under `runs_dir` now.
+fn look_of(runs_dir: &Path) -> Looks {
     let Ok(entries) = std::fs::read_dir(runs_dir) else {
-        return 0;
+        return Looks::new();
     };
-    // Summed rather than hashed in turn, so the order a directory lists its
-    // entries in does not matter.
-    entries.flatten().fold(0u64, |look, entry| {
-        let Some(stamp) = Stamp::of(&entry.path()) else {
-            return look;
-        };
-        let mut hasher = DefaultHasher::new();
-        entry.file_name().hash(&mut hasher);
-        stamp.hash(&mut hasher);
-        look.wrapping_add(hasher.finish())
-    })
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let stamp = Stamp::of(&entry.path())?;
+            Some((entry.file_name().to_string_lossy().into_owned(), stamp))
+        })
+        .collect()
+}
+
+/// One run in the index, its summary kept as the index holds it.
+#[derive(Serialize, Deserialize)]
+struct RawEntry {
+    stamp: Stamp,
+    run: Box<serde_json::value::RawValue>,
+}
+
+/// The index, every summary in it kept as it holds it.
+#[derive(Serialize, Deserialize)]
+struct RawFile {
+    version: u32,
+    runs: BTreeMap<String, RawEntry>,
 }
 
 /// Bring the index of `runs_dir` up to date, unless its run files still
-/// look the way they did at `seen` (see [`look_of`]). Returns how they look
-/// now.
+/// look the way they did at `seen`. Returns how they look now.
 ///
-/// An index is a few kilobytes per run, so reading it is far from free in a
-/// home of a thousand runs. A daemon sitting idle leaves every run file as it
-/// was, and this reads nothing but the directory.
-fn refresh(runs_dir: &Path, seen: u64) -> u64 {
-    let look = look_of(runs_dir);
-    if look != seen {
-        indexed(runs_dir);
+/// An index is a few kilobytes per run, so making a summary of every run in
+/// it is far from free in a home of a thousand runs. A daemon sitting idle
+/// leaves every run file as it was, and this reads nothing but the
+/// directory; one with runs going reads the files of the runs that moved,
+/// and carries every other summary over as the index holds it, unread.
+fn refresh(runs_dir: &Path, seen: Looks) -> Looks {
+    let now = look_of(runs_dir);
+    if now != seen {
+        update(runs_dir, &seen, &now);
     }
-    look
+    now
+}
+
+/// Bring up to date the entries of the runs whose files look different in
+/// `now` from `seen`: read again, added or dropped. An entry its file
+/// already matches (another listing brought it up to date) is left alone.
+/// An index that does not read, or is in another format, is built again
+/// whole.
+fn update(runs_dir: &Path, seen: &Looks, now: &Looks) {
+    let path = path_for(runs_dir);
+    let read = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<RawFile>(&bytes).ok())
+        .filter(|file| file.version == VERSION);
+    let Some(mut index) = read else {
+        indexed(runs_dir);
+        return;
+    };
+    let moved: BTreeSet<&String> = seen
+        .keys()
+        .chain(now.keys())
+        .filter(|name| seen.get(*name) != now.get(*name))
+        .collect();
+    let mut changed = false;
+    for name in moved {
+        let Some(stamp) = now.get(name) else {
+            changed |= index.runs.remove(name).is_some();
+            continue;
+        };
+        if index.runs.get(name).is_some_and(|e| e.stamp == *stamp) {
+            continue;
+        }
+        changed = true;
+        match read_run(&runs_dir.join(name)) {
+            Some(run) => {
+                let run =
+                    serde_json::value::to_raw_value(&run).expect("a run summary is plain data");
+                index
+                    .runs
+                    .insert(name.clone(), RawEntry { stamp: *stamp, run });
+            }
+            None => {
+                index.runs.remove(name);
+            }
+        }
+    }
+    if changed {
+        write_index(&path, &index);
+    }
 }
 
 /// Keep the index of `runs_dir` up to date for as long as `runtime` runs, off
 /// its worker threads: every [`REFRESH_EVERY`] the run files are looked at,
-/// and the index is read and brought up to date when one has changed since
-/// the last look. The first look is taken now, so the index is taken to be up
+/// and the entries of the ones that changed since the last look are brought
+/// up to date (see [`refresh`]). The first look is taken now, so the index is taken to be up
 /// to date already, as the daemon's start leaves it.
 pub(crate) fn keep_fresh(runtime: &tokio::runtime::Handle, runs_dir: PathBuf) {
     keep_fresh_every(runtime, runs_dir, REFRESH_EVERY);
@@ -320,12 +391,18 @@ fn keep_fresh_every(runtime: &tokio::runtime::Handle, runs_dir: PathBuf, every: 
         let mut tick = tokio::time::interval_at(start, every);
         loop {
             tick.tick().await;
-            let dir = runs_dir.clone();
-            seen = tokio::task::spawn_blocking(move || refresh(&dir, seen))
-                .await
-                .unwrap_or(seen);
+            seen = refresh_off_thread(runs_dir.clone(), seen).await;
         }
     });
+}
+
+/// [`refresh`] on a blocking thread, off the runtime's workers. A refresh
+/// that panicked leaves the look as it was, so the next tick tries again.
+async fn refresh_off_thread(runs_dir: PathBuf, seen: Looks) -> Looks {
+    let last = seen.clone();
+    tokio::task::spawn_blocking(move || refresh(&runs_dir, last))
+        .await
+        .unwrap_or(seen)
 }
 
 #[cfg(test)]

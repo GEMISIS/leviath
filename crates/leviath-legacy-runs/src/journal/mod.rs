@@ -386,6 +386,9 @@ pub struct PendingToolBatch {
     pub iteration: usize,
     /// The calls, with every recorded result merged in.
     pub calls: Vec<ToolCallRecord>,
+    /// The attempt whose answer asked for the calls, as the batch record
+    /// named it. Empty for a journal from before releases named one.
+    pub requested_by: String,
 }
 
 /// What a whole journal says about the run as it last stood.
@@ -435,7 +438,10 @@ pub fn fold(records: &[JournalRecord]) -> Option<Folded> {
         match record {
             JournalRecord::Header { meta, .. } => folded.meta = (**meta).clone(),
             JournalRecord::ToolBatch {
-                calls, iteration, ..
+                calls,
+                iteration,
+                requested_by,
+                ..
             } => {
                 // Only the newest batch can still be in flight, and only one
                 // with a call the dispatcher did not settle itself.
@@ -445,6 +451,7 @@ pub fn fold(records: &[JournalRecord]) -> Option<Folded> {
                         .any(|call| call.result.is_none())
                         .then(|| PendingToolBatch {
                             iteration: *iteration,
+                            requested_by: requested_by.clone(),
                             calls: calls.clone(),
                         });
             }

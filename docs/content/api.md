@@ -2184,7 +2184,8 @@ with either way.
 `agent_spend` arrives while the run is still going, which is the point: a run that quietly spends
 far more than intended looks, from the outside, exactly like one making ordinary progress. Each
 figure in `[limits] notify_spend_usd` is announced once per run, the first time the total passes it,
-and `stage` names the stage that was running when it crossed. Nothing is emitted for an operator who
+and `stage` names the stage that was running when it crossed. Spend is counted in millionths of a
+dollar, so a figure below one millionth is passed by the first millionth spent. Nothing is emitted for an operator who
 has not listed any figures.
 
 `complete` says whether every call behind `total_usd` could be priced. When it is false the run has

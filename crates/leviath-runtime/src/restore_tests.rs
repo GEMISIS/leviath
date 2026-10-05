@@ -240,6 +240,7 @@ fn a_run_comes_back_with_its_answer_and_the_questions_it_asked() {
         }],
         done: Default::default(),
         executions: Default::default(),
+        requested_by: String::new(),
         held: None,
     });
     next.final_output = Some(crate::state::FinalOutputState {
@@ -480,6 +481,7 @@ fn calls_interrupted_by_a_crash_get_a_result_that_says_to_check() {
         calls: vec![call("a", "shell"), call("b", "spawn_agent")],
         done: Default::default(),
         executions: Default::default(),
+        requested_by: String::new(),
         held: None,
     });
     interrupt_in_flight(&mut state);
@@ -492,6 +494,7 @@ fn calls_interrupted_by_a_crash_get_a_result_that_says_to_check() {
         calls: vec![call("q", "ask_user_text"), call("a", "shell")],
         done: Default::default(),
         executions: Default::default(),
+        requested_by: String::new(),
         held: None,
     });
     interrupt_in_flight(&mut state);
@@ -502,6 +505,7 @@ fn calls_interrupted_by_a_crash_get_a_result_that_says_to_check() {
         calls: vec![call("a", "shell")],
         done: Default::default(),
         executions: Default::default(),
+        requested_by: String::new(),
         held: Some(Default::default()),
     });
     interrupt_in_flight(&mut state);

@@ -475,6 +475,11 @@ pub struct PendingBatch {
     /// a batch the run's file records as dispatched, and none of one still
     /// waiting to be. Empty where a run recorded no execution id for a call.
     pub executions: BTreeMap<String, String>,
+    /// The model call whose answer asked for the calls, by its attempt id,
+    /// so a batch sent again after a restart still names it. Empty where
+    /// the run recorded none: a run converted from an old journal that
+    /// named no attempt.
+    pub requested_by: String,
     /// Where the batch stands while it waits on a person before any of its
     /// calls is sent to run: `None` once it is sent.
     pub held: Option<HeldBatch>,
@@ -652,3 +657,7 @@ pub struct FinalOutputState {
 #[cfg(test)]
 #[path = "tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "delta_tests.rs"]
+mod delta_tests;

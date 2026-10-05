@@ -398,6 +398,20 @@ pub fn apply_region_flags(
     }
 }
 
+/// The line `lev` logs as it starts `command`: its version. The internal
+/// `lev daemon convert-runs` logs none, since its log goes into the log of
+/// the daemon that started it, which said its version as it started.
+pub fn banner(command: &Commands) -> Option<String> {
+    let converting = matches!(
+        command,
+        Commands::Daemon(commands::daemon::DaemonArgs {
+            action: Some(commands::daemon::DaemonAction::ConvertRuns(_)),
+            ..
+        })
+    );
+    (!converting).then(|| format!("Leviath CLI v{}", env!("CARGO_PKG_VERSION")))
+}
+
 /// Whether `command` talks to the daemon, so that a daemon of another build
 /// than this `lev` changes what it does or shows. Only these say so before
 /// they run; a command that reads files or config alone has no daemon to
@@ -514,6 +528,30 @@ mod tests {
         use clap::{Command, FromArgMatches, Subcommand};
         let lev = Commands::augment_subcommands(Command::new("lev"));
         Commands::from_arg_matches(&lev.get_matches_from(argv)).expect("the command parses")
+    }
+
+    /// Every command logs the version it runs as, but the converting child,
+    /// whose log is the daemon's.
+    #[test]
+    fn the_converting_child_logs_no_version_line() {
+        let version = format!("Leviath CLI v{}", env!("CARGO_PKG_VERSION"));
+        for argv in [
+            &["lev", "ps"][..],
+            &["lev", "daemon"],
+            &["lev", "daemon", "start"],
+        ] {
+            assert_eq!(banner(&parsed(argv)), Some(version.clone()), "{argv:?}");
+        }
+        let child = [
+            "lev",
+            "daemon",
+            "convert-runs",
+            "--runs-dir",
+            "r",
+            "--build",
+            "b",
+        ];
+        assert_eq!(banner(&parsed(&child)), None);
     }
 
     /// The mixed-build warning is for commands that talk to the daemon, and

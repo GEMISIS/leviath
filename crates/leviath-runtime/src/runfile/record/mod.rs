@@ -79,12 +79,6 @@ impl InferenceKind {
             InferenceKind::Routing => "routing",
         }
     }
-
-    /// Whether this call is stage work the agent asked for, as opposed to
-    /// machinery the runtime ran on its behalf.
-    pub fn is_stage_work(&self) -> bool {
-        matches!(self, InferenceKind::Stage)
-    }
 }
 
 /// One region's part in a committed transaction.

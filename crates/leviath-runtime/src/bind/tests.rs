@@ -5,17 +5,19 @@ use leviath_core::JsonDoc;
 
 use super::*;
 use crate::spec::graph::CodeRef;
-use crate::spec::names::{ModelRef, ToolName};
+use crate::spec::names::{ModelRef, StageName, ToolName};
 use crate::spec::run_spec::tests::spec;
 
-/// A machine with a fixed set of providers and MCP servers. Its `mcp_tools`
-/// is the trait's own, which lists nothing.
+/// A machine with a fixed set of providers and MCP servers, whose stages'
+/// tools all run in one kind of sandbox (`None`: it runs none). Its
+/// `mcp_tools` is the trait's own, which lists nothing.
 #[derive(Default)]
 struct Plain {
     providers: BTreeMap<String, Digest>,
     mcp: BTreeMap<String, Digest>,
     /// Whether the secret store has lost the run's webhook secret.
     secret_gone: bool,
+    sandbox: Option<SandboxKind>,
 }
 
 #[async_trait]
@@ -25,6 +27,13 @@ impl BindEnv for Plain {
     }
     fn mcp_fingerprint(&self, server: &McpServerName) -> Option<Digest> {
         self.mcp.get(server.as_str()).cloned()
+    }
+    fn sandbox_kind(
+        &self,
+        _graph: &crate::spec::graph::RunGraph,
+        _stage: &crate::spec::graph::StageDef,
+    ) -> Option<SandboxKind> {
+        self.sandbox
     }
     fn providers_now(&self) -> Vec<String> {
         self.providers.keys().cloned().collect()
@@ -56,6 +65,13 @@ impl BindEnv for Listing {
     fn mcp_fingerprint(&self, server: &McpServerName) -> Option<Digest> {
         self.plain.mcp_fingerprint(server)
     }
+    fn sandbox_kind(
+        &self,
+        graph: &crate::spec::graph::RunGraph,
+        stage: &crate::spec::graph::StageDef,
+    ) -> Option<SandboxKind> {
+        self.plain.sandbox_kind(graph, stage)
+    }
     fn mcp_tools(&self, _server: &McpServerName) -> Option<Vec<ToolDef>> {
         Some(self.tools.clone())
     }
@@ -77,6 +93,7 @@ fn same() -> Plain {
         providers: [("mock".to_string(), d())].into(),
         mcp: [("gh".to_string(), d())].into(),
         secret_gone: false,
+        sandbox: Some(SandboxKind::Container),
     }
 }
 
@@ -119,6 +136,70 @@ async fn an_unchanged_machine_binds_through_the_host() {
         ),
     );
     assert_eq!(world.get::<Bound>(e), Some(&Bound("t-1".into())));
+}
+
+/// A stage whose tools ran in a container and would run on the machine
+/// itself now is held, naming the stage and both kinds; so is one moved to
+/// another kind of sandbox.
+#[tokio::test]
+async fn a_changed_sandbox_holds_the_run_and_names_the_stage() {
+    for now in [SandboxKind::None, SandboxKind::Namespace] {
+        let env = Plain {
+            sandbox: Some(now),
+            ..same()
+        };
+        let issues = refused(&spec(), &code(), &env).await;
+        assert_eq!(paths(&issues), ["env.sandbox.plan"]);
+        let issue = issues.iter().next().unwrap();
+        assert_eq!(issue.code, IssueCode::Changed);
+        assert!(
+            issue.message.contains("stage 'plan'")
+                && issue.message.contains("'container' sandbox")
+                && issue.message.contains(kind_name(now)),
+            "{issue}"
+        );
+        assert!(issue.hint.as_deref().unwrap().contains("'container'"));
+    }
+}
+
+/// A host that runs no sandboxes holds a run that ran in one, and carries
+/// on one that ran on the machine itself. A run that recorded no sandbox (a
+/// converted one), or a stage its graph no longer has, is not compared.
+/// A machine that runs no sandboxes, as the trait's own answer says.
+struct NoSandboxes(Plain);
+
+#[async_trait]
+impl BindEnv for NoSandboxes {
+    fn provider_fingerprint(&self, provider: &ProviderName) -> Option<Digest> {
+        self.0.provider_fingerprint(provider)
+    }
+    fn mcp_fingerprint(&self, server: &McpServerName) -> Option<Digest> {
+        self.0.mcp_fingerprint(server)
+    }
+    async fn bind(&self, spec: &RunSpec, code: &CodeFiles) -> Result<Bindings, SpawnIssues> {
+        self.0.bind(spec, code).await
+    }
+}
+
+#[tokio::test]
+async fn a_host_without_sandboxes_holds_only_a_sandboxed_run() {
+    let none = NoSandboxes(same());
+    let issues = refused(&spec(), &code(), &none).await;
+    let issue = issues.iter().next().unwrap();
+    assert_eq!(issue.code, IssueCode::Unavailable);
+    assert!(issue.message.contains("runs no sandboxes"), "{issue}");
+
+    let mut on_host = spec();
+    on_host.env.sandbox = [(StageName::new("plan").unwrap(), SandboxKind::None)].into();
+    assert!(bind(&on_host, &code(), &none).await.is_ok());
+
+    let mut converted = spec();
+    converted.env.sandbox.clear();
+    assert!(bind(&converted, &code(), &none).await.is_ok());
+
+    let mut gone = spec();
+    gone.env.sandbox = [(StageName::new("gone").unwrap(), SandboxKind::Container)].into();
+    assert!(bind(&gone, &code(), &none).await.is_ok());
 }
 
 #[tokio::test]
@@ -318,6 +399,7 @@ async fn empty_fingerprints_were_not_recorded_and_are_not_compared() {
     let mut s = spec();
     s.env.providers.clear();
     s.env.mcp_servers.clear();
+    s.env.sandbox.clear();
     let bindings = bind(&s, &code(), &Plain::default()).await.unwrap();
     assert_eq!(bindings.len(), 1);
 }
@@ -327,7 +409,12 @@ async fn every_problem_is_reported_at_once() {
     let issues = refused(&spec(), &CodeFiles::new(), &Plain::default()).await;
     assert_eq!(
         paths(&issues),
-        ["stages.plan.provider", "stages.plan.tools", "code[0]"]
+        [
+            "stages.plan.provider",
+            "stages.plan.tools",
+            "env.sandbox.plan",
+            "code[0]"
+        ]
     );
 }
 
