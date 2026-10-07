@@ -104,6 +104,43 @@ pub trait ToolService: Send + Sync {
     fn scan_stale(&self, _entity: Entity) -> bool {
         false
     }
+
+    /// Decide `call` for `entity` before its batch runs. Called in the world,
+    /// once per call, in the order the model made them; `ctx` is what the run
+    /// has been granted and what it has written so far. Default: run it,
+    /// charging nothing, for a service that applies no policy.
+    fn decide(
+        &self,
+        _entity: Entity,
+        _call: &leviath_providers::ToolCall,
+        _ctx: &super::tool_verdicts::DecideCtx<'_>,
+    ) -> super::tool_verdicts::ToolVerdict {
+        super::tool_verdicts::ToolVerdict::Run { charge: 0 }
+    }
+
+    /// Build the closure that runs a decided batch: each call with what the
+    /// world decided for it. `written` is the run's write total as the batch
+    /// starts. Default: run every call through [`exec_for`](Self::exec_for),
+    /// which is all a service that never refuses or asks needs.
+    fn exec_decided(
+        &self,
+        entity: Entity,
+        calls: Vec<super::tool_verdicts::DecidedCall>,
+        _written: u64,
+        progress: ToolProgress,
+    ) -> BoxedToolExec {
+        self.exec_for(
+            entity,
+            calls.into_iter().map(|d| d.call).collect(),
+            progress,
+        )
+    }
+
+    /// What `entity`'s run has written by the end of its last batch, as its
+    /// executors measured it. `None` for a service that keeps no write total.
+    fn written(&self, _entity: Entity) -> Option<u64> {
+        None
+    }
 }
 
 /// The tool service, as a world resource.
@@ -146,15 +183,52 @@ pub(crate) struct ContextToolResults(pub Vec<(String, String)>);
 
 /// Results a batch already had before a restart, carried into its re-dispatch.
 ///
-/// A daemon that died while a batch waited on a person had asked its question
-/// and run nothing after it; recovery re-arms the batch rather than handing
-/// the model a stand-in (see `restore::restore_pending_batch`). The calls that
-/// finished before the crash are here, with the result the journal recorded,
-/// so [`dispatch_tools`] runs only the rest and none of these twice. Held until
-/// [`collect_tools`](super::collect_tools) merges them, or until an all-inline
-/// batch applies them.
+/// The calls that finished before the daemon stopped are here with the result
+/// the run's file recorded, and so is the stand-in for each call a stop
+/// interrupted (see `restore::interrupt_in_flight`), so [`dispatch_tools`] runs
+/// only the rest and none of these twice. A batch stopped on a question to a
+/// person has no stand-ins: nothing in it ran after the question, so it is
+/// asked again. Held until [`super::collect_tools`] merges them, or until an
+/// all-inline batch applies them.
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct RecoveredResults(pub Vec<crate::tool_bridge::ToolResult>);
+
+/// The execution each call of a batch brought back from a run's file was
+/// dispatched as, by call id. Its presence says the file already records the
+/// batch as dispatched, so [`dispatch_tools`] keeps these ids and records only
+/// what is new: the results it settles now, and the calls it sends to the
+/// lane again.
+#[derive(Component, Debug, Clone, Default)]
+pub(crate) struct ResumedExecutions(pub std::collections::HashMap<String, String>);
+
+/// The results of a batch's lane calls that have landed while the rest still
+/// run, written by the batch's [`ToolProgress`] the moment each call resolves.
+/// Read by `inspect`, so the run's state (and the run file it is recorded in)
+/// holds a finished call as done before the batch ends.
+#[derive(Component, Debug, Clone, Default)]
+pub(crate) struct LandedResults(pub Arc<std::sync::Mutex<Vec<crate::tool_bridge::ToolResult>>>);
+
+impl LandedResults {
+    /// What has landed so far.
+    pub(crate) fn snapshot(&self) -> Vec<crate::tool_bridge::ToolResult> {
+        self.0
+            .lock()
+            .expect("the landed results are never held across a panic")
+            .clone()
+    }
+
+    /// `progress`, also keeping each result here as it lands.
+    pub(super) fn keeping(&self, progress: ToolProgress) -> ToolProgress {
+        let landed = self.0.clone();
+        Arc::new(move |call_id, result| {
+            landed
+                .lock()
+                .expect("the landed results are never held across a panic")
+                .push((call_id.to_string(), result.clone()));
+            progress(call_id, result);
+        })
+    }
+}
 
 /// Merge context + lane tool results into one `(id, result)` list in the
 /// original tool-call order (Anthropic requires a `tool_result` per `tool_use`,
@@ -363,7 +437,6 @@ type DispatchToolsQuery = (
     Option<&'static mut crate::taint::TaintGate>,
     Option<&'static crate::gate_prompt::GateResolved>,
     Option<&'static crate::components::GateAutoApprove>,
-    Option<&'static InFlightWork>,
     Option<&'static StageCursor>,
     // Nested rather than two more members: `QueryData` is implemented up to a
     // fixed arity and this tuple had reached it. Grouping the two run-context
@@ -381,98 +454,9 @@ type DispatchToolsQuery = (
     ),
     Option<&'static crate::components::OutputValidators>,
     // For the submit_output guard: a submission that is exactly the name of a
-    // stage in this blueprint is a routing token, not an answer.
-    Option<&'static crate::pipeline::transition::AgentBlueprint>,
+    // stage in this graph is a routing token, not an answer.
+    Option<&'static crate::insert::RunSpecC>,
 );
-
-/// One dispatched batch, in the shape the journal records it.
-///
-/// Gathered once and borrowed, because two paths write the same record and
-/// neither can see the other's: a batch with lane work journals it with an ack
-/// the exec waits on, and a batch the dispatcher resolved entirely journals it
-/// on its way out. Two copies of the field list would be two chances for one of
-/// them to stop carrying something.
-struct BatchDispatch<'a> {
-    /// The calls, in the order the model asked for them.
-    calls: &'a [crate::components::ToolCall],
-    /// The execution id minted for each, by provider call id.
-    executions: &'a std::collections::HashMap<String, String>,
-    /// The results the dispatcher already has, by provider call id. A call with
-    /// one here never reaches the lane and no completion record will follow it.
-    inline: &'a [(String, String)],
-    /// Results carried from before a restart, which are journaled the same
-    /// way, so a second crash still sees them as done.
-    recovered: &'a [crate::tool_bridge::ToolResult],
-    /// The stage the batch was dispatched in.
-    stage_index: usize,
-    /// The stage-local iteration that produced it.
-    iteration: usize,
-    /// The stay in the stage it was dispatched during.
-    visit_id: &'a str,
-    /// The provider attempt whose answer asked for the calls.
-    requested_by: &'a str,
-    /// The assistant text of the turn that issued them.
-    response: &'a str,
-}
-
-impl BatchDispatch<'_> {
-    /// The record.
-    fn record(&self) -> leviath_core::run_archive::RunRecord {
-        leviath_core::run_archive::RunRecord::ToolBatch {
-            calls: self
-                .calls
-                .iter()
-                .map(|c| leviath_core::run_archive::ToolCallRecord {
-                    id: c.tool_id.clone(),
-                    execution_id: self.executions.get(&c.tool_id).cloned().unwrap_or_default(),
-                    name: c.name.clone(),
-                    arguments: c.arguments.to_string(),
-                    result: self
-                        .inline
-                        .iter()
-                        .find(|(id, _)| id == &c.tool_id)
-                        .map(|(_, r)| r.clone().into())
-                        .or_else(|| {
-                            self.recovered
-                                .iter()
-                                .find(|(id, _)| id == &c.tool_id)
-                                .map(|(_, r)| r.clone())
-                        }),
-                    thought_signature: c.thought_signature.clone(),
-                })
-                .collect(),
-            at: chrono::Utc::now().timestamp(),
-            stage_index: self.stage_index,
-            iteration: self.iteration,
-            visit_id: self.visit_id.to_string(),
-            requested_by: self.requested_by.to_string(),
-            response: self.response.to_string(),
-        }
-    }
-}
-
-/// Journal the files each execution produced, one record per execution.
-///
-/// Fire and forget, like the change records: nothing waits on it, and a run with
-/// no lane writes nothing. Called from the same place the batch record is written
-/// so the artifacts cannot land before the dispatch that made them.
-pub(super) fn journal_artifacts(
-    persist: &PersistenceStage,
-    run_id: &str,
-    produced: &[(String, Vec<leviath_core::output::Artifact>)],
-) {
-    for (execution_id, artifacts) in produced {
-        let _ = persist.0.send(PersistMsg::Append {
-            run_id: run_id.to_string(),
-            record: Box::new(leviath_core::run_archive::RunRecord::ArtifactsProduced {
-                execution_id: execution_id.clone(),
-                artifacts: artifacts.clone(),
-                at: chrono::Utc::now().timestamp(),
-            }),
-            ack: None,
-        });
-    }
-}
 
 /// The resources the daemon installs, which a bare world does not have.
 ///
@@ -490,10 +474,8 @@ pub(crate) struct DaemonServices<'w> {
     pub hub: Option<Res<'w, InteractionHub>>,
     /// The lane a gate prompt's answer comes back on.
     pub gate_stage: Option<Res<'w, crate::gate_prompt::GatePromptStage>>,
-    /// The lane run state is written on.
-    pub persist: Option<Res<'w, PersistenceStage>>,
-    /// Where world events are broadcast.
-    pub sink: Option<Res<'w, crate::host::WorldEventSink>>,
+    /// Where what a run does is recorded, for its run file.
+    pub persist: Option<Res<'w, super::JournalSender>>,
 }
 
 /// Tool-dispatch system: for each `ReadyForTools` agent, apply its `context_*`
@@ -505,15 +487,18 @@ pub(crate) struct DaemonServices<'w> {
 /// enqueued in turn.
 ///
 /// A persisted agent's batch is journaled at dispatch: a `ToolBatch` record
-/// (inline results pre-filled, lane calls pending) goes to the persistence lane
-/// with an ack the exec waits on, and a per-call [`ToolProgress`] journals each
-/// completion as a `ToolCallDone`. On a crash mid-batch, recovery replays the
+/// (inline results pre-filled, lane calls pending) goes to the world's journal
+/// with an ack the exec waits on, answered once the step holding it is written,
+/// and a per-call [`ToolProgress`] journals each completion as a
+/// `ToolCallDone`. On a crash mid-batch, recovery replays the
 /// recorded results instead of re-running their side effects.
 pub(crate) fn dispatch_tools(
     mut agents: Query<DispatchToolsQuery, With<ReadyForTools>>,
-    recovered_results: Query<&RecoveredResults>,
-    service: Res<ToolServiceRes>,
-    stage: Res<ToolStage>,
+    carried: Query<(
+        Option<&RecoveredResults>,
+        Option<&ResumedExecutions>,
+        Option<&super::lane_batch::ResumedHold>,
+    )>,
     daemon: DaemonServices,
     mime: crate::blob_store::MimeParams,
     mut commands: Commands,
@@ -524,7 +509,6 @@ pub(crate) fn dispatch_tools(
         hub,
         gate_stage,
         persist,
-        sink,
     } = daemon;
     crate::tick_scope::clear();
     let default_policy = leviath_core::PolicyConfig::default();
@@ -545,7 +529,6 @@ pub(crate) fn dispatch_tools(
         mut gate,
         resolved,
         auto_gate,
-        in_flight,
         cursor,
         (metadata, stage_progress, mut io_buffer),
         validators,
@@ -559,8 +542,13 @@ pub(crate) fn dispatch_tools(
         // `--yolo`: waive taint-gate enforcement so a headless run never blocks
         // on a gate prompt no one can answer (taint tracking still records).
         let auto_approve_gates = auto_gate.is_some();
-        if state.status != AgentStatus::Active {
-            continue; // paused / waiting / cancelled - don't start new work
+        let (recovered, resumed, hold) = carried.get(entity).unwrap_or_default();
+        // Paused, waiting or cancelled: no new work starts. A batch a paused
+        // run was holding on a person when the daemon stopped is not new
+        // work: it puts its questions again, as it was putting them before.
+        let reasking = state.status == AgentStatus::Paused && hold.is_some();
+        if state.status != AgentStatus::Active && !reasking {
+            continue;
         }
 
         // This stage, for routing the parts a reply produces to regions of
@@ -568,7 +556,7 @@ pub(crate) fn dispatch_tools(
         // share it.
         let routing_stage = blueprint
             .zip(cursor)
-            .and_then(|(bp, cur)| bp.0.stages.get(cur.index));
+            .and_then(|(spec, cur)| spec.0.graph.stages.get(cur.index));
 
         // Apply context_* tools inline (they need world access); collect the rest
         // for the async lane. A taint-gated agent's outbound call that would leak
@@ -589,9 +577,11 @@ pub(crate) fn dispatch_tools(
             leviath_core::TaintLevel,
             leviath_core::TaintLevel,
         )> = Vec::new();
-        // One execution id per call, minted before anything runs. The provider's
-        // own id travels beside it: a provider may reuse one across a retry, and
-        // two attempts under one id cannot be told apart afterwards.
+        // One execution id per call, minted before anything runs, and kept by
+        // a batch brought back from the run's file, whose calls the file
+        // already names. The provider's own id travels beside it: a provider
+        // may reuse one across a retry, and two attempts under one id cannot be
+        // told apart afterwards.
         //
         // Minted ahead of the loop rather than beside the journal write below,
         // because the calls this dispatcher resolves itself need theirs while it
@@ -601,9 +591,10 @@ pub(crate) fn dispatch_tools(
             .tool_calls
             .iter()
             .map(|c| {
+                let kept = resumed.and_then(|r| r.0.get(&c.tool_id).cloned());
                 (
                     c.tool_id.clone(),
-                    leviath_core::execution::mint_execution_id(),
+                    kept.unwrap_or_else(leviath_core::execution::mint_execution_id),
                 )
             })
             .collect();
@@ -614,10 +605,8 @@ pub(crate) fn dispatch_tools(
         // What the batch had already finished before a restart. Checked before
         // anything else below, so a context write, a submission or a file tool
         // that already ran is never run again.
-        let recovered: Vec<crate::tool_bridge::ToolResult> = recovered_results
-            .get(entity)
-            .map(|r| r.0.clone())
-            .unwrap_or_default();
+        let recovered: Vec<crate::tool_bridge::ToolResult> =
+            recovered.map(|r| r.0.clone()).unwrap_or_default();
         for c in &result.tool_calls {
             if recovered.iter().any(|(id, _)| id == &c.tool_id) {
                 continue;
@@ -675,10 +664,9 @@ pub(crate) fn dispatch_tools(
             // stage, the iteration counts and the window occupancy it reports
             // live in the world, which the async lane cannot reach.
             if crate::runtime_info_tool::is_runtime_info_tool(&c.name) {
-                let stage_max = blueprint
-                    .zip(cursor)
-                    .and_then(|(bp, cur)| bp.0.stages.get(cur.index))
-                    .and_then(|s| s.max_iterations);
+                let stage_max = routing_stage
+                    .and_then(|s| s.max_iterations)
+                    .map(|n| n as usize);
                 let facts = crate::runtime_info_tool::RuntimeFacts {
                     version: env!("CARGO_PKG_VERSION"),
                     run_id: metadata.map(|m| m.run_id.as_str()),
@@ -694,7 +682,7 @@ pub(crate) fn dispatch_tools(
                     total_iterations: state.iteration,
                     provider_model: (&stage_inf.provider_name, &stage_inf.model),
                     tools: stage_inf.tools.iter().map(|t| t.name.as_str()).collect(),
-                    unattended: metadata.is_some_and(|m| m.unattended),
+                    unattended: metadata.is_some_and(|m| m.unattended.is_on()),
                     workdir: metadata.map(|m| m.workdir.as_str()),
                 };
                 let text = crate::runtime_info_tool::handle_runtime_info(&facts, &window);
@@ -702,6 +690,9 @@ pub(crate) fn dispatch_tools(
                 continue;
             }
             if crate::mime_tools::is_mime_tool(&c.name) {
+                let tool_limit: Option<Vec<String>> = routing_stage
+                    .and_then(|s| s.tool_accepts.iter().find(|(t, _)| t.as_str() == c.name))
+                    .map(|(_, list)| list.iter().map(ToString::to_string).collect());
                 let text = crate::mime_tools::handle_mime_tool(
                     &c.name,
                     &c.arguments,
@@ -711,10 +702,7 @@ pub(crate) fn dispatch_tools(
                         entity,
                         run_id: &state.agent_id,
                         workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
-                        tool_limit: blueprint
-                            .zip(cursor)
-                            .and_then(|(bp, cur)| bp.0.stages.get(cur.index))
-                            .and_then(|s| s.tool_limit(&c.name)),
+                        tool_limit: tool_limit.as_deref(),
                     },
                 );
                 context_results.push((c.tool_id.clone(), text));
@@ -739,7 +727,7 @@ pub(crate) fn dispatch_tools(
                     Ok(_) if fan_out.is_some() => Some(format!(
                         "[error] only one {} call per turn - put all the work in \
                          one call, the concurrency is paced for you",
-                        leviath_core::blueprint::FAN_OUT_TOOL
+                        leviath_core::stage_tools::FAN_OUT_TOOL
                     )),
                     Ok(request) => {
                         fan_out = Some((c.tool_id.clone(), request));
@@ -766,6 +754,7 @@ pub(crate) fn dispatch_tools(
             if let Some(gate) = gate.as_deref_mut()
                 && !cleared
             {
+                gate.at_stage(cursor.map_or(0, |c| c.index));
                 let decision = gate.check_with_policy(
                     &state.agent_id,
                     &c.name,
@@ -774,6 +763,12 @@ pub(crate) fn dispatch_tools(
                     policy_ref,
                     script_checker,
                 );
+                // A call put to a person before a restart meets the block it
+                // was put to them over, which its audit already holds.
+                let asked_before = hold.is_some_and(|h| h.0.asked.contains_key(&c.tool_id));
+                if asked_before && !decision.is_allowed() {
+                    gate.forget_repeat();
+                }
                 if !decision.is_allowed() {
                     if auto_approve_gates {
                         // `--yolo`: waive enforcement but record the override in
@@ -815,15 +810,23 @@ pub(crate) fn dispatch_tools(
             // because `commands` cannot be borrowed inside it.
             //
             // After the gate, not before it with the other inline tools: the
-            // submitted answer leaves the machine (`GET /api/agents/{id}/result`,
+            // submitted answer leaves the machine (`GET /api/runs/{id}/result`,
             // the dashboard), so `submit_output` is classified outbound, and a
             // classification the gate never sees gates nothing. Applied above
             // the gate, a Private region reaches a remote reader with no
             // prompt however it was classified.
             if crate::output_tool::is_output_tool(&c.name) {
                 let stage_names: Vec<String> = blueprint
-                    .map(|bp| bp.0.stages.iter().map(|s| s.name.clone()).collect())
+                    .map(|spec| {
+                        spec.0
+                            .graph
+                            .stages
+                            .iter()
+                            .map(|s| s.name.to_string())
+                            .collect()
+                    })
                     .unwrap_or_default();
+
                 let (text, output) = crate::output_tool::handle_output_tool(
                     &c.arguments,
                     &crate::output_tool::OutputContext {
@@ -883,33 +886,35 @@ pub(crate) fn dispatch_tools(
                 .insert(crate::persistence::FinalOutput(output));
         }
 
-        // Hold the batch and ask the user about each blocked call.
+        // Hold the batch and ask the user about each blocked call. A call
+        // asked about before a restart is asked again under the same id.
         if let (false, Some((hub, gate_stage))) = (pending_prompts.is_empty(), interactive) {
             let n = pending_prompts.len();
+            let mut held = resolved.cloned().unwrap_or_default();
             for (tool_id, name, taint, clearance) in pending_prompts {
-                gate_stage
-                    .runtime
-                    .spawn(crate::gate_prompt::run_gate_prompt(
-                        crate::gate_prompt::GatedCall {
-                            entity,
-                            agent_id: state.agent_id.clone(),
-                            tool_id,
-                            tool_name: name,
-                            taint,
-                            clearance,
-                        },
-                        crate::interaction_hub::PromptLane {
-                            hub: (*hub).clone(),
-                            outcomes: gate_stage.outcomes.clone(),
-                            wake: gate_stage.wake.clone(),
-                        },
-                    ));
+                let question = hold
+                    .and_then(|h| h.0.asked.get(&tool_id).cloned())
+                    .unwrap_or_else(|| hub.next_request_id(&state.agent_id, "gate"));
+                held.asked.insert(tool_id.clone(), question.clone());
+                crate::gate_prompt::ask(
+                    gate_stage,
+                    hub,
+                    crate::gate_prompt::GatedCall {
+                        entity,
+                        agent_id: state.agent_id.clone(),
+                        question,
+                        tool_id,
+                        tool_name: name,
+                        taint,
+                        clearance,
+                    },
+                );
             }
             commands
                 .entity(entity)
                 .remove::<ReadyForTools>()
                 .insert(crate::gate_prompt::AwaitingGatePrompt(n))
-                .insert(crate::gate_prompt::GateResolved::default());
+                .insert(held);
             continue; // re-run after the prompts resolve
         }
 
@@ -930,7 +935,7 @@ pub(crate) fn dispatch_tools(
                 format!(
                     "[error] {} has to be the only tool call in its turn, because it \
                      waits for its workers. Call it on its own.",
-                    leviath_core::blueprint::FAN_OUT_TOOL
+                    leviath_core::stage_tools::FAN_OUT_TOOL
                 ),
             ));
             fan_out = None;
@@ -972,28 +977,31 @@ pub(crate) fn dispatch_tools(
             commands
                 .entity(entity)
                 .remove::<ReadyForTools>()
-                .remove::<RecoveredResults>()
+                .remove::<(
+                    RecoveredResults,
+                    ResumedExecutions,
+                    super::lane_batch::ResumedHold,
+                )>()
                 .insert(crate::fanout::PendingFanOut { call_id, request });
             continue;
         }
 
-        // What the journal is told about this batch, once, whoever runs it.
-        // Built here because both paths below need it and neither can see the
-        // other's copy: a batch with lane work waits on an ack, one without goes
-        // straight into the file.
-        let dispatch = BatchDispatch {
-            calls: &result.tool_calls,
-            executions: &executions,
-            inline: &context_results,
-            recovered: &recovered,
-            stage_index: cursor.map_or(0, |c| c.index),
-            iteration: state.iteration,
-            visit_id: &state.current_visit,
-            requested_by: &result.attempt_id,
-            response: &result.response,
-        };
-
         if lane_calls.is_empty() {
+            // What the journal is told about this batch. A batch with lane
+            // work is journaled by `dispatch_lane_batches`, which holds it
+            // while each call is decided.
+            let dispatch = super::batch_record::BatchDispatch {
+                calls: &result.tool_calls,
+                executions: &executions,
+                inline: &context_results,
+                recovered: &recovered,
+                resumed: resumed.is_some(),
+                stage_index: cursor.map_or(0, |c| c.index),
+                iteration: state.iteration,
+                visit_id: &state.current_visit,
+                requested_by: &result.attempt_id,
+                response: &result.response,
+            };
             // Every call resolved without the lane: context tools, refusals,
             // gate denials. Journaled all the same, so the run's executions are
             // every call the model made rather than only the ones something ran
@@ -1001,12 +1009,10 @@ pub(crate) fn dispatch_tools(
             // names an execution a reader can find. No ack, because nothing is
             // about to run that could outrace the record.
             if let (Some(persist), Some(md)) = (persist.as_ref(), metadata) {
-                let _ = persist.0.send(PersistMsg::Append {
-                    run_id: md.run_id.clone(),
-                    record: Box::new(dispatch.record()),
-                    ack: None,
-                });
-                journal_artifacts(persist, &md.run_id, &produced);
+                for record in dispatch.records(&[]) {
+                    persist.record(&md.run_id, record);
+                }
+                super::batch_record::journal_artifacts(persist, &md.run_id, &produced);
             }
             // Nothing async to run - apply the context results now and loop back.
             let mut resolved = typed_results(&context_results);
@@ -1047,107 +1053,33 @@ pub(crate) fn dispatch_tools(
             commands
                 .entity(entity)
                 .remove::<ReadyForTools>()
-                .remove::<RecoveredResults>()
+                .remove::<(
+                    RecoveredResults,
+                    ResumedExecutions,
+                    super::lane_batch::ResumedHold,
+                )>()
                 .insert(ReadyToInfer);
             continue;
         }
-
-        // Journal the batch before it can run: a `ToolBatch` record with the
-        // dispatcher's inline results pre-filled and every lane call pending,
-        // plus a per-call progress hook that records each completion. Worlds
-        // without a persistence lane or run metadata (tests, unpersisted
-        // agents) dispatch unjournaled with a no-op progress.
-        let (progress, ack) = match (persist.as_ref(), metadata) {
-            (Some(persist), Some(md)) => {
-                let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-                let _ = persist.0.send(PersistMsg::Append {
-                    run_id: md.run_id.clone(),
-                    record: Box::new(dispatch.record()),
-                    ack: Some(ack_tx),
-                });
-                journal_artifacts(persist, &md.run_id, &produced);
-                let sender = persist.0.clone();
-                let run_id = md.run_id.clone();
-                let iteration = state.iteration;
-                let minted = executions.clone();
-                let progress: ToolProgress = Arc::new(move |call_id: &str, result| {
-                    let _ = sender.send(PersistMsg::Append {
-                        run_id: run_id.clone(),
-                        record: Box::new(leviath_core::run_archive::RunRecord::ToolCallDone {
-                            iteration,
-                            call_id: call_id.to_string(),
-                            // The attempt this completes, so a completion cannot
-                            // be attached to a different attempt that shared the
-                            // provider's id.
-                            execution_id: minted.get(call_id).cloned().unwrap_or_default(),
-                            result: result.clone(),
-                            // The structured verdict comes with the executor
-                            // contract; until then the completion says only that
-                            // the call finished, which is what it has always
-                            // said.
-                            outcome: None,
-                            at: chrono::Utc::now().timestamp(),
-                        }),
-                        ack: None,
-                    });
-                });
-                // The run id travels with the ack: an ack only exists when the
-                // batch was journaled for a known run, so pairing them here
-                // leaves the waiter below no impossible case to handle.
-                (progress, Some((ack_rx, md.run_id.clone())))
-            }
-            _ => (noop_progress(), None),
-        };
-        // The attempt ids this batch is running under, so the completion system
-        // can say which attempt finished rather than which provider id did.
+        // Lane work: decided call by call in the world, journaled and sent by
+        // `dispatch_lane_batches`, which the batch is handed to here.
         commands
             .entity(entity)
-            .insert(crate::components::BatchExecutions {
-                ids: executions.clone(),
-            });
-        // Announce each lane-bound call before it starts executing. Inline
-        // results (context tools, refusals, blocks) never reach the lane and
-        // are deliberately not announced.
-        if let (Some(sink), Some(md)) = (sink.as_ref(), metadata) {
-            for call in &lane_calls {
-                let _ = sink.0.send(crate::host::WorldEvent::ToolCallStarted {
-                    run_id: md.run_id.clone(),
-                    agent_id: state.agent_id.clone(),
-                    call_id: call.id.clone(),
-                    execution_id: executions.get(&call.id).cloned().unwrap_or_default(),
-                    tool: call.name.clone(),
-                });
-            }
-        }
-        // What a tool may read by name: every stored part the window holds
-        // right now, offered whole so a stale offer never outlives the entry
-        // it came from.
-        let offered: Vec<leviath_core::mime::Part> = window
-            .regions
-            .iter()
-            .flat_map(|r| r.content.iter())
-            .flat_map(|e| e.content.stored().cloned())
-            .collect();
-        service.0.offer_parts(entity, offered);
-        let exec = service.0.exec_for(entity, lane_calls, progress);
-        let exec = match ack {
-            Some((ack, run_id)) => barrier_then(exec, ack, BATCH_JOURNAL_ACK_TIMEOUT, run_id),
-            None => exec,
-        };
-        let cancel = crate::cancel::CancelToken::new();
-        // The lane is alive for the world's lifetime; a failed send would
-        // only happen during shutdown, where dropping the job is fine.
-        stage.stats.enqueued();
-        let _ = stage.jobs.send(ToolJob {
-            entity,
-            exec,
-            cancel: cancel.clone(),
-        });
-        track_in_flight(&mut commands, entity, in_flight, cancel);
-        commands
-            .entity(entity)
-            .remove::<ReadyForTools>()
-            .insert(AwaitingTools)
-            .insert(ContextToolResults(context_results));
+            .remove::<(
+                ReadyForTools,
+                ResumedExecutions,
+                super::lane_batch::ResumedHold,
+            )>()
+            .insert(
+                super::lane_batch::PendingBatch::new(
+                    lane_calls,
+                    context_results,
+                    executions,
+                    recovered,
+                    produced,
+                )
+                .resumed(resumed.is_some())
+                .holding(hold),
+            );
     }
 }

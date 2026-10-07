@@ -4,7 +4,7 @@
 
 use super::*;
 
-/// Decide whether a chosen edge's [gate](leviath_core::blueprint::TransitionGate)
+/// Decide whether a chosen edge's [gate](crate::spec::graph::GateDef)
 /// blocks the transition.
 ///
 /// The failure this guards against: an agent can read and reason about a
@@ -24,8 +24,8 @@ use super::*;
 /// When the gate's re-run budget is spent it gives up loudly, as
 /// [`GateDecision::Forced`].
 pub(crate) fn gate_blocks(
-    gate: Option<&leviath_core::blueprint::TransitionGate>,
-    stage: &leviath_core::Stage,
+    gate: Option<&crate::spec::graph::GateDef>,
+    stage: &crate::spec::graph::StageDef,
     progress: &StageProgress,
     window: &ContextWindow,
 ) -> GateDecision {
@@ -41,8 +41,8 @@ pub(crate) fn gate_blocks(
     // and blocking on it would strand the run, so it passes.
     if let Some(name) = &gate.require_region_updated
         && let (Some(before), Some(region)) = (
-            progress.entry_region_digests.get(name),
-            window.get_region(name),
+            progress.entry_region_digests.get(name.as_str()),
+            window.get_region(name.as_str()),
         )
         && *before == region_digest(region)
     {
@@ -66,8 +66,8 @@ pub(crate) fn gate_blocks(
     // likes per reply - gets another reply to add to the set. A region the
     // window does not hold passes with a warning, as the presence gates do.
     if let Some(count) = &gate.require_region_entries {
-        match window.get_region(&count.region) {
-            Some(region) if region.content.len() < count.at_least => {
+        match window.get_region(count.region.as_str()) {
+            Some(region) if region.content.len() < count.at_least as usize => {
                 let have = region.content.len();
                 let name = &count.region;
                 return spend_gate_attempt(
@@ -100,7 +100,7 @@ pub(crate) fn gate_blocks(
     // blocking - no amount of work could satisfy it, and stranding the run over
     // a typo in a region name would be worse than the missing check.
     if let Some(name) = &gate.require_no_open_items
-        && let Some(region) = window.get_region(name)
+        && let Some(region) = window.get_region(name.as_str())
     {
         let open = region.open_checklist_items();
         if !open.is_empty() {
@@ -132,7 +132,7 @@ pub(crate) fn gate_blocks(
         .require_regions
         .iter()
         .filter(|name| {
-            match window.get_region(name) {
+            match window.get_region(name.as_str()) {
                 Some(region) => region.content.is_empty(),
                 // Not held by the window at all. `lev validate` refuses a gate
                 // naming a region no stage declares, so this means a layout
@@ -149,7 +149,7 @@ pub(crate) fn gate_blocks(
                 }
             }
         })
-        .map(String::as_str)
+        .map(|name| name.as_str())
         .collect();
     if !missing.is_empty() {
         let listed = missing.join(", ");
@@ -170,15 +170,7 @@ pub(crate) fn gate_blocks(
     if !gate.require_modifications {
         return GateDecision::Pass;
     }
-    let can_modify = stage.grants_all_builtins()
-        || stage.available_tools.iter().any(|t| {
-            let canonical = leviath_tools::canonical_tool_name(t);
-            leviath_core::blueprint::MODIFYING_TOOLS.contains(&canonical)
-                || gate
-                    .tools
-                    .iter()
-                    .any(|extra| leviath_tools::canonical_tool_name(extra) == canonical)
-        });
+    let can_modify = stage.can_change_files(&gate.tools);
     if !can_modify {
         return GateDecision::Pass;
     }
@@ -195,7 +187,7 @@ pub(crate) fn gate_blocks(
     }
     if let Some(region) = &gate.region
         && window
-            .get_region(region)
+            .get_region(region.as_str())
             .is_some_and(|r| !r.content.is_empty())
     {
         return GateDecision::Pass;
@@ -222,15 +214,18 @@ pub(crate) fn gate_blocks(
 /// worse than letting a questionable transition through with a warning that
 /// names the `condition` given up on.
 fn spend_gate_attempt(
-    gate: &leviath_core::blueprint::TransitionGate,
-    stage: &leviath_core::Stage,
+    gate: &crate::spec::graph::GateDef,
+    stage: &crate::spec::graph::StageDef,
     progress: &StageProgress,
     condition: &'static str,
     nudge: String,
 ) -> GateDecision {
     let cap = gate
         .max_attempts
-        .unwrap_or(leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS);
+        .map_or(crate::spec::graph::GateDef::DEFAULT_MAX_ATTEMPTS, |n| {
+            n as usize
+        });
+
     if progress.gate_reentries >= cap {
         tracing::warn!(
             stage = %stage.name,

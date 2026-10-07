@@ -10,7 +10,9 @@ use crate::commands::serve::graphql::scalars::Json;
 #[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct StageModelRoute {
-    /// The provider that serves it, as the config names providers.
+    /// The provider that serves it, as the config names providers. Empty when
+    /// the blueprint names the model alone and the machine's provider order
+    /// picks one.
     pub(crate) provider: String,
     /// The model id, as that provider spells it.
     pub(crate) model: String,
@@ -65,12 +67,12 @@ pub(crate) enum MaxOutputTokens {
     RegionPercent(MaxTokensRegionPercent),
 }
 
-impl From<leviath_core::blueprint::OutputCap> for MaxOutputTokens {
-    fn from(cap: leviath_core::blueprint::OutputCap) -> Self {
-        use leviath_core::blueprint::OutputCap as Core;
+impl From<&leviath_runtime::spec::graph::OutputCap> for MaxOutputTokens {
+    fn from(cap: &leviath_runtime::spec::graph::OutputCap) -> Self {
+        use leviath_runtime::spec::graph::OutputCap as Core;
         match cap {
             Core::Tokens(tokens) => Self::Count(MaxTokensCount {
-                tokens: count(tokens),
+                tokens: count(*tokens),
             }),
             Core::WindowPercent(fraction) => Self::ContextPercent(MaxTokensContextPercent {
                 percent: fraction * 100.0,
@@ -78,7 +80,7 @@ impl From<leviath_core::blueprint::OutputCap> for MaxOutputTokens {
             Core::RegionPercent { percent, region } => {
                 Self::RegionPercent(MaxTokensRegionPercent {
                     percent: percent * 100.0,
-                    region,
+                    region: region.to_string(),
                 })
             }
         }
@@ -102,21 +104,43 @@ pub(crate) struct ModelParameters {
     pub(crate) provider_params: Json,
 }
 
+impl From<&leviath_runtime::spec::graph::ModelParams> for ModelParameters {
+    fn from(parameters: &leviath_runtime::spec::graph::ModelParams) -> Self {
+        let rest: serde_json::Map<String, serde_json::Value> = parameters
+            .extra
+            .iter()
+            .map(|(key, value)| (key.clone(), value.to_json()))
+            .collect();
+        Self {
+            temperature: parameters.temperature,
+            max_output_tokens: parameters
+                .max_output_tokens
+                .as_ref()
+                .map(MaxOutputTokens::from),
+            provider_params: Json(serde_json::Value::Object(rest)),
+        }
+    }
+}
+
 impl ModelParameters {
-    /// Read a stage's parameter table.
+    /// Read the parameters a request really carried, as the inference record
+    /// keeps them: `temperature`, `max_output_tokens` in any form a blueprint
+    /// may write it, and every other key as written.
     ///
-    /// A `max_output_tokens` that does not parse is left out rather than
-    /// guessed at. The manifest loader refuses such a blueprint, so reaching
-    /// that here means the file changed underneath an installed run, and
-    /// reporting a cap nobody wrote would be worse than reporting none.
+    /// A `max_output_tokens` that does not read as a cap is left out rather
+    /// than guessed at: reporting a cap nobody set would be worse than
+    /// reporting none.
     pub(crate) fn from_table(
         parameters: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Self {
         let temperature = parameters.get("temperature").and_then(|v| v.as_f64());
         let max_output_tokens = parameters
             .get("max_output_tokens")
-            .and_then(|value| leviath_core::blueprint::OutputCap::parse(value).ok())
-            .map(MaxOutputTokens::from);
+            .and_then(|value| {
+                serde_json::from_value::<leviath_runtime::spec::graph::OutputCap>(value.clone())
+                    .ok()
+            })
+            .map(|cap| MaxOutputTokens::from(&cap));
         let rest: serde_json::Map<String, serde_json::Value> = parameters
             .iter()
             .filter(|(key, _)| key.as_str() != "temperature" && key.as_str() != "max_output_tokens")
@@ -147,19 +171,23 @@ pub(crate) struct StageModelConfig {
     pub(crate) request_timeout_secs: Option<i32>,
 }
 
-impl From<&leviath_core::blueprint::ModelConfig> for StageModelConfig {
-    fn from(model: &leviath_core::blueprint::ModelConfig) -> Self {
+impl From<&leviath_runtime::spec::graph::ModelChoice> for StageModelConfig {
+    fn from(model: &leviath_runtime::spec::graph::ModelChoice) -> Self {
         Self {
             models: model
                 .models
                 .iter()
                 .map(|entry| StageModelRoute {
-                    provider: entry.provider.clone(),
-                    model: entry.model.clone(),
+                    provider: entry
+                        .provider
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                    model: entry.model.to_string(),
                 })
                 .collect(),
             allow_user_default: model.allow_user_default,
-            parameters: ModelParameters::from_table(&model.parameters),
+            parameters: ModelParameters::from(&model.params),
             request_timeout_secs: model
                 .request_timeout_secs
                 .map(|secs| i32::try_from(secs).unwrap_or(i32::MAX)),

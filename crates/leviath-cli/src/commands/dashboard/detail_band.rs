@@ -279,7 +279,7 @@ impl Dashboard {
         }
     }
 
-    /// The run's path as the band draws it: what the archive recorded, plus
+    /// The run's path as the band draws it: what the run file recorded, plus
     /// the stage the run is in now.
     fn path_visits(&self, agent: &DashboardAgent) -> Vec<Visit> {
         let visits: Vec<Visit> = self
@@ -331,8 +331,8 @@ impl Dashboard {
         if agent.graph.is_none() {
             return false;
         }
-        // The path (and the visit counts behind it) comes from the archive.
-        self.ensure_history(&agent.id);
+        // The path (and the visit counts behind it) comes from the run file.
+        self.ensure_history_on_draw(&agent.id);
         let (graph, live, visits) = self.run_path_for(agent);
         if visits == 0 {
             return false;
@@ -409,29 +409,52 @@ mod tests {
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use leviath_core::manifest::parse_manifest;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     fn stage_graph() -> Arc<StageGraph> {
-        Arc::new(StageGraph::from_blueprint(
-            &parse_manifest(
-                r#"
-[agent]
+        Arc::new(crate::tui::flowgraph::model::toml_graph(
+            r#"[blueprint]
 name = "grapher"
-[stages.plan]
-[stages.plan.transitions.implement]
-[stages.implement]
-[stages.implement.transitions.review]
-[stages.review]
-[stages.review.transitions.implement]
-condition = "llm_choice"
-[stages.review.transitions.done]
-[stages.done]
-[stages.done.transitions]
+version = "0.1.0"
+
+[[graph.stages]]
+name = "plan"
+
+[[graph.stages]]
+name = "implement"
+
+[[graph.stages]]
+name = "review"
+
+[[graph.stages]]
+name = "done"
+
+[[graph.edges]]
+name = "implement"
+from = "plan"
+to = "implement"
+
+[[graph.edges]]
+name = "review"
+from = "implement"
+to = "review"
+
+[[graph.edges]]
+name = "done"
+from = "review"
+to = "done"
+
+[[graph.edges]]
+name = "implement"
+from = "review"
+to = "implement"
+when = "llm_choice"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
-            )
-            .unwrap(),
         ))
     }
 
@@ -471,7 +494,7 @@ condition = "llm_choice"
     /// Give `run` an archived path: one point per stage named, in order, so
     /// `derive_visits` sees them as consecutive stays.
     fn seed(dash: &mut Dashboard, run_id: &str, stages: &[&str]) {
-        let points: Vec<leviath_core::run_archive::RunPoint> = stages
+        let points: Vec<leviath_runtime::runfile::history::RunPoint> = stages
             .iter()
             .enumerate()
             .map(|(i, stage)| {
@@ -486,7 +509,7 @@ condition = "llm_choice"
                 );
                 meta.current_stage = (*stage).to_string();
                 meta.iteration = 2;
-                leviath_core::run_archive::RunPoint {
+                leviath_runtime::runfile::history::RunPoint {
                     meta,
                     context: leviath_core::run_meta::ContextSnapshot {
                         stage_name: (*stage).to_string(),
@@ -506,6 +529,7 @@ condition = "llm_choice"
             // loader that would hand back nothing.
             checked_at_tick: u64::MAX,
             stamp: None,
+            transitions: None,
         });
     }
 

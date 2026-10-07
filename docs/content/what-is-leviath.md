@@ -25,9 +25,9 @@ Most of Leviath comes down to six words. The rest of the docs use them in this s
 
 | Word | What it is |
 | --- | --- |
-| **Blueprint** | The files you write to define what a run does: its `agent.leviath` file, tools, and scripts. |
+| **Blueprint** | The files you write to define what a run does: its `agent.toml` file, tools, and scripts. |
 | **Stage** | One step in a blueprint, with its own model, tools, regions, inputs and outputs. |
-| **Transition** | The way from one stage to the next. |
+| **Transition** | The way from one stage to the next. `agent.toml` calls each one an edge. |
 | **Run** | One execution of a blueprint, started with `lev run`. Each run gets its own id and its own memory. |
 | **Region** | A named part of a run's memory, with its own size limit. |
 | **Agent** | The casual word. It can mean a blueprint or a run. |
@@ -35,12 +35,14 @@ Most of Leviath comes down to six words. The rest of the docs use them in this s
 "Agent" means two things. "The agents I've built" means blueprints. "The agents I'm running" means
 runs. In these docs we say blueprint or run, so you always know which one.
 
-A blueprint is more than one model in a loop. It is a graph of stages. The `agent.leviath` file
+A blueprint is more than one model in a loop. It is a graph of stages. The `agent.toml` file
 lists the stages, the regions and the transitions, and the blueprint's own tools and scripts sit
 beside it. You share, install and copy a blueprint as one unit.
 
 You can start the same blueprint as many times as you like. Each run gets its own id and its own
 memory, laid out in the regions the blueprint names. Two runs never share what they have seen.
+What differs from one run to the next, such as the task, comes in as the run's **inputs**, which
+the blueprint declares and types.
 
 Each stage says what it takes in, such as text, a picture or a PDF. It also says what it has to give
 back, such as a report or a video file. A transition moves a run to its next stage. The model
@@ -95,13 +97,13 @@ levels down, is out of reach. It keeps going with the wrong plan until it is don
 
 ### You write a blueprint
 
-A blueprint is a directory. Its `agent.leviath` file lists the stages, and for each one its model,
+A blueprint is a directory. Its `agent.toml` file lists the stages, and for each one its model,
 its tools, what it takes in and what it gives back. Tools and scripts made for this blueprint sit
 beside it. There is no agent code to write.
 
 ```text
 csv-tool/
-  agent.leviath        # stages, regions, transitions
+  agent.toml           # stages, regions, transitions, inputs
   tools/summarize.rhai # a tool only this blueprint has
   hooks/cost_gate.rhai # a script that runs before each model request
 ```
@@ -110,21 +112,21 @@ Two stages can use models from two different companies, and Leviath sends each r
 place.
 
 ```toml
-[stages.research]
-model = { models = ["gpt-5.4-mini"] }
-available_tools = ["read_file", "list_dir", "summarize"]
+[[graph.stages]]
+name = "research"
+model = { models = [{ model = "gpt-5.4-mini" }] }
+tools = ["read_file", "list_dir", "summarize"]
 
-[stages.build]
-model = { models = ["claude-opus-5"] }
-available_tools = ["read_file", "write_file", "shell"]
+[[graph.stages]]
+name = "build"
+model = { models = [{ model = "claude-opus-5" }] }
+tools = ["read_file", "write_file", "shell"]
+input_accepts = ["text/*", "image/png"]   # the task, and a picture of the design
 
-[stages.build.input]
-accepts = ["text/*", "image/png"]      # the task, and a picture of the design
-
-[[stages.build.output.artifacts]]
+[[graph.stages.output.artifacts]]
 name = "report"
-type = "text/markdown"
-required = true                        # the stage is not done until this file exists
+mime_type = "text/markdown"
+required = true                           # the stage is not done until this file exists
 ```
 
 A stage that says it needs a file does not end without one. See [Agent blueprints](/docs/agents)
@@ -185,9 +187,10 @@ lev msg <run-id> "Skip the tests directory, it is generated"
 
 ### All of it is written down as it happens
 
-Every run keeps a record on disk of its memory, its stages, its logs and its answer. Stop Leviath in
-the middle of a run and the next start takes the work back up. A step that was cut off is picked up
-again, not run a second time.
+Every run keeps one file on disk, its **run file**. It holds what the run was asked to do, every
+change to its memory, and where each stage got to. Stop Leviath in the middle of a run and the next
+start takes the work back up from that file. A step that was cut off is picked up again, not run a
+second time. See [The run file](/docs/run-file).
 
 ## What is it not?
 
@@ -229,7 +232,7 @@ curl -fsSL https://leviath.dev/install.sh | sh
 After it, `lev setup` asks for one model provider, and you are ready.
 
 - [Getting Started](/docs/getting-started): from install to your first run in four steps.
-- [Agent catalog](/docs/agent-catalog): seven ready-made blueprints.
+- [Agent catalog](/docs/agent-catalog): eleven ready-made blueprints.
 - [Build your first agent](/docs/first-agent): write a blueprint from an empty directory.
 
 Then read [Overview](/docs/overview) for the whole system in one pass.

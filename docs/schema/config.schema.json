@@ -490,7 +490,7 @@
           "type": "integer",
           "minimum": 1,
           "default": 33554432,
-          "description": "Bytes one request body may carry: the ceiling on a multipart upload to POST /api/agents or POST /api/agents/{id}/message. 32 MiB by default."
+          "description": "Bytes one request body may carry: the ceiling on a multipart upload to POST /api/runs or POST /api/runs/{id}/message. 32 MiB by default."
         }
       }
     },

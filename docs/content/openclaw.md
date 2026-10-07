@@ -141,7 +141,7 @@ blueprint when you want the choice to be OpenClaw's:
 
 Add both names to `allowedAgents`, then set `runtime.acp.agent` per OpenClaw agent.
 
-Drop `--agent` entirely and Leviath looks for an `agent.leviath` in the session's working directory
+Drop `--agent` entirely and Leviath looks for an `agent.toml` in the session's working directory
 instead. That is the better default when different projects want different blueprints.
 
 ## Checking it works

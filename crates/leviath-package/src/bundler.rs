@@ -1,7 +1,7 @@
 //! Agent bundling for distribution.
 //!
 //! Creates `.leviath-bundle` files which are tar.gz archives containing
-//! the agent manifest, definition, scripts, and documentation.
+//! the blueprint (`agent.toml`), scripts, and documentation.
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -100,10 +100,14 @@ impl AgentBundler {
             );
         }
 
-        // Verify agent.leviath exists
-        let manifest_path = project_path.join(leviath_core::files::MANIFEST_FILENAME);
+        // A bundle is a blueprint's directory, so it must hold one.
+        let manifest_path = project_path.join(leviath_blueprint::FILE_NAME);
         if !manifest_path.exists() {
-            anyhow::bail!("No agent.leviath found in '{}'", project_path.display());
+            anyhow::bail!(
+                "No {} found in '{}'",
+                leviath_blueprint::FILE_NAME,
+                project_path.display()
+            );
         }
 
         let mut buf = Vec::new();
@@ -305,7 +309,7 @@ mod tests {
     fn does_not_exclude_ordinary_agent_files() {
         let bundler = AgentBundler::new();
         for name in [
-            "agent.leviath",
+            "agent.toml",
             "README.md",
             "prompt.txt",
             "web_fetch.rhai",
@@ -329,7 +333,7 @@ mod tests {
     #[test]
     fn test_should_not_exclude_safe_files() {
         let bundler = AgentBundler::new();
-        assert!(!bundler.should_exclude("agent.leviath"));
+        assert!(!bundler.should_exclude("agent.toml"));
         assert!(!bundler.should_exclude("README.md"));
         assert!(!bundler.should_exclude("main.rs"));
         assert!(!bundler.should_exclude("keyboard.rs"));
@@ -421,7 +425,7 @@ mod tests {
         let bundler = AgentBundler::new();
         let result = bundler.bundle(dir.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("agent.leviath"));
+        assert!(result.unwrap_err().to_string().contains("agent.toml"));
     }
 
     // ─── bundle: valid project ──────────────────────────────────────────
@@ -433,8 +437,8 @@ mod tests {
 
         // Create minimal agent project
         fs::write(
-            project.join("agent.leviath"),
-            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+            project.join("agent.toml"),
+            "[blueprint]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
         )
         .unwrap();
         fs::write(project.join("README.md"), "# Test Agent").unwrap();
@@ -454,8 +458,8 @@ mod tests {
         let project = dir.path();
 
         fs::write(
-            project.join("agent.leviath"),
-            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+            project.join("agent.toml"),
+            "[blueprint]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
         )
         .unwrap();
         fs::write(project.join(".env"), "SECRET=123").unwrap();
@@ -476,7 +480,7 @@ mod tests {
             .map(|e| e.path().unwrap().to_string_lossy().to_string())
             .collect();
 
-        assert!(names.iter().any(|n| n.contains("agent.leviath")));
+        assert!(names.iter().any(|n| n.contains("agent.toml")));
         assert!(names.iter().any(|n| n.contains("safe.txt")));
         assert!(!names.iter().any(|n| n.contains(".env")));
         assert!(!names.iter().any(|n| n.contains("server.key")));
@@ -491,8 +495,8 @@ mod tests {
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
         fs::write(
-            project.join("agent.leviath"),
-            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+            project.join("agent.toml"),
+            "[blueprint]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
         )
         .unwrap();
 
@@ -511,8 +515,8 @@ mod tests {
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
         fs::write(
-            project.join("agent.leviath"),
-            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+            project.join("agent.toml"),
+            "[blueprint]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
         )
         .unwrap();
 
@@ -563,8 +567,8 @@ mod tests {
         let project = dir.path();
 
         fs::write(
-            project.join("agent.leviath"),
-            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+            project.join("agent.toml"),
+            "[blueprint]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
         )
         .unwrap();
         let sub = project.join("scripts");
@@ -596,8 +600,8 @@ mod tests {
         let project = dir.path();
 
         fs::write(
-            project.join("agent.leviath"),
-            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+            project.join("agent.toml"),
+            "[blueprint]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
         )
         .unwrap();
         let git = project.join(".git");
@@ -626,7 +630,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
-        // No agent.leviath written - `bundle()` must fail before ever
+        // No agent.toml written - `bundle()` must fail before ever
         // reaching the write step, and `bundle_to_file` must propagate that
         // failure via its `?` rather than attempting to write anything.
         let output = dir.path().join("output.leviath-bundle");
@@ -635,7 +639,7 @@ mod tests {
         let result = bundler.bundle_to_file(&project, &output);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("agent.leviath"));
+        assert!(result.unwrap_err().to_string().contains("agent.toml"));
         assert!(!output.exists());
     }
 
@@ -648,8 +652,8 @@ mod tests {
         let project = dir.path();
 
         fs::write(
-            project.join("agent.leviath"),
-            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+            project.join("agent.toml"),
+            "[blueprint]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
         )
         .unwrap();
 
@@ -735,8 +739,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         fs::write(
-            project.join("agent.leviath"),
-            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+            project.join("agent.toml"),
+            "[blueprint]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
         )
         .unwrap();
         let locked = project.join("locked");

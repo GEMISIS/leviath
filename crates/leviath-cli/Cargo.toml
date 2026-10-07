@@ -24,7 +24,12 @@ name = "lev"
 path = "src/main.rs"
 
 [features]
-default = ["mimalloc-allocator"]
+default = ["mimalloc-allocator", "legacy-runs"]
+# Converts a run directory in the older many-file layout into a run file the
+# first time the daemon loads it. Its crate is never published (it goes before
+# 1.0), so a published build leaves this off and reports such a directory
+# instead.
+legacy-runs = ["dep:leviath-legacy-runs"]
 debug-http = ["leviath-providers/debug-http"]
 # The lev binary's global allocator (see main.rs). A feature so the two
 # allocators can be benchmarked against each other on identical code
@@ -47,11 +52,20 @@ leviath-telemetry = { workspace = true }
 leviath-providers = { workspace = true }
 leviath-mcp = { workspace = true }
 leviath-package = { workspace = true }
+leviath-blueprint = { workspace = true }
+# `publish = false` (see the `legacy-runs` feature). Pinned by version all the
+# same: a path dependency with no version is a wildcard, which cargo-deny
+# refuses in a published crate. The release deletes this line and the feature
+# before publishing (prod.yml), and `cargo xtask version --check` holds the
+# deletion and the pin together.
+leviath-legacy-runs = { path = "../leviath-legacy-runs", version = "0.6.4", optional = true }
 leviath-scripting = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value`: the run index's refresher carries the summaries of runs that
+# did not change as the index holds them, never read.
+serde_json = { workspace = true, features = ["raw_value"] }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 # `lev rage`: the token-shaped patterns its scrubber replaces.
@@ -101,6 +115,8 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }
+# Decompressing a run file's frames, to prove a secret is in none of them.
+zstd = { workspace = true }
 # `SO_LINGER(0)` on one websocket test's socket, to force an RST rather than a
 # FIN. Tokio deprecates its own `set_linger` because the option blocks a runtime
 # thread on drop - a real hazard, and irrelevant to a socket the test closes

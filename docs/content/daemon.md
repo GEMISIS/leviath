@@ -36,7 +36,7 @@ flowchart TB
   end
   POOLS -->|inference| PROV["LLM providers"]
   LANE -->|"shell, files, MCP"| TOOLS["Tools, in the run's workdir"]
-  DAEMON -->|"journal, context, outputs"| DISK["Disk"]
+  DAEMON -->|"run files, logs, outputs"| DISK["Disk"]
 ```
 
 Agents never talk to a provider or run a tool themselves. The world builds each request and each
@@ -78,10 +78,38 @@ reads it when it starts. `lev rage` packs all of these files into a bug report. 
 On start, the daemon reloads any runs that were interrupted, so a crash or a restart does not lose
 work.
 
+Each run lives in one file, `run.lvr`, in its directory under `~/.leviath/runs/<run-id>/`. The
+[run file](/docs/run-file) holds the run's spec, the code and blobs it needs, every step, and state
+checkpoints. A reload reads the spec and the last state from it. It then checks the run against this
+machine: the providers it was started on, its MCP servers, and its code. A run that still fits is
+placed back in the world where it stopped.
+
+A run that was waiting on a person comes back waiting on the same question. A tool call waiting
+for approval, or held at the taint gate, is asked again under the same id, and the model is not
+asked again. `lev respond` with that id answers it, and the call runs once. A paused run comes
+back paused with its question still open, and an answer given while it is paused runs the call.
+
+A run that no longer fits is held, with every problem recorded in its file. A provider whose key,
+base URL or model list changed since the run started is the usual cause. The daemon log names the
+run and each problem:
+
+```
+ERROR leviath_cli::daemon::recovery: a run cannot be resumed on this machine as it stands; holding it run_id=release-notes-1790848481-4774f2f3b6fa issues=2 problems with this spawn:
+1. stages.gather.provider: changed: provider 'openai' is configured differently from when the run started: the run was started against a different configuration. put 'openai' back the way it was (its kind, base URL and model list), or start a new run. Known: openai
+```
+
+A held run is listed as paused, with the reason `machine changed`. The same problem at several
+stages is one line naming each stage. Put the provider or server back and restart the daemon, or
+`lev resume` it, and it carries on where it stopped. A `lev resume` while it still does not fit
+leaves it paused and says what to put back. See
+[when the machine changed](/docs/run-file#when-the-machine-changed). A run directory from an older
+Leviath is converted to a run file the first time the daemon loads it. Its old files move to a
+`legacy/` directory inside it, except its stage logs and its answer, which stay where they are. See [upgrading from an earlier release](#upgrading-from-an-earlier-release).
+
 The tricky part is tool calls that were mid-batch when it went down. Some of those already had real
 effects: a file written, a shell command run. Re-running them would do the damage twice. So the
-daemon keeps a **journal**, an append-only record of every tool batch when it is dispatched and
-every result as it arrives. On reload it uses the journal to work out what actually happened:
+run file keeps a **journal**: each tool batch is recorded when it is dispatched, and each result as
+it arrives. On reload the daemon uses the journal to work out what actually happened:
 
 - **A call that finished** is replayed from the journal, not run again. A file write that already
   landed does not land twice.
@@ -93,18 +121,17 @@ every result as it arrives. On reload it uses the journal to work out what actua
   asked again. A question has no effect to check, and nothing after it in the batch had started, so
   the batch is dispatched again with its finished calls' results carried over. The question comes
   back in `lev interactions` under a new request id, and the run shows as waiting on it, as it did
-  before the restart. A taint-gate prompt is not yet among these: its call is not journaled until
-  you answer, so the run asks the model again instead.
+  before the restart.
+- **A call held for a tool approval or at the taint gate** had not been sent, so it is put to you
+  again under the same id, and the model is not asked for the turn again. The taint gate's audit
+  in `stages/<n>/taint_audit.json` keeps what it decided before the restart, once.
 - **A crash in the instant between an effect landing and the journal recording it** is the one gap
   this cannot close, because no journal can watch an external side effect happen atomically. Those
   calls come back as the same check-first error rather than being quietly re-run.
 
-A reloaded run keeps the launch options that shape it: `--yolo`, the output format it was asked for,
-and a `--model` override, replayed exactly as given. A run launched with no `--model` resolves each
-stage afresh on reload, the same way the launch did, so its failover list is intact.
-
-Before 0.4.1, the reload handed back the entry stage's resolved `provider/model` as if it had been
-the override. That pinned every stage of a reloaded run to that one pair.
+A reloaded run is not resolved again. It carries on with the models, tools, launch policy and
+inputs its spec recorded when it started, including `--yolo`, the output format it was asked for,
+and each stage's failover list.
 
 If something on your end consumes completion webhooks, deduplicate on `delivery_id`, described in
 the [API guide](/docs/api). A completion that re-fires after a restart carries the same id as the
@@ -120,11 +147,133 @@ stateDiagram-v2
   Stopped --> [*]
 ```
 
+## Upgrading from an earlier release
+
+The first time a new release's daemon starts on your home, it brings what the earlier release wrote
+up to date:
+
+- each installed blueprint still written as an `agent.leviath` becomes an `agent.toml`, or is
+  replaced by this release's copy when Leviath ships it;
+- each run directory in the old many-file layout becomes a run file.
+
+Before it changes any of them, the daemon saves it under `~/.leviath/backups/<version>-<time>/`:
+
+| Folder | Holds |
+|---|---|
+| `agents/` | Each installed blueprint directory, as it was |
+| `agent_paths/` | Each blueprint from one of your `agent_paths`, as it was |
+| `runs/` | Each old run directory, as it was |
+
+A run's files are hard links rather than copies, so the backup costs no extra disk space while the
+run's own `legacy/` folder holds the same files. Its stage logs are copied instead, because they
+stay in the run's directory, where a resumed run adds to them. One backup is kept per release, and Leviath never
+deletes anything in it. An item that cannot be saved is left exactly as it was.
+
+The backup is the old home as it was, secrets included. A run whose webhook was signed keeps its
+secret there in plain text, in `meta.json` and the old journal, while the converted run keeps it
+only in the secret store. Guard the backup as you guarded the old home, and delete it once you no
+longer need to go back.
+
+On a large home this takes a while: about 18 seconds for a thousand runs. The daemon answers
+meanwhile, so any `lev` command waiting on it shows what it is doing and how far along it is.
+That covers the command that started it, `lev ps`, `lev dash` before it opens, and `lev daemon`
+in the foreground:
+
+```text
+leviath: saving everything it changes to ~/.leviath/backups/<version>-1790000000 first
+leviath daemon starting: converting runs [##########--------------] 412/982
+```
+
+On a terminal the line is redrawn in place. Through a pipe or a log, each step gets one plain line
+and no escape codes, and `--json` output on stdout is untouched. When the daemon is ready, the
+first command to see it prints a summary once:
+
+```text
+Upgraded this home for Leviath <version>: 19 blueprints upgraded, 982 old runs converted. Everything it changed was saved first to ~/.leviath/backups/<version>-1790000000; Leviath never deletes it.
+warning: blueprint 'researcher': region 'log': `max_stored = 5` was dropped: Leviath 0.6.4 and earlier accepted it but never read it, so it never changed a run
+```
+
+There is one warning for each key an upgraded blueprint held that Leviath 0.6.4 and earlier
+accepted but never read. A key dropped from the blueprints of old runs is warned about once, with
+how many runs held it. The summary is in the daemon log too, and when the daemon was started with
+nobody waiting, the next `lev ps` prints it.
+
+An upgraded blueprint keeps its warnings beside it, in `legacy/upgrade-warnings.json`, and
+`lev list` and `lev validate` show them under it until you edit its `agent.toml` or delete that
+file.
+
+The runs are converted by a second `lev` process that the daemon starts and waits for, so the
+memory converting takes goes back to the system when it exits and the daemon stays small. It
+shows as `lev daemon convert-runs` in the process list, and its log lines are in the daemon log.
+If it cannot start, or stops part way, the daemon converts the runs that are left itself. A run
+it was part way through is put back as it was and converted again.
+
+A run converts once. One that cannot be converted is left as it was and listed, with the reason, in
+`~/.leviath/runs.unconverted`. Later starts of the same release leave it alone, and the next release
+tries it again. To try again now, delete that file and run `lev daemon restart`.
+
+A run whose blueprint is gone, or no longer reads, still converts: its graph is what the run
+recorded, so it lists and reads back like any other run. It never resumes. One that had not
+finished ends in `error`, saying why.
+
+A blueprint that cannot be upgraded is left as it was, and the summary says why once. The daemon
+tries it again on every start without repeating the summary, and `lev list` names it, with the
+reason, until you fix it and convert it with `lev blueprint migrate`.
+
+### One version at a time
+
+Run one version of `lev` and its daemon at a time, and run `lev daemon restart` after upgrading.
+Each release reads the home its own way, so a `lev` talking to a daemon of another build shows
+that build's view of it: an empty `lev ps`, no open questions while one is pending, or a run file
+it cannot read. When the two differ, every command that talks to the daemon starts with a line
+saying which is which, and `lev daemon status` says it too. A command that only reads files, such
+as `lev list` or `lev validate`, has no daemon to differ from and says nothing:
+
+```text
+warning: this daemon is an earlier release (build 839f0344), older than this lev (<version> (build 1a2b3c4d)). Each build reads the home its own way, ...
+```
+
+A command that starts runs replaces an older daemon with its own build, and says so. It leaves a
+newer one running: use the newer `lev`, or run `lev daemon restart` with the one you mean to keep.
+A `lev` from 0.6.4 or earlier cannot tell the two apart. It replaces any daemon that is not its own
+build, newer or not, and shows its own view of the home without a warning.
+
+### Going back
+
+To return to the release you upgraded from:
+
+1. Stop the daemon with this release's `lev`: `lev daemon stop`.
+2. For each name in `~/.leviath/backups/<version>-<time>/agents/`, replace
+   `~/.leviath/agents/<name>` with the backup's copy. Do the same for each name in the backup's
+   `runs/`, replacing `~/.leviath/runs/<name>`. A blueprint under the backup's `agent_paths/` goes
+   back to the agent path it came from; its folder is named after it, followed by a digest of
+   where it was.
+3. Delete `~/.leviath/runs.index`, and `~/.leviath/runs.unconverted` if there is one.
+4. Put the earlier release's `lev` back on your `PATH` and start its daemon: `lev daemon start`.
+
+Release 0.1.0 has no daemon, so it has no `lev daemon start` either. For it, steps 2 and 3 are
+all there is: it runs each agent in the foreground with `lev run`, as it always did.
+
+The backup holds each run as it was when the upgrade converted it. A run this release resumed and
+carried on is back where it was at the upgrade, and the earlier daemon picks up each unfinished
+run from there, as after any restart.
+
+Runs started after the upgrade stay unreadable by the earlier release: they exist only as run
+files, which it does not read, so it leaves their directories out of `lev ps`. Copy them aside
+before going back if you want them later; the new release reads them again when you upgrade once
+more. The same goes for a blueprint installed after the upgrade, which is an `agent.toml`.
+
+Started on an upgraded home without restoring, an earlier release changes nothing, but it sees
+little. `lev ps` and `lev list` come back empty, because every run is a run file and every
+blueprint an `agent.toml`, neither of which it reads. `lev result` and `lev stages` say the run is
+not there, and `lev run <name>` says there is no blueprint by that name. The backup folder holds a
+`README.txt` with these steps.
+
 ## What the front-ends do while it restarts
 
-A daemon restart used to break whatever was talking to it. `lev serve` answered 503 for the
-second the socket was gone, and the ACP bridge ended its turn with half an answer. Now the
-long-lived front-ends ride the restart out: `lev serve`, `lev dash`, and `lev agent-client`.
+The long-lived front-ends ride a daemon restart out: `lev serve`, `lev dash`, and
+`lev agent-client`. Without that, `lev serve` would answer 503 for the second the socket is gone,
+and the ACP bridge would end its turn with half an answer.
 
 A request that arrives while the daemon is down waits up to ten seconds for it to come back. The
 new daemon serves it. The wait is per outage, not per request: a daemon that is really gone costs
@@ -355,7 +504,7 @@ These are the commands that talk to it:
 | `lev interactions` | List the questions runs are waiting on, or show one |
 | `lev respond <id>` | Answer one of them |
 | `lev pause <run-id>` | Pause a run |
-| `lev resume <run-id>` | Resume a paused run |
+| `lev resume <run-id>` | Resume a paused or cancelled run |
 | `lev cancel <run-id>` | Cancel a run |
 | `lev context <run-id>` | Show a run's context-window history |
 

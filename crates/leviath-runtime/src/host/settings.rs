@@ -1,6 +1,6 @@
 //! The host's own `[limits]` settings, in a handle that can be shared.
 //!
-//! Three of the numbers [`WorldHost`] runs on come from `config.toml` and are
+//! Three of the numbers [`WorldHost`](crate::host::WorldHost) runs on come from `config.toml` and are
 //! not world resources: how many dead cycles buy the tool lane some relief, how
 //! long a finished run stays in the listing, and the spend figures worth an
 //! event. Plain fields on the host cannot carry them: the host is reachable

@@ -150,6 +150,15 @@ It didn't. `lev run` hands the agent to the [daemon](/docs/daemon), which keeps 
 it back with `lev ps` or `lev dash`. If the daemon itself was stopped, it reloads interrupted runs
 on its next start.
 
+## A run ended in `error` after the daemon restarted
+
+A reloaded run carries on with the providers, MCP servers and code it started with. When one of
+those changed while the daemon was down, the run cannot resume here and ends in `error`. A provider
+whose base URL, kind or model list you edited is the usual cause. `~/.leviath/daemon.log` names
+the run and every problem, after the words `a run could not be resumed on this machine`, and the
+run's file records the same list. Start a new run. See
+[when the machine changed](/docs/run-file#when-the-machine-changed).
+
 ## A run says `running` but never does anything
 
 Check its provider first, with `lev doctor`. If a stage's model list names only providers you
@@ -204,8 +213,8 @@ and the message says why. `HTTP 402` there means the provider account is out of 
 that Leviath lost the run.
 
 **It finished longer ago than the window.** Now it really is gone from the listing, and the
-answer is on disk: `~/.leviath/runs/<run-id>/meta.json`, or `GET /api/agents`, which reads the
-same records and does not expire them. Widen `[limits] finished_retention_secs` if you are
+answer is on disk in the run's file, `~/.leviath/runs/<run-id>/run.lvr`. `lev ps --all` and
+`GET /api/runs` read the same files and do not expire them. Widen `[limits] finished_retention_secs` if you are
 polling less often than the default five minutes.
 
 If it is none of those, the spawn itself failed and no run was ever created. `lev run` reports
@@ -321,7 +330,7 @@ resolved shell in the tool's description and, on Windows, prepends a short syste
 PowerShell stand-ins, so an up-to-date install should not do this.
 
 If you see it anyway, check that `shell_hint` has not been turned off in `config.toml` or in the
-blueprint's `[agent]` / `[stages.<name>]` block. A blueprint that spells out POSIX commands in its
+blueprint's `[graph]` table or one of its `[[graph.stages]]`. A blueprint that spells out POSIX commands in its
 own prompt will still ask for them; that text has to change in the blueprint. See
 [which shell you get](/docs/tools#which-shell-you-get).
 
@@ -366,7 +375,7 @@ healthy daemon sits at zero dead cycles.
 ## My work queue thinks runs are still running
 
 A scheduler that hands work to Leviath and marks a slot busy has to learn when the run ends, and
-two things get in the way of the obvious approach. `updated_at` in `meta.json` is a 30-second
+two things get in the way of the obvious approach. A run's `updated_at` is a 30-second
 heartbeat, so it stays fresh on a run that has stopped dead. `pid` is 0 for every run, live or
 finished, so a sweeper that reverts on `pid == 0` reverts everything.
 
@@ -381,7 +390,7 @@ reach: no inference in flight, no tool batch, nothing waiting on it. It has stop
 still reports `running`.
 
 Set `[limits] wedge_timeout_secs = 300` and the daemon fails such a run instead of leaving it. It
-is off by default because it fails runs. A run it fails logs at `error` level and its `meta.json`
+is off by default because it fails runs. A run it fails logs at `error` level and its run file
 carries the reason, which begins `[wedged]` in the stage log. Nothing else in Leviath produces that
 line, so it means the engine lost track of a run. Please report it.
 
@@ -390,9 +399,9 @@ sub-agents, or on a person is holding the marker that says so and is exempt howe
 
 ## An agent seems stuck in a loop
 
-That's what [stuck detection](/docs/stages#stuck-detection) is for. Add a `condition = "stuck"` transition
-with thresholds (`stuck_after_iterations`, `stuck_after_same_file_edits`, …) so the runtime escapes
-the stage automatically instead of burning tokens.
+That's what [stuck detection](/docs/stages#stuck-detection) is for. Add an edge with `when = "stuck"`
+and thresholds, such as `stuck = { after_iterations = 20, after_same_file_edits = 5 }`, so the
+runtime escapes the stage automatically instead of burning tokens.
 
 ## The Lair can't reach my server
 

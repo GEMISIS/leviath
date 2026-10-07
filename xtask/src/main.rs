@@ -16,12 +16,15 @@
 //!   `modalities --check`        Print the diff and fail if the modality table would change.
 //!   `bedrock-windows`           Refresh each Bedrock model's token limits from AWS's model cards.
 //!   `bedrock-windows --check`   Print the diff and fail if the Bedrock table would change.
+//!   `schema`                    Regenerate the JSON Schemas under `docs/schema/` from the code.
+//!   `schema --check`            Fail if a checked-in schema differs from what the code generates.
 
 mod bedrock_windows;
 mod coverage;
 mod docs;
 mod modalities;
 mod prices;
+mod schema;
 mod structure;
 mod version;
 
@@ -41,7 +44,7 @@ pub fn dispatch(args: &[String]) -> Result<()> {
         coverage::run,
         version::run,
         docs::run,
-        structure::run,
+        (structure::run, schema::run),
         (prices::run, modalities::run, bedrock_windows::run),
     )
 }
@@ -52,6 +55,10 @@ pub fn dispatch(args: &[String]) -> Result<()> {
 /// readable as commands are added.
 pub type Refreshers<P, M, W> = (P, M, W);
 
+/// The handlers for the two commands that check the source tree itself:
+/// structure and the generated schemas, in that order.
+pub type TreeChecks<S, G> = (S, G);
+
 /// Route the CLI arguments to the provided handler closures.
 ///
 /// The handlers replace the real ones in unit tests, making every match arm
@@ -61,13 +68,17 @@ pub fn dispatch_with(
     run_cov: impl FnOnce(coverage::CoverageMode) -> Result<()>,
     run_ver: impl FnOnce(version::VersionMode) -> Result<()>,
     run_docs: impl FnOnce(docs::DocsMode) -> Result<()>,
-    run_struct: impl FnOnce(structure::StructureMode) -> Result<()>,
+    run_tree: TreeChecks<
+        impl FnOnce(structure::StructureMode) -> Result<()>,
+        impl FnOnce(schema::SchemaMode) -> Result<()>,
+    >,
     run_tables: Refreshers<
         impl FnOnce(prices::PricesMode) -> Result<()>,
         impl FnOnce(modalities::ModalitiesMode) -> Result<()>,
         impl FnOnce(bedrock_windows::WindowsMode) -> Result<()>,
     >,
 ) -> Result<()> {
+    let (run_struct, run_schema) = run_tree;
     let (run_prices, run_mod, run_windows) = run_tables;
     let subcommand = args.first().map(String::as_str).unwrap_or("help");
     match subcommand {
@@ -86,6 +97,10 @@ pub fn dispatch_with(
         "structure" => {
             let mode = structure::StructureMode::parse(&args[1..])?;
             run_struct(mode)
+        }
+        "schema" => {
+            let mode = schema::SchemaMode::parse(&args[1..])?;
+            run_schema(mode)
         }
         "prices" => {
             let mode = prices::PricesMode::parse(&args[1..])?;
@@ -110,6 +125,8 @@ pub fn dispatch_with(
             println!("  structure                 Hold every file to the production-line limit");
             println!("  structure --list          Print every file's production-line count");
             println!("  docs                      Check docs/content for dead links + frontmatter");
+            println!("  schema                    Regenerate the JSON Schemas in docs/schema");
+            println!("  schema --check            Fail if a checked-in schema is out of date");
             println!("  prices                    Refresh the vendor list prices (network)");
             println!("  prices --check            Fail if the price table would change (network)");
             println!("  modalities                Refresh model input/output mime types (network)");
@@ -160,6 +177,11 @@ mod tests {
         Ok(())
     }
 
+    /// A `run_schema` stub matching `impl FnOnce(SchemaMode) -> Result<()>`.
+    fn schema_ok(_mode: schema::SchemaMode) -> Result<()> {
+        Ok(())
+    }
+
     /// A `run_prices` stub matching `impl FnOnce(PricesMode) -> Result<()>`.
     fn prices_ok(_mode: prices::PricesMode) -> Result<()> {
         Ok(())
@@ -183,6 +205,7 @@ mod tests {
         assert!(ver_ok(VersionMode::Check).is_ok());
         assert!(docs_ok(docs::DocsMode::Check).is_ok());
         assert!(struct_ok(structure::StructureMode::Check).is_ok());
+        assert!(schema_ok(schema::SchemaMode::Check).is_ok());
         assert!(prices_ok(prices::PricesMode::Check).is_ok());
         assert!(mod_ok(modalities::ModalitiesMode::Check).is_ok());
         assert!(windows_ok(bedrock_windows::WindowsMode::Check).is_ok());
@@ -246,7 +269,7 @@ mod tests {
             },
             ver_ok,
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         )
         .unwrap();
@@ -264,7 +287,7 @@ mod tests {
             },
             ver_ok,
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         )
         .unwrap();
@@ -278,7 +301,7 @@ mod tests {
             cov_ok, // never called; covered by stub_returns_ok
             ver_ok,
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         );
         assert!(
@@ -294,7 +317,7 @@ mod tests {
             |_mode| anyhow::bail!("simulated coverage failure"),
             ver_ok,
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         );
         assert!(result.is_err());
@@ -319,7 +342,7 @@ mod tests {
                 got = Some(mode);
                 Ok(())
             },
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         )
         .unwrap();
@@ -333,13 +356,46 @@ mod tests {
             cov_ok,
             ver_ok,
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         );
         assert!(
             result.is_err(),
             "an unknown docs flag must error: {result:?}"
         );
+    }
+
+    // ── schema arm: mode parsing + dispatch ─────────────────────────────────
+
+    #[test]
+    fn dispatch_with_schema_parses_check() {
+        let mut got = None;
+        dispatch_with(
+            &args(&["schema", "--check"]),
+            cov_ok,
+            ver_ok,
+            docs_ok,
+            (struct_ok, |mode| {
+                got = Some(mode);
+                Ok(())
+            }),
+            (prices_ok, mod_ok, windows_ok),
+        )
+        .unwrap();
+        assert_eq!(got, Some(schema::SchemaMode::Check));
+    }
+
+    #[test]
+    fn dispatch_with_schema_bad_arg_returns_err() {
+        let result = dispatch_with(
+            &args(&["schema", "--write"]),
+            cov_ok,
+            ver_ok,
+            docs_ok,
+            (struct_ok, schema_ok),
+            (prices_ok, mod_ok, windows_ok),
+        );
+        assert!(result.is_err(), "an unknown schema flag must error");
     }
 
     // ── prices arm: mode parsing + dispatch ─────────────────────────────────
@@ -352,7 +408,7 @@ mod tests {
             cov_ok,
             ver_ok,
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (
                 |mode| {
                     got = Some(mode);
@@ -374,7 +430,7 @@ mod tests {
             cov_ok,
             ver_ok,
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (
                 prices_ok,
                 |mode| {
@@ -396,7 +452,7 @@ mod tests {
             cov_ok,
             ver_ok,
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, |mode| {
                 got = Some(mode);
                 Ok(())
@@ -413,7 +469,7 @@ mod tests {
             cov_ok,
             ver_ok,
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         );
         assert!(
@@ -429,7 +485,7 @@ mod tests {
             cov_ok,
             ver_ok,
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         );
         assert!(result.is_err(), "an unknown modalities flag must error");
@@ -442,7 +498,7 @@ mod tests {
             cov_ok,
             ver_ok,
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         );
         assert!(
@@ -464,7 +520,7 @@ mod tests {
                 Ok(())
             },
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         )
         .unwrap();
@@ -482,7 +538,7 @@ mod tests {
                 Ok(())
             },
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         )
         .unwrap();
@@ -496,7 +552,7 @@ mod tests {
             cov_ok,
             ver_ok,
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         );
         assert!(
@@ -512,7 +568,7 @@ mod tests {
             cov_ok,
             |_mode| anyhow::bail!("simulated version failure"),
             docs_ok,
-            struct_ok,
+            (struct_ok, schema_ok),
             (prices_ok, mod_ok, windows_ok),
         );
         assert!(

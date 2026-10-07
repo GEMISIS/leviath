@@ -26,7 +26,7 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
     // forever. The shared factory supplies a connect+total timeout floor and
     // caps redirects.
     // `checked_client`, not `client`: the webhook URL comes from a request body,
-    // and it was checked once at `POST /api/agents` and then never again. A
+    // and it was checked once at `POST /api/runs` and then never again. A
     // caller registered a public endpoint that answered `307 Location:
     // http://169.254.169.254/…`, and since 307 preserves the method *and* the
     // body, that was a repeatable POST primitive against the internal network -
@@ -36,8 +36,12 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
         state.limits.allow_local_network,
     );
     let mut link = LinkWatch::new(&state);
+    // Where the stream had got to when it last dropped, so the next one
+    // starts with what was missed: above all a run that a restarted daemon
+    // finished before this loop was back, whose webhook is fired from here.
+    let mut cursor = None;
     loop {
-        consume_once(&state, &client, &mut link).await;
+        consume_once(&state, &client, &mut link, &mut cursor).await;
         // The stream ended (daemon closed / restarted) or was unreachable; back
         // off briefly, then re-subscribe.
         tokio::time::sleep(backoff).await;
@@ -114,10 +118,16 @@ impl LinkWatch {
     }
 }
 
-/// One subscribe-and-consume pass: forward events until the stream ends. Returns
+/// One subscribe-and-consume pass: forward events until the stream ends,
+/// starting after `cursor` and leaving it where the stream got to. Returns
 /// immediately if the daemon can't be reached.
-async fn consume_once(state: &AppState, client: &reqwest::Client, link: &mut LinkWatch) {
-    let Ok(mut stream) = state.control.subscribe().await else {
+async fn consume_once(
+    state: &AppState,
+    client: &reqwest::Client,
+    link: &mut LinkWatch,
+    cursor: &mut Option<leviath_runtime::control_socket::EventCursor>,
+) {
+    let Ok(mut stream) = state.control.subscribe_from(cursor.as_ref()).await else {
         link.down(state);
         return;
     };
@@ -125,6 +135,9 @@ async fn consume_once(state: &AppState, client: &reqwest::Client, link: &mut Lin
     while let Some(event) = stream.next().await {
         handle_event(state, client, event);
     }
+    // A stream that dropped before the daemon said where it starts leaves
+    // the cursor where it was.
+    *cursor = stream.cursor().or(cursor.take());
     link.down(state);
 }
 
@@ -284,7 +297,7 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             result: runstate::read_meta(&run_id).ok().and_then(|m| m.error),
             // Taken from the event rather than re-read from disk: the event
             // fires the moment the run goes terminal, and the persist tick that
-            // writes `meta.json` has not necessarily run yet.
+            // writes the run file has not necessarily run yet.
             final_output: final_output.map(Into::into),
         },
         WorldEvent::Log {
@@ -302,12 +315,16 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             from,
             to,
             iteration,
+            edge,
+            reason,
         } => ServerEvent::StageTransition {
             agent_id,
             run_id,
             from,
             to,
             iteration,
+            edge,
+            reason,
         },
         WorldEvent::ToolCallStarted {
             run_id,
@@ -353,9 +370,12 @@ fn delivery_id(event: &str, run_id: &str) -> String {
     format!("{event}:{run_id}")
 }
 
-/// POST a completion webhook for `run_id` if its persisted metadata carries a
-/// `callback_url`. When the metadata also carries a `callback_secret`, the body
-/// is signed with HMAC-SHA256 and the signature travels in `X-Leviath-Signature`.
+/// POST a completion webhook for `run_id` if its run file names a callback
+/// URL. When the webhook has a signing secret, the body is signed with
+/// HMAC-SHA256 and the signature travels in `X-Leviath-Signature`. The run
+/// file names the secret by where it is kept; the secret is read from the
+/// store beside the runs, and a webhook whose secret is no longer there is
+/// not posted unsigned.
 /// Every delivery carries a deterministic [`delivery_id`] for receiver-side
 /// dedupe (in the signed body and the `X-Leviath-Delivery` header).
 fn fire_completion_webhook(
@@ -365,9 +385,11 @@ fn fire_completion_webhook(
     status: &str,
     final_output: Option<&leviath_core::output::FinalOutput>,
 ) {
-    let Ok(meta) = runstate::read_meta(run_id) else {
+    let dir = runstate::run_dir(run_id);
+    let Ok(tail) = runstate::run_file::tail_in(&dir) else {
         return; // metadata not yet persisted
     };
+    let meta = leviath_runtime::runfile::summary_of(&tail.spec, &tail.state, tail.updated_at);
     let Some(url) = meta.callback_url.clone() else {
         return; // no webhook configured
     };
@@ -376,7 +398,16 @@ fn fire_completion_webhook(
     // Serialize once so the signature covers the exact bytes we send. `Value`'s
     // `Display` is infallible and byte-identical to `to_vec`.
     let body = payload.to_string().into_bytes();
-    let signature = meta.callback_secret.as_deref().map(|s| sign(s, &body));
+    // Read on its own, so nothing sent but the signature comes from it.
+    let signature = match runstate::run_file::callback_secret(&dir, &tail.spec) {
+        None => None,
+        Some(Ok(secret)) => Some(sign(secret.expose(), &body)),
+        Some(Err(reference)) => {
+            let reference = reference.to_string();
+            tracing::warn!(run_id = %run_id, secret = %reference, "the run's webhook was not posted: its signing secret is not in the secret store");
+            return;
+        }
+    };
     tokio::spawn(fire_webhook(
         client.clone(),
         url,
@@ -408,7 +439,7 @@ fn completion_payload(
         // run's *error*. The answer is `final_output`, below.
         "result": meta.error,
         // Taken from the event, not from `meta`: the webhook fires the moment
-        // the run goes terminal, and the persist tick that writes `meta.json`
+        // the run goes terminal, and the persist tick that writes the run file
         // has not necessarily run yet - reading it here would race and deliver
         // a finished run with no answer.
         "final_output": final_output,
@@ -688,7 +719,9 @@ mod tests {
                 agent_id: "a".into(),
                 from: "plan".into(),
                 to: "implement".into(),
-                iteration: 1
+                iteration: 1,
+                edge: None,
+                reason: None,
             }),
             "stage_transition"
         );
@@ -830,9 +863,13 @@ mod tests {
             from: "plan".into(),
             to: "implement".into(),
             iteration: 2,
+            edge: Some("build_it".into()),
+            reason: Some(leviath_runtime::state::TransitionReason::ModelChoice),
         }))
         .unwrap();
         assert_eq!(json["type"], "stage_transition");
+        assert_eq!(json["edge"], "build_it");
+        assert_eq!(json["reason"], "ModelChoice");
         assert_eq!(json["run_id"], "run-9");
         assert_eq!(json["agent_id"], "a");
         assert_eq!(json["from"], "plan");
@@ -969,6 +1006,7 @@ mod tests {
                     1,
                 );
                 meta.callback_url = Some("http://127.0.0.1:0/hook".into());
+                meta.status = leviath_core::run_meta::RunStatus::Error;
                 meta.error = Some("boom".into());
                 create_run(&meta).unwrap();
 
@@ -1192,9 +1230,11 @@ mod tests {
                     1,
                 );
                 meta.callback_url = Some(url);
-                meta.callback_secret = Some("topsecret".into());
-                meta.flags.empty_output = true;
-                create_run(&meta).unwrap();
+                // A finished run that wrote nothing and handed nothing back.
+                meta.status = leviath_core::run_meta::RunStatus::Complete;
+                // Made fresh for the test, so nothing can pass by knowing it.
+                let secret = format!("{:032x}", rand::random::<u128>());
+                crate::runstate::create_signed_run(&meta, &secret).unwrap();
 
                 fire_completion_webhook(
                     &reqwest::Client::new(),
@@ -1204,11 +1244,17 @@ mod tests {
                     None,
                 );
                 let requests = server.await.unwrap();
+                // Signed with the secret the store holds for the run: the
+                // run file only names it.
+                let (_, body) = requests[0].split_once("\r\n\r\n").unwrap();
+                let expected = sign(&secret, body.as_bytes());
                 assert!(
                     requests[0]
                         .to_lowercase()
-                        .contains("x-leviath-signature: sha256=")
+                        .contains(&format!("x-leviath-signature: {expected}"))
                 );
+                let file = runstate::run_file::path_in(&runstate::run_dir("signed"));
+                assert!(!crate::test_support::run_file_holds(&file, &secret));
                 assert!(requests[0].contains("agent_completed"));
                 // The delivery id travels in the signed body and the header.
                 assert!(
@@ -1229,6 +1275,44 @@ mod tests {
                 );
             },
         )
+        .await;
+    }
+
+    /// A webhook whose signing secret has gone from the store is not posted
+    /// at all: posted unsigned, a receiver that checks would refuse it and
+    /// one that does not would trust a body nobody signed.
+    #[tokio::test]
+    async fn a_webhook_whose_secret_is_lost_is_not_posted_unsigned() {
+        crate::runstate::with_isolated_runs_dir_async("webhook_secret_lost", |_d| async move {
+            let (url, server) = fake_receiver(vec![200]).await;
+            for id in ["lost", "kept"] {
+                let mut meta = RunMeta::new(
+                    id.into(),
+                    "coder".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/w".into(),
+                    1,
+                );
+                meta.callback_url = Some(url.clone());
+                meta.status = leviath_core::run_meta::RunStatus::Complete;
+                crate::runstate::create_signed_run(
+                    &meta,
+                    &format!("{:032x}", rand::random::<u128>()),
+                )
+                .unwrap();
+            }
+            leviath_runtime::secret_store::SecretStore::of_runs(&runstate::runs_dir())
+                .forget_run("lost");
+            let client = reqwest::Client::new();
+            fire_completion_webhook(&client, &fast_cfg(), "lost", "complete", None);
+            fire_completion_webhook(&client, &fast_cfg(), "kept", "complete", None);
+            // The one request the receiver took is the run whose secret is
+            // still there.
+            let requests = server.await.unwrap();
+            assert!(requests[0].contains("agent_completed:kept"));
+        })
         .await;
     }
 
@@ -1314,7 +1398,7 @@ mod tests {
         );
         let (state, mut rx) = state_with(control);
         let client = reqwest::Client::new();
-        consume_once(&state, &client, &mut LinkWatch::new(&state)).await; // returns when the stream closes
+        consume_once(&state, &client, &mut LinkWatch::new(&state), &mut None).await; // returns when the stream closes
         server.await.unwrap();
         assert_eq!(tag(&rx.try_recv().unwrap()), "agent_status");
     }
@@ -1323,7 +1407,121 @@ mod tests {
     async fn consume_once_returns_when_daemon_absent() {
         let (state, _rx) = state_with(no_daemon_client());
         let client = reqwest::Client::new();
-        consume_once(&state, &client, &mut LinkWatch::new(&state)).await; // subscribe fails → returns immediately
+        consume_once(&state, &client, &mut LinkWatch::new(&state), &mut None).await; // subscribe fails → returns immediately
+    }
+
+    /// A daemon on `id` serving one connection from `log`, as the real
+    /// daemon's gate serves every connection from its one log.
+    fn log_daemon(
+        id: &leviath_runtime::control_socket::ControlId,
+        log: &leviath_runtime::control_socket::EventLog,
+    ) -> tokio::task::JoinHandle<()> {
+        let mut listener = bind_control_listener(id).unwrap();
+        let log = log.clone();
+        tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (op_tx, _op_rx) = tokio::sync::mpsc::unbounded_channel();
+            let identity = crate::test_support::same_code_daemon(1);
+            let _ = leviath_runtime::control_socket::handle_connection_as(
+                stream, op_tx, log, None, identity,
+            )
+            .await;
+        })
+    }
+
+    /// A relay holding a cursor, reconnecting to a daemon built before
+    /// streams were numbered (`lev daemon restart` onto an older build): the
+    /// daemon refuses `resubscribe` as an unknown request, and the relay
+    /// subscribes plainly and keeps forwarding.
+    #[tokio::test]
+    async fn a_relay_back_on_an_older_daemon_keeps_forwarding() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = control_id(dir.path());
+        let mut listener = bind_control_listener(&id).unwrap();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let refused = lines.next_line().await.unwrap().unwrap();
+            assert!(refused.contains("\"resubscribe\""), "{refused}");
+            write_half
+                .write_all(
+                    b"{\"result\":\"error\",\"message\":\"invalid request: unknown variant\"}\n",
+                )
+                .await
+                .unwrap();
+            let plain = lines.next_line().await.unwrap().unwrap();
+            assert!(plain.contains("\"subscribe\""), "{plain}");
+            let mut line = serde_json::to_string(&WorldEvent::Log {
+                run_id: "r".into(),
+                agent_id: "a".into(),
+                line: "still here".into(),
+            })
+            .unwrap();
+            line.push('\n');
+            write_half.write_all(line.as_bytes()).await.unwrap();
+            // Dropped: the stream ends and the relay's pass returns.
+        });
+        let (state, mut rx) = state_with(ControlClient::new(id));
+        let client = reqwest::Client::new();
+        let before = leviath_runtime::control_socket::EventCursor {
+            session: "a newer daemon".into(),
+            after: 3,
+        };
+        let mut cursor = Some(before.clone());
+        consume_once(&state, &client, &mut LinkWatch::new(&state), &mut cursor).await;
+        server.await.unwrap();
+        assert_eq!(tag(&rx.try_recv().unwrap()), "log");
+        assert_eq!(cursor, Some(before), "nothing newer to pick up from");
+    }
+
+    /// The daemon was killed and started again, and a run it restored
+    /// finished before this relay was subscribed again. Its completion went
+    /// out to nobody; the relay picks the stream up from where it was, so it
+    /// is sent the completion anyway and fires the run's webhook, rather than
+    /// the run ending in silence.
+    #[tokio::test]
+    async fn a_run_finished_while_the_relay_was_away_is_still_completed() {
+        use leviath_runtime::control_socket::EventLog;
+        let dir = tempfile::tempdir().unwrap();
+        let id = control_id(dir.path());
+        let (state, mut rx) = state_with(ControlClient::new(id.clone()));
+        let client = reqwest::Client::new();
+        let mut link = LinkWatch::new(&state);
+        let mut cursor = None;
+
+        // The first daemon: the relay is subscribed, then the daemon dies.
+        let (world, _keep) = broadcast::channel(16);
+        let first = EventLog::recording(&world);
+        let served = log_daemon(&id, &first);
+        drop(world);
+        consume_once(&state, &client, &mut link, &mut cursor).await;
+        served.await.unwrap();
+        let down = serde_json::to_value(rx.try_recv().unwrap().event).unwrap();
+        assert_eq!(down["connected"], false);
+
+        // Its replacement restores the run and finishes it at once.
+        let (world, _keep) = broadcast::channel(16);
+        let second = EventLog::recording(&world);
+        world
+            .send(WorldEvent::Completed {
+                run_id: "restored".into(),
+                agent_id: "a".into(),
+                status: "complete".into(),
+                final_output: None,
+            })
+            .unwrap();
+        drop(world);
+        let served = log_daemon(&id, &second);
+        consume_once(&state, &client, &mut link, &mut cursor).await;
+        served.await.unwrap();
+        let frames: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|frame| tag(&frame))
+            .collect();
+        assert!(
+            frames.contains(&"agent_completed".to_string()),
+            "the completion reached the relay: {frames:?}"
+        );
     }
 
     /// A fake daemon that accepts `passes` subscribe connections, streaming one
@@ -1403,8 +1601,8 @@ mod tests {
         let (state, mut rx) = state_with(no_daemon_client());
         let client = reqwest::Client::new();
         let mut link = LinkWatch::new(&state);
-        consume_once(&state, &client, &mut link).await;
-        consume_once(&state, &client, &mut link).await;
+        consume_once(&state, &client, &mut link, &mut None).await;
+        consume_once(&state, &client, &mut link, &mut None).await;
         let down = serde_json::to_value(rx.try_recv().unwrap().event).unwrap();
         assert_eq!(down["type"], "daemon_link");
         assert_eq!(down["connected"], false);
@@ -1435,7 +1633,7 @@ mod tests {
         };
 
         // Pass 1: nothing listening.
-        consume_once(&state, &client, &mut link).await;
+        consume_once(&state, &client, &mut link, &mut None).await;
         let down = next(&mut rx);
         assert_eq!(down["connected"], false);
 
@@ -1464,7 +1662,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             drop(events);
         });
-        consume_once(&state, &client, &mut link).await;
+        consume_once(&state, &client, &mut link, &mut None).await;
         ender.await.unwrap();
         server_a.await.unwrap();
         let up = next(&mut rx);
@@ -1487,7 +1685,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             drop(events);
         });
-        consume_once(&state, &client, &mut link).await;
+        consume_once(&state, &client, &mut link, &mut None).await;
         ender.await.unwrap();
         server_b.await.unwrap();
         let up = next(&mut rx);
@@ -1519,7 +1717,7 @@ mod tests {
     }
 
     /// The answer rides the payload, so a receiver learns what the run
-    /// concluded without a second round trip to `/api/agents/{id}/result`.
+    /// concluded without a second round trip to `/api/runs/{id}/result`.
     #[test]
     fn the_completion_payload_carries_the_agents_answer() {
         let answer = leviath_core::output::FinalOutput::new(

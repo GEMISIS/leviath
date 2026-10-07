@@ -6,7 +6,7 @@
 //! is the fan-out collector's, and so on. The marker is what makes the agent
 //! reachable. An agent that is non-terminal and holds *none* of them is in a
 //! state no query matches, so nothing will ever touch it again, and it stays
-//! `running` in `meta.json` for the life of the daemon.
+//! `running` in `lev ps` for the life of the daemon.
 //!
 //! That is not hypothetical. `PipelineWorld` already logs "a pipeline system
 //! panicked outside any agent's scope; the daemon survived (an agent may be
@@ -25,7 +25,7 @@
 //! transient windows inside a tick.
 //!
 //! Those invariants hold on both sides. Every site that removes a phase marker
-//! either inserts a successor or sets a terminal status, and `spawn_agent_seeded`
+//! either inserts a successor or sets a terminal status, and `insert` of a new run
 //! always lands `Active + ReadyToInfer`, so no ordinary path arrives here.
 //!
 //! What is *not* touched, and why:
@@ -35,7 +35,7 @@
 //!   supervisor that turns a dead task into an ordinary error outcome). A
 //!   fifteen-minute call is never a candidate.
 //! - A full inference pool leaves the agent `ReadyToInfer` with a
-//!   [`DispatchStall`](super::DispatchStall). That is backpressure working as
+//!   [`super::DispatchStall`]. That is backpressure working as
 //!   designed, and the stall watchdog already declines to fail it.
 //! - A tool batch holds `AwaitingTools` and is deliberately unbounded: it may
 //!   park off-lane on a tool approval, an `ask_user`, or a `wait_for_agent` that
@@ -67,7 +67,7 @@ use super::*;
 /// An agent found in a state no system can reach, and when it was first seen
 /// that way.
 ///
-/// One field, unlike [`DispatchStall`](super::DispatchStall), which also carries
+/// One field, unlike [`super::DispatchStall`], which also carries
 /// a freshness stamp. That record is written by the dispatch systems and read by
 /// a different one, so it has to cope with its writer going away. This one has a
 /// single owner: the watchdog inserts it when the condition holds, keeps the
@@ -152,6 +152,7 @@ pub(crate) type Unreachable = (
     (
         Without<InFlightWork>,
         Without<crate::tick_scope::PanickedInParallel>,
+        Without<super::lane_batch::PendingBatch>,
     ),
 );
 

@@ -39,9 +39,17 @@ impl Dashboard {
             .get(self.selected)
             .and_then(|&i| self.agents.get(i))
             .map(|agent| agent.id.clone());
+        self.take_fed_history();
+        // While the detail view is open the loader reads the run's history,
+        // unless what is held is as its run file stands.
+        let wanted = self.detail_view
+            && showing
+                .as_deref()
+                .is_some_and(|id| !self.history_on_draw_loop(id));
+        let history = wanted.then(|| self.held_history(showing.as_deref()));
         let snapshot = match self.run_feed.as_mut() {
             Some(feed) => {
-                feed.show(showing.as_deref());
+                feed.show(showing.as_deref(), history);
                 if let Some(latest) = feed.take() {
                     self.run_snapshot = Some(latest);
                 }
@@ -205,6 +213,7 @@ impl Dashboard {
                 agent.workdir = run.workdir.clone();
                 agent.context_snapshot = context_snapshot.clone();
                 agent.stages = stages;
+                agent.graph = entry.graph.clone();
                 agent.last_progress_at = run.last_progress_at;
 
                 if now_needs_input {

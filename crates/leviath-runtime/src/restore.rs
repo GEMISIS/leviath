@@ -1,1657 +1,498 @@
-//! Restart recovery: bring a freshly-spawned agent back to its persisted running
-//! state so the daemon resumes it where it stopped.
+//! Resuming a run from its run file.
 //!
-//! When the daemon restarts, the CLI reloads each non-terminal run's blueprint
-//! and spawns a fresh agent, then calls [`restore_agent`] to overlay the persisted
-//! context, jump to the persisted stage + iteration, and restore token totals,
-//! plus [`restore_stage_ledger`] for the run's per-stage history. The
-//! agent keeps the `ReadyToInfer` marker `spawn_agent` set, so **any inference
-//! that was in flight when the daemon stopped is re-issued** on the next tick -
-//! nothing is left stuck awaiting a job that died with the old process.
+//! A run's file holds the spec it was resolved to, the code that spec names,
+//! and the state it was last in. Resuming it is [`read_for_resume`], then the
+//! host binds the spec against this machine (a binding that fails is a typed
+//! refusal naming what changed, never a quiet fall back), then [`resume`]
+//! places it with [`insert`](crate::insert::insert). Nothing is resolved
+//! again: the spec is the run's, as it was decided when it started.
 //!
-//! A tool batch that was in flight is not blindly re-issued, though: when the run
-//! journal holds a dispatched-but-unapplied batch, [`restore_pending_batch`]
-//! reconstructs its assistant turn in the window first - real journaled results
-//! for calls that completed, a verify-first [`INTERRUPTED_TOOL_RESULT`] for calls
-//! that didn't - so the re-issued inference sees exactly what already ran and
-//! completed side effects never run twice.
+//! What the run was doing comes back with its state. A run that was waiting on
+//! a model reply asks again; a tool batch in flight is dispatched again with
+//! the results that had come back carried over, so a call that finished is
+//! never run twice, a call that was still running is never started again (it
+//! comes back interrupted, for the model to check), and a question one of its
+//! calls put to a person is asked again; a batch held on a person before it
+//! was sent (an approval, the taint gate) asks the same questions under the
+//! same ids, with what was settled while it waited kept; a run stopped at a
+//! checkpoint has it asked again over the same document; a run choosing its
+//! next stage is asked again among the same
+//! edges; a fan-out picks its workers back up by run id, and a worker that
+//! finished while the daemon was down is read from its own file. See
+//! [`insert::place`](crate::insert::place) for each.
 //!
-//! The exception is a batch that was waiting on a person. A question has no
-//! side effect to verify, and nothing after it in the batch had started, so
-//! that batch is dispatched again with its finished results carried over: the
-//! question goes back in front of the person rather than an error in front of
-//! the model.
+//! When the daemon restarts, [`triage`] puts the runs it finds in the order
+//! they come back in.
+
+use std::cmp::Reverse;
 
 use bevy_ecs::prelude::*;
-use leviath_core::region::RegionEntry;
-use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus};
 
-use crate::components::{AgentState, AgentStatus, ContextWindow};
-use crate::persistence::TokenTotals;
-use crate::pipeline::{StageCursor, StageInferences, StageSetups};
+use crate::state::{PipelinePhase, RunStatus};
 
-/// How urgently a persisted run should be brought back on restart. Ordered so a
-/// higher value restores first (see [`triage_restores`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum RestorePriority {
-    /// Restorable, but can make no immediate progress: blocked on user input,
-    /// done-but-interactive (awaiting optional follow-up), or a parent parked mid
-    /// fan-out waiting on its children. Brought back after the actionable runs.
-    Blocked,
-    /// Actionable now: an in-flight inference to re-dispatch or pending tool
-    /// results to process. These resume real work the moment they're reloaded, so
-    /// they come back first.
-    Active,
+/// A run read back from its run file, ready to bind and insert.
+#[derive(Debug)]
+pub struct Resumable {
+    /// The run's spec.
+    pub spec: std::sync::Arc<crate::spec::run_spec::RunSpec>,
+    /// Its state as of its last step.
+    pub state: crate::state::RunState,
+    /// The code its spec names, for binding.
+    pub code: crate::spec::env::CodeFiles,
+    /// The answer it handed back, read from the file its state names.
+    pub answer: Option<String>,
+    /// How many questions it has put to a person, answered or still open,
+    /// so a question it asks again gets an id of its own.
+    pub asked: u64,
+    /// What its taint gate decided in each stage, as the stage's audit file
+    /// holds it, so what the gate decides next is added to it.
+    pub audit: Vec<(usize, Vec<leviath_core::taint::GateEvent>)>,
 }
 
-/// Classify one persisted run for restart recovery from its on-disk status and
-/// whether it is parked mid fan-out (a `<run_dir>/fanout.json` is present).
+/// Read the run in `run_dir` back from its run file.
 ///
-/// Returns `None` for a **terminal** run (`Complete` / `Error` / `Cancelled`) -
-/// those are never resumed. A run parked on a fan-out is [`Blocked`] regardless of
-/// its status: it can't progress until its children finish.
-///
-/// [`Blocked`]: RestorePriority::Blocked
-pub(crate) fn classify_restore(
-    status: &RunStatus,
-    parked_on_fanout: bool,
-) -> Option<RestorePriority> {
-    match status {
-        RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled => None,
-        _ if parked_on_fanout => Some(RestorePriority::Blocked),
-        RunStatus::Starting | RunStatus::Running => Some(RestorePriority::Active),
-        RunStatus::WaitingInput | RunStatus::CompleteInteractive | RunStatus::Paused => {
-            Some(RestorePriority::Blocked)
-        }
+/// `Ok(None)` when the directory holds no run file. A run file that is there
+/// and cannot be read is an error naming the file and what is wrong with it,
+/// and so is a stored part it names whose file is missing from `blobs/`, or
+/// an answer whose file does not read as the run file names it.
+pub fn read_for_resume(
+    run_dir: &std::path::Path,
+) -> Result<Option<Resumable>, crate::runfile::RunFileError> {
+    let path = run_dir.join(leviath_core::files::RUN_FILE);
+    if !path.exists() {
+        return Ok(None);
     }
-}
-
-/// Triage a set of persisted runs into the order they should be restored on
-/// restart: drop terminal runs, then rank the rest **actionable-first**
-/// (`RestorePriority::Active` before `Blocked`), breaking ties by most-recently
-/// updated. Each input is `(meta, parked_on_fanout)` where `parked_on_fanout` is
-/// whether the run has a `fanout.json` (see `classify_restore`); the returned
-/// [`RunMeta`]s are ready to reload in order.
-///
-/// This lets a resource- or time-constrained caller restore only a prefix (the most
-/// actionable agents) and still make the most progress possible.
-///
-/// `Blocked`: RestorePriority::Blocked
-pub fn triage_restores(candidates: Vec<(RunMeta, bool)>) -> Vec<RunMeta> {
-    let mut ranked: Vec<(RestorePriority, RunMeta)> = candidates
-        .into_iter()
-        .filter_map(|(meta, parked)| {
-            classify_restore(&meta.status, parked).map(|prio| (prio, meta))
-        })
-        .collect();
-    // Higher priority first; within a tier, most-recently updated first. `sort_by`
-    // is stable, so equal keys keep their scan order.
-    ranked.sort_by(|(a_prio, a), (b_prio, b)| {
-        b_prio
-            .cmp(a_prio)
-            .then_with(|| b.updated_at.cmp(&a.updated_at))
-    });
-    ranked.into_iter().map(|(_, meta)| meta).collect()
-}
-
-/// Restore a just-spawned `entity` to the persisted state captured in `snapshot`
-/// (its context), `stage_index` + `iteration` (its position), and `totals` (its
-/// running token/tool counts). The agent stays `Active` + `ReadyToInfer` so it
-/// resumes on the next tick.
-///
-/// Context is overlaid by region **name**: each persisted region replaces the
-/// matching window region's entries (rebuilt from the blueprint layout, so region
-/// kinds/limits are correct). A persisted region with no matching window region
-/// is skipped. An out-of-range `stage_index` (e.g. the blueprint gained/lost
-/// stages) leaves the spawned stage-0 config in place.
-pub fn restore_agent(
-    world: &mut World,
-    entity: Entity,
-    snapshot: &ContextSnapshot,
-    stage_index: usize,
-    iteration: usize,
-    totals: TokenTotals,
-) {
-    // 1. Overlay the persisted context onto the (blueprint-built) window.
+    let reader = crate::runfile::RunFileReader::open(&path)?;
+    let mut state = reader.latest_state()?;
+    if let (Some(fan_out), Some(runs_dir)) = (state.fan_out.as_mut(), run_dir.parent()) {
+        settle_finished_workers(fan_out, runs_dir);
+    }
+    let fail = |kind| crate::runfile::RunFileError::new(&path, kind);
+    if let Some(blob) = state
+        .blobs
+        .iter()
+        .find(|b| !crate::runfile::blob_path(run_dir, &b.digest).is_file())
     {
-        let mut window = world
-            .get_mut::<ContextWindow>(entity)
-            .expect("a spawned agent has a context window");
-        // One transaction over every region the overlay is about to write. A
-        // resume rebuilds the whole window in one act, and the record says so:
-        // this is where the window came from after the restart, not a series of
-        // unrelated writes that happened to share a second.
-        let names: Vec<String> = snapshot.regions.iter().map(|r| r.name.clone()).collect();
-        let rebuilding = window.begin_changes(names.iter().map(String::as_str));
-        for snap_region in &snapshot.regions {
-            if let Some(region) = window
-                .regions
-                .iter_mut()
-                .find(|r| r.name == snap_region.name)
-            {
-                region.content = snap_region
-                    .entries
-                    .iter()
-                    .map(|e| RegionEntry {
-                        content: e.content.clone(),
-                        tokens: e.tokens,
-                        timestamp: 0,
-                        metadata: e.metadata.clone(),
-                        kind: e.kind.clone(),
-                        key: e.key.clone(),
-                        reasoning: e.reasoning.clone(),
-                    })
-                    .collect();
-                // Rebuild the taint alongside the content. Assigning `content`
-                // directly bypasses `add_tainted_entry`, which is the only thing
-                // that records per-entry taint - so without this the region came
-                // back `Public` no matter how sensitive it had been, while the
-                // gate reported itself armed.
-                // Only where the region already tracks taint: restoring it onto
-                // a region with tracking off would invent a level nothing reads.
-                if region.taint.is_some() {
-                    region.taint = Some(leviath_core::taint::RegionTaint::from_entry_taints(
-                        snap_region.entries.iter().map(|e| e.taint).collect(),
-                    ));
-                }
-                region.current_tokens = region.content.iter().map(|e| e.tokens).sum();
-            }
-        }
-        window.current_tokens = window.calculate_tokens();
-        // A resume rebuilds the window by assignment rather than by writing, so
-        // every entry it puts back is invisible to the write paths. Every one of
-        // them counts as an arrival, which is what `Everything` says.
-        window.commit_change(
-            leviath_core::ContextCause::Resume,
-            rebuilding,
-            crate::components::Pushed::Everything,
-        );
+        return Err(fail(crate::runfile::RunFileErrorKind::MissingBlob(
+            blob.digest.clone(),
+        )));
     }
-
-    // 2. Jump to the persisted stage, swapping in its inference config and
-    //    tool-result routing.
-    // `stage_index` comes off disk, so both vectors are indexed with `get`:
-    // the two are built together at spawn and agree in practice, but a guard
-    // on one that then indexes the other is a panic waiting for the day they
-    // do not.
-    let inf = world
-        .get::<StageInferences>(entity)
-        .expect("a spawned agent has stage inferences")
-        .0
-        .get(stage_index)
-        .cloned();
-    let setup = world
-        .get::<StageSetups>(entity)
-        .expect("a spawned agent has stage setups")
-        .0
-        .get(stage_index)
-        .map(|s| (s.inference_config.clone(), s.routing.clone()));
-    if let Some((inf, (cfg, routing))) = inf.zip(setup) {
-        world.entity_mut(entity).insert((inf, cfg));
-        // Mirror `attach_stage_components`' routing arm: present ⇒ insert,
-        // absent ⇒ clear the stale one. Without this a reloaded agent kept the
-        // spawn stage's routing (or none) for every future tool batch.
-        match routing {
-            Some(routing) => {
-                world
-                    .entity_mut(entity)
-                    .insert(crate::components::ToolResultRoutingComponent { routing });
-            }
-            None => {
-                world
-                    .entity_mut(entity)
-                    .remove::<crate::components::ToolResultRoutingComponent>();
-            }
-        }
-        world
-            .get_mut::<StageCursor>(entity)
-            .expect("a spawned agent has a stage cursor")
-            .index = stage_index;
-        // The tool service was set up for the entry stage when the agent was
-        // built, and nothing else moves it on a resume: a run restored in a
-        // later stage would ask its questions under the entry stage's name
-        // and be held to the entry stage's permissions.
-        if let Some(service) = world
-            .get_resource::<crate::pipeline::ToolServiceRes>()
-            .map(|s| s.0.clone())
-        {
-            service.sync_stage(entity, stage_index, &snapshot.stage_name);
-        }
-    }
-
-    // 3. Restore the agent's running state + token totals.
-    {
-        let mut state = world
-            .get_mut::<AgentState>(entity)
-            .expect("a spawned agent has state");
-        state.current_stage = snapshot.stage_name.clone();
-        state.iteration = iteration;
-        state.status = AgentStatus::Active;
-    }
-    world.entity_mut(entity).insert(totals);
-}
-
-/// Put the persisted per-stage ledger back on a just-spawned `entity`, matching
-/// `records` (as read from the run's `stages.json`) onto the blueprint-seeded
-/// [`StageLedger`](crate::pipeline::StageLedger) **by stage name**.
-///
-/// Nothing else rebuilds this. `spawn_agent` seeds one all-zero record per
-/// blueprint stage, so without this a reloaded run comes back with no tokens, no
-/// `entered` flags and no timestamps against any stage - and since the persist
-/// tick writes the whole ledger, the next one writes those zeros over the real
-/// `stages.json`. The run-level totals in `meta.json` survive that, so the run
-/// looks healthy while `lev stages` and the stages API serve zeroed records.
-///
-/// The seeded shape wins: a persisted record whose stage the blueprint no longer
-/// has is dropped, and a stage with no persisted record keeps its zeroed one.
-/// Matching on name rather than position is what keeps a blueprint that gained
-/// or lost a stage from filing one stage's history under another; the seeded
-/// `index` is kept for the same reason.
-///
-/// Call after [`restore_agent`]. An agent without a ledger (a test world, or one
-/// spawned outside the blueprint path) is left alone.
-pub fn restore_stage_ledger(
-    world: &mut World,
-    entity: Entity,
-    records: &[leviath_core::run_meta::StageRecord],
-) {
-    let Some(mut ledger) = world.get_mut::<crate::pipeline::StageLedger>(entity) else {
-        return;
+    let answer = match (&state.final_output, &state.files.final_output) {
+        (Some(_), Some(file)) => Some(
+            file.read(run_dir)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .map_err(|e| fail(crate::runfile::RunFileErrorKind::Beside(e)))?,
+        ),
+        _ => None,
     };
-    for rec in ledger.0.iter_mut() {
-        if let Some(saved) = records.iter().find(|saved| saved.name == rec.name) {
-            let index = rec.index;
-            *rec = saved.clone();
-            rec.index = index;
-        }
-    }
-    // The per-stage runtime counters are rebuilt from zero on restore. The one
-    // that must not be is the raised output cap: without it a resumed run
-    // retries at the cap that already cut a reply off, and pays for that
-    // reply again before raising.
-    let cursor = world
-        .get::<crate::pipeline::StageCursor>(entity)
-        .map(|c| c.index);
-    let raised = world
-        .get::<crate::pipeline::StageLedger>(entity)
-        .zip(cursor)
-        .and_then(|(ledger, index)| ledger.0.iter().find(|rec| rec.index == index))
-        .is_some_and(|rec| rec.output_cap_raised);
-    if raised && let Some(mut progress) = world.get_mut::<crate::pipeline::StageProgress>(entity) {
-        progress.raise_output_cap = true;
-    }
-}
-
-/// The synthesized result for a call whose completion never reached the journal.
-/// It tells the model plainly that the effect may or may not have landed, so the
-/// re-issued turn verifies before re-running side-effecting work.
-pub const INTERRUPTED_TOOL_RESULT: &str = "[error] interrupted: the daemon restarted while this tool call was executing and its \
-     result was lost. Verify whether it took effect before re-running side-effecting work.";
-
-/// The synthesized result for one interrupted call: the base text, plus - for a
-/// sub-agent tool on a run with known children - the child runs to check before
-/// spawning again. Mechanical dedupe is impossible here (the model mints a fresh
-/// call id when it re-issues), so informed re-issue is the guarantee.
-fn interrupted_result(tool_name: &str, children: &[String]) -> String {
-    if leviath_tools::is_subagent_tool(tool_name) && !children.is_empty() {
-        format!(
-            "{INTERRUPTED_TOOL_RESULT} This run already has child agent runs: {}; check them \
-             with check_agent before spawning again.",
-            children.join(", ")
-        )
-    } else {
-        INTERRUPTED_TOOL_RESULT.to_string()
-    }
-}
-
-/// Write the outcome of every execution this resume gave up on.
-///
-/// A call in the pending batch with no journaled result is one nobody ever saw
-/// the end of. The resume does not re-run it: it lands a stand-in result and
-/// carries on, so that execution's real outcome is unobservable from here on.
-/// Recording it is the only moment the fact is knowable, and leaving the journal
-/// silent is what made a crashed batch look like one that never started.
-///
-/// The record carries the stand-in as its result, because that is what the run
-/// went on to reason about. The outcome is what says the tool did not produce
-/// it, and a reader must not take the text for the tool's answer.
-///
-/// Fire and forget, like every other per-call append: a resume must not wait on
-/// the persistence lane, and a record lost here costs the same as any other lost
-/// completion record.
-fn record_abandoned_executions(
-    world: &World,
-    entity: Entity,
-    batch: &leviath_core::run_archive::PendingToolBatch,
-    merged: &[crate::tool_bridge::ToolResult],
-) {
-    let (Some(persist), Some(md)) = (
-        world.get_resource::<crate::pipeline::PersistenceStage>(),
-        world.get::<crate::persistence::RunMetadata>(entity),
-    ) else {
-        return;
-    };
-    // Zipped rather than looked up: `merged` is built from these calls, in this
-    // order, one entry each. A lookup would add a "what if it is missing" branch
-    // to a pairing the caller above guarantees.
-    for (call, (_, stood_in)) in batch
-        .calls
+    // Every step decoded on the way to the state, so these read too.
+    let answered = reader
+        .deltas(1, reader.last_seq())
+        .unwrap_or_default()
         .iter()
-        .zip(merged)
-        .filter(|(call, _)| call.result.is_none())
-    {
-        let _ = persist
-            .0
-            .send(crate::persistence_bridge::PersistMsg::Append {
-                run_id: md.run_id.clone(),
-                record: Box::new(leviath_core::run_archive::RunRecord::ToolCallDone {
-                    iteration: batch.iteration,
-                    call_id: call.id.clone(),
-                    execution_id: call.execution_id.clone(),
-                    result: stood_in.clone(),
-                    outcome: Some(leviath_core::execution::ToolOutcome::Indeterminate),
-                    at: chrono::Utc::now().timestamp(),
-                }),
-                ack: None,
-            });
-    }
+        .flat_map(|d| &d.events)
+        .filter(|e| matches!(e, crate::state::RunEvent::Answered { .. }))
+        .count();
+    let open = state.interactions.len() + state.pending.as_ref().map_or(0, |b| b.calls.len());
+    let audit = audit_files(run_dir, reader.spec().graph.stages.len());
+    Ok(Some(Resumable {
+        audit,
+        asked: u64::try_from(answered + open).unwrap_or(u64::MAX),
+        code: reader.code_files()?,
+        answer,
+        state,
+        spec: std::sync::Arc::new(reader.spec().clone()),
+    }))
 }
 
-/// Replay a tool batch that was dispatched but never applied before the crash
-/// (folded from the run journal as a
-/// [`PendingToolBatch`](leviath_core::run_archive::PendingToolBatch)): land the
-/// assistant turn plus one result per call in the context window, exactly as
-/// `apply_tool_results` would have - real journaled results for calls that
-/// finished, [`INTERRUPTED_TOOL_RESULT`] for calls that didn't. The turn is
-/// always fully paired, so the request assembler's orphan sanitizer keeps it,
-/// and the re-issued inference sees precisely what already ran instead of
-/// blindly re-executing the whole batch.
-///
-/// Call after [`restore_agent`], which swaps the restored stage's
-/// `ToolResultRoutingComponent` in - the routing and per-tool sensitivities are
-/// read off the entity so replayed results route and taint like live ones.
-/// `children` is the run's known child-run ids (`meta.children`), folded into
-/// the synthesized text of interrupted sub-agent calls. Secondary bookkeeping
-/// (modification counters, telemetry, file tracking, log lines) is deliberately
-/// skipped: totals and outcome flags are already restored from the persisted
-/// metadata, and the dead process's calls have no live stage to report to.
-///
-/// One thing is written: every call that got a stand-in is journaled as an
-/// execution whose outcome nobody observed, since the resume is the last moment
-/// that fact is knowable.
-///
-/// A batch that stopped on a question to a person is not replayed but
-/// dispatched again, with the finished calls' results carried over, so the
-/// question is asked again rather than answered with a stand-in.
-pub fn restore_pending_batch(
-    world: &mut World,
-    entity: Entity,
-    batch: &leviath_core::run_archive::PendingToolBatch,
-    children: &[String],
-) {
-    let calls: Vec<crate::components::ToolCall> = recorded_calls(batch);
-    if waiting_on_a_person(batch) {
-        redispatch_pending_batch(world, entity, batch, calls);
-        return;
-    }
-    replay_pending_batch(world, entity, batch, children, calls);
-}
-
-/// Whether the batch stopped on a question to a person: an unfinished call
-/// to one of the tools that asks one.
-///
-/// The tool service asks every question in a batch, in order, before it
-/// starts any other call. So a batch stopped on one has run nothing after it,
-/// and every unfinished call in it is one that never began.
-fn waiting_on_a_person(batch: &leviath_core::run_archive::PendingToolBatch) -> bool {
-    batch.calls.iter().any(|call| {
-        call.result.is_none()
-            && crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS
-                .contains(&leviath_tools::canonical_tool_name(&call.name))
-    })
-}
-
-/// Put a batch that was waiting on a person back where it was: dispatched,
-/// with the calls that finished carrying the results the journal recorded.
-///
-/// Nothing lands in the window yet. The tool lane asks the question again,
-/// under a new request id, and the run shows as waiting on it exactly as it
-/// did before the restart; the turn and all its results are applied together
-/// when the batch completes, as for any other batch. Not routed through
-/// `process_response`, whose counting the restored totals already include.
-fn redispatch_pending_batch(
-    world: &mut World,
-    entity: Entity,
-    batch: &leviath_core::run_archive::PendingToolBatch,
-    calls: Vec<crate::components::ToolCall>,
-) {
-    let finished: Vec<crate::tool_bridge::ToolResult> = batch
-        .calls
-        .iter()
-        .filter_map(|c| c.result.clone().map(|r| (c.id.clone(), r)))
-        .collect();
-    world
-        .entity_mut(entity)
-        .remove::<crate::pipeline::ReadyToInfer>()
-        .insert((
-            crate::components::InferenceResult {
-                attempt_id: String::new(),
-                response: batch.response.clone(),
-                tool_calls: calls,
-                tokens_used: 0,
-                cut_off_at: None,
-                reasoning: None,
-                parts: Vec::new(),
-            },
-            crate::pipeline::RecoveredResults(finished),
-            crate::pipeline::ReadyForTools,
-        ));
-}
-
-/// The batch's calls as the tool pipeline takes them.
-fn recorded_calls(
-    batch: &leviath_core::run_archive::PendingToolBatch,
-) -> Vec<crate::components::ToolCall> {
-    batch
-        .calls
-        .iter()
-        .map(|c| crate::components::ToolCall {
-            tool_id: c.id.clone(),
-            name: c.name.clone(),
-            // Journaled arguments are stringified JSON; a record that doesn't
-            // parse (torn write) survives as a raw string rather than dropping
-            // the call and orphaning the turn.
-            arguments: serde_json::from_str(&c.arguments)
-                .unwrap_or_else(|_| serde_json::Value::String(c.arguments.clone())),
-            thought_signature: c.thought_signature.clone(),
+/// The taint gate's audit of each of a run's `stages` that has one in
+/// `run_dir`, read as written. Each is read whatever the run file last named,
+/// since a file rewritten whole after the run's last step holds more.
+fn audit_files(
+    run_dir: &std::path::Path,
+    stages: usize,
+) -> Vec<(usize, Vec<leviath_core::taint::GateEvent>)> {
+    (0..stages)
+        .filter_map(|stage| {
+            let index = u32::try_from(stage).unwrap_or(u32::MAX);
+            let path = run_dir.join(crate::state::StageFile::TaintAudit.path(index));
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .map(|events| (stage, events))
         })
         .collect()
 }
 
-/// Land the batch's turn with a result for every call: the journaled one where
-/// it finished, a stand-in where it did not.
-fn replay_pending_batch(
-    world: &mut World,
-    entity: Entity,
-    batch: &leviath_core::run_archive::PendingToolBatch,
-    children: &[String],
-    calls: Vec<crate::components::ToolCall>,
-) {
-    let merged: Vec<crate::tool_bridge::ToolResult> = batch
-        .calls
+/// Take each fan-out worker that finished out of the running ones, with what
+/// it finished with, read from its own run file under `runs_dir`. A worker's
+/// end is recorded on its own file before its parent records reaping it, so a
+/// parent that stopped in between still lists it as running; a finished run
+/// is not brought back, so this is where its result is found. A worker whose
+/// file does not read stays running, and placing the parent counts it failed
+/// when it is not in the world either.
+fn settle_finished_workers(fan_out: &mut crate::state::FanOutState, runs_dir: &std::path::Path) {
+    let active = std::mem::take(&mut fan_out.active);
+    for (item, run) in active {
+        let dir = runs_dir.join(run.as_str());
+        let reader =
+            crate::runfile::RunFileReader::open(&dir.join(leviath_core::files::RUN_FILE)).ok();
+        let finished = reader
+            .and_then(|reader| reader.latest_state().ok().map(|state| (state, reader)))
+            .and_then(|(state, reader)| worker_result(reader.spec(), &state, &dir));
+        match finished {
+            Some(Ok(summary)) => fan_out.done.push((item, summary)),
+            Some(Err(why)) => fan_out.failed.push((item, why)),
+            None => fan_out.active.push((item, run)),
+        }
+    }
+}
+
+/// What a worker finished with, or `None` while it is still going: as the
+/// parent reads a worker it reaps live (its final output, read from the file
+/// its state names in its directory `dir`, else its last reply, unless its
+/// stage requires an output it did not give).
+fn worker_result(
+    spec: &crate::spec::run_spec::RunSpec,
+    state: &crate::state::RunState,
+    dir: &std::path::Path,
+) -> Option<Result<String, String>> {
+    match &state.status {
+        RunStatus::Complete => Some(match &state.final_output {
+            Some(_) => worker_answer(state, dir),
+            None if spec
+                .graph
+                .stage(state.cursor.stage.as_str())
+                .is_some_and(|s| s.require_output) =>
+            {
+                Err("worker finished without the final output its stage requires".to_string())
+            }
+            None => Ok(last_reply(state)),
+        }),
+        RunStatus::Error(message) => Some(Err(message.clone())),
+        RunStatus::Cancelled => Some(Err("worker cancelled".to_string())),
+        _ => None,
+    }
+}
+
+/// A finished worker's answer, from the file its state names.
+fn worker_answer(state: &crate::state::RunState, dir: &std::path::Path) -> Result<String, String> {
+    let file = state
+        .files
+        .final_output
+        .as_ref()
+        .ok_or("worker handed back an answer its run file names no file for")?;
+    file.read(dir)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .map_err(|e| format!("worker's answer cannot be read: {e}"))
+}
+
+/// The text of the last model turn in a run's context.
+fn last_reply(state: &crate::state::RunState) -> String {
+    state
+        .context
+        .regions
         .iter()
-        .map(|c| {
-            let result = c
-                .result
-                .clone()
-                .unwrap_or_else(|| interrupted_result(&c.name, children).into());
-            (c.id.clone(), result)
+        .flat_map(|r| &r.entries)
+        .filter(|e| matches!(e.kind, crate::state::EntryKind::AssistantTurn(_)))
+        .max_by_key(|e| e.timestamp)
+        .map(|e| e.text.clone())
+        .unwrap_or_default()
+}
+
+/// The result a call gets when the daemon died while it was running. Its
+/// effect may or may not have landed (the command may even still be running),
+/// so it is not run again: the model is told to check before it runs
+/// side-effecting work again.
+pub const INTERRUPTED_TOOL_RESULT: &str = "[error] interrupted: the daemon restarted while this tool call was executing and its \
+     result was lost. Verify whether it took effect before re-running side-effecting work.";
+
+/// The file a daemon keeps in its runs directory while it runs, and removes
+/// when it stops cleanly. Finding it when starting means the last daemon died.
+const SESSION_MARK: &str = ".daemon-running";
+
+/// Start a daemon's session over `runs_dir`, and say whether the last one
+/// died without stopping cleanly (it left its mark behind).
+pub fn begin_session(runs_dir: &std::path::Path) -> bool {
+    let mark = runs_dir.join(SESSION_MARK);
+    let crashed = mark.exists();
+    let _ = std::fs::create_dir_all(runs_dir);
+    let _ = std::fs::write(&mark, b"");
+    crashed
+}
+
+/// End a daemon's session over `runs_dir` cleanly: every call it had running
+/// was stopped, and settled so that a restart does not start it again.
+pub fn end_session(runs_dir: &std::path::Path) {
+    let _ = std::fs::remove_file(runs_dir.join(SESSION_MARK));
+}
+
+/// Settle the calls a run had running when the daemon died: each call of its
+/// batch that had not finished gets [`INTERRUPTED_TOOL_RESULT`] (naming the
+/// run's children for a call that starts one), so it is not run again. A
+/// batch stopped on a question to a person is left to ask it again: the
+/// question is asked before anything else in a batch runs, so nothing in it
+/// was running; nor was anything in a batch held on a person before it was
+/// sent (see [`HeldBatch`](crate::state::HeldBatch)).
+pub fn interrupt_in_flight(state: &mut crate::state::RunState) {
+    let children: Vec<String> = state.children.iter().map(ToString::to_string).collect();
+    let Some(batch) = state.pending.as_mut().filter(|b| b.held.is_none()) else {
+        return;
+    };
+    let settled = stand_ins(batch, &children);
+    batch.done.extend(settled);
+}
+
+/// Settle the calls a world stopping cleanly had running on the tool lane.
+/// Stopping killed each one part way, so like a call the daemon died under
+/// it is not started again after a restart: it gets the same stand-in, which
+/// the run's last step records as its result. A batch still being decided or
+/// held on an approval never reached the lane, so it is left to run. Returns
+/// the runs with a batch on the lane, whose state the stop records.
+pub(crate) fn settle_running_calls(world: &mut World) -> Vec<String> {
+    let mut lane = world.query_filtered::<(
+        Entity,
+        &crate::components::AgentState,
+        &crate::persistence::RunMetadata,
+    ), With<crate::pipeline::AwaitingTools>>();
+    let running: Vec<(Entity, String, Vec<String>)> = lane
+        .iter(world)
+        .map(|(entity, agent, md)| {
+            let children = agent.spawned_children_ids.clone();
+            (entity, md.run_id.clone(), children)
         })
         .collect();
-    record_abandoned_executions(world, entity, batch, &merged);
-    let routing = world
-        .get::<crate::components::ToolResultRoutingComponent>(entity)
-        .map(|c| c.routing.clone());
-    let sensitivities = world
-        .get::<crate::pipeline::ToolSensitivities>(entity)
-        .map(|s| s.0.clone());
-    let mut window = world
-        .get_mut::<ContextWindow>(entity)
-        .expect("a spawned agent has a context window");
-    crate::pipeline::apply_tool_results(
-        &mut window,
-        &batch.response,
-        &calls,
-        &merged,
-        routing.as_ref(),
-        sensitivities.as_ref(),
-        // A recovered batch is rebuilt from journal records, which carry the
-        // calls and their results but not the turn's opaque reasoning token.
-        // Losing it costs one turn of chain-of-thought continuity after a
-        // crash; the blob is optional on the wire, so the replay stays valid.
-        // The ordinary pause and resume path goes through the context
-        // snapshot, which does carry it.
-        None,
-    );
+    let mut on_the_lane = Vec::new();
+    for (entity, run_id, children) in running {
+        let settled: Vec<crate::tool_bridge::ToolResult> =
+            crate::state::inspect::pending_of(world, entity)
+                .iter()
+                .flat_map(|batch| stand_ins(batch, &children))
+                .map(|(id, result)| (id, result.text.into()))
+                .collect();
+        on_the_lane.push(run_id);
+        world
+            .entity_mut(entity)
+            .entry::<crate::pipeline::RecoveredResults>()
+            .or_default()
+            .into_mut()
+            .0
+            .extend(settled);
+    }
+    on_the_lane
+}
+
+/// The stand-in result for each call of `batch` that had not finished, by
+/// call id; none for a batch stopped on a question to a person.
+fn stand_ins(
+    batch: &crate::state::PendingBatch,
+    children: &[String],
+) -> Vec<(String, crate::state::ToolResultState)> {
+    let unfinished: Vec<&crate::state::context::ToolCallState> = batch
+        .calls
+        .iter()
+        .filter(|call| !batch.done.contains_key(&call.id))
+        .collect();
+    let asking = unfinished.iter().any(|call| {
+        crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS
+            .contains(&leviath_tools::canonical_tool_name(&call.name))
+    });
+    match asking {
+        true => Vec::new(),
+        false => unfinished
+            .into_iter()
+            .map(|call| {
+                let result = crate::state::ToolResultState {
+                    text: interrupted_result(&call.name, children),
+                    is_error: true,
+                };
+                (call.id.clone(), result)
+            })
+            .collect(),
+    }
+}
+
+/// The stand-in for one interrupted call: the base text, and for a call that
+/// starts sub-agents in a run that has some, the child runs to check before
+/// starting more.
+fn interrupted_result(tool_name: &str, children: &[String]) -> String {
+    match leviath_tools::is_subagent_tool(tool_name) && !children.is_empty() {
+        true => format!(
+            "{INTERRUPTED_TOOL_RESULT} This run already has child agent runs: {}; check them \
+             with check_agent before spawning again.",
+            children.join(", ")
+        ),
+        false => INTERRUPTED_TOOL_RESULT.to_string(),
+    }
+}
+
+/// Place a run read back by [`read_for_resume`] into the world, with the live
+/// handles binding its spec produced. A run that was held is held no longer.
+pub fn resume(
+    world: &mut World,
+    mut run: Resumable,
+    bindings: crate::spec::env::Bindings,
+) -> Entity {
+    run.state.held = None;
+    let entity = crate::insert::insert(world, run.spec, bindings, &run.state);
+    if let (Some(content), Some(mut out)) = (
+        run.answer,
+        world.get_mut::<crate::persistence::FinalOutput>(entity),
+    ) {
+        out.0.content = content;
+    }
+    if let Some(mut gate) = world.get_mut::<crate::taint::TaintGate>(entity) {
+        for (stage, events) in run.audit {
+            gate.restore_audit(stage, events);
+        }
+    }
+    let announced = Announced {
+        title: run.state.title.clone(),
+        priced_usd: run.state.totals.spend.priced_usd,
+        finished: crate::pipeline::is_terminal_status(&crate::insert::place::agent_status(
+            &run.state.status,
+        )),
+    };
+    world.entity_mut(entity).insert(announced);
+    entity
+}
+
+/// What a run had already told subscribers when it stopped being in the
+/// world: placed on a run that comes back (paged in, or restored when the
+/// daemon starts), and read once by the host's first event pass over it, so
+/// that pass says only what is new. Without it, a run coming back would be
+/// announced as a run starting, renamed to the name it had, past every spend
+/// threshold it had passed, and, finished, finished again.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct Announced {
+    /// The title it had.
+    pub title: Option<String>,
+    /// What it had spent on calls that could be priced, in US dollars.
+    pub priced_usd: f64,
+    /// Whether it had finished.
+    pub finished: bool,
+}
+
+/// Why a run is held, as the listings say it: the machine changed, and what
+/// to put back, one problem after another. A problem found at several places
+/// (one provider gone from every stage) is said once, naming each place.
+pub fn held_reason(
+    issues: &crate::spec::issues::SpawnIssues,
+) -> leviath_core::run_meta::WaitReason {
+    let mut found: Vec<(Vec<String>, String)> = Vec::new();
+    for issue in issues.iter() {
+        let place = issue.path.to_string();
+        let said = issue.to_string();
+        let what = said
+            .strip_prefix(&format!("{place}: "))
+            .unwrap_or(&said)
+            .to_string();
+        match found.iter_mut().find(|(_, w)| *w == what) {
+            Some((places, _)) => places.push(place),
+            None => found.push((vec![place], what)),
+        }
+    }
+    let problems: Vec<String> = found
+        .iter()
+        .map(|(places, what)| format!("{}: {what}", places.join(", ")))
+        .collect();
+    leviath_core::run_meta::WaitReason::NeedsSetup {
+        blocker: leviath_core::run_meta::SetupBlocker::MachineChanged,
+        remedy: format!(
+            "{}; put that back, then `lev resume` this run or restart the daemon",
+            problems.join("; ")
+        ),
+    }
+}
+
+/// The listing row of a run held because this machine cannot take it back
+/// as it stands: paused, with [`held_reason`] as its wait reason, and the rest
+/// as its state last recorded.
+pub fn held_entry(
+    spec: &crate::spec::run_spec::RunSpec,
+    state: &crate::state::RunState,
+    issues: &crate::spec::issues::SpawnIssues,
+) -> crate::host::RunListEntry {
+    use crate::insert::place;
+    let md = place::run_metadata(spec, state);
+    let flags = place::outcome_flags(state).0;
+    crate::host::RunListEntry {
+        run_id: md.run_id,
+        title: md.title,
+        status: crate::components::AgentStatus::Paused,
+        wait_reason: Some(held_reason(issues)),
+        stage: state.cursor.stage.to_string(),
+        stage_index: Some(place::stage_index(spec, state)),
+        num_stages: Some(md.num_stages),
+        iteration: state.cursor.iteration as usize,
+        tool_calls: state.totals.tool_calls as usize,
+        last_progress_at: None,
+        started_at: Some(md.started_at),
+        active: Some(place::run_clock(state).0),
+        unattended: md.unattended,
+        empty_output: false,
+        splits_degraded: flags.splits_degraded,
+        broken_scripts: flags.broken_scripts,
+        read_paths: md.read_paths,
+        has_final_output: state.final_output.is_some(),
+        may_never_finish: spec.warnings().iter().map(ToString::to_string).collect(),
+    }
+}
+
+/// How urgently a run should come back on restart. Ordered so a higher value
+/// comes back first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RestorePriority {
+    /// Can make no progress the moment it is back: waiting on a person,
+    /// paused, or a parent waiting on its fan-out workers.
+    Blocked,
+    /// Has work to do the moment it is back: a model call to make again or
+    /// tool calls to dispatch.
+    Active,
+}
+
+/// How a run should come back on restart, or `None` for one that has
+/// finished. A run that was cancelled stays stopped: somebody stopped it on
+/// purpose, and restarting the daemon is not them changing their mind.
+pub(crate) fn classify(state: &crate::state::RunState) -> Option<RestorePriority> {
+    match &state.status {
+        RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled => None,
+        RunStatus::Paused | RunStatus::Waiting => Some(RestorePriority::Blocked),
+        RunStatus::Idle | RunStatus::Active => match state.phase {
+            PipelinePhase::FanOut
+            | PipelinePhase::AwaitingPerson
+            | PipelinePhase::Paused
+            | PipelinePhase::WaitingForChildren => Some(RestorePriority::Blocked),
+            _ => Some(RestorePriority::Active),
+        },
+    }
+}
+
+/// The runs to bring back on restart, in the order to bring them back in.
+///
+/// Finished and cancelled runs are left out. A child comes back before the
+/// run that started it, since a parent waiting on fan-out workers picks them
+/// up by run id as it is placed; among runs at the same depth, the ones with
+/// work to do come first, then the most recently started.
+///
+/// `of` reads the run out of each item, so a caller can carry its own
+/// details along with each run.
+pub fn triage<T>(runs: Vec<T>, of: impl Fn(&T) -> &Resumable) -> Vec<T> {
+    let mut ranked: Vec<(RestorePriority, T)> = runs
+        .into_iter()
+        .filter_map(|item| classify(&of(&item).state).map(|p| (p, item)))
+        .collect();
+    ranked.sort_by_key(|(priority, item)| {
+        let run = of(item);
+        (
+            Reverse(run.spec.placement.depth),
+            Reverse(*priority),
+            Reverse(run.spec.created_at),
+        )
+    });
+    ranked.into_iter().map(|(_, item)| item).collect()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::components::InferenceConfig;
-    use crate::pipeline::{ReadyToInfer, StageInference, StageSetup};
-    use leviath_core::region::EntryKind;
-    use leviath_core::run_meta::{RegionEntrySnapshot, RegionSnapshot};
-    use leviath_core::{Region, RegionKind};
-
-    fn setup(temp: Option<f32>) -> StageSetup {
-        StageSetup {
-            inference_config: InferenceConfig {
-                temperature: temp,
-                max_output_tokens: None,
-                extra_params: Default::default(),
-                batch_tool_hint: false,
-                shell_hint: false,
-                request_timeout_secs: None,
-                as_text: Vec::new(),
-            },
-            routing: None,
-            accepts_messages: true,
-            context_layout: None,
-            context_hide: Vec::new(),
-            context_reset: Vec::new(),
-            system_prompt: None,
-        }
-    }
-
-    fn si(model: &str) -> StageInference {
-        StageInference {
-            provider_name: "p".to_string(),
-            model: model.to_string(),
-            tools: vec![],
-            tool_filter: None,
-            fallbacks: Vec::new(),
-            output: None,
-        }
-    }
-
-    /// A world with one spawned-looking agent: a `conversation` region window,
-    /// two stages, cursor at 0, `ReadyToInfer`.
-    fn agent_world() -> (World, Entity) {
-        let mut world = World::new();
-        let mut window = ContextWindow::new(10_000);
-        window.add_region(Region::new(
-            "conversation".to_string(),
-            RegionKind::Clearable,
-            10_000,
-        ));
-        let _ = window.add_to_region("conversation", "fresh task seed".to_string(), 3);
-        let entity = world
-            .spawn((
-                window,
-                StageCursor { index: 0 },
-                AgentState {
-                    agent_id: "a".to_string(),
-                    current_visit: String::new(),
-                    current_stage: "s0".to_string(),
-                    iteration: 0,
-                    status: AgentStatus::Active,
-                    spawned_children_ids: vec![],
-                    pending_wait: None,
-                    accepts_messages: true,
-                },
-                StageInferences(vec![si("m0"), si("m1")]),
-                StageSetups(vec![setup(None), setup(Some(0.5))]),
-                si("m0"),
-                setup(None).inference_config,
-                TokenTotals::default(),
-                ReadyToInfer,
-            ))
-            .id();
-        (world, entity)
-    }
-
-    fn snapshot() -> ContextSnapshot {
-        ContextSnapshot {
-            stage_name: "s1".to_string(),
-            total_tokens: 8,
-            max_tokens: 10_000,
-            regions: vec![
-                RegionSnapshot {
-                    name: "conversation".to_string(),
-                    kind: "clearable".to_string(),
-                    current_tokens: 8,
-                    max_tokens: 10_000,
-                    entries: vec![
-                        RegionEntrySnapshot {
-                            content: "prior user turn".into(),
-                            tokens: 5,
-                            kind: EntryKind::UserMessage,
-                            metadata: None,
-                            key: None,
-                            taint: Default::default(),
-                            reasoning: None,
-                        },
-                        RegionEntrySnapshot {
-                            content: "prior assistant".into(),
-                            tokens: 3,
-                            kind: EntryKind::AssistantTurn { tool_calls: vec![] },
-                            metadata: None,
-                            key: None,
-                            taint: Default::default(),
-                            reasoning: None,
-                        },
-                    ],
-                    description: None,
-                },
-                // A region that no longer exists in the window - skipped.
-                RegionSnapshot {
-                    name: "ghost".to_string(),
-                    kind: "pinned".to_string(),
-                    current_tokens: 1,
-                    max_tokens: 10,
-                    entries: vec![RegionEntrySnapshot {
-                        content: "orphan".into(),
-                        tokens: 1,
-                        kind: EntryKind::Text,
-                        metadata: None,
-                        key: None,
-                        taint: Default::default(),
-                        reasoning: None,
-                    }],
-                    description: None,
-                },
-            ],
-        }
-    }
-
-    /// Taint was not persisted at all, so a restart, resume or page-in brought
-    /// every region back `Public` no matter how sensitive it had been - while
-    /// the gate went on reporting itself armed. It is rebuilt from the entries,
-    /// and only where the region already tracks taint: restoring a level onto a
-    /// region with tracking off would invent one nothing reads.
-    #[test]
-    fn restore_rebuilds_region_taint_from_the_persisted_entries() {
-        use leviath_core::taint::TaintLevel;
-
-        let mut snap = snapshot();
-        snap.regions[0].entries[0].taint = TaintLevel::Private;
-        snap.regions[0].entries[1].taint = TaintLevel::Public;
-
-        // Tracking off: the region stays untainted rather than gaining a level.
-        let (mut world, entity) = agent_world();
-        restore_agent(&mut world, entity, &snap, 1, 7, TokenTotals::default());
-        assert!(
-            world
-                .get::<ContextWindow>(entity)
-                .unwrap()
-                .get_region("conversation")
-                .unwrap()
-                .taint
-                .is_none()
-        );
-
-        // Tracking on: the level comes back, per entry and in aggregate.
-        let (mut world, entity) = agent_world();
-        world
-            .get_mut::<ContextWindow>(entity)
-            .unwrap()
-            .get_region_mut("conversation")
-            .unwrap()
-            .enable_taint_tracking();
-        restore_agent(&mut world, entity, &snap, 1, 7, TokenTotals::default());
-
-        let window = world.get::<ContextWindow>(entity).unwrap();
-        let region = window.get_region("conversation").unwrap();
-        assert_eq!(region.taint_level(), Some(TaintLevel::Private));
-        let taint = region.taint.as_ref().unwrap();
-        assert_eq!(taint.entry_taint(0), Some(TaintLevel::Private));
-        assert_eq!(taint.entry_taint(1), Some(TaintLevel::Public));
-    }
-
-    /// The per-stage ledger has to be rebuilt on restore. Without it a
-    /// reloaded run comes back with every stage at zero, and because the
-    /// persist tick rewrites `stages.json` whole, the next one writes those
-    /// zeros over the run's real history.
-    /// The raised output cap survives a restart through the ledger: the
-    /// per-stage counters are rebuilt from zero, and this is the one that must
-    /// not be.
-    #[test]
-    fn a_raised_output_cap_is_read_back_from_the_ledger_on_restore() {
-        use crate::pipeline::{StageCursor, StageLedger, StageProgress};
-        let mut world = World::new();
-        let entity = world
-            .spawn((
-                StageCursor { index: 1 },
-                StageProgress::default(),
-                StageLedger(vec![
-                    leviath_core::run_meta::StageRecord::new("gather".into(), 0),
-                    leviath_core::run_meta::StageRecord::new("polish".into(), 1),
-                ]),
-            ))
-            .id();
-        let mut saved = leviath_core::run_meta::StageRecord::new("polish".into(), 1);
-        saved.output_cap_raised = true;
-        restore_stage_ledger(&mut world, entity, &[saved.clone()]);
-        assert!(world.get::<StageProgress>(entity).unwrap().raise_output_cap);
-
-        // Raised in a stage the run is no longer in: nothing to carry.
-        let elsewhere = world
-            .spawn((
-                StageCursor { index: 0 },
-                StageProgress::default(),
-                StageLedger(vec![
-                    leviath_core::run_meta::StageRecord::new("gather".into(), 0),
-                    leviath_core::run_meta::StageRecord::new("polish".into(), 1),
-                ]),
-            ))
-            .id();
-        restore_stage_ledger(&mut world, elsewhere, &[saved]);
-        assert!(
-            !world
-                .get::<StageProgress>(elsewhere)
-                .unwrap()
-                .raise_output_cap
-        );
-    }
-
-    #[test]
-    fn restore_stage_ledger_overlays_the_persisted_records_by_name() {
-        use crate::pipeline::StageLedger;
-        use leviath_core::run_meta::{StageRecord, StageRunStatus};
-
-        let (mut world, entity) = agent_world();
-        // An agent with no ledger at all is left alone rather than panicking.
-        restore_stage_ledger(&mut world, entity, &[StageRecord::new("s0".to_string(), 0)]);
-        assert!(world.get::<StageLedger>(entity).is_none());
-
-        world.entity_mut(entity).insert(StageLedger(vec![
-            StageRecord::new("s0".to_string(), 0),
-            StageRecord::new("s1".to_string(), 1),
-        ]));
-        // `s1` as the run left it, filed under a stale index; plus a record for
-        // a stage this blueprint no longer has.
-        let mut saved = StageRecord::new("s1".to_string(), 4);
-        saved.status = StageRunStatus::Complete;
-        saved.entered = true;
-        saved.prompt_tokens = 900;
-        saved.completion_tokens = 30;
-        saved.cached_tokens = 12;
-        saved.cache_write_tokens = 4;
-        saved.first_call_prompt_tokens = Some(300);
-        saved.runaway_warned = true;
-        saved.region_tokens.insert("conversation".to_string(), 120);
-        saved.started_at = Some(5);
-        saved.ended_at = Some(9);
-        restore_stage_ledger(
-            &mut world,
-            entity,
-            &[saved, StageRecord::new("removed".to_string(), 9)],
-        );
-
-        let ledger = world.get::<StageLedger>(entity).unwrap();
-        assert_eq!(
-            ledger.0.len(),
-            2,
-            "a record for a stage the blueprint no longer has is dropped, not appended"
-        );
-        // Nothing persisted against `s0`: its seeded record stands.
-        assert_eq!(ledger.0[0].prompt_tokens, 0);
-        assert_eq!(ledger.0[0].status, StageRunStatus::Pending);
-        assert!(!ledger.0[0].entered);
-        // `s1` comes back whole, under its blueprint index rather than the
-        // stale persisted one.
-        assert_eq!(ledger.0[1].index, 1);
-        assert_eq!(ledger.0[1].name, "s1");
-        assert_eq!(ledger.0[1].prompt_tokens, 900);
-        assert_eq!(ledger.0[1].completion_tokens, 30);
-        assert_eq!(ledger.0[1].cached_tokens, 12);
-        assert_eq!(ledger.0[1].cache_write_tokens, 4);
-        assert_eq!(ledger.0[1].first_call_prompt_tokens, Some(300));
-        assert!(ledger.0[1].runaway_warned);
-        assert_eq!(ledger.0[1].region_tokens.get("conversation"), Some(&120));
-        assert_eq!(ledger.0[1].started_at, Some(5));
-        assert_eq!(ledger.0[1].ended_at, Some(9));
-        assert_eq!(ledger.0[1].status, StageRunStatus::Complete);
-        assert!(ledger.0[1].entered);
-    }
-
-    #[test]
-    fn restore_overlays_context_and_jumps_to_stage() {
-        let (mut world, entity) = agent_world();
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals {
-                prompt_tokens: 100,
-                ..Default::default()
-            },
-        );
-
-        // Context replaced by the persisted entries (with kinds), not the seed.
-        let window = world.get::<ContextWindow>(entity).unwrap();
-        let region = window.get_region("conversation").unwrap();
-        assert_eq!(region.content.len(), 2);
-        assert_eq!(region.content[0].content, "prior user turn");
-        assert_eq!(region.content[0].kind, EntryKind::UserMessage);
-        assert_eq!(region.current_tokens, 8);
-
-        // Jumped to stage 1 (its config swapped in) + iteration restored.
-        assert_eq!(world.get::<StageCursor>(entity).unwrap().index, 1);
-        let state = world.get::<AgentState>(entity).unwrap();
-        assert_eq!(state.current_stage, "s1");
-        assert_eq!(state.iteration, 7);
-        assert_eq!(state.status, AgentStatus::Active);
-        assert_eq!(
-            world.get::<InferenceConfig>(entity).unwrap().temperature,
-            Some(0.5)
-        );
-        assert_eq!(world.get::<StageInference>(entity).unwrap().model, "m1");
-        assert_eq!(world.get::<TokenTotals>(entity).unwrap().prompt_tokens, 100);
-        // Still ready to (re-)infer.
-        assert!(world.get::<ReadyToInfer>(entity).is_some());
-    }
-
-    // ── pending-batch replay ──
-
-    fn pending_call(
-        id: &str,
-        name: &str,
-        result: Option<&str>,
-    ) -> leviath_core::run_archive::ToolCallRecord {
-        leviath_core::run_archive::ToolCallRecord {
-            execution_id: format!("x-{id}"),
-            id: id.to_string(),
-            name: name.to_string(),
-            arguments: r#"{"path":"x.txt"}"#.to_string(),
-            result: result.map(Into::into),
-            thought_signature: None,
-        }
-    }
-
-    fn pending_batch(
-        calls: Vec<leviath_core::run_archive::ToolCallRecord>,
-    ) -> leviath_core::run_archive::PendingToolBatch {
-        leviath_core::run_archive::PendingToolBatch {
-            stage_index: 1,
-            iteration: 7,
-            response: "writing then checking".to_string(),
-            calls,
-        }
-    }
-
-    /// The `conversation` entries of `entity`'s window.
-    fn conv_entries(world: &World, entity: Entity) -> Vec<RegionEntry> {
-        world
-            .get::<ContextWindow>(entity)
-            .unwrap()
-            .get_region("conversation")
-            .unwrap()
-            .content
-            .clone()
-    }
-
-    /// A batch that stopped on a question to a person is dispatched again
-    /// rather than replayed: the question has no effect to verify, and nothing
-    /// after it had started, so its tool asks it anew. What finished before the
-    /// crash is carried into the dispatch with the result the journal holds,
-    /// nothing lands in the window yet, and nothing is recorded as abandoned.
-    #[test]
-    fn a_batch_waiting_on_a_person_is_dispatched_again() {
-        let (mut world, entity) = agent_world();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        world.insert_resource(crate::pipeline::PersistenceStage(tx));
-        world.entity_mut(entity).insert(run_metadata());
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals::default(),
-        );
-        let before = conv_entries(&world, entity).len();
-        restore_pending_batch(
-            &mut world,
-            entity,
-            &pending_batch(vec![
-                pending_call("c1", "write_file", Some("Wrote 42 bytes to x.txt")),
-                pending_call("c2", "ask_user_text", None),
-                pending_call("c3", "shell", None),
-            ]),
-            &[],
-        );
-
-        assert!(
-            world.get::<ReadyToInfer>(entity).is_none(),
-            "no re-inference"
-        );
-        assert!(
-            world
-                .get::<crate::pipeline::ReadyForTools>(entity)
-                .is_some()
-        );
-        let result = world
-            .get::<crate::components::InferenceResult>(entity)
-            .expect("the batch is back as the turn that asked for it");
-        let ids: Vec<&str> = result
-            .tool_calls
-            .iter()
-            .map(|c| c.tool_id.as_str())
-            .collect();
-        assert_eq!(ids, ["c1", "c2", "c3"]);
-        assert_eq!(result.response, "writing then checking");
-        let recovered = world
-            .get::<crate::pipeline::RecoveredResults>(entity)
-            .expect("the finished call is carried over");
-        assert_eq!(recovered.0.len(), 1);
-        assert_eq!(recovered.0[0].0, "c1");
-        assert_eq!(recovered.0[0].1.as_str(), "Wrote 42 bytes to x.txt");
-        assert_eq!(
-            conv_entries(&world, entity).len(),
-            before,
-            "nothing landed yet"
-        );
-        assert!(rx.try_recv().is_err(), "nothing is recorded as abandoned");
-    }
-
-    /// Only an unanswered question makes a batch one that waited on a person.
-    #[test]
-    fn only_an_unanswered_question_is_a_wait_on_a_person() {
-        let asking = pending_batch(vec![pending_call("c1", "ask_user_choice", None)]);
-        assert!(waiting_on_a_person(&asking));
-        let answered = pending_batch(vec![pending_call(
-            "c1",
-            "ask_user_choice",
-            Some("User chose: a"),
-        )]);
-        assert!(
-            !waiting_on_a_person(&answered),
-            "a question already answered"
-        );
-        let running = pending_batch(vec![pending_call("c1", "shell", None)]);
-        assert!(
-            !waiting_on_a_person(&running),
-            "a call with an effect to verify"
-        );
-    }
-
-    /// A tool service that records which stage it was told the agent is in.
-    #[derive(Default)]
-    struct StageRecorder(std::sync::Mutex<Vec<(usize, String)>>);
-    impl crate::pipeline::ToolService for StageRecorder {
-        fn exec_for(
-            &self,
-            _entity: Entity,
-            _calls: Vec<leviath_providers::ToolCall>,
-            _progress: crate::pipeline::ToolProgress,
-        ) -> crate::tool_bridge::BoxedToolExec {
-            Box::new(|| Box::pin(async { Vec::new() }))
-        }
-        fn sync_stage(&self, _entity: Entity, stage_index: usize, stage_name: &str) {
-            self.0
-                .lock()
-                .unwrap()
-                .push((stage_index, stage_name.to_string()));
-        }
-    }
-
-    /// A run restored in a later stage asks its questions, and is held to its
-    /// permissions, as that stage: the tool service is told where it is.
-    #[tokio::test]
-    async fn a_restored_run_puts_its_tool_service_in_the_restored_stage() {
-        let (mut world, entity) = agent_world();
-        let service = std::sync::Arc::new(StageRecorder::default());
-        world.insert_resource(crate::pipeline::ToolServiceRes(service.clone()));
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals::default(),
-        );
-        assert_eq!(
-            *service.0.lock().unwrap(),
-            [(1, snapshot().stage_name.clone())]
-        );
-        // It is an ordinary service otherwise, and runs what it is handed.
-        let exec = crate::pipeline::ToolService::exec_for(
-            service.as_ref(),
-            entity,
-            Vec::new(),
-            crate::pipeline::noop_progress(),
-        );
-        assert!(exec().await.is_empty());
-    }
-
-    #[test]
-    fn pending_batch_replays_real_results_and_synthesizes_interrupted_ones() {
-        let (mut world, entity) = agent_world();
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals::default(),
-        );
-        restore_pending_batch(
-            &mut world,
-            entity,
-            &pending_batch(vec![
-                pending_call("c1", "write_file", Some("Wrote 42 bytes to x.txt")),
-                pending_call("c2", "shell", None),
-            ]),
-            &[],
-        );
-
-        let entries = conv_entries(&world, entity);
-        // The assistant turn landed with both calls, then one result per call:
-        // the journaled real result and the synthesized interrupted one.
-        let turn = entries
-            .iter()
-            .find_map(|e| match &e.kind {
-                EntryKind::AssistantTurn { tool_calls } if !tool_calls.is_empty() => {
-                    Some(tool_calls.clone())
-                }
-                _ => None,
-            })
-            .expect("assistant turn appended");
-        assert_eq!(turn.len(), 2);
-        assert_eq!(turn[0].id, "c1");
-        assert_eq!(
-            turn[0].arguments,
-            serde_json::json!({"path": "x.txt"}),
-            "journaled arguments parsed back to JSON"
-        );
-        let result_of = |id: &str| {
-            entries
-                .iter()
-                .find(|e| {
-                    matches!(&e.kind, EntryKind::ToolResult { tool_call_id, .. } if tool_call_id == id)
-                })
-                .map(|e| e.content.clone())
-                .expect("a result per call")
-        };
-        assert_eq!(result_of("c1"), "Wrote 42 bytes to x.txt");
-        assert!(result_of("c2").contains("interrupted"));
-        assert!(result_of("c2").contains("Verify whether it took effect"));
-    }
-
-    /// What a completion record says.
-    struct Completion<'r> {
-        iteration: usize,
-        call_id: &'r str,
-        execution_id: &'r str,
-        result: &'r leviath_core::region::EntryContent,
-        outcome: Option<leviath_core::execution::ToolOutcome>,
-    }
-
-    /// A completion record read as one, or nothing for any other record.
-    ///
-    /// Exercised both ways below, so the arm that says "this is not a
-    /// completion" is a claim a test makes rather than a branch nothing takes.
-    fn completion_of(record: &leviath_core::run_archive::RunRecord) -> Option<Completion<'_>> {
-        match record {
-            leviath_core::run_archive::RunRecord::ToolCallDone {
-                iteration,
-                call_id,
-                execution_id,
-                result,
-                outcome,
-                ..
-            } => Some(Completion {
-                iteration: *iteration,
-                call_id,
-                execution_id,
-                result,
-                outcome: *outcome,
-            }),
-            _ => None,
-        }
-    }
-
-    /// The run this test's agent belongs to, for the paths that name it.
-    fn run_metadata() -> crate::persistence::RunMetadata {
-        crate::persistence::RunMetadata {
-            run_id: "run-1".to_string(),
-            agent_name: "a".to_string(),
-            agent_path: "/p".to_string(),
-            task: "t".to_string(),
-            model: None,
-            workdir: "/w".to_string(),
-            num_stages: 1,
-            started_at: 0,
-            parent_run_id: None,
-            metadata: std::collections::HashMap::new(),
-            callback_url: None,
-            callback_secret: None,
-            title: None,
-            title_error: None,
-            blueprint_digest: None,
-            unattended: false,
-            yolo_profile: None,
-            read_paths: None,
-            output_request: None,
-            model_override: None,
-        }
-    }
-
-    /// The journal learns which executions the resume gave up on.
-    ///
-    /// A call with a journaled result finished, and nothing more is written
-    /// about it. A call without one is an attempt whose ending nobody observed,
-    /// and the resume is the last moment that is knowable: after it the run has
-    /// moved on with a stand-in and the real outcome is gone. Without this
-    /// record the two look identical to anybody reading the journal afterwards,
-    /// which is the question a run debugger exists to answer.
-    #[test]
-    fn a_resume_records_the_executions_it_gave_up_on() {
-        let (mut world, entity) = agent_world();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        world.insert_resource(crate::pipeline::PersistenceStage(tx));
-        world.entity_mut(entity).insert(run_metadata());
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals::default(),
-        );
-        restore_pending_batch(
-            &mut world,
-            entity,
-            &pending_batch(vec![
-                pending_call("c1", "write_file", Some("Wrote 42 bytes to x.txt")),
-                pending_call("c2", "shell", None),
-            ]),
-            &[],
-        );
-
-        // Something else on the same lane, so the drain below has to pick the
-        // appends out rather than assume every message is one.
-        let _ = world
-            .resource::<crate::pipeline::PersistenceStage>()
-            .0
-            .send(crate::persistence_bridge::PersistMsg::StageLines {
-                run_id: "run-1".to_string(),
-                output_appends: vec![(0, "a line".to_string())],
-                log_appends: Vec::new(),
-            });
-        let mut recorded = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg {
-                recorded.push(*record);
-            }
-        }
-        assert_eq!(recorded.len(), 1, "only the unfinished call: {recorded:?}");
-        let completion = completion_of(&recorded[0]).expect("a completion record");
-        let Completion {
-            iteration,
-            call_id,
-            execution_id,
-            result,
-            outcome,
-        } = completion;
-        assert_eq!(call_id, "c2");
-        // The attempt, as dispatch minted it before the crash. Naming the call
-        // alone would leave a later attempt at the same call indistinguishable.
-        assert_eq!(execution_id, "x-c2");
-        assert_eq!(iteration, 7);
-        assert_eq!(
-            outcome,
-            Some(leviath_core::execution::ToolOutcome::Indeterminate)
-        );
-        // The stand-in the run went on to reason about, recorded as what was in
-        // the window rather than as something the tool returned.
-        assert!(result.contains("interrupted"), "{result:?}");
-        // And nothing else reads as a completion: the batch that dispatched the
-        // call is a different record with a different meaning.
-        assert!(
-            completion_of(&leviath_core::run_archive::RunRecord::ToolBatch {
-                calls: Vec::new(),
-                at: 1,
-                stage_index: 0,
-                iteration: 7,
-                visit_id: String::new(),
-                requested_by: String::new(),
-                response: String::new(),
-            })
-            .is_none(),
-            "a batch is not a completion"
-        );
-    }
-
-    /// A resume with no journal behind it records nothing and still replays.
-    ///
-    /// An embedded world keeps no run directory, so there is no journal to tell
-    /// anything. The replay itself is unaffected: the stand-in still lands in
-    /// the window, because that is what the next inference has to see.
-    #[test]
-    fn a_resume_with_no_journal_records_nothing() {
-        let (mut world, entity) = agent_world();
-        restore_pending_batch(
-            &mut world,
-            entity,
-            &pending_batch(vec![pending_call("c2", "shell", None)]),
-            &[],
-        );
-        let entries = conv_entries(&world, entity);
-        assert!(
-            entries.iter().any(|e| e.content.contains("interrupted")),
-            "the stand-in still landed: {entries:?}"
-        );
-    }
-
-    #[test]
-    fn pending_batch_survives_request_assembly_unstripped() {
-        // The whole point of pairing the turn with a result per call: the
-        // assembler's orphan sanitizer must keep every block, so the re-issued
-        // request shows the model exactly what already ran. A sliding-window
-        // conversation, since that's the kind assembled as typed messages.
-        let (mut world, entity) = agent_world();
-        world
-            .get_mut::<ContextWindow>(entity)
-            .unwrap()
-            .get_region_mut("conversation")
-            .unwrap()
-            .kind = RegionKind::SlidingWindow {
-            max_items: 100,
-            eviction_strategy: Default::default(),
-        };
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals::default(),
-        );
-        restore_pending_batch(
-            &mut world,
-            entity,
-            &pending_batch(vec![pending_call("c1", "shell", None)]),
-            &[],
-        );
-
-        let assembled = world.get::<ContextWindow>(entity).unwrap().assemble();
-        let mut tool_uses = 0;
-        let mut tool_results = 0;
-        for msg in &assembled.messages {
-            if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
-                for block in blocks {
-                    match block {
-                        leviath_providers::ContentBlock::ToolUse { id, .. } => {
-                            assert_eq!(id, "c1");
-                            tool_uses += 1;
-                        }
-                        leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } => {
-                            assert_eq!(tool_use_id, "c1");
-                            tool_results += 1;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        assert_eq!((tool_uses, tool_results), (1, 1), "nothing stripped");
-    }
-
-    #[test]
-    fn a_resumed_cut_off_call_assembles_as_an_object() {
-        // A run saved with a cut-off call in its conversation is resumed with
-        // that call as it was stored. The request built from it must still be
-        // one a provider accepts: the stored text is wrapped, not sent as a
-        // bare string that Anthropic refuses on every attempt.
-        let (mut world, entity) = agent_world();
-        world
-            .get_mut::<ContextWindow>(entity)
-            .unwrap()
-            .get_region_mut("conversation")
-            .unwrap()
-            .kind = RegionKind::SlidingWindow {
-            max_items: 100,
-            eviction_strategy: Default::default(),
-        };
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals::default(),
-        );
-        let mut call = pending_call("c1", "shell", None);
-        call.arguments = "not json {".to_string();
-        restore_pending_batch(&mut world, entity, &pending_batch(vec![call]), &[]);
-
-        let assembled = world.get::<ContextWindow>(entity).unwrap().assemble();
-        let inputs: Vec<serde_json::Value> = assembled
-            .messages
-            .iter()
-            .filter_map(|msg| match &msg.content {
-                leviath_providers::MessageContent::Blocks(blocks) => Some(blocks),
-                leviath_providers::MessageContent::Text(_) => None,
-            })
-            .flatten()
-            .filter_map(|block| match block {
-                leviath_providers::ContentBlock::ToolUse { input, .. } => Some(input.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(inputs, vec![serde_json::json!({ "_raw": "not json {" })]);
-    }
-
-    #[test]
-    fn pending_batch_routes_results_through_the_restored_stage_routing() {
-        // Stage 1 routes results to `knowledge`: the replayed result's full text
-        // lands there and the conversation keeps the pointer - identical to the
-        // live apply path, because it IS the live apply path.
-        let (mut world, entity) = agent_world();
-        world
-            .get_mut::<ContextWindow>(entity)
-            .unwrap()
-            .add_region(Region::new(
-                "knowledge".to_string(),
-                RegionKind::Pinned,
-                10_000,
-            ));
-        world
-            .get_mut::<StageSetups>(entity)
-            .unwrap()
-            .0
-            .get_mut(1)
-            .unwrap()
-            .routing = Some(leviath_core::ToolResultRouting {
-            default_region: "knowledge".to_string(),
-            ..Default::default()
-        });
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals::default(),
-        );
-        restore_pending_batch(
-            &mut world,
-            entity,
-            &pending_batch(vec![pending_call("c1", "read_file", Some("the file body"))]),
-            &[],
-        );
-
-        let window = world.get::<ContextWindow>(entity).unwrap();
-        let knowledge = window.get_region("knowledge").unwrap();
-        assert!(
-            knowledge
-                .content
-                .iter()
-                .any(|e| e.content.contains("the file body")),
-            "full text routed to the knowledge region"
-        );
-        assert!(
-            conv_entries(&world, entity).iter().any(
-                |e| matches!(&e.kind, EntryKind::ToolResult { tool_call_id, .. } if tool_call_id == "c1")
-            ),
-            "conversation keeps the paired pointer result"
-        );
-    }
-
-    #[test]
-    fn pending_batch_taints_results_per_tool_sensitivity() {
-        use leviath_core::taint::TaintLevel;
-        let (mut world, entity) = agent_world();
-        world
-            .get_mut::<ContextWindow>(entity)
-            .unwrap()
-            .get_region_mut("conversation")
-            .unwrap()
-            .enable_taint_tracking();
-        world
-            .entity_mut(entity)
-            .insert(crate::pipeline::ToolSensitivities(
-                [("read_file".to_string(), TaintLevel::Private)]
-                    .into_iter()
-                    .collect(),
-            ));
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals::default(),
-        );
-        restore_pending_batch(
-            &mut world,
-            entity,
-            &pending_batch(vec![pending_call("c1", "read_file", Some("secret body"))]),
-            &[],
-        );
-
-        let window = world.get::<ContextWindow>(entity).unwrap();
-        assert_eq!(
-            window.get_region("conversation").unwrap().taint_level(),
-            Some(TaintLevel::Private),
-            "replayed result tainted like a live one"
-        );
-    }
-
-    #[test]
-    fn unparseable_journaled_arguments_survive_as_a_raw_string() {
-        let (mut world, entity) = agent_world();
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals::default(),
-        );
-        let mut call = pending_call("c1", "shell", None);
-        call.arguments = "not json {".to_string();
-        restore_pending_batch(&mut world, entity, &pending_batch(vec![call]), &[]);
-
-        let entries = conv_entries(&world, entity);
-        let turn = entries
-            .iter()
-            .find_map(|e| match &e.kind {
-                EntryKind::AssistantTurn { tool_calls } if !tool_calls.is_empty() => {
-                    Some(tool_calls.clone())
-                }
-                _ => None,
-            })
-            .expect("turn still lands");
-        assert_eq!(
-            turn[0].arguments,
-            serde_json::Value::String("not json {".to_string())
-        );
-    }
-
-    #[test]
-    fn interrupted_subagent_calls_point_at_known_children() {
-        // A sub-agent call with known children gets the check-first note; other
-        // shapes (children but a non-subagent tool, a subagent tool but no
-        // children) get the plain interrupted text.
-        let kids = vec!["run-kid-1".to_string(), "run-kid-2".to_string()];
-        let enriched = interrupted_result("spawn_agent", &kids);
-        assert!(enriched.contains("run-kid-1, run-kid-2"));
-        assert!(enriched.contains("check_agent"));
-        assert_eq!(interrupted_result("shell", &kids), INTERRUPTED_TOOL_RESULT);
-        assert_eq!(
-            interrupted_result("spawn_agent", &[]),
-            INTERRUPTED_TOOL_RESULT
-        );
-
-        // And end-to-end: the enriched text is what lands in the window.
-        let (mut world, entity) = agent_world();
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals::default(),
-        );
-        restore_pending_batch(
-            &mut world,
-            entity,
-            &pending_batch(vec![pending_call("c1", "spawn_agent", None)]),
-            &kids,
-        );
-        assert!(
-            conv_entries(&world, entity)
-                .iter()
-                .any(|e| e.content.contains("already has child agent runs")),
-            "the synthesized sub-agent note lands in the window"
-        );
-    }
-
-    #[test]
-    fn restore_swaps_in_the_stage_routing_and_clears_stale() {
-        use crate::components::ToolResultRoutingComponent;
-
-        // The restored stage routes tool results: the component comes in.
-        let (mut world, entity) = agent_world();
-        let routed = leviath_core::ToolResultRouting {
-            default_region: "knowledge".to_string(),
-            ..Default::default()
-        };
-        world
-            .get_mut::<StageSetups>(entity)
-            .unwrap()
-            .0
-            .get_mut(1)
-            .unwrap()
-            .routing = Some(routed);
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals::default(),
-        );
-        assert_eq!(
-            world
-                .get::<ToolResultRoutingComponent>(entity)
-                .expect("stage 1's routing swapped in")
-                .routing
-                .default_region,
-            "knowledge"
-        );
-
-        // The restored stage has no routing: a stale component (left over from
-        // the spawn stage) is cleared rather than routing future batches.
-        let (mut world, entity) = agent_world();
-        world.entity_mut(entity).insert(ToolResultRoutingComponent {
-            routing: leviath_core::ToolResultRouting::default(),
-        });
-        restore_agent(
-            &mut world,
-            entity,
-            &snapshot(),
-            1,
-            7,
-            TokenTotals::default(),
-        );
-        assert!(world.get::<ToolResultRoutingComponent>(entity).is_none());
-    }
-
-    fn meta_with(run_id: &str, status: RunStatus, updated_at: i64) -> RunMeta {
-        let mut m = RunMeta::new(
-            run_id.to_string(),
-            "a".to_string(),
-            "/p".to_string(),
-            "t".to_string(),
-            None,
-            "/w".to_string(),
-            1,
-        );
-        m.status = status;
-        m.updated_at = updated_at;
-        m
-    }
-
-    #[test]
-    fn classify_restore_skips_terminal_and_ranks_the_rest() {
-        // Terminal → skipped.
-        assert_eq!(classify_restore(&RunStatus::Complete, false), None);
-        assert_eq!(classify_restore(&RunStatus::Error, false), None);
-        assert_eq!(classify_restore(&RunStatus::Cancelled, false), None);
-        // Actionable → Active.
-        assert_eq!(
-            classify_restore(&RunStatus::Running, false),
-            Some(RestorePriority::Active)
-        );
-        assert_eq!(
-            classify_restore(&RunStatus::Starting, false),
-            Some(RestorePriority::Active)
-        );
-        // No immediate progress → Blocked.
-        assert_eq!(
-            classify_restore(&RunStatus::WaitingInput, false),
-            Some(RestorePriority::Blocked)
-        );
-        assert_eq!(
-            classify_restore(&RunStatus::Paused, false),
-            Some(RestorePriority::Blocked)
-        );
-        assert_eq!(
-            classify_restore(&RunStatus::CompleteInteractive, false),
-            Some(RestorePriority::Blocked)
-        );
-        // Parked mid fan-out is Blocked even when otherwise Running.
-        assert_eq!(
-            classify_restore(&RunStatus::Running, true),
-            Some(RestorePriority::Blocked)
-        );
-        // A terminal run parked on a fan-out is still skipped.
-        assert_eq!(classify_restore(&RunStatus::Complete, true), None);
-    }
-
-    #[test]
-    fn triage_orders_actionable_first_then_by_recency_and_drops_terminal() {
-        let candidates = vec![
-            (
-                meta_with("blocked-old", RunStatus::WaitingInput, 100),
-                false,
-            ),
-            (meta_with("active-old", RunStatus::Running, 200), false),
-            (meta_with("terminal", RunStatus::Complete, 999), false),
-            (meta_with("active-new", RunStatus::Starting, 300), false),
-            (meta_with("parked", RunStatus::Running, 999), true), // fan-out → Blocked
-            (
-                meta_with("blocked-new", RunStatus::WaitingInput, 400),
-                false,
-            ),
-        ];
-        let order: Vec<String> = triage_restores(candidates)
-            .into_iter()
-            .map(|m| m.run_id)
-            .collect();
-        // Active tier first (most-recent first), then Blocked tier (most-recent
-        // first, with the fan-out-parked run demoted into it). Terminal dropped.
-        assert_eq!(
-            order,
-            vec![
-                "active-new".to_string(),  // Active, updated 300
-                "active-old".to_string(),  // Active, updated 200
-                "parked".to_string(),      // Blocked (fan-out), updated 999
-                "blocked-new".to_string(), // Blocked, updated 400
-                "blocked-old".to_string(), // Blocked, updated 100
-            ]
-        );
-    }
-
-    #[test]
-    fn restore_with_out_of_range_stage_keeps_spawn_config() {
-        let (mut world, entity) = agent_world();
-        let mut snap = snapshot();
-        snap.stage_name = "s0".to_string();
-        // The blueprint now has fewer stages than the persisted index.
-        restore_agent(&mut world, entity, &snap, 9, 2, TokenTotals::default());
-
-        // Stage jump skipped: cursor + config stay at stage 0.
-        assert_eq!(world.get::<StageCursor>(entity).unwrap().index, 0);
-        assert_eq!(world.get::<StageInference>(entity).unwrap().model, "m0");
-        // State + context still restored.
-        assert_eq!(world.get::<AgentState>(entity).unwrap().iteration, 2);
-        assert_eq!(
-            world
-                .get::<ContextWindow>(entity)
-                .unwrap()
-                .get_region("conversation")
-                .unwrap()
-                .content
-                .len(),
-            2
-        );
-    }
-}
+#[path = "restore_tests.rs"]
+mod resume_tests;

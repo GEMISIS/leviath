@@ -402,7 +402,7 @@ fn an_edited_blueprint_is_left_alone_and_the_step_says_why() {
         .expect("at least one blueprint was installed")
         .expect("a readable entry")
         .path();
-    let marker = edited.join("agent.leviath");
+    let marker = edited.join(leviath_blueprint::FILE_NAME);
     let original = std::fs::read_to_string(&marker).expect("a bundled blueprint has a manifest");
     std::fs::write(&marker, format!("{original}\n# mine\n")).expect("the edit writes");
 
@@ -864,47 +864,13 @@ fn every_value_has_the_word_a_client_reads() {
 
 // ─── The keys step ────────────────────────────────────────────────────────────
 
-/// A blueprint of the reader's own, spelling two settings the old way.
-const THEIR_BLUEPRINT: &str = "[agent]\nname = \"mine\"\nversion = \"0.1.0\"\n\n\
-     [sandbox]\nkind = \"container\"\npersist = true\n\n\
-     [stages.main]\nmode = \"autonomous\"\n\n\
-     [stages.main.tool_routing]\npersist = false\n";
-
-/// Put a blueprint in the fixture's agents directory.
-fn install_blueprint(fixture: &Fixture, name: &str, text: &str) -> std::path::PathBuf {
-    let dir = fixture.agents_dir.join(name);
-    std::fs::create_dir_all(&dir).expect("the agent directory");
-    let path = dir.join("agent.leviath");
-    std::fs::write(&path, text).expect("the manifest");
-    path
-}
-
-/// The step rewrites the blueprint and says which.
-#[test]
-fn the_keys_step_respells_what_it_found() {
-    let fixture = Fixture::advising("");
-    let path = install_blueprint(&fixture, "mine", THEIR_BLUEPRINT);
-
-    let job = fixture.apply(ApplyRequest {
-        binary: false,
-        agents: false,
-        keys: true,
-        migrations: false,
-    });
-
-    let step = step(&job, Step::Keys);
-    assert_eq!(step.status, StepStatus::Done);
-    assert!(step.detail.contains("rewrote mine"), "{step:?}");
-    let after = std::fs::read_to_string(&path).expect("still there");
-    assert!(after.contains("keep_warm = true"), "{after}");
-    assert!(after.contains("keep_results = false"), "{after}");
-}
-
 /// Nothing to respell is a skip that says so, not a silent success.
 #[test]
 fn a_keys_step_with_nothing_to_respell_skips() {
     let fixture = Fixture::advising("");
-    install_blueprint(&fixture, "current", "[sandbox]\nkeep_warm = true\n");
+    let dir = fixture.agents_dir.join("current");
+    std::fs::create_dir_all(&dir).expect("the agent directory");
+    crate::test_support::write_test_agent(&dir, crate::test_support::tiny_blueprint("current"));
 
     let job = fixture.apply(ApplyRequest {
         binary: false,
@@ -916,32 +882,4 @@ fn a_keys_step_with_nothing_to_respell_skips() {
     let step = step(&job, Step::Keys);
     assert_eq!(step.status, StepStatus::Skipped);
     assert!(step.detail.contains("current key names"), "{step:?}");
-}
-
-/// A manifest that will not write fails the step and names the blueprint.
-///
-/// The blueprint still runs either way - both spellings parse - so what this
-/// checks is that the failure is reported rather than swallowed.
-#[test]
-fn a_manifest_that_will_not_write_fails_the_step_and_names_it() {
-    let fixture = Fixture::advising("");
-    let path = install_blueprint(&fixture, "mine", THEIR_BLUEPRINT);
-    // Readable, so the plan finds what to change, and read-only, so writing it
-    // back fails. `set_readonly` is the one way to say that on every platform.
-    let mut perms = std::fs::metadata(&path)
-        .expect("the manifest")
-        .permissions();
-    perms.set_readonly(true);
-    std::fs::set_permissions(&path, perms).expect("the manifest goes read-only");
-
-    let job = fixture.apply(ApplyRequest {
-        binary: false,
-        agents: false,
-        keys: true,
-        migrations: false,
-    });
-
-    let step = step(&job, Step::Keys);
-    assert_eq!(step.status, StepStatus::Failed);
-    assert!(step.detail.contains("could not rewrite mine"), "{step:?}");
 }

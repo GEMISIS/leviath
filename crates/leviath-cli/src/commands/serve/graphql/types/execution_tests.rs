@@ -1,15 +1,16 @@
 //! Tests for what a run did: the executions field and the results behind it.
 //!
-//! These write a real journal and read it back through the schema, because the
-//! whole surface is a reading of that file: the pairing of a dispatch with its
-//! completion, the position a result is fetched by, and the states an attempt can
-//! be left in.
+//! These record a real run file from the journal records the lane would have
+//! been handed, and read it back through the schema, because the whole surface
+//! is a reading of that file: the pairing of a dispatch with its completion,
+//! the position a result is fetched by, and the states an attempt can be left
+//! in.
 
 use std::sync::Arc;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 use leviath_core::execution::ToolOutcome;
-use leviath_core::run_archive::{self, RunIdentity, RunRecord, ToolCallRecord};
+use leviath_runtime::runfile::record::{self, RunRecord, ToolCallRecord};
 
 use super::run::Run;
 use crate::commands::serve::testutil::state_with_agent_paths;
@@ -20,7 +21,7 @@ fn meta() -> RunMeta {
     let mut meta = RunMeta::new(
         "did-things".to_string(),
         "coder".to_string(),
-        "/agents/coder/agent.leviath".to_string(),
+        "/agents/coder/agent.toml".to_string(),
         "do two things".to_string(),
         None,
         "/tmp".to_string(),
@@ -87,33 +88,26 @@ fn call(id: &str, execution: &str, tool: &str, arguments: &str) -> ToolCallRecor
     }
 }
 
-/// Write a journal of `records` for the run.
+/// Record a run file of `records` for the run.
 fn write_journal(records: Vec<RunRecord>) {
-    let meta = meta();
-    let mut buf = Vec::new();
-    run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION)
-        .expect("a preamble");
-    run_archive::write_record(
-        &mut buf,
-        &RunRecord::Header {
-            identity: RunIdentity {
-                run_id: meta.run_id.clone(),
-                machine_id: "m".to_string(),
-                world_id: "w".to_string(),
-                created_at: 0,
-            },
-            meta: Box::new(meta.clone()),
+    super::journal_fixture::journal(&meta().run_id, &records);
+}
+
+/// Record a run file of `records` for the run, its ledger holding one stay in
+/// `plan` that began at 90.
+fn write_journal_with_stay(stay: &str, records: Vec<RunRecord>) {
+    super::journal_fixture::journal_with(
+        &meta().run_id,
+        |state| {
+            state.ledger = vec![super::journal_fixture::stay(stay, 90)];
         },
-    )
-    .expect("a header");
-    for record in &records {
-        run_archive::write_record(&mut buf, record).expect("a record");
-    }
-    std::fs::write(
-        crate::runstate::run_dir(&meta.run_id).join(leviath_core::files::ARCHIVE_FILE),
-        &buf,
-    )
-    .expect("the journal");
+        &records,
+    );
+}
+
+/// Make the run's file unreadable.
+fn break_journal() {
+    crate::commands::serve::core::run_file::tests::garbage(&meta().run_id, b"not a run file");
 }
 
 /// Every attempt comes back with its call typed, its outcome and its result.
@@ -243,6 +237,49 @@ async fn an_abandoned_attempt_reads_as_indeterminate() {
             "the stand-in the run went on with: {}",
             node["result"]["text"]
         );
+    })
+    .await;
+}
+
+/// A call sent to the lane again after a restart (a question asked again) is
+/// the one execution it was: listed once, ending as itself.
+#[tokio::test]
+async fn a_call_sent_again_is_listed_once() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-resent", |_dir| async move {
+        create_run(&meta()).expect("run written");
+        write_journal(vec![
+            RunRecord::ToolBatch {
+                calls: vec![call("q", "x1", "ask_user_text", r#"{"prompt":"colour?"}"#)],
+                at: 100,
+                stage_index: 0,
+                iteration: 1,
+                visit_id: String::new(),
+                requested_by: "a1".to_string(),
+                response: String::new(),
+            },
+            RunRecord::ToolCallsResent {
+                calls: vec![("q".to_string(), "x1".to_string())],
+                requested_by: String::new(),
+                at: 120,
+            },
+            RunRecord::ToolCallDone {
+                iteration: 1,
+                call_id: "q".to_string(),
+                execution_id: "x1".to_string(),
+                result: "blue".into(),
+                outcome: None,
+                at: 140,
+            },
+        ]);
+
+        let json =
+            data("{ run { executions(first: 10) { results { id callId endedAt } } } }").await;
+        let rows = json["run"]["executions"]["results"]
+            .as_array()
+            .expect("a list");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["id"], "x1");
+        assert_eq!(rows[0]["endedAt"], 140);
     })
     .await;
 }
@@ -483,13 +520,9 @@ async fn a_large_result_comes_back_as_its_head() {
 async fn an_unreadable_journal_says_so() {
     crate::runstate::with_isolated_runs_dir_async("graphql-exec-corrupt", |_dir| async move {
         create_run(&meta()).expect("run written");
-        std::fs::write(
-            crate::runstate::run_dir("did-things").join(leviath_core::files::ARCHIVE_FILE),
-            b"not an archive",
-        )
-        .expect("a corrupt journal");
+        break_journal();
         let message = error("{ run { executions(first: 10) { total } } }").await;
-        assert!(message.contains("unreadable journal"), "{message}");
+        assert!(message.contains("cannot read"), "{message}");
     })
     .await;
 }
@@ -588,17 +621,13 @@ async fn a_result_read_from_a_broken_journal_fails() {
         "graphql-exec-result-broken",
         |_dir| async move {
             create_run(&meta()).expect("run written");
-            std::fs::write(
-                crate::runstate::run_dir("did-things").join(leviath_core::files::ARCHIVE_FILE),
-                b"not an archive",
-            )
-            .expect("a corrupt journal");
+            break_journal();
 
             // The execution is built here rather than listed, because listing is what
             // would fail first: this is the race where the file breaks in between.
             let execution = super::execution::ToolExecution {
                 run_id: "did-things".to_string(),
-                record: leviath_core::run_archive::Execution {
+                record: leviath_runtime::runfile::history::Execution {
                     id: "x1".to_string(),
                     call_id: "c1".to_string(),
                     tool: "shell".to_string(),
@@ -627,7 +656,7 @@ async fn a_result_read_from_a_broken_journal_fails() {
                 .first()
                 .map(|e| e.message.clone())
                 .expect("a failure");
-            assert!(message.contains("unreadable journal"), "{message}");
+            assert!(message.contains("cannot read"), "{message}");
         },
     )
     .await;
@@ -742,7 +771,7 @@ fn committed(execution: &str, at: i64) -> RunRecord {
         revision_before: format!("cw1-{at}"),
         revision_after: format!("cw1-{}", at + 1),
         cause: leviath_core::ContextCause::ContextTool,
-        regions: vec![run_archive::RegionCommit {
+        regions: vec![record::RegionCommit {
             region: "plan".to_string(),
             digest_before: "rg1-a".to_string(),
             digest_after: "rg1-b".to_string(),
@@ -759,18 +788,18 @@ fn committed(execution: &str, at: i64) -> RunRecord {
 
 /// One attempt record, under the id an answer names it by.
 fn attempt(id: &str, provider: &str, model: &str) -> RunRecord {
-    RunRecord::InferenceAttempt(run_archive::AttemptRecord {
+    RunRecord::InferenceAttempt(Box::new(record::AttemptRecord {
         id: id.to_string(),
         stage: "plan".to_string(),
         attempt: 2,
         provider: provider.to_string(),
         model: model.to_string(),
-        outcome: run_archive::AttemptOutcome::Succeeded,
+        outcome: record::AttemptOutcome::Succeeded,
         finish_reason: "tool_call".to_string(),
         stopped_for: None,
         duration_ms: 900,
         backoff_ms: 100,
-        digest: run_archive::RequestDigest {
+        digest: record::RequestDigest {
             system_hash: 7,
             messages: 4,
             tools: 2,
@@ -779,7 +808,7 @@ fn attempt(id: &str, provider: &str, model: &str) -> RunRecord {
         },
         model_input: None,
         at: 99,
-    })
+    }))
 }
 
 /// An execution says which stay it belonged to, which trip to the provider asked
@@ -791,35 +820,35 @@ fn attempt(id: &str, provider: &str, model: &str) -> RunRecord {
 async fn an_execution_reads_back_with_what_it_is_connected_to() {
     crate::runstate::with_isolated_runs_dir_async("graphql-execution-joins", |_dir| async move {
         create_run(&meta()).expect("run written");
-        let mut stages = leviath_core::run_meta::StageRecord::new("plan".to_string(), 0);
-        stages.begin_visit(90, "v-the-stay".to_string());
-        crate::runstate::write_stages_index(&meta().run_id, &[stages]).expect("a ledger");
-        write_journal(vec![
-            attempt("a-answered", "anthropic", "claude-sonnet-5"),
-            RunRecord::ToolBatch {
-                calls: vec![call("c1", "x1", "context_write", r#"{"region":"plan"}"#)],
-                at: 100,
-                stage_index: 0,
-                iteration: 3,
-                visit_id: "v-the-stay".to_string(),
-                requested_by: "a-answered".to_string(),
-                response: "writing the plan".to_string(),
-            },
-            committed("x1", 101),
-            committed("x-somebody-else", 102),
-            RunRecord::ArtifactsProduced {
-                execution_id: "x1".to_string(),
-                artifacts: vec![leviath_core::output::Artifact {
-                    name: "report".to_string(),
-                    path: "out/report.md".to_string(),
-                    mime_type: leviath_core::mime::MimeType::parse("text/markdown")
-                        .expect("a type"),
-                    size: 4_096,
-                    sha256: "beef".to_string(),
-                }],
-                at: 103,
-            },
-        ]);
+        write_journal_with_stay(
+            "v-the-stay",
+            vec![
+                attempt("a-answered", "anthropic", "claude-sonnet-5"),
+                RunRecord::ToolBatch {
+                    calls: vec![call("c1", "x1", "context_write", r#"{"region":"plan"}"#)],
+                    at: 100,
+                    stage_index: 0,
+                    iteration: 3,
+                    visit_id: "v-the-stay".to_string(),
+                    requested_by: "a-answered".to_string(),
+                    response: "writing the plan".to_string(),
+                },
+                committed("x1", 101),
+                committed("x-somebody-else", 102),
+                RunRecord::ArtifactsProduced {
+                    execution_id: "x1".to_string(),
+                    artifacts: vec![leviath_core::output::Artifact {
+                        name: "report".to_string(),
+                        path: "out/report.md".to_string(),
+                        mime_type: leviath_core::mime::MimeType::parse("text/markdown")
+                            .expect("a type"),
+                        size: 4_096,
+                        sha256: "beef".to_string(),
+                    }],
+                    at: 103,
+                },
+            ],
+        );
 
         let json = data(
             r#"{ run { executions(first: 10) { results {
@@ -922,18 +951,18 @@ async fn an_execution_with_nothing_recorded_invents_nothing() {
 async fn a_visit_the_ledger_does_not_hold_is_null() {
     crate::runstate::with_isolated_runs_dir_async("graphql-execution-capped", |_dir| async move {
         create_run(&meta()).expect("run written");
-        let mut stages = leviath_core::run_meta::StageRecord::new("plan".to_string(), 0);
-        stages.begin_visit(90, "v-an-early-stay".to_string());
-        crate::runstate::write_stages_index(&meta().run_id, &[stages]).expect("a ledger");
-        write_journal(vec![RunRecord::ToolBatch {
-            calls: vec![call("c1", "x1", "shell", r#"{"command":"ls"}"#)],
-            at: 100,
-            stage_index: 0,
-            iteration: 1,
-            visit_id: "v-past-the-cap".to_string(),
-            requested_by: String::new(),
-            response: String::new(),
-        }]);
+        write_journal_with_stay(
+            "v-an-early-stay",
+            vec![RunRecord::ToolBatch {
+                calls: vec![call("c1", "x1", "shell", r#"{"command":"ls"}"#)],
+                at: 100,
+                stage_index: 0,
+                iteration: 1,
+                visit_id: "v-past-the-cap".to_string(),
+                requested_by: String::new(),
+                response: String::new(),
+            }],
+        );
 
         let json = data("{ run { executions(first: 10) { results { visit { id } } } } }").await;
         assert!(json["run"]["executions"]["results"][0]["visit"].is_null());
@@ -984,7 +1013,7 @@ async fn an_unreadable_journal_is_not_an_execution_that_changed_nothing() {
             create_run(&meta()).expect("run written");
             let execution = super::execution::ToolExecution {
                 run_id: "did-things".to_string(),
-                record: leviath_core::run_archive::Execution {
+                record: leviath_runtime::runfile::history::Execution {
                     id: "x1".to_string(),
                     call_id: "c1".to_string(),
                     tool: "context_write".to_string(),
@@ -1001,11 +1030,7 @@ async fn an_unreadable_journal_is_not_an_execution_that_changed_nothing() {
                     outcome: None,
                 },
             };
-            std::fs::write(
-                crate::runstate::run_dir("did-things").join(leviath_core::files::ARCHIVE_FILE),
-                b"not an archive",
-            )
-            .expect("a corrupt journal");
+            break_journal();
             let schema =
                 Schema::build(OneExecution { execution }, EmptyMutation, EmptySubscription)
                     .data(state_with_agent_paths(Vec::new()))
@@ -1021,7 +1046,7 @@ async fn an_unreadable_journal_is_not_an_execution_that_changed_nothing() {
                     .first()
                     .map(|e| e.message.clone())
                     .unwrap_or_else(|| format!("no error for {query}"));
-                assert!(message.contains("unreadable journal"), "{message}");
+                assert!(message.contains("cannot read"), "{message}");
             }
         },
     )
@@ -1078,7 +1103,7 @@ async fn every_mirrored_function_runs() {
 
     let execution = super::execution::ToolExecution {
         run_id: "did-things".to_string(),
-        record: leviath_core::run_archive::Execution {
+        record: leviath_runtime::runfile::history::Execution {
             id: "x1".to_string(),
             call_id: "c1".to_string(),
             tool: "shell".to_string(),

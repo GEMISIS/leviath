@@ -1,4 +1,4 @@
-//! The checks that read a manifest as a shape: does every stage it names exist,
+//! The checks that read a graph as a shape: does every stage it names exist,
 //! can the run reach an output, does a tool it advertises actually resolve.
 //!
 //! Split from the security checks next door because these answer "will this
@@ -6,38 +6,27 @@
 
 use super::*;
 use leviath_runtime::pipeline::model_key;
+use leviath_runtime::spec::graph::{
+    Budget, EdgeCarry, EdgeCondition, EdgeDef, RegionKind, StageDef, WorkerSource,
+};
 
-/// Fields the stage left to a default: `mode`, `model`, and `max_iterations`.
-pub(super) fn lint_declarations(stage: &leviath_core::Stage, keys: StageKeys) -> Vec<LintFinding> {
+/// Fields the stage left to a default: its models and `max_iterations`.
+pub(super) fn lint_declarations(stage: &StageDef) -> Vec<LintFinding> {
     let mut findings = Vec::new();
 
-    if !keys.mode {
-        findings.push(
-            LintFinding::new(
-                LintSeverity::Warning,
-                "stage-missing-mode",
-                "no mode is set, so the stage runs as autonomous".to_string(),
-            )
-            .in_stage(&stage.name)
-            .with_fix("write mode = \"autonomous\" if that is what you meant"),
-        );
-    }
-
-    if !keys.model {
+    if stage.model.models.is_empty() {
         findings.push(
             LintFinding::new(
                 LintSeverity::Warning,
                 "stage-missing-model",
-                format!(
-                    "no [stages.{}.model] block, so the stage runs on your \
-                     configured default_provider, whatever that is",
-                    stage.name
-                ),
+                "names no model, so the stage runs on your configured \
+                 default_provider, whatever that is"
+                    .to_string(),
             )
-            .in_stage(&stage.name)
+            .in_stage(stage.name.as_str())
             .with_fix(format!(
                 "add model = {{ models = [{{ provider = \"...\", model = \"...\" }}] }} \
-                 to [stages.{}]",
+                 to the stage named '{}'",
                 stage.name
             )),
         );
@@ -45,7 +34,7 @@ pub(super) fn lint_declarations(stage: &leviath_core::Stage, keys: StageKeys) ->
 
     // A fan_out stage does not run inference itself - it splits work and waits
     // on its workers - so it has no iteration count to cap.
-    let counts_iterations = !matches!(stage.mode, StageMode::FanOut { .. });
+    let counts_iterations = !matches!(stage.mode, StageMode::FanOut(_));
     if counts_iterations && stage.max_iterations.is_none() {
         findings.push(
             LintFinding::new(
@@ -55,7 +44,7 @@ pub(super) fn lint_declarations(stage: &leviath_core::Stage, keys: StageKeys) ->
                  sets [limits] default_max_iterations"
                     .to_string(),
             )
-            .in_stage(&stage.name)
+            .in_stage(stage.name.as_str())
             .with_fix("give the stage a max_iterations it should never reach"),
         );
     }
@@ -65,9 +54,9 @@ pub(super) fn lint_declarations(stage: &leviath_core::Stage, keys: StageKeys) ->
 
 /// Tool names that resolve to nothing, and permissions for tools the stage
 /// never granted.
-pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<LintFinding> {
+pub(super) fn lint_tools(stage: &StageDef, env: &LintEnv) -> Vec<LintFinding> {
     let mut findings = Vec::new();
-    let groups = stage.tool_groups();
+    let groups = tool_groups(stage);
 
     // Which group a name written elsewhere in the stage would fall under, or
     // `None` when the install was never asked (or the name matches nothing),
@@ -78,16 +67,17 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
         }
         leviath_tools::tool_name_spellings(name).find_map(|n| env.tool_sources.get(n).copied())
     };
-    let group_grants =
-        |name: &str| source_of(name).is_some_and(|source| groups.iter().any(|g| g.covers(source)));
+    let group_grants = |name: &str| {
+        source_of(name).is_some_and(|source| groups.iter().any(|g| covers(*g, source)))
+    };
 
     if !env.known_tools.is_empty() {
-        for tool in stage.named_tools() {
+        for tool in named_tools(stage) {
             // `server__tool` is an MCP name, and every MCP name has that shape:
             // advertised names are always server-qualified, so the test is
             // exact rather than a heuristic. Such a name resolves only once
             // that server is installed and connected, which is not a property
-            // of the manifest, so it is never this check's business.
+            // of the blueprint, so it is never this check's business.
             if tool.contains("__") || env.known_tools.contains(tool) {
                 continue;
             }
@@ -100,20 +90,20 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
                          tool, or one of this agent's own tools/*.rhai"
                     ),
                 )
-                .in_stage(&stage.name)
+                .in_stage(stage.name.as_str())
                 .with_fix("check the spelling, or drop the entry"),
             );
         }
     }
 
-    // `Stage::validate` insists every required tool is also granted, except
-    // when a group is in play: whether `@scripts` reaches `summarize` depends
-    // on where `summarize` lives, which only an install can say. Say it here,
-    // because a required tool the stage never grants is a tool the model
-    // never sees, whatever the name promised.
+    // A required tool the stage never grants is a tool the model never sees,
+    // whatever the name promised. Whether a group like `@scripts` reaches it
+    // depends on where the tool lives, which only an install can say, so the
+    // check runs only when the install was asked.
     if !groups.is_empty() && !env.tool_sources.is_empty() {
-        let named: Vec<&str> = stage.named_tools().map(String::as_str).collect();
+        let named: Vec<&str> = named_tools(stage).collect();
         for tool in &stage.required_tools {
+            let tool = tool.as_str();
             let by_name = named
                 .iter()
                 .any(|n| canonical_tool_name(n) == canonical_tool_name(tool));
@@ -122,7 +112,7 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
             }
             let granted = groups
                 .iter()
-                .map(|g| g.token())
+                .map(|g| group_token(*g))
                 .collect::<Vec<_>>()
                 .join(", ");
             findings.push(
@@ -134,9 +124,9 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
                          {granted}, so the model never sees it"
                     ),
                 )
-                .in_stage(&stage.name)
+                .in_stage(stage.name.as_str())
                 .with_fix(format!(
-                    "add '{tool}' to available_tools, or grant the group it belongs to"
+                    "add '{tool}' to the stage's tools, or grant the group it belongs to"
                 )),
             );
         }
@@ -148,13 +138,13 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
     // tool the connector grants, and the check has nothing to tell it apart
     // with. Skipped rather than guessed, the same way an MCP tool name is never
     // reported as unknown above.
-    if !stage.available_connectors.is_empty() {
+    if !stage.connectors.is_empty() {
         return findings;
     }
 
-    let granted: HashSet<&str> = stage.available_tools.iter().map(String::as_str).collect();
-    for tool in stage.tool_permissions.keys() {
-        if granted.contains(tool.as_str()) {
+    let granted: HashSet<&str> = named_tools(stage).collect();
+    for tool in stage.tool_permissions.keys().map(|t| t.as_str()) {
+        if granted.contains(tool) {
             continue;
         }
         // A group is a grant too, of a set only the install can spell out.
@@ -170,12 +160,12 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
                 "orphan-stage-permission",
                 format!(
                     "sets a permission for '{tool}', which it does not grant in \
-                     available_tools - it reads as a grant and is not one"
+                     its tools - it reads as a grant and is not one"
                 ),
             )
-            .in_stage(&stage.name)
+            .in_stage(stage.name.as_str())
             .with_fix(format!(
-                "add '{tool}' to available_tools, or drop the permission"
+                "add '{tool}' to the stage's tools, or drop the permission"
             )),
         );
     }
@@ -187,14 +177,16 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
     // `read_file` at the region name. Measured over 152 local runs: 90 of 168
     // failed `read_file` calls were a region name where a path belongs.
     //
-    // A Warning rather than an Error: the runtime now names the region's
-    // heading in the pointer and corrects the mistake on the error, so this is
-    // an ergonomics gap and not a broken blueprint - and an Error would fail
-    // every user manifest written before it existed.
-    let routes_to_region = stage.tool_result_routing.as_ref().is_some_and(|r| {
-        r.default_region != "conversation" || r.tool_overrides.values().any(|v| v != "conversation")
+    // A Warning rather than an Error: the runtime names the region's heading
+    // in the pointer and corrects the mistake on the error, so this is an
+    // ergonomics gap and not a broken blueprint.
+    let routes_to_region = stage.tool_routing.as_ref().is_some_and(|r| {
+        r.default_region.as_str() != "conversation"
+            || r.tool_regions
+                .values()
+                .any(|v| v.as_str() != "conversation")
     });
-    let all_builtins = stage.grants_all_builtins();
+    let all_builtins = grants_all_builtins(stage);
     let reads_files =
         all_builtins || granted.contains("read_file") || granted.contains("read_files");
     let reads_context = all_builtins || granted.contains("context_read");
@@ -208,8 +200,8 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
                  \"go and read that region\" is to aim read_file at the region name"
                     .to_string(),
             )
-            .in_stage(&stage.name)
-            .with_fix("add 'context_read' to available_tools".to_string()),
+            .in_stage(stage.name.as_str())
+            .with_fix("add 'context_read' to the stage's tools".to_string()),
         );
     }
 
@@ -217,7 +209,7 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
 }
 
 /// Human-in-the-loop tools offered by a stage that runs with nobody attached.
-pub(super) fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFinding> {
+pub(super) fn lint_blocking_tools(stage: &StageDef) -> Vec<LintFinding> {
     // Only autonomous stages are a problem: the interactive modes are where a
     // person is expected, and the one tool a fan_out stage carries is its own
     // `fan_out`, which blocks on nobody.
@@ -234,11 +226,9 @@ pub(super) fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFindin
         stage
             .required_tools
             .iter()
-            .any(|r| canonical_tool_name(r) == canonical_tool_name(tool))
+            .any(|r| canonical_tool_name(r.as_str()) == canonical_tool_name(tool))
     };
-    let mut findings: Vec<LintFinding> = stage
-        .available_tools
-        .iter()
+    let mut findings: Vec<LintFinding> = named_tools(stage)
         .filter(|t| BLOCKING_INTERACTION_TOOLS.contains(&canonical_tool_name(t)))
         .filter(|t| !required(t))
         .map(|tool| {
@@ -250,7 +240,7 @@ pub(super) fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFindin
                      until a person answers"
                 ),
             )
-            .in_stage(&stage.name)
+            .in_stage(stage.name.as_str())
             .with_fix(
                 "drop the tool, switch the stage to an interactive mode, list it in \
                  required_tools so it survives an unattended run too, or set \
@@ -262,10 +252,9 @@ pub(super) fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFindin
     // A group that reaches the built-ins reaches every blocking tool at once.
     // One finding for the group rather than five for its members: the fix is
     // the same whichever member is named, and a list that long is skimmed.
-    let group = stage
-        .tool_groups()
+    let group = tool_groups(stage)
         .into_iter()
-        .find(|g| g.covers(ToolGroup::Builtin));
+        .find(|g| covers(*g, ToolGroup::Builtin));
     if let Some(group) = group {
         let members: Vec<&str> = BLOCKING_INTERACTION_TOOLS
             .iter()
@@ -278,12 +267,13 @@ pub(super) fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFindin
                     LintSeverity::Warning,
                     "blocking-tool-in-autonomous-stage",
                     format!(
-                        "is autonomous but grants '{group}', which includes {}; each \
+                        "is autonomous but grants '{}', which includes {}; each \
                          suspends the run until a person answers",
+                        group_token(group),
                         members.join(", ")
                     ),
                 )
-                .in_stage(&stage.name)
+                .in_stage(stage.name.as_str())
                 .with_fix(
                     "name the tools you want instead of the group, switch the stage to an \
                      interactive mode, list the blocking tools you need in required_tools \
@@ -298,39 +288,29 @@ pub(super) fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFindin
 
 /// A stage's own output declarations: a demand it cannot meet, a shape nothing
 /// will read, or a reporting stage that can also change the workspace.
-pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding> {
+pub(super) fn lint_output_stage(stage: &StageDef) -> Vec<LintFinding> {
     let mut findings = Vec::new();
-    let grants_submit = stage
-        .available_tools
-        .iter()
-        .any(|t| canonical_tool_name(t) == leviath_core::blueprint::SUBMIT_OUTPUT_TOOL);
+    let grants_submit = named_tools(stage).any(|t| canonical_tool_name(t) == SUBMIT_OUTPUT_TOOL);
 
-    // `Stage::validate` already refuses this outright, so reaching it here means
-    // the manifest never loaded. Reported anyway because `lev validate` runs the
-    // linter over a blueprint it *did* load, and a future path that relaxes the
-    // hard error should still surface it.
     if stage.require_output && !grants_submit {
         findings.push(
             LintFinding::new(
                 LintSeverity::Error,
                 "output-missing-submit-tool",
-                format!(
-                    "must produce a final output but does not grant '{}'",
-                    leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
-                ),
+                format!("must produce a final output but does not grant '{SUBMIT_OUTPUT_TOOL}'"),
             )
-            .in_stage(&stage.name)
+            .in_stage(stage.name.as_str())
             .with_fix(format!(
-                "add '{}' to available_tools, or use mode = \"output\", which grants it",
-                leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
+                "add '{SUBMIT_OUTPUT_TOOL}' to the stage's tools, or use mode = \"output\""
             )),
         );
     }
 
     // A declared shape nobody is obliged to produce is a wish, not a contract:
     // the tool description carries it, and the agent may still finish without
-    // calling the tool at all.
-    if stage.output.is_some() && !stage.require_output {
+    // calling the tool at all. An output stage is required to produce one:
+    // the resolver sets `require_output` on every stage in that mode.
+    if stage.output.is_some() && !stage.require_output && stage.mode != StageMode::Output {
         findings.push(
             LintFinding::new(
                 LintSeverity::Warning,
@@ -339,7 +319,7 @@ pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding>
                  finish with nothing"
                     .to_string(),
             )
-            .in_stage(&stage.name)
+            .in_stage(stage.name.as_str())
             .with_fix("set require_output = true, or move the shape to the stage that submits"),
         );
     }
@@ -347,17 +327,20 @@ pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding>
     // An output stage summarizes work; one that can also change files invites
     // the model to keep working where it was meant to report.
     if stage.mode == StageMode::Output {
-        let modifying = stage
-            .named_tools()
-            .filter(|t| leviath_core::blueprint::MODIFYING_TOOLS.contains(&canonical_tool_name(t)))
+        let modifying = named_tools(stage)
+            .filter(|t| MODIFYING_TOOLS.contains(&canonical_tool_name(t)))
             .map(|tool| format!("'{tool}', which changes the workspace"));
         // A group reaching the built-ins carries every modifying tool with it,
         // so it is named once, as the group, rather than once per member.
-        let grouped = stage
-            .tool_groups()
+        let grouped = tool_groups(stage)
             .into_iter()
-            .find(|g| g.covers(ToolGroup::Builtin))
-            .map(|g| format!("'{g}', which includes every tool that changes the workspace"));
+            .find(|g| covers(*g, ToolGroup::Builtin))
+            .map(|g| {
+                format!(
+                    "'{}', which includes every tool that changes the workspace",
+                    group_token(g)
+                )
+            });
         for what in modifying.chain(grouped) {
             findings.push(
                 LintFinding::new(
@@ -365,7 +348,7 @@ pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding>
                     "output-stage-can-modify",
                     format!("is an output stage but grants {what}"),
                 )
-                .in_stage(&stage.name)
+                .in_stage(stage.name.as_str())
                 .with_fix(
                     "drop the tool: an output stage reports what happened, and work done here \
                      lands after the review that was meant to check it",
@@ -382,34 +365,25 @@ pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding>
 /// `submit_output` is a tool, so a stage on an image model or a 3D generator
 /// (every compiled row for those says `supports_tools = false`) can never
 /// call it. Such a stage answers only one way: the model's produced part,
-/// routed into a region with `output_routing` and declared under
-/// `[[stages.<name>.output.artifacts]]`, is emitted as the run's answer.
-/// Without both, the runtime re-enters the stage and nudges it for text it
-/// cannot write - up to six re-submitted jobs on a paid API - and the run
-/// ends with nothing. Only providers with compiled tables are judged; an open
-/// route is taken on trust.
-pub(super) fn lint_output_stage_can_answer(stage: &leviath_core::Stage) -> Vec<LintFinding> {
-    if !(stage.require_output || stage.mode == StageMode::Output) {
+/// routed into a region with `output_routing` and declared under the stage's
+/// `output.artifacts`, is emitted as the run's answer. Without both, the
+/// runtime re-enters the stage and nudges it for text it cannot write - up to
+/// six re-submitted jobs on a paid API - and the run ends with nothing. Only
+/// providers with compiled tables are judged; an open route is taken on trust.
+pub(super) fn lint_output_stage_can_answer(stage: &StageDef) -> Vec<LintFinding> {
+    if !(stage.require_output || stage.mode == StageMode::Output) || !all_pinned(&stage.model) {
         return Vec::new();
     }
     let catalog = leviath_providers::capabilities::builtin_catalog();
-    let judged: Vec<&leviath_core::blueprint::ModelEntry> = stage
-        .model
-        .models
-        .iter()
-        .filter(|e| !e.provider.is_empty())
-        .collect();
-    if judged.is_empty() || judged.len() != stage.model.models.len() {
-        return Vec::new();
-    }
+    let judged: Vec<(&str, &str)> = stage.model.models.iter().map(route).collect();
     let tool_less: Vec<String> = judged
         .iter()
-        .filter(|e| {
+        .filter(|(provider, model)| {
             catalog.iter().any(|row| {
-                row.provider == e.provider && row.id == e.model && !row.capabilities.supports_tools
+                row.provider == *provider && row.id == *model && !row.capabilities.supports_tools
             })
         })
-        .map(|e| format!("{}/{}", e.provider, e.model))
+        .map(|(provider, model)| format!("{provider}/{model}"))
         .collect();
     if tool_less.len() != judged.len() {
         return Vec::new();
@@ -437,26 +411,24 @@ pub(super) fn lint_output_stage_can_answer(stage: &leviath_core::Stage) -> Vec<L
                 tool_less.join(", ")
             ),
         )
-        .in_stage(&stage.name)
+        .in_stage(stage.name.as_str())
         .with_fix(
-            "declare the file under [[stages.<name>.output.artifacts]] and route the model's \
-             part into a region with [stages.<name>.output_routing], so the runtime emits it \
+            "declare the file under the stage's output.artifacts and route the model's \
+             part into a region with the stage's output_routing, so the runtime emits it \
              as the answer; or list a model that calls tools",
         ),
     ]
 }
 
-/// Output stages nothing can reach, and the upstream `allow_complete` that is
-/// the usual reason.
-///
-/// The second half is the one that fails quietly. `allow_complete` offers the
-/// model a "DONE" it may pick instead of routing onward, and it is appended even
-/// to a stage's custom `transition_prompt` - so a stage can offer an exit its own
-/// prompt never mentions. A run that takes it ends with no answer and looks
-/// exactly like success.
+/// Whether an edge is one a stage leaves by in the ordinary course of things:
+/// when it ends, or when the model picks it.
+fn is_normal(edge: &EdgeDef) -> bool {
+    matches!(edge.when, EdgeCondition::Always | EdgeCondition::LlmChoice)
+}
+
 /// Stages whose every normal exit can run out of `max_revisits` budget.
 ///
-/// A stage transitions along its `Always`/`LlmChoice` edges; an edge whose
+/// A stage moves on along its `always`/`llm_choice` edges; an edge whose
 /// target has `max_revisits` stops being followable once the budget is spent.
 /// When EVERY normal edge is like that, a long enough run strands the stage
 /// with nowhere to go, which the engine reports as a dead-end *error* rather
@@ -464,45 +436,30 @@ pub(super) fn lint_output_stage_can_answer(stage: &leviath_core::Stage) -> Vec<L
 /// pending. The live shape: a wide-researcher bouncing deep_dive → compare
 /// until compare's budget runs out, with nothing produced.
 ///
-/// The fix is one un-exhaustible way forward: an edge to a stage without
-/// `max_revisits` (an output/terminal stage usually), or a
-/// `condition = "max_iterations"` escape.
-pub(super) fn lint_dead_end_possible(blueprint: &Blueprint) -> Vec<LintFinding> {
+/// The fix is one un-exhaustible way forward: a `dead_end` (or `error`) edge
+/// to a stage without `max_revisits`.
+pub(super) fn lint_dead_end_possible(graph: &RunGraph) -> Vec<LintFinding> {
     let mut findings = Vec::new();
-    for stage in &blueprint.stages {
-        let Some(transitions) = &stage.transitions else {
-            continue;
-        };
-        let normal: Vec<&leviath_core::blueprint::TransitionEdge> = transitions
-            .values()
-            .filter(|e| {
-                matches!(
-                    e.condition,
-                    leviath_core::blueprint::TransitionCondition::Always
-                        | leviath_core::blueprint::TransitionCondition::LlmChoice
-                )
-            })
-            .collect();
+    for stage in &graph.stages {
+        let edges: Vec<&EdgeDef> = graph.edges_from(stage.name.as_str()).collect();
+        let normal: Vec<&&EdgeDef> = edges.iter().filter(|e| is_normal(e)).collect();
         if normal.is_empty() {
             continue; // terminal (or conditioned-only) stage: nothing to strand
         }
         let all_exhaustible = normal.iter().all(|e| {
-            blueprint
-                .find_stage(&e.target)
+            graph
+                .stage(e.to.as_str())
                 .is_none_or(|t| t.max_revisits.is_some())
         });
-        // An escape the runtime actually consults on this path. `resolve_transition`
-        // resolves a dead end down a `dead_end` edge, then an `error` edge, so
-        // either satisfies the check - provided its own target can still be
+        // An escape the runtime actually consults on this path: a dead end
+        // resolves down a `dead_end` edge, then an `error` edge, so either
+        // satisfies the check - provided its own target can still be
         // entered, or it is no escape at all.
-        let has_escape = transitions.values().any(|e| {
-            matches!(
-                e.condition,
-                leviath_core::blueprint::TransitionCondition::DeadEnd
-                    | leviath_core::blueprint::TransitionCondition::Error
-            ) && blueprint
-                .find_stage(&e.target)
-                .is_some_and(|t| t.max_revisits.is_none())
+        let has_escape = edges.iter().any(|e| {
+            matches!(e.when, EdgeCondition::DeadEnd | EdgeCondition::Error)
+                && graph
+                    .stage(e.to.as_str())
+                    .is_some_and(|t| t.max_revisits.is_none())
         });
 
         if all_exhaustible && !has_escape {
@@ -510,13 +467,13 @@ pub(super) fn lint_dead_end_possible(blueprint: &Blueprint) -> Vec<LintFinding> 
                 LintFinding::new(
                     LintSeverity::Warning,
                     "dead-end-possible",
-                    "can strand the run: every normal transition's target has a max_revisits \
+                    "can strand the run: every normal edge's target has a max_revisits \
                      budget, and once they are all spent the run errors as dead-ended"
                         .to_string(),
                 )
-                .in_stage(&stage.name)
+                .in_stage(stage.name.as_str())
                 .with_fix(
-                    "add a condition = \"dead_end\" edge to a stage without max_revisits \
+                    "add an edge with when = \"dead_end\" to a stage without max_revisits \
                      (the output stage, usually). It is taken only when the graph would \
                      otherwise strand, so it is not a route the model can choose early - \
                      unlike a plain edge to the same stage, which is offered on every visit",
@@ -527,8 +484,16 @@ pub(super) fn lint_dead_end_possible(blueprint: &Blueprint) -> Vec<LintFinding> 
     findings
 }
 
-pub(super) fn lint_output_reachable(blueprint: &Blueprint) -> Vec<LintFinding> {
-    let outputs: Vec<&leviath_core::Stage> = blueprint
+/// Output stages nothing can reach, and the upstream `allow_complete` that is
+/// the usual reason.
+///
+/// The second half is the one that fails quietly. `allow_complete` offers the
+/// model a "DONE" it may pick instead of routing onward, and it is appended even
+/// to a stage's custom `transition_prompt` - so a stage can offer an exit its own
+/// prompt never mentions. A run that takes it ends with no answer and looks
+/// exactly like success.
+pub(super) fn lint_output_reachable(graph: &RunGraph) -> Vec<LintFinding> {
+    let outputs: Vec<&StageDef> = graph
         .stages
         .iter()
         .filter(|s| s.mode == StageMode::Output)
@@ -537,18 +502,14 @@ pub(super) fn lint_output_reachable(blueprint: &Blueprint) -> Vec<LintFinding> {
         return Vec::new();
     }
     let mut findings = Vec::new();
+    let entry = graph.entry_stage().map(|s| s.name.as_str());
 
     for output in &outputs {
-        let reached = blueprint.stages.iter().any(|s| {
-            s.name != output.name
-                && s.transitions
-                    .iter()
-                    .flat_map(|edges| edges.values())
-                    .any(|e| e.target == output.name)
-        });
-        let is_entry = blueprint.entry_stage.as_deref() == Some(output.name.as_str())
-            || blueprint.stages.first().map(|s| s.name.as_str()) == Some(output.name.as_str());
-        if !reached && !is_entry {
+        let reached = graph
+            .edges
+            .iter()
+            .any(|e| e.from != output.name && e.to == output.name);
+        if !reached && entry != Some(output.name.as_str()) {
             findings.push(
                 LintFinding::new(
                     LintSeverity::Error,
@@ -556,16 +517,16 @@ pub(super) fn lint_output_reachable(blueprint: &Blueprint) -> Vec<LintFinding> {
                     "is an output stage no edge routes to, so the run can never produce one"
                         .to_string(),
                 )
-                .in_stage(&output.name)
+                .in_stage(output.name.as_str())
                 .with_fix(format!(
-                    "add a transition to '{}' from whichever stage finishes the work",
+                    "add an edge to '{}' from whichever stage finishes the work",
                     output.name
                 )),
             );
         }
     }
 
-    for stage in &blueprint.stages {
+    for stage in &graph.stages {
         if stage.allow_complete && stage.mode != StageMode::Output {
             findings.push(
                 LintFinding::new(
@@ -575,7 +536,7 @@ pub(super) fn lint_output_reachable(blueprint: &Blueprint) -> Vec<LintFinding> {
                      output stage"
                         .to_string(),
                 )
-                .in_stage(&stage.name)
+                .in_stage(stage.name.as_str())
                 .with_fix(
                     "drop allow_complete and route to the output stage instead - the run then \
                      still explains what it did",
@@ -587,48 +548,57 @@ pub(super) fn lint_output_reachable(blueprint: &Blueprint) -> Vec<LintFinding> {
 }
 
 /// Graph shape: stages the entry can never reach, and cycles with no revisit
-/// cap. Both only mean anything for a blueprint that declares transitions at
-/// all - a linear one has no graph to walk.
-pub(super) fn lint_graph(blueprint: &Blueprint) -> Vec<LintFinding> {
-    if !blueprint.stages.iter().any(|s| s.transitions.is_some()) {
+/// cap. Both only mean anything for a graph that declares edges at all.
+pub(super) fn lint_graph(graph: &RunGraph) -> Vec<LintFinding> {
+    if graph.edges.is_empty() {
         return Vec::new();
     }
-    let stage_names: HashSet<&str> = blueprint.stages.iter().map(|s| s.name.as_str()).collect();
-    let entry = blueprint.resolve_entry_stage_name();
+    // The entry as written, even when it names no stage: then nothing is
+    // reachable, which is what is worth saying about such a graph.
+    let Some(entry) = graph
+        .entry
+        .as_ref()
+        .or_else(|| graph.stages.first().map(|s| &s.name))
+        .map(ToString::to_string)
+    else {
+        return Vec::new();
+    };
 
     // Breadth-first from the entry stage; whatever is left over is orphaned.
-    let mut reachable = HashSet::new();
+    let mut reachable: HashSet<String> = HashSet::new();
     let mut queue = std::collections::VecDeque::from([entry.clone()]);
     while let Some(name) = queue.pop_front() {
         if !reachable.insert(name.clone()) {
             continue;
         }
-        let Some(stage) = blueprint.find_stage(&name) else {
+        let Some(stage) = graph.stage(&name) else {
             continue;
         };
         // A fan_out stage reaches its worker and merge stages through its own
-        // config rather than a transition edge, so following only `transitions`
-        // would report a perfectly wired worker as an orphan.
+        // settings rather than an edge, so following only edges would report a
+        // perfectly wired worker as an orphan.
         let fan_out = match &stage.mode {
-            StageMode::FanOut { config } => [
-                config.worker_stage.as_deref(),
-                config.merge_stage.as_deref(),
+            StageMode::FanOut(config) => [
+                match &config.worker {
+                    WorkerSource::Stage(worker) => Some(worker.as_str()),
+                    _ => None,
+                },
+                config.merge_stage.as_ref().map(|s| s.as_str()),
             ],
             _ => [None, None],
         };
-        let edges = stage
-            .transitions
-            .iter()
-            .flat_map(|t| t.keys().map(String::as_str))
+        let targets = graph
+            .edges_from(stage.name.as_str())
+            .map(|e| e.to.as_str())
             .chain(fan_out.into_iter().flatten());
-        for target in edges {
-            if !reachable.contains(target) && stage_names.contains(target) {
+        for target in targets {
+            if !reachable.contains(target) && graph.stage(target).is_some() {
                 queue.push_back(target.to_string());
             }
         }
     }
 
-    let mut findings: Vec<LintFinding> = blueprint
+    let mut findings: Vec<LintFinding> = graph
         .stages
         .iter()
         .filter(|s| !reachable.contains(s.name.as_str()))
@@ -638,38 +608,33 @@ pub(super) fn lint_graph(blueprint: &Blueprint) -> Vec<LintFinding> {
                 "unreachable-stage",
                 format!("cannot be reached from entry stage '{entry}'"),
             )
-            .in_stage(&s.name)
-            .with_fix("give some stage a transition to it, or delete it")
+            .in_stage(s.name.as_str())
+            .with_fix("give some stage an edge to it, or delete it")
         })
         .collect();
 
-    // A pair of stages that each transition to the other, where the one being
-    // returned to has no revisit cap, can bounce forever.
-    for stage in &blueprint.stages {
-        let Some(transitions) = &stage.transitions else {
+    // A pair of stages that each have an edge to the other, where the one
+    // being returned to has no revisit cap, can bounce forever. Each pair is
+    // judged once per direction, however many edges join them.
+    let mut judged: HashSet<(&str, &str)> = HashSet::new();
+    for edge in &graph.edges {
+        let (from, to) = (edge.from.as_str(), edge.to.as_str());
+        if from == to || !judged.insert((from, to)) {
+            continue;
+        }
+        let Some(target) = graph.stage(to) else {
             continue;
         };
-        for target in transitions.keys().filter(|t| **t != stage.name) {
-            let Some(target_stage) = blueprint.find_stage(target) else {
-                continue;
-            };
-            let Some(t2) = &target_stage.transitions else {
-                continue;
-            };
-            if t2.contains_key(&stage.name) && target_stage.max_revisits.is_none() {
-                findings.push(
-                    LintFinding::new(
-                        LintSeverity::Warning,
-                        "cycle-without-max-revisits",
-                        format!(
-                            "is in a cycle with '{}' and has no max_revisits",
-                            stage.name
-                        ),
-                    )
-                    .in_stage(target)
-                    .with_fix("set max_revisits so the loop has to end"),
-                );
-            }
+        if graph.edges_from(to).any(|e| e.to.as_str() == from) && target.max_revisits.is_none() {
+            findings.push(
+                LintFinding::new(
+                    LintSeverity::Warning,
+                    "cycle-without-max-revisits",
+                    format!("is in a cycle with '{from}' and has no max_revisits"),
+                )
+                .in_stage(to)
+                .with_fix("set max_revisits so the loop has to end"),
+            );
         }
     }
 
@@ -693,8 +658,8 @@ fn sample_catalog(ids: &[String]) -> String {
 /// Under `[providers] zero_retention`, the models this stage names that keep
 /// something: an error for the one the stage would start on, since the spawn
 /// gate refuses it, and a warning for a fallback, since failover drops it.
-pub(super) fn lint_retention(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<LintFinding> {
-    let Some(refusals) = env.retention_refusals.get(&stage.name) else {
+pub(super) fn lint_retention(stage: &StageDef, env: &LintEnv) -> Vec<LintFinding> {
+    let Some(refusals) = env.retention_refusals.get(stage.name.as_str()) else {
         return Vec::new();
     };
     refusals
@@ -709,7 +674,7 @@ pub(super) fn lint_retention(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<
                     r.route, r.reason
                 ),
             )
-            .in_stage(&stage.name)
+            .in_stage(stage.name.as_str())
             .with_fix(
                 "name a model that keeps nothing (`lev providers retention` says which), \
                  declare the agreement in `[providers] zero_retention_agreements` if you \
@@ -724,53 +689,46 @@ pub(super) fn lint_retention(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<
                     r.route, r.reason
                 ),
             )
-            .in_stage(&stage.name)
+            .in_stage(stage.name.as_str())
             .with_fix("list a fallback that keeps nothing, or drop this one"),
         })
         .collect()
 }
 
 /// Models and providers the install cannot resolve.
-pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<LintFinding> {
+pub(super) fn lint_models(stage: &StageDef, env: &LintEnv) -> Vec<LintFinding> {
     let mut findings = Vec::new();
 
-    for entry in &stage.model.models {
+    for (provider, model) in stage.model.models.iter().map(route) {
         // What the provider itself said, when this install asked it. It beats
         // every check below: a live catalogue knows about models released after
         // this build, and about a script provider's models that no build could
         // know.
-        match env.provider_catalogs.get(&entry.provider) {
+        match env.provider_catalogs.get(provider) {
             Some(ProviderCatalog::Complete(ids)) => {
-                let key = model_key(&entry.model);
+                let key = model_key(model);
                 if !ids.iter().any(|id| model_key(id) == key) {
                     // The provider's own reason wins. "Does not serve it" is
                     // right for a typo and wrong for a model the route carries
                     // and this account cannot reach, and the two send a reader
                     // to different places.
-                    let reason = env
-                        .provider_refusals
-                        .get(&format!("{}/{}", entry.provider, entry.model));
+                    let reason = env.provider_refusals.get(&format!("{provider}/{model}"));
                     findings.push(
                         LintFinding::new(
                             LintSeverity::Error,
                             "unserved-model",
                             match reason {
-                                Some(reason) => {
-                                    format!("names {}/{}: {reason}", entry.provider, entry.model)
-                                }
+                                Some(reason) => format!("names {provider}/{model}: {reason}"),
                                 None => format!(
-                                    "names {}/{}, which provider '{}' does not serve (it lists {})",
-                                    entry.provider,
-                                    entry.model,
-                                    entry.provider,
+                                    "names {provider}/{model}, which provider '{provider}' \
+                                     does not serve (it lists {})",
                                     sample_catalog(ids),
                                 ),
                             },
                         )
-                        .in_stage(&stage.name)
+                        .in_stage(stage.name.as_str())
                         .with_fix(format!(
-                            "run `lev models list --provider {}` and name one of those",
-                            entry.provider
+                            "run `lev models list --provider {provider}` and name one of those"
                         )),
                     );
                 }
@@ -785,16 +743,14 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
                         LintSeverity::Warning,
                         "catalog-unchecked",
                         format!(
-                            "names {}/{}, and provider '{}' does not say which models \
-                             it serves, so the name went unchecked",
-                            entry.provider, entry.model, entry.provider
+                            "names {provider}/{model}, and provider '{provider}' does not say \
+                             which models it serves, so the name went unchecked"
                         ),
                     )
-                    .in_stage(&stage.name)
+                    .in_stage(stage.name.as_str())
                     .with_fix(format!(
-                        "give {}.rhai a `list_models(state)`, or list its models under \
-                         `[model_providers.{}] serves`",
-                        entry.provider, entry.provider
+                        "give {provider}.rhai a `list_models(state)`, or list its models under \
+                         `[model_providers.{provider}] serves`"
                     )),
                 );
                 continue;
@@ -806,22 +762,21 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
         // is pulled, OpenRouter's list runs to hundreds, a script provider
         // defines its own). Checking a model against a catalog that does not
         // claim to be complete would only produce false alarms.
-        let catalog_known = env.known_models.iter().any(|(p, _)| *p == entry.provider);
+        let catalog_known = env.known_models.iter().any(|(p, _)| p == provider);
         let listed = env
             .known_models
             .iter()
-            .any(|(p, m)| *p == entry.provider && *m == entry.model);
+            .any(|(p, m)| p == provider && m == model);
         if catalog_known && !listed {
             findings.push(
                 LintFinding::new(
                     LintSeverity::Warning,
                     "unknown-model",
                     format!(
-                        "names {}/{}, which is not a model this build knows about",
-                        entry.provider, entry.model
+                        "names {provider}/{model}, which is not a model this build knows about"
                     ),
                 )
-                .in_stage(&stage.name)
+                .in_stage(stage.name.as_str())
                 .with_fix(
                     "check `lev models list`, or `lev models list --remote` \
                            if it is newer than this build",
@@ -838,42 +793,24 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
     //
     // An entry is reachable when this install can actually run it: a pinned one
     // needs its provider registered, an open one needs something that serves
-    // its model.
-    //
-    // Answering that second half takes the resolver, which arrives here as
-    // `unrouted_models`. Without it an open entry has to be counted reachable
-    // on the grounds that the resolver knows better, and the check skips itself
-    // on any stage holding one - the form every bundled blueprint is written
-    // in. With it, a stage whose every entry names something this machine
-    // cannot run is reported whichever form its entries take.
-    //
-    // `unrouted_models` is empty both when nobody asked and when everything
-    // routes, and both read as reachable here. That is the safe direction: a
-    // question nobody asked must not turn into a finding.
-    let reachable = |e: &leviath_core::blueprint::ModelEntry| match e.provider.is_empty() {
-        true => !env.unrouted_models.contains(&e.model),
+    // its model, which arrives here as `unrouted_models`. That is empty both
+    // when nobody asked and when everything routes, and both read as reachable
+    // here: a question nobody asked must not turn into a finding.
+    let reachable = |(provider, model): (&str, &str)| match provider.is_empty() {
+        true => !env.unrouted_models.contains(model),
         false => env
             .available_providers
             .as_ref()
-            .is_some_and(|a| a.contains(&e.provider)),
+            .is_some_and(|a| a.contains(provider)),
     };
     if env.available_providers.is_some()
         && !stage.model.models.is_empty()
-        && !stage.model.models.iter().any(reachable)
+        && !stage.model.models.iter().map(route).any(reachable)
     {
         // Written the way the blueprint writes them, so the list in the message
         // can be found in the file: a bare name for an entry that left the route
-        // open, `provider/model` for one that pinned it. Rendering an open entry
-        // as `/gpt-5.5` would show a route it does not claim to have.
-        let tried: Vec<String> = stage
-            .model
-            .models
-            .iter()
-            .map(|e| match e.provider.is_empty() {
-                true => e.model.clone(),
-                false => format!("{}/{}", e.provider, e.model),
-            })
-            .collect();
+        // open, `provider/model` for one that pinned it.
+        let tried: Vec<String> = stage.model.models.iter().map(ToString::to_string).collect();
         findings.push(
             LintFinding::new(
                 LintSeverity::Warning,
@@ -884,7 +821,7 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
                     tried.join(", ")
                 ),
             )
-            .in_stage(&stage.name)
+            .in_stage(stage.name.as_str())
             .with_fix("run `lev setup` to configure one of them, or name a model you have"),
         );
     }
@@ -892,42 +829,45 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
     findings
 }
 
-/// A bare `compact` edge that would summarize a region holding a deliverable.
-///
-/// `transform = "compact"` reads as "summarize the transcript on the way out"
-/// and means "summarize every region that is not pinned", which includes the
-/// ones holding the run's results. Figures that survive a paraphrase are no
-/// longer figures, and nothing about the blueprint is malformed, so the only
-/// place to say so is here.
-///
-/// Scoped to regions declared `required` rather than every region a bare
-/// compact touches. `required` is the author saying "a stage must populate
-/// this", which is the closest thing a blueprint has to "this is a
-/// deliverable" - warning on all of them would fire on every agent that ever
-/// wrote `transform = "compact"` and teach people to ignore it.
-pub(super) fn lint_compacted_deliverables(blueprint: &Blueprint) -> Vec<LintFinding> {
-    use leviath_core::blueprint::EdgeTransform;
+/// Whether a region is one an edge's whole-context summary reaches: anything
+/// but the regions kept for the whole run.
+fn is_stage_specific(kind: &RegionKind) -> bool {
+    !matches!(
+        kind,
+        RegionKind::Pinned
+            | RegionKind::CompactHistory { .. }
+            | RegionKind::Keyed { .. }
+            | RegionKind::Custom { pinned: true, .. }
+    )
+}
 
+/// A `compact` edge that would summarize a region holding a deliverable.
+///
+/// `carry = { compact = {} }` reads as "summarize the transcript on the way
+/// out" and means "summarize every region that is not kept for the whole
+/// run", which includes the ones holding the run's results. Figures that
+/// survive a paraphrase are no longer figures, and nothing about the
+/// blueprint is malformed, so the only place to say so is here.
+///
+/// Scoped to regions declared `required` rather than every region a compact
+/// touches. `required` is the author saying "a stage must populate this",
+/// which is the closest thing a blueprint has to "this is a deliverable" -
+/// warning on all of them would teach people to ignore it.
+pub(super) fn lint_compacted_deliverables(graph: &RunGraph) -> Vec<LintFinding> {
     // Named once per region, however many edges would summarize it: the fix is
     // on the region, so repeating it per edge is noise.
     let mut at_risk: Vec<&str> = Vec::new();
-    for stage in &blueprint.stages {
-        let layout = stage
-            .context_layout
-            .as_ref()
-            .unwrap_or(&blueprint.context_layout);
-        let bare_compact = stage
-            .transitions
-            .iter()
-            .flat_map(|edges| edges.values())
-            .any(|e| matches!(e.transform, EdgeTransform::Compact { .. }));
-        if !bare_compact {
+    for stage in &graph.stages {
+        let compacts = graph
+            .edges_from(stage.name.as_str())
+            .any(|e| matches!(e.carry, EdgeCarry::Compact { .. }));
+        if !compacts {
             continue;
         }
-        for region in &layout.regions {
+        for region in &graph.layout_for(stage).regions {
             if region.required
                 && region.summarizable
-                && leviath_runtime::is_stage_specific(&region.kind)
+                && is_stage_specific(&region.kind)
                 && !at_risk.contains(&region.name.as_str())
             {
                 at_risk.push(region.name.as_str());
@@ -943,15 +883,14 @@ pub(super) fn lint_compacted_deliverables(blueprint: &Blueprint) -> Vec<LintFind
                 "compact-summarizes-deliverable",
                 format!(
                     "region '{region}' is declared required - a stage must populate it - \
-                     and a `transform = \"compact\"` edge would hand it to the summarizer \
-                     on the way out, so whatever the stage wrote reaches later stages \
-                     paraphrased"
+                     and an edge carrying `compact` would hand it to the summarizer on the \
+                     way out, so whatever the stage wrote reaches later stages paraphrased"
                 ),
             )
             .with_fix(format!(
-                "add summarizable = false to [context.regions] {region} if its content \
-                 does not survive a rewrite, or name the regions to summarize with \
-                 transform = \"custom\""
+                "set summarizable = false on region '{region}' if its content does not \
+                 survive a rewrite, or name the regions to summarize with \
+                 carry = {{ custom = {{ ... }} }}"
             ))
         })
         .collect()
@@ -960,11 +899,10 @@ pub(super) fn lint_compacted_deliverables(blueprint: &Blueprint) -> Vec<LintFind
 /// A `required` region no stage is able to populate, so nothing enforces it.
 ///
 /// `required` reads as a guarantee: a stage may not complete while the region is
-/// empty. The runtime gate that provides it
-/// (`leviath_runtime::pipeline::unmet_required_regions`) opens with an escape -
-/// a stage granting neither `context_write` nor `context_append` is skipped
-/// entirely, because gating a stage that could never populate the region would
-/// loop until the re-entry cap and then proceed anyway.
+/// empty. The runtime gate that provides it opens with an escape - a stage
+/// granting neither `context_write` nor `context_append` is skipped entirely,
+/// because gating a stage that could never populate the region would loop
+/// until the re-entry cap and then proceed anyway.
 ///
 /// That escape is right per stage and wrong per blueprint. If *no* stage using
 /// the layout grants a context-writing tool, the flag is inert everywhere: it
@@ -973,42 +911,33 @@ pub(super) fn lint_compacted_deliverables(blueprint: &Blueprint) -> Vec<LintFind
 /// research run and the report stage invented a bibliography rather than
 /// reporting it had none.
 ///
-/// Caller-seeded regions are exempt for the same reason the runtime exempts
-/// them: the caller owns those, and they are validated at spawn.
-pub(super) fn lint_required_regions_enforceable(blueprint: &Blueprint) -> Vec<LintFinding> {
-    let writes_context = |stage: &leviath_core::Stage| {
-        stage.grants_all_builtins()
-            || stage
-                .available_tools
-                .iter()
-                .any(|t| t == "context_write" || t == "context_append")
+/// Regions an input fills are exempt for the same reason the runtime exempts
+/// them: the caller owns those, and they are checked at spawn.
+pub(super) fn lint_required_regions_enforceable(graph: &RunGraph) -> Vec<LintFinding> {
+    let writes_context = |stage: &StageDef| {
+        grants_all_builtins(stage)
+            || named_tools(stage).any(|t| t == "context_write" || t == "context_append")
     };
 
     let mut findings = Vec::new();
     let mut named: Vec<&str> = Vec::new();
-    for stage in &blueprint.stages {
-        let layout = stage
-            .context_layout
-            .as_ref()
-            .unwrap_or(&blueprint.context_layout);
-        for region in &layout.regions {
+    for stage in &graph.stages {
+        for region in &graph.layout_for(stage).regions {
             if !region.required
-                || matches!(
-                    region.seed,
-                    Some(leviath_core::layout::RegionSeed::CallerInput { .. })
-                )
+                || bound_by_input(graph, region)
                 || named.contains(&region.name.as_str())
             {
                 continue;
             }
             // Any stage sharing this region's layout and able to write context
             // is enough: that stage is where the gate binds.
-            let enforceable = blueprint.stages.iter().any(|s| {
-                let l = s
-                    .context_layout
-                    .as_ref()
-                    .unwrap_or(&blueprint.context_layout);
-                writes_context(s) && l.regions.iter().any(|r| r.name == region.name)
+            let enforceable = graph.stages.iter().any(|s| {
+                writes_context(s)
+                    && graph
+                        .layout_for(s)
+                        .regions
+                        .iter()
+                        .any(|r| r.name == region.name)
             });
             if enforceable {
                 continue;
@@ -1026,7 +955,7 @@ pub(super) fn lint_required_regions_enforceable(blueprint: &Blueprint) -> Vec<Li
                     ),
                 )
                 .with_fix(format!(
-                    "add context_write or context_append to available_tools on the stage that \
+                    "add context_write or context_append to the tools of the stage that \
                      owes '{}', or drop required = true",
                     region.name
                 )),
@@ -1044,13 +973,14 @@ pub(super) fn lint_required_regions_enforceable(blueprint: &Blueprint) -> Vec<Li
 /// only ever runs at the bound, so the bound is the discipline, and a percentage
 /// re-reads that discipline every time the model changes.
 ///
-/// The bundled researcher declares `raw_findings = { kind = "temporary", budget
-/// = "38%" }`. Written against ~200k windows that means "hold the last ~76k of
-/// raw source material" - sane. Resolved against a 1M window the same line means
-/// a 380k ceiling: oldest-first eviction exists, and never triggers, because the
-/// bound is never reached. A measured run grew monotonically from 3k to 196k
-/// tokens per request over 31 requests and burned 3.3M cache-write tokens
-/// without finishing. `max_tokens = 24000` fixed it completely.
+/// The bundled researcher declares a temporary `raw_findings` region at
+/// `budget = "38%"`. Written against ~200k windows that means "hold the last
+/// ~76k of raw source material" - sane. Resolved against a 1M window the same
+/// line means a 380k ceiling: oldest-first eviction exists, and never
+/// triggers, because the bound is never reached. A measured run grew
+/// monotonically from 3k to 196k tokens per request over 31 requests and
+/// burned 3.3M cache-write tokens without finishing. A 24000-token cap fixed
+/// it completely.
 ///
 /// Nothing errored, which is the point. The failure is invisible until the bill
 /// arrives, so it is worth saying out loud at the only moment somebody is
@@ -1058,22 +988,17 @@ pub(super) fn lint_required_regions_enforceable(blueprint: &Blueprint) -> Vec<Li
 ///
 /// Warned once per region name however many layouts declare it: the fix is on
 /// the declaration.
-pub(super) fn lint_unbounded_percentage(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> {
-    let Some((model, window)) = widest_declared_window(blueprint, env) else {
+pub(super) fn lint_unbounded_percentage(graph: &RunGraph, env: &LintEnv) -> Vec<LintFinding> {
+    let Some((model, window)) = widest_declared_window(graph, env) else {
         // No window in hand means no number to put in the sentence, and the
         // sentence is the whole value: "38% might be large" is not actionable.
         return Vec::new();
     };
 
     let mut named: Vec<(&str, usize, f64)> = Vec::new();
-    for layout in std::iter::once(&blueprint.context_layout).chain(
-        blueprint
-            .stages
-            .iter()
-            .filter_map(|s| s.context_layout.as_ref()),
-    ) {
+    for layout in layouts(graph) {
         for region in &layout.regions {
-            let leviath_core::layout::BudgetSpec::Percent {
+            let Budget::Percent {
                 percent, max: None, ..
             } = region.budget
             else {
@@ -1082,10 +1007,17 @@ pub(super) fn lint_unbounded_percentage(blueprint: &Blueprint, env: &LintEnv) ->
             if !evicts_at_its_bound(&region.kind) {
                 continue;
             }
-            if named.iter().any(|(name, _, _)| *name == region.name) {
+            if named
+                .iter()
+                .any(|(name, _, _)| *name == region.name.as_str())
+            {
                 continue;
             }
-            named.push((&region.name, region.budget.resolve(window), percent));
+            named.push((
+                region.name.as_str(),
+                resolve_budget(&region.budget, window),
+                percent,
+            ));
         }
     }
 
@@ -1104,36 +1036,35 @@ pub(super) fn lint_unbounded_percentage(blueprint: &Blueprint, env: &LintEnv) ->
                 ),
             )
             .with_fix(format!(
-                "add max_tokens to [context.regions] {region} - the percentage \
-                 still applies on smaller windows, and the guard keeps eviction \
-                 running on larger ones"
+                "give region '{region}' a cap, budget = {{ percent = \"{pct:.0}%\", max = ... }} - \
+                 the percentage still applies on smaller windows, and the cap keeps \
+                 eviction running on larger ones",
+                pct = percent * 100.0,
             ))
         })
         .collect()
 }
 
-/// The largest context window among the models this blueprint names, and which
+/// The largest context window among the models this graph names, and which
 /// model that is.
 ///
 /// The largest rather than the average: it is the one that turns a modest
 /// percentage into a hoard, and the blueprint will meet it as soon as anybody
 /// runs a stage on it.
-fn widest_declared_window<'a>(blueprint: &Blueprint, env: &'a LintEnv) -> Option<(&'a str, usize)> {
-    blueprint
-        .stages
-        .iter()
-        .flat_map(|stage| stage.model.models.iter())
+fn widest_declared_window<'a>(graph: &RunGraph, env: &'a LintEnv) -> Option<(&'a str, usize)> {
+    model_entries(graph)
+        .map(route)
         // A model that does not write text has no context window in the
         // sense this check means: a 3D generator's "window" is the ceiling
         // its REST call takes a mesh under, and one Meshy stage made every
         // percentage region in the blueprint resolve against it.
-        .filter(|m| {
-            leviath_providers::mime_tables::builtin_mime(&m.provider, &m.model)
+        .filter(|(provider, model)| {
+            leviath_providers::mime_tables::builtin_mime(provider, model)
                 .produces(&leviath_core::mime::text_plain())
         })
-        .filter_map(|m| {
+        .filter_map(|(provider, model)| {
             env.model_windows
-                .get_key_value(&(m.provider.clone(), m.model.clone()))
+                .get_key_value(&(provider.to_string(), model.to_string()))
                 .map(|((_, model), window)| (model.as_str(), *window))
         })
         .max_by_key(|(_, window)| *window)
@@ -1145,12 +1076,12 @@ fn widest_declared_window<'a>(blueprint: &Blueprint, env: &'a LintEnv) -> Option
 /// reach is a mechanism that never runs. Everything else either holds what it is
 /// given (`Pinned`, `Checklist`) or is bounded by something other than a token
 /// count, and a percentage there is exactly as intended.
-fn evicts_at_its_bound(kind: &leviath_core::RegionKind) -> bool {
+fn evicts_at_its_bound(kind: &RegionKind) -> bool {
     matches!(
         kind,
-        leviath_core::RegionKind::Temporary
-            | leviath_core::RegionKind::Clearable
-            | leviath_core::RegionKind::SlidingWindow { .. }
-            | leviath_core::RegionKind::Compacting { .. }
+        RegionKind::Temporary
+            | RegionKind::Clearable
+            | RegionKind::SlidingWindow { .. }
+            | RegionKind::Compacting { .. }
     )
 }

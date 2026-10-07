@@ -1,1400 +1,3601 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://leviath.dev/docs/stable/blueprint.schema.json",
-  "title": "Leviath agent blueprint (agent.leviath)",
-  "description": "The TOML manifest defining a Leviath agent: its stages, the model each one runs on, the tools it may call, and the shape of its context. Written against the parser in crates/leviath-core/src/manifest.rs, and checked against every bundled blueprint by a test in crates/leviath-cli/src/bundled.rs. See https://leviath.dev/docs/agents.",
-  "type": "object",
-  "required": [
-    "agent"
-  ],
-  "additionalProperties": false,
-  "properties": {
-    "agent": {
-      "$ref": "#/$defs/agent"
-    },
-    "stages": {
-      "type": "object",
-      "description": "One entry per stage, keyed by stage name.",
-      "additionalProperties": {
-        "$ref": "#/$defs/stage"
-      }
-    },
-    "context": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "regions": {
-          "type": "object",
-          "description": "One entry per context region, keyed by region name.",
-          "additionalProperties": {
-            "$ref": "#/$defs/region"
-          }
-        },
-        "file_tracking": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "region": {
-              "type": "string",
-              "default": "files"
-            },
-            "track_reads": {
-              "type": "boolean",
-              "default": true
-            },
-            "track_writes": {
-              "type": "boolean",
-              "default": true
-            },
-            "max_file_tokens": {
-              "type": "integer",
-              "minimum": 0
-            }
-          }
-        }
-      }
-    },
-    "tool_permissions": {
-      "$ref": "#/$defs/toolPermissions"
-    },
-    "security": {
-      "type": "object",
-      "description": "Taint tracking for this blueprint. A machine-wide ceiling still applies.",
-      "properties": {
-        "taint_tracking": {
-          "type": "boolean"
-        }
-      }
-    },
-    "sandbox": {
-      "$ref": "#/$defs/sandbox"
-    },
-    "read_paths": {
-      "type": "object",
-      "description": "Paths outside the workdir this agent may read. Inert until the host grants them under [agent_read_paths] in config.toml.",
-      "additionalProperties": false,
-      "properties": {
-        "allow": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "description": "An exact path (granting its subtree), `glob:<pattern>`, or `regex:<pattern>` (auto-anchored). `~/` expands; a relative path resolves against the workdir."
-          }
-        }
-      }
-    },
-    "safe_commands": {
-      "type": "object",
-      "description": "Tools and shell command prefixes this agent would like to run without an approval prompt. Inert until the host opts in under [agent_safe_commands.<name>] allow_blueprint or [security] allow_blueprint_safe_commands in config.toml.",
-      "additionalProperties": false,
-      "properties": {
-        "tools": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "description": "A tool name, exactly as the model calls it."
-          }
-        },
-        "shell": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "description": "A program, optionally with the subcommand that narrows it: \"rg\", \"cargo test\". No flags, arguments, redirects, quotes or chained commands."
-          }
-        }
-      }
-    },
-    "compaction": {
-      "type": "object",
-      "description": "The model that summarizes a compacting region. Skipped without error when its provider is not registered, so a run on another provider loses compaction rather than failing.",
-      "additionalProperties": false,
-      "properties": {
-        "provider": {
-          "type": "string"
-        },
-        "model": {
-          "type": "string"
-        },
-        "system_prompt": {
-          "type": "string"
-        },
-        "max_summary_tokens": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "temperature": {
-          "type": "number"
-        }
-      }
-    },
-    "repetition_detection": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "max_repeat_calls": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "max_readonly_streak": {
-          "type": "integer",
-          "minimum": 1
-        }
-      }
-    },
-    "mime_types": {
-      "type": "object",
-      "description": "Rows this agent adds to the mime registry, keyed by type/subtype or type/*, layered over the operator's rows for this agent's runs. Name only what the row changes.",
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "family": {
-            "type": "string",
-            "description": "What providers key their encoders on: text, image, audio, video, document, model, binary, or a name of your own."
-          },
-          "text": {
-            "type": "boolean",
-            "description": "The bytes are UTF-8 and may travel inline and reach any text model as text."
-          },
-          "tokens": {
-            "type": "object",
-            "description": "Exactly one of per_byte, per_pixel (with max), per_second or fixed.",
-            "additionalProperties": false,
-            "properties": {
-              "per_byte": {
-                "type": "number"
-              },
-              "per_pixel": {
-                "type": "integer"
-              },
-              "max": {
-                "type": "integer"
-              },
-              "per_second": {
-                "type": "integer"
-              },
-              "fixed": {
-                "type": "integer"
-              }
-            }
-          },
-          "extensions": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Extensions, without the dot, that imply this type."
-          },
-          "magic": {
-            "type": "string",
-            "description": "A hex prefix that identifies the bytes."
-          },
-          "stand_in": {
-            "type": "string",
-            "description": "What a consumer that cannot take the type sees; {type} {name} {size} {dims} {duration}."
-          },
-          "check": {
-            "type": "string",
-            "description": "A Rhai script, relative to the blueprint's directory, whose check(bytes, mime_type) refuses bytes that are not what they claim. An empty string lifts a check a broader row put on the type."
-          }
-        }
-      }
-    },
-    "transforms": {
-      "type": "array",
-      "description": "How context maps when one blueprint hands off to another.",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "from_blueprint": {
-            "type": "string"
-          },
-          "to_blueprint": {
-            "type": "string"
-          },
-          "mappings": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "from_region": {
-                  "type": "string"
-                },
-                "to_region": {
-                  "type": "string"
-                },
-                "transform": {
-                  "enum": [
-                    "direct",
-                    "summarize",
-                    "extract"
-                  ]
-                },
-                "fields": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "dependencies": {
-      "type": "array",
-      "description": "Things that must be in place before the agent runs: an MCP server, an environment variable, a program on PATH, or a condition a Rhai script checks. Declared, never granted; an unmet required dependency fails the spawn before any billed inference.",
-      "items": {
-        "$ref": "#/$defs/dependency"
-      }
-    }
-  },
   "$defs": {
-    "agent": {
-      "type": "object",
+    "Admission": {
+      "description": "What a region does when a write does not fit.\n\nThe default is what every region did before this existed: make room. That\nis the right behaviour for a transcript, where the oldest turn is the least\nuseful thing present and losing it costs nothing anyone will notice.\n\nIt is the wrong behaviour for a region holding material the agent chose to\nkeep. There, silently dropping the oldest entry is a decision about what\nmatters, taken by whichever write happened to arrive when the region was\nfull - and the agent never learns it happened. [`Admission::Reject`] hands\nthat decision back: the write fails, the agent is told the region is full,\nand it releases what it is finished with before adding more.",
+      "oneOf": [
+        {
+          "const": "evict",
+          "description": "Make room for the write - roll off the oldest entry, or let the\nwindow-level cascade reclaim the region.",
+          "type": "string"
+        },
+        {
+          "const": "reject",
+          "description": "Refuse the write and say so. Nothing already in the region is lost to a\nwrite the agent did not know would displace it.",
+          "type": "string"
+        }
+      ]
+    },
+    "AnswerStyle": {
+      "description": "How a person answers an interaction point.",
+      "oneOf": [
+        {
+          "const": "free_text",
+          "description": "Free text.",
+          "type": "string"
+        },
+        {
+          "const": "multiple_choice",
+          "description": "One of the point's options.",
+          "type": "string"
+        },
+        {
+          "const": "confirm",
+          "description": "Yes or no.",
+          "type": "string"
+        }
+      ]
+    },
+    "ArtifactDef": {
       "additionalProperties": false,
+      "description": "A file the final output hands back.",
       "properties": {
-        "name": {
-          "type": "string",
-          "default": "unnamed"
-        },
-        "version": {
-          "type": "string",
-          "default": "0.1.0"
-        },
         "description": {
-          "type": "string",
-          "default": ""
-        },
-        "entry_stage": {
-          "type": "string",
-          "description": "The stage a run starts in. Defaults to the first stage declared."
-        },
-        "max_child_depth": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "tool_rescan": {
-          "enum": [
-            "at_spawn",
-            "after_writes",
-            "before_dispatch"
-          ],
-          "default": "at_spawn",
-          "description": "When a run looks for tools again. `at_spawn` fixes the set when the run starts. `after_writes` adds the workdir's tools/ to the scan set and looks again before the next turn, when the agent itself writes or installs a script. `before_dispatch` also looks at those directories before each batch of tool calls, which is how a tool that arrived any other way is noticed."
-        },
-        "dynamic_tools": {
-          "type": "boolean",
-          "default": false,
-          "deprecated": true,
-          "description": "Renamed to `tool_rescan`. `true` still reads as `after_writes`."
-        },
-        "batch_tool_hint": {
-          "type": "boolean"
-        },
-        "shell_hint": {
-          "type": "boolean"
-        },
-        "nudge": {
-          "$ref": "#/$defs/nudge"
-        },
-        "output": {
-          "$ref": "#/$defs/outputSpec"
-        }
-      }
-    },
-    "outputSpec": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "What shape the run's final output should take. Declared by the agent, narrowed by a stage, and overridable by whoever starts the run.",
-      "properties": {
-        "format": {
-          "type": "string",
-          "description": "A label for the shape, carried to the model and recorded beside the answer. Deliberately not an enum: any value is valid, and one the engine has never seen is simply not parsed. json, xml, yaml, csv and toml get a free well-formedness check; anything else needs a validator to be checked at all."
-        },
-        "instructions": {
-          "type": "string",
-          "description": "Free-form guidance folded into the submit_output tool description and the stage's system prompt. Where a format the model has never seen gets explained."
-        },
-        "example": {
-          "type": "string",
-          "description": "A literal sample shown to the model verbatim. The most effective lever for an unusual format, and the reason one needs no code support."
-        },
-        "schema": {
-          "type": "object",
-          "description": "A JSON Schema describing the answer's shape. Separate from format, which asks only whether the answer parses. A failing submission is refused back to the model to correct. A schema that itself will not compile skips the check and records the submission unchecked, unlike a validator, whose failures follow on_validator_error."
-        },
-        "validator": {
-          "type": "string",
-          "description": "A .rhai script deciding whether an answer is valid, as a path relative to the blueprint directory. For a format the engine cannot parse and a shape a JSON Schema cannot describe. Defines fn validate(content), returning () when fine or a string saying what is wrong. Compiled at spawn, so a broken script fails fast."
-        },
-        "on_validator_error": {
-          "enum": [
-            "reject",
-            "accept"
-          ],
-          "default": "reject",
-          "description": "What happens to a submission when the validator itself cannot run: it threw, ran out of operations, or returned the wrong type. reject (the default) refuses the submission and sends the script's error back to the model as retry feedback; accept records the answer unchecked. The broken script is flagged on the run either way."
-        },
-        "overwrite_artifacts": {
-          "type": "boolean",
-          "description": "Whether an artifact named after a part the run produced (an image a model drew, a mesh a provider built) may replace a different file already at that path in the working directory. Unset defers to [mime] overwrite_artifacts in the user's config, which defaults to false: the existing file is left alone and the part is written beside it as <stem>-<sha8>.<ext>, which is the path the answer records."
-        },
-        "artifacts": {
-          "type": "array",
-          "description": "Files the stage hands back beside its answer, by name and type. A submission is checked against them: a required one must be present, and one that is present must be of the declared type. Accepted files are stored as parts of the run and served by the API.",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "name",
-              "type"
-            ],
-            "properties": {
-              "name": {
-                "type": "string",
-                "description": "What the submission calls it: final, scene, track."
-              },
-              "type": {
-                "type": "string",
-                "description": "The mime type it must be, or a pattern it must match (video/*)."
-              },
-              "required": {
-                "type": "boolean",
-                "default": false,
-                "description": "Whether a submission without it is refused."
-              },
-              "description": {
-                "type": "string",
-                "description": "What it is for, shown to the model."
-              }
-            }
-          }
-        }
-      }
-    },
-    "stage": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "mode": {
-          "description": "How the stage runs. `interactive_points` holds at each declared interaction point. `output` produces the run's final answer and nothing else. An unrecognized value is a load error, not a silent fallback to autonomous.",
-          "enum": [
-            "autonomous",
-            "interactive",
-            "interactive_points",
-            "fan_out",
-            "fan_out_merge",
-            "output"
+          "default": null,
+          "description": "What it is.",
+          "type": [
+            "string",
+            "null"
           ]
         },
-        "description": {
+        "mime_type": {
+          "description": "Its mime type.",
           "type": "string"
         },
-        "system_prompt": {
+        "name": {
+          "description": "The file's name.",
           "type": "string"
         },
-        "transition_prompt": {
-          "type": "string"
-        },
-        "available_tools": {
-          "type": "array",
-          "description": "The only tools the model is offered here. Anything absent is refused at dispatch. An entry may be a tool name or a group token: `@builtin` (every compiled-in tool), `@subagent` (spawn, check, wait, send, kill), `@scripts` (every Rhai tool, the agent's own and the global ones), `@mcp` (every tool every connected server advertises) or `@all`. A group grants whatever exists at the time the stage runs, so a script or server installed later is offered without editing the manifest. Groups never grant submit_output or fan_out; name those, or use the mode that carries them.",
-          "items": {
-            "type": "string"
-          }
-        },
-        "available_connectors": {
-          "type": "array",
-          "description": "MCP servers whose whole tool set this stage may use, by server name. Resolved at spawn against what each server actually advertises, and merged with available_tools - so a tool the server gains later is offered without editing the manifest.",
-          "items": {
-            "type": "string"
-          },
-          "$comment": "The per-server form. `@mcp` in available_tools grants every connected server at once; this field is for granting one server and not another."
-        },
-        "require_output": {
-          "type": "boolean",
+        "required": {
           "default": false,
-          "description": "This stage must call submit_output before it transitions. Unlike required_tools, which is never checked afterwards, this is enforced: a stage that finishes without submitting is nudged and re-run, bounded, then let through with the run's output_forced flag set. `mode = \"output\"` sets it for you.",
-          "$comment": "A stage that sets this must also grant submit_output; lev validate refuses it otherwise."
+          "description": "Whether the answer must include it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "mime_type"
+      ],
+      "type": "object"
+    },
+    "BlueprintMeta": {
+      "additionalProperties": false,
+      "description": "What a blueprint says about itself.",
+      "properties": {
+        "description": {
+          "default": null,
+          "description": "What it does, in a sentence or two.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "output": {
-          "$ref": "#/$defs/outputSpec"
+        "name": {
+          "description": "The name it is installed and run by.",
+          "type": "string"
         },
-        "input": {
-          "type": "object",
+        "version": {
+          "description": "Its version, bumped when its graph changes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "BlueprintRef": {
+      "additionalProperties": false,
+      "description": "An installed blueprint, optionally pinned to one revision.",
+      "properties": {
+        "digest": {
+          "default": null,
+          "description": "The revision to run. `None` runs whatever is installed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The blueprint's name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Bound": {
+      "anyOf": [
+        {
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "format": "double",
+          "type": "number"
+        }
+      ],
+      "description": "A number bound, whole or not."
+    },
+    "Budget": {
+      "anyOf": [
+        {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "pattern": "^\\s*[-+]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][-+]?[0-9]+)?\\s*%\\s*$",
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/ClampedPercent"
+        }
+      ]
+    },
+    "ClampedPercent": {
+      "additionalProperties": false,
+      "description": "A share of the window, clamped.",
+      "properties": {
+        "max": {
+          "description": "The most tokens.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min": {
+          "description": "The fewest tokens.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "percent": {
+          "description": "The share: `\"35%\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "percent"
+      ],
+      "type": "object"
+    },
+    "CodeRef": {
+      "description": "Custom code. Where the code comes from is kept apart from what it is used\nfor, so a hook, a validator or a region script names code the same way.",
+      "oneOf": [
+        {
           "additionalProperties": false,
-          "description": "What this stage takes as typed parts, beyond what the regions it sees already say.",
+          "description": "A file beside a blueprint, by path relative to the blueprint's\ndirectory. Only a blueprint can name one.",
           "properties": {
-            "accepts": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "Mime type patterns the stage takes as parts (image/*, audio/wav). Left off, the union of the visible regions' accepts. Shown by lev validate and used to prefer a model that covers them."
-            },
-            "as_text": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "Mime type patterns whose parts reach this stage's model as text whatever the model takes: the text bypass, forced. For a type the registry already calls text this changes nothing."
+            "file": {
+              "type": "string"
             }
-          }
-        },
-        "required_tools": {
-          "type": "array",
-          "description": "Tools this stage cannot work without. Every entry must also appear in available_tools. Survives an unattended run, where the blocking interaction tools are otherwise withheld.",
-          "items": {
-            "type": "string"
-          }
-        },
-        "max_iterations": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "max_revisits": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "requires_children": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_complete": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_as_worker": {
-          "type": "boolean",
-          "default": false
-        },
-        "accepts_messages": {
-          "type": "boolean",
-          "default": true
-        },
-        "allow_blocking_tools": {
-          "type": "boolean",
-          "default": false
-        },
-        "batch_tool_hint": {
-          "type": "boolean"
-        },
-        "shell_hint": {
-          "type": "boolean"
-        },
-        "model": {
-          "$ref": "#/$defs/modelConfig"
-        },
-        "nudge": {
-          "$ref": "#/$defs/nudge"
-        },
-        "hooks": {
-          "$ref": "#/$defs/stageHooks"
-        },
-        "sandbox": {
-          "$ref": "#/$defs/sandbox"
-        },
-        "security": {
+          },
+          "required": [
+            "file"
+          ],
           "type": "object"
         },
-        "tool_accepts": {
-          "type": "object",
-          "description": "What each tool may be handed at this stage: a tool name to a list of mime type patterns. A stored part outside the list is out of that tool's reach here (spawn_agent's parts, a script's read_part and list_parts, context_export). Inline text is never hidden.",
-          "additionalProperties": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
+        {
+          "additionalProperties": false,
+          "description": "The code itself.",
+          "properties": {
+            "inline": {
               "type": "string"
             }
-          }
+          },
+          "required": [
+            "inline"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CompactionDef": {
+      "additionalProperties": false,
+      "description": "How the conversation is summarized when the context fills.",
+      "properties": {
+        "max_summary_tokens": {
+          "description": "The longest summary, in tokens.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
         },
-        "tool_permissions": {
-          "$ref": "#/$defs/toolPermissions"
+        "model": {
+          "$ref": "#/$defs/ModelRef",
+          "description": "The model that writes the summary."
         },
-        "tool_routing": {
-          "type": "object",
-          "description": "Where a tool result lands in context.",
+        "system_prompt": {
+          "default": null,
+          "description": "Its system prompt, over the default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "temperature": {
+          "description": "Its sampling temperature. Kept as the number written, so a `0.2`\nreads back as `0.2`.",
+          "format": "double",
+          "type": "number"
+        },
+        "user_prompt_template": {
+          "default": null,
+          "description": "Its request, over the default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "model",
+        "max_summary_tokens",
+        "temperature"
+      ],
+      "type": "object"
+    },
+    "ContentTransform": {
+      "description": "How carried content changes on the way to a child.",
+      "oneOf": [
+        {
+          "const": "direct",
+          "description": "As it is.",
+          "type": "string"
+        },
+        {
+          "const": "summarize",
+          "description": "Summarized.",
+          "type": "string"
+        },
+        {
           "additionalProperties": false,
+          "description": "Only the named fields of JSON content.",
           "properties": {
-            "default_region": {
-              "type": "string"
+            "extract": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "extract"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ContextTransformDef": {
+      "additionalProperties": false,
+      "description": "How a child run's context is built from its parent's, by blueprint.",
+      "properties": {
+        "from": {
+          "description": "The parent's blueprint.",
+          "type": "string"
+        },
+        "mappings": {
+          "description": "Which parent region fills which child region.",
+          "items": {
+            "$ref": "#/$defs/RegionMappingDef"
+          },
+          "type": "array"
+        },
+        "to": {
+          "description": "The child's blueprint.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "mappings"
+      ],
+      "type": "object"
+    },
+    "DependencyDef": {
+      "additionalProperties": false,
+      "description": "Something the run needs from the machine.",
+      "properties": {
+        "description": {
+          "default": null,
+          "description": "What it is for.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "install": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InstallDef"
             },
-            "keep_results": {
-              "type": "boolean",
-              "description": "Whether a tool's result stays in the region it was routed to. False sends it to `scratch` instead, where the stage can drop it."
-            },
-            "persist": {
-              "type": "boolean",
-              "deprecated": true,
-              "description": "Renamed to `keep_results`. Still read; `lev update` rewrites it."
-            },
-            "max_result_tokens": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "overrides": {
-              "type": "object",
-              "description": "Tool name to a region name, or to a table carrying that tool's region, its result ceiling, or both.",
-              "additionalProperties": {
-                "oneOf": [
-                  {
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How `lev deps install` gets it."
+        },
+        "name": {
+          "description": "What it is called in messages.",
+          "type": "string"
+        },
+        "needs": {
+          "$ref": "#/$defs/Needs",
+          "description": "What must be present."
+        },
+        "remedy": {
+          "default": null,
+          "description": "How to get it, as a person reads it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required": {
+          "default": true,
+          "description": "Whether a spawn is refused without it. Otherwise it only warns.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "needs"
+      ],
+      "type": "object"
+    },
+    "EdgeCarry": {
+      "description": "What happens to the context when a run takes an edge.",
+      "oneOf": [
+        {
+          "const": "direct",
+          "description": "Everything carries over.",
+          "type": "string"
+        },
+        {
+          "const": "clear",
+          "description": "Every clearable region is emptied.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The conversation is summarized.",
+          "properties": {
+            "compact": {
+              "properties": {
+                "prompt": {
+                  "default": null,
+                  "description": "The summarizing prompt, over the default.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "compact"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Each region is carried, compacted or cleared by name.",
+          "properties": {
+            "custom": {
+              "properties": {
+                "carry": {
+                  "default": [],
+                  "description": "Regions carried as they are.",
+                  "items": {
+                    "description": "A region name.",
                     "type": "string"
                   },
-                  {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "minProperties": 1,
-                    "properties": {
-                      "region": {
-                        "type": "string"
-                      },
-                      "max_result_tokens": {
-                        "type": "integer",
-                        "minimum": 0
-                      }
-                    }
-                  }
-                ]
-              }
-            },
-            "max_result_tokens_per_tool": {
-              "type": "object",
-              "description": "Tool name to that tool's result ceiling, overriding max_result_tokens for it.",
-              "additionalProperties": {
-                "type": "integer",
-                "minimum": 0
-              }
+                  "type": "array"
+                },
+                "clear": {
+                  "default": [],
+                  "description": "Regions emptied.",
+                  "items": {
+                    "description": "A region name.",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "compact": {
+                  "default": [],
+                  "description": "Regions summarized.",
+                  "items": {
+                    "description": "A region name.",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "compact_prompt": {
+                  "default": null,
+                  "description": "The summarizing prompt, over the default.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
             }
-          }
+          },
+          "required": [
+            "custom"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EdgeCondition": {
+      "description": "When a run takes an edge.",
+      "oneOf": [
+        {
+          "const": "always",
+          "description": "When the stage ends normally.",
+          "type": "string"
         },
-        "output_routing": {
-          "type": "object",
-          "description": "Where the model's produced parts go, by mime type: a mime pattern (image/png, image/*, */*) to a region name. A reply that mixes text and media is split part by part; each part goes to the most specific matching pattern's region, and text and unmatched parts stay in conversation. The target need only be a region some layout declares, so a stage can hand a produced file to a later stage or to the user.",
-          "additionalProperties": {
-            "type": "string"
-          }
+        {
+          "const": "error",
+          "description": "When the stage fails.",
+          "type": "string"
         },
-        "context": {
-          "type": "object",
+        {
+          "const": "max_iterations",
+          "description": "When the stage reaches its iteration cap.",
+          "type": "string"
+        },
+        {
+          "const": "llm_choice",
+          "description": "When the model picks it.",
+          "type": "string"
+        },
+        {
+          "const": "dead_end",
+          "description": "When no other edge applies.",
+          "type": "string"
+        },
+        {
+          "const": "stuck",
+          "description": "When the stage is stuck, by the edge's `stuck` rule.",
+          "type": "string"
+        }
+      ]
+    },
+    "EdgeDef": {
+      "additionalProperties": false,
+      "description": "An edge from one stage to another.",
+      "properties": {
+        "carry": {
+          "$ref": "#/$defs/EdgeCarry",
+          "default": "direct",
+          "description": "What happens to the context on the way."
+        },
+        "from": {
+          "description": "The stage it leaves.",
+          "type": "string"
+        },
+        "gate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GateDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What must be true before the run may take it."
+        },
+        "hint": {
+          "default": null,
+          "description": "What the model is told about it when it picks the next edge.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The edge's name, unique among the edges leaving `from`.",
+          "type": "string"
+        },
+        "stuck": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StuckDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When the stage counts as stuck, for a `stuck` edge."
+        },
+        "to": {
+          "description": "The stage it enters.",
+          "type": "string"
+        },
+        "when": {
+          "$ref": "#/$defs/EdgeCondition",
+          "default": "always",
+          "description": "When the run takes it."
+        }
+      },
+      "required": [
+        "name",
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "Eviction": {
+      "description": "How a sliding window drops old entries.",
+      "oneOf": [
+        {
+          "const": "per_item",
+          "description": "One turn at a time.",
+          "type": "string"
+        },
+        {
           "additionalProperties": false,
+          "description": "In bulk, once the window is this many entries over its cap, back down\nto the cap. The prefix stays stable in between, for prompt caching.",
           "properties": {
-            "regions": {
-              "type": "object",
-              "additionalProperties": {
-                "$ref": "#/$defs/region"
-              }
-            },
-            "hide": {
-              "type": "array",
-              "description": "Regions this stage leaves out of its prompt. Hidden, not destroyed: the content is kept and every other stage sees it. Names must be declared by a layout in this blueprint, and the always-visible regions (conversation, tool_results, final_output, stage_instructions) cannot be hidden.",
-              "items": {
-                "type": "string"
-              }
-            },
-            "reset": {
-              "type": "array",
-              "description": "Regions emptied when this stage is entered, so it starts on a clean slate. Unlike hide, this clears the content (gone, not hidden); a re-entered stage clears it each visit. conversation can be reset. Names must be declared by a layout in this blueprint.",
-              "items": {
-                "type": "string"
-              }
+            "bulk": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
             }
-          }
+          },
+          "required": [
+            "bulk"
+          ],
+          "type": "object"
         },
-        "transitions": {
-          "type": "object",
-          "description": "Outgoing edges, keyed by target stage name. An empty table marks a terminal stage.",
-          "additionalProperties": {
-            "$ref": "#/$defs/transition"
-          }
+        {
+          "additionalProperties": false,
+          "description": "Summarize this many of the oldest entries once the cap is reached.",
+          "properties": {
+            "compact": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "compact"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FanOutDef": {
+      "additionalProperties": false,
+      "description": "A fan-out stage: split work over worker runs, then merge.",
+      "properties": {
+        "max_attempts": {
+          "default": null,
+          "description": "How many times the stage is asked again to call `fan_out` when it\nends without starting any workers, before it is let through with\nnone. `0` lets it through at once.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
-        "interaction_points": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/interactionPoint"
-          }
-        },
-        "on_worker_failure": {
-          "enum": [
-            "continue",
-            "fail_all"
+        "max_items": {
+          "default": null,
+          "description": "The most work items one fan-out may have, at least one. Left out,\nevery item the split makes runs.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
           ]
         },
         "max_workers": {
-          "type": "integer",
+          "default": null,
+          "description": "The most workers at once, at least one. Left out, every item starts\nat once and the inference pool paces the model calls.",
+          "format": "uint32",
           "minimum": 0,
-          "default": 30,
-          "description": "How many workers run at once. 0 means unlimited: every work item starts as soon as the split has produced it, and the daemon's inference pool paces the requests."
-        },
-        "worker_agent": {
-          "type": "string"
-        },
-        "worker_stage": {
-          "type": "string"
-        },
-        "worker_query": {
-          "type": "string"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "merge_stage": {
-          "type": "string"
+          "default": null,
+          "description": "The stage the merged results go to.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "split_prompt": {
-          "type": "string"
+        "on_worker_failure": {
+          "$ref": "#/$defs/WorkerFailure",
+          "default": "continue",
+          "description": "What one worker's failure does to the rest."
         },
         "results_region": {
-          "type": "string",
-          "description": "Context region the consolidated worker report is written to. Defaults to conversation, which is also carrying the message history. Worth naming when the results are bulky: the region's budget is what each worker's share is divided from."
+          "default": null,
+          "description": "The region the workers' results land in.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "max_items": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Most work items the split may produce. 0 (or no key) means however many it produces. Distinct from max_workers, which caps how many run at once. This caps how many exist at all, bounding both the run's cost and each worker's share of the results region."
+        "split_prompt": {
+          "default": "",
+          "description": "The prompt that asks the model to split the work.",
+          "type": "string"
         },
-        "max_attempts": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 3,
-          "description": "How many times this stage is asked again when it ends without having called the fan_out tool, before it is let through without workers. Raise it for a small or local model that needs more than a nudge; 0 lets the stage through on its first refusal. Separate from max_revisits, which bounds how often the graph may re-enter the stage."
+        "worker": {
+          "$ref": "#/$defs/WorkerSource",
+          "description": "What each worker runs."
         }
-      }
+      },
+      "required": [
+        "worker"
+      ],
+      "type": "object"
     },
-    "modelConfig": {
-      "type": "object",
-      "description": "Which model this stage runs on. `models` is an ordered fallback list: the first entry whose provider is registered wins.",
+    "FileTrackingDef": {
       "additionalProperties": false,
+      "description": "Which files the run has read and written, kept in a region.",
       "properties": {
-        "models": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/modelEntry"
-          }
+        "max_file_tokens": {
+          "default": null,
+          "description": "The most tokens one file's entry may take.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
-        "provider": {
-          "type": "string",
-          "description": "Back-compat shorthand for a single-entry `models` list."
+        "region": {
+          "description": "The region the list lives in.",
+          "type": "string"
         },
-        "model": {
-          "type": "string",
-          "description": "Back-compat shorthand, paired with `provider`."
-        },
-        "fallbacks": {
-          "type": "array",
-          "description": "Back-compat: folded onto the end of `models`.",
-          "items": {
-            "$ref": "#/$defs/modelEntry"
-          }
-        },
-        "allow_user_default": {
-          "type": "boolean",
+        "track_reads": {
           "default": true,
-          "description": "Whether the host's default model may be used when nothing listed is registered."
+          "description": "Whether reads are listed.",
+          "type": "boolean"
         },
-        "request_timeout_secs": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "parameters": {
-          "type": "object",
-          "description": "Passed to the provider verbatim, so the accepted keys are the provider's. The one key Leviath reads itself is max_output_tokens: a token count, a percentage of the model's context window (\"40%\"), or a percentage of a region's budget (\"100% of claims\").",
-          "additionalProperties": true
+        "track_writes": {
+          "default": true,
+          "description": "Whether writes are listed.",
+          "type": "boolean"
         }
-      }
+      },
+      "required": [
+        "region"
+      ],
+      "type": "object"
     },
-    "modelEntry": {
-      "description": "A model this stage may run on. Either a bare model name, which leaves the route to whichever configured provider serves it, or a table that pins a provider for a model only one route can reach (a local or self-hosted model). Entries are tried in order.",
+    "GateDef": {
+      "additionalProperties": false,
+      "description": "What must be true before a run may take an edge.",
+      "properties": {
+        "max_attempts": {
+          "default": null,
+          "description": "How many times the gate holds the run back before letting it through.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "default": null,
+          "description": "What the model is told when the gate holds it back.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "region": {
+          "default": null,
+          "description": "For `require_modifications`: a region whose holding something counts\nas the stage's change, so a stage that writes its work there passes\nwithout writing a file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "require_modifications": {
+          "default": false,
+          "description": "The stage must have changed a file.",
+          "type": "boolean"
+        },
+        "require_no_open_items": {
+          "default": null,
+          "description": "A checklist region that must have no open items.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "require_region_entries": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RegionCount"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A region that must hold at least so many entries."
+        },
+        "require_region_updated": {
+          "default": null,
+          "description": "A region the stage must have written to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "require_regions": {
+          "default": [],
+          "description": "Regions that must not be empty.",
+          "items": {
+            "description": "A region name.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tools": {
+          "default": [],
+          "description": "For `require_modifications`: tools that count as changing a file,\nbeside `write_file` and `edit_file`. Only a tool the stage has counts.",
+          "items": {
+            "description": "A tool name.",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "InputDecl": {
+      "additionalProperties": false,
+      "description": "A declared input.",
+      "properties": {
+        "binds": {
+          "default": [],
+          "description": "Where the value goes.",
+          "items": {
+            "$ref": "#/$defs/InputSlot"
+          },
+          "type": "array"
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The value used when a spawn does not supply one."
+        },
+        "description": {
+          "default": null,
+          "description": "What the input is for, as a form or an agent reads it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The input's name, as a caller writes it.",
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "description": "Whether a spawn must supply it. An input with a `default` is never\nmissing.",
+          "type": "boolean"
+        },
+        "type": {
+          "$ref": "#/$defs/InputType",
+          "description": "Its type."
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "type": "object"
+    },
+    "InputSlot": {
+      "anyOf": [
+        {
+          "enum": [
+            "output_format",
+            "output_instructions"
+          ],
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/SlotTable"
+        }
+      ]
+    },
+    "InputType": {
+      "anyOf": [
+        {
+          "enum": [
+            "text",
+            "bool",
+            "int",
+            "float",
+            "file",
+            "path",
+            "model",
+            "blueprint",
+            "duration",
+            "url"
+          ],
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/TypeTable"
+        }
+      ]
+    },
+    "InputValue": {
+      "description": "A checked input value. Each variant matches one [`InputType`].",
       "oneOf": [
         {
-          "type": "string",
-          "description": "A model name with no route. Every configured provider is asked which of them serves it, the user's default provider first."
+          "additionalProperties": false,
+          "description": "A `text` value.",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
         },
         {
-          "type": "object",
+          "additionalProperties": false,
+          "description": "A `bool` value.",
+          "properties": {
+            "bool": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "bool"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An `int` value.",
+          "properties": {
+            "int": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "int"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A `float` value.",
+          "properties": {
+            "float": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "float"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A `choice` value.",
+          "properties": {
+            "choice": {
+              "description": "A choice option.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "choice"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A `list` value.",
+          "properties": {
+            "list": {
+              "items": {
+                "$ref": "#/$defs/InputValue"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "list"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A `record` value.",
+          "properties": {
+            "record": {
+              "additionalProperties": {
+                "$ref": "#/$defs/InputValue"
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "record"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A `file` value: the name of an attachment on the request.",
+          "properties": {
+            "file": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A `path` value.",
+          "properties": {
+            "path": {
+              "description": "A workdir path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A `model` value.",
+          "properties": {
+            "model": {
+              "$ref": "#/$defs/ModelRef"
+            }
+          },
           "required": [
             "model"
           ],
+          "type": "object"
+        },
+        {
           "additionalProperties": false,
+          "description": "A `blueprint` value.",
           "properties": {
-            "provider": {
-              "type": "string",
-              "description": "A registered provider name. The built-ins are anthropic, openai, google, openrouter, and ollama; a Rhai provider resolves by its script name. Omit it unless the model is reachable only one way; omitting it lets the user's own provider choice decide."
-            },
-            "model": {
-              "type": "string",
-              "description": "Passed to the provider verbatim and never validated locally, so a typo surfaces on the first live call."
+            "blueprint": {
+              "$ref": "#/$defs/BlueprintRef"
             }
-          }
+          },
+          "required": [
+            "blueprint"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A `duration` value, in seconds.",
+          "properties": {
+            "duration": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "duration"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A `url` value.",
+          "properties": {
+            "url": {
+              "description": "A URL.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
         }
       ]
     },
-    "region": {
-      "type": "object",
-      "description": "One region of the context window. Budgets are ceilings, not allocations, and may sum past 100%.",
+    "InstallDef": {
       "additionalProperties": false,
+      "description": "How a dependency is installed.",
       "properties": {
-        "kind": {
-          "description": "Omitted means `temporary`. An unrecognised value is a hard parse error.",
-          "enum": [
-            "temporary",
-            "pinned",
-            "sliding_window",
-            "compacting",
-            "compact_history",
-            "clearable",
-            "hashmap",
-            "hash_map",
-            "checklist",
-            "custom"
+        "command": {
+          "default": null,
+          "description": "One command for every platform.",
+          "type": [
+            "string",
+            "null"
           ]
         },
-        "budget": {
-          "type": "string",
-          "pattern": "^[0-9]+(\\.[0-9]+)?%$",
-          "description": "A percentage of the window, as a string such as \"35%\"."
+        "commands": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "A command per platform (`macos`, `linux`, `windows`).",
+          "type": "object"
         },
-        "max_tokens": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 5000
+        "script": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Code that installs it."
         },
-        "min_tokens": {
-          "type": "integer",
-          "minimum": 0
+        "server": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpServerTemplate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "An MCP server entry to add."
+        }
+      },
+      "type": "object"
+    },
+    "InteractionPointDef": {
+      "additionalProperties": false,
+      "description": "A point where a stage stops for a person.",
+      "properties": {
+        "abort_options": {
+          "default": [],
+          "description": "Choices that end the run.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "directives": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "What the model is told after each choice.",
+          "type": "object"
+        },
+        "document_region": {
+          "default": null,
+          "description": "The region holding the document the person reviews.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "edit_options": {
+          "default": [],
+          "description": "Choices that open the document for editing.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "The point's name.",
+          "type": "string"
+        },
+        "options": {
+          "default": [],
+          "description": "The choices, for a multiple-choice point.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "prompt": {
+          "description": "What the person is asked.",
+          "type": "string"
         },
         "required": {
-          "type": "boolean",
-          "default": false
-        },
-        "volatility": {
-          "type": "string",
-          "enum": [
-            "stable",
-            "grows",
-            "rewritten"
-          ],
-          "default": "rewritten",
-          "description": "How much this region's contents move between requests, which decides where it sits in the prompt and whether it is split for caching. A provider caches by prefix, so a region that changes invalidates the cache for every region behind it: \"stable\" is seeded and never written, \"grows\" is appended to, \"rewritten\" changes in place. The default is the pessimistic value, so leaving it out never makes a blueprint slower."
-        },
-        "summarizable": {
-          "type": "boolean",
-          "default": true,
-          "description": "Set false to keep an edge transform = \"compact\" from handing this region to the summarizer. Protects the region wherever it is used, and wins over an explicit compact list."
-        },
-        "description": {
-          "type": "string",
-          "description": "One line on what this region is for. Documentation by default: it reaches the dashboard and the API, and the model only with `describe_in_prompt`. Optional - most regions are named well enough that a sentence would only cost tokens; use it where the contents do not explain themselves."
-        },
-        "describe_in_prompt": {
-          "type": "boolean",
           "default": false,
-          "description": "Also show the `description` to the model, above the region's contents, on every turn. Off by default: a person reading the blueprint wants the sentence, a model re-reads it every request."
+          "description": "Whether the stage cannot end without an answer.",
+          "type": "boolean"
         },
-        "admission": {
-          "enum": [
-            "evict",
-            "reject"
-          ],
-          "default": "evict",
-          "description": "What the region does when a write does not fit. \"evict\" makes room by dropping the oldest entry; \"reject\" refuses the write and tells the agent to release something first, so nothing is discarded without the agent knowing."
+        "style": {
+          "$ref": "#/$defs/AnswerStyle",
+          "default": "free_text",
+          "description": "How the person answers."
         },
-        "required_message": {
-          "type": "string",
-          "description": "Shown when a required region is empty. `{region}` interpolates."
-        },
-        "seed": {
-          "$ref": "#/$defs/regionSeed"
-        },
-        "max_items": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 10
-        },
-        "strategy": {
-          "enum": [
-            "per_item",
-            "bulk",
-            "compact"
+        "unattended": {
+          "$ref": "#/$defs/UnattendedPoint",
+          "default": "auto_approve",
+          "description": "What an unattended run does here."
+        }
+      },
+      "required": [
+        "name",
+        "prompt"
+      ],
+      "type": "object"
+    },
+    "KindTable": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
-        "overflow": {
-          "type": "integer",
-          "minimum": 0
+        "eviction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Eviction"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "compact_count": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "compact_at": {
-          "type": "string",
-          "pattern": "^[0-9]+(\\.[0-9]+)?%$"
-        },
-        "threshold_tokens": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "source_region": {
+        "kind": {
+          "enum": [
+            "pinned",
+            "sliding_window",
+            "temporary",
+            "compacting",
+            "clearable",
+            "compact_history",
+            "keyed",
+            "checklist",
+            "custom"
+          ],
           "type": "string"
         },
         "max_entries": {
-          "type": "integer",
-          "minimum": 1
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
-        "script": {
-          "type": "string",
-          "description": "For `kind = \"custom\"`: the Rhai script under context_hooks/."
+        "max_items": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "pinned": {
-          "type": "boolean",
-          "description": "Make a custom region behave like a pinned one: never evicted, immune to a `clear` transform, counted as fixed budget."
+          "type": "boolean"
         },
-        "persistent": {
-          "type": "boolean",
-          "deprecated": true,
-          "description": "Renamed to `pinned`. Still read; `lev update` rewrites it."
+        "source": {
+          "description": "A region name.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "accepts": {
-          "type": "array",
+        "threshold_tokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "McpServerDef": {
+      "additionalProperties": false,
+      "description": "An MCP server the run brings with it, connected for the runs that need it\nbeside the operator's own servers.",
+      "properties": {
+        "args": {
+          "default": [],
+          "description": "The command's arguments.",
           "items": {
             "type": "string"
           },
-          "description": "Mime types this region takes, each type/subtype or type/*. Absent means anything. A write carrying a part outside the list is refused with the list."
+          "type": "array"
+        },
+        "command": {
+          "default": null,
+          "description": "The command that starts it, for stdio.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Environment variables the command is started with.",
+          "type": "object"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "HTTP headers. A value may name an environment variable as `${NAME}`.",
+          "type": "object"
+        },
+        "name": {
+          "description": "The server's name, which its tools are prefixed with.",
+          "type": "string"
+        },
+        "transport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpTransport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How it is reached. Left out, `command` means stdio and `url` HTTP."
+        },
+        "url": {
+          "default": null,
+          "description": "Where it is, for HTTP.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
-      }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
     },
-    "regionSeed": {
-      "description": "What fills the region at spawn. The table form is checked key by key in the order below, so the first one present wins.",
+    "McpServerTemplate": {
+      "additionalProperties": false,
+      "description": "An MCP server entry a dependency's install adds.",
+      "properties": {
+        "args": {
+          "default": [],
+          "description": "The command's arguments.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "default": null,
+          "description": "The command, for stdio.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Environment variables.",
+          "type": "object"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "HTTP headers.",
+          "type": "object"
+        },
+        "transport": {
+          "default": null,
+          "description": "`stdio` or `http`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "default": null,
+          "description": "The URL, for http.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "McpTransport": {
+      "description": "How an MCP server is reached.",
       "oneOf": [
         {
-          "type": "string",
-          "description": "A caller-input key, such as \"task\", filled from --task or a --<region> flag."
+          "const": "stdio",
+          "description": "Started as a child process, spoken to over its pipes.",
+          "type": "string"
         },
         {
-          "type": "object",
-          "additionalProperties": false,
-          "minProperties": 1,
-          "properties": {
-            "glob": {
-              "type": "string",
-              "description": "Concatenated contents of the files matching this pattern, expanded against the workdir, or against the blueprint's own directory with a blueprint: prefix. Neither base can be escaped: each match is fenced inside it, with [read_paths] as the only way out for the workdir form and no way out at all for the prefixed one."
-            },
-            "files": {
-              "type": "array",
-              "description": "Concatenated contents of these paths, resolved against the workdir, or against the blueprint's own directory with a blueprint: prefix. Neither base can be escaped: a path outside it is refused at spawn, with [read_paths] as the only way out for the workdir form and no way out at all for the prefixed one.",
-              "items": {
-                "type": "string"
-              }
-            },
-            "literal": {
-              "type": "string",
-              "description": "Verbatim text baked into the blueprint."
-            },
-            "rhai": {
-              "type": "string",
-              "description": "A Rhai script whose returned String fills the region, resolved against the workdir, or against the blueprint's own directory with a blueprint: prefix. Neither base can be escaped: a path outside it is refused at spawn, with [read_paths] as the only way out for the workdir form and no way out at all for the prefixed one."
-            },
-            "command": {
-              "type": "string",
-              "description": "A shell command run at spawn. The only seed that executes anything, and it runs before the first inference and so before any approval prompt. Gated by [security] allow_seed_commands and --no-seed-commands."
-            },
-            "tool": {
-              "type": "string",
-              "description": "One tool to call at spawn, whose output fills the region. Shorthand for a single-entry `tools` list."
-            },
-            "tools": {
-              "type": "array",
-              "description": "Tools to call at spawn, in order, each writing a headed block into the region. Any tool the agent could call: a built-in, an MCP server's, or a Rhai script's. Each call resolves against the same [tool_permissions] the tool lane applies, so a seed reaches nothing the agent could not; a tool set to `ask` is refused, because a seed runs before any prompt exists.",
-              "minItems": 1,
-              "items": {
-                "oneOf": [
-                  {
-                    "type": "string",
-                    "description": "A tool name, for the many tools that take no arguments."
-                  },
-                  {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "name"
-                    ],
-                    "properties": {
-                      "name": {
-                        "type": "string",
-                        "description": "The tool to call."
-                      },
-                      "args": {
-                        "type": "object",
-                        "description": "The arguments object."
-                      }
-                    }
-                  }
-                ]
-              }
-            },
-            "refresh": {
-              "enum": [
-                "once",
-                "each_stage"
-              ],
-              "default": "once",
-              "description": "For `tool`/`tools`: when the calls run again. `once` (the default, and what every other seed kind does) resolves at spawn. `each_stage` resolves again on every stage entry, for a seed whose answer moves - a clock, say - at the cost of a tool call per stage."
-            },
-            "caller": {
-              "type": "string",
-              "description": "The caller-input key to fill from, the table form of the plain string."
-            }
-          }
+          "const": "http",
+          "description": "Reached over HTTP.",
+          "type": "string"
         }
       ]
     },
-    "transition": {
-      "type": "object",
-      "description": "One outgoing edge. A `hint` with no `condition` implies `llm_choice`.",
+    "MimeRowDef": {
       "additionalProperties": false,
+      "description": "One row of the run's mime registry: what the engine knows about a type.",
       "properties": {
-        "hint": {
-          "type": "string",
-          "description": "Told to the model when it is choosing where to go next."
+        "check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Code the bytes must pass to be stored as this type."
         },
-        "condition": {
-          "description": "An unrecognised value is a hard parse error.",
-          "enum": [
-            "always",
-            "llm_choice",
-            "error",
-            "max_iterations",
-            "stuck",
-            "dead_end"
+        "extensions": {
+          "default": null,
+          "description": "File extensions, lowercase, without the dot.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
           ]
         },
-        "transform": {
-          "description": "What happens to context on this edge. `custom` reads transform_config. Anything else is a hard parse error rather than a silent downgrade to `direct`.",
-          "enum": [
-            "direct",
-            "clear",
-            "compact",
-            "summarize",
-            "custom"
+        "family": {
+          "default": null,
+          "description": "What providers key their encoders on.",
+          "type": [
+            "string",
+            "null"
           ]
         },
-        "transform_config": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "carry": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+        "magic": {
+          "default": null,
+          "description": "A hex prefix identifying the bytes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stand_in": {
+          "default": null,
+          "description": "The stand-in template shown to a model that cannot take the type.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "default": null,
+          "description": "Whether the bytes are UTF-8 text.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "tokens": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenRule"
             },
-            "compact": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "clear": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "compact_prompt": {
-              "type": "string"
+            {
+              "type": "null"
             }
-          }
-        },
-        "gate": {
-          "type": "object",
-          "description": "A condition the stage must satisfy before this edge may be taken.",
-          "additionalProperties": false,
-          "properties": {
-            "require_modifications": {
-              "type": "boolean"
-            },
-            "require_regions": {
-              "type": "array",
-              "description": "Regions that must all hold content before this edge may be taken. ANDed with every other condition on the gate, unlike `region`.",
-              "items": {
-                "type": "string"
-              }
-            },
-            "require_region_updated": {
-              "type": "string",
-              "description": "A region that must have changed during this stage, not merely be present. For a revise loop, where re-emitting the same content would satisfy a presence check."
-            },
-            "require_no_open_items": {
-              "type": "string",
-              "description": "A checklist region that must have no open items before this edge is taken."
-            },
-            "require_region_entries": {
-              "type": "object",
-              "description": "A region that must hold at least so many entries before this edge is taken. The gate holds the stage and re-runs it with the message until the count is met, so a stage whose model cannot call tools (an image model) draws until its set is complete.",
-              "additionalProperties": false,
-              "required": ["region", "at_least"],
-              "properties": {
-                "region": {
-                  "type": "string"
-                },
-                "at_least": {
-                  "type": "integer",
-                  "minimum": 1
-                }
-              }
-            },
-            "message": {
-              "type": "string"
-            },
-            "region": {
-              "type": "string",
-              "description": "An alternative way to satisfy require_modifications: the gate also passes when this region is non-empty. A restart-durable stand-in for the per-stage counters, not a requirement - use require_regions for that."
-            },
-            "tools": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "max_attempts": {
-              "type": "integer",
-              "minimum": 1
-            }
-          }
-        },
-        "stuck_after_iterations": {
-          "type": "integer"
-        },
-        "stuck_after_minutes": {
-          "type": "integer"
-        },
-        "stuck_after_same_file_edits": {
-          "type": "integer"
-        },
-        "stuck_after_tool_calls": {
-          "type": "integer"
+          ],
+          "default": null,
+          "description": "How to estimate the part's tokens."
         }
-      }
+      },
+      "type": "object"
     },
-    "interactionPoint": {
-      "type": "object",
-      "description": "A checkpoint the runtime raises at the stage boundary, every time, rather than one the model chooses to raise.",
+    "ModelChoice": {
       "additionalProperties": false,
+      "description": "The models a stage may run on, best first.",
       "properties": {
-        "name": {
+        "allow_user_default": {
+          "default": true,
+          "description": "Whether the operator's default model may stand in when none of\n`models` is available.",
+          "type": "boolean"
+        },
+        "models": {
+          "default": [],
+          "description": "The models, best first. Empty takes the operator's default.",
+          "items": {
+            "$ref": "#/$defs/ModelRef"
+          },
+          "type": "array"
+        },
+        "params": {
+          "$ref": "#/$defs/ModelParams",
+          "default": {
+            "extra": {},
+            "max_output_tokens": null,
+            "temperature": null
+          },
+          "description": "Sampling and output settings."
+        },
+        "request_timeout_secs": {
+          "default": null,
+          "description": "How long one request may take, in seconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ModelParams": {
+      "additionalProperties": false,
+      "description": "Settings sent with each model request.",
+      "properties": {
+        "extra": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ParamScalar"
+          },
+          "default": {},
+          "description": "Provider-specific settings passed through as written (`top_p`,\n`reasoning_effort`, `stop`). Their meaning belongs to the provider.",
+          "type": "object"
+        },
+        "max_output_tokens": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputCap"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The cap on one reply's length."
+        },
+        "temperature": {
+          "default": null,
+          "description": "Sampling temperature. Kept as the number written, so a `0.2` reads\nback as `0.2`.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ModelRef": {
+      "additionalProperties": false,
+      "description": "A model to run, and optionally the provider to run it on.\n\nWith no provider, the operator's `provider_order` picks one at spawn.",
+      "properties": {
+        "model": {
+          "description": "The model.",
           "type": "string"
         },
-        "prompt": {
+        "provider": {
+          "default": null,
+          "description": "The provider to use, when the caller names one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "Needs": {
+      "description": "What a dependency needs.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A configured MCP server, and the environment variables it reads.",
+          "properties": {
+            "mcp_server": {
+              "properties": {
+                "env": {
+                  "default": [],
+                  "description": "Variables it needs set.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "server": {
+                  "description": "The server.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "server"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "mcp_server"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An environment variable.",
+          "properties": {
+            "env": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "env"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A program on `PATH`.",
+          "properties": {
+            "binary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "binary"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Code that says whether it is there.",
+          "properties": {
+            "check": {
+              "$ref": "#/$defs/CodeRef"
+            }
+          },
+          "required": [
+            "check"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NudgeDef": {
+      "additionalProperties": false,
+      "description": "The nudge sent when the model answers with nothing.",
+      "properties": {
+        "enabled": {
+          "default": null,
+          "description": "Whether to nudge.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max": {
+          "default": null,
+          "description": "The most nudges in a row.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "text": {
+          "default": null,
+          "description": "The nudge's text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "OnUnavailable": {
+      "description": "What to do when the configured sandbox runtime can't be established (e.g. no\ncontainer engine on `PATH`, or `namespace` requested on a non-Linux host).",
+      "oneOf": [
+        {
+          "const": "error",
+          "description": "Fail agent spawn with a clear error. The safe default for untrusted code.",
+          "type": "string"
+        },
+        {
+          "const": "warn",
+          "description": "Log a warning and fall back to host execution.",
+          "type": "string"
+        }
+      ]
+    },
+    "OnValidatorError": {
+      "description": "What happens to a submission when its Rhai validator cannot run: the script\nthrew, exhausted its operation budget, or returned something that is neither\n`()` nor a string.\n\nDistinct from the validator *rejecting* the answer, which always refuses the\nsubmission back to the model. This knob is only about the script itself\nfailing.",
+      "oneOf": [
+        {
+          "const": "reject",
+          "description": "Refuse the submission, sending the script's error text to the model as\nretry feedback. The default: an answer nothing checked must not ship as\nif it passed, and a `parse_json` throw on malformed output is something\nthe model can act on.",
+          "type": "string"
+        },
+        {
+          "const": "accept",
+          "description": "Record the submission unchecked, as if no validator were declared. For\nblueprints that would rather have an unchecked answer than a failed run.\nThe broken script is still flagged on the run either way.",
+          "type": "string"
+        }
+      ]
+    },
+    "OutputCap": {
+      "anyOf": [
+        {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "pattern": "^\\s*[-+]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][-+]?[0-9]+)?\\s*%\\s*( of .+)?$",
+          "type": "string"
+        }
+      ]
+    },
+    "OutputDef": {
+      "additionalProperties": false,
+      "description": "The shape a run's final output must take.",
+      "properties": {
+        "artifacts": {
+          "default": [],
+          "description": "Files the answer hands back beside its text.",
+          "items": {
+            "$ref": "#/$defs/ArtifactDef"
+          },
+          "type": "array"
+        },
+        "example": {
+          "default": null,
+          "description": "An example answer.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format": {
+          "default": null,
+          "description": "The format, as an opaque label the model is told: `markdown`, `json`,\na house format.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "instructions": {
+          "default": null,
+          "description": "How to write it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "on_validator_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnValidatorError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What happens when that code itself fails."
+        },
+        "overwrite_artifacts": {
+          "default": null,
+          "description": "Whether a later answer may replace files an earlier one wrote.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "schema": {
+          "default": null,
+          "description": "A JSON Schema the answer must meet."
+        },
+        "validator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Code that checks the answer."
+        }
+      },
+      "type": "object"
+    },
+    "ParamScalar": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/ParamScalar"
+          },
+          "type": "object"
+        }
+      ],
+      "description": "A model setting as written: a boolean, a number, text, a list of text, or\na table of settings."
+    },
+    "PathKind": {
+      "description": "What kind of path a [`InputType::Path`] input names.",
+      "oneOf": [
+        {
+          "const": "file",
+          "description": "A file.",
+          "type": "string"
+        },
+        {
+          "const": "dir",
+          "description": "A directory.",
+          "type": "string"
+        },
+        {
+          "const": "any",
+          "description": "Either.",
+          "type": "string"
+        }
+      ]
+    },
+    "RegionCount": {
+      "additionalProperties": false,
+      "description": "A region and how many entries it must hold.",
+      "properties": {
+        "at_least": {
+          "description": "The fewest entries.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "region": {
+          "description": "The region.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "region",
+        "at_least"
+      ],
+      "type": "object"
+    },
+    "RegionDef": {
+      "additionalProperties": false,
+      "description": "One region.",
+      "properties": {
+        "accepts": {
+          "default": [],
+          "description": "Mime types a part placed in it may carry. Empty accepts any.",
+          "items": {
+            "description": "A mime pattern.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "admission": {
+          "$ref": "#/$defs/Admission",
+          "default": "evict",
+          "description": "What happens to an entry that does not fit."
+        },
+        "budget": {
+          "$ref": "#/$defs/Budget",
+          "description": "How big it may grow."
+        },
+        "compact_at": {
+          "default": null,
+          "description": "The fraction of its budget at which it is summarized, when it is one\nthat can be.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "describe_in_prompt": {
+          "default": false,
+          "description": "Whether the description is shown to the model.",
+          "type": "boolean"
+        },
+        "description": {
+          "default": null,
+          "description": "What it is for.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/RegionKind",
+          "description": "How it keeps and drops entries."
+        },
+        "name": {
+          "description": "The region's name, unique in its layout.",
           "type": "string"
         },
         "required": {
-          "type": "boolean",
-          "default": true
+          "default": false,
+          "description": "Whether a spawn that leaves it empty is refused.",
+          "type": "boolean"
         },
-        "unattended": {
-          "description": "What a --yolo run does here. `auto_approve` (the default) resolves it without asking. `ask` holds for a person even unattended, and the run then waits until somebody answers (or until [limits] interaction_timeout_secs, if set).",
-          "enum": [
-            "ask",
-            "auto_approve"
+        "required_message": {
+          "default": null,
+          "description": "What that refusal says.",
+          "type": [
+            "string",
+            "null"
           ]
         },
-        "style": {
-          "enum": [
-            "free_text",
-            "multiple_choice",
-            "confirm"
-          ]
+        "seed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Seed"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What fills it at spawn, besides inputs bound to it."
         },
-        "options": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+        "summarizable": {
+          "default": true,
+          "description": "Whether it may be summarized when the context is compacted.",
+          "type": "boolean"
         },
-        "choices": {
-          "type": "array",
-          "description": "Alias for `options`.",
-          "items": {
-            "type": "string"
-          }
-        },
-        "directives": {
-          "type": "object",
-          "description": "Option text to the instruction added when it is picked.",
-          "additionalProperties": {
-            "type": "string"
-          }
-        },
-        "followups": {
-          "type": "object",
-          "description": "Alias for `directives`.",
-          "additionalProperties": {
-            "type": "string"
-          }
-        },
-        "abort_options": {
-          "type": "array",
-          "description": "Options that end the run immediately, with no further inference.",
-          "items": {
-            "type": "string"
-          }
-        },
-        "edit_options": {
-          "type": "array",
-          "description": "Options that open the document for the user to edit directly.",
-          "items": {
-            "type": "string"
-          }
-        },
-        "document_region": {
-          "type": "string",
-          "description": "The pinned region holding what this point is about. Replaced with the current text each time the point is presented."
+        "volatility": {
+          "$ref": "#/$defs/Volatility",
+          "default": "rewritten",
+          "description": "How often its contents change, for prompt caching."
         }
-      }
+      },
+      "required": [
+        "name",
+        "kind",
+        "budget"
+      ],
+      "type": "object"
     },
-    "toolPermissions": {
-      "type": "object",
-      "description": "Tool name to policy. May only tighten the machine-wide ceiling in config.toml, never loosen it. `ask` blocks until answered.",
-      "additionalProperties": {
-        "enum": [
-          "allow",
-          "ask",
-          "deny"
-        ]
-      }
-    },
-    "sandbox": {
-      "type": "object",
-      "description": "Where tools execute. An agent and a stage resolve to the stronger of the pair.",
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
+    "RegionKind": {
+      "anyOf": [
+        {
           "enum": [
-            "none",
-            "namespace",
-            "container"
+            "pinned",
+            "temporary",
+            "compacting",
+            "clearable",
+            "compact_history",
+            "keyed",
+            "checklist"
+          ],
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/KindTable"
+        }
+      ]
+    },
+    "RegionLayoutDef": {
+      "additionalProperties": false,
+      "description": "A context layout.",
+      "properties": {
+        "eviction_order": {
+          "default": [],
+          "description": "Which regions give up entries first when the context is full.",
+          "items": {
+            "description": "A region name.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "regions": {
+          "description": "The regions, in the order the model reads them.",
+          "items": {
+            "$ref": "#/$defs/RegionDef"
+          },
+          "type": "array"
+        },
+        "total_budget_tokens": {
+          "description": "The token budget the whole layout shares.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "regions",
+        "total_budget_tokens"
+      ],
+      "type": "object"
+    },
+    "RegionMappingDef": {
+      "additionalProperties": false,
+      "description": "One region carried from a parent to a child.",
+      "properties": {
+        "from": {
+          "description": "The parent's region.",
+          "type": "string"
+        },
+        "to": {
+          "description": "The child's region.",
+          "type": "string"
+        },
+        "transform": {
+          "$ref": "#/$defs/ContentTransform",
+          "default": "direct",
+          "description": "How the content changes on the way."
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "RepetitionDef": {
+      "additionalProperties": false,
+      "description": "When repeated tool calls count as a loop.",
+      "properties": {
+        "enabled": {
+          "default": null,
+          "description": "Whether to watch for loops.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_readonly_streak": {
+          "default": null,
+          "description": "This many read-only calls in a row is a loop.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_repeat_calls": {
+          "default": null,
+          "description": "The same call this many times in a row is a loop.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RunGraph": {
+      "additionalProperties": false,
+      "description": "A whole run, written down.",
+      "properties": {
+        "batch_tool_hint": {
+          "default": null,
+          "description": "The batch-tool-calls hint. `None` takes the operator's.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "compaction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompactionDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How the conversation is summarized when the context fills."
+        },
+        "dependencies": {
+          "default": [],
+          "description": "What the run needs from the machine.",
+          "items": {
+            "$ref": "#/$defs/DependencyDef"
+          },
+          "type": "array"
+        },
+        "description": {
+          "default": null,
+          "description": "What the run does.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "edges": {
+          "default": [],
+          "description": "The edges between them.",
+          "items": {
+            "$ref": "#/$defs/EdgeDef"
+          },
+          "type": "array"
+        },
+        "entry": {
+          "default": null,
+          "description": "The stage the run starts in. `None` starts in the first stage.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "file_tracking": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileTrackingDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The list of files read and written, kept in a region."
+        },
+        "inputs": {
+          "default": [],
+          "description": "The inputs the run takes.",
+          "items": {
+            "$ref": "#/$defs/InputDecl"
+          },
+          "type": "array"
+        },
+        "layout": {
+          "$ref": "#/$defs/RegionLayoutDef",
+          "description": "The context layout every stage uses unless it has its own."
+        },
+        "max_child_depth": {
+          "default": null,
+          "description": "How deep the run's tree of child runs may grow.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mcp_servers": {
+          "default": [],
+          "description": "MCP servers the run brings with it.",
+          "items": {
+            "$ref": "#/$defs/McpServerDef"
+          },
+          "type": "array"
+        },
+        "mime_types": {
+          "additionalProperties": {
+            "$ref": "#/$defs/MimeRowDef"
+          },
+          "default": {},
+          "description": "Mime registry rows the run adds.",
+          "type": "object"
+        },
+        "nudge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NudgeDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The empty-response nudge."
+        },
+        "output": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The shape of the run's final output."
+        },
+        "read_paths": {
+          "default": [],
+          "description": "Paths outside the workdir the run may read (globs and `re:` patterns).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "repetition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepetitionDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Loop detection."
+        },
+        "safe_commands": {
+          "$ref": "#/$defs/SafeCommandsDef",
+          "default": {
+            "shell": [],
+            "tools": []
+          },
+          "description": "Commands and tools that only read, so they run without approval."
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SandboxDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where tools run."
+        },
+        "script_permissions": {
+          "$ref": "#/$defs/ScriptPermissionsDef",
+          "default": {
+            "env_var": null,
+            "http_get": null,
+            "http_post": null,
+            "read_file": null,
+            "shell": null,
+            "write_file": null
+          },
+          "description": "What its script tools may do, stricter than the operator allows."
+        },
+        "shell_hint": {
+          "default": null,
+          "description": "The platform shell hint. `None` takes the operator's.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "stages": {
+          "description": "The stages.",
+          "items": {
+            "$ref": "#/$defs/StageDef"
+          },
+          "type": "array"
+        },
+        "taint_tracking": {
+          "default": null,
+          "description": "Whether taint tracking is on.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "title": {
+          "default": null,
+          "description": "What the run is called where runs are listed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_permissions": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ToolPolicy"
+          },
+          "default": {},
+          "description": "Per-tool approval policy for every stage.",
+          "type": "object"
+        },
+        "tool_rescan": {
+          "$ref": "#/$defs/ToolRescan",
+          "default": "at_spawn",
+          "description": "When the tool list is looked at again."
+        },
+        "transforms": {
+          "default": [],
+          "description": "How child runs' contexts are built from this run's.",
+          "items": {
+            "$ref": "#/$defs/ContextTransformDef"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "stages",
+        "layout"
+      ],
+      "type": "object"
+    },
+    "SafeCommandsDef": {
+      "additionalProperties": false,
+      "description": "Commands and tools that run without approval because they only read.",
+      "properties": {
+        "shell": {
+          "default": [],
+          "description": "Shell command prefixes.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tools": {
+          "default": [],
+          "description": "Tools.",
+          "items": {
+            "description": "A tool name.",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "SandboxDef": {
+      "additionalProperties": false,
+      "description": "Where tools run.",
+      "properties": {
+        "engine": {
+          "default": null,
+          "description": "The container engine, over the operator's.",
+          "type": [
+            "string",
+            "null"
           ]
         },
         "image": {
-          "type": "string"
-        },
-        "engine": {
-          "enum": [
-            "docker",
-            "podman",
-            "nerdctl",
-            "finch"
+          "default": null,
+          "description": "The container image, for a container sandbox.",
+          "type": [
+            "string",
+            "null"
           ]
-        },
-        "network": {
-          "type": "boolean"
-        },
-        "mount": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "mounts": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
         },
         "keep_warm": {
-          "type": "boolean",
-          "description": "Keep one container warm across the run's stages rather than building one per call. It is still torn down when the run ends."
-        },
-        "persist": {
-          "type": "boolean",
-          "deprecated": true,
-          "description": "Renamed to `keep_warm`. Still read; `lev update` rewrites it."
-        },
-        "on_unavailable": {
-          "enum": [
-            "error",
-            "warn"
-          ]
-        }
-      }
-    },
-    "nudge": {
-      "type": "object",
-      "description": "What to say to a stage that has gone quiet. Cascades stage over agent over config.",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
+          "default": false,
+          "description": "Whether the sandbox stays up between tool calls.",
           "type": "boolean"
         },
-        "max": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "text": {
-          "type": "string",
-          "description": "`{stage}` and `{regions}` interpolate."
-        }
-      }
-    },
-    "stageHooks": {
-      "type": "object",
-      "description": "Rhai scripts run at points in this stage's lifecycle. Each value is a script path relative to the agent directory.",
-      "additionalProperties": false,
-      "properties": {
-        "on_stage_enter": {
-          "type": "string"
-        },
-        "on_stage_exit": {
-          "type": "string"
-        },
-        "before_inference": {
-          "type": "string"
-        },
-        "after_inference": {
-          "type": "string"
-        },
-        "on_tool_call": {
-          "type": "string"
-        },
-        "on_completion": {
-          "type": "string"
-        },
-        "on_error": {
-          "type": "string"
-        }
-      }
-    },
-    "dependency": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "One [[dependencies]] entry. The kind field selects what must be present and which of the kind fields (server/env, var, command, check) apply.",
-      "required": [
-        "name",
-        "kind"
-      ],
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "A short identifier, unique within the blueprint."
-        },
         "kind": {
-          "type": "string",
-          "enum": [
-            "mcp_server",
-            "env",
-            "binary",
-            "script"
-          ],
-          "description": "What must be present."
+          "$ref": "#/$defs/SandboxKind",
+          "default": "none",
+          "description": "The kind of sandbox."
         },
-        "required": {
-          "type": "boolean",
-          "default": true,
-          "description": "Whether an unmet dependency blocks the run."
-        },
-        "remedy": {
-          "type": "string",
-          "description": "A human sentence on how to satisfy the dependency, shown when it is missing."
-        },
-        "description": {
-          "type": "string",
-          "description": "Why the agent needs it."
-        },
-        "server": {
-          "type": "string",
-          "description": "kind=mcp_server: the MCP server name that must be configured."
-        },
-        "env": {
-          "type": "array",
+        "mounts": {
+          "default": [],
+          "description": "Extra mounts, as the engine writes them.",
           "items": {
             "type": "string"
           },
-          "description": "kind=mcp_server: environment variables or secrets the server needs."
+          "type": "array"
         },
-        "var": {
-          "type": "string",
-          "description": "kind=env: the variable that must be set and non-empty."
+        "network": {
+          "default": true,
+          "description": "Whether tools may reach the network.",
+          "type": "boolean"
         },
-        "command": {
-          "type": "string",
-          "description": "kind=binary: the program that must resolve on PATH."
-        },
-        "check": {
-          "type": "string",
-          "description": "kind=script: path to the Rhai check script (returns #{ ok, remedy })."
-        },
-        "install": {
-          "$ref": "#/$defs/dependencyInstall"
+        "on_unavailable": {
+          "$ref": "#/$defs/OnUnavailable",
+          "default": "error",
+          "description": "What happens when the sandbox cannot start."
         }
-      }
+      },
+      "type": "object"
     },
-    "dependencyInstall": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "How `lev deps install` can put a dependency in place. Never run automatically.",
-      "properties": {
-        "command": {
-          "type": "string",
-          "description": "A shell command that installs the dependency on any platform."
+    "SandboxKind": {
+      "description": "The isolation mechanism used for an agent's shell tool execution.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "Run directly on the host - current behavior, explicit opt-out.",
+          "type": "string"
         },
-        "commands": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
+        {
+          "const": "namespace",
+          "description": "Run under fresh Linux namespaces via `unshare(1)` (Linux only).",
+          "type": "string"
+        },
+        {
+          "const": "container",
+          "description": "Run inside a container via Docker or Podman.",
+          "type": "string"
+        }
+      ]
+    },
+    "ScriptPermission": {
+      "description": "What a script tool's host function may do.",
+      "oneOf": [
+        {
+          "const": "allow",
+          "description": "It may run.",
+          "type": "string"
+        },
+        {
+          "const": "deny",
+          "description": "It is refused.",
+          "type": "string"
+        },
+        {
+          "const": "inherit",
+          "description": "It follows the run's own permission for the matching built-in tool.",
+          "type": "string"
+        }
+      ]
+    },
+    "ScriptPermissionsDef": {
+      "additionalProperties": false,
+      "description": "What the run's script tools may do, per host function. A graph can only\nmake the operator's settings stricter; a function it leaves out keeps the\noperator's.",
+      "properties": {
+        "env_var": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScriptPermission"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "`env_var`."
+        },
+        "http_get": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScriptPermission"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "`http_get`."
+        },
+        "http_post": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScriptPermission"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "`http_post`."
+        },
+        "read_file": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScriptPermission"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "`read_file`."
+        },
+        "shell": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScriptPermission"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "`shell`."
+        },
+        "write_file": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScriptPermission"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "`write_file`."
+        }
+      },
+      "type": "object"
+    },
+    "Seed": {
+      "description": "What fills a region at spawn.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Workdir files matching a glob, concatenated.",
+          "properties": {
+            "glob": {
+              "type": "string"
+            }
           },
-          "description": "Per-OS shell commands keyed by macos/linux/windows, preferred over command on a matching host."
+          "required": [
+            "glob"
+          ],
+          "type": "object"
         },
-        "script": {
-          "type": "string",
-          "description": "A Rhai install script (relative to the blueprint), gated like a script tool."
+        {
+          "additionalProperties": false,
+          "description": "Workdir files, concatenated.",
+          "properties": {
+            "files": {
+              "items": {
+                "description": "A workdir path.",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "files"
+          ],
+          "type": "object"
         },
-        "server": {
-          "$ref": "#/$defs/mcpServerTemplate"
+        {
+          "additionalProperties": false,
+          "description": "Fixed text.",
+          "properties": {
+            "literal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "literal"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The text some code returns.",
+          "properties": {
+            "code": {
+              "$ref": "#/$defs/CodeRef"
+            }
+          },
+          "required": [
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The output of a shell command run in the workdir.",
+          "properties": {
+            "command": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The results of tool calls.",
+          "properties": {
+            "tools": {
+              "properties": {
+                "calls": {
+                  "description": "The calls.",
+                  "items": {
+                    "$ref": "#/$defs/SeedToolCall"
+                  },
+                  "type": "array"
+                },
+                "refresh": {
+                  "$ref": "#/$defs/SeedRefresh",
+                  "default": "once",
+                  "description": "When they run again."
+                }
+              },
+              "required": [
+                "calls"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "tools"
+          ],
+          "type": "object"
         }
-      }
+      ]
     },
-    "mcpServerTemplate": {
-      "type": "object",
+    "SeedRefresh": {
+      "description": "When a tool seed runs again.",
+      "oneOf": [
+        {
+          "const": "once",
+          "description": "Only at spawn.",
+          "type": "string"
+        },
+        {
+          "const": "each_stage",
+          "description": "At the start of every stage.",
+          "type": "string"
+        }
+      ]
+    },
+    "SeedToolCall": {
       "additionalProperties": false,
-      "description": "kind=mcp_server install: the non-secret server settings written into the user's config. Secrets are named in env and prompted for.",
+      "description": "A tool call made at spawn to fill a region.",
       "properties": {
-        "transport": {
-          "type": "string",
-          "enum": [
-            "stdio",
-            "http"
+        "args": {
+          "description": "Its arguments: JSON, as a model would write them."
+        },
+        "tool": {
+          "description": "The tool.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool",
+        "args"
+      ],
+      "type": "object"
+    },
+    "SlotTable": {
+      "additionalProperties": false,
+      "properties": {
+        "fan_out_max_workers": {
+          "description": "A stage name.",
+          "type": [
+            "string",
+            "null"
           ]
         },
-        "command": {
-          "type": "string"
+        "region": {
+          "description": "A region name.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "url": {
-          "type": "string"
+        "stage_max_iterations": {
+          "description": "A stage name.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+        "stage_model": {
+          "description": "A stage name.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "headers": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "Non-secret headers; a value may reference a secret with ${VAR} named in env."
-        },
-        "env": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "Environment for a stdio server's child; a value may reference a secret with ${VAR} named in env."
+        "template": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
-      }
+      },
+      "type": "object"
+    },
+    "StageDef": {
+      "additionalProperties": false,
+      "description": "One stage.",
+      "properties": {
+        "accepts_messages": {
+          "default": true,
+          "description": "Whether messages sent to the run reach this stage.",
+          "type": "boolean"
+        },
+        "allow_as_worker": {
+          "default": false,
+          "description": "Whether a fan-out may run this stage as a worker.",
+          "type": "boolean"
+        },
+        "allow_blocking_tools": {
+          "default": false,
+          "description": "Whether tools that wait on a person may run here.",
+          "type": "boolean"
+        },
+        "allow_complete": {
+          "default": false,
+          "description": "Whether the model may end the run from this stage.",
+          "type": "boolean"
+        },
+        "batch_tool_hint": {
+          "default": null,
+          "description": "The batch-tool-calls hint. `None` takes the graph's.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "connectors": {
+          "default": [],
+          "description": "MCP servers whose tools the stage may call.",
+          "items": {
+            "description": "A MCP server name.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "default": null,
+          "description": "What the stage is for.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hide": {
+          "default": [],
+          "description": "Regions this stage does not show the model.",
+          "items": {
+            "description": "A region name.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "hooks": {
+          "$ref": "#/$defs/StageHooks",
+          "default": {
+            "after_inference": null,
+            "before_inference": null,
+            "on_completion": null,
+            "on_error": null,
+            "on_stage_enter": null,
+            "on_stage_exit": null,
+            "on_tool_call": null
+          },
+          "description": "Code run at points of the stage's life."
+        },
+        "input_accepts": {
+          "default": [],
+          "description": "Mime types a message or part sent to this stage may carry.",
+          "items": {
+            "description": "A mime pattern.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "input_as_text": {
+          "default": [],
+          "description": "Mime types turned into text before this stage's model sees them.",
+          "items": {
+            "description": "A mime pattern.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "layout": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RegionLayoutDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A layout for this stage alone, replacing the graph's."
+        },
+        "max_iterations": {
+          "default": null,
+          "description": "The most inference rounds the stage runs before it is cut off.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_revisits": {
+          "default": null,
+          "description": "How many times the stage may be re-entered by a gate before it is let\nthrough anyway.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/StageMode",
+          "default": "autonomous",
+          "description": "How the stage runs."
+        },
+        "model": {
+          "$ref": "#/$defs/ModelChoice",
+          "default": {
+            "allow_user_default": true,
+            "models": [],
+            "params": {
+              "extra": {},
+              "max_output_tokens": null,
+              "temperature": null
+            },
+            "request_timeout_secs": null
+          },
+          "description": "The models that may run it."
+        },
+        "name": {
+          "description": "The stage's name, unique in the graph.",
+          "type": "string"
+        },
+        "nudge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NudgeDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The empty-response nudge. `None` takes the graph's."
+        },
+        "output": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The stage's final-output shape, over the graph's."
+        },
+        "output_routing": {
+          "additionalProperties": {
+            "description": "A region name.",
+            "type": "string"
+          },
+          "default": {},
+          "description": "Which region each named part of the stage's output lands in.",
+          "type": "object"
+        },
+        "require_output": {
+          "default": false,
+          "description": "Whether the stage must hand back a final output before it ends.",
+          "type": "boolean"
+        },
+        "required_tools": {
+          "default": [],
+          "description": "Tools the stage must have; a spawn that cannot provide one is refused.",
+          "items": {
+            "description": "A tool name.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "requires_children": {
+          "default": false,
+          "description": "Whether the stage waits for the child runs it started before it ends.",
+          "type": "boolean"
+        },
+        "reset": {
+          "default": [],
+          "description": "Regions emptied when the stage starts.",
+          "items": {
+            "description": "A region name.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SandboxDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where tools run. `None` takes the graph's."
+        },
+        "shell_hint": {
+          "default": null,
+          "description": "The platform shell hint. `None` takes the graph's.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "system_prompt": {
+          "default": null,
+          "description": "The stage's system prompt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "taint_tracking": {
+          "default": null,
+          "description": "Whether taint tracking is on for this stage. `None` takes the graph's.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "tool_accepts": {
+          "additionalProperties": {
+            "items": {
+              "description": "A mime pattern.",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "description": "Mime types each tool's results may carry.",
+          "type": "object"
+        },
+        "tool_permissions": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ToolPolicy"
+          },
+          "default": {},
+          "description": "Per-tool approval policy for this stage.",
+          "type": "object"
+        },
+        "tool_routing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolRoutingDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where tool results land."
+        },
+        "tools": {
+          "default": [],
+          "description": "The tools it may call.",
+          "items": {
+            "$ref": "#/$defs/ToolSelector"
+          },
+          "type": "array"
+        },
+        "transition_prompt": {
+          "default": null,
+          "description": "Extra guidance shown when the model picks the next edge.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "StageHooks": {
+      "additionalProperties": false,
+      "description": "Code run at points of a stage's life.",
+      "properties": {
+        "after_inference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "After each model reply."
+        },
+        "before_inference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Before each model request."
+        },
+        "on_completion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When the run completes."
+        },
+        "on_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When the run fails."
+        },
+        "on_stage_enter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When the stage starts."
+        },
+        "on_stage_exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When the stage ends."
+        },
+        "on_tool_call": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Before a batch of tool calls runs."
+        }
+      },
+      "type": "object"
+    },
+    "StageMode": {
+      "description": "How a stage runs.",
+      "oneOf": [
+        {
+          "const": "autonomous",
+          "description": "The model works on its own until it moves on.",
+          "type": "string"
+        },
+        {
+          "const": "interactive",
+          "description": "The model and a person take turns.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The model works on its own, stopping at declared points for a person.",
+          "properties": {
+            "interactive_points": {
+              "items": {
+                "$ref": "#/$defs/InteractionPointDef"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "interactive_points"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The stage splits its work over worker runs. It is given the\n`fan_out` tool it starts them with, whether or not its `tools` name it.",
+          "properties": {
+            "fan_out": {
+              "$ref": "#/$defs/FanOutDef"
+            }
+          },
+          "required": [
+            "fan_out"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "output",
+          "description": "The stage only writes the run's final output. It is given the\n`submit_output` tool and must call it, whether or not its `tools` name\nit, and it may end the run when no edge leaves it.",
+          "type": "string"
+        }
+      ]
+    },
+    "StuckDef": {
+      "additionalProperties": false,
+      "description": "When a stage counts as stuck. Any one limit reached is enough.",
+      "properties": {
+        "after_iterations": {
+          "default": null,
+          "description": "After this many inference rounds.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "after_minutes": {
+          "default": null,
+          "description": "After this many minutes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "after_same_file_edits": {
+          "default": null,
+          "description": "After this many edits of one file.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "after_tool_calls": {
+          "default": null,
+          "description": "After this many tool calls.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Template": {
+      "description": "Text with `{input}` placeholders. `{{` and `}}` write a literal brace.",
+      "type": "string"
+    },
+    "TokenRule": {
+      "description": "How a part's tokens are estimated.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Tokens per byte.",
+          "properties": {
+            "per_byte": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "per_byte"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One token per so many pixels, up to a cap.",
+          "properties": {
+            "per_pixel": {
+              "properties": {
+                "divisor": {
+                  "description": "Pixels per token.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max": {
+                  "description": "The most tokens.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "divisor",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "per_pixel"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Tokens per second of media.",
+          "properties": {
+            "per_second": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "per_second"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Tokens per page.",
+          "properties": {
+            "per_page": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "per_page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A fixed count.",
+          "properties": {
+            "fixed": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "fixed"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ToolPolicy": {
+      "description": "Whether a tool call should execute automatically or require user approval.\n\nThe effective policy for a tool is resolved by narrowest scope first:\nlaunch-flag > stage > agent > global config > built-in default.",
+      "oneOf": [
+        {
+          "const": "allow",
+          "description": "Execute without prompting.",
+          "type": "string"
+        },
+        {
+          "const": "ask",
+          "description": "Ask the user before each call (or once per session with `allow_session`).",
+          "type": "string"
+        },
+        {
+          "const": "deny",
+          "description": "Never execute - return a denied error to the model.",
+          "type": "string"
+        }
+      ]
+    },
+    "ToolRescan": {
+      "description": "When the tool list is looked at again.",
+      "oneOf": [
+        {
+          "const": "at_spawn",
+          "description": "Once, at spawn.",
+          "type": "string"
+        },
+        {
+          "const": "after_writes",
+          "description": "After a stage writes a file.",
+          "type": "string"
+        },
+        {
+          "const": "before_dispatch",
+          "description": "Before every batch of tool calls.",
+          "type": "string"
+        }
+      ]
+    },
+    "ToolRoutingDef": {
+      "additionalProperties": false,
+      "description": "Where a stage's tool results land.",
+      "properties": {
+        "default_region": {
+          "description": "The region results land in unless a tool has its own.",
+          "type": "string"
+        },
+        "keep_results": {
+          "default": false,
+          "description": "Whether results stay in context after the turn that used them.",
+          "type": "boolean"
+        },
+        "max_result_tokens": {
+          "default": null,
+          "description": "The most tokens one result may take.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tool_max_result_tokens": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default": {},
+          "description": "Per-tool caps on one result's tokens.",
+          "type": "object"
+        },
+        "tool_regions": {
+          "additionalProperties": {
+            "description": "A region name.",
+            "type": "string"
+          },
+          "default": {},
+          "description": "Per-tool regions.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "default_region"
+      ],
+      "type": "object"
+    },
+    "ToolSelector": {
+      "description": "A tool by name, or a group as `@all`, `@builtin`, `@subagent`, `@scripts`, `@mcp`.",
+      "type": "string"
+    },
+    "TypeTable": {
+      "additionalProperties": false,
+      "properties": {
+        "accepts": {
+          "items": {
+            "description": "A mime pattern.",
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/InputDecl"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "item": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "text",
+            "bool",
+            "int",
+            "float",
+            "choice",
+            "list",
+            "record",
+            "file",
+            "path",
+            "model",
+            "blueprint",
+            "duration",
+            "url"
+          ],
+          "type": "string"
+        },
+        "max": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bound"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_len": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bound"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "min_len": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "multiline": {
+          "type": "boolean"
+        },
+        "must_exist": {
+          "type": "boolean"
+        },
+        "names": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PathKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "options": {
+          "items": {
+            "description": "A choice option.",
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "UnattendedPoint": {
+      "description": "What an unattended run does at an interaction point.",
+      "oneOf": [
+        {
+          "const": "auto_approve",
+          "description": "Answer it automatically.",
+          "type": "string"
+        },
+        {
+          "const": "ask",
+          "description": "Wait for a person anyway.",
+          "type": "string"
+        }
+      ]
+    },
+    "Volatility": {
+      "description": "How much a region's contents move between requests.\n\nThis exists because a provider caches by *prefix*: an entry is readable next\ntime only when every byte in front of it is unchanged, so a block that moves\ninvalidates everything behind it however stable that later content is. The\narrangement that pays is stable content first and churn last.\n\nA region's [`RegionKind`] cannot answer this. A pinned region sounds\nimmutable and is written constantly - `context_write` into a findings region\nis an ordinary move, and tool routing sends read results straight into one.\nA compact-history region sounds settled and gains an entry every time\ncompaction fires. Inferring stability from the kind put churn at the front of\nthe prefix and cost a measured 456,860 cache-write tokens against zero\nreads.\n\nSo the blueprint says. The author knows whether a region is set once at spawn\nor written every turn, and nothing else does.",
+      "oneOf": [
+        {
+          "const": "stable",
+          "description": "Written rarely or never after setup: a task, a system prompt, a\nconvention the run does not revise. Sorted to the front, where it forms\nthe prefix everything else caches behind.",
+          "type": "string"
+        },
+        {
+          "const": "grows",
+          "description": "Appended to, with existing entries left alone: a findings list, a\nbibliography, a transcript of what has been read. Sorted after the stable\ncontent, and split into chunks so the settled head of it can be cached\nwhile only the tail is re-sent.",
+          "type": "string"
+        },
+        {
+          "const": "rewritten",
+          "description": "Existing content changes in place: a scratchpad, a key-value store whose\nkeys are overwritten, anything rebuilt each turn. Sorted last, where it\ninvalidates nothing but itself.\n\nThe default, and deliberately the pessimistic one: a blueprint that\ndeclares nothing must never be made *worse* by this, and an optimistic\ndefault is exactly how inferring stability from the kind went wrong.",
+          "type": "string"
+        }
+      ]
+    },
+    "WorkerFailure": {
+      "description": "What one fan-out worker's failure does to the rest.",
+      "oneOf": [
+        {
+          "const": "continue",
+          "description": "The others carry on and the merge sees the failure.",
+          "type": "string"
+        },
+        {
+          "const": "fail_all",
+          "description": "The whole fan-out fails.",
+          "type": "string"
+        }
+      ]
+    },
+    "WorkerSource": {
+      "description": "What a fan-out worker runs.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "An installed blueprint.",
+          "properties": {
+            "blueprint": {
+              "$ref": "#/$defs/BlueprintRef"
+            }
+          },
+          "required": [
+            "blueprint"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A stage of this same graph.",
+          "properties": {
+            "stage": {
+              "description": "A stage name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stage"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An installed blueprint picked at run time by a query the model answers.",
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A blueprint that is not installed, read from its directory on this\nmachine. A request from a remote caller may not name one; see\n[`SpawnRequest::check_remote`](crate::spec::request::SpawnRequest::check_remote).",
+          "properties": {
+            "blueprint_file": {
+              "description": "A blueprint path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "blueprint_file"
+          ],
+          "type": "object"
+        }
+      ]
     }
-  }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A whole `agent.toml`.\n\n`[graph]` is a [`RunGraph`] exactly as a raw spawn request carries one.\nThe graph's `title` and `description` may be left out: a graph read from\nthe file takes them from `[blueprint]` (see [`BlueprintFile::run_graph`]).",
+  "properties": {
+    "blueprint": {
+      "$ref": "#/$defs/BlueprintMeta",
+      "description": "What the blueprint is called."
+    },
+    "graph": {
+      "$ref": "#/$defs/RunGraph",
+      "description": "The run it describes."
+    }
+  },
+  "required": [
+    "blueprint",
+    "graph"
+  ],
+  "title": "Leviath blueprint (agent.toml)",
+  "type": "object"
 }

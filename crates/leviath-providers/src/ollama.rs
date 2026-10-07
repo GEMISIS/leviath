@@ -2936,7 +2936,7 @@ mod tests {
         );
     }
 
-    /// The id has to survive being written to `context.json` and replayed, so it
+    /// The id has to survive being written to the run file and replayed, so it
     /// stays inside what a JSON string and a provider will carry.
     #[test]
     fn an_id_is_plain_ascii_and_short() {

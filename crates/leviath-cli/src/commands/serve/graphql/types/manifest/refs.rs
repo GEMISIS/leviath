@@ -1,31 +1,29 @@
-//! Turning one name the manifest wrote into the thing it names.
+//! Turning one name the blueprint wrote into the thing it names.
 //!
-//! A manifest addresses its own regions and stages by name, and the schema
+//! A blueprint addresses its own regions and stages by name, and the schema
 //! serves objects. One place does the lookup, so every field that resolves a
 //! region agrees about which layouts count and in what order.
 //!
-//! A region is looked for in the blueprint's own layout first and then in each
-//! stage's own, which is the order [`leviath_core::Blueprint`] itself uses when
-//! it decides whether a name exists anywhere. Nothing is invented: a name no
-//! layout declares resolves to nothing, and the field that asked says what that
-//! means.
+//! A region is looked for in the graph's own layout first and then in each
+//! stage's own. Nothing is invented: a name no layout declares resolves to
+//! nothing, and the field that asked says what that means.
 
 use std::sync::Arc;
 
-use leviath_core::Blueprint as CoreBlueprint;
+use leviath_runtime::spec::graph::RegionLayoutDef;
 
 use super::super::blueprint::Region;
 use super::stage::Stage;
+use crate::commands::serve::core::blueprints::ParsedBlueprint;
 
 /// The region a name points at, or nothing when no layout declares it.
 ///
-/// The four regions the runtime carries whatever a manifest says -
-/// `conversation`, `tool_results`, `final_output` and `stage_instructions` -
-/// resolve only where a layout declares them too. A blueprint may name one it
-/// left to the runtime, and this answers nothing for it rather than describing a
-/// declaration nobody wrote.
-pub(crate) fn region(blueprint: &Arc<CoreBlueprint>, name: &str) -> Option<Region> {
-    if let Some(at) = position(&blueprint.context_layout, name) {
+/// The regions the runtime carries whatever a blueprint says, such as
+/// `conversation`, resolve only where a layout declares them too. A blueprint
+/// may name one it left to the runtime, and this answers nothing for it rather
+/// than describing a declaration nobody wrote.
+pub(crate) fn region(blueprint: &Arc<ParsedBlueprint>, name: &str) -> Option<Region> {
+    if let Some(at) = position(&blueprint.graph.layout, name) {
         return Some(Region {
             blueprint: Arc::clone(blueprint),
             stage: None,
@@ -33,11 +31,12 @@ pub(crate) fn region(blueprint: &Arc<CoreBlueprint>, name: &str) -> Option<Regio
         });
     }
     blueprint
+        .graph
         .stages
         .iter()
         .enumerate()
         .find_map(|(stage, def)| {
-            let at = position(def.context_layout.as_ref()?, name)?;
+            let at = position(def.layout.as_ref()?, name)?;
             Some(Region {
                 blueprint: Arc::clone(blueprint),
                 stage: Some(stage),
@@ -50,18 +49,22 @@ pub(crate) fn region(blueprint: &Arc<CoreBlueprint>, name: &str) -> Option<Regio
 ///
 /// A name with no declaration is left out rather than standing in for one, and
 /// every field that calls this serves the names it was given beside the result,
-/// so nothing a manifest wrote disappears.
-pub(crate) fn regions(blueprint: &Arc<CoreBlueprint>, names: &[String]) -> Vec<Region> {
+/// so nothing a blueprint wrote disappears.
+pub(crate) fn regions<T: AsRef<str>>(blueprint: &Arc<ParsedBlueprint>, names: &[T]) -> Vec<Region> {
     names
         .iter()
-        .filter_map(|name| region(blueprint, name))
+        .filter_map(|name| region(blueprint, name.as_ref()))
         .collect()
 }
 
-/// The stage a name points at, or nothing when the blueprint declares no stage
+/// The stage a name points at, or nothing when the graph declares no stage
 /// under it.
-pub(crate) fn stage(blueprint: &Arc<CoreBlueprint>, name: &str) -> Option<Stage> {
-    let at = blueprint.stages.iter().position(|def| def.name == name)?;
+pub(crate) fn stage(blueprint: &Arc<ParsedBlueprint>, name: &str) -> Option<Stage> {
+    let at = blueprint
+        .graph
+        .stages
+        .iter()
+        .position(|def| def.name.as_str() == name)?;
     Some(Stage {
         blueprint: Arc::clone(blueprint),
         at,
@@ -69,6 +72,9 @@ pub(crate) fn stage(blueprint: &Arc<CoreBlueprint>, name: &str) -> Option<Stage>
 }
 
 /// Where `name` sits in one layout.
-fn position(layout: &leviath_core::layout::ContextLayout, name: &str) -> Option<usize> {
-    layout.regions.iter().position(|region| region.name == name)
+fn position(layout: &RegionLayoutDef, name: &str) -> Option<usize> {
+    layout
+        .regions
+        .iter()
+        .position(|region| region.name.as_str() == name)
 }

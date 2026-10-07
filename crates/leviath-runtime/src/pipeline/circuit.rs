@@ -290,7 +290,7 @@ pub(crate) fn rotate_open_circuits(
         let Some(next) = si
             .fallbacks
             .iter()
-            .position(|e| !circuits.is_open(&e.provider, now, &policy))
+            .position(|e| !circuits.is_open(e.provider_or_empty(), now, &policy))
         else {
             continue; // nowhere to go; dispatch will park it
         };
@@ -298,12 +298,12 @@ pub(crate) fn rotate_open_circuits(
         si.fallbacks.drain(..next);
         tracing::warn!(
             from_provider = %si.provider_name,
-            to_provider = %entry.provider,
+            to_provider = %entry.provider_or_empty(),
             to_model = %entry.model,
             "provider circuit is open; moving this run to the next candidate"
         );
-        si.provider_name = entry.provider;
-        si.model = entry.model;
+        si.provider_name = entry.provider_or_empty().to_string();
+        si.model = entry.model.to_string();
     }
 }
 
@@ -660,9 +660,7 @@ mod tests {
             tool_filter: None,
             fallbacks: fallbacks
                 .iter()
-                .map(|p| {
-                    leviath_core::blueprint::ModelEntry::new((*p).to_string(), format!("{p}-model"))
-                })
+                .map(|p| crate::spec::names::ModelRef::parse(&format!("{p}/{p}-model")).unwrap())
                 .collect(),
             output: None,
         }

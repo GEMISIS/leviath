@@ -21,6 +21,8 @@ mod serve;
 pub(crate) use serve::*;
 mod mime;
 pub(crate) use mime::*;
+mod nudge;
+pub(crate) use nudge::NudgeSettings;
 
 // Why a config file would not load, kept structured rather than flattened into
 // a string, so the surfaces that have to explain a broken file can point at
@@ -293,14 +295,11 @@ pub struct Config {
     #[serde(default = "leviath_core::default_true")]
     pub shell_hint: bool,
 
-    /// Machine-wide defaults for the empty-response nudge (`[nudge]`): the
-    /// `[System]` message injected when a stage's model replies with text
-    /// before making any tool call. All three keys (`enabled`, `max`, `text`)
-    /// are optional; an agent's `[agent.nudge]` or a stage's
-    /// `[stages.<name>.nudge]` overrides each field independently. See
-    /// [`leviath_core::resolve_nudge`].
+    /// Machine-wide defaults for the empty-response nudge (`[nudge]`); a
+    /// graph's or a stage's `nudge` overrides each field independently. See
+    /// [`NudgeDef::resolve`](leviath_runtime::spec::graph::NudgeDef::resolve).
     #[serde(default)]
-    pub nudge: leviath_core::NudgeConfig,
+    pub nudge: NudgeSettings,
 
     /// Completion-webhook delivery tuning (retry/backoff/timeout).
     #[serde(default)]
@@ -394,7 +393,7 @@ impl Default for Config {
             limits: LimitsConfig::default(),
             batch_tool_hint: true,
             shell_hint: true,
-            nudge: leviath_core::NudgeConfig::default(),
+            nudge: NudgeSettings::default(),
             webhook: WebhookConfig::default(),
             observability: ObservabilityConfig::default(),
             sandbox: None,
@@ -427,13 +426,13 @@ impl Config {
     /// The safe-command keys in effect for `agent_name`, and where each came
     /// from. Resolved once at spawn, mirroring [`Self::permissions_for_agent`].
     ///
-    /// `blueprint` is the manifest's own `[safe_commands]`, which contributes
+    /// `blueprint` is the graph's own `safe_commands`, which contributes
     /// only when the user opted in - see
     /// [`crate::approvals::resolve_safe_keys`].
     pub(crate) fn safe_keys_for_agent(
         &self,
         agent_name: &str,
-        blueprint: Option<&leviath_core::blueprint::SafeCommandsConfig>,
+        blueprint: Option<&leviath_runtime::spec::graph::SafeCommandsDef>,
     ) -> std::collections::BTreeMap<String, crate::approvals::SafeSource> {
         crate::approvals::resolve_safe_keys(
             &self.safe_commands,
@@ -1955,8 +1954,8 @@ some_custom_thing = \"forwarded to the script\"
                 true,
             ),
             (
-                "NudgeConfig",
-                "../leviath-core/src/blueprint/transition.rs",
+                "NudgeSettings",
+                "src/config/nudge.rs",
                 &["properties", "nudge", "properties"],
                 true,
             ),
@@ -4068,10 +4067,9 @@ name = "broken"
     /// A server name goes into every one of that server's tool names, so a
     /// character a provider refuses has to be caught here.
     ///
-    /// It used to be rewritten instead: `my.tools` became the prefix
-    /// `my_tools`, which is also what a server actually named `my_tools`
-    /// produces. The two servers then fought over one set of tool names and
-    /// the loser's tools were handed a `_2` suffix nobody could predict.
+    /// Rewriting it instead would be ambiguous: `my.tools` as the prefix
+    /// `my_tools` is also what a server actually named `my_tools` produces,
+    /// and the two servers would then share one set of tool names.
     #[test]
     fn load_rejects_an_mcp_server_name_a_provider_would_refuse() {
         let dir = tempfile::tempdir().unwrap();
@@ -4477,7 +4475,7 @@ anthropic_api_key = "sk-ant-test-key"
             Some("sk-ant-test-key")
         );
         // No [nudge] section ⇒ every field unset ⇒ built-in defaults apply.
-        assert_eq!(config.nudge, leviath_core::NudgeConfig::default());
+        assert_eq!(config.nudge, NudgeSettings::default());
     }
 
     #[test]
@@ -4651,7 +4649,7 @@ enabled = false
             },
             batch_tool_hint: true,
             shell_hint: false,
-            nudge: leviath_core::NudgeConfig {
+            nudge: NudgeSettings {
                 enabled: Some(true),
                 max: Some(2),
                 text: Some("Use your tools.".to_string()),
@@ -4761,7 +4759,7 @@ enabled = false
         );
         assert_eq!(
             deserialized.nudge,
-            leviath_core::NudgeConfig {
+            NudgeSettings {
                 enabled: Some(true),
                 max: Some(2),
                 text: Some("Use your tools.".to_string()),

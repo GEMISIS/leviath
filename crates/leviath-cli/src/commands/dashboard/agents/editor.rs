@@ -72,7 +72,7 @@ pub(in crate::commands::dashboard) const TYPE_ANOTHER: &str = "another…";
 /// A full-screen overlay over the editor.
 #[derive(Debug, Clone)]
 pub(in crate::commands::dashboard) enum Overlay {
-    /// The exact manifest that will be saved, scrolled by `scroll` lines.
+    /// The exact `agent.toml` that will be saved, scrolled by `scroll` lines.
     Definition { scroll: usize },
     /// A stage's prompts.
     Prompts(Box<super::prompts::PromptsEditor>),
@@ -104,10 +104,10 @@ pub(in crate::commands::dashboard) struct Editor {
     /// The directory was made at open, only so the lint could see a
     /// bundled agent's scripts; closing without a save removes it again.
     pub(in crate::commands::dashboard) scratch_dir: bool,
-    /// Where `agent.leviath` is written.
+    /// Where `agent.toml` is written.
     pub(in crate::commands::dashboard) dir: PathBuf,
     pub(in crate::commands::dashboard) doc: ManifestDoc,
-    /// The manifest before each edit, newest last.
+    /// The file before each edit, newest last.
     pub(in crate::commands::dashboard) undo: Vec<String>,
     pub(in crate::commands::dashboard) redo: Vec<String>,
     pub(in crate::commands::dashboard) view: FlowView,
@@ -201,24 +201,37 @@ const UNDO_DEPTH: usize = 100;
 /// An edit to run on the document.
 type Mutation<'a> = Box<dyn FnOnce(&mut ManifestDoc) -> Result<(), EditError> + 'a>;
 
-/// A linear chain of `names`, for a manifest the runtime cannot read yet.
+/// A linear chain of `names`, each stage falling through to the next, for a
+/// file the runtime cannot read yet.
 fn chain_graph(names: &[String]) -> Arc<StageGraph> {
-    let mut text = String::from("[agent]\nname = \"chain\"\n");
+    let quote = |s: &str| toml_edit::Value::from(s).to_string();
+    let mut text = String::from(
+        "[blueprint]\nname = \"chain\"\nversion = \"0\"\n\
+         [graph]\nlayout = { total_budget_tokens = 0, regions = [] }\n",
+    );
     for name in names {
-        text.push_str(&format!("[stages.{name}]\n"));
+        text.push_str(&format!("[[graph.stages]]\nname = {}\n", quote(name)));
     }
-    let bp = leviath_core::manifest::parse_manifest(&text)
-        .expect("stage names passed the manifest's charset");
-    Arc::new(StageGraph::from_blueprint(&bp))
+    for pair in names.windows(2) {
+        text.push_str(&format!(
+            "[[graph.edges]]\nname = {}\nfrom = {}\nto = {}\n",
+            quote(leviath_runtime::spec::graph::FALL_THROUGH_EDGE),
+            quote(&pair[0]),
+            quote(&pair[1])
+        ));
+    }
+    let file = leviath_blueprint::BlueprintFile::parse(&text)
+        .expect("a chain of the stage names the document holds reads");
+    Arc::new(StageGraph::from_graph(&file.run_graph()))
 }
 
 impl Editor {
     /// The graph the runtime would run; when the runtime rejects the
-    /// manifest, the last graph that parsed, or a bare chain of the stage
-    /// names so there is still something to point at.
+    /// file, the last graph that read, or a bare chain of the stage names so
+    /// there is still something to point at.
     fn graph_of(doc: &ManifestDoc, fallback: Option<&Arc<StageGraph>>) -> Arc<StageGraph> {
-        match doc.blueprint() {
-            Ok(bp) => Arc::new(StageGraph::from_blueprint(&bp)),
+        match doc.file() {
+            Ok(file) => Arc::new(StageGraph::from_graph(&file.run_graph())),
             Err(_) => fallback
                 .cloned()
                 .unwrap_or_else(|| chain_graph(&doc.stage_names())),
@@ -322,7 +335,7 @@ impl Editor {
         }
     }
 
-    /// Run a mutator: the manifest before it goes on the undo stack, and a
+    /// Run a mutator: the file before it goes on the undo stack, and a
     /// refusal comes back as its message with nothing changed. Tests drive
     /// the document through here; the dashboard goes through
     /// [`Dashboard::editor_mutate`].
@@ -402,7 +415,7 @@ impl Dashboard {
         let doc = match ManifestDoc::parse(text) {
             Ok(doc) => doc,
             Err(e) => {
-                self.toast(format!("Cannot edit that manifest: {e}"), ToastLevel::Error);
+                self.toast(format!("Cannot edit that agent: {e}"), ToastLevel::Error);
                 return;
             }
         };
@@ -454,7 +467,10 @@ impl Dashboard {
         let mime_types = mime_type_options(&self.new_run_ctx.config_path, &doc);
         // The agent's own servers join the config's in the chooser, asked
         // for their tools the same way.
-        let own_servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(text);
+        let own_servers = doc
+            .file()
+            .map(|file| crate::daemon::starter::mcp_configs(&file.graph))
+            .unwrap_or_default();
         let mut editor = Editor {
             name,
             is_new,
@@ -539,7 +555,7 @@ impl Dashboard {
         let name = self.editor().name.clone();
         let written = std::fs::create_dir_all(&dir).and_then(|()| {
             leviath_sys::write_atomic(
-                &dir.join(leviath_core::files::MANIFEST_FILENAME),
+                &dir.join(leviath_blueprint::FILE_NAME),
                 text.as_bytes(),
                 None,
             )
@@ -557,7 +573,7 @@ impl Dashboard {
             editor.is_new = false;
             editor.message = Some(format!(
                 "Saved to {}",
-                dir.join(leviath_core::files::MANIFEST_FILENAME).display()
+                dir.join(leviath_blueprint::FILE_NAME).display()
             ));
         }
         self.refresh_catalog();
@@ -584,7 +600,7 @@ impl Dashboard {
 
     /// Close the editor, back to the catalog.
     pub(in crate::commands::dashboard) fn close_editor(&mut self) {
-        // The arrangement is worth keeping even when the manifest is not.
+        // The arrangement is worth keeping even when the file is not.
         let (name, positions, unsaved_dir) = {
             let editor = self.editor();
             (
@@ -601,7 +617,7 @@ impl Dashboard {
         // An agent never saved leaves nothing behind (its scripts were
         // materialised for the lint's sake).
         if let Some(dir) = unsaved_dir
-            && !dir.join(leviath_core::files::MANIFEST_FILENAME).exists()
+            && !dir.join(leviath_blueprint::FILE_NAME).exists()
         {
             let _ = std::fs::remove_dir_all(&dir);
         }

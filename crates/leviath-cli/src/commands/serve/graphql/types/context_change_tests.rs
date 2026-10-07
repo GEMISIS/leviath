@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 use leviath_core::ContextCause;
-use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+use leviath_runtime::runfile::record::{self, RunRecord};
+use leviath_runtime::state::RunEvent;
+use leviath_runtime::state::journal::{CauseState, ContextNoteState};
 
 use super::super::run::Run;
 use crate::commands::serve::testutil::state_with_agent_paths;
@@ -20,7 +22,7 @@ fn meta() -> RunMeta {
     let mut meta = RunMeta::new(
         "moved-regions".to_string(),
         "coder".to_string(),
-        "/agents/coder/agent.leviath".to_string(),
+        "/agents/coder/agent.toml".to_string(),
         "move a few regions".to_string(),
         None,
         "/tmp".to_string(),
@@ -75,52 +77,34 @@ async fn error(query: &str) -> String {
         .expect("a refusal")
 }
 
-/// One region change record.
+/// One change noted a region at a time, at `at`.
 fn changed(
     region: &str,
-    cause: ContextCause,
-    added: usize,
-    removed: usize,
+    cause: CauseState,
+    added: u32,
+    removed: u32,
     delta: i64,
     at: i64,
-) -> RunRecord {
-    RunRecord::ContextChange {
+) -> (RunEvent, i64) {
+    let note = ContextNoteState {
         region: region.to_string(),
         cause,
         entries_added: added,
         entries_removed: removed,
         token_delta: delta,
-        at,
-    }
+    };
+    (RunEvent::ContextNoted(note), at)
 }
 
-/// Write a journal of `records` for the run.
+/// Record a run file for the run with one step per noted change.
+fn write_notes(notes: Vec<(RunEvent, i64)>) {
+    super::super::journal_fixture::events(&meta().run_id, notes);
+}
+
+/// Record a run file of `records` for the run, one step per record, the way
+/// the persistence lane would have.
 fn write_journal(records: Vec<RunRecord>) {
-    let meta = meta();
-    let mut buf = Vec::new();
-    run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION)
-        .expect("a preamble");
-    run_archive::write_record(
-        &mut buf,
-        &RunRecord::Header {
-            identity: RunIdentity {
-                run_id: meta.run_id.clone(),
-                machine_id: "m".to_string(),
-                world_id: "w".to_string(),
-                created_at: 0,
-            },
-            meta: Box::new(meta.clone()),
-        },
-    )
-    .expect("a header");
-    for record in &records {
-        run_archive::write_record(&mut buf, record).expect("a record");
-    }
-    std::fs::write(
-        crate::runstate::run_dir(&meta.run_id).join(leviath_core::files::ARCHIVE_FILE),
-        &buf,
-    )
-    .expect("the journal");
+    super::super::journal_fixture::journal(&meta().run_id, &records);
 }
 
 /// Every field reads back typed, and a region that shrank carries a negative
@@ -129,9 +113,9 @@ fn write_journal(records: Vec<RunRecord>) {
 async fn the_changes_read_back_typed_with_their_cause() {
     crate::runstate::with_isolated_runs_dir_async("graphql-context-changes", |_dir| async move {
         create_run(&meta()).expect("run written");
-        write_journal(vec![
-            changed("plan", ContextCause::Seed, 1, 0, 40, 20),
-            changed("plan", ContextCause::Compaction, 0, 3, -120, 30),
+        write_notes(vec![
+            changed("plan", CauseState::Seed, 1, 0, 40, 20),
+            changed("plan", CauseState::Compaction, 0, 3, -120, 30),
         ]);
 
         let json = data(
@@ -187,18 +171,9 @@ async fn the_snapshots_and_the_reasons_are_separate_fields() {
         "graphql-context-changes-vs-history",
         |_dir| async move {
             create_run(&meta()).expect("run written");
-            write_journal(vec![
-                RunRecord::ContextCheckpoint {
-                    snapshot: leviath_core::run_meta::ContextSnapshot {
-                        stage_name: "plan".to_string(),
-                        total_tokens: 90,
-                        max_tokens: 1_000,
-                        regions: Vec::new(),
-                    },
-                    at: 25,
-                },
-                changed("conversation", ContextCause::ToolResult, 2, 0, 90, 25),
-                changed("conversation", ContextCause::ModelReply, 1, 0, 30, 26),
+            write_notes(vec![
+                changed("conversation", CauseState::ToolResult, 2, 0, 90, 25),
+                changed("conversation", CauseState::ModelReply, 1, 0, 30, 26),
             ]);
 
             let json = data(
@@ -230,9 +205,9 @@ async fn the_changes_page_carries_on_from_its_cursor() {
         "graphql-context-changes-paging",
         |_dir| async move {
             create_run(&meta()).expect("run written");
-            write_journal(
+            write_notes(
                 (0..5)
-                    .map(|i| changed("plan", ContextCause::ContextTool, 1, 0, 10, 20 + i))
+                    .map(|i| changed("plan", CauseState::ContextTool, 1, 0, 10, 20 + i))
                     .collect(),
             );
 
@@ -307,9 +282,9 @@ async fn an_explicit_order_by_walks_backwards() {
         "graphql-context-changes-orderby",
         |_dir| async move {
             create_run(&meta()).expect("run written");
-            write_journal(vec![
-                changed("plan", ContextCause::Seed, 1, 0, 10, 20),
-                changed("plan", ContextCause::ContextTool, 1, 0, 10, 21),
+            write_notes(vec![
+                changed("plan", CauseState::Seed, 1, 0, 10, 20),
+                changed("plan", CauseState::ContextTool, 1, 0, 10, 21),
             ]);
 
             let json = data(
@@ -380,13 +355,12 @@ async fn an_unreadable_journal_says_so() {
         "graphql-context-changes-corrupt",
         |_dir| async move {
             create_run(&meta()).expect("run written");
-            std::fs::write(
-                crate::runstate::run_dir("moved-regions").join(leviath_core::files::ARCHIVE_FILE),
-                b"not an archive",
-            )
-            .expect("a corrupt journal");
+            crate::commands::serve::core::run_file::tests::garbage(
+                "moved-regions",
+                b"not a run file",
+            );
             let message = error("{ run { contextChanges(first: 10) { total } } }").await;
-            assert!(message.contains("unreadable journal"), "{message}");
+            assert!(message.contains("cannot read"), "{message}");
         },
     )
     .await;
@@ -435,7 +409,7 @@ async fn a_transaction_reads_back_with_the_windows_either_side() {
                 revision_after: "cw1-after".to_string(),
                 cause: ContextCause::Compaction,
                 regions: vec![
-                    run_archive::RegionCommit {
+                    record::RegionCommit {
                         region: "plan".to_string(),
                         digest_before: "rg1-full".to_string(),
                         digest_after: "rg1-empty".to_string(),
@@ -445,7 +419,7 @@ async fn a_transaction_reads_back_with_the_windows_either_side() {
                         entries_after: 0,
                         entries_added: 0,
                     },
-                    run_archive::RegionCommit {
+                    record::RegionCommit {
                         region: "plan_history".to_string(),
                         digest_before: "rg1-empty".to_string(),
                         digest_after: "rg1-summary".to_string(),

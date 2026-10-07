@@ -1,7 +1,14 @@
 //! [`AgentWorld`]: the embedder-facing runtime. Build one with plain values,
-//! spawn agents, watch the event stream, answer their questions, shut down.
+//! spawn runs, watch the event stream, answer their questions, shut down.
+//!
+//! A run is asked for with a [`SpawnRequest`], the same typed request every
+//! other front door takes. It names a blueprint the world was given (see
+//! [`AgentWorldBuilder::blueprint`]) with its inputs, or carries a whole
+//! graph. The world resolves it against an [`EmbedEnv`](super::EmbedEnv),
+//! binds it and places it, exactly as the daemon does, and a request it
+//! refuses comes back with every problem at once.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -9,123 +16,31 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{broadcast, oneshot};
 
-use super::spawner::{EmbedSpawner, StagedBlueprints, mint_run_id};
+use super::spawner::{Blueprints, EmbedStarter};
 use super::{BasicToolService, EmbedError, EventStream};
 use crate::components::AgentStatus;
-use crate::host::{ControlOp, SpawnArgs, WorldEvent, WorldHost};
+use crate::host::{ControlOp, WorldEvent, WorldHost};
 use crate::inference_pool::InferencePoolConfig;
 use crate::interaction_hub::InteractionHub;
 use crate::pipeline::{ModelDefaults, ToolService};
 use crate::provider_creds::ProviderCreds;
 use crate::providers::ProviderRegistry;
+use crate::spec::env::LoadedBlueprint;
+use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+use crate::spec::names::RunId;
+use crate::spec::request::SpawnRequest;
+use crate::spec::summary::SpawnSummary;
+use crate::state::RunState;
 use crate::world::PipelineWorld;
 
-/// How long a spawn waits for a gateway's model list it has not read yet.
-/// Bounded so an unreachable gateway costs a spawn this and no more.
-const PRIME_TIMEOUT_SECS: u64 = 10;
-
-/// An opaque run identifier, minted by [`AgentWorld::spawn`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RunId(String);
-
-impl std::fmt::Display for RunId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for RunId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Where a spawn's blueprint comes from.
-pub enum BlueprintSource {
-    /// A `.leviath` manifest file on disk.
-    Path(PathBuf),
-    /// Manifest TOML held in memory (parsed and validated at spawn).
-    Toml(String),
-    /// An already-constructed blueprint value (boxed: a Blueprint is a
-    /// large value, and boxing keeps the enum small).
-    Inline(Box<leviath_core::Blueprint>),
-}
-
-/// One spawn request. Build with [`SpawnSpec::new`], then set the optional
-/// fields directly; the struct is non-exhaustive so new options stay
-/// additive.
-#[non_exhaustive]
-pub struct SpawnSpec {
-    /// The agent's blueprint.
-    pub blueprint: BlueprintSource,
-    /// The task prompt, seeded into the blueprint's `task` region.
-    pub task: String,
-    /// Working directory tools are confined to. Must exist.
-    pub workdir: PathBuf,
-    /// Optional model override (`provider/model` or a bare model name).
-    pub model: Option<String>,
-    /// Seed content for named caller-input regions.
-    pub regions: HashMap<String, String>,
-    /// Custom key/value metadata carried in the run's metadata.
-    pub metadata: HashMap<String, String>,
-    /// Ask for the run's final output in a particular shape, overriding what
-    /// the blueprint declares.
-    ///
-    /// The format is an opaque label handed to the model, never interpreted
-    /// here, so an embedder can ask for its own house format without this crate
-    /// knowing anything about it. Supplying a
-    /// [`schema`](leviath_core::output::OutputSpec::schema) is the one thing
-    /// that makes the runtime check the answer.
-    pub output: Option<leviath_core::output::OutputSpec>,
-    /// Files to put in the run's regions as typed parts: on the task region
-    /// unless a part names another. Built with [`SpawnSpec::attach`].
-    pub parts: Vec<leviath_core::mime::InboundPart>,
-}
-
-impl SpawnSpec {
-    /// A spec with the required fields; optional fields start empty.
-    pub fn new(
-        blueprint: BlueprintSource,
-        task: impl Into<String>,
-        workdir: impl Into<PathBuf>,
-    ) -> Self {
-        Self {
-            blueprint,
-            task: task.into(),
-            workdir: workdir.into(),
-            model: None,
-            regions: HashMap::new(),
-            metadata: HashMap::new(),
-            output: None,
-            parts: Vec::new(),
-        }
-    }
-
-    /// Attach a file to the run: bytes with a name, typed by the run's
-    /// registry unless the part declares a type, landing in the task region
-    /// unless the part names another.
-    pub fn attach(mut self, part: leviath_core::mime::InboundPart) -> Self {
-        self.parts.push(part);
-        self
-    }
-
-    /// Ask for the final output in `format`, with optional guidance.
-    ///
-    /// `format` is carried through untouched: `"markdown"`, `"a2ui"`, a mime
-    /// type, or a shape invented for this program are all equally valid.
-    pub fn output(mut self, format: impl Into<String>, instructions: Option<String>) -> Self {
-        self.output = Some(leviath_core::output::OutputSpec {
-            format: Some(format.into()),
-            instructions,
-            example: None,
-            schema: None,
-            validator: None,
-            on_validator_error: None,
-            overwrite_artifacts: None,
-            artifacts: Vec::new(),
-        });
-        self
-    }
+/// The issue a request gets when the world has shut down under it.
+fn closed() -> SpawnIssues {
+    SpawnIssue::new(
+        SpecPath::root(),
+        IssueCode::Unavailable,
+        EmbedError::ChannelClosed.to_string(),
+    )
+    .into()
 }
 
 /// Builds an [`AgentWorld`] from plain values - no config file, no daemon.
@@ -145,6 +60,8 @@ pub struct AgentWorldBuilder {
     defaults: ModelDefaults,
     hints: leviath_core::config::PromptHints,
     runtime: Option<Handle>,
+    blueprints: BTreeMap<String, LoadedBlueprint>,
+    workdir: Option<PathBuf>,
 }
 
 impl AgentWorldBuilder {
@@ -164,6 +81,8 @@ impl AgentWorldBuilder {
                 shell: false,
             },
             runtime: None,
+            blueprints: BTreeMap::new(),
+            workdir: None,
         }
     }
 
@@ -171,6 +90,23 @@ impl AgentWorldBuilder {
     /// for the supported providers.
     pub fn provider(mut self, creds: ProviderCreds) -> Self {
         self.creds.push(creds);
+        self
+    }
+
+    /// Offer a blueprint to the world's requests, under the name it carries
+    /// (repeatable; a second blueprint of the same name replaces the first).
+    /// Load one from its `agent.toml` with `leviath_blueprint::load`. A
+    /// request names it with `SpawnSource::Blueprint`.
+    pub fn blueprint(mut self, blueprint: LoadedBlueprint) -> Self {
+        self.blueprints
+            .insert(blueprint.reference.name.to_string(), blueprint);
+        self
+    }
+
+    /// The directory a run whose request names no workdir works in. Without
+    /// this, every request has to name one.
+    pub fn workdir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.workdir = Some(dir.into());
         self
     }
 
@@ -216,14 +152,15 @@ impl AgentWorldBuilder {
     ///
     /// Call it once per target, best first. This is what keeps a blueprint
     /// that names exactly one model running when that provider runs out of
-    /// credits.
+    /// credits. A provider or model id that is not a valid name (one with
+    /// whitespace in it, say) names nowhere a request could go, and is left
+    /// out with a warning.
     pub fn fallback_route(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
-        self.defaults
-            .fallback_order
-            .push(leviath_core::blueprint::ModelEntry::new(
-                provider.into(),
-                model.into(),
-            ));
+        let (provider, model) = (provider.into(), model.into());
+        match crate::spec::names::ModelRef::parse(&format!("{provider}/{model}")) {
+            Ok(route) => self.defaults.fallback_order.push(route),
+            Err(e) => tracing::warn!(%provider, %model, "ignoring a fallback route: {e}"),
+        }
         self
     }
 
@@ -300,7 +237,8 @@ impl AgentWorldBuilder {
             registry.register(name, provider);
         }
         // Shares every provider with the world's copy, so a list read through
-        // it is the list the spawn resolves against.
+        // it is the list the spawn resolves against, and the starter chooses
+        // models from the same set the world infers on.
         let unread_registry = registry.clone();
         // The providers a bare model name may route to: the only ones whose
         // unread list can hold a stage back, so the only ones worth asking.
@@ -332,30 +270,16 @@ impl AgentWorldBuilder {
         world.insert_interaction_hub(hub.clone());
         let mut host = WorldHost::with_interactions(world, hub.clone());
 
-        let staged: StagedBlueprints = Arc::new(Mutex::new(HashMap::new()));
-        let spawner = EmbedSpawner {
-            basic_tools: basic_tools.clone(),
+        let blueprints: Blueprints = Arc::new(Mutex::new(self.blueprints));
+        host.set_starter(Arc::new(EmbedStarter {
+            registry: unread_registry,
+            creds: self.creds,
             defaults: self.defaults,
             hints: self.hints,
-            staged: staged.clone(),
-        };
-        host.set_spawner(Box::new(move |world, args| spawner.spawn(world, args)));
-        // A gateway's model list is what a bare model name is judged against,
-        // and a stage naming one is refused while that list is unread. Read it
-        // before a spawn needs it (and again before the next, if the gateway
-        // did not answer); a list already in hand costs nothing.
-        host.set_spawn_preprocessor(Box::new(move |_args| {
-            let registry = unread_registry.clone();
-            let preferred = preferred.clone();
-            Box::pin(async move {
-                let preferred: Vec<&str> = preferred.iter().map(String::as_str).collect();
-                registry
-                    .prime_unread(
-                        std::time::Duration::from_secs(PRIME_TIMEOUT_SECS),
-                        &preferred,
-                    )
-                    .await;
-            })
+            basic_tools: basic_tools.clone(),
+            blueprints: blueprints.clone(),
+            workdir: self.workdir,
+            preferred,
         }));
         if let Some(tools) = basic_tools {
             host.set_reaper(Box::new(move |_world, entity| tools.unregister(entity)));
@@ -372,7 +296,7 @@ impl AgentWorldBuilder {
             control,
             events,
             hub,
-            staged,
+            blueprints,
             serve_task,
         })
     }
@@ -386,7 +310,7 @@ pub struct AgentWorld {
     control: UnboundedSender<ControlOp>,
     events: broadcast::Sender<WorldEvent>,
     hub: InteractionHub,
-    staged: StagedBlueprints,
+    blueprints: Blueprints,
     serve_task: tokio::task::JoinHandle<WorldHost>,
 }
 
@@ -408,64 +332,54 @@ impl AgentWorld {
         rx.await.map_err(|_| EmbedError::ChannelClosed)
     }
 
-    /// Spawn an agent. Returns its [`RunId`] once the agent is live in the
-    /// world (blueprint loaded, stages resolved, seeds applied).
-    pub async fn spawn(&self, spec: SpawnSpec) -> Result<RunId, EmbedError> {
-        // Resolve the blueprint source: a path passes through to the spawner;
-        // in-memory blueprints validate here and park in the staged map under
-        // the freshly minted run id.
-        enum Resolved {
-            Path(PathBuf),
-            Inline(Box<leviath_core::Blueprint>),
-        }
-        let resolved = match spec.blueprint {
-            BlueprintSource::Path(path) => Resolved::Path(path),
-            BlueprintSource::Toml(toml) => Resolved::Inline(Box::new(
-                leviath_core::manifest::parse_manifest(&toml)
-                    .map_err(|e| EmbedError::Blueprint(format!("parse manifest: {e}")))?,
-            )),
-            BlueprintSource::Inline(blueprint) => Resolved::Inline(blueprint),
-        };
-        if let Resolved::Inline(blueprint) = &resolved {
-            blueprint
-                .validate()
-                .map_err(|e| EmbedError::Blueprint(format!("invalid blueprint: {e}")))?;
-        }
-        let stem = match &resolved {
-            Resolved::Path(path) => path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            Resolved::Inline(blueprint) => blueprint.name.clone(),
-        };
-        let run_id = mint_run_id(&stem);
-        let blueprint_path = match resolved {
-            Resolved::Path(path) => path.to_string_lossy().into_owned(),
-            Resolved::Inline(blueprint) => {
-                leviath_core::sync::lock(&self.staged).insert(run_id.clone(), *blueprint);
-                format!("inline:{run_id}")
-            }
-        };
-        let args = SpawnArgs {
-            run_id,
-            blueprint_path,
-            task: spec.task,
-            regions: spec.regions,
-            model: spec.model,
-            workdir: spec.workdir.to_string_lossy().into_owned(),
-            metadata: spec.metadata,
-            output: spec.output,
-            parts: spec.parts,
-            ..Default::default()
-        };
-        let run_id = self
-            .ask(|reply| ControlOp::Spawn {
-                args: Box::new(args),
-                reply,
-            })
-            .await?
-            .map_err(EmbedError::Spawn)?;
-        Ok(RunId(run_id))
+    /// Offer one more blueprint to the world's requests, as
+    /// [`AgentWorldBuilder::blueprint`] does before the world starts.
+    pub fn add_blueprint(&self, blueprint: LoadedBlueprint) {
+        leviath_core::sync::lock(&self.blueprints)
+            .insert(blueprint.reference.name.to_string(), blueprint);
+    }
+
+    /// Start the run `request` asks for. Returns its id once the run is live
+    /// in the world: resolved, bound and placed. A request that cannot run
+    /// comes back with every reason at once, each naming the place in the
+    /// request it is about. A run its graph may keep from ever finishing
+    /// still starts; [`validate`](Self::validate) answers with those
+    /// warnings, and the world's log says them as the run starts.
+    pub async fn spawn(&self, request: SpawnRequest) -> Result<RunId, SpawnIssues> {
+        self.ask(|reply| ControlOp::Spawn {
+            request: Box::new(request),
+            reply,
+        })
+        .await
+        .unwrap_or_else(|_| Err(closed()))
+        .map(|spawned| spawned.run_id)
+    }
+
+    /// What `request` would run, without running it: the same checks
+    /// [`spawn`](Self::spawn) makes, answered with a summary of the run.
+    pub async fn validate(&self, request: SpawnRequest) -> Result<SpawnSummary, SpawnIssues> {
+        self.ask(|reply| ControlOp::ValidateSpawn {
+            request: Box::new(request),
+            reply,
+        })
+        .await
+        .unwrap_or_else(|_| Err(closed()))
+    }
+
+    /// A run's whole state: where it is, its context, what it is waiting on
+    /// and what it has spent. Read live while the run is in the world, or
+    /// from its run file once it has left (with a
+    /// [`state_dir`](AgentWorldBuilder::state_dir)). `None` for a run the
+    /// world does not know.
+    pub async fn inspect(&self, id: &RunId) -> Option<RunState> {
+        self.ask(|reply| ControlOp::Inspect {
+            run_id: id.to_string(),
+            reply,
+        })
+        .await
+        .ok()
+        .flatten()
+        .map(|state| *state)
     }
 
     /// What a run handed back, or `None` if it has not submitted anything (or
@@ -477,7 +391,7 @@ impl AgentWorld {
     /// scraping the log stream.
     pub async fn result(&self, id: &RunId) -> Option<leviath_core::output::FinalOutput> {
         self.ask(|reply| ControlOp::Result {
-            run_id: id.0.clone(),
+            run_id: id.to_string(),
             reply,
         })
         .await
@@ -501,7 +415,7 @@ impl AgentWorld {
             return None;
         }
         self.ask(|reply| ControlOp::Blob {
-            run_id: id.0.clone(),
+            run_id: id.to_string(),
             sha256: artifact.sha256.clone(),
             reply,
         })
@@ -518,7 +432,7 @@ impl AgentWorld {
     /// A run's current status, or `None` if the world doesn't know it.
     pub async fn status(&self, id: &RunId) -> Option<AgentStatus> {
         self.ask(|reply| ControlOp::Status {
-            run_id: id.0.clone(),
+            run_id: id.to_string(),
             reply,
         })
         .await
@@ -543,7 +457,7 @@ impl AgentWorld {
         parts: Vec<leviath_core::mime::InboundPart>,
     ) -> bool {
         self.ask(|reply| ControlOp::Message {
-            agent_id: id.0.clone(),
+            agent_id: id.to_string(),
             content: content.to_string(),
             target_region: None,
             parts,
@@ -556,27 +470,28 @@ impl AgentWorld {
     /// Pause a run. `false` if there is no such live run.
     pub async fn pause(&self, id: &RunId) -> bool {
         self.ask(|reply| ControlOp::Pause {
-            run_id: id.0.clone(),
+            run_id: id.to_string(),
             reply,
         })
         .await
         .unwrap_or(false)
     }
 
-    /// Resume a paused run. `false` if there is no such live run.
+    /// Resume a paused run. `false` if there is no such live run, or it is
+    /// held because this machine cannot take it back.
     pub async fn resume(&self, id: &RunId) -> bool {
         self.ask(|reply| ControlOp::Resume {
-            run_id: id.0.clone(),
+            run_id: id.to_string(),
             reply,
         })
         .await
-        .unwrap_or(false)
+        .is_ok_and(|resumed| resumed == Ok(true))
     }
 
     /// Cancel a run. `false` if there is no such live run.
     pub async fn cancel(&self, id: &RunId) -> bool {
         self.ask(|reply| ControlOp::Cancel {
-            run_id: id.0.clone(),
+            run_id: id.to_string(),
             reply,
         })
         .await
@@ -589,7 +504,10 @@ impl AgentWorld {
         self.hub
             .pending()
             .into_iter()
-            .map(|(agent_id, request)| (RunId(agent_id), request))
+            .map(|(agent_id, request)| {
+                let id = RunId::new(agent_id).expect("the hub holds the ids the world minted");
+                (id, request)
+            })
             .collect()
     }
 
@@ -631,6 +549,11 @@ mod tests {
         ProviderError, TokenUsage, ToolCall,
     };
     use std::collections::VecDeque;
+    use std::path::Path;
+
+    use crate::spec::inputs::RawInput;
+    use crate::spec::names::BlueprintRef;
+    use crate::spec::request::SpawnSource;
 
     /// A scripted provider: pops one canned response per inference call.
     struct Mock {
@@ -726,49 +649,87 @@ mod tests {
             .expect("world builds inside the test runtime")
     }
 
-    const TWO_STAGE: &str = r#"[agent]
-name = "embedded"
-version = "0.0.0"
+    /// A two-stage graph, as the `[graph]` table of an `agent.toml` holds it.
+    const TWO_STAGE: &str = r#"title = "embedded"
 description = "Two stage embedded test agent."
-entry_stage = "work"
+entry = "work"
+edges = [{ name = "wrap", from = "work", to = "wrap" }]
 
-[stages.work]
-mode = "autonomous"
-model = { provider = "mock", model = "m" }
+[[stages]]
+name = "work"
 description = "Do the work"
-available_tools = ["read_file"]
 system_prompt = "Work."
-[stages.work.transitions.wrap]
-transform = "direct"
+model = { models = [{ provider = "mock", model = "m" }] }
+tools = ["read_file"]
 
-[stages.wrap]
-mode = "autonomous"
-model = { provider = "mock", model = "m" }
+[[stages]]
+name = "wrap"
 description = "Wrap up"
-allow_complete = true
 system_prompt = "Wrap."
+model = { models = [{ provider = "mock", model = "m" }] }
 
-[context.regions]
-conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
+[layout]
+total_budget_tokens = 20000
+
+[[layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 40 }
+budget = 20000
 "#;
 
-    const ASKER: &str = r#"[agent]
-name = "asker"
-version = "0.0.0"
+    const ASKER: &str = r#"title = "asker"
 description = "Asks one question then finishes."
-entry_stage = "chat"
+entry = "chat"
 
-[stages.chat]
-mode = "autonomous"
-model = { provider = "mock", model = "m" }
+[[stages]]
+name = "chat"
 description = "Chat"
-available_tools = ["ask_user_text"]
-allow_complete = true
 system_prompt = "Ask."
+model = { models = [{ provider = "mock", model = "m" }] }
+tools = ["ask_user_text"]
 
-[context.regions]
-conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
+[layout]
+total_budget_tokens = 20000
+
+[[layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 40 }
+budget = 20000
 "#;
+
+    /// `graph` (one of the graphs above, whose regions share 20000 tokens)
+    /// with one more pinned region of `budget` tokens, filled from a text
+    /// input of the same name.
+    fn with_input(graph: &str, name: &str, budget: u32, required: bool) -> String {
+        let total = 20_000 + budget;
+        format!(
+            "{}\n[[layout.regions]]\nname = \"{name}\"\nkind = \"pinned\"\nbudget = {budget}\n\
+             required = {required}\n\n[[inputs]]\nname = \"{name}\"\n\
+             type = {{ kind = \"text\", multiline = true }}\nrequired = {required}\n\
+             binds = [{{ region = \"{name}\" }}]\n",
+            graph.replace(
+                "total_budget_tokens = 20000",
+                &format!("total_budget_tokens = {total}"),
+            )
+        )
+    }
+
+    /// The blueprint `graph` describes, named after its title and pinned to
+    /// its text, reading its files from `dir`.
+    fn blueprint(graph: &str, dir: &Path) -> LoadedBlueprint {
+        let graph_def: crate::spec::graph::RunGraph =
+            toml::from_str(graph).expect("the test graph reads");
+        let name = graph_def.title.clone().expect("the test graph has a title");
+        LoadedBlueprint {
+            graph: graph_def,
+            reference: BlueprintRef {
+                name: crate::spec::names::BlueprintName::new(name).expect("a valid name"),
+                digest: Some(crate::spec::names::Digest::of(graph.as_bytes())),
+            },
+            version: "0.0.0".to_string(),
+            base_dir: dir.to_path_buf(),
+        }
+    }
 
     /// Drain events until `pred` matches (or the stream ends), collecting
     /// everything seen. Bounded by the caller's `tokio::time::timeout`.
@@ -787,72 +748,119 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         seen
     }
 
+    /// The blueprint `graph` describes, offered to `world` under its own
+    /// name, and a request for it working in `dir`, with `task` as its task
+    /// when the blueprint takes one.
+    fn request(world: &AgentWorld, graph: &str, task: &str, dir: &Path) -> SpawnRequest {
+        let loaded = blueprint(graph, dir);
+        let takes_task = loaded
+            .graph
+            .inputs
+            .iter()
+            .any(|d| d.name.as_str() == "task");
+        let name = loaded.reference.name.clone();
+        world.add_blueprint(loaded);
+        let mut request =
+            SpawnRequest::new(SpawnSource::Blueprint(BlueprintRef { name, digest: None }));
+        if takes_task {
+            request = request.input("task", RawInput::Text(task.to_string()));
+        }
+        request.workdir = Some(dir.to_path_buf());
+        request
+    }
+
+    /// A check resolves the registered blueprint the request names without
+    /// starting it; one that names nothing registered is refused.
+    #[tokio::test]
+    async fn a_check_resolves_a_registered_blueprint_and_refuses_an_unknown_one() {
+        use crate::host::RunStarter;
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(Mock {
+                responses: Mutex::new(VecDeque::new()),
+            }),
+        );
+        let blueprints: Blueprints = Default::default();
+        let loaded = blueprint(TWO_STAGE, &std::env::temp_dir());
+        leviath_core::sync::lock(&blueprints).insert("embedded".to_string(), loaded);
+        let starter = EmbedStarter {
+            registry,
+            creds: Vec::new(),
+            defaults: Default::default(),
+            hints: Default::default(),
+            basic_tools: None,
+            blueprints,
+            workdir: Some(std::env::temp_dir()),
+            preferred: Vec::new(),
+        };
+        let named = |name: &str| {
+            SpawnRequest::new(SpawnSource::Blueprint(BlueprintRef::parse(name).unwrap()))
+        };
+        let summary = starter
+            .check(named("embedded"), crate::spec::env::Caller::TopLevel)
+            .await
+            .expect("the registered blueprint checks, in the default workdir");
+        assert_eq!(summary.title, "embedded");
+        assert!(
+            starter
+                .check(named("nowhere"), crate::spec::env::Caller::TopLevel)
+                .await
+                .is_err()
+        );
+        // A graph of the caller's own needs nothing registered.
+        let loaded = blueprint(TWO_STAGE, &std::env::temp_dir());
+        let raw = SpawnRequest::new(SpawnSource::Raw(Box::new(loaded.graph)));
+        assert!(
+            starter
+                .check(raw, crate::spec::env::Caller::TopLevel)
+                .await
+                .is_ok()
+        );
+    }
+
+    /// A blueprint with a task region takes the spawn's task.
+    #[tokio::test]
+    async fn a_task_reaches_a_blueprint_with_a_task_region() {
+        let dir = tempfile::tempdir().unwrap();
+        let world = mock_world(vec![text("done"), text("done"), text("done")]);
+        let graph = with_input(ASKER, "task", 500, false);
+        world
+            .spawn(request(&world, &graph, "say hello", dir.path()))
+            .await
+            .expect("spawns");
+        world.shutdown().await;
+    }
+
+    /// A dry run answers with what would run and starts nothing; the issues
+    /// it finds are the ones a spawn of the same request would get.
+    #[tokio::test]
+    async fn a_dry_run_says_what_would_run_or_everything_wrong() {
+        let dir = tempfile::tempdir().unwrap();
+        let world = mock_world(vec![]);
+        let summary = world
+            .validate(request(&world, TWO_STAGE, "t", dir.path()))
+            .await
+            .expect("valid");
+        assert_eq!(summary.title, "embedded");
+        assert_eq!(summary.stages.len(), 2);
+        assert_eq!(summary.stages[0].model.as_str(), "m");
+
+        let mut bad = request(&world, TWO_STAGE, "t", dir.path());
+        bad = bad.input("nonsense", RawInput::Int(1));
+        bad.workdir = Some(dir.path().join("nope"));
+        let issues = world.validate(bad.clone()).await.unwrap_err();
+        let paths: Vec<String> = issues.iter().map(|i| i.path.to_string()).collect();
+        assert!(paths.contains(&"inputs.nonsense".to_string()), "{issues}");
+        assert!(paths.contains(&"workdir".to_string()), "{issues}");
+        assert_eq!(world.spawn(bad).await.unwrap_err(), issues);
+        world.shutdown().await;
+    }
+
     #[tokio::test]
     async fn build_without_providers_is_refused() {
         let err = AgentWorld::builder().build().map(|_| ()).unwrap_err();
         assert_eq!(err, EmbedError::NoProviders);
-    }
-
-    /// The embedder's side of the format rule: the label is carried through
-    /// untouched, so a program can ask for a shape this crate has never heard of
-    /// without any code here knowing what it is.
-    #[test]
-    fn a_spawn_spec_carries_the_requested_output_shape() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let spec = SpawnSpec::new(
-            BlueprintSource::Toml("[agent]\nname = \"x\"".to_string()),
-            "do the thing",
-            dir.path(),
-        )
-        .output("a2ui", Some("One card per finding.".to_string()));
-
-        let requested = spec.output.expect("the spec carries it");
-        assert_eq!(requested.format.as_deref(), Some("a2ui"));
-        assert_eq!(
-            requested.instructions.as_deref(),
-            Some("One card per finding.")
-        );
-        // The embed builder sets the shape, not a schema or a validator: those
-        // belong to a blueprint, which is what ships them alongside the agent.
-        assert!(requested.schema.is_none());
-        assert!(requested.validator.is_none());
-        assert!(requested.example.is_none());
-    }
-
-    /// Files attach to a spec one at a time and ride the spawn as inbound
-    /// parts, bound for the task region unless one names another.
-    #[test]
-    fn a_spawn_spec_carries_attached_files() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let spec = SpawnSpec::new(
-            BlueprintSource::Toml("[agent]\nname = \"x\"".to_string()),
-            "edit @hero.png",
-            dir.path(),
-        )
-        .attach(leviath_core::mime::InboundPart::from_bytes(
-            "hero.png",
-            vec![1, 2, 3],
-        ))
-        .attach(
-            leviath_core::mime::InboundPart::from_bytes("notes.md", b"# n".to_vec())
-                .in_region("brief"),
-        );
-        assert_eq!(spec.parts.len(), 2);
-        assert!(spec.parts[0].region.is_none());
-        assert_eq!(spec.parts[1].region.as_deref(), Some("brief"));
-    }
-
-    /// A spec that never asked for one requests nothing, so a blueprint's own
-    /// declared shape is what applies.
-    #[test]
-    fn a_spawn_spec_requests_no_shape_by_default() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let spec = SpawnSpec::new(
-            BlueprintSource::Toml("[agent]\nname = \"x\"".to_string()),
-            "do the thing",
-            dir.path(),
-        );
-        assert!(spec.output.is_none());
     }
 
     #[test]
@@ -910,8 +918,9 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         let mut events = world.events();
 
         let run_id = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Toml(TWO_STAGE.to_string()),
+            .spawn(request(
+                &world,
+                TWO_STAGE,
                 "summarize the notes",
                 dir.path(),
             ))
@@ -965,11 +974,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         ]);
         let mut events = world.events();
         let run_id = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Toml(ASKER.to_string()),
-                "pick a database",
-                dir.path(),
-            ))
+            .spawn(request(&world, ASKER, "pick a database", dir.path()))
             .await
             .expect("spawns");
 
@@ -994,10 +999,12 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].0, run_id);
 
-        // A live, parked agent still accepts messages. (Pause is refused
-        // while the agent waits on input - see the capacity test below for
-        // the pause/resume round-trip.)
-        assert!(!world.pause(&run_id).await);
+        // A run waiting on a person can be paused and resumed with its
+        // question still open, and a live, parked agent still accepts
+        // messages.
+        assert!(world.pause(&run_id).await);
+        assert!(world.resume(&run_id).await);
+        assert_eq!(world.pending_inputs().len(), 1, "the question stays open");
         assert!(world.send_message(&run_id, "prefer something boring").await);
         assert!(
             world
@@ -1049,93 +1056,68 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         world.shutdown().await;
     }
 
+    /// A request naming a blueprint the world was not given, in a workdir
+    /// that is not there, hears about both at once, each at its place.
     #[tokio::test]
-    async fn spawn_reports_blueprint_and_workdir_errors() {
+    async fn spawn_reports_every_problem_with_its_path() {
         let dir = tempfile::tempdir().unwrap();
         let world = mock_world(vec![]);
-
-        // Unparseable TOML.
-        let err = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Toml("not = [valid".to_string()),
-                "t",
-                dir.path(),
-            ))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().starts_with("blueprint error"));
-
-        // A manifest path that does not exist fails in the spawner.
-        let err = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Path(dir.path().join("missing.leviath")),
-                "t",
-                dir.path(),
-            ))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().starts_with("spawn error"));
-
-        // A workdir that does not exist is refused before anything spawns.
-        let err = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Toml(TWO_STAGE.to_string()),
-                "t",
-                dir.path().join("nope"),
-            ))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().starts_with("spawn error"));
-
+        let _ = request(&world, TWO_STAGE, "t", dir.path());
+        let mut unknown = SpawnRequest::new(SpawnSource::Blueprint(
+            BlueprintRef::parse("nowhere").unwrap(),
+        ));
+        unknown.workdir = Some(dir.path().join("nope"));
+        let issues = world.spawn(unknown).await.unwrap_err();
+        let paths: Vec<String> = issues.iter().map(|i| i.path.to_string()).collect();
+        assert_eq!(paths[0], "source.blueprint", "{issues}");
+        assert_eq!(issues.0[0].code, IssueCode::Unresolvable);
+        assert_eq!(issues.0[0].known, ["embedded"]);
+        assert!(
+            issues.iter().any(|i| i.path.to_string() == "workdir"),
+            "{issues}"
+        );
         world.shutdown().await;
     }
 
+    /// A graph the embedder wrote runs as it is, in the builder's default
+    /// workdir, and its state reads back while it is live.
     #[tokio::test]
-    async fn spawn_from_a_manifest_file_works() {
+    async fn a_graph_of_the_callers_own_runs_and_can_be_inspected() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("embedded.leviath");
-        std::fs::write(&manifest, TWO_STAGE).unwrap();
-        // Both stages are text-only here, so each needs its nudge budget.
-        let world = mock_world(vec![
-            text("moving on"),
-            text("moving on"),
-            text("moving on"),
-            text("moving on"),
-            text("done"),
-            text("done"),
-            text("done"),
-            text("done"),
-        ]);
-        let mut events = world.events();
-
+        // No inference permits: the run stays in its first stage, live.
+        let mut pool = InferencePoolConfig::new();
+        pool.set_limit("m", 0);
+        let world = AgentWorld::builder()
+            .register_provider(
+                "mock",
+                Arc::new(Mock {
+                    responses: Mutex::new(VecDeque::new()),
+                }),
+            )
+            .inference_pool(pool)
+            .workdir(dir.path())
+            .build()
+            .unwrap();
+        let graph = blueprint(TWO_STAGE, dir.path()).graph;
         let run_id = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Path(manifest),
-                "just finish",
-                dir.path(),
-            ))
+            .spawn(SpawnRequest::new(SpawnSource::Raw(Box::new(graph))))
             .await
-            .expect("spawns from the file");
-        assert!(run_id.as_ref().starts_with("embedded-"));
-
-        let seen = tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            events_until(&mut events, |e| matches!(e, WorldEvent::Completed { .. })),
-        )
-        .await
-        .expect("completed before timeout");
-        assert!(
-            seen.iter()
-                .any(|e| matches!(e, WorldEvent::Completed { .. }))
-        );
+            .expect("spawns the graph");
+        let live = world
+            .inspect(&run_id)
+            .await
+            .expect("a live run has a state");
+        assert_eq!(live.cursor.stage.as_str(), "work");
+        assert!(world.cancel(&run_id).await);
         world.shutdown().await;
     }
 
     #[tokio::test]
     async fn unknown_runs_answer_negatively() {
         let world = mock_world(vec![]);
-        let ghost = RunId("no-such-run".to_string());
+        let ghost = RunId::new("no-such-run").unwrap();
         assert_eq!(world.status(&ghost).await, None);
+        assert!(world.inspect(&ghost).await.is_none());
         assert_eq!(world.result(&ghost).await, None);
         // An artifact the store never held, and one that was never stored at
         // all (no hash), both answer nothing rather than erroring.
@@ -1179,11 +1161,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         )]);
         let mut events = world.events();
         let run_id = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Toml(ASKER.to_string()),
-                "ask",
-                dir.path(),
-            ))
+            .spawn(request(&world, ASKER, "ask", dir.path()))
             .await
             .expect("spawns");
         tokio::time::timeout(
@@ -1256,10 +1234,20 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
                 .defaults
                 .fallback_order
                 .iter()
-                .map(|e| (e.provider.as_str(), e.model.as_str()))
+                .map(|e| (e.provider_or_empty(), e.model.as_str()))
                 .collect::<Vec<_>>(),
             vec![("anthropic", "sonnet"), ("openai", "gpt")]
         );
+    }
+
+    /// A route whose model id is not a valid name goes nowhere, so it is left
+    /// out rather than carried into every stage's failover chain.
+    #[test]
+    fn a_fallback_route_that_names_nothing_is_left_out() {
+        crate::test_support::with_tracing(|| {
+            let builder = AgentWorldBuilder::new().fallback_route("openai", "has space");
+            assert!(builder.defaults.fallback_order.is_empty());
+        });
     }
 
     #[tokio::test]
@@ -1290,15 +1278,16 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             .state_dir(state.path())
             .inference_pool(InferencePoolConfig::new())
             .tool_concurrency(2)
+            .blueprint(blueprint(TWO_STAGE, dir.path()))
+            .workdir(dir.path())
             .build()
             .expect("all options compose");
         let mut events = world.events();
+        // The builder's blueprint, in the builder's workdir.
         let run_id = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Toml(TWO_STAGE.to_string()),
-                "persist me",
-                dir.path(),
-            ))
+            .spawn(SpawnRequest::new(SpawnSource::Blueprint(
+                BlueprintRef::parse("embedded").unwrap(),
+            )))
             .await
             .expect("spawns");
         tokio::time::timeout(
@@ -1307,33 +1296,41 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         )
         .await
         .expect("completes");
+        // A finished run's state still reads back.
+        assert!(world.inspect(&run_id).await.is_some());
         world.shutdown().await;
 
         // The daemon's on-disk layout appeared under the state dir.
         let run_dir = state.path().join("runs").join(run_id.as_ref());
-        assert!(run_dir.join("meta.json").exists());
+        assert!(run_dir.join(leviath_core::files::RUN_FILE).exists());
         assert!(state.path().join("machine-id").exists());
     }
 
     /// The single-stage blueprint the hint tests drive, with a shell tool so the
     /// shell hint's tool guard is satisfied.
-    const SHELL_STAGE: &str = r#"[agent]
-name = "shelly"
-version = "0.0.0"
+    const SHELL_STAGE: &str = r#"title = "shelly"
 description = "One stage that can run commands."
-entry_stage = "work"
+entry = "work"
 
-[stages.work]
-mode = "autonomous"
-model = { provider = "mock", model = "m" }
+[[stages]]
+name = "work"
 description = "Do the work"
-available_tools = ["shell"]
-allow_complete = true
 system_prompt = "Work."
+model = { models = [{ provider = "mock", model = "m" }] }
+tools = ["shell"]
 
-[context.regions]
-instructions = { kind = "pinned", max_tokens = 2000 }
-conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
+[layout]
+total_budget_tokens = 22000
+
+[[layout.regions]]
+name = "instructions"
+kind = "pinned"
+budget = 2000
+
+[[layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 40 }
+budget = 20000
 "#;
 
     /// Run `SHELL_STAGE` once against a [`Recorder`] and hand back the system
@@ -1353,11 +1350,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             .expect("world builds inside the test runtime");
         let mut events = world.events();
         world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Toml(SHELL_STAGE.to_string()),
-                "go",
-                dir.path(),
-            ))
+            .spawn(request(&world, SHELL_STAGE, "go", dir.path()))
             .await
             .expect("spawns");
         tokio::time::timeout(
@@ -1430,8 +1423,9 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             .expect("builds with a custom service");
         let mut events = world.events();
         world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Toml(TWO_STAGE.to_string()),
+            .spawn(request(
+                &world,
+                TWO_STAGE,
                 "use the canned tools",
                 dir.path(),
             ))
@@ -1450,49 +1444,21 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         world.shutdown().await;
     }
 
+    /// An input the blueprint requires and the request leaves out fails the
+    /// spawn before any inference, naming the input.
     #[tokio::test]
-    async fn manifest_files_that_do_not_parse_or_validate_fail_the_spawn() {
+    async fn a_missing_required_input_fails_the_spawn() {
         let dir = tempfile::tempdir().unwrap();
         let world = mock_world(vec![]);
-
-        let garbled = dir.path().join("garbled.leviath");
-        std::fs::write(&garbled, "not = [valid").unwrap();
-        let err = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Path(garbled),
-                "t",
-                dir.path(),
-            ))
+        let demanding = with_input(TWO_STAGE, "spec", 2000, true);
+        let issues = world
+            .spawn(request(&world, &demanding, "t", dir.path()))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("parse manifest"));
-
-        // A path with no file stem still spawns an attempt (and fails to read).
-        let err = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Path(PathBuf::from("")),
-                "t",
-                dir.path(),
-            ))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().starts_with("spawn error"));
-
-        // A required caller-input region that was not provided fails before
-        // any inference.
-        let demanding = format!(
-            "{TWO_STAGE}\nspec = {{ kind = \"pinned\", max_tokens = 2000, seed = \"input\", required = true }}\n"
+        assert!(
+            issues.iter().any(|i| i.path.to_string() == "inputs.spec"),
+            "{issues}"
         );
-        let err = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Toml(demanding),
-                "t",
-                dir.path(),
-            ))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("required region"));
-
         world.shutdown().await;
     }
 
@@ -1508,66 +1474,16 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             .expect("world is up");
         // Wait until the serve loop is really gone (its rx dropped).
         leviath_testkit::wait_until("the serve loop shut down", || world.control.is_closed()).await;
-        let ghost = RunId("ghost".to_string());
+        let ghost = RunId::new("ghost").unwrap();
         assert_eq!(world.status(&ghost).await, None);
         assert!(!world.pause(&ghost).await);
         assert!(!world.send_message(&ghost, "hello").await);
-        let err = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Toml(TWO_STAGE.to_string()),
-                "t",
-                std::env::temp_dir(),
-            ))
-            .await
-            .unwrap_err();
-        assert_eq!(err, EmbedError::ChannelClosed);
-    }
-
-    #[tokio::test]
-    async fn inline_blueprints_spawn_and_invalid_ones_are_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let world = mock_world(vec![text("done"), text("done"), text("done"), text("done")]);
-        let mut events = world.events();
-
-        // An invalid inline blueprint (entry stage names nothing) is refused
-        // before it reaches the world.
-        let mut invalid = leviath_core::manifest::parse_manifest(TWO_STAGE).unwrap();
-        invalid.entry_stage = Some("ghost".to_string());
-        let err = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Inline(Box::new(invalid)),
-                "t",
-                dir.path(),
-            ))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("invalid blueprint"));
-
-        // A valid one runs. Trim it to a single text-only stage.
-        let mut valid = leviath_core::manifest::parse_manifest(TWO_STAGE).unwrap();
-        valid.stages.truncate(1);
-        valid.stages[0].transitions = None;
-        valid.entry_stage = Some(valid.stages[0].name.clone());
-        let run_id = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Inline(Box::new(valid)),
-                "just answer",
-                dir.path(),
-            ))
-            .await
-            .expect("inline blueprint spawns");
-        assert!(run_id.as_ref().starts_with("embedded-"));
-        let seen = tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            events_until(&mut events, |e| matches!(e, WorldEvent::Completed { .. })),
-        )
-        .await
-        .expect("completes");
-        assert!(
-            seen.iter()
-                .any(|e| matches!(e, WorldEvent::Completed { .. }))
-        );
-        world.shutdown().await;
+        // A spawn or a dry run says the world is gone, as an issue.
+        let spawn = request(&world, TWO_STAGE, "t", &std::env::temp_dir());
+        let issues = world.spawn(spawn.clone()).await.unwrap_err();
+        assert_eq!(issues.0[0].code, IssueCode::Unavailable);
+        assert!(issues.to_string().contains("shut down"), "{issues}");
+        assert_eq!(world.validate(spawn).await.unwrap_err(), issues);
     }
 
     #[tokio::test]
@@ -1635,11 +1551,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             .build()
             .expect("builds");
         let run_id = world
-            .spawn(SpawnSpec::new(
-                BlueprintSource::Toml(ASKER.to_string()),
-                "wait around",
-                dir.path(),
-            ))
+            .spawn(request(&world, ASKER, "wait around", dir.path()))
             .await
             .expect("spawns");
 
@@ -1649,13 +1561,6 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         assert!(world.resume(&run_id).await);
         assert!(world.cancel(&run_id).await);
         world.shutdown().await;
-    }
-
-    #[test]
-    fn run_id_displays_as_its_string() {
-        let id = RunId("coder-1-2".to_string());
-        assert_eq!(id.to_string(), "coder-1-2");
-        assert_eq!(id.as_ref(), "coder-1-2");
     }
 
     #[tokio::test]

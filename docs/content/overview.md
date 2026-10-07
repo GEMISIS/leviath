@@ -16,7 +16,7 @@ covers it properly, so read straight through once and then follow whichever link
 
 ```mermaid
 flowchart LR
-  BP["agent.leviath<br/>your blueprint"] --> RUN["lev run"]
+  BP["agent.toml<br/>your blueprint"] --> RUN["lev run"]
   RUN --> W
   subgraph W["The daemon: one shared world"]
     A1["agent"]
@@ -25,17 +25,18 @@ flowchart LR
   end
   W <-->|inference| P["Model providers"]
   W <-->|tool calls| T["Tools: files, shell, MCP"]
-  W --> D["Disk: journal, context,<br/>outputs, artifacts"]
+  W --> D["Disk: one run file per run,<br/>outputs, artifacts"]
 ```
 
 ## An agent is a blueprint
 
-An agent is described by its **blueprint**: a directory holding an `agent.leviath` TOML file and
-its own tools and scripts. The file names the stages a run moves through, the model and tools each
-stage gets, what each stage takes in and hands back, and the shape of a run's memory. There is
-no agent code to write, and nothing is compiled.
+An agent is described by its **blueprint**: a directory holding an `agent.toml` file and its own
+tools and scripts. The file names the stages a run moves through, the model and tools each stage
+gets, what each stage takes in and hands back, and the shape of a run's memory. It also declares
+the run's typed **inputs**, such as its task, which each run is given when it starts. There is no
+agent code to write, and nothing is compiled.
 
-Seven [pre-built agents](/docs/agent-catalog) ship with Leviath, and `lev create` scaffolds your own.
+Eleven [pre-built agents](/docs/agent-catalog) ship with Leviath, and `lev create` scaffolds your own.
 See [Agent blueprints](/docs/agents).
 
 ## Work happens in stages
@@ -96,13 +97,14 @@ you never have to think about it to use Leviath.
 
 ## Nothing lives only in memory
 
-Every run journals to disk as it goes: its context, its stages, its logs, and its final answer.
-Kill the daemon mid-run and the next start picks the work back up, replaying an interrupted tool
-batch rather than running it twice.
+Every run writes one [run file](/docs/run-file) as it goes: the spec it started from, every step
+it took, and checkpoints of its state. Kill the daemon mid-run and the next start picks the work
+back up from that file, replaying an interrupted tool batch rather than running it twice.
 
 ## Ways in
 
-The CLI is one of four front doors, and they all drive the same daemon.
+The CLI is one of four front doors, and they all drive the same daemon. Each one starts a run
+with the same [spawn request](/docs/starting-a-run).
 
 | You are | Use | Covered in |
 |---|---|---|
@@ -120,7 +122,13 @@ webhooks can deliver a finished run to you. See
 
 - [Build your first agent](/docs/first-agent) is the natural next page: it writes one from
   scratch, and the ideas below make more sense once you have.
-- [Agent blueprints](/docs/agents) is the field-by-field reference for what you wrote.
+- [Agent blueprints](/docs/agents) explains each part of what you wrote.
+- [The blueprint format](/docs/blueprint-format) lists every key an `agent.toml` can hold.
+- [Starting a run](/docs/starting-a-run) covers the spawn request: inputs, attachments, and launch
+  policy.
+- [The run file](/docs/run-file) is what a run keeps on disk, and how a run resumes from it.
+- [Inspecting a run](/docs/inspecting-a-run) reads a run's spec, state and steps, from any front
+  door.
 - [Multi-stage workflows](/docs/stages) and [Structured context](/docs/context) are the two ideas
   that do the most work.
 - [Glossary](/docs/glossary) defines every term these docs use in a particular way.

@@ -1459,6 +1459,21 @@ mod tests {
             }
         );
         assert_ne!(RegionKind::Pinned, RegionKind::Temporary);
+        assert_eq!(
+            RegionKind::HashMap {
+                max_entries: Some(3)
+            },
+            RegionKind::HashMap {
+                max_entries: Some(3)
+            }
+        );
+        assert_ne!(
+            RegionKind::HashMap {
+                max_entries: Some(3)
+            },
+            RegionKind::HashMap { max_entries: None }
+        );
+        assert_eq!(RegionKind::Checklist, RegionKind::Checklist);
     }
 
     #[test]

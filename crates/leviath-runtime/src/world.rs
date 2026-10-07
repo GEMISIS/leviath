@@ -70,7 +70,7 @@ use crate::tool_bridge::ToolLane;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Fingerprint {
     /// How many agents hold each phase marker.
-    markers: [usize; 12],
+    markers: [usize; 13],
     /// Per-agent run progress that no marker reflects (see
     /// [`PipelineWorld::agent_digest`]).
     agents: u64,
@@ -219,7 +219,7 @@ pub(crate) struct OwnWorldId(pub WorldId);
 ///
 /// The provenance has to travel *with* the id, which is what this is. It cannot
 /// be built outside this module: the only sources are [`PipelineWorld::spawn_agent`]
-/// and `PipelineWorld::spawn_from_blueprint`, so an id always names an agent
+/// and `PipelineWorld::spawn_from_graph`, so an id always names an agent
 /// in the world that minted it.
 ///
 /// A tag component on the agent was tried first and does not work: looking the
@@ -302,6 +302,8 @@ pub struct PipelineWorld {
     /// [`Self::flush_and_stop`] can close its channel and `await` it, guaranteeing
     /// every queued snapshot reaches disk before shutdown. `None` once flushed.
     persist_task: Option<JoinHandle<()>>,
+    /// Where runs persist, when anywhere.
+    runs_dir: Option<std::path::PathBuf>,
 }
 
 /// Agent status control: read a status, set one, and pause/resume/cancel.
@@ -344,6 +346,7 @@ impl PipelineWorld {
         let (tool_job_tx, tool_job_rx) = unbounded_channel();
         let (tool_res_tx, tool_res_rx) = unbounded_channel();
         let (persist_tx, persist_rx) = unbounded_channel();
+        let (journal_tx, journal_rx) = unbounded_channel();
         let (msg_tx, msg_rx) = unbounded_channel();
         let (ip_tx, ip_rx) = unbounded_channel();
         let (gp_tx, gp_rx) = unbounded_channel();
@@ -365,7 +368,7 @@ impl PipelineWorld {
         let blob_store = crate::blob_store::store_for(runs_dir.as_deref());
         let persist_stats = Arc::new(crate::persist_stats::PersistLaneStats::new());
         let persist_task = runtime.spawn(persistence_worker(
-            runs_dir,
+            runs_dir.clone(),
             persist_rx,
             persist_stats.clone(),
         ));
@@ -381,6 +384,11 @@ impl PipelineWorld {
         world.insert_resource(crate::blob_store::MimeRegistryHandle::default());
         world.insert_resource(crate::blob_store::MimeLimits::default());
         world.insert_resource(Providers(providers));
+        world.insert_resource(crate::fanout::WorkerStarts::new(
+            runtime.clone(),
+            wake.clone(),
+        ));
+        world.insert_resource(crate::fanout::FanOutIo::new(runtime.clone(), wake.clone()));
         world.insert_resource(InferenceStage {
             // The wake goes into the pools, not just the bridges: freeing a slot
             // has to re-drive dispatch, or the agents parked on a full pool never
@@ -409,9 +417,10 @@ impl PipelineWorld {
         world.insert_resource(crate::gate_prompt::GatePromptStage {
             outcomes: gp_tx,
             wake: wake.clone(),
-            runtime: gp_runtime,
+            runtime: gp_runtime.clone(),
         });
         world.insert_resource(crate::gate_prompt::GatePromptResults(gp_rx));
+        crate::approval_prompt::install(&mut world, gp_runtime, wake.clone());
         world.insert_resource(InferenceResults(inf_rx));
         world.insert_resource(TransitionResults(trans_rx));
         world.insert_resource(CompactionResults(compact_rx));
@@ -419,6 +428,12 @@ impl PipelineWorld {
         world.insert_resource(ToolStage::new(tool_job_tx, tool_stats));
         world.insert_resource(ToolResults(tool_res_rx));
         world.insert_resource(PersistenceStage(persist_tx));
+        world.insert_resource(crate::pipeline::JournalSender::new(
+            journal_tx,
+            Some(wake.clone()),
+        ));
+        world.insert_resource(crate::pipeline::JournalInbox(journal_rx));
+        world.insert_resource(crate::pipeline::RunJournals::default());
         world.insert_resource(crate::pipeline::PersistLaneHealth(persist_stats));
         world.insert_resource(MessageIntake(msg_rx));
         // Telemetry defaults to the no-op sink; a host that wants export
@@ -436,7 +451,14 @@ impl PipelineWorld {
                 // the async lanes. Ahead of everything else so a cancel frees its
                 // inference permit and tool-lane capacity on the very next tick,
                 // rather than whenever the provider or tool happens to answer.
-                abort_terminal_work,
+                // Beside it, the calls waiting out a backoff: an ended agent's
+                // gives its permit back, and a due one sends its next trip.
+                (
+                    abort_terminal_work,
+                    crate::inference_call::fire_due_calls,
+                    crate::title_bridge::fire_due_titles,
+                )
+                    .chain(),
                 deliver_messages,
                 collect_compaction,
                 // Apply any completed Summarize context-transform summaries into
@@ -499,8 +521,16 @@ impl PipelineWorld {
                 // again before each batch has to be looked at here, or a tool
                 // that arrived since its turn was built is refused for another
                 // one.
-                (rescan_before_dispatch, run_tool_call_hooks, dispatch_tools).chain(),
-                collect_tools,
+                // Then a batch with lane work is decided call by call and sent.
+                (
+                    rescan_before_dispatch,
+                    run_tool_call_hooks,
+                    dispatch_tools,
+                    crate::approval_prompt::collect_approvals,
+                    crate::pipeline::dispatch_lane_batches,
+                )
+                    .chain(),
+                (collect_tools, crate::pipeline::settle_write_ledgers).chain(),
                 // Apply any resolved stage-boundary interaction-point answers
                 // before the stage decides its transition.
                 crate::interaction_points::collect_interaction_point,
@@ -613,7 +643,7 @@ impl PipelineWorld {
                 // collect system, so a marker set anywhere on this tick counts;
                 // after the interaction reflection, so an agent that just parked
                 // on a prompt is already wearing its marker and is exempt; and
-                // before persistence, so the failure reaches meta.json on the
+                // before persistence, so the failure reaches the run file on the
                 // same tick rather than waiting for the next one.
                 fail_wedged_runs,
                 dispatch_persistence,
@@ -637,7 +667,14 @@ impl PipelineWorld {
             tool_lane,
             _tool_task: tool_task,
             persist_task: Some(persist_task),
+            runs_dir,
         }
+    }
+
+    /// Where this world's runs persist (`<runs_dir>/<run_id>/`), or `None`
+    /// for a world kept in memory.
+    pub fn runs_dir(&self) -> Option<&std::path::Path> {
+        self.runs_dir.as_deref()
     }
 
     /// Mutable access to the underlying ECS world, for spawning agents (the CLI /
@@ -742,22 +779,22 @@ impl PipelineWorld {
         }
     }
 
-    /// Spawn an agent from a blueprint + task + per-stage resolution (see
-    /// [`crate::pipeline::spawn_agent`]) and wake the driver. Returns the new
+    /// Spawn an agent from a graph + task + per-stage resolution (see
+    /// [`crate::pipeline::place_test_task`]) and wake the driver. Returns the new
     /// entity, or an error if the first stage's system prompt doesn't fit.
     #[cfg(test)]
-    pub(crate) fn spawn_from_blueprint(
+    pub(crate) fn spawn_from_graph(
         &mut self,
         agent_id: String,
-        blueprint: leviath_core::Blueprint,
+        graph: crate::spec::graph::RunGraph,
         task: &str,
         stages: Vec<crate::pipeline::ResolvedStage>,
         global_hints: leviath_core::config::PromptHints,
     ) -> Result<AgentId, String> {
-        let entity = crate::pipeline::spawn_agent(
+        let entity = crate::pipeline::place_test_task(
             &mut self.world,
             agent_id,
-            blueprint,
+            graph,
             task,
             stages,
             global_hints,
@@ -803,8 +840,8 @@ impl PipelineWorld {
     /// snapshots still queued in the channel. This method closes that gap: it
     /// signals shutdown, drives one last fixed point so any state that settled
     /// after the loop parked is dispatched to the lane, then **closes the lane and
-    /// awaits the worker** so all queued writes (`meta.json` / `context.json` /
-    /// `run.lvr`) land before it returns.
+    /// awaits the worker** so all queued writes (the run file, the
+    /// `final_output` sidecar and the stage logs) land before it returns.
     ///
     /// Call it after the serve loop has returned (the tokio runtime must still be
     /// alive for the worker to be scheduled). Idempotent: a second call is a no-op
@@ -815,14 +852,24 @@ impl PipelineWorld {
         // Dispatch anything that settled between the last park and now (e.g. an
         // inference result that woke the loop the same instant shutdown fired).
         self.run_to_fixed_point();
-        // Drop every in-flight job, which is what makes the line below finish.
+        // Stop every in-flight job, so nothing is left waiting on a person.
         self.abort_in_flight_work();
+        // A call stopped part way is not started again after a restart.
+        let settled = crate::restore::settle_running_calls(&mut self.world);
+        // What happened since the last tick (a call that finished as its batch
+        // was stopped, say) goes to the lane as a step of its own.
+        crate::pipeline::journal::flush(&mut self.world, &settled);
         // Drop the *only* `PersistJob` sender so the worker's `recv()` loop drains
         // its queue and then ends.
         self.world.remove_resource::<PersistenceStage>();
         // Wait for every queued write to hit disk.
         if let Some(task) = self.persist_task.take() {
             let _ = task.await;
+        }
+        // Everything this world had running was stopped and settled above:
+        // the session ended cleanly.
+        if let Some(runs_dir) = &self.runs_dir {
+            crate::restore::end_session(runs_dir);
         }
         // Push any buffered telemetry export out before the process goes away;
         // the final fixed point above already emitted the last events. The
@@ -831,29 +878,6 @@ impl PipelineWorld {
             .resource::<crate::telemetry::Telemetry>()
             .0
             .force_flush();
-    }
-
-    /// Cancel every job still in flight, so shutdown does not wait on one.
-    ///
-    /// `remove_resource::<PersistenceStage>` drops the world's sender, but a
-    /// dispatched tool batch carries its own clone (the progress callback that
-    /// journals each call as it finishes). While that batch is alive the channel
-    /// stays open, so awaiting the persistence worker waits on the batch - and a
-    /// batch parked on an approval prompt is waiting on a person. `lev daemon
-    /// stop` then hung until somebody answered, which with no interaction
-    /// timeout is for ever.
-    ///
-    /// Cancelling drops the batch instead. Its calls are not marked done and its
-    /// assistant turn is already journalled with the batch pending, so the run
-    /// reloads on the next daemon start exactly where it was: parked, and asking
-    /// again.
-    fn abort_in_flight_work(&mut self) {
-        let mut agents = self.world.query::<&crate::pipeline::InFlightWork>();
-        for in_flight in agents.iter(&self.world) {
-            for token in &in_flight.0 {
-                token.cancel();
-            }
-        }
     }
 
     /// A point-in-time read of what the world is holding and what it is waiting
@@ -1235,8 +1259,7 @@ mod tests {
 
     use crate::components::{AgentState, ContextWindow, InferenceConfig};
     use crate::pipeline::{
-        AgentBlueprint, MessageIntake, StageCursor, StageInference, StageInferences, StageProgress,
-        StageSetup, StageSetups, VisitCounts,
+        MessageIntake, StageCursor, StageInference, StageProgress, StageSetup, VisitCounts,
     };
     use crate::tool_bridge::BoxedToolExec;
     use leviath_core::{Region, RegionKind};
@@ -1249,14 +1272,18 @@ mod tests {
     /// A provider scripted with a queue of responses; each `infer` pops the next.
     struct Script {
         responses: Mutex<std::collections::VecDeque<InferenceResponse>>,
+        /// Every request it was sent, serialized.
+        seen: Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
     impl Provider for Script {
         async fn infer(
             &self,
-            _req: &InferenceRequest,
+            req: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
+            let sent = serde_json::to_string(req).expect("a request serializes");
+            self.seen.lock().unwrap().push(sent);
             let next = self.responses.lock().unwrap().pop_front();
             next.ok_or_else(|| ProviderError::Other("script exhausted".to_string()))
         }
@@ -1391,32 +1418,27 @@ mod tests {
         }
     }
 
-    fn blueprint() -> leviath_core::Blueprint {
-        let layout = leviath_core::layout::ContextLayout::new(
-            vec![leviath_core::layout::RegionDefinition::new(
-                "conversation".to_string(),
-                RegionKind::Clearable,
-                10_000,
-            )],
+    fn blueprint() -> crate::spec::graph::RunGraph {
+        use crate::test_graph as g;
+        let layout = g::layout(
+            vec![g::region("conversation", RegionKind::Clearable, 10_000)],
             12_000,
         );
-        let s = leviath_core::Stage::new(
-            "s".to_string(),
-            leviath_core::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
-        );
-        leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
+        let s = crate::spec::graph::StageDef {
+            model: g::model("script", "m"),
+            ..g::stage("s")
+        };
+        g::graph(vec![s], layout)
     }
 
     /// Spawn a single-stage agent, initially ready to infer.
     fn spawn(world: &mut PipelineWorld) -> AgentId {
         world.spawn_agent((
-            AgentBlueprint(blueprint()),
+            crate::test_graph::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -1661,6 +1683,7 @@ mod tests {
             "script".to_string(),
             Arc::new(Script {
                 responses: Mutex::new(responses.into_iter().collect()),
+                seen: Mutex::new(Vec::new()),
             }),
         );
         r
@@ -1803,18 +1826,16 @@ mod tests {
         // would keep the driver looping past run_until_idle's budget.
         let mut world = build_world(registry_with(vec![text("thinking"), text("final")]));
         let mut bp = blueprint();
-        bp.nudge = Some(leviath_core::NudgeConfig {
+        bp.nudge = Some(crate::spec::graph::NudgeDef {
             max: Some(1),
             ..Default::default()
         });
         let e = world.spawn_agent((
-            AgentBlueprint(bp),
+            crate::test_graph::both(bp),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -1908,6 +1929,7 @@ mod tests {
         world
             .send_message(AgentMessage {
                 agent_id: "a".to_string(),
+                from: crate::components::FROM_PERSON.to_string(),
                 content: "hello".to_string(),
                 target_region: Some("conversation".to_string()),
                 parts: Vec::new(),
@@ -1967,6 +1989,7 @@ mod tests {
 
         let err = world.send_message(AgentMessage {
             agent_id: "a".to_string(),
+            from: crate::components::FROM_PERSON.to_string(),
             content: "x".to_string(),
             target_region: None,
             parts: Vec::new(),
@@ -1979,6 +2002,7 @@ mod tests {
         // Keep the mock's non-`infer`/`capabilities` methods measured.
         let p = Script {
             responses: Mutex::new(std::collections::VecDeque::new()),
+            seen: Mutex::new(Vec::new()),
         };
         assert_eq!(p.name(), "script");
         assert_eq!(p.count_tokens("t", "m").await, 1);
@@ -2052,6 +2076,7 @@ mod tests {
                     attempt_id: String::new(),
                     result: Ok(text("t1")),
                     pricing: None,
+                    attempt: None,
                 },
                 lane: crate::pipeline::HeldLane::Stage,
             });
@@ -2107,6 +2132,7 @@ mod tests {
                     attempt_id: String::new(),
                     result: Ok(text("t1")),
                     pricing: None,
+                    attempt: None,
                 },
                 lane: crate::pipeline::HeldLane::TransitionChoice,
             });
@@ -2290,11 +2316,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_from_blueprint_builds_a_runnable_agent() {
-        // End-to-end via the blueprint resolver: build → drive → complete.
+    async fn spawn_from_graph_builds_a_runnable_agent() {
+        // End-to-end via the graph spawn: build → drive → complete.
         let mut world = build_world(registry_with(vec![with_tool("c1", "do"), text("done")]));
         let e = world
-            .spawn_from_blueprint(
+            .spawn_from_graph(
                 "agent-1".to_string(),
                 blueprint(),
                 "do the task",
@@ -2309,16 +2335,109 @@ mod tests {
                 hints(true),
             )
             .unwrap();
+        // The run carries the spec its systems read, named for the run.
+        let spec = &world
+            .world()
+            .get::<crate::insert::RunSpecC>(e.entity())
+            .expect("a spawned run carries its spec")
+            .0;
+        assert_eq!(spec.run_id.as_str(), "agent-1");
+        assert_eq!(spec.stages[0].model.as_str(), "m");
 
         world.run_until_idle(20).await;
 
         assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
     }
 
+    /// `on_stage_enter` fires on entering a stage, before its first
+    /// inference, and the entry stage is entered too: a new run's first
+    /// request carries what the hook wrote, as every later stage's does.
+    #[tokio::test]
+    async fn on_stage_enter_fires_on_the_entry_stage_before_its_first_request() {
+        let recorder = Arc::new(Script {
+            responses: Mutex::new(std::iter::repeat_with(|| text("done")).take(4).collect()),
+            seen: Mutex::new(Vec::new()),
+        });
+        let mut registry = ProviderRegistry::new();
+        registry.register("script".to_string(), recorder.clone());
+        let mut world = build_world(registry);
+        let mut graph = blueprint();
+        graph.stages[0].hooks.on_stage_enter =
+            Some(crate::spec::graph::CodeRef::File("h.rhai".to_string()));
+        let e = world
+            .spawn_from_graph(
+                "agent-enter".to_string(),
+                graph,
+                "do the task",
+                vec![crate::pipeline::ResolvedStage {
+                    provider_name: "script".to_string(),
+                    model: "m".to_string(),
+                    tools: vec![],
+                    fallbacks: Vec::new(),
+                    output: None,
+                    notes: Vec::new(),
+                }],
+                hints(true),
+            )
+            .unwrap();
+        let script = leviath_scripting::stage_hook::compile(
+            "h.rhai",
+            r#"fn on_stage_enter(ctx) { #{ action: "modify", value: #{ conversation: "ENTRY-HOOK-RAN" } } }"#,
+            &["on_stage_enter"],
+        )
+        .expect("the hook compiles");
+        world
+            .world_mut()
+            .entity_mut(e.entity())
+            .insert(crate::components::StageHookScripts(
+                std::collections::HashMap::from([("h.rhai".to_string(), Arc::new(script))]),
+            ));
+
+        world.run_until_idle(20).await;
+
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
+        let sent = recorder.seen.lock().unwrap().clone();
+        assert!(
+            sent.first().is_some_and(|r| r.contains("ENTRY-HOOK-RAN")),
+            "the first request carries what the hook wrote: {sent:?}"
+        );
+    }
+
+    /// The run `run_id` under `runs` as its run file lists it, once it has
+    /// reached `status`; `None` if it does not within two seconds. The
+    /// persistence worker writes on its own task, so this polls, with a short
+    /// real sleep between reads so the write has wall-clock time to land.
+    async fn meta_on_disk(
+        runs: &std::path::Path,
+        run_id: &str,
+        status: leviath_core::run_meta::RunStatus,
+    ) -> Option<leviath_core::run_meta::RunMeta> {
+        let path = runs.join(run_id).join(leviath_core::files::RUN_FILE);
+        let read = async {
+            loop {
+                let meta = crate::runfile::RunFileReader::open(&path)
+                    .ok()
+                    .and_then(|read| crate::runfile::summary(&read).ok())
+                    .filter(|meta| meta.status == status);
+                if let Some(meta) = meta {
+                    break meta;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        // Every caller expects the record to land, so the poll returns as soon
+        // as it does; the deadline only bounds a real failure. It is long
+        // because a coverage-instrumented build on a loaded Windows runner
+        // can take seconds to write a run file.
+        tokio::time::timeout(std::time::Duration::from_secs(30), read)
+            .await
+            .ok()
+    }
+
     #[tokio::test]
     async fn persists_agent_snapshot_to_runs_dir() {
         // An agent carrying RunMetadata + TokenTotals is snapshotted to disk as it
-        // runs; after it completes, meta.json exists with the final status.
+        // runs; after it completes, its run file holds the final status.
         let dir = tempfile::tempdir().unwrap();
         let mut world = PipelineWorld::new(
             registry_with(vec![with_tool("c1", "do"), text("done")]),
@@ -2329,13 +2448,11 @@ mod tests {
             Handle::current(),
         );
         world.spawn_agent((
-            AgentBlueprint(blueprint()),
+            crate::test_graph::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -2353,12 +2470,10 @@ mod tests {
                 parent_run_id: None,
                 metadata: std::collections::HashMap::new(),
                 callback_url: None,
-                callback_secret: None,
                 title: None,
                 title_error: None,
                 blueprint_digest: None,
-                unattended: false,
-                yolo_profile: None,
+                unattended: leviath_core::Unattended::Off,
                 read_paths: None,
                 output_request: None,
                 model_override: None,
@@ -2375,22 +2490,13 @@ mod tests {
         // polls (rather than a bare `yield_now`) gives the worker's write actual
         // wall-clock time to land under load - otherwise the loop can spin through
         // every iteration before the write completes and spuriously time out.
-        let meta_path = dir.path().join("run-42").join("meta.json");
-        let mut meta = None;
-        for _ in 0..200 {
-            if let Ok(text) = std::fs::read_to_string(&meta_path)
-                && let Ok(m) = serde_json::from_str::<leviath_core::run_meta::RunMeta>(&text)
-                && m.status == leviath_core::run_meta::RunStatus::Complete
-            {
-                meta = Some(m);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-
-        let meta = meta.expect("final Complete snapshot flushed to disk");
-        assert_eq!(meta.run_id, "run-42");
-        assert!(dir.path().join("run-42").join("context.json").exists());
+        let meta = meta_on_disk(
+            dir.path(),
+            "run-42",
+            leviath_core::run_meta::RunStatus::Complete,
+        )
+        .await
+        .expect("final Complete snapshot flushed to disk");
         // The run kept a working clock, and it is stopped now the run is over -
         // a finished run's duration must not go on climbing when it is read.
         let clock = meta.active.expect("a run carrying a RunClock records one");
@@ -2399,7 +2505,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_panicked_agent_is_recorded_as_errored_on_disk() {
-        // A crashed run must not be left `"running"` in meta.json forever.
+        // A crashed run must not be left running in its run file forever.
         // `dispatch_persistence` is the *last* system in
         // the chain, so the tick that panics never reaches it - which is exactly
         // why `run_to_fixed_point` keeps driving after failing the agent.
@@ -2424,13 +2530,11 @@ mod tests {
             Handle::current(),
         );
         world.spawn_agent((
-            AgentBlueprint(blueprint()),
+            crate::test_graph::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -2447,12 +2551,10 @@ mod tests {
                 parent_run_id: None,
                 metadata: std::collections::HashMap::new(),
                 callback_url: None,
-                callback_secret: None,
                 title: None,
                 title_error: None,
                 blueprint_digest: None,
-                unattended: false,
-                yolo_profile: None,
+                unattended: leviath_core::Unattended::Off,
                 read_paths: None,
                 output_request: None,
                 model_override: None,
@@ -2464,19 +2566,13 @@ mod tests {
         world.add_test_system(boom_on_active_agent);
         with_silent_panics(|| world.run_to_fixed_point());
 
-        let meta_path = dir.path().join("run-boom").join("meta.json");
-        let mut meta = None;
-        for _ in 0..200 {
-            if let Ok(text) = std::fs::read_to_string(&meta_path)
-                && let Ok(m) = serde_json::from_str::<leviath_core::run_meta::RunMeta>(&text)
-                && m.status == leviath_core::run_meta::RunStatus::Error
-            {
-                meta = Some(m);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let meta = meta.expect("the panicked run must be persisted as errored");
+        let meta = meta_on_disk(
+            dir.path(),
+            "run-boom",
+            leviath_core::run_meta::RunStatus::Error,
+        )
+        .await
+        .expect("the panicked run must be persisted as errored");
         let error = meta.error.unwrap_or_default();
         assert!(error.contains("a pipeline system panicked"), "got: {error}");
         assert!(error.contains("exploded mid-stage"), "got: {error}");
@@ -2484,42 +2580,94 @@ mod tests {
 
     /// A single-stage blueprint whose stage is an `interactive_points` stage with a
     /// `plan_approval` point (the shape that blocks awaiting human approval).
-    fn interactive_blueprint() -> leviath_core::Blueprint {
-        use leviath_core::blueprint::{InteractionPoint, InteractionStyle, StageMode};
-        let layout = leviath_core::layout::ContextLayout::new(
-            vec![leviath_core::layout::RegionDefinition::new(
-                "conversation".to_string(),
-                RegionKind::Clearable,
-                10_000,
-            )],
+    fn interactive_blueprint() -> crate::spec::graph::RunGraph {
+        use crate::spec::graph::{AnswerStyle, InteractionPointDef, StageMode, UnattendedPoint};
+        use crate::test_graph as g;
+        let layout = g::layout(
+            vec![g::region("conversation", RegionKind::Clearable, 10_000)],
             12_000,
         );
-        let mut s = leviath_core::Stage::new(
-            "plan".to_string(),
-            leviath_core::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
-        );
-        s.mode = StageMode::InteractivePoints {
-            points: vec![InteractionPoint {
-                name: "plan_approval".to_string(),
-                prompt: "Approve?".to_string(),
-                required: true,
-                unattended: leviath_core::blueprint::UnattendedPolicy::AutoApprove,
-                style: InteractionStyle::MultipleChoice,
-                options: vec!["Approve".to_string(), "Abort".to_string()],
-                directives: std::collections::HashMap::new(),
-                abort_options: vec!["Abort".to_string()],
-                edit_options: vec![],
-                document_region: None,
-            }],
+        let mut s = crate::spec::graph::StageDef {
+            model: g::model("script", "m"),
+            ..g::stage("plan")
         };
-        leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
+        s.mode = StageMode::InteractivePoints(vec![InteractionPointDef {
+            name: "plan_approval".to_string(),
+            prompt: "Approve?".to_string(),
+            required: true,
+            unattended: UnattendedPoint::AutoApprove,
+            style: AnswerStyle::MultipleChoice,
+            options: vec!["Approve".to_string(), "Abort".to_string()],
+            directives: std::collections::BTreeMap::new(),
+            abort_options: vec!["Abort".to_string()],
+            edit_options: vec![],
+            document_region: None,
+        }]);
+        g::graph(vec![s], layout)
+    }
+
+    /// A run waiting on a person can be paused. The question stays open, an
+    /// answer given while paused is taken, and the run holds there until it is
+    /// resumed rather than carrying on as if nobody had paused it.
+    #[tokio::test]
+    async fn a_run_waiting_on_a_person_pauses_and_holds_past_the_answer() {
+        let mut world = build_world(registry_with(vec![
+            with_tool("c1", "read"),
+            text("## Plan\n1. do it"),
+        ]));
+        let hub = crate::interaction_hub::InteractionHub::new();
+        world.insert_interaction_hub(hub.clone());
+        let e = world.spawn_agent((
+            crate::test_graph::both(interactive_blueprint()),
+            StageCursor { index: 0 },
+            agent_state(),
+            crate::components::MessageInbox::default(),
+            StageProgress::default(),
+            VisitCounts::default(),
+            window(),
+            stage("m"),
+            setup().inference_config,
+            ReadyToInfer,
+        ));
+        world.run_until_idle(30).await;
+        for _ in 0..50 {
+            if world.agent_status(e) == Some(AgentStatus::Waiting) {
+                break;
+            }
+            tokio::task::yield_now().await;
+            world.run_to_fixed_point();
+        }
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Waiting));
+
+        assert!(world.pause(e), "a run waiting on a person can be paused");
+        world.run_to_fixed_point();
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Paused));
+        assert_eq!(hub.pending().len(), 1, "the question stays open");
+
+        let id = hub.pending()[0].1.id.clone();
+        let mut answer = leviath_core::interaction::InteractionResponse::text(&id, "");
+        answer.choice_index = Some(0);
+        assert!(hub.answer(answer));
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            world.run_to_fixed_point();
+        }
+        assert_eq!(
+            world.agent_status(e),
+            Some(AgentStatus::Paused),
+            "the answer does not resume the run"
+        );
+
+        assert!(world.resume(e));
+        world.run_until_idle(30).await;
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
     }
 
     #[tokio::test]
     async fn persists_interaction_point_when_a_live_agent_blocks() {
         // Drive a real agent through inference → transition → the interaction-point
-        // lane until it blocks awaiting approval, and assert the daemon wrote the
-        // `interactions.json` sidecar - the persist side, end-to-end
+        // lane until it blocks awaiting approval, and assert its run file records
+        // it waiting on a person - the persist side, end-to-end
         // through the live lane (a tool call first, then a text "plan", so the stage
         // transitions into the interaction point rather than looping on nudges).
         let dir = tempfile::tempdir().unwrap();
@@ -2533,13 +2681,11 @@ mod tests {
         );
         world.insert_interaction_hub(crate::interaction_hub::InteractionHub::new());
         let e = world.spawn_agent((
-            AgentBlueprint(interactive_blueprint()),
+            crate::test_graph::both(interactive_blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -2557,12 +2703,10 @@ mod tests {
                 parent_run_id: None,
                 metadata: std::collections::HashMap::new(),
                 callback_url: None,
-                callback_secret: None,
                 title: None,
                 title_error: None,
                 blueprint_digest: None,
-                unattended: false,
-                yolo_profile: None,
+                unattended: leviath_core::Unattended::Off,
                 read_paths: None,
                 output_request: None,
                 model_override: None,
@@ -2587,24 +2731,15 @@ mod tests {
         }
         assert_eq!(world.agent_status(e), Some(AgentStatus::Waiting));
 
-        // Poll until the interaction sidecar lands (the persistence worker writes it
-        // on its own task once the agent is parked Waiting at the point).
-        let path = dir.path().join("run-ip").join("interactions.json");
-        let mut sidecar = None;
-        for _ in 0..200 {
-            if let Ok(t) = std::fs::read_to_string(&path)
-                && let Ok(s) =
-                    serde_json::from_str::<crate::interaction_points::InteractionPointState>(&t)
-            {
-                sidecar = Some(s);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let s = sidecar.expect("interaction-point sidecar flushed to disk");
-        assert_eq!(s.cursor, 0);
-        assert_eq!(s.round, 0);
-        assert_eq!(s.body, "## Plan\n1. do it");
+        // Poll until the waiting step lands (the persistence worker writes it on
+        // its own task once the agent is parked Waiting at the point).
+        meta_on_disk(
+            dir.path(),
+            "run-ip",
+            leviath_core::run_meta::RunStatus::WaitingInput,
+        )
+        .await
+        .expect("the run's file records it waiting on a person");
     }
 
     /// A daemon must be able to stop while a run is parked on a person.
@@ -2659,13 +2794,11 @@ mod tests {
             Handle::current(),
         );
         world.spawn_agent((
-            AgentBlueprint(blueprint()),
+            crate::test_graph::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -2683,12 +2816,10 @@ mod tests {
                 parent_run_id: None,
                 metadata: std::collections::HashMap::new(),
                 callback_url: None,
-                callback_secret: None,
                 title: None,
                 title_error: None,
                 blueprint_digest: None,
-                unattended: false,
-                yolo_profile: None,
+                unattended: leviath_core::Unattended::Off,
                 read_paths: None,
                 output_request: None,
                 model_override: None,
@@ -2702,15 +2833,18 @@ mod tests {
         world.flush_and_stop().await;
 
         // Read immediately - the drain guarantees the write landed.
-        let meta_path = dir.path().join("run-flush").join("meta.json");
-        let text = std::fs::read_to_string(&meta_path).expect("meta.json flushed on stop");
-        let meta: leviath_core::run_meta::RunMeta = serde_json::from_str(&text).unwrap();
-        assert_eq!(meta.run_id, "run-flush");
+        let path = dir
+            .path()
+            .join("run-flush")
+            .join(leviath_core::files::RUN_FILE);
+        let read =
+            crate::runfile::RunFileReader::open(&path).expect("the run file flushed on stop");
+        let meta = crate::runfile::summary(&read).unwrap();
         assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Complete);
 
         // A second call is a no-op (resource already removed, task taken) - no panic.
         world.flush_and_stop().await;
-        assert!(meta_path.exists());
+        assert!(path.exists());
     }
 
     #[tokio::test]
@@ -2730,13 +2864,11 @@ mod tests {
             Handle::current(),
         );
         let entity = world.spawn_agent((
-            AgentBlueprint(blueprint()),
+            crate::test_graph::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -2753,12 +2885,10 @@ mod tests {
                 parent_run_id: None,
                 metadata: std::collections::HashMap::new(),
                 callback_url: None,
-                callback_secret: None,
                 title: None,
                 title_error: None,
                 blueprint_digest: None,
-                unattended: false,
-                yolo_profile: None,
+                unattended: leviath_core::Unattended::Off,
                 read_paths: None,
                 output_request: None,
                 model_override: None,
@@ -2776,14 +2906,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn world_init_and_restore_needs_no_daemon_infra() {
-        // `PipelineWorld::new` + `restore::restore_agent` form a self-contained
-        // spin-up→restore path: no control socket, HTTP server, PID files, or build
-        // markers - only providers, a tool service, a runs dir, and a runtime. This
-        // locks that in so the daemon wiring stays optional.
-        use leviath_core::region::EntryKind;
-        use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot};
-
+    async fn world_init_and_resume_needs_no_daemon_infra() {
+        // `PipelineWorld::new` + `restore::resume` form a self-contained
+        // spin-up and resume path: no control socket, HTTP server, PID files, or
+        // build markers - only providers, a tool service, a runs dir, and a
+        // runtime. This locks that in so the daemon wiring stays optional.
         let dir = tempfile::tempdir().unwrap();
         let mut world = PipelineWorld::new(
             registry_with(vec![text("unused")]),
@@ -2793,91 +2920,46 @@ mod tests {
             Some(dir.path().to_path_buf()),
             Handle::current(),
         );
-        let entity = world.spawn_agent((
-            AgentBlueprint(blueprint()),
-            StageCursor { index: 0 },
-            agent_state(),
-            crate::components::MessageInbox::default(),
-            StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
-            VisitCounts::default(),
-            window(),
-            stage("m"),
-            setup().inference_config,
-            crate::persistence::TokenTotals::default(),
-        ));
-
-        let snapshot = ContextSnapshot {
-            stage_name: "s0".to_string(),
-            total_tokens: 4,
-            max_tokens: 10_000,
-            regions: vec![RegionSnapshot {
-                name: "conversation".to_string(),
-                kind: "clearable".to_string(),
-                current_tokens: 4,
-                max_tokens: 10_000,
-                entries: vec![RegionEntrySnapshot {
-                    content: "restored turn".into(),
-                    tokens: 4,
-                    kind: EntryKind::UserMessage,
-                    metadata: None,
-                    key: None,
-                    taint: Default::default(),
-                    reasoning: None,
-                }],
-                description: None,
-            }],
-        };
-        crate::restore::restore_agent(
+        let spec = crate::test_graph::both(blueprint()).0;
+        let mut state = crate::insert::initial_state(&spec);
+        state.cursor.iteration = 3;
+        let entity = crate::restore::resume(
             world.world_mut(),
-            entity.entity(),
-            &snapshot,
-            0,
-            3,
-            crate::persistence::TokenTotals::default(),
+            crate::restore::Resumable {
+                spec,
+                state,
+                code: Default::default(),
+                answer: None,
+                asked: 0,
+                audit: Vec::new(),
+            },
+            crate::spec::env::Bindings::new(),
         );
 
         let state = world
             .world()
-            .get::<crate::components::AgentState>(entity.entity())
+            .get::<crate::components::AgentState>(entity)
             .unwrap();
         assert_eq!(state.status, AgentStatus::Active);
         assert_eq!(state.iteration, 3);
-        let win = world
-            .world()
-            .get::<crate::components::ContextWindow>(entity.entity())
-            .unwrap();
-        assert_eq!(
-            win.get_region("conversation").unwrap().content[0].content,
-            "restored turn"
-        );
+        assert_eq!(world.runs_dir(), Some(dir.path()));
     }
 
     #[tokio::test]
-    async fn spawn_from_blueprint_errors_on_oversized_system_prompt() {
+    async fn spawn_from_graph_errors_on_oversized_system_prompt() {
         let mut world = build_world(registry_with(vec![]));
-        // A blueprint whose stage carries an enormous system prompt in a tiny
+        // A graph whose stage carries an enormous system prompt in a tiny
         // pinned region overflows at spawn.
-        let layout = leviath_core::layout::ContextLayout::new(
-            vec![leviath_core::layout::RegionDefinition::new(
-                "task".to_string(),
-                RegionKind::Pinned,
-                50,
-            )],
-            1000,
-        );
-        let mut s = leviath_core::Stage::new(
-            "s".to_string(),
-            leviath_core::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
-        );
-        s.config.insert(
-            "system_prompt".to_string(),
-            serde_json::Value::String("x".repeat(100_000)),
-        );
-        let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
+        use crate::test_graph as g;
+        let layout = g::layout(vec![g::region("task", RegionKind::Pinned, 50)], 1000);
+        let s = crate::spec::graph::StageDef {
+            model: g::model("script", "m"),
+            system_prompt: Some("x".repeat(100_000)),
+            ..g::stage("s")
+        };
+        let bp = g::graph(vec![s], layout);
 
-        let err = world.spawn_from_blueprint(
+        let err = world.spawn_from_graph(
             "a".to_string(),
             bp,
             "task",

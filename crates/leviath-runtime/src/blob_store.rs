@@ -3,8 +3,9 @@
 //!
 //! A part whose bytes are not text is written once under
 //! `<runs_dir>/<run_id>/blobs/<sha256>` and referenced by hash everywhere
-//! else. Deleting the run deletes its blobs; nothing outside the run's
-//! directory points at them. A world with no runs directory (the embedding
+//! else, the run's file included: the file names each part and never holds
+//! its bytes, so a part whose file is gone is refused by name. Deleting the
+//! run deletes its blobs; nothing outside the run's directory points at them. A world with no runs directory (the embedding
 //! mode) keeps the same bytes in memory instead.
 
 use std::collections::BTreeMap;
@@ -333,19 +334,28 @@ impl BlobStore for FsBlobStore {
 
     fn read(&self, run_id: &str, sha256: &str) -> io::Result<Arc<[u8]>> {
         let path = self.path_for(run_id, sha256)?;
-        let bytes = std::fs::read(&path)?;
-        Ok(Arc::from(bytes))
+        std::fs::read(&path)
+            .map(Arc::from)
+            .map_err(|e| match e.kind() {
+                io::ErrorKind::NotFound => io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "run '{run_id}' names the stored part {sha256}, and its file is missing"
+                    ),
+                ),
+                _ => e,
+            })
     }
 
     fn copy(&self, from_run: &str, to_run: &str, sha256: &str) -> io::Result<()> {
         // `path_for` has validated the hash, so joining it below is safe.
-        let from = self.path_for(from_run, sha256)?;
+        self.path_for(from_run, sha256)?;
         let dir = self.dir_for(to_run)?;
         let to = dir.join(sha256);
         if to.is_file() {
             return Ok(());
         }
-        let bytes = std::fs::read(&from)?;
+        let bytes = self.read(from_run, sha256)?;
         leviath_sys::create_private_dir_all(&dir)?;
         leviath_sys::write_atomic(&to, &bytes, Some(0o600))
     }
@@ -683,6 +693,35 @@ mod tests {
         });
         let mut state = bevy_ecs::system::SystemState::<MimeParams>::new(&mut world);
         assert_eq!(state.get(&world).unwrap().provider_file_ttl_secs(), 7);
+    }
+
+    /// A part whose file is not in the run's blob directory is refused by
+    /// name, whatever the run's file says: the file names parts and never
+    /// holds their bytes. A part that is there reads, and copies.
+    #[test]
+    fn a_part_whose_file_is_missing_is_refused_by_name() {
+        use crate::spec::names::Digest;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FsBlobStore::new(tmp.path().to_path_buf());
+        let bytes = b"kept beside the run file".to_vec();
+        let sha = Digest::of(&bytes).as_str().to_string();
+        let missing = store.read("run-a", &sha).unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        assert!(missing.to_string().contains(&sha), "{missing}");
+        assert!(missing.to_string().contains("run 'run-a'"), "{missing}");
+        let blobs = tmp.path().join("run-a").join(BLOBS_DIR);
+        std::fs::create_dir_all(&blobs).unwrap();
+        std::fs::write(blobs.join(&sha), &bytes).unwrap();
+        assert_eq!(&*store.read("run-a", &sha).unwrap(), bytes.as_slice());
+        store.copy("run-a", "run-b", &sha).unwrap();
+        assert!(store.path_for("run-b", &sha).unwrap().is_file());
+        // A path where a file should be that is not one fails as it is.
+        let other = Digest::of(b"a directory").as_str().to_string();
+        std::fs::create_dir_all(blobs.join(&other)).unwrap();
+        assert_ne!(
+            store.read("run-a", &other).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     #[test]

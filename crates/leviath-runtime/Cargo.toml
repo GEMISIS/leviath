@@ -16,7 +16,7 @@ readme = "README.md"
 # The daemon's control transport (unix socket / named pipe, auth token, pid
 # file). Off by default so embedders compile a runtime with no daemon
 # machinery; the CLI turns it on.
-control-socket = ["dep:rand"]
+control-socket = []
 
 [dependencies]
 leviath-core = { workspace = true }
@@ -24,8 +24,8 @@ leviath-core = { workspace = true }
 # JSON-in/JSON-out, so this crate needs no direct rhai dependency.
 leviath-scripting = { workspace = true }
 toml = { workspace = true }
-# Control-channel token generation (control-socket only).
-rand = { workspace = true, optional = true }
+# Control-channel tokens, and the names a run's secrets are kept under.
+rand = { workspace = true }
 leviath-providers = { workspace = true }
 # File permissions (the persistence lane writes every run file 0600) and the
 # control socket's peer-uid check. Not optional: persistence is compiled into
@@ -43,6 +43,14 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+postcard = { workspace = true }
+zstd = { workspace = true }
+crc32fast = { workspace = true }
+schemars = { workspace = true }
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }
@@ -51,6 +59,8 @@ leviath-testkit = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 temp-env = { workspace = true, features = ["async_closure"] }
 tempfile = { workspace = true }
+# `apply(diff(a, b), a) == b` over generated run states.
+proptest = { workspace = true }
 
 [lints]
 workspace = true

@@ -6,8 +6,8 @@
 //! here, and none of them is visible in a folded context window.
 
 use async_graphql::{Context, Enum, ID, Object, SimpleObject};
-use leviath_core::run_archive::Execution;
 use leviath_graphql_derive::mirror;
+use leviath_runtime::runfile::history::Execution;
 
 use super::super::connection::{
     Connection, Paged, PositionQuery, Total, position_order, position_page,
@@ -164,7 +164,10 @@ impl ToolExecution {
             return Ok(None);
         };
         let run_id = self.run_id.clone();
-        let records = blocking(move || crate::runstate::read_stages_index(&run_id)).await;
+        let records = blocking(move || {
+            super::super::super::core::inspect::stages(&run_id).unwrap_or_default()
+        })
+        .await;
         Ok(records
             .iter()
             .map(super::run_detail::StageRecord::from)
@@ -261,8 +264,10 @@ impl ToolExecution {
 
     /// Where in the run's journal the record that dispatched it sits.
     ///
-    /// A byte offset. It only climbs within a run and never changes, so it orders
-    /// executions and names one for as long as the run exists.
+    /// The step of the run file that dispatched it, counted from the run's
+    /// start. It only climbs within a run and never changes, so it orders
+    /// executions. The calls one batch dispatched share a step, so with
+    /// `callId` it names one for as long as the run exists.
     async fn journal_position(&self) -> BigInt {
         BigInt(i64::try_from(self.record.position).unwrap_or(i64::MAX))
     }

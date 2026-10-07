@@ -1,125 +1,33 @@
-//! Blueprint lint: the checks [`Blueprint::validate`] deliberately does not make.
+//! Blueprint lint: the checks a graph's own validation deliberately does not
+//! make.
 //!
-//! `Blueprint::validate` answers "is this manifest structurally coherent" - the
-//! layout fits, the graph resolves, fan-out wiring points at real stages. It
-//! says nothing about the fields whose *absence* quietly changes what a run
+//! [`RunGraph::validate`] answers "does this graph hold together": every
+//! stage, region and input it names is declared, every setting is in range.
+//! It says nothing about the fields whose *absence* quietly changes what a run
 //! does, and those are what actually bite:
 //!
-//! - a stage with no `[stages.<name>.model]` table parses fine, because the
-//!   parser substitutes a default, and then runs on whatever the user's default
+//! - a stage with an empty model list runs on whatever the user's default
 //!   provider happens to be
-//! - an agent-level `[model]` block is never read at all, so the author's model
-//!   choice is discarded silently
-//! - a typo in `available_tools` matches nothing, and the stage just advertises
-//!   one tool fewer - the model is told the tool does not exist
+//! - a typo in `tools` matches nothing, and the stage just advertises one tool
+//!   fewer, so the model is told the tool does not exist
 //! - an autonomous stage granting `ask_user_text` parks in `WaitingInput` the
 //!   first time it asks, with nobody there to answer
 //!
 //! Each of those is invisible on inspection and shows up hours later as a stuck
 //! run. This module names them at author time instead.
 //!
-//! Questions about what the author *declared* ("is there a `mode` key?") are
-//! answered from the manifest text, not from the parsed [`Blueprint`]: by then
-//! the parser has already filled in its defaults, and asking the struct cannot
-//! tell "wrote `autonomous`" apart from "wrote nothing".
-//!
-//! [`Blueprint::validate`]: leviath_core::Blueprint::validate
+//! [`RunGraph::validate`]: leviath_runtime::spec::graph::RunGraph::validate
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use leviath_core::Blueprint;
-use leviath_core::blueprint::{StageMode, ToolGroup};
+use leviath_blueprint::BlueprintFile;
 use leviath_runtime::dynamic_interaction::BLOCKING_INTERACTION_TOOLS;
+use leviath_runtime::spec::graph::{RunGraph, StageMode, ToolGroup};
 use leviath_tools::canonical_tool_name;
-use serde::{Deserialize, Serialize};
-
-/// How much a finding matters. Only [`LintSeverity::Error`] fails
-/// `lev validate`; warnings are printed and the command still exits zero
-/// (unless `--deny-warnings` is passed); notes never fail anything.
-///
-/// Declared worst-first so sorting by it groups the report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum LintSeverity {
-    /// The manifest says something that cannot be what the author meant - a
-    /// tool name matching nothing, a permission for a tool the stage never
-    /// granted.
-    Error,
-    /// The manifest leaves a decision to a default the author may not know
-    /// about.
-    Warning,
-    /// Nothing is wrong; the blueprint is doing something worth knowing before
-    /// you run it, like reaching outside its workdir or running a shell command
-    /// at spawn. A note must never fail a build, so `--deny-warnings` skips it.
-    Note,
-}
-
-impl LintSeverity {
-    /// Fixed-width label for the report, so the messages line up.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Error => "ERR ",
-            Self::Warning => "WARN",
-            Self::Note => "NOTE",
-        }
-    }
-}
-
-/// One thing worth telling the author about.
-///
-/// Serialize only: `code` is a `&'static str` pointing at a literal in this
-/// file, which no deserializer can produce.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct LintFinding {
-    /// How much this matters, and therefore whether it fails the check.
-    pub severity: LintSeverity,
-    /// Stable slug (`"unknown-tool"`), so a finding can be referenced in an
-    /// issue or grepped for in daemon logs without quoting prose.
-    pub code: &'static str,
-    /// The stage it belongs to, when it belongs to one.
-    pub stage: Option<String>,
-    /// What is wrong.
-    pub message: String,
-    /// What to do about it. Rendered on its own indented line.
-    pub fix: Option<String>,
-}
-
-impl LintFinding {
-    fn new(severity: LintSeverity, code: &'static str, message: String) -> Self {
-        Self {
-            severity,
-            code,
-            stage: None,
-            message,
-            fix: None,
-        }
-    }
-
-    fn in_stage(mut self, stage: &str) -> Self {
-        self.stage = Some(stage.to_string());
-        self
-    }
-
-    fn with_fix(mut self, fix: impl Into<String>) -> Self {
-        self.fix = Some(fix.into());
-        self
-    }
-
-    /// Whether this finding should fail the command.
-    #[cfg(test)]
-    pub(crate) fn is_error(&self) -> bool {
-        self.severity == LintSeverity::Error
-    }
-
-    /// One-line rendering for a log record: `stage 'x': message`.
-    pub(crate) fn one_line(&self) -> String {
-        match &self.stage {
-            Some(stage) => format!("stage '{stage}': {}", self.message),
-            None => self.message.clone(),
-        }
-    }
-}
+// The findings every check reports in belong to the blueprint layer, so the
+// daemon's spawn log, `lev validate` and the blueprint editor show them alike.
+pub(crate) use leviath_blueprint::lint::{LintFinding, LintSeverity};
 
 /// What one provider answered when asked what models it takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +51,7 @@ pub(crate) enum ProviderCatalog {
     ScriptSaidNothing,
 }
 
-/// Facts about the machine the blueprint will run on, which the manifest alone
+/// Facts about the machine the blueprint will run on, which the blueprint alone
 /// cannot supply.
 ///
 /// Every field is "unknown" when empty/`None`, and an unknown field skips its
@@ -151,7 +59,7 @@ pub(crate) enum ProviderCatalog {
 /// MCP servers must not claim their tools do not exist.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct LintEnv {
-    /// Every tool name a manifest may legally write: canonical built-ins, their
+    /// Every tool name a blueprint may legally write: canonical built-ins, their
     /// aliases, the sub-agent tools, this agent's own `tools/*.rhai`, and any
     /// MCP tools already resolved. Empty skips the unknown-tool check.
     pub known_tools: HashSet<String>,
@@ -175,14 +83,14 @@ pub(crate) struct LintEnv {
     /// providers are loaded on demand and cannot be enumerated up front.
     pub available_providers: Option<HashSet<String>>,
 
-    /// Which of the blueprint's `[read_paths]` this install's config grants.
+    /// Which of the blueprint's `read_paths` this install's config grants.
     /// `None` means nobody asked (the daemon's offline lint), in which case the
     /// check only says that a declaration needs granting. `Some(Err(..))` is a
     /// grant list of the user's own that will not compile.
     pub read_paths: Option<Result<crate::read_path_report::GrantReport, String>>,
 
     /// Whether this install's config honours the blueprint's own
-    /// `[safe_commands]`. `None` means nobody asked (the daemon's offline
+    /// `[graph.safe_commands]`. `None` means nobody asked (the daemon's offline
     /// lint), in which case the check only says the declaration needs granting.
     ///
     /// A bool rather than a report: unlike read paths, where *which* entries are
@@ -309,7 +217,7 @@ impl LintEnv {
     /// Nothing is recorded when the switch is off.
     pub(crate) fn with_retention(
         mut self,
-        blueprint: &Blueprint,
+        graph: &RunGraph,
         config: &crate::config::Config,
         registry: &leviath_runtime::ProviderRegistry,
     ) -> Self {
@@ -317,13 +225,17 @@ impl LintEnv {
         if !defaults.retention.zero_requested {
             return self;
         }
-        for stage in &blueprint.stages {
-            let (provider, model) = leviath_runtime::pipeline::resolve_stage_model(
-                &stage.model,
-                None,
-                &defaults,
-                registry,
-            );
+        // The head is chosen with the switch off: with it on, the choice
+        // itself refuses a model that keeps something, and the point here is
+        // to name that model rather than to be refused by it.
+        let mut choosing = defaults.clone();
+        choosing.retention.zero_requested = false;
+        for stage in &graph.stages {
+            let Ok(head) =
+                leviath_runtime::bind::host::choose_model(stage, None, &choosing, registry)
+            else {
+                continue;
+            };
             let mut refusals = Vec::new();
             let mut seen = HashSet::new();
             let mut consider = |provider: &str, model: &str, head: bool| {
@@ -344,22 +256,24 @@ impl LintEnv {
                     });
                 }
             };
-            consider(&provider, &model, true);
+            consider(head.provider.as_str(), head.model.as_str(), true);
             // The pinned entries the stage names after its head, on providers
             // this install has, which are what a failover would reach. An open
             // entry resolves through the same preference the head did, and is
             // judged there; a provider that is not configured here is not in
             // the failover list either.
-            for entry in stage
+            for (provider, model) in stage
                 .model
                 .models
                 .iter()
-                .filter(|e| !e.provider.is_empty() && registry.has(&e.provider))
+                .map(route)
+                .filter(|(p, _)| !p.is_empty() && registry.has(p))
             {
-                consider(&entry.provider, &entry.model, false);
+                consider(provider, model, false);
             }
             if !refusals.is_empty() {
-                self.retention_refusals.insert(stage.name.clone(), refusals);
+                self.retention_refusals
+                    .insert(stage.name.to_string(), refusals);
             }
         }
         self
@@ -370,16 +284,13 @@ impl LintEnv {
     /// so a script provider counts exactly when it would really load.
     pub(crate) fn with_providers(
         mut self,
-        blueprint: &Blueprint,
+        graph: &RunGraph,
         config: &crate::config::Config,
     ) -> Self {
         let registry = crate::commands::run::build_provider_registry_from_config(config);
         self.available_providers = Some(
-            blueprint
-                .stages
-                .iter()
-                .flat_map(|s| s.model.models.iter())
-                .map(|e| e.provider.clone())
+            model_entries(graph)
+                .map(|e| route(e).0.to_string())
                 .filter(|p| registry.as_ref().is_ok_and(|r| r.has(p)))
                 .collect(),
         );
@@ -393,20 +304,17 @@ impl LintEnv {
     /// building another. `with_providers` builds its own because it only needs
     /// a name lookup; this needs the *primed* one, since an unprimed provider
     /// has no catalogue to report and would turn every check below into a
-    /// shrug. `lev validate` primes once, at `primed_registry`, and hands the
-    /// same registry here.
+    /// shrug. `lev validate` primes once and hands the same registry here.
     pub(crate) fn with_provider_catalogs(
         mut self,
-        blueprint: &Blueprint,
+        graph: &RunGraph,
         config: &crate::config::Config,
         registry: &leviath_runtime::ProviderRegistry,
     ) -> Self {
         use leviath_runtime::pipeline::model_key;
 
-        let entries = || blueprint.stages.iter().flat_map(|s| s.model.models.iter());
-
-        for name in entries()
-            .map(|e| e.provider.as_str())
+        for name in model_entries(graph)
+            .map(|e| route(e).0)
             .filter(|p| !p.is_empty())
         {
             if self.provider_catalogs.contains_key(name) {
@@ -421,7 +329,7 @@ impl LintEnv {
             };
             let catalog = match provider.served_catalog() {
                 Some(models) => ProviderCatalog::Complete(models),
-                // Only a script provider's silence is worth reporting - see
+                // Only a script provider's silence is worth reporting: see
                 // `ProviderCatalog::ScriptSaidNothing`. `script_provider_named`
                 // answers `None` for a native provider of the same name, which
                 // is exactly the distinction wanted.
@@ -438,15 +346,14 @@ impl LintEnv {
         //
         // No "already asked" guard, unlike the loop above: that one is keyed
         // by provider and its question can cost a network call, while this is
-        // keyed by the exact pair and answered from memory. A blueprint naming
-        // one pair in two stages asks twice and inserts the same string.
-        for entry in entries() {
-            let Some(provider) = registry.get(&entry.provider) else {
+        // keyed by the exact pair and answered from memory.
+        for (provider_name, model) in model_entries(graph).map(route) {
+            let Some(provider) = registry.get(provider_name) else {
                 continue;
             };
-            if let Some(reason) = provider.refusal_reason(model_key(&entry.model)) {
+            if let Some(reason) = provider.refusal_reason(model_key(model)) {
                 self.provider_refusals
-                    .insert(format!("{}/{}", entry.provider, entry.model), reason);
+                    .insert(format!("{provider_name}/{model}"), reason);
             }
         }
 
@@ -454,12 +361,12 @@ impl LintEnv {
         // in the preference claim this model. A provider outside the
         // preference never serves a bare name, so it is not asked. A script
         // provider is not in `native_providers`, so the machine's default is
-        // offered the question too, matching `resolve_stage_candidates`.
+        // offered the question too, matching the resolver.
         let defaults = crate::daemon::spawn::model_defaults(config);
         let default_script = registry.script_provider_named(&config.default_provider);
-        for model in entries()
-            .filter(|e| e.provider.is_empty())
-            .map(|e| &e.model)
+        for (_, model) in model_entries(graph)
+            .map(route)
+            .filter(|(p, _)| p.is_empty())
         {
             let key = model_key(model);
             let routed = registry
@@ -470,95 +377,72 @@ impl LintEnv {
                     .as_ref()
                     .is_some_and(|p| p.serves_model(key).is_some());
             if !routed {
-                self.unrouted_models.insert(model.clone());
+                self.unrouted_models.insert(model.to_string());
             }
         }
         self
     }
 
     /// Add the answer to "does this install's config grant what the blueprint
-    /// declares under `[read_paths]`", per entry.
+    /// declares under `read_paths`", per entry, for the agent named `agent`.
     ///
     /// Separate from [`Self::with_providers`] because it needs a workdir:
     /// relative entries resolve against the one a run would use, which for a
     /// command run outside a run is the directory it was invoked from.
     pub(crate) fn with_read_paths(
         mut self,
-        blueprint: &Blueprint,
+        graph: &RunGraph,
+        agent: &str,
         config: &crate::config::Config,
         workdir: &Path,
     ) -> Self {
-        self.read_paths = crate::read_path_report::build(blueprint, config, workdir);
+        self.read_paths = crate::read_path_report::build(graph, agent, config, workdir);
         // Asked here rather than in its own builder: both answers come from the
         // same config, and a caller that has one always has the other.
         self.safe_commands_granted = Some(
             config.security.allow_blueprint_safe_commands
                 || config
                     .agent_safe_commands
-                    .get(&blueprint.name)
+                    .get(agent)
                     .is_some_and(|a| a.allow_blueprint),
         );
         self
     }
 }
 
-/// Lint `blueprint`, which was parsed from `content`.
-///
-/// The two arguments describe the same manifest: `blueprint` for what the
-/// engine will do with it, `content` for what the author actually wrote.
-pub(crate) fn lint_manifest(
-    content: &str,
-    blueprint: &Blueprint,
-    env: &LintEnv,
-) -> Vec<LintFinding> {
-    let declared = Declared::from_text(content);
+/// Lint the blueprint in `file`.
+pub(crate) fn lint_blueprint(file: &BlueprintFile, env: &LintEnv) -> Vec<LintFinding> {
+    let graph = file.run_graph();
+    let graph = &graph;
     let mut findings = Vec::new();
 
-    if declared.agent_model_block {
-        findings.push(
-            LintFinding::new(
-                LintSeverity::Warning,
-                "agent-model-block-ignored",
-                "the top-level [model] block is not read by anything: model \
-                 selection is per stage"
-                    .to_string(),
-            )
-            .with_fix("move it into each [stages.<name>.model] that needs it"),
-        );
-    }
+    findings.extend(lint_command_seeds(graph));
+    findings.extend(lint_tool_seeds(graph));
+    findings.extend(lint_read_paths(graph, env));
+    findings.extend(lint_safe_commands(graph, file.blueprint.name.as_str(), env));
+    findings.extend(lint_held_checkpoints(graph));
+    findings.extend(lint_graph(graph));
+    findings.extend(lint_output_reachable(graph));
+    findings.extend(lint_dead_end_possible(graph));
+    findings.extend(lint_compacted_deliverables(graph));
+    findings.extend(lint_required_regions_enforceable(graph));
+    findings.extend(lint_unbounded_percentage(graph, env));
+    findings.extend(lint_long_context_price(graph, env));
+    findings.extend(lint_mime_types(graph));
 
-    findings.extend(lint_renamed_keys(content));
-    findings.extend(lint_dropped_seeds(&declared, blueprint));
-    findings.extend(lint_command_seeds(blueprint));
-    findings.extend(lint_tool_seeds(blueprint));
-    findings.extend(lint_read_paths(blueprint, env));
-    findings.extend(lint_safe_commands(blueprint, env));
-    findings.extend(lint_held_checkpoints(blueprint));
-    findings.extend(lint_graph(blueprint));
-    findings.extend(lint_output_reachable(blueprint));
-    findings.extend(lint_dead_end_possible(blueprint));
-    findings.extend(lint_compacted_deliverables(blueprint));
-    findings.extend(lint_required_regions_enforceable(blueprint));
-    findings.extend(lint_unbounded_percentage(blueprint, env));
-    findings.extend(lint_long_context_price(blueprint, env));
-
-    let agent_permissions = blueprint.agent_tool_permissions();
-
-    findings.extend(lint_mime_types(blueprint));
-    for stage in &blueprint.stages {
-        let keys = declared.stage(&stage.name);
-        findings.extend(lint_declarations(stage, keys));
+    for stage in &graph.stages {
+        findings.extend(lint_declarations(stage));
         findings.extend(lint_tools(stage, env));
         findings.extend(lint_blocking_tools(stage));
-        findings.extend(lint_tool_policies(stage, &agent_permissions));
-        findings.extend(lint_permission_clamp(stage, &agent_permissions));
+        findings.extend(lint_tool_policies(stage, &graph.tool_permissions));
+        findings.extend(lint_permission_clamp(stage, &graph.tool_permissions));
         findings.extend(lint_models(stage, env));
         findings.extend(lint_retention(stage, env));
         findings.extend(lint_output_stage(stage));
         findings.extend(lint_output_stage_can_answer(stage));
-        findings.extend(lint_fanout_escape(stage));
-        findings.extend(lint_fanout_worker_task(blueprint, stage));
-        findings.extend(lint_stage_mime(blueprint, stage));
+        findings.extend(lint_fanout_escape(graph, stage));
+        findings.extend(lint_fanout_worker_task(graph, stage));
+        findings.extend(lint_stage_mime(graph, stage));
         findings.extend(lint_tool_accepts(stage));
     }
 
@@ -568,152 +452,21 @@ pub(crate) fn lint_manifest(
     findings
 }
 
-/// A region wrote a `seed` the parser could not read, so it has none.
-///
-/// `parse_region_seed` returns `None` for a seed table with no recognized key
-/// and for a seed that is neither a string nor a table, and the region then
-/// simply starts empty. That is deliberate - an unknown key is not worth
-/// rejecting a whole manifest over - but it is invisible, and a one-character
-/// typo (`caller_input` for `caller`) reads exactly like a working blueprint
-/// until an agent answers a question it was never given. This is the check that
-/// says so.
-fn lint_dropped_seeds(declared: &Declared, blueprint: &Blueprint) -> Vec<LintFinding> {
-    declared
-        .seeded_regions
-        .iter()
-        .filter(|name| {
-            blueprint
-                .context_layout
-                .get_region(name)
-                .is_some_and(|r| r.seed.is_none())
-        })
-        .map(|name| {
-            LintFinding::new(
-                LintSeverity::Warning,
-                "region-seed-not-understood",
-                format!(
-                    "region '{name}' declares a seed that isn't one of the \
-                     recognized forms, so it is ignored and the region starts empty"
-                ),
-            )
-            .with_fix(
-                "use a string (the caller input key), or one of \
-                 { caller = }, { literal = }, { files = }, { glob = }, \
-                 { rhai = }, { command = }",
-            )
-        })
-        .collect()
-}
-
-// ─── Declared keys ────────────────────────────────────────────────────────────
-
-/// Which optional keys the manifest text actually writes, per stage, plus the
-/// one agent-level block that is silently discarded.
-#[derive(Debug, Default)]
-struct Declared {
-    /// A top-level `[model]` table exists. Nothing reads it.
-    agent_model_block: bool,
-    /// Regions whose text writes a `seed` key, whatever its shape. Compared
-    /// against the parsed seed to catch the ones the parser threw away.
-    seeded_regions: Vec<String>,
-    /// Per stage name, the keys that stage wrote.
-    stages: HashMap<String, StageKeys>,
-    /// The manifest text could not be re-read. Every key is then reported as
-    /// declared, so an unreadable manifest produces no declaration warnings
-    /// rather than a full set of false ones.
-    opaque: bool,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-struct StageKeys {
-    mode: bool,
-    model: bool,
-}
-
-impl Declared {
-    fn from_text(content: &str) -> Self {
-        // `toml::from_str` and not `str::parse`: the latter deserializes a bare
-        // TOML *value*, not a document, and rejects every real manifest.
-        let Ok(root) = toml::from_str::<toml::Table>(content) else {
-            return Self {
-                opaque: true,
-                ..Self::default()
-            };
-        };
-        let agent_model_block = root.get("model").is_some_and(toml::Value::is_table);
-        // Both region spellings - inline `name = { seed = ... }` under
-        // `[context.regions]` and a `[context.regions.name]` section - land here
-        // as the same nested table, so one path covers both.
-        let seeded_regions = root
-            .get("context")
-            .and_then(toml::Value::as_table)
-            .and_then(|c| c.get("regions"))
-            .and_then(toml::Value::as_table)
-            .map(|regions| {
-                regions
-                    .iter()
-                    .filter(|(_, body)| body.get("seed").is_some())
-                    .map(|(name, _)| name.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let stages = root
-            .get("stages")
-            .and_then(toml::Value::as_table)
-            .map(|t| {
-                t.iter()
-                    .map(|(name, body)| {
-                        (
-                            name.clone(),
-                            StageKeys {
-                                mode: body.get("mode").is_some(),
-                                model: body.get("model").is_some(),
-                            },
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self {
-            agent_model_block,
-            seeded_regions,
-            stages,
-            opaque: false,
-        }
-    }
-
-    /// What `stage` declared. An unreadable manifest, or a stage the text has
-    /// no entry for, reports everything as declared so nothing is warned about.
-    fn stage(&self, stage: &str) -> StageKeys {
-        if self.opaque {
-            return StageKeys {
-                mode: true,
-                model: true,
-            };
-        }
-        self.stages.get(stage).copied().unwrap_or(StageKeys {
-            mode: true,
-            model: true,
-        })
-    }
-}
-
-// ─── Checks ───────────────────────────────────────────────────────────────────
-
 // The checks themselves, one module per question they answer. Imported rather
-// than re-exported: `lint_manifest` is the only caller and the only entry point
-// anyone outside this module needs, so the individual checks stay internal.
+// than re-exported: `lint_blueprint` is the only caller and the only entry
+// point anyone outside this module needs, so the individual checks stay
+// internal.
 mod checks;
 mod fanout;
+mod graph;
 mod mime;
 mod pricing;
-mod renamed;
+mod security;
 use checks::*;
 use fanout::*;
+use graph::*;
 use mime::*;
 use pricing::*;
-use renamed::*;
-mod security;
 use security::*;
 
 #[cfg(test)]

@@ -1,0 +1,20 @@
+[agent]
+name = "fanner"
+version = "0.1.0"
+description = "Splits its task across waiter workers with the fan_out tool"
+entry_stage = "main"
+max_child_depth = 2
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 2000, required = true, seed = "task" }
+notes = { kind = "pinned", max_tokens = 500, seed = { literal = "Split the work, then merge." } }
+
+[stages.main]
+mode = "autonomous"
+description = "Fan out, then finish"
+model = { models = [{ provider = "openai", model = "gpt-mock" }] }
+available_tools = ["fan_out"]
+max_iterations = 4
+system_prompt = """
+You split work across workers with fan_out, then reply "done".
+"""

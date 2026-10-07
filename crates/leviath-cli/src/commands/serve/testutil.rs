@@ -116,6 +116,44 @@ pub(super) fn fake_daemon(
     (ControlClient::new(id), dir, handle)
 }
 
+/// A fake daemon that answers every request it is asked, not only the first.
+///
+/// [`fake_daemon`] answers one, which is what most REST handlers make. A bulk
+/// act makes one control request per run it reaches, and an answer named by
+/// an option's word reads the open request before answering it, so those
+/// need a daemon that keeps answering.
+pub(super) fn busy_daemon(
+    respond: impl Fn(ControlRequest) -> ControlResponse + Send + Sync + 'static,
+) -> (ControlClient, tempfile::TempDir, JoinHandle<()>) {
+    let dir = tempfile::tempdir().expect("a temp socket dir");
+    let id = control_id(dir.path());
+    let mut listener = bind_control_listener(&id).expect("the listener binds");
+    let respond = Arc::new(respond);
+    let handle = tokio::spawn(async move {
+        loop {
+            let stream = listener
+                .accept()
+                .await
+                .expect("accept succeeds")
+                .expect("our own connection is admitted");
+            let respond = Arc::clone(&respond);
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = tokio::io::split(stream);
+                let mut lines = BufReader::new(read_half).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let request =
+                        serde_json::from_str::<ControlRequest>(&line).expect("a control request");
+                    let mut out =
+                        serde_json::to_string(&respond(request)).expect("the reply serializes");
+                    out.push('\n');
+                    let _ = write_half.write_all(out.as_bytes()).await;
+                }
+            });
+        }
+    });
+    (ControlClient::new(id), dir, handle)
+}
+
 /// Minimal hand-rolled WebSocket client used to drive `handle_ws` end to
 /// end over a real TCP loopback connection. No `tokio-tungstenite` or
 /// other WS crate is added as a dependency - this speaks just enough of

@@ -1,21 +1,32 @@
-//! Where tables land in the file.
+//! Where headed tables land in the file.
 //!
 //! `toml_edit` writes headed tables in the order of their `position`, a
 //! number each table got when the document was parsed; a table added since
 //! has none and is written right after whichever positioned table the writer
-//! visited last, ties broken by the order the tables sit in memory. The stage
-//! views must list stages in the order the file will show them, and adding a
-//! stage "after plan" or moving one up must land it there, so this module
-//! reproduces the writer's order and renumbers on demand.
+//! visited last, ties broken by the order the tables sit in memory. A file
+//! written by hand keeps each stage's `[[graph.edges]]` next to the stage,
+//! so a stage or an edge the editor adds has to be placed there, not left
+//! wherever the writer happens to be. This module reproduces the writer's
+//! order and renumbers on demand.
 
 use toml_edit::{DocumentMut, Item, Table};
 
 /// One step down into the document: a key, or an element of an array of
-/// tables (`[[stages.plan.interaction_points]]`).
+/// tables (`[[graph.stages]]`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Seg {
     Key(String),
     Index(usize),
+}
+
+/// The path of the `index`th element of the array of tables at
+/// `graph.<list>`.
+pub(super) fn element(list: &str, index: usize) -> Vec<Seg> {
+    vec![
+        Seg::Key("graph".to_string()),
+        Seg::Key(list.to_string()),
+        Seg::Index(index),
+    ]
 }
 
 /// The path of every headed table, root excluded, in the order the writer
@@ -95,75 +106,42 @@ pub(super) fn renumber(doc: &mut DocumentMut, order: &[Vec<Seg>]) {
     }
 }
 
-/// The names of the `[stages.*]` tables in the order the file shows them.
-/// A stage written inline (`stages = { plan = {...} }`, or `plan = {...}`
-/// under `[stages]`) has no position and comes first, as the writer puts a
-/// table's values before its subtables.
-pub(super) fn stage_order(doc: &DocumentMut) -> Vec<String> {
-    let Some(stages) = doc.get("stages") else {
-        return Vec::new();
-    };
-    let Some(table) = stages.as_table_like() else {
-        return Vec::new();
-    };
-    let mut inline: Vec<String> = Vec::new();
-    let mut headed: Vec<String> = Vec::new();
-    for (name, item) in table.iter() {
-        if item.is_inline_table() {
-            inline.push(name.to_string());
-        } else if item.is_table() {
-            headed.push(name.to_string());
-        }
-    }
-    let written = written_order(doc);
-    let rank = |name: &str| {
-        written
-            .iter()
-            .position(|p| {
-                p.first() == Some(&Seg::Key("stages".into()))
-                    && p.get(1) == Some(&Seg::Key(name.into()))
-            })
-            .unwrap_or(usize::MAX)
-    };
-    headed.sort_by_key(|n| rank(n));
-    inline.extend(headed);
-    inline
+/// Where a moved block goes.
+pub(super) enum Spot<'a> {
+    /// Right after the last table under this path.
+    After(&'a [Seg]),
+    /// Right before the first table under this path, or at the end of the
+    /// file when nothing is under it.
+    Before(&'a [Seg]),
 }
 
-/// The paths of the tables that make up stage `name`: its own and every
-/// table under it, in written order.
-pub(super) fn stage_block(order: &[Vec<Seg>], name: &str) -> Vec<Vec<Seg>> {
-    order
-        .iter()
-        .filter(|p| {
-            p.first() == Some(&Seg::Key("stages".into()))
-                && p.get(1) == Some(&Seg::Key(name.into()))
-        })
-        .cloned()
-        .collect()
-}
-
-/// Move stage `name`'s block of tables to just after the block of `after`
-/// (a stage the caller has checked is there, and not `name` itself), and
-/// renumber the file to match. An inline `stages` table has no blocks to
-/// move: its entries sit where they were written.
-pub(super) fn place_stage_after(doc: &mut DocumentMut, name: &str, after: &str) {
+/// Move the tables under `block` (the table at that path and every table
+/// under it) to `spot`, and renumber the file to match. Nothing moves when
+/// `block` has no headed table, or `spot` names nothing to stand after.
+pub(super) fn move_block(doc: &mut DocumentMut, block: &[Seg], spot: Spot<'_>) {
     let order = written_order(doc);
-    let block = stage_block(&order, name);
-    let Some(anchor_end) = stage_block(&order, after).pop() else {
-        return;
-    };
-    let mut rest: Vec<Vec<Seg>> = order
+    let moving: Vec<Vec<Seg>> = order
         .iter()
-        .filter(|p| !block.contains(p))
+        .filter(|p| p.starts_with(block))
         .cloned()
         .collect();
-    // The anchor is in the order and not in the block, so it is in `rest`.
-    let at = rest
-        .iter()
-        .position(|p| *p == anchor_end)
-        .expect("the anchor's last table is in the rest")
-        + 1;
-    rest.splice(at..at, block);
+    if moving.is_empty() {
+        return;
+    }
+    let mut rest: Vec<Vec<Seg>> = order
+        .into_iter()
+        .filter(|p| !p.starts_with(block))
+        .collect();
+    let at = match spot {
+        Spot::After(anchor) => match rest.iter().rposition(|p| p.starts_with(anchor)) {
+            Some(i) => i + 1,
+            None => return,
+        },
+        Spot::Before(anchor) => rest
+            .iter()
+            .position(|p| p.starts_with(anchor))
+            .unwrap_or(rest.len()),
+    };
+    rest.splice(at..at, moving);
     renumber(doc, &rest);
 }

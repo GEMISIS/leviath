@@ -367,7 +367,7 @@ mod tests {
         assert!(
             agents_dir
                 .join(BUNDLED_AGENTS[0].name)
-                .join("agent.leviath")
+                .join(leviath_blueprint::FILE_NAME)
                 .exists()
         );
     }

@@ -42,7 +42,7 @@ pub struct BlobsArgs {
 pub(crate) async fn execute(args: BlobsArgs) -> anyhow::Result<()> {
     let entries = crate::blobs::list(&args.run_id).ok_or_else(|| {
         anyhow::anyhow!(
-            "no context for run '{}' (no readable context.json)",
+            "no context for run '{}' (no readable run file)",
             args.run_id
         )
     })?;

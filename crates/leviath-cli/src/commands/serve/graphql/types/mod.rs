@@ -16,8 +16,12 @@ pub(crate) mod manifest;
 pub(crate) mod run;
 pub(crate) mod run_detail;
 pub(crate) mod run_files;
+pub(crate) mod runfile;
 pub(crate) mod tool_calls;
 pub(crate) mod update;
+
+#[cfg(test)]
+pub(crate) mod journal_fixture;
 
 #[cfg(test)]
 #[path = "execution_tests.rs"]

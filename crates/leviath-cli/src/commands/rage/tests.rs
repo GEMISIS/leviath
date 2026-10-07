@@ -8,10 +8,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use leviath_core::run_archive::{
-    InferenceRequestRecord, InferenceResponseRecord, MessageRecord, RunIdentity, RunRecord,
-    ToolCallRecord, read_archive, write_archive_start, write_record,
-};
 use leviath_core::run_meta::{RunMeta, RunStatus};
 
 use super::collect::{
@@ -133,7 +129,7 @@ fn manifest_text() -> String {
     crate::bundled::BUNDLED_AGENTS
         .iter()
         .flat_map(|agent| agent.files.iter())
-        .find(|(rel, _)| *rel == "agent.leviath")
+        .find(|(rel, _)| *rel == "agent.toml")
         .map(|(_, content)| (*content).to_string())
         .expect("a bundled agent ships a manifest")
 }
@@ -150,28 +146,11 @@ fn meta(id: &str, blueprint: &Path) -> RunMeta {
     );
     meta.status = RunStatus::Error;
     meta.error = Some("the tool failed".to_string());
-    meta.callback_secret = Some(CALLBACK_SECRET.to_string());
     meta
 }
 
 fn write_meta(runs: &Path, meta: &RunMeta) {
-    write(
-        &runs.join(&meta.run_id).join("meta.json"),
-        serde_json::to_string_pretty(meta).unwrap(),
-    );
-}
-
-fn archive(records: &[RunRecord], extra_frame: Option<&[u8]>) -> Vec<u8> {
-    let mut out = Vec::new();
-    write_archive_start(&mut out, 1).unwrap();
-    for record in records {
-        write_record(&mut out, record).unwrap();
-    }
-    if let Some(frame) = extra_frame {
-        out.extend_from_slice(&(frame.len() as u64).to_be_bytes());
-        out.extend_from_slice(frame);
-    }
-    out
+    crate::runstate::create_run_in(&runs.join(&meta.run_id), meta).unwrap();
 }
 
 /// Plant the whole install under `root`, and hand back the blueprint dir.
@@ -230,7 +209,7 @@ api_token = "{EXTRA_VALUE}"
     );
     write(
         &data.join("daemon.log"),
-        format!("info daemon up\nkey {CONFIG_KEY} leaked\n{SLACK_TOKEN}\n"),
+        format!("info daemon up\nkey {CONFIG_KEY} leaked\n{SLACK_TOKEN}\nhook {CALLBACK_SECRET}\n"),
     );
     write(&data.join("daemon.log.1"), "older\n");
     write(
@@ -243,7 +222,7 @@ api_token = "{EXTRA_VALUE}"
 
     // Installed blueprints, with a tree deeper than the bundle copies.
     let demo = data.join("agents").join("demo");
-    write(&demo.join("agent.leviath"), manifest_text());
+    write(&demo.join("agent.toml"), manifest_text());
     write(
         &demo.join("tools").join("t.rhai"),
         format!("let k = \"{GITHUB_TOKEN}\";\n"),
@@ -265,13 +244,15 @@ api_token = "{EXTRA_VALUE}"
 
     // The blueprint the run used.
     let blueprint = root.join("blueprint");
-    write(&blueprint.join("agent.leviath"), manifest_text());
+    write(&blueprint.join("agent.toml"), manifest_text());
     write(&blueprint.join("tools").join("helper.rhai"), "fn x() {}\n");
 
     // A run family: root, a child by parent_run_id, a child by the parent's
     // list, a ghost in that list, and an unrelated run.
     let runs = root.join("runs");
     let mut root_meta = meta(ROOT_RUN, &blueprint);
+    // A signed webhook: its secret goes to the store beside the runs.
+    root_meta.callback_url = Some("https://example.com/hook".to_string());
     // One child listed here and by its own parent id, one listed here only,
     // and one that no longer exists.
     root_meta.children = vec![
@@ -279,7 +260,8 @@ api_token = "{EXTRA_VALUE}"
         LISTED_CHILD.to_string(),
         "run-ghost-99999".to_string(),
     ];
-    write_meta(&runs, &root_meta);
+    crate::runstate::create_signed_run_in(&runs.join(ROOT_RUN), &root_meta, CALLBACK_SECRET)
+        .unwrap();
     let mut child = meta(CHILD_RUN, &blueprint);
     child.parent_run_id = Some(ROOT_RUN.to_string());
     child.agent_path = root.join("missing-blueprint").display().to_string();
@@ -288,20 +270,38 @@ api_token = "{EXTRA_VALUE}"
     let mut listed = meta(LISTED_CHILD, &blueprint);
     listed.started_at -= 20;
     // As the daemon records it: the manifest file, not its directory.
-    listed.agent_path = blueprint.join("agent.leviath").display().to_string();
+    listed.agent_path = blueprint.join("agent.toml").display().to_string();
     write_meta(&runs, &listed);
     let mut other = meta(OTHER_RUN, &blueprint);
     other.started_at -= 30;
     write_meta(&runs, &other);
 
     let run_dir = runs.join(ROOT_RUN);
-    write(&run_dir.join("stages.json"), "[]");
-    write(
-        &run_dir.join("context.json"),
-        format!(
-            r#"{{"stage_name":"analyze","total_tokens":1,"max_tokens":2,"regions":[{{"name":"task","kind":"pinned","current_tokens":1,"max_tokens":2,"entries":[{{"content":"token {JWT} here","tokens":1,"kind":"user_message"}}]}}]}}"#
-        ),
-    );
+    crate::runstate::write_context_snapshot(
+        ROOT_RUN,
+        &leviath_core::run_meta::ContextSnapshot {
+            stage_name: "analyze".to_string(),
+            total_tokens: 1,
+            max_tokens: 2,
+            regions: vec![leviath_core::run_meta::RegionSnapshot {
+                name: "task".to_string(),
+                kind: "pinned".to_string(),
+                current_tokens: 1,
+                max_tokens: 2,
+                entries: vec![leviath_core::run_meta::RegionEntrySnapshot {
+                    content: format!("token {JWT} here").into(),
+                    tokens: 1,
+                    kind: leviath_core::region::EntryKind::UserMessage,
+                    metadata: None,
+                    key: None,
+                    taint: Default::default(),
+                    reasoning: None,
+                }],
+                description: None,
+            }],
+        },
+    )
+    .unwrap();
     write(&run_dir.join("final_output"), "done");
     write(
         &run_dir.join("stages").join("0").join("output.log"),
@@ -311,79 +311,89 @@ api_token = "{EXTRA_VALUE}"
         &run_dir.join("stages").join("0").join("logs.log"),
         "log line\n",
     );
-    write(&run_dir.join("stages").join("0").join("context.json"), "{}");
     write(
         &run_dir.join("stages").join("0").join("taint_audit.json"),
         "[]",
     );
     std::fs::create_dir_all(run_dir.join("stages").join("1")).unwrap();
-    let records = [
-        RunRecord::Header {
-            identity: RunIdentity {
-                run_id: ROOT_RUN.to_string(),
-                machine_id: "m".to_string(),
-                world_id: "w".to_string(),
-                created_at: 0,
-            },
-            meta: Box::new(root_meta.clone()),
+    // A tool call that carried secrets, as one step of the run.
+    let call = leviath_runtime::state::RunEvent::ToolStarted(
+        leviath_runtime::state::context::ToolCallState {
+            id: "c1".to_string(),
+            name: "bash".to_string(),
+            args: leviath_core::JsonDoc::new(
+                serde_json::json!({ "cmd": format!("echo {ENV_SECRET}") }),
+            ),
+            thought_signature: None,
         },
-        RunRecord::Inference {
-            stage: "analyze".to_string(),
-            iteration: 0,
-            request: InferenceRequestRecord {
-                model: "m".to_string(),
-                system: vec![format!("system with {CONFIG_KEY}")],
-                messages: vec![MessageRecord {
-                    role: "user".to_string(),
-                    content: "fix the planted bug".to_string(),
-                }],
-                tool_names: vec!["bash".to_string()],
-                temperature: 0.0,
-                max_tokens: 1,
-            },
-            response: InferenceResponseRecord {
-                content: "running a tool".to_string(),
-                tool_calls: vec![],
-                prompt_tokens: 1,
-                completion_tokens: 1,
-                cached_tokens: 0,
-                cache_write_tokens: 0,
-            },
-            at: 1,
-        },
-        RunRecord::ToolBatch {
-            calls: vec![ToolCallRecord {
-                execution_id: String::new(),
-                id: "c1".to_string(),
-                name: "bash".to_string(),
-                arguments: format!(r#"{{"cmd":"echo {ENV_SECRET}"}}"#),
-                result: Some(format!("AWS_ACCESS_KEY_ID={AWS_KEY}").into()),
-                thought_signature: None,
-            }],
-            at: 2,
-            stage_index: 0,
-            iteration: 0,
-            visit_id: String::new(),
-            requested_by: String::new(),
-            response: String::new(),
-        },
-    ];
-    write(
-        &run_dir.join("run.lvr"),
-        archive(&records, Some(br#"{"NoSuchRecord":{"at":1}}"#)),
     );
-    write(&run_dir.join("blobs").join("aa11"), [0u8, 159, 146, 150]);
-    write(&run_dir.join("blobs").join("bb22"), b"small text blob");
-    // The child's journal is corrupt, and it has nothing else; the listed
-    // child's is clean and small.
-    write(&runs.join(CHILD_RUN).join("run.lvr"), b"not an archive");
+    let done = leviath_runtime::state::RunEvent::ToolFinished {
+        call_id: "c1".to_string(),
+        result: leviath_runtime::state::ToolResultState {
+            text: format!("AWS_ACCESS_KEY_ID={AWS_KEY}"),
+            is_error: false,
+        },
+        millis: 1,
+    };
     write(
-        &runs.join(LISTED_CHILD).join("run.lvr"),
-        archive(&[records[0].clone()], None),
+        &run_dir.join("blobs").join(binary_blob()),
+        [0u8, 159, 146, 150],
     );
+    write(&run_dir.join("blobs").join(text_blob()), b"small text blob");
+    // A file in the blob directory that the run file does not name.
+    write(&run_dir.join("blobs").join("stray"), b"not a part");
+    // The run file names each file beside it, as the lane does.
+    crate::runstate::run_file::tests::step_with(&run_dir, 5, vec![call, done], |s| {
+        use leviath_runtime::state::{FileRef, StageFile};
+        s.files.final_output = Some(FileRef::whole("final_output", b"done"));
+        let out = format!("out {ENV_SECRET}\n");
+        s.files.set_stage_file(
+            0,
+            StageFile::Output,
+            FileRef::log("stages/0/output.log", out.len() as u64),
+        );
+        s.files
+            .set_stage_file(0, StageFile::Logs, FileRef::log("stages/0/logs.log", 9));
+        s.files.set_stage_file(
+            0,
+            StageFile::TaintAudit,
+            FileRef::whole("stages/0/taint_audit.json", b"[]"),
+        );
+        // A name that leaves the run's directory is never followed.
+        s.files.set_stage_file(
+            1,
+            StageFile::Logs,
+            FileRef::log("../../config/config.toml", 1),
+        );
+        for (bytes, size) in [
+            (&[0u8, 159, 146, 150][..], 4),
+            (&b"small text blob"[..], 15),
+        ] {
+            s.blobs.push(leviath_runtime::state::BlobFile {
+                digest: leviath_runtime::spec::names::Digest::of(bytes),
+                mime_type: "application/octet-stream".into(),
+                size,
+                name: None,
+                region: None,
+                tool: None,
+            });
+        }
+    });
+    // The child's run file is corrupt; the listed child's is clean.
+    write(&runs.join(CHILD_RUN).join("run.lvr"), b"not a run file");
     // A blueprint file too large to be one, left out by size.
     write(&demo.join("NOTES.md"), vec![b'x'; 300 * 1024]);
     blueprint
+}
+
+/// The digest of the planted binary part.
+fn binary_blob() -> String {
+    leviath_runtime::spec::names::Digest::of(&[0u8, 159, 146, 150]).to_string()
+}
+
+/// The digest of the planted text part.
+fn text_blob() -> String {
+    leviath_runtime::spec::names::Digest::of(b"small text blob").to_string()
 }
 
 fn selection(about: About) -> Selection {
@@ -434,6 +444,10 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
 async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
     with_env(|root| async move {
         plant(&root);
+        // The runs' webhook secret is in the store beside them, which the
+        // bundle never copies, and its value is scrubbed where it leaked.
+        let kept = leviath_runtime::secret_store::SecretStore::of_runs(&root.join("runs"));
+        assert!(kept.secrets().iter().any(|s| s.expose() == CALLBACK_SECRET));
         let env = env_for(&root);
         let out = root.join("bundle.zip");
         let outcome = build(&env, &selection(About::Run), Some(&out))
@@ -454,6 +468,7 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
                 );
             }
         }
+        assert!(!member_names.iter().any(|n| n.contains("secrets/")));
         for forbidden in [
             "control.token",
             "mcp-auth.json",
@@ -476,7 +491,7 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             "config/policy.toml",
             "config/rules/r.toml",
             "config/ui-state.json",
-            "agents/demo/agent.leviath",
+            "agents/demo/agent.toml",
             "agents/demo/tools/t.rhai",
             "tools/planted.rhai",
             "logs/daemon.log",
@@ -484,18 +499,19 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             "logs/dashboard.log",
             "logs/serve-3000.log",
             "logs/serve-3000.log.1",
-            &format!("runs/{ROOT_RUN}/meta.json"),
-            &format!("runs/{ROOT_RUN}/context.json"),
+            &format!("runs/{ROOT_RUN}/summary.json"),
             &format!("runs/{ROOT_RUN}/final_output"),
             &format!("runs/{ROOT_RUN}/stages/0/output.log"),
             &format!("runs/{ROOT_RUN}/stages/0/taint_audit.json"),
+            &format!("runs/{ROOT_RUN}/run.json"),
             &format!("runs/{ROOT_RUN}/run.lvr"),
-            &format!("runs/{ROOT_RUN}/blobs/aa11"),
-            &format!("runs/{ROOT_RUN}/blueprint/agent.leviath"),
+            &format!("runs/{ROOT_RUN}/request.json"),
+            &format!("runs/{ROOT_RUN}/blobs/{}", binary_blob()),
+            &format!("runs/{ROOT_RUN}/blueprint/agent.toml"),
             &format!("runs/{ROOT_RUN}/blueprint/tools/helper.rhai"),
-            &format!("runs/{CHILD_RUN}/meta.json"),
-            &format!("runs/{LISTED_CHILD}/meta.json"),
-            &format!("runs/{LISTED_CHILD}/blueprint/agent.leviath"),
+            &format!("runs/{LISTED_CHILD}/summary.json"),
+            &format!("runs/{LISTED_CHILD}/run.json"),
+            &format!("runs/{LISTED_CHILD}/blueprint/agent.toml"),
         ] {
             assert!(
                 member_names.iter().any(|n| n.ends_with(expected)),
@@ -522,18 +538,33 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             config.contains("default_provider = \"anthropic\""),
             "{config}"
         );
-        // The run's metadata lost its signing key and kept its task.
+        // The run's metadata kept its task.
         let meta: serde_json::Value =
-            serde_json::from_slice(member(&members, &format!("runs/{ROOT_RUN}/meta.json")))
+            serde_json::from_slice(member(&members, &format!("runs/{ROOT_RUN}/summary.json")))
                 .unwrap();
-        assert_eq!(meta["callback_secret"], serde_json::Value::Null);
         assert_eq!(meta["task"], "fix the planted bug");
-        // The journal reads back with the same tools, minus the frame this
-        // build could not parse.
-        let (_, records) = read_archive(&mut member(&members, "run.lvr")).unwrap();
-        assert_eq!(records.len(), 3);
+        // The run file reads back as its spec, its state and its steps, the
+        // tool call among them.
+        let run: serde_json::Value =
+            serde_json::from_slice(member(&members, &format!("runs/{ROOT_RUN}/run.json"))).unwrap();
+        assert_eq!(run["spec"]["run_id"], ROOT_RUN);
+        assert!(run["state"].is_object());
+        assert!(
+            run["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| step.to_string().contains("ToolStarted")),
+            "{run}"
+        );
         // The binary blob came through byte for byte.
-        assert_eq!(member(&members, "blobs/aa11"), &[0u8, 159, 146, 150]);
+        assert_eq!(
+            member(&members, &format!("blobs/{}", binary_blob())),
+            &[0u8, 159, 146, 150]
+        );
+        // Only what the run file names goes in, and nothing outside the run.
+        assert!(!member_names.iter().any(|n| n.ends_with("blobs/stray")));
+        assert!(!member_names.iter().any(|n| n.contains("../")));
         // The manifest accounts for what was left out.
         let manifest: serde_json::Value =
             serde_json::from_slice(member(&members, "manifest.json")).unwrap();
@@ -567,7 +598,9 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             "{reasons:?}"
         );
         assert!(
-            reasons.iter().any(|r| r.contains("missing-blueprint")),
+            reasons
+                .iter()
+                .any(|r| r.contains(CHILD_RUN) && r.contains("summary.json")),
             "{reasons:?}"
         );
         assert!(
@@ -580,18 +613,7 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
                 .any(|r| r.contains("NOTES.md") && r.contains("over the")),
             "{reasons:?}"
         );
-        assert!(
-            member_names
-                .iter()
-                .any(|n| n.ends_with(&format!("runs/{LISTED_CHILD}/run.lvr")))
-        );
-        let notes = manifest["notes"].as_array().unwrap();
-        assert!(
-            notes
-                .iter()
-                .any(|n| n.as_str().unwrap().contains("frame(s)")),
-            "{notes:?}"
-        );
+
         // The README carries the warning and the sections.
         let readme = String::from_utf8_lossy(member(&members, "README.md")).into_owned();
         assert!(readme.contains("Before you share this"), "{readme}");
@@ -637,34 +659,52 @@ async fn blobs_can_be_left_out() {
 async fn the_other_categories_carry_their_own_extras() {
     with_env(|root| async move {
         let blueprint = plant(&root);
-        // A blueprint that parses and then fails to validate.
+        // A blueprint that parses and then fails to validate: its input
+        // binds a region the layout does not declare.
         write(
-            &root.join("bad").join("agent.leviath"),
-            format!(
-                "{}\n[[dependencies]]\nname = \"dup\"\nkind = \"env\"\nvar = \"X\"\n[[dependencies]]\nname = \"dup\"\nkind = \"env\"\nvar = \"Y\"\n",
-                manifest_text()
+            &root.join("bad").join("agent.toml"),
+            crate::test_support::tiny_blueprint("bad").replace(
+                "binds = [{ region = \"task\" }]",
+                "binds = [{ region = \"nowhere\" }]",
             ),
         );
-        write(&root.join("broken").join("agent.leviath"), "not = = toml");
+        write(&root.join("broken").join("agent.toml"), "not = = toml");
         let env = env_for(&root);
 
         let setup = collect::collect(&env, &selection(About::Setup), "now").await;
-        let imports = setup.members.iter().find(|m| m.path == "setup/imports.json").unwrap();
+        let imports = setup
+            .members
+            .iter()
+            .find(|m| m.path == "setup/imports.json")
+            .unwrap();
         assert!(String::from_utf8_lossy(&imports.bytes).contains("Claude Code"));
 
         let mut sel = selection(About::Agent);
-        sel.agent = Some(blueprint.join("agent.leviath"));
+        sel.agent = Some(blueprint.join("agent.toml"));
         let agent = collect::collect(&env, &sel, "now").await;
-        let check = agent.members.iter().find(|m| m.path == "blueprint-check.json").unwrap();
+        let check = agent
+            .members
+            .iter()
+            .find(|m| m.path == "blueprint-check.json")
+            .unwrap();
         let check: serde_json::Value = serde_json::from_slice(&check.bytes).unwrap();
         assert_eq!(check["parses"], true);
         assert_eq!(check["validates"], true, "{check}");
         assert!(check["name"].is_string(), "{check}");
-        assert!(agent.members.iter().any(|m| m.path == "blueprint/agent.leviath"));
+        assert!(
+            agent
+                .members
+                .iter()
+                .any(|m| m.path == "blueprint/agent.toml")
+        );
 
         sel.agent = Some(root.join("bad"));
         let bad = collect::collect(&env, &sel, "now").await;
-        let check = bad.members.iter().find(|m| m.path == "blueprint-check.json").unwrap();
+        let check = bad
+            .members
+            .iter()
+            .find(|m| m.path == "blueprint-check.json")
+            .unwrap();
         let check: serde_json::Value = serde_json::from_slice(&check.bytes).unwrap();
         assert_eq!(check["parses"], true, "{check}");
         assert_eq!(check["validates"], false, "{check}");
@@ -672,13 +712,21 @@ async fn the_other_categories_carry_their_own_extras() {
 
         sel.agent = Some(root.join("broken"));
         let broken = collect::collect(&env, &sel, "now").await;
-        let check = broken.members.iter().find(|m| m.path == "blueprint-check.json").unwrap();
+        let check = broken
+            .members
+            .iter()
+            .find(|m| m.path == "blueprint-check.json")
+            .unwrap();
         let check: serde_json::Value = serde_json::from_slice(&check.bytes).unwrap();
         assert_eq!(check["parses"], false);
 
         sel.agent = Some(root.join("nowhere"));
         let nowhere = collect::collect(&env, &sel, "now").await;
-        let check = nowhere.members.iter().find(|m| m.path == "blueprint-check.json").unwrap();
+        let check = nowhere
+            .members
+            .iter()
+            .find(|m| m.path == "blueprint-check.json")
+            .unwrap();
         assert!(String::from_utf8_lossy(&check.bytes).contains("cannot read"));
 
         // A category that needs a choice, with none: nothing extra, nothing lost.
@@ -739,23 +787,85 @@ async fn a_config_that_will_not_load_is_still_copied_and_scrubbed() {
 }
 
 #[tokio::test]
-async fn an_unparseable_meta_is_copied_as_text() {
+async fn an_unreadable_run_file_is_left_out_and_says_why() {
     with_env(|root| async move {
         write(
-            &root.join("runs").join("r1").join("meta.json"),
-            format!("{{not json {CONFIG_KEY}"),
+            &root.join("runs").join("r1").join("run.lvr"),
+            format!("{{not a run file {CONFIG_KEY}"),
         );
         let env = env_for(&root);
         let mut sel = selection(About::Run);
         sel.run_id = Some("r1".to_string());
         let bundle = collect::collect(&env, &sel, "now").await;
-        let meta = bundle
-            .members
-            .iter()
-            .find(|m| m.path == "runs/r1/meta.json")
-            .unwrap();
-        assert!(!contains(&meta.bytes, CONFIG_KEY));
+        assert!(
+            !bundle
+                .members
+                .iter()
+                .any(|m| contains(&m.bytes, CONFIG_KEY))
+        );
+        assert!(
+            bundle
+                .skipped
+                .iter()
+                .any(|s| s.path == "runs/r1/summary.json")
+        );
         assert!(bundle.skipped.iter().any(|s| s.path == "runs/r1/run.lvr"));
+    })
+    .await
+}
+
+/// A run of an installed blueprint that names no blueprint file looks for
+/// it among the installed ones; a run whose blueprint directory is gone says
+/// so; a run directory with no run file says that; and a run's webhook
+/// secret never reaches the bundle.
+#[tokio::test]
+async fn each_run_says_what_of_it_could_not_be_copied() {
+    with_env(|root| async move {
+        let runs = root.join("runs");
+        let mut installed = meta("r-installed", Path::new(""));
+        installed.agent_name = "not-installed".to_string();
+        installed.callback_url = Some("https://example.com/hook".to_string());
+        crate::runstate::create_signed_run_in(
+            &runs.join("r-installed"),
+            &installed,
+            CALLBACK_SECRET,
+        )
+        .unwrap();
+        let gone = root.join("gone-blueprint");
+        write(&gone.join("agent.toml"), manifest_text());
+        write_meta(&runs, &meta("r-gone", &gone.join("agent.toml")));
+        std::fs::remove_dir_all(&gone).unwrap();
+        std::fs::create_dir_all(runs.join("r-empty")).unwrap();
+
+        let env = env_for(&root);
+        let mut skipped = Vec::new();
+        let mut members = Vec::new();
+        for id in ["r-installed", "r-gone", "r-empty"] {
+            let mut sel = selection(About::Run);
+            sel.run_id = Some(id.to_string());
+            let bundle = collect::collect(&env, &sel, "now").await;
+            skipped.extend(bundle.skipped);
+            members.extend(bundle.members);
+        }
+        let reason = |path: &str| {
+            skipped
+                .iter()
+                .find(|s| s.path == path)
+                .map(|s| s.reason.clone())
+                .unwrap_or_else(|| panic!("{path} is not in {skipped:?}"))
+        };
+        let installed_dir = env.agents_dir.join("not-installed");
+        assert!(
+            reason("runs/r-installed/blueprint/").contains(&installed_dir.display().to_string())
+        );
+        assert!(reason("runs/r-gone/blueprint/").contains(&gone.display().to_string()));
+        assert_eq!(reason("runs/r-empty/run.lvr"), "not present");
+        let run = members
+            .iter()
+            .find(|m| m.path == "runs/r-installed/run.json")
+            .unwrap();
+        assert!(contains(&run.bytes, "https://example.com/hook"));
+        assert!(!contains(&run.bytes, CALLBACK_SECRET));
     })
     .await
 }
@@ -810,31 +920,52 @@ fn tail_text_keeps_the_end_and_says_so() {
 
 #[test]
 fn blobs_respect_the_caps() {
+    use collect::BlobParts;
     let dir = tempfile::tempdir().unwrap();
     let blobs = dir.path().join("blobs");
-    write(&blobs.join("a"), "12");
-    write(&blobs.join("b"), "123456");
-    write(&blobs.join("c"), "12");
+    let named: Vec<leviath_runtime::state::BlobFile> = ["12", "123456", "12x"]
+        .iter()
+        .map(|bytes| {
+            let digest = leviath_runtime::spec::names::Digest::of(bytes.as_bytes());
+            write(&blobs.join(digest.as_str()), bytes);
+            leviath_runtime::state::BlobFile {
+                digest,
+                mime_type: "text/plain".into(),
+                size: bytes.len() as u64,
+                name: None,
+                region: None,
+                tool: None,
+            }
+        })
+        .collect();
     let mut bundle = Bundle::default();
     let mut budget = 3;
-    collect::copy_blobs(dir.path(), "runs/r", true, 4, &mut budget, &mut bundle);
+    let parts = BlobParts {
+        include: true,
+        per_part: 4,
+    };
+    collect::copy_blobs(
+        dir.path(),
+        "runs/r",
+        &named,
+        parts,
+        &mut budget,
+        &mut bundle,
+    );
     let copied: Vec<&str> = bundle.members.iter().map(|m| m.path.as_str()).collect();
-    assert_eq!(copied, vec!["runs/r/blobs/a"]);
+    assert_eq!(copied, vec![format!("runs/r/{}", named[0].path())]);
     assert_eq!(
         bundle.skipped.len(),
         2,
         "one over the part cap, one over the budget"
     );
-    // No blobs directory: nothing to say.
+    // A run that names no parts: nothing to say, even when left out.
     let mut none = Bundle::default();
-    collect::copy_blobs(
-        &dir.path().join("nowhere"),
-        "runs/r",
-        true,
-        4,
-        &mut 10,
-        &mut none,
-    );
+    let left_out = BlobParts {
+        include: false,
+        per_part: 4,
+    };
+    collect::copy_blobs(dir.path(), "runs/r", &[], left_out, &mut 10, &mut none);
     assert!(none.members.is_empty() && none.skipped.is_empty());
 }
 
@@ -889,10 +1020,7 @@ fn run_ids_resolve_exactly_or_by_a_unique_prefix() {
 #[test]
 fn installed_blueprints_need_a_manifest() {
     let dir = tempfile::tempdir().unwrap();
-    write(
-        &dir.path().join("agents").join("a").join("agent.leviath"),
-        "x",
-    );
+    write(&dir.path().join("agents").join("a").join("agent.toml"), "x");
     std::fs::create_dir_all(dir.path().join("agents").join("empty")).unwrap();
     let found = installed_blueprints(&dir.path().join("agents"));
     assert_eq!(found.len(), 1);
@@ -1193,7 +1321,6 @@ async fn the_summary_screen_shows_the_warning_and_the_sections() {
         assert!(text.contains("Your bundle"), "{text}");
         assert!(text.contains("config/"), "{text}");
         assert!(text.contains("Left out"), "{text}");
-        assert!(text.contains("note:"), "{text}");
         assert!(text.contains("more, listed in manifest.json"), "{text}");
     })
     .await
@@ -1252,7 +1379,7 @@ async fn a_short_skipped_list_is_shown_whole() {
                 },
             ],
             redactions: 0,
-            notes: vec![],
+            notes: vec!["a planted note".to_string()],
         });
         let mut terminal = test_terminal();
         terminal
@@ -1260,6 +1387,7 @@ async fn a_short_skipped_list_is_shown_whole() {
             .unwrap();
         let text = terminal.backend().text();
         assert!(text.contains("logs/dashboard.log"), "{text}");
+        assert!(text.contains("note: a planted note"), "{text}");
         assert!(!text.contains("more, listed"), "{text}");
         // And nothing left out at all: no list.
         ui.outcome.as_mut().unwrap().skipped.clear();

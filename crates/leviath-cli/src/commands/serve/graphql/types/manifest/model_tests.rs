@@ -111,14 +111,47 @@ fn from_table_drops_a_cap_that_does_not_parse() {
 /// back through the schema rather than the bare conversion.
 #[test]
 fn a_model_config_carries_its_routes_and_timeout() {
-    let mut core = leviath_core::blueprint::ModelConfig::new(
-        "anthropic".to_string(),
-        "claude-sonnet-5".to_string(),
-    );
-    core.request_timeout_secs = Some(300);
+    use leviath_runtime::spec::graph::{ModelChoice, ModelParams, ParamScalar};
+    use leviath_runtime::spec::names::ModelRef;
+
+    let core = ModelChoice {
+        models: vec![
+            ModelRef::parse("anthropic/claude-sonnet-5").unwrap(),
+            ModelRef::parse("gpt-5").unwrap(),
+        ],
+        request_timeout_secs: Some(300),
+        params: ModelParams {
+            temperature: Some(0.2),
+            max_output_tokens: None,
+            extra: [
+                ("parallel".to_string(), ParamScalar::Bool(true)),
+                ("seed".to_string(), ParamScalar::Int(7)),
+                ("top_p".to_string(), ParamScalar::Float(0.9)),
+                ("effort".to_string(), ParamScalar::Text("high".to_string())),
+                (
+                    "stop".to_string(),
+                    ParamScalar::TextList(vec!["END".to_string()]),
+                ),
+            ]
+            .into(),
+        },
+        ..ModelChoice::default()
+    };
     let config = StageModelConfig::from(&core);
     assert_eq!(config.models[0].provider, "anthropic");
     assert_eq!(config.models[0].model, "claude-sonnet-5");
+    // A model named alone is served with no provider: the machine's provider
+    // order picks one at spawn.
+    assert_eq!(config.models[1].provider, "");
+    assert_eq!(config.models[1].model, "gpt-5");
     assert!(config.allow_user_default);
     assert_eq!(config.request_timeout_secs, Some(300));
+    // The temperature the blueprint wrote, not the nearest `f32` widened.
+    assert_eq!(config.parameters.temperature, Some(0.2));
+    assert_eq!(
+        config.parameters.provider_params.0,
+        serde_json::json!({
+            "parallel": true, "seed": 7, "top_p": 0.9, "effort": "high", "stop": ["END"]
+        })
+    );
 }

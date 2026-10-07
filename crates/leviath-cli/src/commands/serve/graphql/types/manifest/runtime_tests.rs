@@ -1,7 +1,5 @@
 //! Tests for the run-behaviour settings, and for the mirrors of those types.
 
-use std::sync::Arc;
-
 use super::{
     BlueprintSecurity, CompactionConfig, FileTrackingConfig, NudgeConfig, NudgePolicy,
     RepetitionDetection, SafeCommands, SandboxConfig, SandboxKind, SandboxUnavailable, StageHooks,
@@ -10,27 +8,24 @@ use super::{
 use crate::commands::serve::graphql::filter::testkit::{exercise, exercise_enum};
 
 /// A `FileTrackingConfig` object, built the way `Blueprint.fileTracking`
-/// builds one: from a parsed manifest that declares the block.
+/// builds one: from a parsed blueprint that declares the block.
 fn file_tracking_config() -> FileTrackingConfig {
-    let text = "[agent]\n\
-                name = \"t\"\n\
-                version = \"1.0.0\"\n\
-                description = \"d\"\n\
-                \n\
-                [context.regions.files]\n\
-                kind = \"hashmap\"\n\
-                max_tokens = 800\n\
-                \n\
-                [context.file_tracking]\n\
-                region = \"files\"\n\
-                track_reads = true\n\
-                track_writes = false\n";
-    let parsed = leviath_core::manifest::parse_manifest(text).expect("the manifest parses");
-    let blueprint = Arc::new(parsed);
+    let blueprint = super::super::parsed(
+        r#"[blueprint]
+name = "t"
+version = "1.0.0"
+
+[graph]
+stages = [{ name = "only" }]
+layout = { total_budget_tokens = 800, regions = [{ name = "files", kind = { kind = "keyed" }, budget = 800 }] }
+file_tracking = { region = "files", track_writes = false }
+"#,
+    );
     let tracking = blueprint
+        .graph
         .file_tracking
         .clone()
-        .expect("the manifest declares file tracking");
+        .expect("the blueprint declares file tracking");
     FileTrackingConfig::of(&blueprint, &tracking)
 }
 
@@ -114,10 +109,10 @@ async fn every_mirrored_function_runs() {
     exercise_enum(&[WorkerFailurePolicy::Continue, WorkerFailurePolicy::FailAll]).await;
 }
 
-/// The nudge policy's three states read back from what a manifest can write:
+/// The nudge policy's three states read back from what a blueprint can write:
 /// nothing, `true` or `false`.
 #[test]
-fn nudge_policy_reads_the_three_states_a_manifest_can_write() {
+fn nudge_policy_reads_the_three_states_a_blueprint_can_write() {
     assert_eq!(NudgePolicy::from(None), NudgePolicy::Inherit);
     assert_eq!(NudgePolicy::from(Some(true)), NudgePolicy::Nudge);
     assert_eq!(NudgePolicy::from(Some(false)), NudgePolicy::NeverNudge);

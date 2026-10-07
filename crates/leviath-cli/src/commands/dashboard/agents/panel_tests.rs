@@ -182,9 +182,9 @@ fn the_tools_chooser_offers_mcp_servers_and_their_tools_as_they_answer() {
         "[[mcp_servers]]\nname = \"github\"\ncommand = \"true\"\n",
     )
     .unwrap();
-    let manifest = root.join("agents").join("own").join("agent.leviath");
+    let manifest = root.join("agents").join("own").join("agent.toml");
     let mut manifest_text = std::fs::read_to_string(&manifest).unwrap();
-    manifest_text.push_str("\n[[mcp_servers]]\nname = \"mine\"\ncommand = \"true\"\n");
+    manifest_text.push_str("\n[[graph.mcp_servers]]\nname = \"mine\"\ncommand = \"true\"\n");
     std::fs::write(&manifest, manifest_text).unwrap();
     open_stage(&mut dash, "own", "work", StageTab::Model);
     // Without a runtime both are pending, and both are offered already.
@@ -510,8 +510,8 @@ fn the_context_tab_owns_a_layout_adds_regions_and_routes_tools() {
         .set_tools("work", &["bash".to_string(), "read_file".to_string()])
         .unwrap();
     dash.agents().editor.as_mut().unwrap().refresh();
-    // The default region cycles with ←/→ through the stage's regions and
-    // the ones every stage has.
+    // The default region cycles with ←/→ through the stage's regions (the
+    // copied `task` first) and the ones every stage has.
     goto(&mut dash, FieldId::RoutingDefault);
     dash.handle_key(key(KeyCode::Char('l')));
     let routing = dash
@@ -521,7 +521,7 @@ fn the_context_tab_owns_a_layout_adds_regions_and_routes_tools() {
         .unwrap()
         .doc
         .tool_routing("work");
-    assert_eq!(routing.default_region.as_deref(), Some("notes"));
+    assert_eq!(routing.default_region.as_deref(), Some("task"));
     dash.handle_key(key(KeyCode::Char('h')));
     let routing = dash
         .agents()
@@ -718,9 +718,9 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     )
     .unwrap();
     // And a row of the blueprint's own, which its runs see on top.
-    let manifest = root.join("agents").join("own").join("agent.leviath");
+    let manifest = root.join("agents").join("own").join("agent.toml");
     let mut manifest_text = std::fs::read_to_string(&manifest).unwrap();
-    manifest_text.push_str("\n[mime_types.\"application/x-mine\"]\nfamily = \"model\"\n");
+    manifest_text.push_str("\n[graph.mime_types.\"application/x-mine\"]\nfamily = \"model\"\n");
     std::fs::write(&manifest, manifest_text).unwrap();
     open_stage(&mut dash, "own", "work", StageTab::Behaviour);
     dash.handle_key(key(KeyCode::Char('2')));
@@ -1002,7 +1002,12 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     assert!(region(&mut dash).accepts.is_empty());
     dash.handle_key(key(KeyCode::Esc));
     let screen = text(&mut dash);
-    assert!(screen.contains("shots  any type"), "{screen}");
+    assert!(
+        screen
+            .lines()
+            .any(|l| l.contains("from shots ") && l.contains(" any type")),
+        "{screen}"
+    );
     // The graph beside the inspector wears the badges as you edit.
     goto(&mut dash, FieldId::StageAccepts);
     dash.handle_key(key(KeyCode::Enter));
@@ -1045,6 +1050,9 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
             })
             .unwrap()
     };
+    // The regions the layout copied from the starter take text only here.
+    set_accepts(&mut dash, "task", "text/plain");
+    set_accepts(&mut dash, "conversation", "text/plain");
     set_accepts(&mut dash, "shots", "image/png");
     set_accepts(&mut dash, "notes", "text/plain, audio/*");
     assert_eq!(
@@ -1052,7 +1060,12 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
         "(image/png, audio/*, from its regions)"
     );
     let screen = text(&mut dash);
-    assert!(screen.contains("from shots  image/png"), "{screen}");
+    assert!(
+        screen
+            .lines()
+            .any(|l| l.contains("from shots ") && l.contains(" image/png")),
+        "{screen}"
+    );
     set_accepts(&mut dash, "notes", "");
     assert_eq!(input_row(&mut dash), "(any type, from its regions)");
     let _ = std::fs::remove_dir_all(root);
@@ -1121,7 +1134,7 @@ fn the_models_tab_limits_what_each_tool_may_be_handed() {
         )]
     );
     let saved = dash.agents().editor.as_ref().unwrap().doc.to_toml();
-    assert!(saved.contains("[stages.work.tool_accepts]"), "{saved}");
+    assert!(saved.contains("tool_accepts = {"), "{saved}");
     // A second tool's limit sits beside the first, and reopening either
     // chooser finds its own.
     goto(&mut dash, FieldId::ToolLimitRow("read_file".into()));
@@ -1219,19 +1232,23 @@ fn the_region_panel_edits_every_field_and_deletes() {
             .unwrap()
             .enabled
     );
+    // A window starts at ten items.
     dash.handle_key(key(KeyCode::Right));
-    assert_eq!(region(&mut dash).max_items, Some(1));
+    assert_eq!(region(&mut dash).max_items, Some(11));
     dash.handle_key(key(KeyCode::Enter));
+    dash.handle_key(key(KeyCode::Backspace));
     type_str(&mut dash, "2");
     dash.handle_key(key(KeyCode::Enter));
     assert_eq!(region(&mut dash).max_items, Some(12));
     goto(&mut dash, FieldId::RegionStrategy);
     dash.handle_key(key(KeyCode::Enter));
-    type_str(&mut dash, "oldest");
+    type_str(&mut dash, "bulk");
     dash.handle_key(key(KeyCode::Enter));
-    assert_eq!(region(&mut dash).strategy, "oldest");
+    assert_eq!(region(&mut dash).strategy, "bulk");
     goto(&mut dash, FieldId::RegionOverflow);
     dash.handle_key(key(KeyCode::Enter));
+    dash.handle_key(key(KeyCode::Backspace));
+    dash.handle_key(key(KeyCode::Backspace));
     type_str(&mut dash, "3");
     dash.handle_key(key(KeyCode::Enter));
     assert_eq!(region(&mut dash).overflow, Some(3));
@@ -2346,16 +2363,16 @@ fn a_bundled_agent_opened_for_editing_brings_its_scripts_and_takes_them_back() {
     let dir = dash.agents().editor.as_ref().unwrap().dir.clone();
     assert!(dash.agents().editor.as_ref().unwrap().scratch_dir);
     assert!(dir.exists(), "{}", dir.display());
-    assert!(!dir.join("agent.leviath").exists());
+    assert!(!dir.join("agent.toml").exists());
     // Closing without saving leaves nothing behind.
     dash.close_editor();
     assert!(!dir.exists());
     // Saved, it stays: a complete install.
     open_editor_on(&mut dash, "data-analyst");
     dash.handle_key(ctrl('s'));
-    assert!(dir.join("agent.leviath").exists());
+    assert!(dir.join("agent.toml").exists());
     dash.close_editor();
-    assert!(dir.join("agent.leviath").exists());
+    assert!(dir.join("agent.toml").exists());
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -2782,10 +2799,7 @@ fn the_tools_chooser_offers_groups_first_and_labels_sources() {
             .map(|c| c.detail.clone())
             .unwrap_or_else(|| panic!("{name} offered: {names:?}"))
     };
-    assert_eq!(
-        detail("@builtin"),
-        leviath_core::blueprint::ToolGroup::Builtin.describe()
-    );
+    assert_eq!(detail("@builtin"), super::choices::TOOL_GROUPS[1].1);
     assert_eq!(detail("read_file"), "built in");
     assert_eq!(detail("spawn_agent"), "sub-agent tool");
     assert_eq!(detail("summarize"), "this agent's script");

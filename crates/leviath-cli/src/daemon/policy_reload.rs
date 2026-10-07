@@ -187,6 +187,12 @@ impl PolicyReload {
         change
     }
 
+    /// The taint policy as of the last [`refresh`](Self::refresh), for a
+    /// gate built off the world.
+    pub fn current(&self) -> leviath_core::PolicyConfig {
+        self.lock().policy.clone()
+    }
+
     /// [`refresh`](Self::refresh), then [`install`](Self::install) whatever it
     /// built. What the daemon's spawn and reload hooks call: one statement, and
     /// two stats when nothing moved.

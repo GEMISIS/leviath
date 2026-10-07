@@ -10,7 +10,9 @@ use axum::response::Json;
 
 use super::blueprint_types::{BlueprintDetail, RoutePair, StageRoutingInfo};
 use super::types::*;
-use leviath_core::manifest::parse_manifest;
+use leviath_runtime::spec::graph::{
+    Budget, RegionDef, RegionKind, RunGraph, StageMode, WorkerFailure, WorkerSource,
+};
 
 /// Resolve the installed agents directory.
 ///
@@ -124,7 +126,7 @@ pub(super) fn discover_in(roots: Vec<PathBuf>) -> Vec<BlueprintInfo> {
             continue;
         }
         // Check dir itself
-        let manifest = dir.join(leviath_core::files::MANIFEST_FILENAME);
+        let manifest = dir.join(leviath_blueprint::FILE_NAME);
         if manifest.exists() {
             results.extend(read_blueprint_info(&manifest, &dir));
         }
@@ -141,7 +143,7 @@ pub(super) fn discover_in(roots: Vec<PathBuf>) -> Vec<BlueprintInfo> {
             .collect();
         subdirs.sort();
         for p in subdirs {
-            let m = p.join(leviath_core::files::MANIFEST_FILENAME);
+            let m = p.join(leviath_blueprint::FILE_NAME);
             if m.exists() {
                 results.extend(read_blueprint_info(&m, &p));
             }
@@ -151,20 +153,46 @@ pub(super) fn discover_in(roots: Vec<PathBuf>) -> Vec<BlueprintInfo> {
     canonicalize(results)
 }
 
+/// The catalog row for the `agent.toml` at `manifest_path`, in `dir`. `None`
+/// for a file that cannot be read or does not parse.
+///
+/// A file whose graph does not hold together is still listed: it is a
+/// blueprint someone is part way through writing, and the editor and
+/// `POST /api/blueprints/validate` are where its problems are shown. A spawn
+/// of it is refused with every one of them.
 pub(super) fn read_blueprint_info(manifest_path: &Path, dir: &Path) -> Option<BlueprintInfo> {
     let content = std::fs::read_to_string(manifest_path).ok()?;
-    let bp = parse_manifest(&content).ok()?;
-    Some(BlueprintInfo {
-        name: bp.name.clone(),
-        version: bp.version.clone(),
-        description: bp.description.clone(),
-        path: dir.to_string_lossy().to_string(),
-        stages: bp.stages.iter().map(|s| s.name.clone()).collect(),
-        manifest: content,
-        // Kept rather than dropped: the whole manifest is already parsed here,
+    let file = leviath_blueprint::BlueprintFile::parse(&content).ok()?;
+    Some(info_of(
+        std::sync::Arc::new(super::core::blueprints::ParsedBlueprint::of_file(&file)),
+        dir.to_string_lossy().to_string(),
+        content,
+    ))
+}
+
+/// A catalog row for a parsed blueprint found at `path`, carrying the text it
+/// was parsed from.
+fn info_of(
+    parsed: std::sync::Arc<super::core::blueprints::ParsedBlueprint>,
+    path: String,
+    manifest: String,
+) -> BlueprintInfo {
+    BlueprintInfo {
+        name: parsed.name.clone(),
+        version: parsed.version.clone(),
+        description: parsed.description().to_string(),
+        path,
+        stages: parsed
+            .graph
+            .stages
+            .iter()
+            .map(|s| s.name.to_string())
+            .collect(),
+        manifest,
+        // Kept rather than dropped: the whole file is already parsed here,
         // and the GraphQL surface answers a blueprint object from it.
-        parsed: std::sync::Arc::new(bp),
-    })
+        parsed,
+    }
 }
 
 /// Default page size. Comfortably more blueprints than anyone installs, so the
@@ -323,31 +351,18 @@ pub(super) async fn get_blueprint(
     // Taken out of the info rather than read again: discovery already read
     // this file to build everything else in the response.
     let manifest = std::mem::take(&mut info.manifest);
-    // Parsed from the text already in hand rather than re-read: the same
-    // reason the manifest itself is carried through from discovery.
-    let parsed = parse_manifest(&manifest).ok();
-    let regions = parsed
-        .as_ref()
-        .map(|bp| {
-            bp.context_layout
-                .regions
-                .iter()
-                .map(|r| RegionInfo {
-                    name: r.name.clone(),
-                    kind: leviath_runtime::persistence::region_kind_str(&r.kind).to_string(),
-                    description: r.description.clone(),
-                    describe_in_prompt: r.describe_in_prompt,
-                    max_tokens: r.max_tokens,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let fan_outs = parsed.as_ref().map(fan_out_infos).unwrap_or_default();
-    let stage_routing = parsed.as_ref().map(stage_routing_infos).unwrap_or_default();
-    let dependencies = parsed
-        .as_ref()
-        .map(super::blueprint_types::dependency_infos)
-        .unwrap_or_default();
+    // The parse discovery already made: a row exists only for a file that
+    // parsed.
+    let graph = &info.parsed.graph;
+    let regions = graph
+        .layout
+        .regions
+        .iter()
+        .map(|r| region_info(r, graph.layout.total_budget_tokens))
+        .collect();
+    let fan_outs = fan_out_infos(graph);
+    let stage_routing = stage_routing_infos(graph);
+    let dependencies = super::blueprint_types::dependency_infos(graph);
     Ok(Json(BlueprintDetail {
         info,
         regions,
@@ -362,23 +377,64 @@ pub(super) async fn get_blueprint(
 /// on entry (`context.reset`), so the detail route carries them structured. A
 /// stage that does neither is left out, the way `fan_out_infos` lists only
 /// fan-out stages.
-fn stage_routing_infos(bp: &leviath_core::blueprint::Blueprint) -> Vec<StageRoutingInfo> {
-    bp.stages
+fn stage_routing_infos(graph: &RunGraph) -> Vec<StageRoutingInfo> {
+    graph
+        .stages
         .iter()
-        .filter(|stage| !stage.output_routing.is_empty() || !stage.context_reset.is_empty())
+        .filter(|stage| !stage.output_routing.is_empty() || !stage.reset.is_empty())
         .map(|stage| StageRoutingInfo {
-            stage: stage.name.clone(),
+            stage: stage.name.to_string(),
             output_routing: stage
                 .output_routing
                 .iter()
                 .map(|(pattern, region)| RoutePair {
                     pattern: pattern.clone(),
-                    region: region.clone(),
+                    region: region.to_string(),
                 })
                 .collect(),
-            context_reset: stage.context_reset.clone(),
+            context_reset: stage.reset.iter().map(ToString::to_string).collect(),
         })
         .collect()
+}
+
+/// One region of the graph's layout, as the detail route reports it.
+fn region_info(region: &RegionDef, total_budget_tokens: u32) -> RegionInfo {
+    RegionInfo {
+        name: region.name.to_string(),
+        kind: region_kind_word(&region.kind).to_string(),
+        description: region.description.clone(),
+        describe_in_prompt: region.describe_in_prompt,
+        max_tokens: budget_tokens(&region.budget, total_budget_tokens),
+    }
+}
+
+/// A region kind as `agent.toml` spells it.
+fn region_kind_word(kind: &RegionKind) -> &'static str {
+    match kind {
+        RegionKind::Pinned => "pinned",
+        RegionKind::SlidingWindow { .. } => "sliding_window",
+        RegionKind::Temporary => "temporary",
+        RegionKind::Compacting { .. } => "compacting",
+        RegionKind::Clearable => "clearable",
+        RegionKind::CompactHistory { .. } => "compact_history",
+        RegionKind::Keyed { .. } => "keyed",
+        RegionKind::Checklist => "checklist",
+        RegionKind::Custom { .. } => "custom",
+    }
+}
+
+/// A region's token ceiling, resolved as far as the blueprint alone allows: a
+/// fixed budget as written, and a share as that share of the layout's total
+/// budget, held between its floor and its ceiling.
+fn budget_tokens(budget: &Budget, total_budget_tokens: u32) -> usize {
+    match budget {
+        Budget::Tokens(n) => *n as usize,
+        Budget::Percent { percent, min, max } => {
+            let share = (f64::from(total_budget_tokens) * percent).round() as usize;
+            let floored = min.map_or(share, |m| share.max(m as usize));
+            max.map_or(floored, |m| floored.min(m as usize))
+        }
+    }
 }
 
 /// The fan-out stages of a blueprint, with their limits resolved.
@@ -389,25 +445,34 @@ fn stage_routing_infos(bp: &leviath_core::blueprint::Blueprint) -> Vec<StageRout
 /// as capped at four workers when the daemon runs thirty; one that missed the
 /// zero rule would show "0 workers" for a stage that is unlimited. Resolving
 /// the numbers here means what the API says is what the run does.
-fn fan_out_infos(bp: &leviath_core::blueprint::Blueprint) -> Vec<FanOutInfo> {
-    bp.stages
+fn fan_out_infos(graph: &RunGraph) -> Vec<FanOutInfo> {
+    graph
+        .stages
         .iter()
         .filter_map(|stage| match &stage.mode {
-            leviath_core::blueprint::StageMode::FanOut { config } => Some(FanOutInfo {
-                stage: stage.name.clone(),
-                worker_agent: config.worker_agent.clone(),
-                worker_stage: config.worker_stage.clone(),
-                worker_query: config.worker_query.clone(),
-                merge_stage: config.merge_stage.clone(),
-                max_workers: config.worker_cap(),
-                max_items: config.max_items,
-                on_worker_failure: match config.on_worker_failure {
-                    leviath_core::blueprint::WorkerFailurePolicy::Continue => "continue",
-                    leviath_core::blueprint::WorkerFailurePolicy::FailAll => "fail_all",
-                }
-                .to_string(),
-                results_region: config.results_region.clone(),
-            }),
+            StageMode::FanOut(fan_out) => {
+                let (worker_agent, worker_stage, worker_query) = match &fan_out.worker {
+                    WorkerSource::Blueprint(blueprint) => (Some(blueprint.to_string()), None, None),
+                    WorkerSource::BlueprintFile(path) => (Some(path.to_string()), None, None),
+                    WorkerSource::Stage(stage) => (None, Some(stage.to_string()), None),
+                    WorkerSource::Query(query) => (None, None, Some(query.clone())),
+                };
+                Some(FanOutInfo {
+                    stage: stage.name.to_string(),
+                    worker_agent,
+                    worker_stage,
+                    worker_query,
+                    merge_stage: fan_out.merge_stage.as_ref().map(ToString::to_string),
+                    max_workers: fan_out.max_workers.map(|n| n as usize),
+                    max_items: fan_out.max_items.filter(|&n| n > 0).map(|n| n as usize),
+                    on_worker_failure: match fan_out.on_worker_failure {
+                        WorkerFailure::Continue => "continue",
+                        WorkerFailure::FailAll => "fail_all",
+                    }
+                    .to_string(),
+                    results_region: fan_out.results_region.as_ref().map(ToString::to_string),
+                })
+            }
             _ => None,
         })
         .collect()
@@ -433,20 +498,11 @@ fn written(
     replacing: bool,
 ) -> Result<Json<BlueprintInfo>, super::core::error::ServeError> {
     let written = super::core::blueprints::write_blueprint(name, manifest, replacing)?;
-    Ok(Json(BlueprintInfo {
-        name: written.parsed.name.clone(),
-        version: written.parsed.version.clone(),
-        description: written.parsed.description.clone(),
-        path: written.dir.to_string_lossy().to_string(),
-        stages: written
-            .parsed
-            .stages
-            .iter()
-            .map(|stage| stage.name.clone())
-            .collect(),
-        manifest: written.manifest.text,
-        parsed: written.parsed,
-    }))
+    Ok(Json(info_of(
+        written.parsed,
+        written.dir.to_string_lossy().to_string(),
+        written.manifest.text,
+    )))
 }
 
 pub(super) async fn delete_blueprint(
@@ -490,16 +546,34 @@ pub(super) async fn validate_blueprint(
 /// runs against the built-in tool set alone, which is the most that can be
 /// said about it.
 pub(super) fn validate_manifest_text(manifest: &str, dir: &Path) -> ValidateResponse {
-    let bp = match parse_manifest(manifest) {
-        Ok(bp) => bp,
-        Err(e) => return ValidateResponse::invalid(vec![e.to_string()]),
+    use super::core::blueprints::{CONVERTED_NOTE, as_agent_toml};
+    // An `agent.leviath` is judged as the `agent.toml` it would be saved as.
+    let (manifest, converted) = match as_agent_toml(manifest) {
+        Ok(read) => read,
+        Err(problems) => return ValidateResponse::invalid(problems),
     };
-    if let Err(e) = bp.validate() {
-        return ValidateResponse::invalid(vec![e.to_string()]);
+    let mut verdict = validate_agent_toml(&manifest, dir);
+    if let Some(dropped) = converted {
+        let warnings = verdict.warnings.get_or_insert_with(Vec::new);
+        warnings.insert(0, CONVERTED_NOTE.to_string());
+        warnings.splice(1..1, dropped);
+    }
+    verdict
+}
+
+/// [`validate_manifest_text`] for the text of an `agent.toml`.
+fn validate_agent_toml(manifest: &str, dir: &Path) -> ValidateResponse {
+    let file = match leviath_blueprint::BlueprintFile::parse(manifest) {
+        Ok(file) => file,
+        Err(e) => return ValidateResponse::invalid(vec![e]),
+    };
+    let at = leviath_runtime::spec::issues::SpecPath::root().field("graph");
+    if let Err(issues) = file.run_graph().validate(&at) {
+        return ValidateResponse::invalid(issues.iter().map(ToString::to_string).collect());
     }
 
     let env = crate::lint::LintEnv::offline(dir);
-    let findings = crate::lint::lint_manifest(manifest, &bp, &env);
+    let findings = crate::lint::lint_blueprint(&file, &env);
     let (errors, warnings): (Vec<_>, Vec<_>) = findings
         .iter()
         .partition(|f| f.severity == crate::lint::LintSeverity::Error);
@@ -527,14 +601,14 @@ mod listing_tests {
 
     fn manifest(name: &str, description: &str) -> String {
         format!(
-            r#"
-[agent]
+            r#"[blueprint]
 name = "{name}"
 version = "1.0.0"
 description = "{description}"
 
-[stages.zzstage-work]
-system_prompt = "do it"
+[graph]
+stages = [{{ name = "zzstage-work", system_prompt = "do it" }}]
+layout = {{ total_budget_tokens = 1000, regions = [] }}
 "#
         )
     }
@@ -548,7 +622,7 @@ system_prompt = "do it"
             let sub = dir.path().join(&name);
             std::fs::create_dir_all(&sub).unwrap();
             std::fs::write(
-                sub.join(leviath_core::files::MANIFEST_FILENAME),
+                sub.join(leviath_blueprint::FILE_NAME),
                 manifest(&name, description),
             )
             .unwrap();
@@ -765,13 +839,13 @@ mod canonicalize_tests {
             stages: vec![],
             manifest: String::new(),
             // These tests are about which row wins a name clash, so the
-            // manifest behind the row is the emptiest one that exists.
-            parsed: std::sync::Arc::new(leviath_core::Blueprint::new(
-                name.to_string(),
-                String::new(),
-                Vec::new(),
-                leviath_core::layout::ContextLayout::new(Vec::new(), 0),
-            )),
+            // blueprint behind the row is the smallest one that parses.
+            parsed: std::sync::Arc::new(
+                super::super::core::blueprints::parse_blueprint(
+                    &crate::test_support::tiny_blueprint(name),
+                )
+                .unwrap(),
+            ),
         }
     }
 
@@ -826,6 +900,46 @@ mod tests {
 
     use crate::config::Config;
 
+    /// Every region kind is reported in the word `agent.toml` writes for it.
+    #[test]
+    fn every_region_kind_reads_as_its_blueprint_word() {
+        use leviath_runtime::spec::graph::{CodeRef, Eviction};
+        let kinds = [
+            (RegionKind::Pinned, "pinned"),
+            (
+                RegionKind::SlidingWindow {
+                    max_items: 3,
+                    eviction: Eviction::PerItem,
+                },
+                "sliding_window",
+            ),
+            (RegionKind::Temporary, "temporary"),
+            (
+                RegionKind::Compacting {
+                    threshold_tokens: None,
+                },
+                "compacting",
+            ),
+            (RegionKind::Clearable, "clearable"),
+            (
+                RegionKind::CompactHistory { source: None },
+                "compact_history",
+            ),
+            (RegionKind::Keyed { max_entries: None }, "keyed"),
+            (RegionKind::Checklist, "checklist"),
+            (
+                RegionKind::Custom {
+                    code: CodeRef::Inline("fn render() { \"\" }".to_string()),
+                    pinned: false,
+                },
+                "custom",
+            ),
+        ];
+        for (kind, word) in kinds {
+            assert_eq!(region_kind_word(&kind), word);
+        }
+    }
+
     fn test_state_with_path(path: PathBuf) -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
@@ -845,16 +959,27 @@ mod tests {
         }
     }
 
-    fn test_manifest() -> &'static str {
-        r#"
-[agent]
-name = "test-bp"
-version = "1.0.0"
-description = "A test blueprint"
+    /// An `agent.toml` called `name`, with one stage per entry of `stages`.
+    fn blueprint(name: &str, version: &str, description: &str, stages: &[&str]) -> String {
+        let stages: Vec<String> = stages
+            .iter()
+            .map(|stage| format!("{{ name = \"{stage}\", system_prompt = \"Do {stage}\" }}"))
+            .collect();
+        format!(
+            "[blueprint]\nname = \"{name}\"\nversion = \"{version}\"\n\
+             description = \"{description}\"\n\n[graph]\nstages = [{}]\n\
+             layout = {{ total_budget_tokens = 1000, regions = [] }}\n",
+            stages.join(", ")
+        )
+    }
 
-[stages.plan]
-system_prompt = "Plan the work"
-"#
+    /// A one-stage blueprint called `name`.
+    fn named_manifest(name: &str) -> String {
+        blueprint(name, "1.0.0", "A test blueprint", &["plan"])
+    }
+
+    fn test_manifest() -> String {
+        named_manifest("test-bp")
     }
 
     // ─── list_blueprints ──────────────────────────────────────────────────────
@@ -888,7 +1013,7 @@ system_prompt = "Plan the work"
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("my-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(agent_dir.join("agent.leviath"), test_manifest()).unwrap();
+        write_test_agent(&agent_dir, test_manifest());
 
         let state = test_state_with_path(dir.path().to_path_buf());
         let app = Router::new()
@@ -930,7 +1055,7 @@ system_prompt = "Plan the work"
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("test-bp");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(agent_dir.join("agent.leviath"), test_manifest()).unwrap();
+        write_test_agent(&agent_dir, test_manifest());
 
         let state = test_state_with_path(dir.path().to_path_buf());
         let app = Router::new()
@@ -961,21 +1086,26 @@ system_prompt = "Plan the work"
     /// small window.
     #[tokio::test]
     async fn the_detail_route_reports_the_blueprints_context_regions() {
-        let manifest = r#"
-[agent]
+        let manifest = r#"[blueprint]
 name = "curator"
+version = "1.0.0"
 
-[context.regions]
-sources = { kind = "pinned", max_tokens = 400, describe_in_prompt = true, description = "One line per source." }
-chat = { kind = "sliding_window", max_tokens = 900 }
+[graph]
+stages = [{ name = "plan", system_prompt = "Plan the work" }]
 
-[stages.plan]
-system_prompt = "Plan the work"
+[graph.layout]
+total_budget_tokens = 2000
+regions = [
+    { name = "sources", kind = "pinned", budget = 400, describe_in_prompt = true, description = "One line per source." },
+    { name = "chat", kind = { kind = "sliding_window", max_items = 20 }, budget = 900 },
+    { name = "notes", kind = "keyed", budget = { percent = "50%", max = 600 } },
+    { name = "scratch", kind = "temporary", budget = { percent = "1%", min = 50 } },
+]
 "#;
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("curator");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(agent_dir.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(&agent_dir, manifest);
 
         let state = test_state_with_path(dir.path().to_path_buf());
         let app = Router::new()
@@ -1005,11 +1135,25 @@ system_prompt = "Plan the work"
                 },
                 {
                     "name": "chat",
-                    // The blueprint's own word, and the one a context snapshot
-                    // writes: a console reading both sees one kind, not two.
+                    // The blueprint's own word: a console reading the file
+                    // and this sees one kind, not two.
                     "kind": "sliding_window",
                     "describe_in_prompt": false,
                     "max_tokens": 900,
+                },
+                {
+                    // Half of the layout's 2000, held to its ceiling.
+                    "name": "notes",
+                    "kind": "keyed",
+                    "describe_in_prompt": false,
+                    "max_tokens": 600,
+                },
+                {
+                    // 1% of 2000 is 20, raised to its floor.
+                    "name": "scratch",
+                    "kind": "temporary",
+                    "describe_in_prompt": false,
+                    "max_tokens": 50,
                 },
             ])
         );
@@ -1023,42 +1167,51 @@ system_prompt = "Plan the work"
     /// no key.
     #[tokio::test]
     async fn the_detail_route_reports_the_blueprints_fan_out_limits() {
-        let manifest = r#"
-[agent]
+        let manifest = r#"[blueprint]
 name = "spreader"
+version = "1.0.0"
 
-[stages.plan]
+[graph]
+layout = { total_budget_tokens = 8000, regions = [{ name = "findings", kind = "clearable", budget = 4000 }] }
+
+[[graph.stages]]
+name = "plan"
 system_prompt = "Plan the work"
 
-[stages.spread]
-mode = "fan_out"
-worker_stage = "worker"
-merge_stage = "gather"
-split_prompt = "split it"
-results_region = "findings"
-on_worker_failure = "fail_all"
-max_workers = 0
-max_items = 12
+[[graph.stages]]
+name = "spread"
+mode = { fan_out = { worker = { stage = "worker" }, merge_stage = "gather", split_prompt = "split it", results_region = "findings", on_worker_failure = "fail_all", max_items = 12 } }
 
-[stages.wide]
-mode = "fan_out"
-worker_agent = "researcher"
-split_prompt = "split it"
+[[graph.stages]]
+name = "wide"
+mode = { fan_out = { worker = { blueprint = { name = "researcher" } }, split_prompt = "split it", max_workers = 4 } }
 
-[stages.worker]
+[[graph.stages]]
+name = "asked"
+mode = { fan_out = { worker = { query = "someone who reads papers" }, max_items = 0 } }
+
+[[graph.stages]]
+name = "local"
+mode = { fan_out = { worker = { blueprint_file = "/opt/agents/reader" } } }
+
+[[graph.stages]]
+name = "worker"
 system_prompt = "Do one part"
 allow_as_worker = true
 
-[stages.gather]
+[[graph.stages]]
+name = "gather"
 system_prompt = "Gather"
-
-[context.regions]
-findings = { kind = "clearable", max_tokens = 4000 }
 "#;
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("spreader");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(agent_dir.join("agent.leviath"), manifest).unwrap();
+        // Absolute on every host (`/opt/agents/reader` is not, on Windows),
+        // as a TOML literal string so a Windows path's `\` stays a `\`.
+        let reader = std::env::temp_dir().join("agents").join("reader");
+        let reader = reader.to_string_lossy();
+        let manifest = manifest.replace("\"/opt/agents/reader\"", &format!("'{reader}'"));
+        write_test_agent(&agent_dir, &manifest);
 
         let state = test_state_with_path(dir.path().to_path_buf());
         let app = Router::new()
@@ -1089,7 +1242,21 @@ findings = { kind = "clearable", max_tokens = 4000 }
                 {
                     "stage": "wide",
                     "worker_agent": "researcher",
-                    "max_workers": leviath_core::blueprint::DEFAULT_MAX_WORKERS,
+                    "max_workers": 4,
+                    "max_items": null,
+                    "on_worker_failure": "continue",
+                },
+                {
+                    "stage": "asked",
+                    "worker_query": "someone who reads papers",
+                    "max_workers": null,
+                    "max_items": null,
+                    "on_worker_failure": "continue",
+                },
+                {
+                    "stage": "local",
+                    "worker_agent": reader,
+                    "max_workers": null,
                     "max_items": null,
                     "on_worker_failure": "continue",
                 },
@@ -1103,30 +1270,27 @@ findings = { kind = "clearable", max_tokens = 4000 }
     /// out.
     #[tokio::test]
     async fn the_detail_route_reports_stage_routing() {
-        let manifest = r#"
-[agent]
+        let manifest = r#"[blueprint]
 name = "drawer"
+version = "1.0.0"
 
-[context.regions]
-artwork = { kind = "pinned" }
-conversation = { kind = "sliding_window" }
+[graph]
+stages = [
+    { name = "draw", system_prompt = "Draw", output_routing = { "image/*" = "artwork" } },
+    { name = "describe", system_prompt = "Describe", reset = ["conversation"] },
+]
 
-[stages.draw]
-system_prompt = "Draw"
-
-[stages.draw.output_routing]
-"image/*" = "artwork"
-
-[stages.describe]
-system_prompt = "Describe"
-
-[stages.describe.context]
-reset = ["conversation"]
+[graph.layout]
+total_budget_tokens = 2000
+regions = [
+    { name = "artwork", kind = "pinned", budget = 1000 },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 20 }, budget = 1000 },
+]
 "#;
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("drawer");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(agent_dir.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(&agent_dir, manifest);
 
         let state = test_state_with_path(dir.path().to_path_buf());
         let app = Router::new()
@@ -1164,7 +1328,7 @@ reset = ["conversation"]
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("test-bp");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(agent_dir.join("agent.leviath"), test_manifest()).unwrap();
+        write_test_agent(&agent_dir, test_manifest());
 
         let state = test_state_with_path(dir.path().to_path_buf());
         let app = Router::new()
@@ -1190,7 +1354,7 @@ reset = ["conversation"]
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("test-bp");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(agent_dir.join("agent.leviath"), test_manifest()).unwrap();
+        write_test_agent(&agent_dir, test_manifest());
 
         let state = test_state_with_path(dir.path().to_path_buf());
         let app = Router::new()
@@ -1224,7 +1388,7 @@ reset = ["conversation"]
         std::fs::create_dir_all(&agent_dir).unwrap();
         // A directory where the manifest should be: it exists, and no platform
         // will read it as text.
-        std::fs::create_dir_all(agent_dir.join("agent.leviath")).unwrap();
+        std::fs::create_dir_all(agent_dir.join(leviath_blueprint::FILE_NAME)).unwrap();
 
         let state = test_state_with_path(dir.path().to_path_buf());
         let app = Router::new()
@@ -1273,17 +1437,7 @@ reset = ["conversation"]
         TEST_AGENTS_DIR
             .scope(agents.path().to_path_buf(), async {
                 let name = unique_bp_name("create");
-                let manifest = format!(
-                    r#"
-[agent]
-name = "{name}"
-version = "1.0.0"
-description = "Created via API"
-
-[stages.plan]
-system_prompt = "Plan the work"
-"#
-                );
+                let manifest = blueprint(&name, "1.0.0", "Created via API", &["plan"]);
 
                 let app = Router::new().route("/api/blueprints", post(create_blueprint));
                 let body = serde_json::json!({ "name": name, "manifest": manifest });
@@ -1313,15 +1467,7 @@ system_prompt = "Plan the work"
     /// validated rather than trusted.
     #[tokio::test]
     async fn create_blueprint_rejects_traversing_names() {
-        let manifest = r#"
-[agent]
-name = "x"
-version = "1.0.0"
-description = "d"
-
-[stages.plan]
-system_prompt = "p"
-"#;
+        let manifest = named_manifest("x");
         for name in [
             "../../../../tmp/leviath-traversal-probe",
             "/tmp/leviath-traversal-probe",
@@ -1392,9 +1538,7 @@ system_prompt = "p"
                 std::fs::write(&dir, b"blocking file").unwrap();
 
                 let app = Router::new().route("/api/blueprints", post(create_blueprint));
-                let manifest = format!(
-                    "\n[agent]\nname = \"{name}\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n[stages.plan]\nsystem_prompt = \"p\"\n"
-                );
+                let manifest = named_manifest(&name);
                 let body = serde_json::json!({ "name": name, "manifest": manifest });
                 let req = Request::builder()
                     .method("POST")
@@ -1436,15 +1580,13 @@ system_prompt = "p"
                 // here `create_dir_all` succeeds (the blueprint dir doesn't already
                 // exist as a blocking file), but the manifest *file* write fails --
                 // forced by pre-creating a directory at the exact path
-                // `<dir>/agent.leviath`, so `std::fs::write` hits EISDIR.
+                // `<dir>/agent.toml`, so `std::fs::write` hits EISDIR.
                 let name = unique_bp_name("create-manifest-write-fail");
                 let dir = agents_dir().join(&name);
-                std::fs::create_dir_all(dir.join("agent.leviath")).unwrap();
+                std::fs::create_dir_all(dir.join(leviath_blueprint::FILE_NAME)).unwrap();
 
                 let app = Router::new().route("/api/blueprints", post(create_blueprint));
-                let manifest = format!(
-                    "\n[agent]\nname = \"{name}\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n[stages.plan]\nsystem_prompt = \"p\"\n"
-                );
+                let manifest = named_manifest(&name);
                 let body = serde_json::json!({ "name": name, "manifest": manifest });
                 let req = Request::builder()
                     .method("POST")
@@ -1477,15 +1619,14 @@ system_prompt = "p"
                 let name = unique_bp_name("update-fail");
                 let dir = agents_dir().join(&name);
                 std::fs::create_dir_all(&dir).unwrap();
-                let manifest_path = dir.join("agent.leviath");
-                std::fs::write(&manifest_path, test_manifest()).unwrap();
+                let manifest_path = write_test_agent(&dir, named_manifest(&name));
                 let original = std::fs::metadata(&manifest_path).unwrap().permissions();
                 let mut perms = original.clone();
                 perms.set_readonly(true);
                 std::fs::set_permissions(&manifest_path, perms).unwrap();
 
                 let app = Router::new().route("/api/blueprints/{name}", put(update_blueprint));
-                let body = serde_json::json!({ "manifest": test_manifest() });
+                let body = serde_json::json!({ "manifest": named_manifest(&name) });
                 let req = Request::builder()
                     .method("PUT")
                     .uri(format!("/api/blueprints/{}", name))
@@ -1515,37 +1656,10 @@ system_prompt = "p"
                 let name = unique_bp_name("update");
                 let dir = agents_dir().join(&name);
                 std::fs::create_dir_all(&dir).unwrap();
-                std::fs::write(
-                    dir.join("agent.leviath"),
-                    format!(
-                        r#"
-[agent]
-name = "{name}"
-version = "1.0.0"
-description = "Original"
-
-[stages.plan]
-system_prompt = "Plan"
-"#
-                    ),
-                )
-                .unwrap();
+                write_test_agent(&dir, blueprint(&name, "1.0.0", "Original", &["plan"]));
 
                 let app = Router::new().route("/api/blueprints/{name}", put(update_blueprint));
-                let updated_manifest = format!(
-                    r#"
-[agent]
-name = "{name}"
-version = "2.0.0"
-description = "Updated"
-
-[stages.plan]
-system_prompt = "Plan"
-
-[stages.implement]
-system_prompt = "Implement"
-"#
-                );
+                let updated_manifest = blueprint(&name, "2.0.0", "Updated", &["plan", "implement"]);
                 let body = serde_json::json!({ "manifest": updated_manifest });
                 let req = Request::builder()
                     .method("PUT")
@@ -1592,15 +1706,7 @@ system_prompt = "Implement"
     async fn update_blueprint_rejects_traversing_names() {
         use axum::routing::put;
 
-        let manifest = r#"
-[agent]
-name = "x"
-version = "1.0.0"
-description = "d"
-
-[stages.plan]
-system_prompt = "p"
-"#;
+        let manifest = named_manifest("x");
         for name in ["..", "%2e%2e", "."] {
             let app = Router::new().route("/api/blueprints/{name}", put(update_blueprint));
             let body = serde_json::json!({ "manifest": manifest });
@@ -1625,15 +1731,7 @@ system_prompt = "p"
 
         let app = Router::new().route("/api/blueprints/{name}", put(update_blueprint));
         let body = serde_json::json!({
-            "manifest": r#"
-[agent]
-name = "no-such-agent"
-version = "1.0.0"
-description = "Missing"
-
-[stages.run]
-system_prompt = "Run"
-"#
+            "manifest": named_manifest("no-such-agent-xyz-99999")
         });
         let req = Request::builder()
             .method("PUT")
@@ -1662,7 +1760,7 @@ system_prompt = "Run"
                 let name = unique_bp_name("delete-fail");
                 let dir = agents_dir().join(&name);
                 std::fs::create_dir_all(&dir).unwrap();
-                std::fs::write(dir.join("agent.leviath"), test_manifest()).unwrap();
+                write_test_agent(&dir, test_manifest());
                 std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
                 let app = Router::new().route("/api/blueprints/{name}", delete(delete_blueprint));
@@ -1710,7 +1808,7 @@ system_prompt = "Run"
                 let name = unique_bp_name("delete-fail-win");
                 let dir = agents_dir().join(&name);
                 std::fs::create_dir_all(&dir).unwrap();
-                let manifest_path = dir.join("agent.leviath");
+                let manifest_path = dir.join(leviath_blueprint::FILE_NAME);
 
                 // Create the manifest THROUGH an exclusive (no-share) handle and hold
                 // it open for the duration of the delete attempt below, so
@@ -1755,7 +1853,7 @@ system_prompt = "Run"
                 let name = unique_bp_name("delete");
                 let dir = agents_dir().join(&name);
                 std::fs::create_dir_all(&dir).unwrap();
-                std::fs::write(dir.join("agent.leviath"), test_manifest()).unwrap();
+                write_test_agent(&dir, test_manifest());
                 assert!(dir.exists());
 
                 let app = Router::new().route("/api/blueprints/{name}", delete(delete_blueprint));
@@ -1824,18 +1922,13 @@ system_prompt = "Run"
     async fn validate_blueprint_reports_lint_errors_and_warnings_separately() {
         // `raed_file` is an error (it resolves to nothing); the missing
         // `max_iterations` and the unattended `ask_user_text` are warnings.
-        let manifest = r#"
-[agent]
+        let manifest = r#"[blueprint]
 name = "linty"
 version = "0.1.0"
 
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-available_tools = ["read_file", "raed_file", "ask_user_text"]
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
+[graph]
+stages = [{ name = "main", model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }, tools = ["read_file", "raed_file", "ask_user_text"] }]
+layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pinned", budget = 1000 }] }
 "#;
         let result = validate_manifest_text(manifest, Path::new("."));
         assert!(!result.valid);
@@ -1877,21 +1970,14 @@ system = { kind = "pinned", max_tokens = 1000 }
             "// @tool web_search\n// @description searches\n\"found\"",
         )
         .unwrap();
-        let manifest = r#"
-[agent]
+        let manifest = r#"[blueprint]
 name = "toolful"
 version = "0.1.0"
 description = "d"
 
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-description = "Main"
-max_iterations = 5
-available_tools = ["web_search"]
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
+[graph]
+stages = [{ name = "main", description = "Main", model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }, max_iterations = 5, tools = ["web_search"] }]
+layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pinned", budget = 1000 }] }
 "#;
 
         let rooted = validate_manifest_text(manifest, dir.path());
@@ -1915,20 +2001,14 @@ system = { kind = "pinned", max_tokens = 1000 }
     #[tokio::test]
     async fn validate_accepts_a_blueprint_name_and_ignores_an_unusable_one() {
         let app = Router::new().route("/api/blueprints/validate", post(validate_blueprint));
-        let manifest = r#"
-[agent]
+        let manifest = r#"[blueprint]
 name = "plain"
 version = "0.1.0"
 description = "d"
 
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-description = "Main"
-max_iterations = 5
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
+[graph]
+stages = [{ name = "main", description = "Main", model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }, max_iterations = 5 }]
+layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pinned", budget = 1000 }] }
 "#;
         // A traversal attempt is not a 400 here: the manifest can still be
         // judged, just without a directory behind it.
@@ -1957,17 +2037,13 @@ system = { kind = "pinned", max_tokens = 1000 }
     /// Warnings alone leave the blueprint valid.
     #[tokio::test]
     async fn validate_blueprint_with_only_warnings_stays_valid() {
-        let manifest = r#"
-[agent]
+        let manifest = r#"[blueprint]
 name = "warny"
 version = "0.1.0"
 
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
+[graph]
+stages = [{ name = "main", model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] } }]
+layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pinned", budget = 1000 }] }
 "#;
         let result = validate_manifest_text(manifest, Path::new("."));
         assert!(result.valid);
@@ -1997,22 +2073,21 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     #[tokio::test]
     async fn validate_blueprint_parses_but_fails_structural_validation_returns_ok_valid_false() {
-        // Distinct from the manifest above: this one parses fine as TOML/a
-        // Blueprint (Ok(bp) from parse_manifest), but bp.validate()
-        // itself rejects it - an entry_stage that doesn't match any defined
-        // stage. Exercises the `Ok(bp) => match bp.validate() { Err(e) => .. }`
-        // arm, which `validate_blueprint_invalid_manifest_returns_ok_valid_false`
-        // (a parse failure) never reaches.
+        // Distinct from the file above: this one parses, but its graph does
+        // not hold together - an entry stage and a hidden region it does not
+        // declare. Every problem is reported, each at its own key, which
+        // `validate_blueprint_invalid_manifest_returns_ok_valid_false` (a
+        // parse failure) never reaches.
         let app = Router::new().route("/api/blueprints/validate", post(validate_blueprint));
-        let manifest = r#"
-[agent]
+        let manifest = r#"[blueprint]
 name = "bad-entry-stage"
 version = "1.0.0"
 description = "Entry stage doesn't exist"
-entry_stage = "does-not-exist"
 
-[stages.plan]
-system_prompt = "Plan"
+[graph]
+entry = "does-not-exist"
+stages = [{ name = "plan", system_prompt = "Plan", hide = ["ghost"] }]
+layout = { total_budget_tokens = 1000, regions = [] }
 "#;
         let body = serde_json::json!({"manifest": manifest});
         let req = Request::builder()
@@ -2028,13 +2103,10 @@ system_prompt = "Plan"
             .unwrap();
         let result: ValidateResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(!result.valid);
-        assert!(
-            result
-                .errors
-                .unwrap()
-                .iter()
-                .any(|e| e.contains("entry_stage"))
-        );
+        let errors = result.errors.unwrap();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].starts_with("graph.entry"), "{errors:?}");
+        assert!(errors[1].contains("ghost"), "{errors:?}");
     }
 
     #[test]
@@ -2048,17 +2120,7 @@ system_prompt = "Plan"
     #[test]
     fn read_blueprint_info_from_valid_manifest() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("agent.leviath");
-        let content = r#"
-[agent]
-name = "test-bp"
-version = "1.0.0"
-description = "A test blueprint"
-
-[stages.plan]
-system_prompt = "Plan the work"
-"#;
-        std::fs::write(&manifest_path, content).unwrap();
+        let manifest_path = write_test_agent(dir.path(), test_manifest());
 
         let info = read_blueprint_info(&manifest_path, dir.path()).unwrap();
         assert_eq!(info.name, "test-bp");
@@ -2071,7 +2133,7 @@ system_prompt = "Plan the work"
     #[test]
     fn read_blueprint_info_nonexistent_file_returns_none() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("nonexistent.leviath");
+        let manifest_path = dir.path().join("nonexistent.toml");
         let result = read_blueprint_info(&manifest_path, dir.path());
         assert!(result.is_none());
     }
@@ -2079,8 +2141,7 @@ system_prompt = "Plan the work"
     #[test]
     fn read_blueprint_info_invalid_toml_returns_none() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("agent.leviath");
-        std::fs::write(&manifest_path, "not valid toml [[[").unwrap();
+        let manifest_path = write_test_agent(dir.path(), "not valid toml [[[");
         let result = read_blueprint_info(&manifest_path, dir.path());
         assert!(result.is_none());
     }
@@ -2088,23 +2149,15 @@ system_prompt = "Plan the work"
     #[test]
     fn read_blueprint_info_multiple_stages() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("agent.leviath");
-        let content = r#"
-[agent]
-name = "multi-stage"
-version = "0.2.0"
-description = "Multi-stage"
-
-[stages.plan]
-system_prompt = "Plan"
-
-[stages.implement]
-system_prompt = "Implement"
-
-[stages.review]
-system_prompt = "Review"
-"#;
-        std::fs::write(&manifest_path, content).unwrap();
+        let manifest_path = write_test_agent(
+            dir.path(),
+            blueprint(
+                "multi-stage",
+                "0.2.0",
+                "Multi-stage",
+                &["plan", "implement", "review"],
+            ),
+        );
 
         let info = read_blueprint_info(&manifest_path, dir.path()).unwrap();
         assert_eq!(info.name, "multi-stage");
@@ -2117,16 +2170,7 @@ system_prompt = "Review"
         let agent_dir = dir.path().join("my-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
 
-        let content = r#"
-[agent]
-name = "discovered"
-version = "1.0.0"
-description = "Should be discovered"
-
-[stages.work]
-system_prompt = "Do work"
-"#;
-        write_test_agent(agent_dir, content);
+        write_test_agent(agent_dir, named_manifest("discovered"));
 
         let config = crate::config::Config {
             agent_paths: vec![dir.path().to_path_buf()],
@@ -2172,16 +2216,7 @@ system_prompt = "Do work"
     #[test]
     fn discover_blueprints_direct_manifest_in_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let content = r#"
-[agent]
-name = "direct"
-version = "0.1.0"
-description = "Directly in scan dir"
-
-[stages.run]
-system_prompt = "Run"
-"#;
-        write_test_agent(dir.path(), content);
+        write_test_agent(dir.path(), named_manifest("direct"));
 
         let config = crate::config::Config {
             agent_paths: vec![dir.path().to_path_buf()],
@@ -2194,11 +2229,11 @@ system_prompt = "Run"
     }
 
     fn assert_discovered_directly_in_scan_dir(found: bool) {
-        assert!(found, "should discover agent.leviath directly in scan dir");
+        assert!(found, "should discover agent.toml directly in scan dir");
     }
 
     #[test]
-    #[should_panic(expected = "should discover agent.leviath directly in scan dir")]
+    #[should_panic(expected = "should discover agent.toml directly in scan dir")]
     fn assert_discovered_directly_in_scan_dir_panics_when_not_found() {
         assert_discovered_directly_in_scan_dir(false);
     }

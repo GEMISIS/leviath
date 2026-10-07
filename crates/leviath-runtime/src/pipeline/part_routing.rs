@@ -4,14 +4,14 @@
 //! to send the parts a model produces somewhere other than `conversation` -
 //! an image the model drew into a region a later stage reads, say, leaving the
 //! turn's text where it always went. This module answers the one question both
-//! recording paths ([`super::response::store_reply`] for a reply with no tool
+//! recording paths (`store_reply` in `pipeline::response` for a reply with no tool
 //! calls, [`super::tool_results::apply_tool_results_with_parts`] for one with
 //! them) ask: of the parts the model produced, which stay in the conversation
 //! and which are routed, and to where.
 
 use std::collections::BTreeMap;
 
-use leviath_core::blueprint::Stage;
+use crate::spec::graph::StageDef;
 use leviath_core::mime::Part;
 
 use crate::components::ContextWindow;
@@ -28,15 +28,15 @@ pub(crate) struct RoutedParts {
     pub(crate) routed: Vec<(String, Vec<Part>)>,
 }
 
-/// Split `parts` by `stage`'s [`Stage::output_routing`]. A part whose mime type
-/// matches a rule goes to that rule's region (most specific pattern wins); the
-/// rest are kept for the conversation. With no stage, or no matching rule,
+/// Split `parts` by `stage`'s [`StageDef::output_routing`]. A part whose mime
+/// type matches a rule goes to that rule's region (most specific pattern wins);
+/// the rest are kept for the conversation. With no stage, or no matching rule,
 /// every part is kept.
-pub(crate) fn split(stage: Option<&Stage>, parts: &[Part]) -> RoutedParts {
+pub(crate) fn split(stage: Option<&StageDef>, parts: &[Part]) -> RoutedParts {
     let mut kept = Vec::new();
     let mut groups: BTreeMap<String, Vec<Part>> = BTreeMap::new();
     for part in parts {
-        match stage.and_then(|s| s.route_for_mime(&part.mime_type)) {
+        match stage.and_then(|s| route_for_mime(s, &part.mime_type)) {
             Some(region) => groups
                 .entry(region.to_string())
                 .or_default()
@@ -47,6 +47,31 @@ pub(crate) fn split(stage: Option<&Stage>, parts: &[Part]) -> RoutedParts {
     RoutedParts {
         kept,
         routed: groups.into_iter().collect(),
+    }
+}
+
+/// The region `stage` routes a part of `mime_type` to, when it routes one. The
+/// most specific matching pattern wins, so a table with both `image/png` and
+/// `image/*` sends a PNG to the first and every other image to the second.
+pub(crate) fn route_for_mime<'a>(
+    stage: &'a StageDef,
+    mime_type: &leviath_core::mime::MimeType,
+) -> Option<&'a str> {
+    stage
+        .output_routing
+        .iter()
+        .filter(|(pattern, _)| mime_type.matches(pattern))
+        .max_by_key(|(pattern, _)| specificity(pattern))
+        .map(|(_, region)| region.as_str())
+}
+
+/// How specific a routing pattern is: an exact `type/subtype` (2) beats a
+/// family `type/*` (1) beats the catch-all `*/*` (0).
+fn specificity(pattern: &str) -> u8 {
+    match pattern {
+        "*/*" => 0,
+        p if p.ends_with("/*") => 1,
+        _ => 2,
     }
 }
 
@@ -92,7 +117,6 @@ pub(crate) fn store_routed(window: &mut ContextWindow, routed: &RoutedParts) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::blueprint::ModelConfig;
     use leviath_core::mime::{Blob, MimeRegistry, MimeType};
 
     fn stored_part(mime: &str, name: &str) -> Part {
@@ -101,15 +125,16 @@ mod tests {
         Part::stored(blob.describe(&reg)).named(name)
     }
 
-    fn stage_routing(rules: &[(&str, &str)]) -> Stage {
-        let mut stage = Stage::new(
-            "draw".to_string(),
-            ModelConfig::new("openrouter".to_string(), "m".to_string()),
-        );
+    fn stage_routing(rules: &[(&str, &str)]) -> StageDef {
+        let mut stage = StageDef {
+            model: crate::test_graph::model("openrouter", "m"),
+            ..crate::test_graph::stage("draw")
+        };
         for (pattern, region) in rules {
-            stage
-                .output_routing
-                .insert((*pattern).to_string(), (*region).to_string());
+            stage.output_routing.insert(
+                (*pattern).to_string(),
+                crate::test_graph::region_name(region),
+            );
         }
         stage
     }
@@ -234,5 +259,22 @@ mod tests {
         // Ordered by region name: artwork before docs.
         assert_eq!(routed.routed[0].0, "artwork");
         assert_eq!(routed.routed[1].0, "docs");
+    }
+
+    /// The most specific matching pattern wins: an exact type over a family,
+    /// and a family over the catch-all.
+    #[test]
+    fn the_most_specific_routing_pattern_wins() {
+        let stage = stage_routing(&[
+            ("*/*", "anything"),
+            ("image/*", "images"),
+            ("image/png", "pngs"),
+        ]);
+        let png = MimeType::parse("image/png").unwrap();
+        let jpeg = MimeType::parse("image/jpeg").unwrap();
+        let pdf = MimeType::parse("application/pdf").unwrap();
+        assert_eq!(route_for_mime(&stage, &png), Some("pngs"));
+        assert_eq!(route_for_mime(&stage, &jpeg), Some("images"));
+        assert_eq!(route_for_mime(&stage, &pdf), Some("anything"));
     }
 }

@@ -347,6 +347,11 @@ impl Dashboard {
                 KeyCode::Down if options_len > 0 && self.choice_selected < options_len - 1 => {
                     self.choice_selected += 1;
                 }
+                // The number an option is listed under selects it, the same
+                // number `lev respond` takes.
+                KeyCode::Char(c @ '1'..='9') if (c as usize - '1' as usize) < options_len => {
+                    self.choice_selected = c as usize - '1' as usize;
+                }
                 // Up/Down move the selection here, so the document gets its own
                 // keys. Without these there was no way at all to read a plan
                 // longer than the pane while its approval prompt was open -
@@ -551,13 +556,13 @@ impl Dashboard {
             KeyCode::Char('f') => {
                 let has_answer = self
                     .selected_agent()
-                    .is_some_and(|a| runstate::read_final_output(&a.id).is_some());
+                    .is_some_and(|a| self.final_output_of(&a.id).is_some());
                 if has_answer {
                     self.stage_content_mode = StageContentMode::FinalOutput;
                     self.detail_scroll = 0;
                 }
             }
-            // Browse the run's archived context-window history in the Context
+            // Browse the run's recorded context-window history in the Context
             // view: `,` = earlier point, `.` = later (past the newest → live).
             KeyCode::Char(',') => self.step_context_history(-1),
             KeyCode::Char('.') => self.step_context_history(1),
@@ -669,11 +674,10 @@ impl Dashboard {
                     "Logs",
                 ),
                 StageContentMode::Context => {
-                    let json = std::fs::read_to_string(
-                        runstate::stage_dir(&agent.id, self.selected_stage)
-                            .join(leviath_core::files::CONTEXT_FILE),
-                    )
-                    .unwrap_or_default();
+                    // The run's window as of its last step, as JSON.
+                    let json = runstate::read_context_snapshot(&agent.id)
+                        .and_then(|snapshot| serde_json::to_string_pretty(&snapshot).ok())
+                        .unwrap_or_default();
                     (json, "Context JSON")
                 }
                 StageContentMode::FinalOutput => {
@@ -1068,25 +1072,15 @@ impl Dashboard {
                 InteractionKind::ToolApproval if self.deny_feedback_open => {
                     self.deny_feedback_response(&r.id)
                 }
-                InteractionKind::ToolApproval => {
+                InteractionKind::ToolApproval | InteractionKind::Confirm => {
                     let idx = self.choice_selected;
                     let label = r.options.get(idx).cloned().unwrap_or(idx.to_string());
                     let d = truncate(&label, 40);
-                    // The index-to-scope mapping lives with the labels, so the
-                    // two cannot drift; anything it does not recognise denies.
-                    let (approved, scope) = match leviath_core::interaction::approval_choice(idx) {
-                        Some(scope) => (true, scope),
-                        None => (false, ApprovalScope::Once),
-                    };
-                    (InteractionResponse::approval(&r.id, approved, scope), d)
-                }
-                InteractionKind::Confirm => {
-                    let approved = self.choice_selected == 0;
-                    let label = if approved { "Yes" } else { "No" };
-                    (
-                        InteractionResponse::approval(&r.id, approved, ApprovalScope::Once),
-                        label.to_string(),
-                    )
+                    // An option means what its label says, read the way `lev
+                    // respond` reads it; anything unrecognised denies.
+                    let deny = InteractionResponse::approval(&r.id, false, ApprovalScope::Once);
+                    let answer = leviath_core::interaction::answer_at(r, idx, None).unwrap_or(deny);
+                    (answer, d)
                 }
             },
             None => {
@@ -1764,6 +1758,52 @@ mod tests {
         // Up at top stays
         dash.handle_key(key(KeyCode::Up));
         assert_eq!(dash.choice_selected, 0);
+
+        // The number an option is listed under selects it; one past the list,
+        // and 0, select nothing.
+        dash.handle_key(key(KeyCode::Char('3')));
+        assert_eq!(dash.choice_selected, 2);
+        dash.handle_key(key(KeyCode::Char('1')));
+        assert_eq!(dash.choice_selected, 0);
+        dash.handle_key(key(KeyCode::Char('4')));
+        assert_eq!(dash.choice_selected, 0);
+        dash.handle_key(key(KeyCode::Char('0')));
+        assert_eq!(dash.choice_selected, 0);
+        assert!(dash.input_mode, "a number selects; it never answers");
+    }
+
+    /// A gate approval offers no stage scope, so its second row is the run
+    /// grant, and the dashboard sends what that row says rather than what the
+    /// second row of a tool approval would mean.
+    #[test]
+    fn an_approval_row_answers_with_what_its_label_says() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::gate_approval(
+                "gate-1",
+                "web_fetch",
+                serde_json::json!({}),
+                "main",
+            ),
+        );
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.handle_key(key(KeyCode::Char('2')));
+        dash.submit_input();
+        assert_eq!(
+            cmd_rx.try_recv().expect("an Answer command was queued"),
+            DaemonCommand::Answer {
+                response: interaction::InteractionResponse::approval(
+                    "gate-1",
+                    true,
+                    interaction::ApprovalScope::Run
+                ),
+            }
+        );
     }
 
     #[test]
@@ -3465,6 +3505,7 @@ mod tests {
         // write in `leviath_sys::tty`.)
         crate::runstate::with_isolated_runs_dir("yank_with_real_content_reports_success", |_d| {
             let run_id = "test-yank-real-content";
+            crate::runstate::create_run(&crate::test_support::fixtures::run_meta(run_id)).unwrap();
             crate::runstate::append_stage_output(run_id, 0, "some real output");
 
             let mut dash = make_test_dashboard();
@@ -3519,9 +3560,9 @@ mod tests {
         dash
     }
 
-    /// Enter breaks the line, the way it does in the new-run task; it used to
-    /// send, which made the response box the one text box on the dashboard
-    /// where a newline needed a chord. Ctrl+Enter is what sends.
+    /// Enter breaks the line, the way it does in the new-run task, so no text
+    /// box on the dashboard needs a chord for a newline. Ctrl+Enter is what
+    /// sends.
     #[test]
     fn response_box_enter_is_a_newline_and_ctrl_enter_sends() {
         let mut dash = dash_answering_free_text();
@@ -3832,7 +3873,7 @@ mod tests {
             .push(make_test_agent("run-1", AgentDisplayStatus::Active));
         dash.update_display_indices();
         dash.detail_view = true;
-        let points = vec![leviath_core::run_archive::RunPoint {
+        let points = vec![leviath_runtime::runfile::history::RunPoint {
             meta: fixtures::run_meta("run-1"),
             context: leviath_core::run_meta::ContextSnapshot {
                 stage_name: "s".to_string(),
@@ -3848,6 +3889,7 @@ mod tests {
             points,
             checked_at_tick: u64::MAX,
             stamp: None,
+            transitions: None,
         });
         dash.context_history_idx = Some(0);
         dash
@@ -4005,9 +4047,17 @@ mod tests {
             |_d| {
                 use crate::runstate;
                 let run_id = "test-yank-clipboard-unavailable-x7z9";
-                let stage_path = runstate::stage_dir(run_id, 0);
-                std::fs::create_dir_all(&stage_path).ok();
-                std::fs::write(stage_path.join("context.json"), r#"{"test":true}"#).ok();
+                runstate::create_run(&crate::test_fixtures::fixtures::run_meta(run_id)).unwrap();
+                runstate::write_context_snapshot(
+                    run_id,
+                    &runstate::ContextSnapshot {
+                        stage_name: "main".to_string(),
+                        total_tokens: 0,
+                        max_tokens: 100,
+                        regions: vec![crate::test_fixtures::fixtures::region("task")],
+                    },
+                )
+                .unwrap();
 
                 let mut dash = make_test_dashboard();
                 let agent = make_test_agent(run_id, AgentDisplayStatus::Active);
@@ -4243,6 +4293,7 @@ mod tests {
             message: "Started run-7".to_string(),
             ok: true,
             run_id: Some("run-7".to_string()),
+            refused: None,
         });
         dash.drain_spawn_outcomes();
         dash.open_pending_run();
@@ -4278,6 +4329,7 @@ mod tests {
             message: "Started ghost".to_string(),
             ok: true,
             run_id: Some("ghost".to_string()),
+            refused: None,
         });
         dash.drain_spawn_outcomes();
         for _ in 0..crate::commands::dashboard::new_run::OPEN_RUN_TICKS + 1 {
@@ -4295,6 +4347,7 @@ mod tests {
             message: "Started run-7".to_string(),
             ok: true,
             run_id: Some("run-7".to_string()),
+            refused: None,
         });
         dash.drain_spawn_outcomes();
         dash.agents
@@ -4315,6 +4368,7 @@ mod tests {
             message: "The daemon refused the run: nope".to_string(),
             ok: false,
             run_id: None,
+            refused: None,
         });
         dash.drain_spawn_outcomes();
         assert!(dash.pending_open_run.is_none());

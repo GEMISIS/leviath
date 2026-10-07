@@ -14,29 +14,12 @@ use crate::commands::serve::blueprints::TEST_AGENTS_DIR;
 use crate::commands::serve::core::error::ServeError;
 use crate::commands::serve::testutil::state_with_agent_paths;
 
-/// A manifest that parses, under the given name.
-fn manifest(name: &str) -> String {
-    format!(
-        r#"
-[agent]
-name = "{name}"
-version = "1.0.0"
-description = "for the digest pin"
-
-[stages.plan]
-mode = "autonomous"
-model = {{ models = ["claude-sonnet-5"] }}
-"#
-    )
-}
-
 /// Install one blueprint under `root` and hand back its digest.
 fn install(root: &Path, name: &str) -> String {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).expect("the agent directory");
-    let text = manifest(name);
-    std::fs::write(dir.join(leviath_core::files::MANIFEST_FILENAME), &text)
-        .expect("the manifest is written");
+    let text = crate::test_support::tiny_blueprint(name);
+    crate::test_support::write_test_agent(&dir, &text);
     crate::commands::serve::core::blueprints::digest_of(&text)
 }
 

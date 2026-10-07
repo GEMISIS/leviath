@@ -126,6 +126,12 @@ It counts **production** lines, stopping at the first column-zero `#[cfg(test)]`
 
 Raising the cap to admit one long file is how a limit stops being one. If a file wants to be longer, split it by concern: `config/`, `blueprint/`, `host/`, `components/`, `lint/` and `daemon/spawn/` are all worked examples, and the glob re-export they use means the split touches no call site. Split on what the code *is about*, not on where the line count lands — `lint/checks.rs` asks "will this agent work" and `lint/security.rs` asks "should this agent be allowed to", which is a real boundary; cutting the same file at "lint_a.rs" and "lint_b.rs" would have satisfied the same number and taught a reader nothing.
 
+### Generated schemas
+
+`docs/schema/blueprint.schema.json`, `spawn-request.schema.json` and `run-file.schema.json` are generated from the types they describe. After changing one of those types, run `cargo xtask schema` and commit what it writes. A test in the owning crate fails while a checked-in schema differs from what the build generates, so `cargo test` (and CI) catches a schema left behind; `cargo xtask schema --check` runs just those tests.
+
+A change to a run file's frame types also changes the fingerprint in every run file's header, and `LAYOUT_HASH` in `crates/leviath-runtime/src/runfile/schema_tests.rs` holds the binary layout: that test prints the new hash to record.
+
 ### Where a test module lives
 
 Inline `#[cfg(test)] mod tests` in the file under test is the default; 205 files use it. A sibling `foo_tests.rs` (or `foo/tests.rs`) is the sanctioned alternative, used by 24 — but only for one reason.

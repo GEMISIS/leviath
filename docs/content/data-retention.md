@@ -116,7 +116,7 @@ that keeps something is dropped from failover, with a line in the stage's log sa
 is rerouted: an author who pinned a model would not see it swapped for one at another vendor.
 
 The switch holds past the spawn too. A run's title is written by the first model in its title
-chain that keeps nothing, and a blueprint whose `compaction_config` names a model that keeps
+chain that keeps nothing, and a blueprint whose `[graph.compaction]` names a model that keeps
 something is refused at spawn. Turning the switch on under a running daemon refuses the next call
 of a run already going, which then ends with the reason rather than sending it.
 

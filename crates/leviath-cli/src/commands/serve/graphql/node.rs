@@ -206,7 +206,7 @@ async fn blueprint(ctx: &Context<'_>, id: &str, name: &str) -> async_graphql::Re
     Ok(Some(Node::Blueprint(Blueprint {
         parsed: Arc::clone(&info.parsed),
         digest: manifest.digest,
-        source: manifest.source.into(),
+        source: blueprints::BlueprintSource::Installed.into(),
     })))
 }
 

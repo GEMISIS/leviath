@@ -1,0 +1,59 @@
+[
+  {
+    "name": "main",
+    "index": 0,
+    "status": "waiting_input",
+    "entered": true,
+    "prompt_tokens": 12,
+    "completion_tokens": 3,
+    "cached_tokens": 0,
+    "cache_write_tokens": 0,
+    "cost_usd": null,
+    "unpriced_calls": 1,
+    "cost_is_exact": false,
+    "cost_priced_usd": 0.0,
+    "models": [
+      {
+        "provider": "openai",
+        "model": "gpt-mock"
+      }
+    ],
+    "visits": [
+      {
+        "id": "v18da3de131c85d00-00000006",
+        "entered_at": 1790811839,
+        "left_at": null,
+        "prompt_tokens": 12,
+        "completion_tokens": 3,
+        "cached_tokens": 0,
+        "cache_write_tokens": 0,
+        "cost_usd": null,
+        "unpriced_calls": 1,
+        "cost_is_exact": false,
+        "cost_priced_usd": 0.0,
+        "active": {
+          "banked_secs": 0,
+          "since": 1790811839
+        }
+      }
+    ],
+    "visit_count": 1,
+    "region_tokens": {
+      "conversation": 0,
+      "final_output": 0,
+      "notes": 7,
+      "stage_instructions": 21,
+      "task": 6,
+      "tool_results": 0
+    },
+    "first_call_prompt_tokens": 12,
+    "runaway_warned": false,
+    "output_cap_raised": false,
+    "started_at": 1790811839,
+    "ended_at": null,
+    "active": {
+      "banked_secs": 0,
+      "since": 1790811839
+    }
+  }
+]

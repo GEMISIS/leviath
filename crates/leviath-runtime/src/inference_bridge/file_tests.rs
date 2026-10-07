@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::blob_store::FsBlobStore;
+use crate::inference_call::tests::run_inference_job;
 use crate::inference_pool::{InferencePoolConfig, InferencePools};
 use leviath_core::mime::{Blob, BlobStore, MimeRegistry, MimeType, Part};
 use leviath_providers::files::{FileUpload, MediaLimits, RemoteFile};
@@ -75,7 +76,7 @@ struct Setup {
     _pools: InferencePools,
     /// The journal the job appends its attempts to, so a test can read what the
     /// renewal recorded rather than only what the vendor was sent.
-    journal: mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
+    journal: mpsc::UnboundedReceiver<crate::pipeline::journal::Journaled>,
 }
 
 fn setup(lost: usize, with_route: bool) -> Setup {
@@ -105,6 +106,7 @@ fn setup(lost: usize, with_route: bool) -> Setup {
     let pools = InferencePools::new(InferencePoolConfig::new());
     let (lane, journal) = mpsc::unbounded_channel();
     let job = InferenceJob {
+        jobs: None,
         entity: Entity::from_raw_u32(7).expect("a small literal index is a valid entity id"),
         refused: None,
         provider: vendor.clone(),
@@ -142,8 +144,8 @@ fn setup(lost: usize, with_route: bool) -> Setup {
             stage: "read".into(),
             provider: "anthropic".into(),
             model: "claude".into(),
-            lane,
-            digest: leviath_core::run_archive::RequestDigest {
+            lane: crate::pipeline::JournalSender::new(lane, None),
+            digest: crate::runfile::record::RequestDigest {
                 system_hash: 7,
                 messages: 1,
                 tools: 0,
@@ -211,17 +213,17 @@ async fn a_gone_file_is_uploaded_again_and_the_call_retried_once() {
     assert_eq!(records[0].attempt, 1);
     assert_eq!(
         records[0].outcome,
-        leviath_core::run_archive::AttemptOutcome::Failed {
+        crate::runfile::record::AttemptOutcome::Failed {
             kind: String::new(),
             transient: false,
             capacity: false,
-            next: leviath_core::run_archive::Retry::RenewedFiles,
+            next: crate::runfile::record::Retry::RenewedFiles,
         },
     );
     assert_eq!(records[1].attempt, 2);
     assert_eq!(
         records[1].outcome,
-        leviath_core::run_archive::AttemptOutcome::Succeeded
+        crate::runfile::record::AttemptOutcome::Succeeded
     );
     // Taken at once, so nothing was slept before it.
     assert_eq!(records[1].backoff_ms, 0);
@@ -242,7 +244,7 @@ async fn a_gone_file_is_uploaded_again_and_the_call_retried_once() {
             let input = record.model_input.as_ref().expect("a model input");
             assert_eq!(
                 input.capture_status,
-                leviath_core::run_archive::CaptureStatus::Retained
+                crate::runfile::record::CaptureStatus::Retained
             );
             assert_eq!(input.source_context_digest, "0f0f0f0f0f0f0f0f");
             assert_eq!(input.tool_catalog_version, "no-tools");

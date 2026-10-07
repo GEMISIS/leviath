@@ -30,12 +30,25 @@ an older build.
 
 ### `lev run [PATH]`
 
-Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint directory, or an
-`agent.leviath` file. Omitted, the current directory is used.
+Start a run in the daemon. `PATH` is an installed blueprint name, a blueprint directory, or its
+`agent.toml`. Omitted, the current directory is used. Every flag below lands on one
+[spawn request](/docs/starting-a-run#one-request-every-front-door), the same request every other
+front door sends.
+
+```bash
+lev run coder --task "Add retry with backoff to the HTTP client"
+lev run release-notes --input since=v0.6.0 --audience developers --max_items 10
+lev run release-notes --since v0.6.0 --check
+lev run --request nightly.toml
+```
 
 | Flag | Purpose |
 |---|---|
-| `-t`, `--task <TEXT\|FILE>` | The task prompt, or the path of a file holding it. Left off, your editor opens |
+| `-t`, `--task <TEXT\|FILE>` | The task prompt, or the path of a file holding it: the blueprint's `task` input. Left off, your editor opens |
+| `-i`, `--input <NAME=VALUE>` | Give the run an input, read by the type the blueprint declares for it. Repeatable. See below |
+| `--<name> <VALUE>` | The short form of `--input <name>=<value>`, for any input |
+| `--request <FILE>` | Send a whole spawn request from a TOML or JSON file instead of naming a blueprint. See below |
+| `--check` | Resolve the run the whole way without starting it. See below |
 | `-m`, `--model <MODEL>` | Model override for the whole run, as `provider/model` or a bare model name. Fan-out workers and sub-agents inherit it |
 | `--workdir <DIR>` | Working directory for the run, defaulting to where you ran the command. See below |
 | `--yolo[=PROFILE]` | Run unattended, or under a named profile from `yolo.toml`. The equals sign is required. See below |
@@ -48,13 +61,12 @@ Spawn an agent into the daemon. `PATH` is an installed agent name, a blueprint d
 | `--output-instructions <TEXT>` | Extra guidance about that shape |
 | `--output-schema <JSON\|@FILE>` | A JSON Schema the final output must satisfy |
 | `--attach <PATH[:REGION][:TYPE][:text|native|stand_in]>` | Put a file in a region as a typed part. Repeatable. See below |
-| `--<region> <TEXT\|@FILE>` | Seed a named context region. See below |
 
 **`--workdir`** decides more than where commands run. File tools are confined to it, and relative
-`[read_paths]` entries resolve against it.
+`read_paths` entries resolve against it.
 
 **`--json`** is for a caller that parses the run id back out. With `--count` above 1 it prints an
-array, one object per run.
+array, one object per run. With `--check`, the JSON is the summary or the list of problems.
 
 **`--output-format`** with a label that differs from what the blueprint declares retires its Rhai
 validator and JSON schema, and says so with a warning on stderr.
@@ -81,24 +93,49 @@ asked, and lists the names it does have. Before a profiled run starts, `lev run`
 profile keeps for you, above the blueprint's own held checkpoints. `lev yolo list` shows the
 profiles you have.
 
-Region seed flags are dynamic, because region names come from the blueprint. Any `--<name>` that is
-not one of the flags above is read as a seed for the region called `<name>`, and a value starting
-with `@` is read from that file:
+#### Inputs
+
+A blueprint declares the values a caller gives it as [inputs](/docs/starting-a-run#inputs), each
+with a type. `--input name=value` gives one, and `--<name> value` is the short form for any input
+the blueprint declares. Run `lev validate` on the blueprint's directory to see which inputs it takes.
 
 ```bash
-lev run reviewer --task "Review the auth module" --standards @./team-standards.md
+lev run reviewer --diff @changes.patch --criteria @./team-standards.md
+lev run release-notes --input since=v0.6.0 --input max_items=10 --input audience=developers
 ```
 
-A region only accepts a seed if the blueprint declares it as caller input: a string
-`seed = "<key>"` in its `[context.regions]` entry, or being named `task`, which asks for the `task`
-key implicitly. A table seed (`seed = { glob = ... }`, `{ command = ... }`, and so on) fills the
-region from somewhere else and takes no caller input. A `--<name>` naming any other region is
-dropped.
+`lev run` reads each value by the type the blueprint declares for it:
 
-A `@file` that is not text (an image, a recording, a PDF) is attached to the region as a typed
-[part](/docs/mime) instead of being read as its seed text. A required region counts as provided by
-it. `--attach` does the same for any region the blueprint declares, caller input or not, and says
-more about the file when the name alone does not:
+| Declared type | On the command line |
+|---|---|
+| `text` | The text, or `@file` for a file's text |
+| `bool` | `true` or `false` |
+| `int`, `float` | A number |
+| `list` | `a,b,c`, or a JSON array |
+| `record` | A JSON object |
+| `file` | `@path`, which is attached and named for the input |
+| anything else | The text, which the daemon checks |
+
+Every problem is reported at once, each on its own line with the input's path. A name the
+blueprint does not declare and a value that does not read as its type fail before an editor
+opens:
+
+```
+$ lev run release-notes --input since_tag=v1 --max_items twenty
+Error: 2 problems with this run:
+  inputs.since_tag: unknown: --input names no input this run takes. Known: since, audience, max_items
+  inputs.max_items: wrong type: this is not a whole number (expected an integer 1 to 50; got "twenty")
+```
+
+The daemon then checks what reads but does not fit, such as a missing required input or a choice
+that is not one of the options. See [reading the problems](/docs/starting-a-run#reading-the-problems).
+
+`--task` gives the input named `task`, which by convention fills the `task` region. A blueprint
+that declares no `task` input refuses `--task`, and the message lists the inputs it does take.
+
+A `@file` given to a text input that is not text (an image, a recording, a PDF) is attached to the
+input's region as a typed [part](/docs/mime) instead of being read as text. `--attach` puts a file
+in any region the blueprint declares, and says more about the file when the name alone does not:
 
 ```bash
 lev run storyteller --task "a 30 second trailer" \
@@ -110,27 +147,21 @@ lev run reviewer --task "does @mockup.png match the brief?"
 The segments after the path are told apart by shape. `type/subtype` declares the mime type when
 the registry cannot tell from the bytes or the extension. `text`, `native` or `stand_in` chooses how
 the part reaches the model, and anything else names the region. Left off, the region is the one
-the task lands in. A `@path` inside the task text or a region's text attaches that file to the
+the task lands in. A `@path` inside the task text or another text input attaches that file to the
 same entry, and the text keeps the `@path` as written so the model reads the same name the part
 carries. Paths resolve from where you ran the command. Write `\@` for a literal `@`; a token that
 names no file is left as text, and `lev run` warns when it looked like a path. A part bound for a
 region the blueprint does not declare, or whose declared type the region's `accepts` excludes, is
-refused before the daemon is dialled.
-
-> [!NOTE]
-> `--task` fills the caller-input key `task`. A blueprint receives it only if some region asks for
-> that key, either with `seed = "task_input"` or by being named `task` (which gets the seed
-> implicitly). Passing a task to a blueprint with neither is refused at spawn rather than dropped,
-> because the run would otherwise answer a question it was never given. The error names the caller
-> input the agent does take, so `lev run reviewer -t "..."` points you at `--diff` instead.
+refused before the run starts.
 
 #### Writing the task in your editor
 
-Run `lev run <agent>` with no `-t` and Leviath opens your editor on a short commented template.
+Run `lev run <blueprint>` with no `-t` and Leviath opens your editor on a short commented template.
 Type the task, save, and the run starts. Lines beginning with `#` are stripped, so none of the
-template reaches the agent. Save an empty file and the run is cancelled. No editor opens when the
-command line already carries the run's input, a named region (`--diff @x.patch`) or an attachment,
-and the blueprint's task region is not `required`: that run starts with an empty task.
+template reaches the run. Save an empty file and the run is cancelled. No editor opens when the
+command line already carries another input (`--diff @x.patch`) or an attachment, and the
+blueprint's `task` input is not `required`: that run starts with no task. No editor opens for a
+blueprint that declares no `task` input, or with `--check`.
 
 The editor is `$VISUAL`, then `$EDITOR`, then the first of `vim`, `nano`, `vi` that is installed.
 On Windows it is `edit`, then `notepad`, then `vim`. `$VISUAL` and `$EDITOR` are split on
@@ -142,10 +173,107 @@ says so rather than blocking.
 
 `-t` reads a file when the value names one that exists. A value that looks like a path with no
 file behind it is an error, so a mistyped filename fails instead of quietly becoming the prompt.
-"Looks like a path" means no spaces, plus a `/`, a `\`, or a leading `~`. Region flags work the
-other way round and want an explicit `@` before a path, because a region seed is usually a file
-while a task is usually a
-sentence.
+"Looks like a path" means no spaces, plus a `/`, a `\`, or a leading `~`. Other text inputs work
+the other way round and want an explicit `@` before a path, because their value is often a file
+while a task is usually a sentence.
+
+#### A whole request from a file
+
+`--request <FILE>` sends a whole spawn request, TOML for a `.toml` file and JSON otherwise, instead
+of naming a blueprint. Its `source` names an installed blueprint, a blueprint directory, or a whole
+raw graph. Any input or launch flag given beside it lands on the request too, over what the file
+says. `lev schema spawn-request` prints what a request may hold, and unknown keys are refused.
+The file is the whole request, so `lev run` asks for no task it leaves out. A run it cannot start
+is refused with every problem in it, the same list `--check` prints.
+
+```toml
+# nightly.toml
+source = { blueprint = { name = "release-notes" } }
+model = { provider = "anthropic", model = "claude-sonnet-5" }
+workdir = "/srv/repo"
+
+[inputs]
+since = "v0.6.0"
+audience = "developers"
+
+[launch]
+unattended = "all"
+```
+
+```bash
+lev run --request nightly.toml
+lev run --request nightly.toml --max_items 5 --check
+```
+
+Naming a blueprint and passing `--request` together is refused, because a request names what it
+runs. See [Starting a run](/docs/starting-a-run) for every field.
+
+#### Checking a run without starting it
+
+`--check` asks the daemon to resolve the run the whole way and stop there. It prints what would
+run: each stage's model and tools, the inputs, the working directory. Or it prints every problem
+it found, one per line with where in the request it is. Nothing is spawned and nothing is billed.
+
+```
+$ lev run release-notes --since v0.6.0 --max_items 10 --check
+release-notes would run (blueprint release-notes@a4adce5110b52cc26e95bb6ef879985f2253229b85fcaa3b02842ab287dae61a, version 0.1.0)
+  starts in: gather
+  workdir:   /srv/repo
+  unattended: no
+  max depth: 3
+  inputs:
+    audience = users
+    max_items = 10
+    since = "v0.6.0"
+  stages:
+    gather  anthropic/claude-sonnet-5  tools: read_file, shell, context_append
+    write  openai/gpt-5.5  no tools
+```
+
+A missing task is reported with the other problems rather than opening your editor. With
+`--json`, the summary or the list of problems is JSON. See
+[check before you start](/docs/starting-a-run#check-before-you-start).
+
+### `lev run show <RUN>`
+
+Show what a run's [file](/docs/run-file) holds. `RUN` is the run's id, as `lev ps` lists it. With
+no flag it prints the run's spec: the graph it runs, its inputs, and the machine it was bound to.
+
+| Flag | Purpose |
+|---|---|
+| `--at <SEQ>` | Show the run's state after step `SEQ` instead of its spec. Step 0 is the state it started in |
+| `--deltas <FROM..TO>` | Show the steps from `FROM` to `TO`, both included, instead of the spec |
+| `--toml` | Print TOML (the default) |
+| `--json` | Print JSON |
+
+`--deltas` takes `3..7`, `3..` for every step from 3 on, `..7`, or `..` for them all. Run
+`lev run show <run> --deltas ..` to list the steps there are. What may keep the run from ever
+finishing is printed on stderr first. The JSON spec also carries it as a `warnings` list, one line
+each, as `lev run --json` does.
+
+```bash
+lev run show release-notes-1790848768-495da0e423db
+lev run show release-notes-1790848768-495da0e423db --at 12 --json
+lev run show release-notes-1790848768-495da0e423db --deltas 3..7
+```
+
+It reads the file on disk, so it needs no daemon. See [Inspecting a run](/docs/inspecting-a-run)
+for the other ways to read the same things.
+
+A blueprint named `show` or `help` is read as this subcommand when its name comes first, so give
+an option before the name to run it: `lev run --task "..." show`. `lev add` prints that form for
+such a name.
+
+### `lev schema spawn-request`
+
+Print the JSON Schema of a spawn request: every field a `--request` file, a `POST /api/runs` body or
+a GraphQL `spawnRun` may carry.
+
+```bash
+lev schema spawn-request > spawn-request.schema.json
+```
+
+The daemon serves the same schema at `GET /api/schema/spawn-request`.
 
 ### `lev stages <RUN-ID>`
 
@@ -160,11 +288,11 @@ across stages, and per-stage models with different prices.
 | `--json` | Print the ledger as JSON |
 
 ```
-STAGE                STATUS         PROMPT     OUTPUT   CACHE RD   CACHE WR        COST
-ingest               complete        16832       2249          0          0    ~$0.0891
-report               complete        37644        493          0          0    ~$0.1932
-summary              complete       252848        648          0          0    ~$1.2812
-TOTAL                               307324       3390          0          0    ~$1.5635
+STAGE                STATUS            PROMPT     OUTPUT   CACHE RD   CACHE WR        COST
+ingest               complete           16832       2249          0          0    ~$0.0891
+report               complete           37644        493          0          0    ~$0.1932
+summary              complete          252848        648          0          0    ~$1.2812
+TOTAL                                  307324       3390          0          0    ~$1.5635
 ```
 
 `CACHE WR` is the write half of a cache decision. Without it a stage showing no reads might be
@@ -233,60 +361,126 @@ Scaffold a new [blueprint](/docs/agents) directory.
 |---|---|---|
 | `-t`, `--template <NAME>` | `default` | Starting template. `coder` scaffolds the multi-stage shape; anything else gives a single-stage starting point |
 
+### `lev blueprint migrate <PATH>`
+
+Convert an `agent.leviath` manifest into an `agent.toml` blueprint. `PATH` is the manifest, or the
+directory holding one. With no flag the blueprint is printed, so you can read it first.
+
+| Flag | Purpose |
+|---|---|
+| `-o`, `--output <FILE>` | Write the blueprint here instead of printing it. An existing file is left alone unless `--force` is given |
+| `--force` | Overwrite the `--output` file when it already exists |
+
+```bash
+lev blueprint migrate ./my-agent                          # print the agent.toml
+lev blueprint migrate ./my-agent -o ./my-agent/agent.toml # write it beside the manifest
+lev validate ./my-agent/agent.toml
+```
+
+A key Leviath 0.6.4 and earlier accepted but never read is left out, with a `warning:` line on
+stderr naming the blueprint, the key and its value.
+
+A region the manifest seeds with a key such as `seed = "diff"` becomes an input named `diff`, bound
+to that region. See
+[migrating from agent.leviath](/docs/blueprint-format#migrating-from-agentleviath) for how each key
+is written in `agent.toml`.
+
 ### `lev validate [PATH]`
 
-Check a blueprint before running it. `PATH` defaults to `.`.
+Check a blueprint before running it. `PATH` is a blueprint directory or its `agent.toml`, and
+defaults to `.`. It reads the blueprint the way a spawn would, then prints what it is, the inputs
+it takes and the shape of its graph. An `agent.leviath` from an earlier release is not read; the
+command says how to convert it with `lev blueprint migrate`, as `lev add`, `lev pack` and `lev run`
+do. With `--json`, each input carries its `key`, its `type`, the `regions` it fills, `region` (the
+first of them) and whether it is `required`:
 
-Beyond parsing and structural validation, it reports what the blueprint leaves unsaid. Findings come
-in three levels: an **error** exits non-zero, a **warning** does not, and a **note** never does.
+```
+$ lev validate ./release-notes
+✓ Blueprint 'release-notes' is valid.
+  2 stages, version 0.1.0
+  Inputs: --since (text, required, seeds region 'brief'), --audience (one of "users", "developers"), --max_items (an integer 1 to 50)
+  Note: this agent takes no --task; give it input via --since, --audience, --max_items
+  Entry stage: 'gather'
+  - gather → write
+  - write (terminal)
+  WARN stage 'write': no max_iterations, so the stage is unbounded unless your config sets [limits] default_max_iterations [stage-missing-max-iterations]
+       give the stage a max_iterations it should never reach
+  NOTE 1 region(s) run a shell command at spawn, before the first inference and before any tool-approval prompt: commits: git log --oneline -200 (pre-approved) [command-seed]
+       a refused seed needs its programs in the graph's safe_commands shell list; disable seeds entirely with `--no-seed-commands`, or machine-wide via `[security] allow_seed_commands = false`
+```
 
-Parsing itself refuses a few things outright, before any finding is reported: a negative count
-anywhere in the file (`max_items = -1`), an unknown key under `[sandbox]`, and an unknown key in a
-stage table. Each of those errors names the key.
+A blueprint that does not hold together fails with every problem at once, one per line with its
+path in the file:
 
-The blueprint's scripts are compiled too, exactly as a spawn would compile them. A custom region
-script, an output validator, or a stage hook script that is missing or will not load fails the
-command, since it would fail the run. And because a clean verdict against a config the daemon
-would grumble about is worth less than it looks, the command reads your `config.toml` on the way
-past. Keys nothing reads are named as warnings, usually a typo'd setting. A `[model_providers.*]`
-script entry whose `.rhai` file is not on disk is named along with the path that was looked for.
+```
+Error: ✗ Validation failed: ./release-notes/agent.toml has 2 problem(s):
+  graph.edges[0].to: dangling reference: no stage is named "wrtie". Known: gather, write
+  graph.inputs.since.binds[0].region: dangling reference: no region is named "brif". Known: brief, commits, conversation, notes
+```
+
+Every table refuses keys it does not know, so a misspelled key is a parse error that names it
+rather than a setting quietly ignored. See [the blueprint format](/docs/blueprint-format) for every
+key it checks.
+
+Every piece of code the blueprint names is compiled too, exactly as a spawn would compile it. A
+custom region script, an output validator, or a stage hook script that is missing or will not load
+fails the command, since it would fail the run. The agent's own `tools/*.rhai`, your global script
+tools and your script providers are compiled as well, and one that will not load is named as a
+warning.
+
+And because a clean verdict against a config the daemon would grumble about is worth less than it
+looks, the command reads your `config.toml` on the way past. Keys nothing reads are named as
+warnings, usually a typo'd setting. A `[model_providers.*]` script entry whose `.rhai` file is not
+on disk is named along with the path that was looked for. With a config that loads, the report
+also says which model each stage would run on here, and whether this machine meets the blueprint's
+declared dependencies.
+
+Beyond parsing and structural validation, `lev validate` lints the blueprint: it reports what the
+blueprint leaves unsaid. Findings come in three levels: an **error** exits non-zero, a **warning**
+does not, and a **note** never does. Each finding prints with its code in brackets.
 
 | Level | Code | What it means |
 |---|---|---|
-| error | `unknown-tool` | A name in `available_tools` matches nothing. See below |
-| error | `unparseable-safe-command` | A `[safe_commands] shell` entry no call can ever match. See below |
+| error | `unknown-tool` | A name in a stage's `tools` matches nothing. See below |
+| error | `unparseable-safe-command` | A `graph.safe_commands` shell entry no call can ever match. See below |
 | error | `output-missing-submit-tool` | A stage must produce an output and has no way to submit one. See below |
-| error | `orphan-stage-permission` | A `[stages.X.tool_permissions]` key names a tool the stage never granted. See below |
-| error | `required-tool-not-granted` | A `required_tools` entry no `available_tools` name or group reaches, so the model never sees it. See below |
+| error | `output-stage-cannot-answer` | An output stage whose models cannot call tools, with no file to hand back. See below |
+| error | `output-unreachable` | An output stage that no edge routes to, so the run can never produce one |
+| error | `orphan-stage-permission` | A stage's `tool_permissions` key names a tool the stage never granted. See below |
+| error | `required-tool-not-granted` | A `required_tools` entry no name or group in `tools` reaches. See below |
 | error | `unserved-model` | A stage names a model the provider that would run it does not carry. See below |
-| error | `fanout-worker-task-unheld` | A `fan_out` stage runs its workers on a stage that seeds no region from the task. See below |
+| error | `fanout-worker-task-unheld` | A `fan_out` stage runs workers on this graph, which binds no input to a region. See below |
 | error | `retention-not-zero` | `[providers] zero_retention` is on and the model this stage would start on keeps something. See below |
-| warning | `retention-fallback-dropped` | `[providers] zero_retention` is on and a fallback the stage lists keeps something, so failover skips it |
-| warning | `stage-missing-model` | No `[stages.X.model]` block, so the stage runs on whatever your `default_provider` is. |
-| warning | `stage-missing-mode` | No `mode`, so the stage runs as `autonomous`. |
-| warning | `stage-missing-max-iterations` | Unbounded unless `[limits] default_max_iterations` is set. Fan-out stages are exempt. |
-| warning | `agent-model-block-ignored` | A top-level `[model]` block. Nothing reads it; model selection is per stage. |
-| warning | `region-seed-not-understood` | A region's `seed` is not a recognized form, so the region starts empty. See below |
+| warning | `retention-fallback-dropped` | `[providers] zero_retention` is on and a listed fallback keeps something, so failover skips it |
+| warning | `stage-missing-model` | No `model`, so the stage runs on whatever your `default_provider` is |
+| warning | `stage-missing-max-iterations` | Unbounded unless `[limits] default_max_iterations` is set. Fan-out stages are exempt |
 | warning | `blocking-tool-in-autonomous-stage` | An autonomous stage grants a tool that waits for a person. See below |
 | warning | `implicit-shell-policy` | A shell grant with no policy behind it. See below |
-| warning | `blueprint-permission-clamped` | A `tool_permissions` entry that sets a granted tool more permissively than its built-in default. See below |
+| warning | `blueprint-permission-clamped` | A `tool_permissions` entry looser than the tool's built-in default. See below |
+| warning | `routing-without-region-read` | Tool output routed to a region, with `read_file` granted but not `context_read`. See below |
+| warning | `output-shape-not-required` | A stage declares an `output` shape but is not required to produce one |
+| warning | `output-stage-can-modify` | An output stage grants `write_file`, `edit_file`, or a group that holds them |
+| warning | `allow-complete-skips-output` | A stage with `allow_complete` may end the run before the output stage. See below |
 | warning | `unknown-model` | A model this build has not heard of. See below |
 | warning | `catalog-unchecked` | A script provider that will not say which models it serves. See below |
-| warning | `no-reachable-provider` | Nothing in the stage's models list can run here, so it falls through to your default model. See below |
+| warning | `no-reachable-provider` | Nothing in the stage's models list can run here. See below |
 | warning | `compact-summarizes-deliverable` | A `compact` edge would hand a `required` region to the summarizer. See below |
-| warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `[read_paths]` shape. |
+| warning | `required-region-unenforceable` | A `required` region no stage using it can write to. See below |
+| warning | `unbounded-percentage-budget` | An evicting region whose percentage budget is huge on the widest model named. See below |
+| warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `graph.read_paths` shape |
 | warning | `dead-end-possible` | Every route out of a stage can run out of budget. See below |
-| warning | `fanout-no-escape` | A `fan_out` stage with no `error` or `dead_end` edge: an unusable split degrades to an empty fan-out. See [sub-agents](/docs/sub-agents) |
-| warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. See below |
-| warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error, named here first. |
-| warning | `renamed-key-superseded` | A table sets both an old key and its current name, so the old line does nothing. See below |
+| warning | `fanout-no-escape` | A `fail_all` fan-out stage with no `error` or `dead_end` edge. See [sub-agents](/docs/sub-agents) |
+| warning | `read-paths-not-granted` | The blueprint declares `read_paths` your `config.toml` does not grant. See below |
+| warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error |
+| warning | `tool-accepts-ungranted` | A `tool_accepts` limit on a tool the stage does not grant, so it never applies |
+| warning | `mime-type-overrides-builtin` | A `graph.mime_types` row changes the family or text flag of a built-in type |
+| warning, note | `mime-unseen` | A stage takes mime types its models cannot read natively. See below |
 | note | `holds-under-yolo` | A checkpoint that still stops an unattended run for a person. See below |
 | note | `long-context-price` | A stage's context can grow past the size at which its model bills at a higher rate. See below |
-| note | `safe-commands-declared` | The blueprint declares `[safe_commands]`. Declaring is not granting. See below |
-| note | `renamed-key` | The blueprint uses an old spelling of a setting. Both are read; `lev update` offers to rewrite it. See below |
-| note | `command-seed`, `read-paths-declared` | Things worth knowing before you run the blueprint. See below |
+| note | `safe-commands-declared` | The blueprint declares `graph.safe_commands`. Declaring is not granting. See below |
+| note | `command-seed`, `tool-seed`, `read-paths-declared` | Things worth knowing before you run the blueprint. See below |
 
-Twenty-five of those findings need more than a phrase.
+Many of those findings need more than a phrase.
 
 **`unknown-tool`** means the name matches no built-in, no sub-agent tool, and no `tools/*.rhai`
 file. The stage then advertises one tool fewer, so the model is told a tool it was meant to have
@@ -299,59 +493,73 @@ ever match it. Write a program, optionally with the subcommand that narrows it: 
 **`output-missing-submit-tool`** means a stage sets `require_output` but never grants
 `submit_output`. Use `mode = "output"`, which grants the tool.
 
+**`output-stage-cannot-answer`** is about a stage whose every model cannot call tools, such as an
+image or 3D model, so `submit_output` is out of reach. Such a stage answers only through a file.
+Declare it under the stage's `output.artifacts` and route the model's part into a region with
+`output_routing`, or list a model that calls tools.
+
 **`orphan-stage-permission`** names a tool the stage never granted, by name or through a group. The
-key reads as a grant and is not one.
+key reads as a grant and is not one. A stage that grants a whole MCP server through `connectors` is
+not checked, since its tools are unknown until the server answers.
 
-**`required-tool-not-granted`** is only checked when a group is in play. Without one, the load
-itself refuses the manifest.
-
-**`fanout-worker-task-unheld`** fires when the worker stage is one of this blueprint's own and
-declares no region seeded from the task. Each worker is spawned with its work item as its task, so
-every one is refused and the merge stage works alone. Add a region with `seed = "task"`.
-
-**`retention-not-zero`** means the spawn would be refused. The message carries the provider's
-reason: a Bedrock model the listing never offers under mode `none`, an OpenRouter model with no
-zero-retention endpoint, a provider whose agreement is not declared. See
-[data retention](/docs/providers#data-retention).
-
-**`region-seed-not-understood`** is usually a typo in a table key. It is `{ caller = "task" }`, not
-`{ caller_input = "task" }`. An unrecognized seed is ignored, and the region starts empty.
-
-**`blocking-tool-in-autonomous-stage`** fires when an autonomous stage grants `ask_user_*`,
-`present_for_review` or `edit_document`. With nobody attached, the run parks there until it is
-killed. Set `allow_blocking_tools = true` on the stage to say you meant it. A stage granting
-`@builtin` or `@all` reaches all of them at once and gets one warning naming the group.
-
-**`implicit-shell-policy`** matters because the default is `ask`. An unattended run waits on that
-prompt rather than being denied. The shell arrives with `@builtin` as surely as by name, so a group
-grant with no `shell` policy is reported too.
-
-**`blueprint-permission-clamped`** is the other side of that. Setting `shell = "allow"` (or
-`write_file`, `edit_file`, `install_global_tool`) silences `implicit-shell-policy`. A downloaded blueprint
-is not allowed to grant itself write or shell access. The runtime clamps the policy back to the
-stricter of it and the built-in default, so the tool still asks. The line looks like a
-decision and is not one. Run the agent with `--yolo`, set `[security] allow_blueprint_permissions
-= true` in your own `config.toml`, or set the tool there yourself; otherwise drop the line. Tools a
-blueprint may pre-approve (`web_search`, `web_fetch`) are exempt, and a policy no looser than the
-default (`ask`, `deny`) is fine.
+**`required-tool-not-granted`** is only checked when a group is in play. Without one, a spawn
+refuses a required tool the stage does not grant.
 
 **`unserved-model`** is the one model finding that fails the command, because it is the one that can
 be proved. The provider is configured here, it published the full list of what it carries, and the
-model the stage names is not on it. That is a typo or a renamed model rather than anything about your
-machine, so a stage naming one is refused at spawn too. The message carries a few of the ids the
-provider does list; `lev models list --provider <name>` prints the rest.
+model the stage names is not on it. That is a typo or a renamed model rather than anything about
+your machine, so a stage naming one is refused at spawn too. The message carries a few of the ids
+the provider does list; `lev models list --provider <name>` prints the rest.
 
 A provider publishes its list either by answering `list_models` (a Rhai provider, or a gateway whose
 catalogue Leviath has read) or by having one written down under `[model_providers.<name>] serves`.
 The `serves` route needs no network and no key, which makes it the way to get a script provider
 checked in CI.
 
-**`catalog-unchecked`** is the same question with no answer. The script provider loaded, but it has
-neither a `list_models(state)` function nor a `serves` list. It has never said what it takes, so
-nothing here can tell a good model id from a bad one. It is a warning rather than an error because
-saying nothing is not a refusal. It exists so that "checked and fine" and "never checked" stop
-looking identical. Only script providers are named this way; a built-in that keeps quiet is either
-covered by `unknown-model` below or has a genuinely open catalog.
+**`fanout-worker-task-unheld`** fires when the workers run a stage of this same graph and the graph
+binds no input to a region. A work item's inputs then have nowhere to land, so every worker starts
+without its work and the merge stage works alone. Declare an input the split fills, such as
+`task`, and bind it with `binds = [{ region = "task" }]`.
+
+**`retention-not-zero`** means the spawn would be refused. The message carries the provider's
+reason: a Bedrock model the listing never offers under mode `none`, an OpenRouter model with no
+zero-retention endpoint, a provider whose agreement is not declared. See
+[data retention](/docs/providers#data-retention).
+
+**`blocking-tool-in-autonomous-stage`** fires when an autonomous stage grants `ask_user_*`,
+`present_for_review` or `edit_document`. With nobody attached, the run parks there until it is
+killed. List the tool in `required_tools`, or set `allow_blocking_tools = true` on the stage, to say
+you meant it. A stage granting `@builtin` or `@all` reaches all of them at once and gets one
+warning naming the group.
+
+**`implicit-shell-policy`** matters because the default is `ask`. An unattended run waits on that
+prompt rather than being denied. The shell arrives with `@builtin` as surely as by name, so a group
+grant with no `shell` policy is reported too. A policy in the graph's or the stage's
+`tool_permissions` silences it.
+
+**`blueprint-permission-clamped`** is the other side of that. Setting `shell = "allow"` (or
+`write_file`, `edit_file`, `install_global_tool`) silences `implicit-shell-policy`. A downloaded
+blueprint is not allowed to grant itself write or shell access. The runtime clamps the policy back
+to the stricter of it and the built-in default, so the tool still asks. The line looks like a
+decision and is not one. Run the agent with `--yolo`, set `[security] allow_blueprint_permissions
+= true` in your own `config.toml`, or set the tool there yourself; otherwise drop the line. Tools a
+blueprint may pre-approve (`web_search`, `web_fetch`) are exempt, and a policy no looser than the
+default (`ask`, `deny`) is fine.
+
+**`routing-without-region-read`** fires when a stage routes tool output into a region other than
+the conversation and grants a file-reading tool but not `context_read`. The model is told the
+output lives in that region, and its only read verb points at the filesystem. Grant `context_read`.
+
+**`allow-complete-skips-output`** means the model is offered a way to end the run from that stage,
+even when its own prompt never mentions it. A run that takes it ends with no answer and looks like
+success. Drop `allow_complete` and route to the output stage instead.
+
+**`catalog-unchecked`** is the `unserved-model` question with no answer. The script provider
+loaded, but it has neither a `list_models(state)` function nor a `serves` list. It has never said
+what it takes, so nothing here can tell a good model id from a bad one. It is a warning rather than
+an error because saying nothing is not a refusal. It exists so that "checked and fine" and "never
+checked" stop looking identical. Only script providers are named this way; a built-in that keeps
+quiet is either covered by `unknown-model` below or has a genuinely open catalog.
 
 **`unknown-model`** is the older, weaker check: the table of models compiled into this build, which
 covers Anthropic, OpenAI and Google. It is skipped for any provider that answered for itself, since
@@ -359,28 +567,37 @@ a live catalog knows about models released after this build was cut. A provider 
 publishes a catalog nor appears in that table is not checked at all, which is what keeps an open
 catalog (Ollama serves whatever you have pulled) from raising false alarms.
 
-**`no-reachable-provider`** means every entry in the stage's list names something this install cannot
-run: a pinned entry whose provider is not configured, or a bare model name nothing here serves. One
-entry that works is enough to keep the stage quiet, since the list is an ordered set of fallbacks and
-a machine declining some of the options is the normal case. This is also the check that catches a
-misspelled model in a stage that names only one: nothing serves `claude-sonet-5`, so the stage would
-have fallen through to your default model without saying so.
+**`no-reachable-provider`** means every entry in the stage's list names something this install
+cannot run: a pinned entry whose provider is not configured, or a bare model name nothing here
+serves. One entry that works is enough to keep the stage quiet, since the list is an ordered set of
+fallbacks and a machine declining some of the options is the normal case. This is also the check
+that catches a misspelled model in a stage that names only one: nothing serves `claude-sonet-5`,
+so the stage would have fallen back without saying so. It falls back to your `fallback_model`, if
+one is set.
 
 **`compact-summarizes-deliverable`** means a later stage reads a paraphrase of a region you marked
 `required`. Set `summarizable = false` on the region.
 
+**`required-region-unenforceable`** means `required = true` has no effect. A stage may not finish
+while a required region is empty, but only a stage that can write to it is held. When no stage
+using the region grants `context_write` or `context_append`, nothing is. Grant one of them to the
+stage that owes the region, or drop `required`. A region an input fills is exempt.
+
+**`unbounded-percentage-budget`** names a region that evicts at its bound, budgeted as a share of
+the window with no `max`. On the widest model the blueprint names, that share can be so large the
+region never evicts and only grows. Give the budget a cap: `budget = { percent = "38%", max = 24000 }`.
+
 **`dead-end-possible`** fires when every normal edge's target has a `max_revisits` budget, so the
-run errors once they are spent. Add a `condition = "dead_end"` edge to a stage without one. A
+run errors once they are spent. Add an edge with `when = "dead_end"` to a stage without one. A
 `max_iterations` edge does not count, because it fires on the iteration cap rather than on this
 path.
 
 **`read-paths-not-granted`** is the declaring-is-not-granting case. Those reads are refused at
 runtime, and the fix line carries the stanza that would grant them.
 
-**`renamed-key-superseded`** fires when a table sets a setting under both its old name and its
-current one, such as `[sandbox] persist = true` next to `keep_warm = true`. The parser reads the
-current name, so the old line is dead weight rather than a second, conflicting setting; the fix
-is to delete it.
+**`mime-unseen`** is a warning when a stage's models can read none of the mime types it takes, and
+a note when they read some of them. Either way, such parts reach the model as one-line stand-ins.
+List a model that takes the type, or name the type under the stage's `input_as_text`.
 
 **`holds-under-yolo`** names an interaction point declaring `unattended = "ask"`, or a blocking tool
 a stage keeps in `required_tools`. Both are deliberate wherever they appear. It is a note because
@@ -394,37 +611,39 @@ the cost matters. See [costs](/docs/costs#a-long-prompt-can-cost-more-per-token)
 `[agent_safe_commands.<name>] allow_blueprint`, or globally via
 `[security] allow_blueprint_safe_commands`.
 
-**`renamed-key`** names a key this build still reads under an older spelling, such as `persist`
-under `[sandbox]` or a custom region's `persistent`. Nothing about the run changes: both names are
-read the same way. `lev update` can rewrite the file for you, or you can rename the key by hand.
-
-**`command-seed`** and **`read-paths-declared`** say what the blueprint will do before you run it.
-`read-paths-declared` carries the granted and declared counts, plus each entry's status.
+**`command-seed`**, **`tool-seed`** and **`read-paths-declared`** say what the blueprint will do
+before you run it. The seeds run at spawn, before any approval prompt. `command-seed` says whether
+the default safe list covers each command, and `read-paths-declared` carries the granted and
+declared counts, plus each entry's status.
 
 | Flag | Purpose |
 |---|---|
 | `--deny-warnings` | Exit non-zero on warnings too. Notes still never fail. |
-| `--json` | Print the report as one JSON object with `valid`, `blueprint`, `error`, and `findings` |
+| `--json` | Print the report as one JSON object. See below |
 | `--graph` | Draw the stage graph after the report, as plain text. Ignored with `--json`. See below |
 | `--width <COLS>` | How many columns `--graph` may use (default 120). Only with `--graph`. See below |
+
+`--json` prints one object for every outcome: `valid`, `blueprint`, `error`, `findings`, and the
+`errors`, `warnings` and `notes` counts. `blueprint` holds the name, version, description, entry
+stage, stages, whether a `task` input is accepted, and every input. A blueprint that does not read
+or hold together fills `error` and leaves `blueprint` null.
 
 `--graph` draws the same picture the dashboard's stage explorer shows, escape edges included.
 `--width` sets how wide it may be, and a wider graph is shrunk to fit. `--width` on its own,
 without `--graph`, is refused.
 
-The same findings are written to `daemon.log` when a run spawns, so a blueprint that was never
-validated still says what is wrong with it. Nothing there refuses a spawn.
+The dashboard's blueprint editor and `POST /api/blueprints/validate` report the same findings, so
+a blueprint edited there is checked the same way.
 
-`[read_paths]` entries are checked against your own `config.toml`, entry by entry, because
+`graph.read_paths` entries are checked against your own `config.toml`, entry by entry, because
 declaring one is not the same as being allowed to read it. Anything your config does not grant is
-named as such, with the stanza that would grant it. The daemon's own lint has no user config to
-consult, so there it stays the plain "these need granting" note. See
-[reading outside the workdir](/docs/security#reading-outside-the-workdir).
+named as such, with the stanza that would grant it. Without a config to consult, it stays the plain
+"these need granting" note. See [reading outside the workdir](/docs/security#reading-outside-the-workdir).
 
 ### `lev deps <list|check|install> <agent>`
 
 Inspect and set up what an agent [declares it needs](/docs/agents#dependencies). The agent is an
-installed name or a path to a blueprint directory or manifest.
+installed name or a path to a blueprint directory or its `agent.toml`.
 
 `lev deps list <agent>` prints the declared dependencies: an MCP server, an environment variable, a
 program on PATH, or a condition a Rhai script decides.
@@ -467,9 +686,9 @@ max_tokens = 500
 | Key | Meaning |
 |---|---|
 | `name` | Case name. `--filter` matches on it |
-| `input` | Seeded as the task, exactly as `lev run "..."` would |
+| `input` | Given as the `task` input, exactly as `lev run -t "..."` would |
 | `expect_contains` | Case-insensitive substring the response must contain |
-| `expect_tool_call` | A tool the model must call. It has to be one the stage lists in `available_tools` |
+| `expect_tool_call` | A tool the model must call. It has to be one the stage lists in `tools` |
 | `max_tokens` | Caps this case's output. Narrows the ceiling the window and model already impose; it cannot raise it |
 
 **What a case actually runs.** One inference, not a run. `lev test` builds a fresh context
@@ -577,7 +796,7 @@ Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as 
 
 | Flag | Purpose |
 |---|---|
-| `--agent <NAME\|PATH>` | Blueprint to serve. Omitted, each session's working directory is searched for an `agent.leviath` |
+| `--agent <NAME\|PATH>` | Blueprint to serve. Omitted, each session's working directory is searched for an `agent.toml` |
 | `--yolo` | Approve every tool call without prompting. Recommended for hosts that do not implement `session/request_permission` |
 | `--allow <TOOL>` | Allow one tool outright. Repeatable |
 | `--max-depth <N>` | Override the maximum sub-agent tree depth |
@@ -595,8 +814,8 @@ Serve an agent over the [Agent Client Protocol](/docs/agent-client-protocol) as 
 | `lev pack [PATH]` | `-o`, `--output <FILE>` (default `{name}-{version}.leviath-bundle`) | Bundle a blueprint for [sharing](/docs/packaging) |
 
 `lev list --filter` narrows the listing to installed agents or to bundled blueprints. An
-unrecognized value is an error rather than a silent ignore. An agent declaring
-[`[read_paths]`](/docs/security#reading-outside-the-workdir) also shows how many of its entries your
+unrecognized value is an error rather than a silent ignore. A blueprint declaring
+[`read_paths`](/docs/security#reading-outside-the-workdir) also shows how many of its entries your
 config grants.
 
 ## Watching and steering
@@ -606,14 +825,21 @@ config grants.
 | `lev ps` | `--json`, `--all` | List runs in the daemon with their status. `--all` also reads the runs dir. See [below](#reading-lev-ps) |
 | `lev dash` | | Full-screen TUI [dashboard](/docs/dashboard) |
 | `lev msg <AGENT_ID> <CONTENT>` | `--attach` | Deliver a message into a running agent's context. `--attach` and a `@path` in the text send files with it |
-| `lev pause <RUN_ID>` | | Pause a run. It finishes its in-flight step, then holds |
-| `lev resume <RUN_ID>` | | Un-pause a run |
+| `lev pause <RUN_ID>` | | Pause a run. It finishes its in-flight step, then holds. See [below](#pausing-a-run) |
+| `lev resume <RUN_ID>` | | Un-pause a run, or bring back a cancelled one where it stopped |
 | `lev cancel <RUN_ID>` | `--force` | Cancel a run. Also aliased as `lev kill` |
 | `lev context <RUN_ID>` | `--json`, `--full` | Show a run's context-window history from its `run.lvr` archive |
 | `lev result <RUN_ID>` | `--json`, `--raw`, `--artifact`, `--out`, `--open` | Print what the agent handed back, or hand out the files it produced. See [below](#lev-result) |
 | `lev blobs <RUN_ID> [PART]` | `--json`, `--out`, `--open` | List the files a run holds as stored parts, or fetch one. See [below](#lev-blobs-run-id-part) |
 
 `lev msg --attach` and a `@path` in the message text take the same forms as on `lev run`.
+
+### Pausing a run
+
+A run waiting on a question, an approval or a checkpoint can be paused too. The question stays
+open, and you can still answer it. The run takes the answer and holds until `lev resume`, and
+keeps it across a daemon restart. A run waiting only on its own sub-agents pauses those sub-agents
+instead. Pausing a run that is already paused says so.
 
 `lev cancel --force` writes the run's on-disk state terminal without asking the daemon, for when
 the daemon is gone or unresponsive. Without it, the daemon is asked first, since it can stop the
@@ -626,8 +852,8 @@ stored parts beside its entries, and `--json` carries every part as it was recor
 
 ### `lev result`
 
-Print the answer a finished run submitted. It reads the run's `meta.json`, so it needs no daemon and
-works for a run that finished last week.
+Print the answer a finished run submitted. It reads the run's [file](/docs/run-file), so it needs
+no daemon and works for a run that finished last week.
 
 ```bash
 lev result agent-abc123          # the answer, with its run and stage
@@ -661,7 +887,7 @@ Only an agent that calls `submit_output` has an answer to show. See
 
 Every file a run holds as a stored part, whatever put it there: an attachment on `lev run`, a
 `read_file` on an image, an MCP server's audio block, a `context_attach`, a submitted artifact.
-Read from the run's `context.json` and its `blobs/` directory, so it needs no daemon.
+Read from the run's [file](/docs/run-file) and its `blobs/` directory, so it needs no daemon.
 
 ```bash
 lev blobs agent-abc123                       # name, type, size, shape, tokens, hash, and the regions holding each
@@ -677,9 +903,9 @@ fetched. A part with no name exports as its short hash plus the extension its ty
 
 ### `lev interactions [REQUEST_ID]`
 
-List the questions runs are waiting on. Name one to see it in full: the prompt, its options, the
-tool call's arguments, the document under review, and the `lev respond` line that answers it.
-Reading never answers anything.
+List the questions runs are waiting on, each with its options numbered from 1 and the
+`lev respond` line that answers it. Name one to see it in full, with the tool call's arguments and
+the document under review as well. Reading never answers anything.
 
 ```bash
 lev interactions                    # every open interaction
@@ -687,32 +913,75 @@ lev interactions probe-1789971553   # one, in full
 lev interactions --json             # the whole request for each, for a script
 ```
 
+```
+probe-1789971553-793b8652da33-approve-1  [tool-approval]  agent=probe-1789971553-793b8652da33  stage=work
+  Allow tool call: `shell` - `cargo test`?
+    [1] Allow once  (allow)
+    [2] Allow cargo test for this stage  (allow-stage)
+    [3] Allow cargo test for this run  (allow-run)
+    [4] Deny  (deny)
+    [5] Deny with feedback  (deny --feedback "TEXT")
+    tool: shell
+  answer with: lev respond probe-1789971553-793b8652da33-approve-1 allow|allow-stage|allow-run|deny|deny-feedback  (or 1-5; deny takes --feedback TEXT)
+```
+
+`--json` gives each request an `answer_options` list. Every option there has an `id` (the word
+that answers with it), its `label`, the `number` the listing shows, and `answer`, the whole
+`lev respond` command. An agent keeps the `id`: it does not move when the options are reordered.
+
 `REQUEST_ID` follows the same rules as on `lev respond` below.
 
-### `lev respond <REQUEST_ID> [VALUE]`
+### `lev respond <REQUEST_ID> [ANSWER]`
 
-Answer an interaction the daemon is holding. An answer can't be taken back, so the command needs
-exactly one of `VALUE`, `--choice`, `--approve` or `--deny`. With none it refuses and points at
-`lev interactions`.
+Answer an interaction the daemon is holding, with what the question shows. An answer can't be
+taken back, so the command needs exactly one of `ANSWER`, `--choice`, `--approve` or `--deny`.
+With none it refuses and points at `lev interactions`, and so does `lev respond` with no
+`REQUEST_ID`: `lev interactions` lists the open questions with their ids.
+
+| Question | `ANSWER` |
+|---|---|
+| Tool approval | `allow`, `allow-stage`, `allow-run` or `deny`. `deny` takes `--feedback` |
+| Confirm | `yes` or `no` |
+| Multiple choice | The option, or any start of it that names just one |
+| Free text or edit | The text itself, exactly as written |
+
+Words match in any case. The number `lev interactions` lists an option under answers with it too,
+so `lev respond <id> 2` picks the second option on the screen. Only a question with options reads
+a number that way: for a free-text question, `1` is the text "1".
+
+```bash
+lev respond probe-1789971553 allow-run      # allow, and every later call this covers, this run
+lev respond probe-1789971553 3              # the same, by its number
+lev respond probe-1789971553 deny --feedback "use git log, not git show"
+lev respond pick-1789971553 postgres        # a choice, by its start
+lev respond ask-1789971553 "ship it Friday" # a free-text answer
+```
 
 `REQUEST_ID` can be the start of an id rather than the whole thing, so a prompt is answered
 without copying forty-odd characters. It has to leave exactly one open interaction: a start
 that fits two is refused with both of them listed, and nothing is answered. An id given in
 full always answers that interaction, even where longer ids begin with it.
 
-The answer has to fit the question. Text answers a free-text or edit question, and `""` counts:
-it acknowledges a review or keeps a document unchanged. `--choice` has to name a listed option.
-`--approve` or `--deny` answers a confirm or a tool approval. Anything else is refused with the
-line that would answer it, and the question stays open.
+The answer has to fit the question. `""` is a text answer too: it acknowledges a review or keeps
+a document unchanged. A start of a choice that fits two options is refused with both named. A word
+the question does not offer is refused with every answer that would work, ready to copy, and the
+question stays open:
+
+```
+"maybe" is not an answer to this approval; answer allow, allow-stage, allow-run, deny or
+deny-feedback (or 1-5)
+```
+
+The flags below are the same answers in the older spelling, kept so existing scripts still work.
 
 | Flag | Purpose |
 |---|---|
-| `--choice <INDEX>` | Answer a multiple-choice interaction by zero-based option index |
-| `--approve` | Approve a tool-approval or confirm interaction. Conflicts with `--deny` |
-| `--deny` | Deny it |
-| `--feedback <TEXT>` | With `--deny`, what the model should do instead. An error with anything but `--deny` |
-| `--stage` | With `--approve`, allow what this call runs until the run leaves the current stage |
-| `--session` | With `--approve`, allow what this call runs for the rest of the run (alias `--run`) |
+| `--choice <INDEX>` | The scripting form: the option at this zero-based place in the listing, for any question with options. `--choice 0` is the option listed as 1 |
+| `--approve` | The same as `allow`, or `yes` on a confirm. Conflicts with `--deny` |
+| `--deny` | The same as `deny`, or `no` on a confirm |
+| `--feedback <TEXT>` | With a deny, however it is written, what the model should do instead. An error beside `--approve` |
+| `--stage` | With `--approve`, the same as `allow-stage` |
+| `--session` | With `--approve`, the same as `allow-run` (alias `--run`) |
 | `--attach <PATH[:REGION][:TYPE][:text|native|stand_in]>` | Attach a file to a text answer, as on `lev run --attach`. Repeatable. See below |
 
 The model reads `--feedback` text inside the refused call's tool result.
@@ -750,14 +1019,14 @@ done anything.
 calling tools, or held for its own fan-out workers and sub-agents. It stops for
 everything that is not the run's doing: paused, blocked on a person, parked until the
 machine is fixed, finished. This is the figure to call a run's duration. `AGE` counts the
-overnight pause, and this does not. It is written to disk as `active` in `meta.json`, and
-each stage keeps one of its own in `stages.json`.
+overnight pause, and this does not. The run's [file](/docs/run-file) keeps the clock, and each
+stage keeps one of its own.
 
 `MOVED` is how long since the run last actually moved: a new iteration, a new stage, or a
-change of status. It is deliberately not `meta.json`'s `updated_at`, which also advances
+change of status. It is deliberately not the run's `updated_at`, which also advances
 on a 30-second heartbeat so that observers can tell a live daemon from a dead one. A fresh
 `updated_at` is therefore not evidence of progress; a fresh `MOVED` is. The same figure is
-written to disk as `last_progress_at`, so a script can read it without the daemon.
+`last_progress_at` in `lev ps --json`.
 
 > [!NOTE]
 > `MOVED` was headed `AGE` before, and showed what `MOVED` shows now. If you have a script
@@ -792,7 +1061,7 @@ you are driving Leviath from a scheduler.
 | `paused` | Paused with `lev pause` |
 | `waiting` | Blocked. The reason follows the colon |
 | `complete` | Finished |
-| `cancelled` | Cancelled with `lev cancel` |
+| `cancelled` | Cancelled with `lev cancel`. `lev resume` brings it back |
 | `error` | Ended with the error shown |
 
 A `waiting` run always says what it is blocked on, because the answer decides whether you
@@ -834,11 +1103,11 @@ researcher whose answer is its report, has no file changes to be missing.
 #### The `READS` column
 
 This column only appears when one of the listed runs declares
-[`[read_paths]`](/docs/security#reading-outside-the-workdir). It reads granted over declared, as
+[`read_paths`](/docs/security#reading-outside-the-workdir). It reads granted over declared, as
 resolved when the run spawned.
 
 `0/2` is the one to watch for. That run is up and looks healthy, and every read its author designed
-it around will be refused. Run `lev validate <agent>` to see which entries, and the config block
+it around will be refused. Run `lev validate` on the blueprint's directory to see which entries, and the config block
 that grants them.
 
 ### Runs that have finished
@@ -859,7 +1128,7 @@ worker-1785616492-6f0d21ab4c11  error: HTTP 402 Payment Required    work   0    
 `ITER 0` and `TOOLS 0` next to an error mean the run never got as far as its first turn. Set
 `[limits] finished_retention_secs` to widen or narrow the window, or `0` to drop a run as soon
 as it finishes. The record is held in memory, so restarting the daemon clears it early; the
-durable copy is the run's `meta.json`, which `GET /api/agents` reads.
+durable copy is the run's file, `run.lvr`, which `lev ps --all` and `GET /api/runs` read.
 
 Two things this does not cover. A spawn that fails outright never becomes a run, so it is
 reported by `lev run` itself rather than here. And a run that finished longer ago than the
@@ -906,8 +1175,8 @@ Start the [REST and WebSocket API](/docs/api).
 | `--cors <ORIGIN>` | none | Allow browser requests from an origin. `*` is accepted and means any origin |
 | `--allow-admin` | off | Mount the MCP administration and config-write routes |
 | `--workdir-root <PATH>` | unset | Restrict agent working directories to this root |
-| `--no-remote-yolo` | off | Refuse `"yolo": true` and `"allow": [...]` on spawn requests |
-| `--no-remote-seed-commands` | off | Treat every spawn as `"no_seed_commands": true`, so command seeds never run for a run started over the API |
+| `--no-remote-yolo` | off | Refuse a spawn request whose `launch.unattended` is not `off`, or that sets `launch.allow` |
+| `--no-remote-seed-commands` | off | Treat every spawn as `launch.seed_commands = false`, so command seeds never run for a run started over the API |
 | `--max-concurrent-requests <N>` | `[serve]` key, else `64` | Requests in flight before the next is answered 503. `0` disables the cap. Websocket routes are not counted |
 | `--request-timeout-secs <SECS>` | `[serve]` key, else `30` | Seconds a request may take before it is answered 408. `0` disables the deadline. Websocket routes are not timed |
 | `--tls-cert <PATH>` | unset | PEM certificate chain. Serves HTTPS; needs `--tls-key` too |
@@ -1001,7 +1270,7 @@ Wrote report.zip (1.4 MiB, 6 secrets removed)
 |---|---|
 | `--about <setup\|run\|agent\|other>` | What the problem was about. Answers the first question on the screen |
 | `--run <RUN_ID>` | The run it happened in: an exact id, or a prefix only one run starts with. Implies `--about run` |
-| `--agent <PATH>` | The blueprint you were building: its directory or its `agent.leviath`. Implies `--about agent` |
+| `--agent <PATH>` | The blueprint you were building: its directory or its `agent.toml`. Implies `--about agent` |
 | `--note <TEXT>` | What happened, in your words. Lands at the top of the zip's README |
 | `-o`, `--output <PATH>` | Where to write the zip. Default: `./leviath-rage-<timestamp>.zip` |
 | `--no-blobs` | Leave a run's stored media parts out |
@@ -1208,8 +1477,7 @@ sessions.
 ### `lev update`
 
 Update Leviath, then offer to bring everything else up to date with it: the binary, the bundled
-blueprints, the renamed keys in the blueprints you wrote yourself, and the config file, in that
-order.
+blueprints, and the config file, in that order.
 
 The binary is updated with the installer that put it there, and which one that was is read off the
 filesystem rather than guessed from the version string. The version cannot answer: every
@@ -1218,8 +1486,8 @@ the tap manifests and not in the binary. Where the file sits does answer.
 
 | Found at | What it runs |
 |---|---|
-| A Homebrew Cellar path, or a Homebrew-only prefix | `brew upgrade <formula>` |
-| `scoop/apps/<package>` or a scoop shim | `scoop update <package>` |
+| A Homebrew Cellar path, or a Homebrew-only prefix | `brew update && brew upgrade <formula>` |
+| `scoop/apps/<package>` or a scoop shim | `scoop update && scoop update <package>` |
 | `~/.cargo/bin` | Nothing. It says to run `cargo install leviath-cli` |
 | `/usr/local/bin`, `/usr/bin`, `~/.local/bin`, `%LOCALAPPDATA%\Leviath\bin` | `curl -fsSL https://leviath.dev/install.sh \| sh -s -- --channel <CHANNEL>` |
 | Anywhere else | Nothing. It names the path and leaves the choice to you |
@@ -1238,7 +1506,7 @@ not something to start because somebody typed `lev update`.
 | `--json` | Print the plan as JSON and change nothing |
 | `--channel <stable\|beta\|alpha>` | The channel to re-install. Only the install-script method reads it |
 | `--dry-run` | Walk the whole flow, prompts and all, printing each action instead of doing it |
-| `--yes` | Answer yes to the binary upgrade, respelling renamed keys, and the config write. It does **not** install blueprints |
+| `--yes` | Answer yes to the binary upgrade and the config write. It does **not** install blueprints |
 | `--install-agents` | Install the bundled blueprints without asking |
 
 ```bash
@@ -1247,14 +1515,16 @@ $ lev update --check
 lev 0.3.5, installed with Homebrew (formula leviath-beta, beta channel)
 
   binary   brew update && brew upgrade leviath-beta
-  agents   1 of 7 would change
+  agents   1 of 11 would change
              data-analyst - update 0.0.1 → 0.0.2
-  keys     2 renamed key(s) in 1 of your own blueprint(s)
-             researcher - 2
   config   nothing to migrate
 ```
 
-All four steps run every time, whatever the binary step did. That is the point of the command.
+The package managers are told to refresh their index first, because neither sees a release
+published minutes ago until it has. When the update check says this copy is already the newest on
+its channel, the binary step is skipped and says so.
+
+All three steps run every time, whatever the binary step did. That is the point of the command.
 `brew upgrade` and `scoop update` hand you a new binary and say nothing about the blueprints in
 `~/.leviath/agents` or the config beside them. Anyone who has ever updated that way is running
 blueprints from whenever they last ran `lev setup`. A binary that needs no update is not evidence
@@ -1269,20 +1539,16 @@ A copy at the bundled version whose files differ from the bundled ones reads as 
 is named as edited, asked about on its own, and no flag covers it: installing removes the
 destination directory first and would take your edits, and any file you added, with it.
 
-The keys step is for a blueprint of your own, not one of the bundled ones: those are replaced
-wholesale by the step before it, so they need nothing. A setting like `[sandbox] persist` still
-loads exactly as it did, under a name this version would rather you wrote instead
-([`lev validate`](#lev-validate-path) flags the old spelling as `renamed-key`), and this step
-offers to respell every such line in the blueprints you installed yourself. It lists every old key
-it found, with what the setting actually does, and asks once for the whole set; `--yes` answers
-that question along with the binary and the config write. A table that already sets both names is
-left alone, since the old line there does nothing and that is `lev validate`'s to report, not this
-step's to guess at.
+Blueprints you wrote yourself are left alone. A blueprint is an `agent.toml`, which has no old
+spellings to rewrite: a key it does not know is an error that [`lev validate`](#lev-validate-path)
+names. A blueprint still written as an `agent.leviath` is converted with
+[`lev blueprint migrate`](#lev-blueprint-migrate-path).
 
-The config step applies any migration this build knows how to make, printing every change before it
-asks to write anything. A renamed top-level or `[sandbox]` key, such as the same `persist` becoming
-`keep_warm`, is one such migration; others fix a value whose default or meaning moved. Nothing to
-migrate means your file already says what this version reads.
+The config step applies any migration this build knows how to make to your `config.toml`, printing
+every change before it asks to write anything. A renamed key is one such migration, such as
+`default_model` becoming `fallback_model` or `[sandbox] persist` becoming `keep_warm`. Others fix a
+value whose default or meaning moved. Nothing to migrate means your file already says what this
+version reads.
 
 ### `lev tools`
 

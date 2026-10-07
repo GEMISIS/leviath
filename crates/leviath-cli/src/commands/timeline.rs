@@ -1,10 +1,10 @@
 //! `lev timeline <run-id>` - where a run's wall-clock time went.
 //!
 //! `lev stages` answers "what did each stage cost"; this answers "what was the
-//! run doing for an hour". Everything is read from the journal (`run.lvr`),
-//! which already timestamps every model call, tool batch, tool result and
-//! status change, so the split between model time, tool time and time spent
-//! waiting on children is exact rather than inferred.
+//! run doing for an hour". Everything is read from the run's file
+//! (`run.lvr`), whose every step is timestamped: each model call, each tool
+//! result and each change of status. So the split between model time, tool
+//! time and time spent waiting on children is exact rather than inferred.
 //!
 //! The one heuristic is the warning about repeated large replies. A reply cut
 //! off by the output cap and retried leaves a signature no other behaviour
@@ -14,8 +14,8 @@
 //! the command names it rather than leaving it in a column of numbers.
 
 use clap::Args;
-use leviath_core::run_archive::{InferenceKind, RunRecord};
 use leviath_core::run_meta::{RunMeta, RunStatus};
+use leviath_runtime::state::journal::CallKind;
 use serde::Serialize;
 
 /// Arguments for `lev timeline`.
@@ -104,7 +104,7 @@ pub(crate) struct Totals {
     /// Seconds parked: waiting on children, or on a person to answer a
     /// prompt (an approval, an `ask_user_*` tool, an interaction point).
     pub waiting: i64,
-    /// Whatever is left: scheduling, persistence, gaps between records.
+    /// Whatever is left: scheduling, persistence, gaps between steps.
     pub other: i64,
 }
 
@@ -161,38 +161,148 @@ pub(crate) async fn execute(args: TimelineArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read one run's metadata and journal and reduce them to a [`RunTimeline`].
-fn load(run_id: &str) -> anyhow::Result<RunTimeline> {
-    let meta = crate::runstate::read_meta(run_id)
-        .map_err(|e| anyhow::anyhow!("no readable meta.json for run '{run_id}': {e}"))?;
-    let records = crate::runstate::read_run_archive(run_id)
-        .ok_or_else(|| anyhow::anyhow!("no readable journal (run.lvr) for run '{run_id}'"))?;
-    Ok(analyze(&meta, &records))
+/// One thing the timeline reads off a run's steps.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Moment {
+    /// The run's status changed.
+    Status {
+        /// The status it changed to.
+        status: RunStatus,
+        /// Unix seconds.
+        at: i64,
+    },
+    /// A model call landed.
+    Call {
+        /// Which kind of call it was.
+        kind: CallKind,
+        /// The stage the run was in.
+        stage: String,
+        /// The stage-local iteration.
+        iteration: usize,
+        /// The model, as the run file names it.
+        model: String,
+        /// Prompt tokens billed.
+        prompt_tokens: usize,
+        /// Output tokens.
+        completion_tokens: usize,
+        /// Prompt tokens served from cache.
+        cached_tokens: usize,
+        /// Unix seconds.
+        at: i64,
+    },
+    /// A tool call finished.
+    ToolDone {
+        /// Unix seconds.
+        at: i64,
+    },
 }
 
-/// Reduce a run's journal to its timeline. Pure, so the shape is testable
+/// Read one run's record and steps and reduce them to a [`RunTimeline`]: from
+/// its run file.
+fn load(run_id: &str) -> anyhow::Result<RunTimeline> {
+    use std::borrow::Cow;
+    let dir = crate::runstate::run_dir(run_id);
+    // One read of the run file for both its record and its steps.
+    let (meta, moments) = crate::runstate::run_file::open_in(&dir)
+        .map_err(|e| Cow::Owned(e.to_string()))
+        .and_then(|reader| {
+            run_file_moments(&reader).ok_or(Cow::Borrowed("its steps do not decode"))
+        })
+        .map_err(|why| anyhow::anyhow!("no readable record for run '{run_id}': {why}"))?;
+    Ok(analyze(&meta, &moments))
+}
+
+/// A run file's steps as the moments [`analyze`] reads: each model call in
+/// the stage and iteration it was made in, each finished tool call, and each
+/// change of status. With them, the run's record as of its last step, read
+/// off the state the walk ends in rather than by decoding the file's last
+/// checkpoint a second time. `None` when a step does not decode.
+fn run_file_moments(
+    reader: &leviath_runtime::runfile::RunFileReader,
+) -> Option<(RunMeta, Vec<Moment>)> {
+    let start = reader.state_at(0).ok();
+    let deltas = reader.deltas(1, reader.last_seq()).ok();
+    start
+        .zip(deltas)
+        .map(|(state, deltas)| moments_of(reader.spec(), state, deltas))
+}
+
+/// The steps `deltas` took from `state`, the run's start, as moments, and the
+/// run's record where they end. A call carries its own kind, stage and
+/// iteration, so a title call is its own row and a call is placed where it
+/// was made, whatever step recorded it.
+fn moments_of(
+    spec: &leviath_runtime::spec::run_spec::RunSpec,
+    mut state: leviath_runtime::state::RunState,
+    deltas: Vec<leviath_runtime::state::StateDelta>,
+) -> (RunMeta, Vec<Moment>) {
+    use leviath_runtime::state::{Change, RunEvent};
+    let mut moments = Vec::new();
+    // When the run last moved: its last step, or when it was resolved for one
+    // that has taken none.
+    let mut updated_at = spec.created_at;
+    for delta in deltas {
+        delta.apply(&mut state);
+        updated_at = delta.at;
+        for event in &delta.events {
+            match event {
+                RunEvent::Inference {
+                    model,
+                    spend,
+                    kind,
+                    stage,
+                    iteration,
+                    ..
+                } => moments.push(Moment::Call {
+                    kind: *kind,
+                    stage: stage.as_ref().map(ToString::to_string).unwrap_or_default(),
+                    iteration: *iteration as usize,
+                    model: model.model.to_string(),
+                    prompt_tokens: spend.prompt_tokens as usize,
+                    completion_tokens: spend.completion_tokens as usize,
+                    cached_tokens: spend.cached_tokens as usize,
+                    at: delta.at,
+                }),
+                RunEvent::ToolFinished { .. } => moments.push(Moment::ToolDone { at: delta.at }),
+                _ => {}
+            }
+        }
+        if delta.changes.iter().any(|c| matches!(c, Change::Status(_))) {
+            moments.push(Moment::Status {
+                status: leviath_runtime::runfile::summary_of(spec, &state, delta.at).status,
+                at: delta.at,
+            });
+        }
+    }
+    let meta = leviath_runtime::runfile::summary_of(spec, &state, updated_at);
+    (meta, moments)
+}
+
+/// Reduce a run's steps to its timeline. Pure, so the shape is testable
 /// without a runs directory.
-pub(crate) fn analyze(meta: &RunMeta, records: &[RunRecord]) -> RunTimeline {
+pub(crate) fn analyze(meta: &RunMeta, moments: &[Moment]) -> RunTimeline {
     let mut calls = Vec::new();
     let mut totals = Totals {
         wall: (meta.updated_at - meta.started_at).max(0),
         ..Totals::default()
     };
     // `prev` is the last moment the run was known to be doing something else,
-    // so the next usage record's call is taken to have started there.
+    // so the next call is taken to have started there.
     let mut prev = meta.started_at;
     let mut waiting_since: Option<i64> = None;
-    for record in records {
-        match record {
-            RunRecord::StatusChanged { status, at } => {
+    for moment in moments {
+        match moment {
+            Moment::Status { status, at } => {
+                // Said again while already waiting, the wait still began the
+                // first time.
                 if matches!(status, RunStatus::WaitingInput) {
-                    waiting_since = Some(*at);
+                    waiting_since.get_or_insert(*at);
                 } else if let Some(since) = waiting_since.take() {
                     totals.waiting += (*at - since).max(0);
                     prev = *at;
                 }
             }
-            RunRecord::InferenceUsage {
+            Moment::Call {
                 kind,
                 stage,
                 iteration,
@@ -201,11 +311,10 @@ pub(crate) fn analyze(meta: &RunMeta, records: &[RunRecord]) -> RunTimeline {
                 completion_tokens,
                 cached_tokens,
                 at,
-                ..
             } => {
-                // A usage record while parked is a child's doing, journaled
-                // through the parent (the title call is the usual one); it is
-                // not this run's time.
+                // A call while parked is a child's doing, recorded through the
+                // parent (the title call is the usual one); it is not this
+                // run's time.
                 if waiting_since.is_none() {
                     let span = CallSpan {
                         stage: stage.clone(),
@@ -223,11 +332,14 @@ pub(crate) fn analyze(meta: &RunMeta, records: &[RunRecord]) -> RunTimeline {
                 }
                 prev = *at;
             }
-            RunRecord::ToolCallDone { at, .. } => {
-                totals.tools += (*at - prev).max(0);
+            // A tool that ends while the run is parked was in flight when the
+            // wait began (the approval it asked for, the children it
+            // started): its time runs up to the wait, which is waiting.
+            Moment::ToolDone { at } => {
+                let until = waiting_since.map_or(*at, |since| since.min(*at));
+                totals.tools += (until - prev).max(0);
                 prev = *at;
             }
-            _ => {}
         }
     }
     totals.other = (totals.wall - totals.inference - totals.tools - totals.waiting).max(0);
@@ -280,7 +392,7 @@ fn summarize_stages(calls: &[CallSpan]) -> Vec<StageSummary> {
 fn repeated_large_replies(calls: &[CallSpan]) -> Vec<String> {
     let stage_calls: Vec<&CallSpan> = calls
         .iter()
-        .filter(|c| c.kind == InferenceKind::Stage.label())
+        .filter(|c| c.kind == CallKind::Stage.label())
         .collect();
     let mut warnings = Vec::new();
     let mut i = 0;

@@ -6,21 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Whether a tool call should execute automatically or require user approval.
-///
-/// The effective policy for a tool is resolved by narrowest scope first:
-/// launch-flag > stage > agent > global config > built-in default.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolPolicy {
-    /// Execute without prompting.
-    Allow,
-    /// Ask the user before each call (or once per session with `allow_session`).
-    #[default]
-    Ask,
-    /// Never execute - return a denied error to the model.
-    Deny,
-}
+// The run graph names tool policies too, so the enum lives in core.
+pub use leviath_core::policy::ToolPolicy;
 
 // `TitleConfig` (plain data used by the engine's title generation) lives in
 // `leviath_core::config` so `leviath-runtime` can reference it without a CLI
@@ -36,10 +23,10 @@ pub(crate) use leviath_core::config::TelemetryExporterKind;
 /// Permission for one Rhai *script-tool* host function (Layer 3 of the
 /// four-layer permission model). Gates what a registered script may *do*,
 /// independent of
-/// whether the tool itself is visible ([`available_tools`]) or approved at
+/// whether the tool itself is visible ([`tools`]) or approved at
 /// runtime ([`ToolPolicy`]).
 ///
-/// [`available_tools`]: leviath_core::blueprint::Stage::available_tools
+/// [`tools`]: leviath_runtime::spec::graph::StageDef::tools
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptPermission {

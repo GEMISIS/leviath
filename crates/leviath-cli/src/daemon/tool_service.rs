@@ -1,13 +1,16 @@
-//! The real [`ToolService`] for the shared world: bridges an agent's tool calls
-//! to the built-in and MCP executors, applying the same policy / approval /
-//! interaction flow the imperative worker used - but with interactions routed
-//! through the in-memory [`leviath_runtime::interaction_hub`] instead of file
-//! polling.
+//! The real [`ToolService`] for the shared world: how an agent's tool calls are
+//! judged, and the built-in, MCP and script executors that run them.
 //!
-//! The pipeline already applies `context_*` tools inline (they need ECS-window
-//! access), so those never reach here. Every other call is resolved against the
-//! agent's policy layers and executed; `ask_user_*` / `present_for_review` are
-//! handled by [`dispatch_dynamic_interaction`]. File-tracking result rewriting is
+//! The judging happens in the world. The pipeline asks [`decide_call`] about
+//! each call before its batch runs, handing it what the run has been granted
+//! and what it has written (components on the run); the verdict is run it,
+//! refuse it, ask a person (which the world does on its approval lane), or put
+//! the model's question to a person. The task that runs the batch
+//! ([`run_decided`]) only carries those verdicts out: it runs what was allowed,
+//! asks the questions through [`dispatch_dynamic_interaction_with_parts`], and
+//! reports the refusals. The pipeline already applies `context_*` tools inline
+//! (they need ECS-window access), so those never reach here. File-tracking
+//! result rewriting is
 //! deliberately *not* done here: this executor is ECS-free (no context window),
 //! so the shared world's `collect_tools` applies the agent's `file_tracking`
 //! config to these results downstream - where the window is available - via the
@@ -20,14 +23,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 
 use bevy_ecs::entity::Entity;
-use leviath_core::interaction::{ApprovalScope, InteractionRequest};
+
 use leviath_core::region::EntryContent;
 use leviath_providers::ToolCall;
 use leviath_runtime::dynamic_interaction::{
     InteractionBackend, UnattendedInteraction, dispatch_dynamic_interaction_with_parts,
 };
 use leviath_runtime::interaction_hub::HubInteractionBackend;
-use leviath_runtime::pipeline::{ToolProgress, ToolService};
+use leviath_runtime::pipeline::{
+    DecideCtx, DecidedCall, Decision, ToolProgress, ToolService, ToolVerdict,
+};
 
 use crate::config::Config;
 use leviath_runtime::tool_bridge::BoxedToolExec;
@@ -40,10 +45,13 @@ use crate::tools::resolve_policy;
 use super::tool_content::{Attached, with_attached};
 use super::tool_content::{answer_content, mcp_content};
 
-/// Everything one agent needs to execute a tool call: the executors, its policy
-/// layers, and its interaction backend. All fields are cheap `Arc`s so a clone is
-/// moved into each `exec_for` closure. The stage-scoped fields
-/// One run's write ceilings and what it has spent of them.
+/// One run's write ceilings, and the meter its executors count writes on.
+///
+/// What the run has written is the world's to keep (its `WriteLedger`): the
+/// meter is set from it when a batch starts, counts what the batch's calls
+/// write, and is read back into it when the batch lands. Seeds that run before
+/// the run is in the world count on it the same way, and their total is the
+/// ledger's first value.
 ///
 /// The count is what a *tool call reported writing*, which for a shell redirect
 /// is the target's size measured after the call. That is an approximation in
@@ -94,7 +102,8 @@ impl WriteBudget {
         *self.limits.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Whether a write of `bytes` into `workdir` may proceed.
+    /// Whether a write of `bytes` into `workdir` may proceed, against what
+    /// this meter has counted.
     ///
     /// Does not record anything: a refused write must not spend the budget it
     /// was refused by, or one oversized call would exhaust the run.
@@ -103,9 +112,20 @@ impl WriteBudget {
         workdir: &std::path::Path,
         bytes: u64,
     ) -> leviath_core::write_limits::WriteVerdict {
+        self.check_at(workdir, self.written(), bytes)
+    }
+
+    /// Whether a write of `bytes` into `workdir` may proceed for a run that
+    /// has written `written` so far: the world's count, when it decides a call.
+    pub(crate) fn check_at(
+        &self,
+        workdir: &std::path::Path,
+        written: u64,
+        bytes: u64,
+    ) -> leviath_core::write_limits::WriteVerdict {
         leviath_core::write_limits::check_write(
             self.limits(),
-            self.written.load(std::sync::atomic::Ordering::Relaxed),
+            written,
             bytes,
             (self.available)(workdir),
         )
@@ -117,25 +137,29 @@ impl WriteBudget {
             .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// What this run has written so far.
-    #[cfg(test)]
+    /// Start counting from `written`: the run's total as the world holds it,
+    /// when a batch begins.
+    pub(crate) fn reset_to(&self, written: u64) {
+        self.written
+            .store(written, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// What this meter has counted.
     pub(crate) fn written(&self) -> u64 {
         self.written.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
-/// Everything one agent needs to execute a tool call: the executors, its policy
-/// layers, and its interaction backend. All fields are cheap `Arc`s so a clone
-/// is moved into each `exec_for` closure. The stage-scoped fields
-/// (`stage_perms`/`stage_name`) are shared handles the host updates as the agent
-/// changes stage.
+/// Everything one agent's calls are judged by and run with: the executors, its
+/// policy layers, and its interaction backend. All fields are cheap `Arc`s so a
+/// clone is moved into each batch's closure. The stage-scoped fields used while
+/// a batch runs (`stage_tool_accepts`/`stage_name`) are shared handles the
+/// host updates as the agent changes stage; judging reads the stage the world
+/// says the run is in.
 #[derive(Clone)]
 pub(crate) struct AgentToolState {
-    /// The write ceilings in effect, and what this run has spent of them.
-    ///
-    /// Shared rather than copied because the running total has to survive
-    /// across every batch this run makes - a per-run budget that reset per
-    /// batch would bound nothing.
+    /// The write ceilings in effect, and the meter this run's executors count
+    /// writes on (see [`WriteBudget`]).
     pub writes: Arc<WriteBudget>,
     /// Built-in tool executor (holds the agent's workdir).
     pub builtins: Arc<leviath_tools::BuiltinTools>,
@@ -154,33 +178,11 @@ pub(crate) struct AgentToolState {
     /// naming `cat` covers `cat notes.md`, because otherwise it would cover
     /// nothing anybody runs. See [`crate::shell_keys::program_of`].
     pub safe_keys: Arc<Live<HashSet<String>>>,
-    /// Grant keys the user allowed for the rest of the run.
-    pub run_allows: Arc<Mutex<HashSet<String>>>,
-    /// Grant keys the user allowed for the current stage only, cleared by
-    /// `sync_stage` when the run moves to a different stage.
-    ///
-    /// A `std` mutex rather than the async one `run_allows` uses, because
-    /// `sync_stage` is synchronous and clearing a grant must happen on the same
-    /// tick the stage changes. Every read here is a `contains` with no `await`
-    /// held, so the two lock kinds never contend for longer than a lookup.
-    pub stage_allows: Arc<StdMutex<HashSet<String>>>,
-    /// The stage index `stage_allows` was granted under, so re-entering the
-    /// same stage (a `plan -> plan` revision loop) keeps its grants while
-    /// moving on drops them.
-    pub stage_allows_index: Arc<StdMutex<Option<usize>>>,
-    /// The current stage's `tool_permissions` - re-synced by `sync_stage` on each
-    /// stage change (a `std` mutex so the sync system can update it synchronously).
-    pub stage_perms: Arc<StdMutex<HashMap<String, String>>>,
-    /// Every stage's `tool_permissions`, indexed by stage index; `sync_stage`
-    /// copies the entered stage's map into `stage_perms`.
+    /// Every stage's `tool_permissions`, indexed by stage index.
     pub stage_perms_by_index: Arc<Vec<HashMap<String, String>>>,
-    /// The current stage's `required_tools` - the human-in-the-loop tools it
-    /// keeps through an unattended run. Re-synced by `sync_stage`, and read on
-    /// every interaction so a kept tool reaches a real person instead of
-    /// [`UnattendedInteraction`]. Empty for an attended run, where nothing is
-    /// dropped and nothing needs keeping.
-    pub stage_required: Arc<StdMutex<HashSet<String>>>,
-    /// Every stage's `required_tools`, indexed by stage index.
+    /// Every stage's `required_tools` - the human-in-the-loop tools a stage
+    /// keeps through an unattended run, so a kept tool reaches a real person
+    /// instead of [`UnattendedInteraction`] - indexed by stage index.
     pub stage_required_by_index: Arc<Vec<HashSet<String>>>,
     /// What each tool may be handed at the current stage (`tool_accepts`),
     /// by canonical tool name; a tool absent here has no limit.
@@ -282,16 +284,16 @@ impl<T> Live<T> {
 pub(crate) struct ConfigSource {
     /// The blueprint's name, which the per-agent config tables are keyed by.
     pub agent_name: String,
-    /// The blueprint's `[safe_commands]`, when it declares any.
-    pub blueprint_safe: Option<leviath_core::blueprint::SafeCommandsConfig>,
-    /// The blueprint's `[read_paths]`, when it declares any.
-    pub blueprint_read_paths: Option<leviath_core::blueprint::ReadPathsConfig>,
+    /// The graph's `safe_commands`, when it declares any.
+    pub blueprint_safe: Option<leviath_runtime::spec::graph::SafeCommandsDef>,
+    /// The graph's `read_paths`, empty when it declares none.
+    pub blueprint_read_paths: Vec<String>,
     /// The run's workdir, which read-path entries compile relative to.
     pub workdir: std::path::PathBuf,
-    /// The yolo profile the run was launched under by name, so a resume reads
-    /// the current `yolo.toml` for it. `None` for an attended run and for the
-    /// bare flag, which reads no file.
-    pub yolo_profile: Option<String>,
+    /// The run's unattended setting. A named profile is read again from the
+    /// current `yolo.toml` on resume; an attended run and the bare flag read
+    /// no file.
+    pub launched: leviath_core::Unattended,
 }
 
 /// A minimal [`AgentToolState`] over `workdir`, for the daemon-level test of
@@ -305,41 +307,6 @@ pub(crate) fn test_state_for_resume(workdir: &std::path::Path) -> Arc<AgentToolS
         WriteBudget::new(Default::default()),
         HashMap::new(),
     )
-}
-
-/// The tool result for an approval prompt that resolved with no answer: the
-/// prompt was cancelled, or a configured `[limits] interaction_timeout_secs`
-/// ran out. The timeout is named only when there is one; with none set a
-/// prompt cannot expire, and blaming a timeout would send the operator looking
-/// for a setting that does not exist in their config.
-fn unanswered_approval_result(tool: &str, timeout_secs: Option<u64>) -> String {
-    match timeout_secs {
-        Some(secs) => format!(
-            "[denied] no one answered the approval prompt for '{tool}' before the \
-             interaction timeout ({secs} s, `[limits] interaction_timeout_secs`); \
-             the call did not run. Answer prompts in `lev dash`, raise the \
-             timeout, or set this tool to \"allow\" for the stage."
-        ),
-        None => format!(
-            "[denied] the approval prompt for '{tool}' was closed without an answer; \
-             the call did not run. Answer prompts in `lev dash`, or set this tool \
-             to \"allow\" for the stage."
-        ),
-    }
-}
-
-/// The tool result a declined approval hands the model.
-///
-/// Without feedback it is the exact sentence it has always been (tests and
-/// docs quote it). With feedback the person's words follow a `Feedback:`
-/// marker on the same line, so the model reads the redirect as part of the
-/// refusal rather than as a stray user message somewhere later in the
-/// context.
-fn declined_result(tool: &str, feedback: Option<&str>) -> String {
-    match feedback {
-        Some(text) => format!("[denied] User declined tool call '{tool}'. Feedback: {text}"),
-        None => format!("[denied] User declined tool call '{tool}'."),
-    }
 }
 
 impl AgentToolState {
@@ -386,7 +353,7 @@ impl AgentToolState {
         // edit to get unstuck. A set that will not compile is left alone.
         if let Some(policy) = crate::daemon::spawn::read_path_policy_for(
             &source.agent_name,
-            source.blueprint_read_paths.as_ref(),
+            &source.blueprint_read_paths,
             config,
             &source.workdir,
         ) {
@@ -397,8 +364,8 @@ impl AgentToolState {
         // run resumed with: dropping them would not be safer, it would be
         // whichever of "prompt for everything" and "refuse everything" the
         // code happened to fall into, and neither is what the person asked.
-        if let Some(name) = &source.yolo_profile {
-            match crate::yolo::resolve_for_spawn(true, Some(name)) {
+        if let Some(name) = source.launched.profile() {
+            match crate::yolo::resolve_for_spawn(&source.launched) {
                 Ok(profile) => self.yolo.set(profile),
                 Err(error) => {
                     let error = error.to_string();
@@ -410,50 +377,6 @@ impl AgentToolState {
                     );
                 }
             }
-        }
-    }
-
-    /// Whether every key this call needs is already covered, by the safe list or
-    /// by a grant.
-    ///
-    /// All of them, not any: one uncovered program is enough to ask, and that is
-    /// what stops a safe `ls` or a granted `ls` covering `ls && curl evil`. A
-    /// call with no reusable key is never covered, so it prompts every time.
-    async fn covers(&self, keys: &[String]) -> bool {
-        let staged = self
-            .stage_allows
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let run = self.run_allows.lock().await;
-        let safe = self.safe_keys.get();
-        crate::shell_keys::all_covered(keys, &|k| safe.contains(k), &|k| {
-            staged.contains(k) || run.contains(k)
-        })
-    }
-
-    /// Record the keys a user just approved at the scope they chose.
-    ///
-    /// `Once` and a missing scope record nothing, and neither does an empty key
-    /// list: a call this cannot characterize is one a later call must not
-    /// inherit.
-    async fn remember(&self, scope: Option<ApprovalScope>, keys: &[String]) {
-        if keys.is_empty() {
-            return;
-        }
-        match scope {
-            Some(ApprovalScope::Stage) => {
-                let mut staged = self
-                    .stage_allows
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                staged.extend(keys.iter().cloned());
-            }
-            Some(ApprovalScope::Run) => {
-                let mut run = self.run_allows.lock().await;
-                run.extend(keys.iter().cloned());
-            }
-            Some(ApprovalScope::Once) | None => {}
         }
     }
 }
@@ -639,272 +562,234 @@ fn script_tool_join_failed(e: tokio::task::JoinError) -> EntryContent {
     format!("[error] script tool panicked: {e}").into()
 }
 
-/// Charge the run for a write the call declares, the moment it is queued.
+/// The containment a call is held to whatever its permissions say: a redirect
+/// leaving the workdir is a write `write_file` would refuse, so the shell does
+/// not get to be the spelling that works; the files that decide what agents
+/// may do are not a run's to change; and a full disk, or a run past its write
+/// ceiling (`written` is what it has written so far), is not a permission
+/// question, so no `--yolo` gets to fill one. Checked before policy, because
+/// no policy makes any of it allowed.
+fn fence(state: &AgentToolState, tc: &ToolCall, written: u64) -> Option<String> {
+    let workdir = state.builtins.workdir();
+    crate::tools::escaping_write_refusal(&tc.name, &tc.arguments, workdir)
+        .or_else(|| {
+            crate::tools::protected_path_refusal(
+                &tc.name,
+                &tc.arguments,
+                workdir,
+                crate::yolo::home().as_deref(),
+                &state.protected.get(),
+            )
+        })
+        .or_else(|| {
+            crate::tools::write_budget_refusal(
+                &tc.name,
+                &tc.arguments,
+                workdir,
+                &state.writes,
+                written,
+            )
+        })
+}
+
+/// Judge one call for the world: run it, refuse it, ask a person to approve
+/// it, or put the question it asks to a person.
 ///
-/// Charged here, not after it runs: every call in a batch is authorized
-/// before any of them execute, so a budget charged only on completion would
-/// let all of them check against a total none had spent, and two 8-byte
-/// writes would both pass a 10-byte run budget. And charged only here, on
-/// the two paths that queue the call: a write refused by containment, by the
-/// budget itself, by policy, or by the user at the prompt never reaches the
-/// disk, and charging it anyway would make a denied 8-byte write fail the next
-/// allowed one on a limit it had never spent.
-fn charge_declared(state: &AgentToolState, tc: &ToolCall) {
-    if let Some(declared) = crate::tools::declared_write_bytes(&tc.name, &tc.arguments) {
-        state.writes.record(declared);
+/// `ctx` carries what the world holds about the run: the grants a person made
+/// and what it has written, which a write's charge is judged against and added
+/// to. Policy is resolved first and unconditionally: short-circuiting to allow
+/// on a grant would let a grant made in one stage survive into a later stage
+/// that denies the tool, and "a configured deny is terminal" has to hold
+/// across a stage boundary. A grant only ever collapses `ask` into `allow`.
+pub(crate) fn decide_call(
+    state: &AgentToolState,
+    tc: &ToolCall,
+    ctx: &DecideCtx<'_>,
+) -> ToolVerdict {
+    // ask_user_* / present_for_review are questions. A tool the stage kept in
+    // `required_tools` goes to a person even in an unattended run: keeping it
+    // was the blueprint saying this stage needs one.
+    if leviath_runtime::dynamic_interaction::BLOCKING_INTERACTION_TOOLS.contains(&tc.name.as_str())
+    {
+        let kept = state
+            .stage_required_by_index
+            .get(ctx.stage_index)
+            .is_some_and(|r| r.contains(leviath_tools::canonical_tool_name(&tc.name)));
+        return ToolVerdict::Interact {
+            attended: !state.unattended || kept,
+        };
+    }
+    if let Some(refusal) = fence(state, tc, ctx.written) {
+        return ToolVerdict::Refuse(refusal);
+    }
+    let is_builtin = state.builtin_names.contains(&tc.name);
+    // What a scoped approval for *this specific call* would be remembered
+    // under. For a shell call that is one key per command in the line, not the
+    // bare tool name - see `session_approval_keys`.
+    let approval_keys = crate::tools::session_approval_keys(&tc.name, &tc.arguments);
+    let no_stage_perms = HashMap::new();
+    let stage_perms = state
+        .stage_perms_by_index
+        .get(ctx.stage_index)
+        .unwrap_or(&no_stage_perms);
+    let global = state.global_perms.get();
+    let resolve = |tool: &str, builtin: bool| {
+        resolve_policy(
+            tool,
+            builtin,
+            &state.launch_overrides,
+            stage_perms,
+            &state.agent_perms,
+            &global,
+            state.blueprint_may_loosen(),
+        )
+    };
+    let policy = resolve(&tc.name, is_builtin);
+    // A shell redirect writes a file, and no tool name says so. Clamping by
+    // the write tool's own policy is what stops `echo x > f` being a spelling
+    // of `write_file` that a `write_file = "deny"` never sees.
+    let policy = crate::tools::clamp_by_effect(&tc.name, &tc.arguments, policy, &|| {
+        resolve("write_file", true)
+    });
+    // A spawn that carries a graph the model wrote answers to
+    // `spawn_raw_graph` as well, the same layers resolving it.
+    let policy = crate::tools::clamp_raw_graph(&tc.name, &tc.arguments, policy, &|| {
+        resolve(leviath_tools::SPAWN_RAW_GRAPH_PERMISSION, false)
+    });
+    // The yolo profile, when this is a yolo run. It sees the policy the config
+    // layers settled on and says what runs unprompted, what still asks, and
+    // what is refused; it never lifts a configured deny.
+    let configured = policy;
+    let decision = {
+        let profile = state.yolo.get();
+        let is_script = state
+            .script_tool_names
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&tc.name);
+        crate::yolo::decide_under(
+            profile.as_ref().as_deref(),
+            &tc.name,
+            &tc.arguments,
+            configured,
+            crate::tools::launch_allows(&state.launch_overrides, &tc.name),
+            crate::yolo::ToolKind::classify(&tc.name, is_builtin, is_script),
+            state.builtins.workdir(),
+        )
+    };
+    let policy = decision.as_ref().map_or(configured, |d| d.policy);
+    // Covered when every key the call needs is on the safe list or granted.
+    // All of them, not any: one uncovered program is enough to ask, and that is
+    // what stops a safe `ls` or a granted `ls` covering `ls && curl evil`.
+    let safe = state.safe_keys.get();
+    let covered = || {
+        crate::shell_keys::all_covered(&approval_keys, &|k| safe.contains(k), &|k| {
+            ctx.grants.granted(k)
+        })
+    };
+    let policy = match policy {
+        ToolPolicy::Ask if covered() => ToolPolicy::Allow,
+        other => other,
+    };
+    // Charged when the call is allowed, not after it runs: every call in a
+    // batch is decided before any of them execute, so a budget charged only
+    // on completion would let two 8-byte writes both pass a 10-byte budget. A
+    // write refused by containment, by the budget, by policy or by the person
+    // never reaches the disk and is never charged.
+    let charge = crate::tools::declared_write_bytes(&tc.name, &tc.arguments).unwrap_or(0);
+    match policy {
+        // A deny the profile added names the rule, and the file it lives in:
+        // `[tool_permissions]` is not where this one is lifted.
+        ToolPolicy::Deny if configured != ToolPolicy::Deny => {
+            let reason = decision.map(|d| d.reason).unwrap_or_default();
+            ToolVerdict::Refuse(format!(
+                "[denied] Tool '{}' is refused by this run's yolo profile ({reason}). Edit                  the profile in yolo.toml and resume this run (`lev resume`); the run                  re-reads it and does not need restarting.",
+                tc.name
+            ))
+        }
+        // Says what actually lifts it. The run re-reads its permissions when it
+        // resumes, so the message names an edit plus a resume rather than a
+        // cancel and a fresh run.
+        ToolPolicy::Deny => ToolVerdict::Refuse(format!(
+            "[denied] Tool '{}' is not permitted. To allow it, set it to \"allow\" or \
+             \"ask\" under [tool_permissions] in config.toml and resume this run \
+             (`lev resume`); the run re-reads them and does not need restarting.",
+            tc.name
+        )),
+        ToolPolicy::Ask => ToolVerdict::Ask {
+            keys: approval_keys,
+            charge,
+        },
+        ToolPolicy::Allow => ToolVerdict::Run { charge },
     }
 }
 
-/// Resolve policy, handle approvals / dynamic interactions, and execute a batch
-/// of tool calls, returning `(tool_call_id, result)` pairs in call order.
+/// Run a batch the world has decided, returning `(tool_call_id, result)` pairs
+/// in call order. `written` is the run's write total as the batch starts.
 ///
-/// Two passes so tool calls within one batch run in parallel where it is safe:
-/// 1. **Sequential resolution** - dynamic interactions (`ask_user_*`), sub-agent
-///    tools, and `ask` approval prompts are inherently interactive and are
-///    resolved one at a time, in order (a user answers one prompt at a time, and
-///    a `Session`-scope approval must be visible to later calls in the batch).
-///    Each call ends up either fully resolved or queued for execution.
-/// 2. **Parallel execution** - every queued call runs concurrently (`join_all`),
-///    then results are stitched back into the original call order.
+/// Two passes, so the calls that can run together do:
+/// 1. **In order** - the questions the model put to a person are asked one at
+///    a time (a person answers one prompt at a time), and the refusals are
+///    reported. Each is a resolved result.
+/// 2. **Together** - every call the world allowed runs concurrently
+///    (`join_all`), and the results are stitched back into call order.
 ///
-/// Every resolution - a pass-1 interaction answer or denial, a pass-2 execution -
-/// is reported through `progress` the moment it lands, not at batch end, so the
-/// run journal keeps each completed call's result even if the daemon dies before
-/// the batch finishes.
-pub(crate) async fn dispatch_tools(
+/// Every result is reported through `progress` the moment it lands, not at
+/// batch end, so the run journal keeps each completed call's result even if
+/// the daemon dies before the batch finishes.
+pub(crate) async fn run_decided(
     state: Arc<AgentToolState>,
-    calls: Vec<ToolCall>,
+    calls: Vec<DecidedCall>,
+    written: u64,
     progress: ToolProgress,
 ) -> Vec<leviath_runtime::tool_bridge::ToolResult> {
+    // The meter counts from the world's total, so a script that checks the
+    // budget mid-call checks it against what the run has really spent.
+    state.writes.reset_to(written);
     let stage_name = state
         .stage_name
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .clone();
-
-    // Pass 1: sequential resolution. `slots[i].1 == None` means "execute in pass
-    // 2"; the queued `(slot_index, is_builtin, call)` records what to run.
     let mut slots: Vec<(String, Option<EntryContent>)> = Vec::with_capacity(calls.len());
     let mut queued: Vec<(usize, bool, ToolCall)> = Vec::new();
-    for tc in calls {
+    for DecidedCall { call: tc, decision } in calls {
         let slot = slots.len();
-        // ask_user_* / present_for_review are handled by the interaction backend -
-        // the hub (a real person answers) or, for an unattended `--yolo` run,
-        // the auto-answering one.
-        //
-        // A tool the stage kept in `required_tools` goes to the hub even in an
-        // unattended run. Keeping it was the blueprint saying this stage needs a
-        // person; auto-answering it here would make the opt-out mean nothing.
-        let kept_for_a_person = state
-            .stage_required
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(leviath_tools::canonical_tool_name(&tc.name));
-        let interaction: &dyn InteractionBackend = match state.unattended && !kept_for_a_person {
-            true => &UnattendedInteraction,
-            false => &state.interaction,
-        };
-        if let Some((text, attached)) = dispatch_dynamic_interaction_with_parts(
-            interaction,
-            &tc.name,
-            &tc.id,
-            &tc.arguments,
-            &stage_name,
-        )
-        .await
-        {
-            // Journal the user's answer now: pass 2 hasn't run yet, and losing
-            // an answered prompt to a crash means re-asking it on resume.
-            let result = answer_content(&tc.name, text, attached, state.builtins.mime());
-            progress(&tc.id, &result);
-            slots.push((tc.id, Some(result)));
-            continue;
-        }
-
-        // Containment, checked before policy resolution because no policy
-        // makes any of it allowed: a redirect leaving the workdir is a write
-        // `write_file` would refuse, so the shell does not get to be the
-        // spelling that works; the files that decide what agents may do are
-        // not a run's to change, whatever its permissions say; and a full disk
-        // is not a permission question, so no `--yolo` gets to fill one.
-        let fence =
-            crate::tools::escaping_write_refusal(&tc.name, &tc.arguments, state.builtins.workdir())
-                .or_else(|| {
-                    crate::tools::protected_path_refusal(
-                        &tc.name,
-                        &tc.arguments,
-                        state.builtins.workdir(),
-                        crate::yolo::home().as_deref(),
-                        &state.protected.get(),
-                    )
-                })
-                .or_else(|| {
-                    crate::tools::write_budget_refusal(
-                        &tc.name,
-                        &tc.arguments,
-                        state.builtins.workdir(),
-                        &state.writes,
-                    )
-                });
-        if let Some(refusal) = fence {
-            let refusal: EntryContent = refusal.into();
-            progress(&tc.id, &refusal);
-            slots.push((tc.id.clone(), Some(refusal)));
-            continue;
-        }
-        let is_builtin = state.builtin_names.contains(&tc.name);
-        // What a scoped approval for *this specific call* would be remembered
-        // under. For a shell call that is one key per command in the line, not
-        // the bare tool name - see `session_approval_keys`.
-        let approval_keys = crate::tools::session_approval_keys(&tc.name, &tc.arguments);
-
-        let stage_snap = state
-            .stage_perms
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        // Policy is resolved first and unconditionally. Short-circuiting to
-        // `Allow` on a grant would skip `resolve_policy` entirely, letting a
-        // grant made in one stage survive into a later stage that denies the
-        // tool - and "a configured deny is terminal" has to hold across a stage
-        // boundary.
-        let policy = resolve_policy(
-            &tc.name,
-            is_builtin,
-            &state.launch_overrides,
-            &stage_snap,
-            &state.agent_perms,
-            &state.global_perms.get(),
-            state.blueprint_may_loosen(),
-        );
-        // A shell redirect writes a file, and no tool name says so. Clamping by
-        // the write tool's own policy is what stops `echo x > f` being a
-        // spelling of `write_file` that a `write_file = "deny"` never sees.
-        let policy = crate::tools::clamp_by_effect(&tc.name, &tc.arguments, policy, &|| {
-            resolve_policy(
-                "write_file",
-                true,
-                &state.launch_overrides,
-                &stage_snap,
-                &state.agent_perms,
-                &state.global_perms.get(),
-                state.blueprint_may_loosen(),
-            )
-        });
-        // The yolo profile, when this is a yolo run. It sees the policy the
-        // config layers settled on and says what runs unprompted, what still
-        // asks, and what is refused; it never lifts a configured deny.
-        let configured = policy;
-        let decision = {
-            let profile = state.yolo.get();
-            let is_script = state
-                .script_tool_names
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains(&tc.name);
-            crate::yolo::decide_under(
-                profile.as_ref().as_deref(),
-                &tc.name,
-                &tc.arguments,
-                configured,
-                crate::tools::launch_allows(&state.launch_overrides, &tc.name),
-                crate::yolo::ToolKind::classify(&tc.name, is_builtin, is_script),
-                state.builtins.workdir(),
-            )
-        };
-        let policy = decision.as_ref().map_or(configured, |d| d.policy);
-        // A grant can only ever collapse `Ask` into `Allow`. It never reaches
-        // `Deny`, and it never has to: a denied tool is not one the user was
-        // ever offered a grant for.
-        let policy = match policy {
-            ToolPolicy::Ask if state.covers(&approval_keys).await => ToolPolicy::Allow,
-            other => other,
-        };
-
-        match policy {
-            // A deny the profile added names the rule, and the file it lives
-            // in: `[tool_permissions]` is not where this one is lifted.
-            ToolPolicy::Deny if configured != ToolPolicy::Deny => {
-                let reason = decision.map(|d| d.reason).unwrap_or_default();
-                let result = format!(
-                    "[denied] Tool '{}' is refused by this run's yolo profile ({reason}). Edit \
-                     the profile in yolo.toml and resume this run (`lev resume`); the run \
-                     re-reads it and does not need restarting.",
-                    tc.name
-                );
-                let result: EntryContent = result.into();
-                progress(&tc.id, &result);
-                slots.push((tc.id.clone(), Some(result)));
-            }
-            ToolPolicy::Deny => {
-                // Says what actually lifts it. The run re-reads its permissions
-                // when it resumes, so the message names an edit plus a resume
-                // rather than a cancel and a fresh run.
-                let result = format!(
-                    "[denied] Tool '{}' is not permitted. To allow it, set it to \"allow\" or \
-                     \"ask\" under [tool_permissions] in config.toml and resume this run \
-                     (`lev resume`); the run re-reads them and does not need restarting.",
-                    tc.name
-                );
-                let result: EntryContent = result.into();
-                progress(&tc.id, &result);
-                slots.push((tc.id.clone(), Some(result)));
-            }
-            ToolPolicy::Ask => {
-                let req = InteractionRequest::tool_approval(
-                    state.interaction.request_id("approve"),
+        let result = match decision {
+            Decision::Interact { attended } => {
+                let interaction: &dyn InteractionBackend = match attended {
+                    true => &state.interaction,
+                    false => &UnattendedInteraction,
+                };
+                // Only a question is decided `Interact`, so the backend always
+                // answers it.
+                let (text, attached) = dispatch_dynamic_interaction_with_parts(
+                    interaction,
                     &tc.name,
-                    tc.arguments.clone(),
+                    &tc.id,
+                    &tc.arguments,
                     &stage_name,
-                    &approval_keys,
-                );
-                let response = state.interaction.ask(req).await;
-                match response.approved {
-                    Some(true) => {
-                        // Record a grant for each command the user just saw run.
-                        // An empty key list means this call is not reusable, so
-                        // a scoped approval degrades to "this once" - which is
-                        // what the option label they chose already told them.
-                        state.remember(response.scope, &approval_keys).await;
-                        charge_declared(&state, &tc);
-                        slots.push((tc.id.clone(), None));
-                        queued.push((slot, is_builtin, tc));
-                    }
-                    Some(false) => {
-                        let result: EntryContent =
-                            declined_result(&tc.name, response.deny_feedback()).into();
-                        progress(&tc.id, &result);
-                        slots.push((tc.id.clone(), Some(result)));
-                    }
-                    // The hub's neutral answer: the prompt was cancelled, or
-                    // (only when a timeout is configured) nobody answered it in
-                    // time. Saying "declined" here blamed a person who never
-                    // saw the prompt.
-                    None => {
-                        let timeout = state.interaction.timeout_secs();
-                        tracing::warn!(
-                            tool = %tc.name,
-                            stage = %stage_name,
-                            timeout_secs = timeout,
-                            "approval prompt resolved unanswered; the call did not run"
-                        );
-                        let result: EntryContent =
-                            unanswered_approval_result(&tc.name, timeout).into();
-                        progress(&tc.id, &result);
-                        slots.push((tc.id.clone(), Some(result)));
-                    }
-                }
+                )
+                .await
+                .unwrap_or_default();
+                answer_content(&tc.name, text, attached, state.builtins.mime())
             }
-            ToolPolicy::Allow => {
-                charge_declared(&state, &tc);
+            Decision::Refuse(text) => text.into(),
+            Decision::Run => {
+                let is_builtin = state.builtin_names.contains(&tc.name);
                 slots.push((tc.id.clone(), None));
                 queued.push((slot, is_builtin, tc));
+                continue;
             }
-        }
+        };
+        // Journaled now: pass 2 hasn't run yet, and losing an answered prompt
+        // to a crash means asking it again on resume.
+        progress(&tc.id, &result);
+        slots.push((tc.id, Some(result)));
     }
 
-    // Pass 2: run the approved/allowed calls concurrently, then fill their slots.
-    // Each call reports its own completion the moment it resolves - the heart of
+    // Pass 2: run the allowed calls concurrently, then fill their slots. Each
+    // call reports its own completion the moment it resolves - the heart of
     // the crash-replay guarantee: a batch that dies with 2 of 3 calls done has
     // both results in the journal.
     let executed = futures_util::future::join_all(queued.iter().map(|(_, is_builtin, tc)| {
@@ -912,8 +797,8 @@ pub(crate) async fn dispatch_tools(
         let progress = &progress;
         async move {
             let result = execute_tool(&state, *is_builtin, tc).await;
-            // Charge the run for what this call actually put on disk. A shell
-            // redirect is only measurable here, after the fact - see
+            // Count what this call actually put on disk. A shell redirect is
+            // only measurable here, after the fact - see
             // `write_budget_refusal` for why that is inherent rather than a
             // shortcut.
             state.writes.record(crate::tools::measured_write_bytes(
@@ -934,6 +819,25 @@ pub(crate) async fn dispatch_tools(
         .into_iter()
         .map(|(id, result)| (id, result.unwrap_or_default()))
         .collect()
+}
+
+/// What a call for an agent with no tool state gets.
+const NO_TOOL_STATE: &str = "[error] agent has no tool state";
+
+/// A batch that answers every call in `ids` with `text`, reported through
+/// `progress` as it would be had the calls run.
+fn refuse_all(ids: Vec<String>, text: &'static str, progress: ToolProgress) -> BoxedToolExec {
+    Box::new(move || {
+        Box::pin(async move {
+            ids.into_iter()
+                .map(|id| {
+                    let result: EntryContent = text.into();
+                    progress(&id, &result);
+                    (id, result)
+                })
+                .collect()
+        })
+    })
 }
 
 /// The shared-world tool service: maps entities to their [`AgentToolState`] and
@@ -1023,18 +927,6 @@ impl ToolService for CliToolService {
         else {
             return;
         };
-        if let Some(perms) = state.stage_perms_by_index.get(stage_index) {
-            *state
-                .stage_perms
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = perms.clone();
-        }
-        if let Some(required) = state.stage_required_by_index.get(stage_index) {
-            *state
-                .stage_required
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = required.clone();
-        }
         if let Some(limits) = state.stage_tool_accepts_by_index.get(stage_index) {
             *state
                 .stage_tool_accepts
@@ -1045,61 +937,57 @@ impl ToolService for CliToolService {
             .stage_name
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = stage_name.to_string();
-        // A stage-scoped grant expires when the run moves to different work.
-        // Re-entering the same stage does not expire it: a `plan -> plan`
-        // revision loop is the same work the user approved, and re-prompting
-        // through it would make the scope useless on exactly the stages that
-        // revise.
-        let mut granted_at = state
-            .stage_allows_index
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if *granted_at != Some(stage_index) {
-            *granted_at = Some(stage_index);
-            state
-                .stage_allows
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clear();
-        }
-        drop(granted_at);
         // Point the shell tool at this stage's sandbox (per-stage override).
         if let Some(sandbox) = &state.sandbox {
             sandbox.set_stage(stage_index);
         }
     }
 
+    /// Every call reaches this service decided (see [`Self::exec_decided`]);
+    /// one that arrives undecided is refused rather than run unjudged.
     fn exec_for(
         &self,
-        entity: Entity,
+        _entity: Entity,
         calls: Vec<ToolCall>,
         progress: ToolProgress,
     ) -> BoxedToolExec {
-        let state = self
-            .states
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&entity)
-            .cloned();
-        Box::new(move || {
-            Box::pin(async move {
-                match state {
-                    Some(state) => dispatch_tools(state, calls, progress).await,
-                    // A tool batch for an unregistered agent (never spawned via
-                    // the CLI, or already reaped): fail each call, don't panic.
-                    // Reported through `progress` like any other resolution, so
-                    // the journal stays a complete account of the batch.
-                    None => calls
-                        .into_iter()
-                        .map(|c| {
-                            let result: EntryContent = "[error] agent has no tool state".into();
-                            progress(&c.id, &result);
-                            (c.id, result)
-                        })
-                        .collect(),
-                }
-            })
-        })
+        refuse_all(
+            calls.into_iter().map(|c| c.id).collect(),
+            "[error] this call was not decided before it was run",
+            progress,
+        )
+    }
+
+    fn decide(&self, entity: Entity, call: &ToolCall, ctx: &DecideCtx<'_>) -> ToolVerdict {
+        match self.state_for(entity) {
+            Some(state) => decide_call(&state, call, ctx),
+            None => ToolVerdict::Refuse(NO_TOOL_STATE.to_string()),
+        }
+    }
+
+    fn exec_decided(
+        &self,
+        entity: Entity,
+        calls: Vec<DecidedCall>,
+        written: u64,
+        progress: ToolProgress,
+    ) -> BoxedToolExec {
+        match self.state_for(entity) {
+            Some(state) => Box::new(move || Box::pin(run_decided(state, calls, written, progress))),
+            // A batch for an unregistered agent (never spawned via the CLI, or
+            // already reaped): fail each call, don't panic. Reported through
+            // `progress` like any other resolution, so the journal stays a
+            // complete account of the batch.
+            None => refuse_all(
+                calls.into_iter().map(|d| d.call.id).collect(),
+                NO_TOOL_STATE,
+                progress,
+            ),
+        }
+    }
+
+    fn written(&self, entity: Entity) -> Option<u64> {
+        self.state_for(entity).map(|state| state.writes.written())
     }
 
     fn wants_refresh(&self, entity: Entity) -> bool {
@@ -1180,10 +1068,10 @@ impl ToolService for CliToolService {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::test_support::McpStub;
-    use leviath_core::interaction::{ApprovalScope, InteractionResponse};
+    use leviath_core::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
     use leviath_runtime::interaction_hub::InteractionHub;
     use leviath_runtime::pipeline::noop_progress;
 
@@ -1193,9 +1081,9 @@ mod tests {
         Arc::new(ConfigSource {
             agent_name: "tester".to_string(),
             blueprint_safe: None,
-            blueprint_read_paths: None,
+            blueprint_read_paths: Vec::new(),
             workdir: std::env::temp_dir(),
-            yolo_profile: None,
+            launched: leviath_core::Unattended::Off,
         })
     }
 
@@ -1249,12 +1137,7 @@ mod tests {
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
-            run_allows: Arc::new(Mutex::new(HashSet::new())),
-            stage_allows: Arc::new(StdMutex::new(HashSet::new())),
-            stage_allows_index: Arc::new(StdMutex::new(None)),
-            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
-            stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Live::new(global),
@@ -1329,12 +1212,7 @@ mod tests {
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
-            run_allows: Arc::new(Mutex::new(HashSet::new())),
-            stage_allows: Arc::new(StdMutex::new(HashSet::new())),
-            stage_allows_index: Arc::new(StdMutex::new(None)),
-            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
-            stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Live::new(global),
@@ -1362,6 +1240,163 @@ mod tests {
             arguments: args,
             thought_signature: None,
         }
+    }
+
+    /// What the world holds about a test run between its batches: its grants
+    /// and the stage it is in. Keyed by the state's address, so each test's
+    /// batches see what its earlier ones left. Each entry keeps a `Weak` to its
+    /// state, which holds the allocation, so a later test's state can never
+    /// be given the same address and inherit another run's grants.
+    type Held = std::collections::HashMap<
+        usize,
+        (
+            std::sync::Weak<AgentToolState>,
+            leviath_runtime::pipeline::ToolGrants,
+            usize,
+        ),
+    >;
+
+    fn held() -> std::sync::MutexGuard<'static, Held> {
+        static HELD: std::sync::OnceLock<StdMutex<Held>> = std::sync::OnceLock::new();
+        HELD.get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The world's view of `state`'s run: what it has been granted, and the
+    /// stage it is in.
+    fn world_of(state: &Arc<AgentToolState>) -> (leviath_runtime::pipeline::ToolGrants, usize) {
+        held()
+            .get(&(Arc::as_ptr(state) as usize))
+            .map(|(_, grants, index)| (grants.clone(), *index))
+            .unwrap_or_default()
+    }
+
+    /// Record what the world holds about `state`'s run.
+    fn hold(
+        state: &Arc<AgentToolState>,
+        grants: leviath_runtime::pipeline::ToolGrants,
+        index: usize,
+    ) {
+        held().insert(
+            Arc::as_ptr(state) as usize,
+            (Arc::downgrade(state), grants, index),
+        );
+    }
+
+    /// Move `state`'s run into the stage at `index`, as the world does when it
+    /// enters one: a stage grant made elsewhere ends.
+    fn enter_stage(state: &Arc<AgentToolState>, index: usize) {
+        let (mut grants, _) = world_of(state);
+        grants.enter_stage(index);
+        hold(state, grants, index);
+    }
+
+    /// The grants `state`'s run holds.
+    fn grants_of(state: &Arc<AgentToolState>) -> leviath_runtime::pipeline::ToolGrants {
+        world_of(state).0
+    }
+
+    /// Grant `state`'s run `key` for the rest of the run.
+    fn grant(state: &Arc<AgentToolState>, key: &str) {
+        let (mut grants, index) = world_of(state);
+        grants.grant(Some(ApprovalScope::Run), &[key.to_string()]);
+        hold(state, grants, index);
+    }
+
+    /// Run a batch the way the world does: decide each call in order with
+    /// [`decide_call`], ask an approval on the run's hub backend and apply the
+    /// answer as the approval lane does, then run what was decided with
+    /// [`run_decided`]. The run's grants carry over to its next batch.
+    async fn dispatch_tools(
+        state: Arc<AgentToolState>,
+        calls: Vec<ToolCall>,
+        progress: ToolProgress,
+    ) -> Results {
+        let (mut grants, stage_index) = world_of(&state);
+        let mut written = state.writes.written();
+        let stage = state.stage_name.lock().unwrap().clone();
+        let mut decided = Vec::new();
+        for call in calls {
+            let ctx = DecideCtx {
+                grants: &grants,
+                written,
+                stage_index,
+            };
+            let decision = match decide_call(&state, &call, &ctx) {
+                ToolVerdict::Run { charge } => {
+                    written += charge;
+                    Decision::Run
+                }
+                ToolVerdict::Interact { attended } => Decision::Interact { attended },
+                ToolVerdict::Refuse(text) => Decision::Refuse(text),
+                ToolVerdict::Ask { keys, charge } => {
+                    let backend = &state.interaction;
+                    let request = leviath_core::interaction::InteractionRequest::tool_approval(
+                        backend.request_id("approve"),
+                        &call.name,
+                        call.arguments.clone(),
+                        &stage,
+                        &keys,
+                    );
+                    let response = backend.ask(request).await;
+                    match response.approved {
+                        Some(true) => {
+                            grants.grant(response.scope, &keys);
+                            written += charge;
+                            Decision::Run
+                        }
+                        Some(false) => {
+                            Decision::Refuse(leviath_runtime::pipeline::declined_result(
+                                &call.name,
+                                response.deny_feedback(),
+                            ))
+                        }
+                        None => {
+                            Decision::Refuse(leviath_runtime::pipeline::unanswered_approval_result(
+                                &call.name,
+                                backend.timeout_secs(),
+                            ))
+                        }
+                    }
+                }
+            };
+            decided.push(DecidedCall { call, decision });
+        }
+        hold(&state, grants, stage_index);
+        run_decided(state, decided, written, progress).await
+    }
+
+    /// Run `calls` for `entity` through `service` as the world does for a run
+    /// with no grants, at its first stage: each call decided, then the batch
+    /// run with what was decided. A call that would ask is refused with the
+    /// answer a prompt nobody answered gets.
+    pub(crate) async fn run_judged(
+        service: &CliToolService,
+        entity: Entity,
+        calls: Vec<ToolCall>,
+    ) -> Results {
+        let grants = leviath_runtime::pipeline::ToolGrants::default();
+        let ctx = DecideCtx {
+            grants: &grants,
+            written: 0,
+            stage_index: 0,
+        };
+        let decided = calls
+            .into_iter()
+            .map(|call| DecidedCall {
+                decision: match service.decide(entity, &call, &ctx) {
+                    ToolVerdict::Run { .. } => Decision::Run,
+                    ToolVerdict::Interact { attended } => Decision::Interact { attended },
+                    ToolVerdict::Refuse(text) => Decision::Refuse(text),
+                    ToolVerdict::Ask { .. } => Decision::Refuse(
+                        leviath_runtime::pipeline::unanswered_approval_result(&call.name, None),
+                    ),
+                },
+                call,
+            })
+            .collect();
+        service.exec_decided(entity, decided, 0, noop_progress())().await
     }
 
     /// Run `dispatch_tools` while answering the single interaction it raises.
@@ -1435,12 +1470,7 @@ mod tests {
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
-            run_allows: Arc::new(Mutex::new(HashSet::new())),
-            stage_allows: Arc::new(StdMutex::new(HashSet::new())),
-            stage_allows_index: Arc::new(StdMutex::new(None)),
-            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
-            stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Live::new(global),
@@ -1720,11 +1750,9 @@ mod tests {
             config_source: Arc::new(ConfigSource {
                 agent_name: "tester".to_string(),
                 blueprint_safe: None,
-                blueprint_read_paths: Some(leviath_core::blueprint::ReadPathsConfig {
-                    allow: vec![outside.path().to_string_lossy().to_string()],
-                }),
+                blueprint_read_paths: vec![outside.path().to_string_lossy().to_string()],
                 workdir: workdir.path().to_path_buf(),
-                yolo_profile: None,
+                launched: leviath_core::Unattended::Off,
             }),
             ..(*state_over(workdir.path(), allow)).clone()
         });
@@ -1771,13 +1799,11 @@ mod tests {
             config_source: Arc::new(ConfigSource {
                 agent_name: "tester".to_string(),
                 blueprint_safe: None,
-                blueprint_read_paths: Some(leviath_core::blueprint::ReadPathsConfig {
-                    // An empty entry is refused by the compiler, which is the
-                    // arm a resume has to survive.
-                    allow: vec![String::new()],
-                }),
+                // An empty entry is refused by the compiler, which is the arm
+                // a resume has to survive.
+                blueprint_read_paths: vec![String::new()],
                 workdir: workdir.path().to_path_buf(),
-                yolo_profile: None,
+                launched: leviath_core::Unattended::Off,
             }),
             ..(*state_over(workdir.path(), HashMap::new())).clone()
         });
@@ -1846,12 +1872,7 @@ mod tests {
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
-            run_allows: Arc::new(Mutex::new(HashSet::new())),
-            stage_allows: Arc::new(StdMutex::new(HashSet::new())),
-            stage_allows_index: Arc::new(StdMutex::new(None)),
-            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
-            stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Live::new(allow),
@@ -2188,12 +2209,7 @@ mod tests {
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
-            run_allows: Arc::new(Mutex::new(HashSet::new())),
-            stage_allows: Arc::new(StdMutex::new(HashSet::new())),
-            stage_allows_index: Arc::new(StdMutex::new(None)),
-            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
-            stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Live::new(allow),
@@ -2341,7 +2357,7 @@ mod tests {
             "{result}"
         );
         assert_eq!(
-            unanswered_approval_result("echo", None),
+            leviath_runtime::pipeline::unanswered_approval_result("echo", None),
             result.as_str(),
             "the wording is the helper's, verbatim"
         );
@@ -2353,6 +2369,7 @@ mod tests {
     /// next turn has a redirect rather than a refusal to guess at.
     #[test]
     fn a_decline_names_the_feedback_when_there_is_some() {
+        use leviath_runtime::pipeline::declined_result;
         assert_eq!(
             declined_result("bash", None),
             "[denied] User declined tool call 'bash'."
@@ -2569,12 +2586,7 @@ mod tests {
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
-            run_allows: Arc::new(Mutex::new(HashSet::new())),
-            stage_allows: Arc::new(StdMutex::new(HashSet::new())),
-            stage_allows_index: Arc::new(StdMutex::new(None)),
-            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
-            stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Live::new(global),
@@ -2643,12 +2655,7 @@ mod tests {
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
-            run_allows: Arc::new(Mutex::new(HashSet::new())),
-            stage_allows: Arc::new(StdMutex::new(HashSet::new())),
-            stage_allows_index: Arc::new(StdMutex::new(None)),
-            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
-            stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Live::new(global),
@@ -3008,16 +3015,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_for_without_state_errors() {
+    async fn an_undecided_batch_is_refused_and_a_stateless_one_errors() {
+        let hub = InteractionHub::new();
         let service = CliToolService::new();
+        let e = Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id");
+        service.register(
+            e,
+            state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new()),
+        );
+        // Every call reaches the service decided; one that does not is not run.
         let exec = service.exec_for(
-            Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),
+            e,
             vec![call("c1", "read_file", serde_json::json!({}))],
             noop_progress(),
         );
         let results = exec().await;
         assert_eq!(results.len(), 1);
+        let refused = results[0].1.to_string();
+        assert!(refused.contains("not decided"), "{refused}");
+
+        // An agent with no tool state is refused when judged, errors when run,
+        // and has no write total.
+        let ghost =
+            Entity::from_raw_u32(2).expect("a small literal index is always a valid entity id");
+        let grants = leviath_runtime::pipeline::ToolGrants::default();
+        let ctx = DecideCtx {
+            grants: &grants,
+            written: 0,
+            stage_index: 0,
+        };
+        assert_eq!(
+            service.decide(ghost, &call("c1", "read_file", serde_json::json!({})), &ctx),
+            ToolVerdict::Refuse(NO_TOOL_STATE.to_string())
+        );
+        let results = run_judged(
+            &service,
+            ghost,
+            vec![call("c1", "read_file", serde_json::json!({}))],
+        )
+        .await;
         assert!(results[0].1.contains("no tool state"));
+        assert_eq!(service.written(ghost), None);
+        // A call that would ask is not run when nobody is there to answer.
+        let asked = run_judged(
+            &service,
+            e,
+            vec![call(
+                "c2",
+                "write_file",
+                serde_json::json!({"path": "x", "content": "y"}),
+            )],
+        )
+        .await;
+        let asked = asked[0].1.to_string();
+        assert!(asked.contains("closed without an answer"), "{asked}");
+        assert_eq!(service.written(e), Some(0));
+
+        // A question in an unattended run is answered by the run itself.
+        let hub = InteractionHub::new();
+        let mut unattended =
+            (*state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new())).clone();
+        unattended.unattended = true;
+        let yolo =
+            Entity::from_raw_u32(3).expect("a small literal index is always a valid entity id");
+        service.register(yolo, Arc::new(unattended));
+        let answered = run_judged(
+            &service,
+            yolo,
+            vec![call(
+                "c3",
+                "ask_user_text",
+                serde_json::json!({"prompt": "which way?"}),
+            )],
+        )
+        .await;
+        let answered = answered[0].1.to_string();
+        assert!(answered.contains("unattended run"), "{answered}");
+        assert!(hub.pending().is_empty(), "nobody was asked");
     }
 
     #[tokio::test]
@@ -3029,21 +3103,16 @@ mod tests {
         let e = Entity::from_raw_u32(5).expect("a small literal index is always a valid entity id");
         service.register(e, state_with(&hub, leviath_mcp::ToolExecutor::new(), deny));
 
-        let out = service.exec_for(
+        let out = run_judged(
+            &service,
             e,
             vec![call("c1", "bash", serde_json::json!({"command": "ls"}))],
-            noop_progress(),
-        )()
+        )
         .await;
         assert!(out[0].1.contains("[denied]"));
 
         service.unregister(e);
-        let out2 = service.exec_for(
-            e,
-            vec![call("c1", "bash", serde_json::json!({}))],
-            noop_progress(),
-        )()
-        .await;
+        let out2 = run_judged(&service, e, vec![call("c1", "bash", serde_json::json!({}))]).await;
         assert!(out2[0].1.contains("no tool state"));
     }
 
@@ -3066,12 +3135,7 @@ mod tests {
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
-            run_allows: Arc::new(Mutex::new(HashSet::new())),
-            stage_allows: Arc::new(StdMutex::new(HashSet::new())),
-            stage_allows_index: Arc::new(StdMutex::new(None)),
-            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(vec![HashMap::new(), deny.clone()]),
-            stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(vec![
                 HashSet::new(),
                 HashSet::from(["ask_user_text".to_string()]),
@@ -3100,16 +3164,26 @@ mod tests {
         });
         service.register(e, state.clone());
 
-        // Entering stage 1 swaps in that stage's perms + name.
+        // Entering stage 1 swaps in that stage's name.
         service.sync_stage(e, 1, "review");
-        assert_eq!(*state.stage_perms.lock().unwrap(), deny);
         assert_eq!(*state.stage_name.lock().unwrap(), "review");
-        // And that stage's kept human tools, so an unattended run asks a person
-        // only where the stage it is actually in said to.
-        assert_eq!(
-            *state.stage_required.lock().unwrap(),
-            HashSet::from(["ask_user_text".to_string()])
-        );
+        // A call is judged by the stage the world says the run is in: stage 1
+        // denies `bash`, and stage 0 does not.
+        let grants = leviath_runtime::pipeline::ToolGrants::default();
+        let at = |stage_index| DecideCtx {
+            grants: &grants,
+            written: 0,
+            stage_index,
+        };
+        let bash = call("c1", "bash", serde_json::json!({"command": "ls"}));
+        assert!(matches!(
+            service.decide(e, &bash, &at(1)),
+            ToolVerdict::Refuse(text) if text.contains("not permitted")
+        ));
+        assert!(!matches!(
+            service.decide(e, &bash, &at(0)),
+            ToolVerdict::Refuse(_)
+        ));
         // And what the stage lets each tool be handed.
         assert_eq!(
             tool_limit(&state, "spawn_agent").as_deref(),
@@ -3127,10 +3201,14 @@ mod tests {
             Vec::new(),
         );
 
-        // An out-of-range index leaves perms as-is but still updates the name.
+        // An out-of-range index still updates the name, and a call judged
+        // there has no stage permissions to answer to.
         service.sync_stage(e, 99, "ghost");
-        assert_eq!(*state.stage_perms.lock().unwrap(), deny);
         assert_eq!(*state.stage_name.lock().unwrap(), "ghost");
+        assert!(!matches!(
+            service.decide(e, &bash, &at(99)),
+            ToolVerdict::Refuse(_)
+        ));
 
         // An unregistered entity is a no-op (must not panic).
         service.sync_stage(
@@ -3236,11 +3314,7 @@ mod tests {
     async fn session_allows_short_circuits_to_allow() {
         let hub = InteractionHub::new();
         let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
-        state
-            .run_allows
-            .lock()
-            .await
-            .insert("read_file".to_string());
+        grant(&state, "read_file");
         let out = dispatch_tools(
             state,
             vec![call(
@@ -3276,7 +3350,7 @@ mod tests {
     async fn a_grant_does_not_carry_to_a_chained_command() {
         let hub = InteractionHub::new();
         let state = asking_shell_state(&hub);
-        state.run_allows.lock().await.insert("shell:ls".to_string());
+        grant(&state, "shell:ls");
 
         let out = dispatch_answering(
             state.clone(),
@@ -3320,11 +3394,9 @@ mod tests {
     async fn an_ungrantable_line_rides_no_grant() {
         let hub = InteractionHub::new();
         let state = asking_shell_state(&hub);
-        let mut allows = state.run_allows.lock().await;
         for key in ["shell:echo", "shell:whoami"] {
-            allows.insert(key.to_string());
+            grant(&state, key);
         }
-        drop(allows);
 
         let out = dispatch_answering(
             state,
@@ -3351,7 +3423,7 @@ mod tests {
         let mut denied = HashMap::new();
         denied.insert("shell".to_string(), ToolPolicy::Deny);
         let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), denied);
-        state.run_allows.lock().await.insert("shell:ls".to_string());
+        grant(&state, "shell:ls");
 
         let out = dispatch_tools(
             state,
@@ -3383,6 +3455,7 @@ mod tests {
         // `sync_tool_stages` fires on entering the entry stage too, before the
         // first tool call, so a grant is always made under a known stage.
         service.sync_stage(entity, 0, "main");
+        enter_stage(&state, 0);
 
         let approve_for_stage = |req: &InteractionRequest| {
             InteractionResponse::approval(&req.id, true, ApprovalScope::Stage)
@@ -3401,12 +3474,14 @@ mod tests {
         // Re-entering the same stage keeps it: a `plan -> plan` revision loop is
         // the same work the user approved.
         service.sync_stage(entity, 0, "main");
+        enter_stage(&state, 0);
         let out = dispatch_tools(state.clone(), vec![ls()], noop_progress()).await;
         let result = out[0].1.clone();
         assert!(!result.contains("[denied]"), "got: {result}");
 
         // Moving on drops it, so the call is asked again.
         service.sync_stage(entity, 1, "next");
+        enter_stage(&state, 1);
         let out = dispatch_answering(state, vec![ls()], deny_it, hub).await;
         let expired = out[0].1.clone();
         assert!(
@@ -3426,6 +3501,7 @@ mod tests {
             Entity::from_raw_u32(71).expect("a small literal index is always a valid entity id");
         service.register(entity, state.clone());
         service.sync_stage(entity, 0, "main");
+        enter_stage(&state, 0);
 
         let out = dispatch_answering(
             state.clone(),
@@ -3443,6 +3519,7 @@ mod tests {
         assert!(!out[0].1.contains("[denied]"));
 
         service.sync_stage(entity, 3, "later");
+        enter_stage(&state, 3);
         let out = dispatch_tools(
             state,
             vec![call("c2", "shell", serde_json::json!({"command": "ls -l"}))],
@@ -3500,7 +3577,7 @@ mod tests {
         )
         .await;
         assert!(!out[0].1.contains("[denied]"));
-        assert!(state.run_allows.lock().await.is_empty());
+        assert_eq!(grants_of(&state), Default::default());
 
         let out = dispatch_answering(state, vec![backtick()], deny_it, hub).await;
         let result = out[0].1.clone();
@@ -3592,8 +3669,8 @@ mod tests {
         {
             let s = Arc::get_mut(&mut state).expect("sole owner before dispatch");
             s.unattended = true;
-            s.stage_required =
-                Arc::new(StdMutex::new(HashSet::from(["ask_user_text".to_string()])));
+            s.stage_required_by_index =
+                Arc::new(vec![HashSet::from(["ask_user_text".to_string()])]);
         }
 
         let out = dispatch_answering(
@@ -3645,13 +3722,13 @@ mod tests {
             sender: tx,
             parent_run_id: "parent".to_string(),
             workdir: "/tmp".to_string(),
-            max_depth: 3,
             no_seed_commands: false,
-            unattended: false,
-            yolo_profile: None,
+            unattended: leviath_core::Unattended::Off,
+            allow: Vec::new(),
             model_override: None,
             offered_parts: Arc::new(std::sync::Mutex::new(Vec::new())),
             mime: None,
+            agents_dir: None,
         };
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
             leviath_tools::ToolContext::new(std::env::temp_dir()),
@@ -3667,12 +3744,7 @@ mod tests {
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
-            run_allows: Arc::new(Mutex::new(HashSet::new())),
-            stage_allows: Arc::new(StdMutex::new(HashSet::new())),
-            stage_allows_index: Arc::new(StdMutex::new(None)),
-            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
             stage_perms_by_index: Arc::new(Vec::new()),
-            stage_required: Arc::new(StdMutex::new(HashSet::new())),
             stage_required_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Live::new(HashMap::new()),
@@ -3806,7 +3878,7 @@ mod tests {
         .await;
         assert_eq!(out[0].0, "c1");
         // Once-scope approval does not persist.
-        assert!(!state.run_allows.lock().await.contains("read_file"));
+        assert!(!grants_of(&state).granted("read_file"));
     }
 
     #[tokio::test]
@@ -3850,7 +3922,60 @@ mod tests {
         )
         .await;
         assert_eq!(out[0].0, "c1");
-        assert!(state.run_allows.lock().await.contains("read_file"));
+        assert!(grants_of(&state).granted("read_file"));
+    }
+
+    /// A `spawn_agent` that carries a graph the model wrote stops for a
+    /// person, though `spawn_agent` itself runs unprompted; a configured
+    /// `spawn_raw_graph = "deny"` refuses it, and `allow` lets it through to
+    /// the handler, as any tool permission does. Spawning an installed
+    /// blueprint never asks.
+    #[tokio::test]
+    async fn a_raw_graph_spawn_asks_unless_the_operator_said_otherwise() {
+        let raw = serde_json::json!({"source": {"graph": {}}});
+        let hub = InteractionHub::new();
+        let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        let out = dispatch_answering(
+            state,
+            vec![call("c1", "spawn_agent", raw.clone())],
+            |req| {
+                let shown = format!("{req:?}");
+                assert!(shown.contains("spawn_agent"), "{shown}");
+                InteractionResponse::approval(&req.id, false, ApprovalScope::Once)
+            },
+            hub,
+        )
+        .await;
+        assert!(out[0].1.contains("User declined"));
+
+        for (setting, says) in [
+            (ToolPolicy::Deny, "is not permitted"),
+            (ToolPolicy::Allow, "sub-agent tools are unavailable"),
+        ] {
+            let hub = InteractionHub::new();
+            let global = HashMap::from([(
+                leviath_tools::SPAWN_RAW_GRAPH_PERMISSION.to_string(),
+                setting,
+            )]);
+            let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), global);
+            let out = dispatch_tools(
+                state,
+                vec![call("c1", "spawn_agent", raw.clone())],
+                noop_progress(),
+            )
+            .await;
+            assert!(out[0].1.contains(says));
+        }
+        let hub = InteractionHub::new();
+        let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        let named = serde_json::json!({"source": {"blueprint": "coder"}});
+        let out = dispatch_tools(
+            state,
+            vec![call("c1", "spawn_agent", named)],
+            noop_progress(),
+        )
+        .await;
+        assert!(out[0].1.contains("sub-agent tools are unavailable"));
     }
 
     #[tokio::test]
@@ -3975,9 +4100,13 @@ mod tests {
     async fn progress_reports_the_no_tool_state_error() {
         let service = CliToolService::new();
         let (progress, log) = recording_progress();
-        let exec = service.exec_for(
+        let exec = service.exec_decided(
             Entity::from_raw_u32(1).expect("a small literal index is always a valid entity id"),
-            vec![call("c1", "read_file", serde_json::json!({}))],
+            vec![DecidedCall {
+                call: call("c1", "read_file", serde_json::json!({})),
+                decision: Decision::Run,
+            }],
+            0,
             progress,
         );
         let results = exec().await;
@@ -4215,9 +4344,11 @@ mod tests {
             Arc::get_mut(&mut state).expect("sole owner").config_source = Arc::new(ConfigSource {
                 agent_name: "tester".to_string(),
                 blueprint_safe: None,
-                blueprint_read_paths: None,
+                blueprint_read_paths: Vec::new(),
                 workdir: std::env::temp_dir(),
-                yolo_profile: Some("careful".to_string()),
+                launched: leviath_core::Unattended::Profile(
+                    leviath_core::names::ProfileName::new("careful").unwrap(),
+                ),
             });
             let default_of =
                 |state: &AgentToolState| state.yolo.get().as_ref().as_ref().map(|p| p.spec.default);

@@ -475,9 +475,8 @@ mod tests {
 
     /// Both spellings of a kind get the same colour and the same cell width.
     ///
-    /// A `context.json` written by an older daemon says `sliding` where one
-    /// written today says `sliding_window`, and nothing rewrites those files,
-    /// so both are on disk and both get drawn. The width is the half that is
+    /// `sliding` and `sliding_window` name the same kind, and both get drawn
+    /// the same way. The width is the half that is
     /// easy to miss: the kind sits in a fixed column with the token bar after
     /// it, and a word too long for the column pushes that row's bar out of
     /// line with every other row.

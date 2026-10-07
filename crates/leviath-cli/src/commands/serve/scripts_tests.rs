@@ -172,7 +172,10 @@ fn each_kind_is_compiled_by_its_own_compiler() {
 async fn a_mime_check_resolves_beside_the_manifest_or_the_config() {
     with_home(|home| async move {
         let agent = agent_root(&home, "scenes");
-        write(&agent.join("agent.leviath"), "[agent]\nname = \"scenes\"\n");
+        write(
+            &agent.join("agent.toml"),
+            &crate::test_support::tiny_blueprint("scenes"),
+        );
         let target = resolve(
             &Config::default(),
             "mime_check",
@@ -214,8 +217,12 @@ async fn mime_checks_are_listed_from_the_rows_that_name_them() {
         );
         let agent = agent_root(&home, "scenes");
         write(
-            &agent.join("agent.leviath"),
-            "[agent]\nname = \"scenes\"\n\n[mime_types.\"image/*\"]\ncheck = \"checks/image.rhai\"\n",
+            &agent.join("agent.toml"),
+            &format!(
+                "{}\n[graph.mime_types.\"image/*\"]\ncheck = {{ file = \"checks/image.rhai\" }}\n\
+                 [graph.mime_types.\"text/x-note\"]\ntext = true\n",
+                crate::test_support::tiny_blueprint("scenes")
+            ),
         );
         write(
             &agent.join("checks").join("image.rhai"),
@@ -270,7 +277,10 @@ async fn mime_checks_are_listed_from_the_rows_that_name_them() {
         // In row order: the registry lists its keys sorted.
         assert_eq!(names, vec!["checks/scene", "checks/gone"]);
         // A file of rows the registry refuses names no checks.
-        write(&config_dir.join("mime_types.toml"), "[png]\ncheck = \"x.rhai\"\n");
+        write(
+            &config_dir.join("mime_types.toml"),
+            "[png]\ncheck = \"x.rhai\"\n",
+        );
         let (_, body) = get_json("/api/scripts").await;
         assert!(
             !body["scripts"]
@@ -438,7 +448,7 @@ async fn an_agent_from_a_configured_path_resolves_to_its_own_directory() {
     with_home(|home| async move {
         let workspace = home.join("workspace");
         let agent = workspace.join("researcher");
-        write(&agent.join("agent.leviath"), manifest_with_hooks());
+        write(&agent.join("agent.toml"), manifest_with_hooks());
         let config = Config {
             agent_paths: vec![workspace],
             ..Default::default()
@@ -602,27 +612,22 @@ fn a_declared_path_must_already_name_a_rhai_file() {
 /// A manifest declaring one of each hook kind, so the listing has something to
 /// classify beyond tools.
 fn manifest_with_hooks() -> &'static str {
-    r#"
-[agent]
+    r#"[blueprint]
 name = "researcher"
 version = "0.1.0"
 description = "d"
 
-[agent.output]
-validator = "check.rhai"
+[graph]
+output = { validator = { file = "check.rhai" } }
+stages = [{ name = "main", description = "Main", max_iterations = 5, hooks = { on_stage_enter = { file = "hooks.rhai" }, after_inference = { inline = "fn after_inference(ctx) { () }" } } }]
 
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-description = "Main"
-max_iterations = 5
-
-[stages.main.hooks]
-on_stage_enter = "hooks.rhai"
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-notes = { kind = "custom", script = "notes.rhai", max_tokens = 500 }
+[graph.layout]
+total_budget_tokens = 2000
+regions = [
+    { name = "system", kind = "pinned", budget = 1000 },
+    { name = "notes", kind = { kind = "custom", code = { file = "notes.rhai" } }, budget = 500 },
+    { name = "scratch", kind = { kind = "custom", code = { inline = "fn render(entries) { \"\" }" } }, budget = 500 },
+]
 "#
 }
 
@@ -632,7 +637,7 @@ notes = { kind = "custom", script = "notes.rhai", max_tokens = 500 }
 async fn the_listing_carries_every_kind_and_both_scopes() {
     with_home(|home| async move {
         let agent = agent_root(&home, "researcher");
-        write(&agent.join("agent.leviath"), manifest_with_hooks());
+        write(&agent.join("agent.toml"), manifest_with_hooks());
         write(&agent.join("tools").join("web_search.rhai"), GOOD_TOOL);
         write(&agent.join("hooks.rhai"), "fn on_stage_enter(ctx) { () }");
         write(&agent.join("notes.rhai"), "fn render(ctx) { \"n\" }");
@@ -658,6 +663,13 @@ async fn the_listing_carries_every_kind_and_both_scopes() {
         assert_eq!(find("stage_hook", "hooks")["compiles"], true);
         assert_eq!(find("region_hook", "notes")["compiles"], true);
         assert_eq!(find("output_validator", "check")["compiles"], true);
+        // Code written inline in the blueprint has no file, so it is not
+        // listed beside the hooks that do.
+        let hooks = scripts
+            .iter()
+            .filter(|s| s["kind"] == "stage_hook" || s["kind"] == "region_hook")
+            .count();
+        assert_eq!(hooks, 2, "{scripts:?}");
         assert_eq!(find("tool", "shared")["source"], "global");
         assert!(find("tool", "shared").get("agent").is_none());
         assert_eq!(find("provider", "groq")["source"], "global");
@@ -690,7 +702,7 @@ async fn the_listing_says_why_a_script_does_not_compile() {
 async fn a_declared_hook_with_no_file_is_listed_as_failing() {
     with_home(|home| async move {
         let agent = agent_root(&home, "researcher");
-        write(&agent.join("agent.leviath"), manifest_with_hooks());
+        write(&agent.join("agent.toml"), manifest_with_hooks());
         let (status, body) = get_json("/api/scripts?agent=researcher").await;
 
         assert_eq!(status, StatusCode::OK);
@@ -707,37 +719,25 @@ async fn a_declared_hook_with_no_file_is_listed_as_failing() {
 }
 
 /// A hook declared in a subdirectory is listed, addressed by the relative path
-/// the manifest wrote, and the read route opens that exact file. It used to be
-/// dropped from the listing entirely, so a console could not show a validator
-/// declared the way the docs themselves declare one.
+/// the blueprint wrote, and the read route opens that exact file, so a console
+/// can show a validator declared the way the docs themselves declare one.
 #[tokio::test]
 async fn a_hook_declared_in_a_subdirectory_is_listed_and_readable() {
     with_home(|home| async move {
         let agent = agent_root(&home, "nested");
-        let manifest = r#"
-[agent]
+        let manifest = r#"[blueprint]
 name = "nested"
 version = "0.1.0"
 description = "d"
 
+[graph]
 # An output spec that names a format and no validator, which is the common case:
 # an output block is not a declaration that a script exists.
-[agent.output]
-format = "markdown"
-
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-description = "Main"
-max_iterations = 5
-
-[stages.main.hooks]
-on_stage_enter = "hooks/deep.rhai"
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
+output = { format = "markdown" }
+stages = [{ name = "main", description = "Main", max_iterations = 5, hooks = { on_stage_enter = { file = "hooks/deep.rhai" } } }]
+layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pinned", budget = 1000 }] }
 "#;
-        write(&agent.join("agent.leviath"), manifest);
+        write(&agent.join("agent.toml"), manifest);
         write(
             &agent.join("hooks").join("deep.rhai"),
             "fn on_stage_enter(ctx) { () }",
@@ -771,28 +771,17 @@ system = { kind = "pinned", max_tokens = 1000 }
 async fn a_declaration_that_cannot_be_addressed_is_left_out() {
     with_home(|home| async move {
         let agent = agent_root(&home, "odd");
-        let manifest = r#"
-[agent]
+        let manifest = r#"[blueprint]
 name = "odd"
 version = "0.1.0"
 description = "d"
 
-[agent.output]
-validator = "../outside.rhai"
-
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-description = "Main"
-max_iterations = 5
-
-[stages.main.hooks]
-on_stage_enter = "notes.txt"
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
+[graph]
+output = { validator = { file = "../outside.rhai" } }
+stages = [{ name = "main", description = "Main", max_iterations = 5, hooks = { on_stage_enter = { file = "notes.txt" } } }]
+layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pinned", budget = 1000 }] }
 "#;
-        write(&agent.join("agent.leviath"), manifest);
+        write(&agent.join("agent.toml"), manifest);
         let (status, body) = get_json("/api/scripts?agent=odd").await;
 
         assert_eq!(status, StatusCode::OK);
@@ -807,7 +796,7 @@ system = { kind = "pinned", max_tokens = 1000 }
 async fn a_manifest_that_will_not_parse_leaves_the_tools_listed() {
     with_home(|home| async move {
         let agent = agent_root(&home, "mangled");
-        write(&agent.join("agent.leviath"), "this is not toml =");
+        write(&agent.join("agent.toml"), "this is not toml =");
         write(&agent.join("tools").join("web_search.rhai"), GOOD_TOOL);
         let (status, body) = get_json("/api/scripts?agent=mangled").await;
 
@@ -850,24 +839,16 @@ async fn the_listing_refuses_a_traversing_agent_name() {
 fn agent_with_a_draft(home: &Path) -> PathBuf {
     let agent = agent_root(home, "picker");
     write(
-        &agent.join("agent.leviath"),
-        r#"
-[agent]
+        &agent.join("agent.toml"),
+        r#"[blueprint]
 name = "picker"
 version = "0.1.0"
 description = "d"
 
-[agent.output]
-validator = "validators/a2ui.rhai"
-
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-description = "Main"
-max_iterations = 5
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
+[graph]
+output = { validator = { file = "validators/a2ui.rhai" } }
+stages = [{ name = "main", description = "Main", max_iterations = 5 }]
+layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pinned", budget = 1000 }] }
 "#,
     );
     write(&agent.join("tools").join("summarize.rhai"), GOOD_TOOL);
@@ -1670,7 +1651,7 @@ async fn a_provider_with_an_agent_is_refused() {
 async fn the_listing_carries_providers_in_both_scopes() {
     with_home(|home| async move {
         write(&providers_root(&home).join("groq.rhai"), GOOD_PROVIDER);
-        write(&agent_root(&home, "researcher").join("agent.leviath"), "");
+        write(&agent_root(&home, "researcher").join("agent.toml"), "");
 
         for uri in ["/api/scripts", "/api/scripts?agent=researcher"] {
             let (status, body) = get_json(uri).await;
@@ -1904,7 +1885,7 @@ async fn the_routes_see_an_agent_discovered_through_agent_paths() {
     with_home(|home| async move {
         let workspace = home.join("workspace");
         let agent = workspace.join("researcher");
-        write(&agent.join("agent.leviath"), manifest_with_hooks());
+        write(&agent.join("agent.toml"), manifest_with_hooks());
         write(&agent.join("tools").join("web_search.rhai"), GOOD_TOOL);
         write(&agent.join("hooks.rhai"), "fn on_stage_enter(ctx) { () }");
         let paths = vec![workspace];

@@ -15,7 +15,9 @@
 use serde::{Deserialize, Serialize};
 
 /// The isolation mechanism used for an agent's shell tool execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxKind {
     /// Run directly on the host - current behavior, explicit opt-out.
@@ -29,7 +31,9 @@ pub enum SandboxKind {
 
 /// What to do when the configured sandbox runtime can't be established (e.g. no
 /// container engine on `PATH`, or `namespace` requested on a non-Linux host).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum OnUnavailable {
     /// Fail agent spawn with a clear error. The safe default for untrusted code.
@@ -124,7 +128,7 @@ impl ToolSandboxConfig {
     ///
     /// `engine` is spawned as argv[0] on the **host** when the sandbox is built -
     /// before the first inference, and so before any tool-approval prompt.
-    /// A downloaded `agent.leviath` naming `engine = "/tmp/payload"` therefore
+    /// A downloaded `agent.toml` naming `engine = "/tmp/payload"` therefore
     /// executed it, and clamping only against a user who had *pinned* an engine
     /// missed the ordinary case: auto-detection is the default, so the ceiling
     /// was `None` and the manifest's value won. With no global `[sandbox]` at
@@ -145,7 +149,7 @@ impl ToolSandboxConfig {
     ///
     /// Refusing a manifest's `kind = "none"` was never enough on its own. A
     /// manifest that keeps an isolating `kind` passed that check and then
-    /// replaced *every other field*, so an `agent.leviath` shipping
+    /// replaced *every other field*, so an `agent.toml` shipping
     ///
     /// ```toml
     /// [sandbox]
@@ -199,7 +203,7 @@ impl ToolSandboxConfig {
 /// is set. Mirrors [`crate::taint::resolve_security`].
 ///
 /// **A blueprint cannot turn off a sandbox the user turned on.** The `agent` and
-/// `stage` configs come from `agent.leviath` - a downloaded file - so when the
+/// `stage` configs come from `agent.toml` - a downloaded file - so when the
 /// user's global config asks for isolation, a manifest asking for
 /// [`SandboxKind::None`] is ignored and the global stands. A manifest may still
 /// *choose a different isolated kind* (a stage that wants its own container
@@ -512,7 +516,7 @@ mod tests {
     }
 
     /// A downloaded manifest cannot drop the user back onto the host. Both the
-    /// agent and stage levels come from `agent.leviath`, so if those levels
+    /// agent and stage levels come from `agent.toml`, so if those levels
     /// could win, `kind = "none"` there would defeat a global
     /// `kind = "container"`.
     #[test]

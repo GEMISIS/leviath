@@ -2414,6 +2414,28 @@ mod tests {
         );
     }
 
+    /// A rejected key fails over with its own remedy, and is not also called a
+    /// bad request: the reader is not sent looking for a parameter.
+    #[tokio::test]
+    async fn check_http_response_401_says_the_key_and_nothing_else() {
+        let body =
+            br#"{"error":{"message":"Incorrect API key provided","code":"invalid_api_key"}}"#;
+        let response = spawn_mock_response(401, "Unauthorized", &[], body).await;
+        let err = check_http_response(response, None).await.unwrap_err();
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(UnavailableReason::AuthFailed)
+        );
+        let msg = err.to_string();
+        assert!(msg.starts_with("the API key was rejected"), "{msg}");
+        assert!(
+            msg.contains("401") && msg.contains("Incorrect API key"),
+            "{msg}"
+        );
+        assert!(!msg.contains("bad-request"), "{msg}");
+        assert!(!msg.contains("a parameter it does not accept"), "{msg}");
+    }
+
     #[tokio::test]
     async fn check_http_response_ordinary_4xx_stays_an_api_error() {
         let response = spawn_mock_response(404, "Not Found", &[], b"no such model").await;

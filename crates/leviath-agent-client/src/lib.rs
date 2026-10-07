@@ -20,17 +20,21 @@
 //! Leviath daemon. The stdio server that drives it lives in `leviath-cli`
 //! (`commands::agent_client`).
 //!
+//! Leviath's own additions, the `_leviath/*` extension methods, are named and
+//! shaped in [`extensions`].
+//!
 //! Framing is **newline-delimited JSON**: exactly one compact JSON message per
 //! line. See [`protocol::MAX_FRAME_BYTES`] for the size ceiling this implies.
 //!
 //! [acp]: https://agentclientprotocol.com
 
+pub mod extensions;
 pub mod mapping;
 pub mod protocol;
 
 pub use mapping::{
-    flatten_prompt, flatten_prompt_with, is_permission_request, parse_region_markers,
-    permission_request, prompt_parts, stop_reason_for, stop_reason_for_label,
+    flatten_prompt, flatten_prompt_with, is_permission_request, permission_request, prompt_parts,
+    stop_reason_for, stop_reason_for_label,
 };
 pub use protocol::{
     AgentCapabilities, AgentInfo, ContentBlock, EmbeddedResource, InitializeParams,

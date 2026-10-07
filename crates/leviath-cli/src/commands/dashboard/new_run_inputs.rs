@@ -1,19 +1,31 @@
-//! The new-run screen's Inputs pane: one slot per caller-input region the
-//! selected blueprint declares (`seed = "input"`, or a named key), so a file
-//! or a line of text can be sent straight to `pictures` or `diff` the way
-//! `lev run --pictures @photo.png` does, instead of every `@path` landing in
-//! the task region.
+//! The new-run screen's Inputs pane: one row per input the selected
+//! blueprint declares beside its task, each drawn for its type.
 //!
-//! A slot takes what the `--<region>` flag takes: `@file` attaches the file
-//! (or seeds the region with its text when it is text), a bare path that
-//! names a file in the working directory does the same, and anything else is
-//! the region's text, with `@path` tokens inside it attached beside it.
+//! - A `text` input takes what the `--<name>` flag takes: `@file` attaches the
+//!   file (or seeds the input with its text when it is text), a bare path that
+//!   names a file in the working directory does the same, and anything else is
+//!   the input's text, with `@path` tokens inside it attached beside it. One
+//!   whose region takes files opens a picker too.
+//! - A `choice` is a picker: `←`/`→` or `Space` moves through its options.
+//! - A `bool` is a toggle: `Space` flips it.
+//! - A `file` input opens the picker; the file is attached and the input names
+//!   it.
+//! - Anything else (a number, a list, a duration, a URL) is typed as text and
+//!   read by its type when the run starts.
+//!
+//! Every input is checked against its declaration before the run is sent,
+//! and each problem is shown beside its row: a number out of range, a list
+//! too long, a required input left empty. A problem the daemon finds with an
+//! input comes back to the same row.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use leviath_core::mime::InboundPart;
+use leviath_runtime::spec::inputs::{CheckCtx, InputDecl, InputSlot, InputType, RawInput};
+use leviath_runtime::spec::issues::{IssueCode, PathSeg, SpawnIssue, SpawnIssues, SpecPath};
+use leviath_runtime::spec::names::ChoiceName;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -25,59 +37,130 @@ use super::state::Dashboard;
 use super::theme::*;
 use super::types::{ClickTarget, NewRunPane};
 use crate::commands::run::attach::{cli_registry, read_region_input};
+use crate::commands::run::inputs::typed_value;
+use crate::commands::run::request::TASK_INPUT;
 use crate::tui::widgets::line_edit::{EditOutcome, LineEdit};
 use crate::tui::widgets::list_cursor;
 
-/// One caller-input region of the selected blueprint, and what was typed
-/// for it.
+/// One input of the selected blueprint, and what was entered for it.
 #[derive(Debug)]
 pub(super) struct NewRunInput {
-    /// The caller key, what `--<key>` names on the command line.
+    /// The input's name, what `--input <name>=` names on the command line.
     pub(super) key: String,
-    /// The region the key seeds.
+    /// The region a text input fills, where the files chosen for it go.
     pub(super) region: String,
-    /// The mime type patterns the region takes; empty means anything.
+    /// The input's declared type, which decides how its row is drawn and how
+    /// what is entered is read.
+    pub(super) ty: InputType,
+    /// The mime type patterns the input takes; empty means anything.
     pub(super) accepts: Vec<String>,
     /// Whether the run refuses to start without it.
     pub(super) required: bool,
     /// The region's token budget, resolved against the entry model's context
-    /// window. `0` means the region declares none, so no token limit applies.
+    /// window. `0` means none applies.
     pub(super) max_tokens: usize,
-    /// The text typed for it (for a region that takes text).
+    /// The text typed for it (for an input typed as text).
     pub(super) edit: LineEdit,
-    /// The files chosen for it through the picker, workdir-relative. Filled
-    /// for a region that takes files, and the reason a file no longer needs an
-    /// `@` in front of a typed name to attach.
+    /// The files chosen for it through the picker, workdir-relative.
     pub(super) files: Vec<PathBuf>,
+    /// A choice's picked option, by index, or a toggle's state (`1` on, `0`
+    /// off). `None` until one is picked: an input left alone is not sent.
+    pub(super) pick: Option<usize>,
+    /// The problem the last check found with this input, shown beside it.
+    pub(super) issue: Option<String>,
 }
 
 impl NewRunInput {
-    /// Whether the region takes text a person would type: it says so, or it
-    /// takes anything.
+    /// A row for `decl`, with nothing entered: a declared default is
+    /// pre-picked for a choice or a toggle and pre-typed for anything else.
+    pub(super) fn new(decl: &InputDecl) -> Self {
+        let region = decl
+            .binds
+            .iter()
+            .find_map(|slot| match slot {
+                InputSlot::Region(binding) => Some(binding.region.to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| decl.name.to_string());
+        let accepts = match &decl.ty {
+            InputType::File { accepts } => accepts.iter().map(ToString::to_string).collect(),
+            _ => Vec::new(),
+        };
+        let mut row = Self {
+            key: decl.name.to_string(),
+            region,
+            ty: decl.ty.clone(),
+            accepts,
+            required: decl.required && decl.default.is_none(),
+            max_tokens: 0,
+            edit: LineEdit::new(String::new(), false),
+            files: Vec::new(),
+            pick: None,
+            issue: None,
+        };
+        if let Some(default) = &decl.default {
+            match (&decl.ty, default.to_raw()) {
+                (InputType::Bool, RawInput::Bool(on)) => row.pick = Some(usize::from(on)),
+                (InputType::Choice { options }, RawInput::Text(name)) => {
+                    row.pick = options.iter().position(|o| o.as_str() == name);
+                }
+                (_, _) => row.edit = LineEdit::new(default.render_text(), false),
+            }
+        }
+        row
+    }
+
+    /// Whether the row is a picker or a toggle rather than a text field.
+    fn picks(&self) -> bool {
+        matches!(self.ty, InputType::Choice { .. } | InputType::Bool)
+    }
+
+    /// Whether the input is a file, or a list of files.
+    fn is_file(&self) -> bool {
+        match &self.ty {
+            InputType::File { .. } => true,
+            InputType::List { item, .. } => matches!(**item, InputType::File { .. }),
+            _ => false,
+        }
+    }
+
+    /// Whether the row takes text a person would type: a text input whose
+    /// region says it takes text (or anything), or a value typed as text.
     pub(super) fn takes_text(&self) -> bool {
-        self.accepts.is_empty()
-            || self
-                .accepts
-                .iter()
-                .any(|p| p == "*/*" || p.starts_with("text/"))
+        match &self.ty {
+            InputType::Text { .. } => {
+                self.accepts.is_empty()
+                    || self
+                        .accepts
+                        .iter()
+                        .any(|p| p == "*/*" || p.starts_with("text/"))
+            }
+            _ => !self.picks() && !self.is_file(),
+        }
     }
 
-    /// Whether the region takes a file: it names a non-text type, or it takes
-    /// anything.
+    /// Whether the row takes a file: a file input, or a text input whose
+    /// region names a non-text type or takes anything.
     pub(super) fn takes_files(&self) -> bool {
-        self.accepts.is_empty()
-            || self
-                .accepts
-                .iter()
-                .any(|p| p == "*/*" || !p.starts_with("text/"))
+        match &self.ty {
+            InputType::Text { .. } => {
+                self.accepts.is_empty()
+                    || self
+                        .accepts
+                        .iter()
+                        .any(|p| p == "*/*" || !p.starts_with("text/"))
+            }
+            _ => self.is_file(),
+        }
     }
 
-    /// The dim note beside the key: what the region takes, how many, the token
-    /// room it has, and whether it is required. The token budget is the honest
-    /// answer to "how many files fit": the count cap is one limit, the budget
-    /// the other.
+    /// The dim note beside the name: the type (for anything but text), what
+    /// files it takes, the token room it has, and whether it is required.
     fn note(&self) -> String {
         let mut bits: Vec<String> = Vec::new();
+        if !matches!(self.ty, InputType::Text { .. } | InputType::File { .. }) {
+            bits.push(self.ty.describe());
+        }
         if !self.accepts.is_empty() {
             bits.push(self.accepts.join(" "));
         }
@@ -93,21 +176,75 @@ impl NewRunInput {
         }
     }
 
-    /// The spans shown for the row's value: the chosen files for a file
-    /// region, the typed text otherwise, or a prompt when it is empty.
-    fn value_spans(&self, on: bool) -> Vec<Span<'static>> {
-        // A file-only region shows the files it holds, never a text cursor.
-        if self.takes_files() && !self.takes_text() {
-            return self.file_spans(on);
-        }
-        let hint = match self.takes_files() {
-            true => "text, or ^O for files",
-            false => "text",
+    /// Move a choice to the next (`forward`) or previous option, or flip a
+    /// toggle. Nothing picked yet starts at the first option, or on.
+    fn cycle(&mut self, forward: bool) {
+        // A toggle is a choice of off (0) and on (1) that starts on.
+        let (count, first) = match &self.ty {
+            InputType::Choice { options } => (options.len().max(1), 0),
+            _ => (2, 1),
         };
-        // Keep the hint visible whenever the field is empty, focused or not, so
-        // a slot never looks blank and nobody forgets what it wants. Focused,
-        // the cursor stays and the hint trails it dim; unfocused, the hint
-        // stands alone.
+        let next = match (self.pick, forward) {
+            (None, _) => first,
+            (Some(i), true) => (i + 1) % count,
+            (Some(i), false) => (i + count - 1) % count,
+        };
+        self.pick = Some(next);
+        self.issue = None;
+    }
+
+    /// The spans shown for the row's value, then its problem when it has one.
+    fn value_spans(&self, on: bool) -> Vec<Span<'static>> {
+        let mut spans = match &self.ty {
+            InputType::Choice { options } => self.choice_spans(options, on),
+            InputType::Bool => self.toggle_spans(),
+            _ if self.takes_files() && !self.takes_text() => self.file_spans(on),
+            _ => self.text_spans(on),
+        };
+        if let Some(issue) = &self.issue {
+            spans.push(Span::styled(
+                format!("  ✗ {issue}"),
+                Style::default().fg(C_ERROR),
+            ));
+        }
+        spans
+    }
+
+    /// A choice: the picked option between arrows, or a prompt to pick.
+    fn choice_spans(&self, options: &[ChoiceName], on: bool) -> Vec<Span<'static>> {
+        match self.pick.and_then(|i| options.get(i)) {
+            Some(option) => vec![Span::styled(
+                format!("‹ {option} ›"),
+                Style::default().fg(C_ACTIVE),
+            )],
+            None => vec![Span::styled(
+                match on {
+                    true => "← → to choose",
+                    false => "not chosen",
+                },
+                Style::default().fg(C_DIM),
+            )],
+        }
+    }
+
+    /// A toggle: a box and its state, or a prompt when it is not set.
+    fn toggle_spans(&self) -> Vec<Span<'static>> {
+        match self.pick {
+            Some(1) => vec![Span::styled("[x] yes", Style::default().fg(C_ACTIVE))],
+            Some(_) => vec![Span::styled("[ ] no", Style::default().fg(C_ACTIVE))],
+            None => vec![Span::styled("[ ] not set", Style::default().fg(C_DIM))],
+        }
+    }
+
+    /// A text field: what was typed, or a hint at what it wants.
+    fn text_spans(&self, on: bool) -> Vec<Span<'static>> {
+        let hint = match (&self.ty, self.takes_files()) {
+            (InputType::Text { .. }, true) => "text, or ^O for files".to_string(),
+            (InputType::Text { .. }, false) => "text".to_string(),
+            (ty, _) => ty.describe(),
+        };
+        // Keep the hint visible whenever the field is empty, focused or not,
+        // so a row never looks blank and nobody forgets what it wants.
         let mut spans = match (self.edit.value().is_empty(), on) {
             (true, true) => {
                 let mut spans = self.edit.display_spans(true).spans;
@@ -117,7 +254,7 @@ impl NewRunInput {
             (true, false) => vec![Span::styled(hint, Style::default().fg(C_DIM))],
             (false, _) => self.edit.display_spans(true).spans,
         };
-        // A region that takes both shows any chosen files after the text.
+        // A row that takes both shows any chosen files after the text.
         if self.takes_files() && !self.files.is_empty() {
             spans.push(Span::styled(
                 format!("  +{}", self.file_summary()),
@@ -127,7 +264,7 @@ impl NewRunInput {
         spans
     }
 
-    /// The spans for a file region: the chosen names, or a prompt to choose.
+    /// The spans for a file row: the chosen names, or a prompt to choose.
     fn file_spans(&self, on: bool) -> Vec<Span<'static>> {
         if self.files.is_empty() {
             let prompt = match on {
@@ -142,7 +279,7 @@ impl NewRunInput {
         )]
     }
 
-    /// The chosen files as a short chip, e.g. `hero.png, villain.png (2/3)`.
+    /// The chosen files as a short chip, e.g. `hero.png, villain.png (2)`.
     fn file_summary(&self) -> String {
         let names: Vec<String> = self
             .files
@@ -162,19 +299,49 @@ impl NewRunInput {
     }
 }
 
-/// What the slots resolve to when the run starts.
+/// What the rows resolve to when the run starts.
 #[derive(Debug, Default)]
 pub(super) struct ResolvedInputs {
-    /// Text seeds by caller key, what `--<key> text` sends.
-    pub(super) regions: HashMap<String, String>,
-    /// Files, each already naming its region.
+    /// Each input's value, read by its type, by name: what `--input
+    /// name=value` sends.
+    pub(super) values: BTreeMap<String, RawInput>,
+    /// Files, each already naming its region (for a text input) or named by
+    /// its input (for a file input).
     pub(super) parts: Vec<InboundPart>,
     /// `@path` tokens that looked like files but named none.
     pub(super) unresolved: Vec<String>,
 }
 
+/// What a region tells a row of the input that fills it: its name, the
+/// types it accepts, whether it is required, and its token room.
+pub(super) type RegionRoom = (String, Vec<String>, bool, usize);
+
+/// The rows for a graph's `inputs`, the task left to the task box. `regions`
+/// are the layout's regions in order: a text input takes its region's
+/// settings, and the rows follow the order of the regions they fill, with
+/// any other input after them in the order declared.
+pub(super) fn rows_for(inputs: &[InputDecl], regions: &[RegionRoom]) -> Vec<NewRunInput> {
+    let mut rows: Vec<(usize, NewRunInput)> = inputs
+        .iter()
+        .filter(|decl| decl.name.as_str() != TASK_INPUT)
+        .map(|decl| {
+            let mut row = NewRunInput::new(decl);
+            let found = regions.iter().position(|(name, ..)| *name == row.region);
+            if let (InputType::Text { .. }, Some(i)) = (&row.ty, found) {
+                let (_, accepts, required, max_tokens) = &regions[i];
+                row.accepts = accepts.clone();
+                row.required |= *required;
+                row.max_tokens = *max_tokens;
+            }
+            (found.unwrap_or(usize::MAX), row)
+        })
+        .collect();
+    rows.sort_by_key(|(order, _)| *order);
+    rows.into_iter().map(|(_, row)| row).collect()
+}
+
 impl Dashboard {
-    /// Rebuild the slots for the selected agent when the selection moved.
+    /// Rebuild the rows for the selected agent when the selection moved.
     /// Kept per agent path, so moving the cursor away and back keeps what was
     /// typed only while the same agent is selected.
     pub(super) fn sync_new_run_inputs(&mut self) {
@@ -197,34 +364,26 @@ impl Dashboard {
         self.new_run_inputs_key = path;
         let config_path = self.new_run_ctx.config_path.clone();
         self.new_run_inputs = blueprint
-            .map(|bp| {
+            .map(|graph| {
                 // Resolve each region's percentage budget against the entry
-                // stage's effective (smallest) model window, so a slot knows the
-                // token room it really has.
+                // stage's effective (smallest) model window, so a row knows
+                // the token room it really has.
                 let cache_path = leviath_core::paths::capability_cache_path();
-                let window = entry_stage_window(&bp, &config_path, cache_path.as_deref());
-                let layout = bp.context_layout.resolved(window);
-                layout
+                let window = entry_stage_window(&graph, &config_path, cache_path.as_deref());
+                let regions: Vec<RegionRoom> = graph
+                    .layout
                     .regions
                     .iter()
-                    .filter_map(|r| match &r.seed {
-                        // The `task` key is the task box; every other key gets a slot.
-                        Some(leviath_core::layout::RegionSeed::CallerInput { name })
-                            if name != "task" =>
-                        {
-                            Some(NewRunInput {
-                                key: name.clone(),
-                                region: r.name.clone(),
-                                accepts: r.accepts.clone(),
-                                required: r.required,
-                                max_tokens: r.max_tokens,
-                                edit: LineEdit::new(String::new(), false),
-                                files: Vec::new(),
-                            })
-                        }
-                        _ => None,
+                    .map(|r| {
+                        (
+                            r.name.to_string(),
+                            r.accepts.iter().map(|p| p.as_str().to_string()).collect(),
+                            r.required,
+                            r.budget.resolve(window),
+                        )
                     })
-                    .collect()
+                    .collect();
+                rows_for(&graph.inputs, &regions)
             })
             .unwrap_or_default();
     }
@@ -234,10 +393,10 @@ impl Dashboard {
         !self.new_run_inputs.is_empty()
     }
 
-    /// Keys while the Inputs pane has them: `↑`/`↓` pick a slot, `Enter`
+    /// Keys while the Inputs pane has them: `↑`/`↓` pick a row, `Enter`
     /// moves down and on to the task after the last, `Tab` goes to the task,
-    /// `Shift+Tab` and `Esc` back to the agents; anything else types into the
-    /// slot.
+    /// `Shift+Tab` and `Esc` back to the agents; a choice or a toggle takes
+    /// `←`/`→` and `Space`, and anything else types into a text row.
     pub(super) fn handle_new_run_inputs_key(&mut self, key: KeyEvent) {
         let last = self.new_run_inputs.len().saturating_sub(1);
         match key.code {
@@ -253,13 +412,23 @@ impl Dashboard {
             }
             _ => {
                 let idx = self.new_run_input_selected;
-                let Some(slot) = self.new_run_inputs.get(idx) else {
+                let Some(slot) = self.new_run_inputs.get_mut(idx) else {
                     return;
                 };
+                if slot.picks() {
+                    match key.code {
+                        KeyCode::Left => slot.cycle(false),
+                        KeyCode::Right | KeyCode::Char(' ') => slot.cycle(true),
+                        KeyCode::Enter if idx >= last => self.new_run_focus = NewRunPane::Task,
+                        KeyCode::Enter => self.new_run_input_selected += 1,
+                        _ => {}
+                    }
+                    return;
+                }
                 let takes_text = slot.takes_text();
                 let takes_files = slot.takes_files();
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                // A file region opens the picker: on Enter or Space when it is
+                // A file row opens the picker: on Enter or Space when it is
                 // file-only (there is nothing to type), and always on Ctrl+O.
                 let open_picker = takes_files
                     && ((ctrl && matches!(key.code, KeyCode::Char('o' | 'O')))
@@ -272,9 +441,7 @@ impl Dashboard {
                 if !takes_text {
                     return;
                 }
-                // `idx` was just proven valid by the `get` above, and no key
-                // changes the rows here, so it still is.
-                let slot = &mut self.new_run_inputs[idx];
+                slot.issue = None;
                 match slot.edit.handle_key(&key) {
                     EditOutcome::Commit if idx >= last => {
                         self.new_run_focus = NewRunPane::Task;
@@ -286,7 +453,7 @@ impl Dashboard {
         }
     }
 
-    /// A click on slot `index`: the pane takes the keys and the slot is the
+    /// A click on row `index`: the pane takes the keys and the row is the
     /// one under the cursor.
     pub(super) fn click_new_run_input(&mut self, index: usize) {
         if index < self.new_run_inputs.len() {
@@ -295,42 +462,74 @@ impl Dashboard {
         }
     }
 
-    /// Resolve every filled slot into what the spawn sends. A slot the file
-    /// tools cannot read is an error naming it, so a typo is a toast here
-    /// rather than a run that started without its picture.
+    /// Resolve every filled row into what the spawn sends. A row whose files
+    /// cannot be read is an error naming it, so a typo is a toast here rather
+    /// than a run that started without its picture.
     pub(super) fn new_run_input_values(&self) -> Result<ResolvedInputs, String> {
         let workdir: &Path = &self.new_run_ctx.workdir;
         let registry = cli_registry();
         let mut out = ResolvedInputs::default();
         for slot in &self.new_run_inputs {
-            // The token cost of everything this slot puts in its region, so a
+            let fail = |e: &dyn std::fmt::Display| format!("{}: {e}", slot.key);
+            if slot.picks() {
+                let picked = match (&slot.ty, slot.pick) {
+                    (InputType::Bool, Some(i)) => Some(RawInput::Bool(i == 1)),
+                    (InputType::Choice { options }, Some(i)) => {
+                        options.get(i).map(|o| RawInput::Text(o.to_string()))
+                    }
+                    _ => None,
+                };
+                out.values.extend(picked.map(|v| (slot.key.clone(), v)));
+                continue;
+            }
+            // The token cost of everything this row puts in its region, so a
             // choice that would not fit the region's budget is refused here
             // rather than at spawn.
             let mut slot_tokens = 0usize;
-            // Files chosen through the picker attach straight to the region,
-            // no `@` and no typed name.
+            let mut names = Vec::new();
+            // Files chosen through the picker attach without an `@` or a
+            // typed name: to a text input's region, or named by a file input.
             for rel in &slot.files {
                 let full = workdir.join(rel);
                 let part = crate::commands::run::attach::read_part(&rel.to_string_lossy(), workdir)
-                    .map_err(|e| format!("{}: {e}", slot.key))?
-                    .in_region(&slot.region);
+                    .map_err(|e| fail(&e))?;
+                let part = match slot.is_file() {
+                    true => part,
+                    false => part.in_region(&slot.region),
+                };
+                names.push(RawInput::Text(part.name.clone()));
                 out.parts.push(part);
                 slot_tokens += super::new_run_picker::estimate_file_tokens(&full, &registry);
             }
+            if slot.is_file() {
+                let value = match (&slot.ty, names.len()) {
+                    (InputType::List { .. }, _) => Some(RawInput::List(names)),
+                    (_, 0) => None,
+                    (_, _) => names.into_iter().next(),
+                };
+                out.values.extend(value.map(|v| (slot.key.clone(), v)));
+                continue;
+            }
             let raw = slot.edit.value().trim().to_string();
+            if !raw.is_empty() && !matches!(slot.ty, InputType::Text { .. }) {
+                let value = typed_value(&slot.ty, &raw).map_err(|e| fail(&e))?;
+                out.values.insert(slot.key.clone(), value);
+                continue;
+            }
             if !raw.is_empty() {
                 // A bare path that names a file is the file, as it is on the
-                // command line's `--<region> @file`; a slot is for one input, so
+                // command line's `--<name> @file`; a row is for one input, so
                 // the `@` is implied.
                 let value = match !raw.starts_with('@') && workdir.join(&raw).is_file() {
                     true => format!("@{raw}"),
                     false => raw,
                 };
                 let read = read_region_input(&slot.region, &value, workdir, &registry)
-                    .map_err(|e| format!("{}: {e}", slot.key))?;
+                    .map_err(|e| fail(&e))?;
                 if !read.text.is_empty() {
                     slot_tokens += leviath_core::text::estimate_tokens(&read.text);
-                    out.regions.insert(slot.key.clone(), read.text);
+                    out.values
+                        .insert(slot.key.clone(), RawInput::Text(read.text));
                 }
                 out.parts.extend(read.parts);
                 out.unresolved.extend(read.unresolved);
@@ -345,7 +544,67 @@ impl Dashboard {
         Ok(out)
     }
 
-    /// The pane's height when it is drawn: a border and one row per slot.
+    /// Check what the rows resolved to against each input's declared type,
+    /// before anything is sent, and put each problem beside its row. Returns
+    /// how many rows have one.
+    pub(super) fn check_new_run_inputs(&mut self, resolved: &ResolvedInputs) -> usize {
+        let names: Vec<String> = resolved.parts.iter().map(|p| p.name.clone()).collect();
+        let cx = CheckCtx {
+            attachments: &names,
+        };
+        let mut issues = SpawnIssues::new();
+        let at = SpecPath::root().field("inputs");
+        for slot in &self.new_run_inputs {
+            let path = at.key(&slot.key);
+            match resolved.values.get(&slot.key) {
+                Some(raw) => {
+                    slot.ty.check(raw, &path, &cx, &mut issues);
+                }
+                // A text input whose files went to its region has been given
+                // something, even with no text of its own.
+                None if slot.required
+                    && !resolved
+                        .parts
+                        .iter()
+                        .any(|p| p.region.as_deref() == Some(slot.region.as_str())) =>
+                {
+                    issues.push(SpawnIssue::new(
+                        path,
+                        IssueCode::Missing,
+                        "this input is required",
+                    ))
+                }
+                None => {}
+            }
+        }
+        self.show_new_run_issues(&issues)
+    }
+
+    /// Put each issue about one of the rows' inputs beside its row, clearing
+    /// the rest, and select the first row with one. Returns how many rows
+    /// have one.
+    pub(super) fn show_new_run_issues(&mut self, issues: &SpawnIssues) -> usize {
+        let mut first = None;
+        for (i, slot) in self.new_run_inputs.iter_mut().enumerate() {
+            slot.issue = issues
+                .iter()
+                .find(|issue| issue_input(&issue.path) == Some(slot.key.as_str()))
+                .map(issue_text);
+            if slot.issue.is_some() && first.is_none() {
+                first = Some(i);
+            }
+        }
+        if let Some(i) = first {
+            self.new_run_focus = NewRunPane::Inputs;
+            self.new_run_input_selected = i;
+        }
+        self.new_run_inputs
+            .iter()
+            .filter(|slot| slot.issue.is_some())
+            .count()
+    }
+
+    /// The pane's height when it is drawn: a border and one row per input.
     pub(super) fn new_run_inputs_height(&self) -> u16 {
         match self.new_run_inputs.len() {
             0 => 0,
@@ -353,7 +612,7 @@ impl Dashboard {
         }
     }
 
-    /// Draw the slots into `area`, registering each row for the mouse.
+    /// Draw the rows into `area`, registering each for the mouse.
     pub(super) fn draw_new_run_inputs(&mut self, frame: &mut Frame, area: Rect) {
         let focused = self.new_run_focus == NewRunPane::Inputs;
         let agent = self
@@ -399,9 +658,9 @@ impl Dashboard {
             ];
             spans.extend(slot.value_spans(on));
             lines.push(Line::from(spans));
-            // The pane is sized to hold every slot (`new_run_inputs_height`),
+            // The pane is sized to hold every row (`new_run_inputs_height`),
             // and it is not drawn at all when the column cannot give it that
-            // many rows, so each slot's row is always inside `inner`.
+            // many rows, so each row is always inside `inner`.
             let row = Rect {
                 x: inner.x,
                 y: inner.y.saturating_add(i as u16),
@@ -417,30 +676,50 @@ impl Dashboard {
     }
 }
 
-/// The effective context window of the blueprint's entry stage, resolved
+/// The input an issue is about, when its path is `inputs.<name>` or below it.
+pub(super) fn issue_input(path: &SpecPath) -> Option<&str> {
+    match path.0.as_slice() {
+        [PathSeg::Field(inputs), PathSeg::Key(name), ..] if inputs == "inputs" => {
+            Some(name.as_str())
+        }
+        _ => None,
+    }
+}
+
+/// An issue as it reads beside its row: what is wrong, and what was expected.
+fn issue_text(issue: &SpawnIssue) -> String {
+    match &issue.expected {
+        Some(expected) => format!("{}; expected {expected}", issue.message),
+        None => issue.message.clone(),
+    }
+}
+
+/// The effective context window of the graph's entry stage, resolved
 /// offline: the **smallest** window across the stage's declared models, since a
 /// region's percentage budget must fit the tightest of them. Each model
 /// resolves through [`offline_model_window`]. Region percentage budgets resolve
 /// against this, so the picker's token room matches the tightest a run will get.
 fn entry_stage_window(
-    blueprint: &leviath_core::blueprint::Blueprint,
+    graph: &leviath_runtime::spec::graph::RunGraph,
     config_path: &Path,
     cache_path: Option<&Path>,
 ) -> usize {
     const DEFAULT_WINDOW: usize = 8192;
-    let entry = blueprint.resolve_entry_stage_name();
     let config = crate::config::Config::load_from_path_public(config_path).ok();
     let cache = cache_path.and_then(leviath_providers::CapabilityCache::load);
     // A missing entry stage and a stage that names no models both fold into an
     // empty iterator, so both take the `unwrap_or` default without a dead arm.
-    blueprint
-        .stages
-        .iter()
-        .find(|s| s.name == entry)
+    // A model with no provider asks under an empty one, which no override,
+    // cache row or catalogue entry names.
+    graph
+        .entry_stage()
         .map(|s| &s.model.models)
         .into_iter()
         .flatten()
-        .map(|m| offline_model_window(&m.provider, &m.model, config.as_ref(), cache.as_ref()))
+        .map(|m| {
+            let provider = m.provider.as_ref().map_or("", |p| p.as_str());
+            offline_model_window(provider, m.model.as_str(), config.as_ref(), cache.as_ref())
+        })
         .min()
         .unwrap_or(DEFAULT_WINDOW)
 }
@@ -483,532 +762,5 @@ fn offline_model_window(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::commands::dashboard::test_support::make_test_dashboard;
-    use crate::commands::dashboard::types::NewRunContext;
-    use crossterm::event::KeyModifiers;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    /// An agent with two caller inputs beside its task: a typed picture slot
-    /// and a plain notes slot.
-    fn write_agent(dir: &Path) {
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(
-            dir.join("agent.leviath"),
-            "[agent]\nname = \"looker\"\nversion = \"0.1.0\"\ndescription = \"looks\"\n\n\
-             [stages.main]\nmode = \"autonomous\"\n\n\
-             [stages.main.model]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-5\"\n\n\
-             [context.regions]\n\
-             task = { kind = \"pinned\", max_tokens = 1000, seed = \"task\" }\n\
-             pictures = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"], required = true }\n\
-             notes = { kind = \"pinned\", max_tokens = 1000, seed = \"input\" }\n\
-             conversation = { kind = \"sliding_window\", max_items = 20, max_tokens = 10000 }\n",
-        )
-        .unwrap();
-    }
-
-    fn dash_at(dir: &Path) -> Dashboard {
-        let mut dash = make_test_dashboard();
-        dash.new_run_ctx = NewRunContext {
-            agents_dir: dir.join("agents"),
-            config_path: dir.join("config.toml"),
-            workdir: dir.join("work"),
-        };
-        std::fs::create_dir_all(dir.join("work")).unwrap();
-        // The catalog lists the bundled blueprints too, ahead of `looker`
-        // alphabetically; the screen opens on the agent last launched.
-        dash.last_launched_agent = Some("looker".to_string());
-        dash
-    }
-
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
-    fn type_str(dash: &mut Dashboard, s: &str) {
-        for c in s.chars() {
-            dash.handle_new_run_key(key(KeyCode::Char(c)));
-        }
-    }
-
-    fn screen(dash: &mut Dashboard) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
-        terminal.draw(|f| dash.draw(f)).unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol().to_string())
-            .collect()
-    }
-
-    /// The slots follow the selected agent: one per caller-input region, in
-    /// the manifest's order, with the task left to the task box.
-    #[test]
-    fn the_slots_are_the_blueprints_caller_inputs() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agent(&dir.path().join("agents").join("looker"));
-        let mut dash = dash_at(dir.path());
-        dash.open_new_run_screen();
-        let keys: Vec<&str> = dash.new_run_inputs.iter().map(|s| s.key.as_str()).collect();
-        assert_eq!(keys, ["pictures", "notes"]);
-        assert_eq!(dash.new_run_inputs[0].region, "pictures");
-        assert_eq!(dash.new_run_inputs[0].accepts, ["image/*"]);
-        assert!(dash.new_run_inputs[0].required);
-        // The note names the type, the token budget, and that it is required.
-        assert_eq!(
-            dash.new_run_inputs[0].note(),
-            " (image/*, ≤100k tok, required)"
-        );
-        assert_eq!(dash.new_run_inputs[1].note(), " (≤1k tok)");
-        assert!(dash.new_run_has_inputs());
-        assert_eq!(dash.new_run_inputs_height(), 4);
-        // The same agent again keeps the slots; no agent clears them.
-        dash.sync_new_run_inputs();
-        assert_eq!(dash.new_run_inputs.len(), 2);
-        dash.new_run_agents.clear();
-        dash.sync_new_run_inputs();
-        assert!(!dash.new_run_has_inputs());
-        assert_eq!(dash.new_run_inputs_height(), 0);
-    }
-
-    /// Tab walks agents → inputs → task → start and back; Enter in the last
-    /// slot moves on to the task; Esc goes back to the agents.
-    #[test]
-    fn the_keys_walk_the_slots_and_the_panes() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agent(&dir.path().join("agents").join("looker"));
-        let mut dash = dash_at(dir.path());
-        dash.open_new_run_screen();
-        dash.handle_new_run_key(key(KeyCode::Tab));
-        assert_eq!(dash.new_run_focus, NewRunPane::Inputs);
-        dash.handle_new_run_key(key(KeyCode::Down));
-        assert_eq!(dash.new_run_input_selected, 1);
-        dash.handle_new_run_key(key(KeyCode::Down));
-        assert_eq!(dash.new_run_input_selected, 1, "stops at the last");
-        dash.handle_new_run_key(key(KeyCode::Up));
-        assert_eq!(dash.new_run_input_selected, 0);
-        // Row 0 (pictures) takes images only: Enter opens the picker, not text.
-        assert_eq!(dash.new_run_input_selected, 0);
-        dash.handle_new_run_key(key(KeyCode::Enter));
-        assert!(dash.new_run_picker_open(), "a file row opens the picker");
-        dash.handle_new_run_key(key(KeyCode::Esc));
-        assert!(!dash.new_run_picker_open());
-        // Row 1 (notes) takes text: typing lands there and Enter on the last
-        // slot moves on to the task.
-        dash.new_run_input_selected = 1;
-        type_str(&mut dash, "be brief");
-        assert_eq!(dash.new_run_inputs[1].edit.value(), "be brief");
-        dash.handle_new_run_key(key(KeyCode::Enter));
-        assert_eq!(dash.new_run_focus, NewRunPane::Task, "and on from the last");
-        dash.handle_new_run_key(key(KeyCode::BackTab));
-        assert_eq!(dash.new_run_focus, NewRunPane::Inputs);
-        dash.handle_new_run_key(key(KeyCode::Tab));
-        assert_eq!(dash.new_run_focus, NewRunPane::Task);
-        dash.new_run_focus = NewRunPane::Inputs;
-        dash.handle_new_run_key(key(KeyCode::Esc));
-        assert_eq!(dash.new_run_focus, NewRunPane::Agents);
-        dash.new_run_focus = NewRunPane::Inputs;
-        dash.handle_new_run_key(key(KeyCode::BackTab));
-        assert_eq!(dash.new_run_focus, NewRunPane::Agents);
-        // A slot's own Esc is the pane's Esc, never a cancel that eats text.
-        dash.new_run_focus = NewRunPane::Inputs;
-        dash.new_run_input_selected = 1;
-        assert_eq!(dash.new_run_inputs[1].edit.value(), "be brief");
-        // With no slots the pane is skipped both ways.
-        dash.new_run_agents.clear();
-        dash.sync_new_run_inputs();
-        dash.new_run_focus = NewRunPane::Agents;
-        dash.handle_new_run_key(key(KeyCode::Tab));
-        assert_eq!(dash.new_run_focus, NewRunPane::Task);
-        dash.handle_new_run_key(key(KeyCode::BackTab));
-        assert_eq!(dash.new_run_focus, NewRunPane::Agents);
-        // Keys on an empty Inputs pane do nothing.
-        dash.new_run_focus = NewRunPane::Inputs;
-        dash.handle_new_run_key(key(KeyCode::Char('x')));
-        assert!(dash.new_run_inputs.is_empty());
-    }
-
-    /// A bare file name attaches the file to its region, `@file` does too,
-    /// text seeds the region under its caller key, a text file seeds it with
-    /// the file's text, and a path that names nothing is an error naming the
-    /// slot.
-    #[test]
-    fn the_slots_resolve_the_way_the_region_flags_do() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agent(&dir.path().join("agents").join("looker"));
-        let mut dash = dash_at(dir.path());
-        let work = dir.path().join("work");
-        std::fs::write(work.join("hero.png"), b"\x89PNG\r\n\x1a\nbody").unwrap();
-        std::fs::write(work.join("notes.md"), "read me").unwrap();
-        dash.open_new_run_screen();
-        // Nothing typed: nothing sent.
-        let none = dash.new_run_input_values().unwrap();
-        assert!(none.regions.is_empty() && none.parts.is_empty());
-
-        dash.new_run_inputs[0].edit = LineEdit::new("hero.png", false);
-        dash.new_run_inputs[1].edit = LineEdit::new("look at @hero.png and @ghost.png", false);
-        let got = dash.new_run_input_values().unwrap();
-        assert_eq!(got.parts.len(), 2);
-        assert_eq!(got.parts[0].region.as_deref(), Some("pictures"));
-        assert_eq!(got.parts[0].name, "hero.png");
-        assert_eq!(got.parts[1].region.as_deref(), Some("notes"));
-        assert_eq!(
-            got.regions.get("notes").map(String::as_str),
-            Some("look at @hero.png and @ghost.png")
-        );
-        assert_eq!(got.unresolved, ["ghost.png"]);
-
-        dash.new_run_inputs[0].edit = LineEdit::new("@hero.png", false);
-        dash.new_run_inputs[1].edit = LineEdit::new("@notes.md", false);
-        let got = dash.new_run_input_values().unwrap();
-        assert_eq!(got.parts.len(), 1);
-        assert_eq!(
-            got.regions.get("notes").map(String::as_str),
-            Some("read me")
-        );
-
-        dash.new_run_inputs[0].edit = LineEdit::new("@missing.png", false);
-        let err = dash.new_run_input_values().unwrap_err();
-        assert!(err.starts_with("pictures:"), "{err}");
-    }
-
-    /// Starting the run sends the slots: the picture as a part in its region,
-    /// the notes as a seed, beside whatever the task named.
-    #[test]
-    fn the_run_carries_the_slots() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agent(&dir.path().join("agents").join("looker"));
-        let mut dash = dash_at(dir.path());
-        let work = dir.path().join("work");
-        std::fs::write(work.join("hero.png"), b"\x89PNG\r\n\x1a\nbody").unwrap();
-        dash.open_new_run_screen();
-        dash.new_run_inputs[0].edit = LineEdit::new("hero.png", false);
-        dash.new_run_inputs[1].edit = LineEdit::new("be brief", false);
-        dash.new_run_task.area_mut().insert_str("describe it");
-        dash.submit_new_run();
-        let cmd = dash.spawn_cmd_rx_for_test().try_recv().unwrap();
-        assert_eq!(cmd.parts.len(), 1);
-        assert_eq!(cmd.parts[0].region.as_deref(), Some("pictures"));
-        assert_eq!(
-            cmd.regions.get("notes").map(String::as_str),
-            Some("be brief")
-        );
-        // A slot that cannot be read stops the start with a toast naming it.
-        let mut dash = dash_at(dir.path());
-        dash.open_new_run_screen();
-        dash.new_run_inputs[0].edit = LineEdit::new("@nope.png", false);
-        dash.new_run_task.area_mut().insert_str("describe it");
-        dash.submit_new_run();
-        assert!(dash.spawn_cmd_rx_for_test().try_recv().is_err());
-        let toasts = dash.toast_messages_for_test();
-        assert!(toasts.iter().any(|t| t.contains("pictures:")), "{toasts:?}");
-    }
-
-    /// The pane draws between the preview and the task with a row per slot,
-    /// says what each takes, and a click on a row picks it.
-    #[test]
-    fn the_pane_draws_its_rows_and_takes_a_click() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agent(&dir.path().join("agents").join("looker"));
-        let mut dash = dash_at(dir.path());
-        dash.open_new_run_screen();
-        let text = screen(&mut dash);
-        assert!(text.contains("Inputs for looker"), "{text}");
-        assert!(
-            text.contains("pictures (image/*, ≤100k tok, required)"),
-            "{text}"
-        );
-        // The pictures row takes images only, so it prompts for a file rather
-        // than a line of text.
-        assert!(text.contains("no files chosen"), "{text}");
-        let rect = dash
-            .click_targets
-            .iter()
-            .find(|(_, t)| *t == ClickTarget::NewRunInput(1))
-            .map(|(r, _)| *r)
-            .expect("the second slot is clickable");
-        assert!(dash.handle_click(rect.x + 2, rect.y));
-        assert_eq!(dash.new_run_focus, NewRunPane::Inputs);
-        assert_eq!(dash.new_run_input_selected, 1);
-        dash.click_new_run_input(9);
-        assert_eq!(
-            dash.new_run_input_selected, 1,
-            "a row that is not there is ignored"
-        );
-        // A focused slot shows its text where the placeholder was.
-        dash.new_run_inputs[1].edit = LineEdit::new("be brief", false);
-        let text = screen(&mut dash);
-        assert!(text.contains("be brief"), "{text}");
-    }
-
-    /// A slot with nothing worth noting (no type, one file, no budget, not
-    /// required) shows no note at all.
-    #[test]
-    fn a_plain_slot_has_no_note() {
-        let slot = NewRunInput {
-            key: "x".to_string(),
-            region: "x".to_string(),
-            accepts: Vec::new(),
-            required: false,
-            max_tokens: 0,
-            edit: LineEdit::new(String::new(), false),
-            files: Vec::new(),
-        };
-        assert_eq!(slot.note(), "");
-    }
-
-    /// A file slot shows the files it holds: the names, the count against the
-    /// cap for a many-file slot, and a chip of extra files beside typed text on
-    /// a slot that takes both.
-    #[test]
-    fn a_file_row_shows_its_chosen_files() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agent(&dir.path().join("agents").join("looker"));
-        let mut dash = dash_at(dir.path());
-        dash.open_new_run_screen();
-        // Focused and empty, the file slot prompts to choose.
-        dash.new_run_focus = NewRunPane::Inputs;
-        dash.new_run_input_selected = 0;
-        let text = screen(&mut dash);
-        assert!(text.contains("Enter to choose files"), "{text}");
-        // A chosen path with no final component still renders its name.
-        dash.new_run_inputs[0].files = vec![PathBuf::from("..")];
-        let text = screen(&mut dash);
-        assert!(text.contains("pictures"), "{text}");
-        // The pictures slot (image/*) holds one file: the name shows, no count.
-        dash.new_run_inputs[0].files = vec![PathBuf::from("out/hero.png")];
-        let text = screen(&mut dash);
-        assert!(text.contains("hero.png"), "{text}");
-        // Several files show a count.
-        dash.new_run_inputs[0].files = vec![PathBuf::from("a.png"), PathBuf::from("b.png")];
-        let text = screen(&mut dash);
-        assert!(text.contains("(2)"), "{text}");
-        // The notes slot takes anything, so text and a file chip sit together.
-        dash.new_run_inputs[1].edit = LineEdit::new("look", false);
-        dash.new_run_inputs[1].files = vec![PathBuf::from("c.png")];
-        let text = screen(&mut dash);
-        assert!(text.contains("look"), "{text}");
-        assert!(text.contains("+c.png"), "{text}");
-    }
-
-    /// An empty text slot keeps its hint while it has focus, so it never looks
-    /// blank and nobody forgets what it wants.
-    #[test]
-    fn an_empty_text_slot_keeps_its_hint_while_focused() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agent(&dir.path().join("agents").join("looker"));
-        let mut dash = dash_at(dir.path());
-        dash.open_new_run_screen();
-        // Focus the notes slot (takes text and files); empty, it still shows
-        // the hint.
-        dash.new_run_focus = NewRunPane::Inputs;
-        dash.new_run_input_selected = 1;
-        let text = screen(&mut dash);
-        assert!(text.contains("text, or ^O for files"), "{text}");
-    }
-
-    /// A file slot opens the picker by key: Space (or Enter) on a file-only
-    /// slot, and Ctrl+O on one that also takes text, which still types
-    /// otherwise.
-    #[test]
-    fn a_file_row_opens_the_picker_by_key() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agent(&dir.path().join("agents").join("looker"));
-        let mut dash = dash_at(dir.path());
-        dash.open_new_run_screen();
-        dash.new_run_focus = NewRunPane::Inputs;
-        // Space on the file-only pictures slot opens the picker.
-        dash.new_run_input_selected = 0;
-        dash.handle_new_run_key(key(KeyCode::Char(' ')));
-        assert!(dash.new_run_picker_open());
-        dash.handle_new_run_key(key(KeyCode::Esc));
-        // Ctrl+O on the notes slot (which takes anything) opens it too.
-        dash.new_run_input_selected = 1;
-        dash.handle_new_run_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
-        assert!(dash.new_run_picker_open());
-        dash.handle_new_run_key(key(KeyCode::Esc));
-        // A plain letter on that slot still types.
-        dash.handle_new_run_key(key(KeyCode::Char('h')));
-        assert!(!dash.new_run_picker_open());
-        assert_eq!(dash.new_run_inputs[1].edit.value(), "h");
-        // On the file-only slot, a control chord that is not Ctrl+O, and a
-        // plain letter, both do nothing: no picker, no text.
-        dash.new_run_input_selected = 0;
-        dash.handle_new_run_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
-        assert!(!dash.new_run_picker_open());
-        dash.handle_new_run_key(key(KeyCode::Char('z')));
-        assert!(!dash.new_run_picker_open());
-        assert!(dash.new_run_inputs[0].edit.value().is_empty());
-    }
-
-    /// Enter on a text slot that is not the last moves to the next slot.
-    #[test]
-    fn enter_advances_between_text_slots() {
-        let dir = tempfile::tempdir().unwrap();
-        let agent = dir.path().join("agents").join("noter");
-        std::fs::create_dir_all(&agent).unwrap();
-        std::fs::write(
-            agent.join("agent.leviath"),
-            "[agent]\nname = \"noter\"\nversion = \"0.1.0\"\ndescription = \"notes\"\n\n\
-             [stages.main]\nmode = \"autonomous\"\n\n\
-             [stages.main.model]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-5\"\n\n\
-             [context.regions]\n\
-             task = { kind = \"pinned\", max_tokens = 1000, seed = \"task\" }\n\
-             one = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"text/*\"] }\n\
-             two = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"text/*\"] }\n",
-        )
-        .unwrap();
-        let mut dash = make_test_dashboard();
-        dash.new_run_ctx = NewRunContext {
-            agents_dir: dir.path().join("agents"),
-            config_path: dir.path().join("config.toml"),
-            workdir: dir.path().join("work"),
-        };
-        std::fs::create_dir_all(dir.path().join("work")).unwrap();
-        dash.last_launched_agent = Some("noter".to_string());
-        dash.open_new_run_screen();
-        assert_eq!(dash.new_run_inputs.len(), 2);
-        dash.new_run_focus = NewRunPane::Inputs;
-        dash.new_run_input_selected = 0;
-        dash.handle_new_run_key(key(KeyCode::Char('a')));
-        dash.handle_new_run_key(key(KeyCode::Enter));
-        assert_eq!(
-            dash.new_run_input_selected, 1,
-            "Enter on a non-last text slot advances"
-        );
-    }
-
-    /// The entry model's window resolves offline: from the compiled catalog,
-    /// from a `[model_capabilities]` override, and from the default when the
-    /// model is unknown or the stage names none.
-    #[test]
-    fn the_entry_window_resolves() {
-        let dir = tempfile::tempdir().unwrap();
-        let agent = dir.path().join("agents").join("looker");
-        write_agent(&agent);
-        let agent_path = agent.to_str().unwrap();
-        let missing = dir.path().join("no-config.toml");
-
-        // A known model uses the compiled catalog window.
-        let builtin = crate::commands::models::builtin_model_windows()
-            .get(&("anthropic".to_string(), "claude-sonnet-5".to_string()))
-            .copied()
-            .expect("claude-sonnet-5 is in the catalog");
-        let bp = super::super::graph::load_blueprint(agent_path).unwrap();
-        assert_eq!(entry_stage_window(&bp, &missing, None), builtin);
-
-        // A stage that names no model falls back to the default window.
-        let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
-        bp.stages[0].model.models.clear();
-        assert_eq!(entry_stage_window(&bp, &missing, None), 8192);
-
-        // A `[model_capabilities]` override for this model wins.
-        let bp = super::super::graph::load_blueprint(agent_path).unwrap();
-        let config = dir.path().join("config.toml");
-        std::fs::write(
-            &config,
-            "[model_capabilities.\"anthropic/claude-sonnet-5\"]\nmax_context_tokens = 4321\n",
-        )
-        .unwrap();
-        assert_eq!(entry_stage_window(&bp, &config, None), 4321);
-
-        // An unknown model, checked against a config that loads but has no entry
-        // for it, falls past the override lookup to the catalog and then to the
-        // default.
-        let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
-        bp.stages[0].model.models[0].provider = "acme".to_string();
-        bp.stages[0].model.models[0].model = "mystery".to_string();
-        assert_eq!(entry_stage_window(&bp, &config, None), 8192);
-
-        // A config file that cannot be parsed is ignored, and the window comes
-        // from the catalog.
-        let bp = super::super::graph::load_blueprint(agent_path).unwrap();
-        let bad = dir.path().join("bad.toml");
-        std::fs::write(&bad, "this is not [valid toml").unwrap();
-        assert_eq!(entry_stage_window(&bp, &bad, None), builtin);
-
-        // The shared capability cache supplies a window for a model absent from
-        // the compiled table - the offline OpenRouter case #810 is about.
-        let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
-        bp.stages[0].model.models[0].provider = "openrouter".to_string();
-        bp.stages[0].model.models[0].model = "x-ai/grok-4".to_string();
-        let cache_file = dir.path().join("model_capabilities.json");
-        let cache = {
-            let mut c = leviath_providers::CapabilityCache::new(1);
-            c.set(
-                "openrouter",
-                std::collections::BTreeMap::from([(
-                    "x-ai/grok-4".to_string(),
-                    leviath_providers::LearnedModel {
-                        max_context_tokens: Some(256_000),
-                        ..Default::default()
-                    },
-                )]),
-            );
-            c
-        };
-        cache.save(&cache_file).unwrap();
-        assert_eq!(
-            entry_stage_window(&bp, &missing, Some(&cache_file)),
-            256_000
-        );
-        // A cache path that does not exist loads nothing and falls to the
-        // default.
-        let no_cache = dir.path().join("absent.json");
-        assert_eq!(entry_stage_window(&bp, &missing, Some(&no_cache)), 8192);
-
-        // The smallest window across several models wins: a second, narrower
-        // model pulls the effective window down.
-        let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
-        bp.stages[0].model.models[0].provider = "anthropic".to_string();
-        bp.stages[0].model.models[0].model = "claude-sonnet-5".to_string();
-        bp.stages[0]
-            .model
-            .models
-            .push(leviath_core::blueprint::ModelEntry::new(
-                "acme".to_string(),
-                "tiny".to_string(),
-            ));
-        // acme/tiny is unknown everywhere → 8192, smaller than the sonnet
-        // window, so it is the effective window.
-        assert_eq!(entry_stage_window(&bp, &missing, None), 8192);
-    }
-
-    /// A choice that would not fit the region's token budget stops the start
-    /// with an error naming the region, rather than a run that overflows.
-    #[test]
-    fn a_slot_over_budget_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agent(&dir.path().join("agents").join("looker"));
-        let mut dash = dash_at(dir.path());
-        let work = dir.path().join("work");
-        std::fs::write(work.join("big.png"), b"\x89PNG\r\n\x1a\nbody").unwrap();
-        dash.open_new_run_screen();
-        // A tiny budget the ~1600-token image cannot fit.
-        dash.new_run_inputs[0].max_tokens = 500;
-        dash.new_run_inputs[0].files = vec![PathBuf::from("big.png")];
-        let err = dash.new_run_input_values().unwrap_err();
-        assert!(err.starts_with("pictures:"), "{err}");
-        assert!(err.contains("region 'pictures' holds 500"), "{err}");
-        // With room, it resolves.
-        dash.new_run_inputs[0].max_tokens = 100000;
-        assert!(dash.new_run_input_values().is_ok());
-    }
-
-    /// A chosen file that has gone missing stops the start with an error naming
-    /// the slot, rather than a run that began without it.
-    #[test]
-    fn a_missing_file_slot_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agent(&dir.path().join("agents").join("looker"));
-        let mut dash = dash_at(dir.path());
-        dash.open_new_run_screen();
-        dash.new_run_inputs[0].files = vec![PathBuf::from("gone.png")];
-        let err = dash.new_run_input_values().unwrap_err();
-        assert!(err.starts_with("pictures:"), "{err}");
-    }
-}
+#[path = "new_run_inputs_tests.rs"]
+mod tests;

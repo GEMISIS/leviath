@@ -14,8 +14,8 @@
 //! rather than to a moment.
 
 use async_graphql::{Enum, ID, SimpleObject};
-use leviath_core::run_archive::IndexedChange;
 use leviath_graphql_derive::mirror;
+use leviath_runtime::runfile::history::IndexedChange;
 
 use super::super::connection::{
     Connection, Paged, PositionQuery, Total, position_order, position_page,
@@ -188,8 +188,9 @@ pub(crate) struct ContextChange {
     pub(crate) regions: Vec<RegionTransition>,
     /// Where in the run's journal the record that carries this change sits.
     ///
-    /// A byte offset. It only climbs within a run and never changes, so it orders
-    /// changes and names one for as long as the run exists.
+    /// The step of the run file that made the change, counted from the run's
+    /// start. It only climbs within a run and never changes, so it orders
+    /// changes; the changes one step made share it.
     pub(crate) journal_position: BigInt,
     /// When the transaction committed.
     pub(crate) at: Timestamp,
@@ -214,8 +215,8 @@ impl From<IndexedChange> for ContextChange {
     }
 }
 
-impl From<leviath_core::run_archive::RegionTransition> for RegionTransition {
-    fn from(region: leviath_core::run_archive::RegionTransition) -> Self {
+impl From<leviath_runtime::runfile::history::RegionTransition> for RegionTransition {
+    fn from(region: leviath_runtime::runfile::history::RegionTransition) -> Self {
         Self {
             region: region.region,
             digest_before: region.digest_before,

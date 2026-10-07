@@ -1,9 +1,8 @@
 //! How many requests `lev serve` takes on at once, and how long it gives each.
 //!
-//! Before this the router had an auth layer, an optional CORS layer, and
-//! axum's own 2 MiB body limit, and nothing else: a client that opened a
-//! thousand connections held a thousand handlers, and a route that never
-//! answered held its connection for as long as the client cared to wait.
+//! Without these, a client that opened a thousand connections would hold a
+//! thousand handlers, and a route that never answered would hold its
+//! connection for as long as the client cared to wait.
 //!
 //! Two ceilings, both configurable in the config file and on the command line
 //! and both switched off with `0`:
@@ -378,7 +377,7 @@ mod tests {
             limits,
             Router::new()
                 .route("/api/mcp/servers/{name}/login", post(super::tests::parked))
-                .route("/api/agents", get(super::tests::parked))
+                .route("/api/runs", get(super::tests::parked))
                 .with_state(Arc::clone(&parked)),
         );
         let login = {
@@ -392,7 +391,7 @@ mod tests {
         while parked.arrived.load(Ordering::SeqCst) < 1 {
             tokio::task::yield_now().await;
         }
-        let refused = app.clone().oneshot(request("/api/agents")).await.unwrap();
+        let refused = app.clone().oneshot(request("/api/runs")).await.unwrap();
         assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             error_of(refused).await,
@@ -402,7 +401,7 @@ mod tests {
         assert_eq!(login.await.unwrap().status(), StatusCode::OK);
         // The permit came back with the response.
         parked.release.notify_one();
-        let after = app.oneshot(request("/api/agents")).await.unwrap();
+        let after = app.oneshot(request("/api/runs")).await.unwrap();
         assert_eq!(after.status(), StatusCode::OK);
     }
 

@@ -38,6 +38,43 @@ pub enum DaemonAction {
     Install,
     /// Deregister the daemon from the OS supervisor.
     Uninstall,
+    /// Internal: convert the old runs for the daemon that started this
+    /// process. The daemon runs it at its first start after an upgrade.
+    #[command(hide = true)]
+    ConvertRuns(ConvertRunsArgs),
+}
+
+/// Arguments for the internal `lev daemon convert-runs`, which only a daemon
+/// starts (see `daemon::convert_child`).
+#[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
+pub struct ConvertRunsArgs {
+    /// The runs directory to convert.
+    #[arg(long)]
+    pub runs_dir: std::path::PathBuf,
+    /// Where the installed blueprints are.
+    #[arg(long)]
+    pub agents_dir: Option<std::path::PathBuf>,
+    /// The build of the daemon that started this process, which must be
+    /// this one's.
+    #[arg(long)]
+    pub build: String,
+}
+
+/// `lev daemon convert-runs`: convert the old runs for the daemon that
+/// started this process, over this process's stdin and stdout.
+#[cfg(feature = "legacy-runs")]
+pub fn convert_runs(args: &ConvertRunsArgs) -> anyhow::Result<()> {
+    crate::daemon::convert_child::run_child(
+        args,
+        Box::new(std::io::BufReader::new(std::io::stdin())),
+        Box::new(std::io::stdout()),
+    )
+}
+
+/// Without the converter there is nothing to convert old runs with.
+#[cfg(not(feature = "legacy-runs"))]
+pub fn convert_runs(_args: &ConvertRunsArgs) -> anyhow::Result<()> {
+    bail!("this build of lev cannot convert old runs")
 }
 
 /// Ask the daemon to shut down and report the outcome.

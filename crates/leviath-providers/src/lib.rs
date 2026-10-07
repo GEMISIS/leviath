@@ -23,6 +23,7 @@ pub mod failure;
 pub mod files;
 pub mod gemini;
 pub mod grok;
+pub mod jobs;
 pub mod learned;
 pub(crate) mod media;
 pub mod meshy;

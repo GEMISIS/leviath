@@ -34,6 +34,8 @@ the typed file either way.
 
 Bytes are only touched at the edges. When a part arrives it is written once under
 `<run>/blobs/<sha256>`, and when a request is built the bytes are read back for the model.
+The run's file takes a copy at the run's next step and keeps it for good, so `lev blobs` and
+anything else that reads a part finds it there when the blob directory lacks it.
 Everything between, the journal, the snapshots, the events, carries a reference: hash, type,
 size, dimensions, a token estimate. Deleting a run deletes its blobs.
 
@@ -85,7 +87,7 @@ Rows layer, and a later row wins. The compiled defaults come first. Then the row
 [Rhai provider ships](/docs/rhai-providers) for the types its models are built for. Then a
 `[mime_types]` table in your config, then
 [`mime_types.toml`](/docs/configuration#mime_typestoml) beside it, then the
-[`[mime_types]` a blueprint carries](/docs/agents#mime-types-the-agent-brings). So your own rows
+[`[graph.mime_types]` a blueprint carries](/docs/agents#mime-types-the-blueprint-brings). So your own rows
 and a blueprint's both win over a provider's. A row names only what it changes: adding an extension to `image/png`
 keeps its family and token rule. `lev mime add <type>` writes a row from the command line, and
 `lev mime list` prints the effective table with the source of every row. `lev mime check <file>`
@@ -168,14 +170,41 @@ so it can take a review stage's notes and draw again without the run dying on it
 
 ## Regions hold typed inputs
 
-A region can say what it accepts and how many stored parts it holds:
+A region can say what it accepts, and an input can carry a file into it:
 
 ```toml
-[context.regions]
-brief         = { kind = "pinned", seed = "task_input", accepts = ["text/*"] }
-voice_samples = { kind = "pinned", seed = "input", accepts = ["audio/*"] }
-storyboard    = { kind = "pinned", seed = "input", accepts = ["image/*"] }
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "brief" }]
+
+[[graph.inputs]]
+name = "voice"
+type = { kind = "file", accepts = ["audio/*"] }   # names an attached file
+binds = [{ region = "voice_samples" }]
+
+[[graph.layout.regions]]
+name = "brief"
+kind = "pinned"
+budget = "5%"
+accepts = ["text/*"]
+
+[[graph.layout.regions]]
+name = "voice_samples"
+kind = "pinned"
+budget = "10%"
+accepts = ["audio/*"]
+
+[[graph.layout.regions]]
+name = "storyboard"
+kind = "pinned"
+budget = "20%"
+accepts = ["image/*"]
 ```
+
+A `file` input names one of the run's attachments, and the file lands in the region the input
+is bound to. An attachment can also name a region directly, which is how `storyboard` gets its
+frames. See [where an input goes](/docs/starting-a-run#where-an-input-goes).
 
 A stage's inputs are the regions it can see, so a stage that reads those three has three typed
 inputs and nothing new to declare. A write that does not match `accepts` is refused and says
@@ -186,9 +215,8 @@ When a stage lists several models, the one that takes what the stage's regions a
 first, so a stage reading a storyboard lands on the model that can see it. `lev validate` says
 what each stage takes. It warns (`mime-unseen`) when its models can see none of the types its
 regions take. When they see some and not the rest, it says so as information. That is how a
-pipeline that draws in one stage and builds in the next looks. Two keys under
-`[stages.<name>.input]` adjust this. `accepts` states the types
-outright. `as_text` names types whose parts reach the model as text whatever it takes,
+pipeline that draws in one stage and builds in the next looks. Two keys on the stage adjust
+this. `input_accepts` states the types outright. `input_as_text` names types whose parts reach the model as text whatever it takes,
 which is how a `model/obj` scene gets to a text model even when the registry calls it binary.
 
 ## What a tool may be handed
@@ -197,7 +225,11 @@ A tool says what it takes (`@accepts` on a script, the built-in tables), and a s
 narrow that further for its own turn:
 
 ```toml
-[stages.review.tool_accepts]
+[[graph.stages]]
+name = "review"
+tools = ["spawn_agent", "context_export"]
+
+[graph.stages.tool_accepts]
 spawn_agent = ["image/*", "audio/*"]   # a sub-agent started here gets pictures and sound, never the video
 context_export = ["text/*"]            # only text files may be written back into the workdir here
 ```
@@ -220,12 +252,10 @@ gated by the `read_file` permission instead.
 ## Stages declare typed outputs
 
 ```toml
-[stages.assemble]
-available_tools = ["concat_video", "submit_output"]
-[[stages.assemble.output.artifacts]]
-name = "final"
-type = "video/mp4"
-required = true
+[[graph.stages]]
+name = "assemble"
+tools = ["concat_video", "submit_output"]
+output = { artifacts = [{ name = "final", mime_type = "video/mp4", required = true }] }
 ```
 
 `submit_output` names the files, Leviath checks that each exists inside the working directory
@@ -248,13 +278,16 @@ the same for the region the text lands in, and keeps the text exactly as written
 and the stand-in agree on the name. Write `\@` for a literal `@`. A token that names no file is
 left alone, so an email address is never mistaken for one. On the command line, paths resolve
 from where you ran the command; over the API they resolve inside the run's working directory.
-A `--<region> @file` whose bytes are not text is attached to that region as a part rather than
-read as its seed. The daemon types every part with its own registry, so a file the CLI could
+A `file` input takes `@path` (`--voice @voice.wav`): the file is attached, and the input names
+it. The daemon types every part with its own registry, so a file the CLI could
 not name still gets the type your `[mime_types]` rows give it. `:type` overrides that, and
 `:text`, `:native` or `:stand_in` override how the part reaches the model.
 
-Over HTTP, `POST /api/agents` and `POST /api/agents/{id}/message` take `multipart/form-data`
-with any number of file parts, or a JSON `parts` list naming files already inside the workdir.
+Over HTTP, `POST /api/runs` takes the spawn request as JSON with each file in its `attachments`,
+or as `multipart/form-data` with the JSON in a `request` field and each file in a field of its
+own. A file field becomes an attachment named after the field, so a `file` input names it by
+that name. `POST /api/runs/{id}/message` takes `multipart/form-data` with any number of file
+parts, or a JSON `parts` list naming files already inside the workdir.
 [The API page](/docs/api) has the shapes.
 
 ## Files and size limits

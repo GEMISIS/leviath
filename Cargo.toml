@@ -6,6 +6,7 @@ members = [
     "crates/leviath-net",
     "crates/leviath-agent-client",
     "crates/leviath-runtime",
+    "crates/leviath-blueprint",
     "crates/leviath-providers",
     "crates/leviath-mcp",
     "crates/leviath-scripting",
@@ -17,6 +18,7 @@ members = [
     "crates/leviath-sys",
     "crates/leviath-telemetry",
     "crates/leviath-testkit",
+    "crates/leviath-legacy-runs",
     "xtask",
 ]
 
@@ -50,6 +52,11 @@ categories = ["development-tools"]
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+# The CLI's `legacy-runs` feature is deleted from its manifest before it is
+# published (prod.yml), but its code still asks for it, so the published
+# crate would warn on every such `cfg`. Naming the feature here, where the
+# published manifest still inherits it, keeps that build quiet.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("legacy-runs"))'] }
 
 # `&s[a..b]` on a `&str` panics when an index lands inside a multi-byte character.
 # That is not hypothetical here: it aborted the daemon twice (issues #109 and #115,
@@ -104,6 +111,7 @@ leviath-core = { path = "crates/leviath-core", version = "0.6.4" }
 leviath-net = { path = "crates/leviath-net", version = "0.6.4" }
 leviath-agent-client = { path = "crates/leviath-agent-client", version = "0.6.4" }
 leviath-runtime = { path = "crates/leviath-runtime", version = "0.6.4" }
+leviath-blueprint = { path = "crates/leviath-blueprint", version = "0.6.4" }
 leviath-providers = { path = "crates/leviath-providers", version = "0.6.4" }
 leviath-mcp = { path = "crates/leviath-mcp", version = "0.6.4" }
 leviath-scripting = { path = "crates/leviath-scripting", version = "0.6.4" }
@@ -203,6 +211,14 @@ sha2 = "0.11"
 hmac = "0.13"
 hex = "0.4"
 base64 = "0.23"
+# The run file (`leviath_runtime::runfile`): typed binary frames. Postcard is not
+# self-describing, so a frame decodes only into the exact Rust type that wrote
+# it; zstd keeps context-heavy state small and crc32 catches a torn tail.
+postcard = { version = "1.1", default-features = false, features = ["use-std"] }
+zstd = "0.13"
+crc32fast = "1.5"
+# The exported JSON Schema of a spawn request, for outside tools and agents.
+schemars = "1"
 rand = "0.10"
 futures-core = "0.3"
 tokio-stream = "0.1"
@@ -221,6 +237,9 @@ dotenvy = "0.15"
 # from driving the daemon.
 nix = { version = "0.31", default-features = false, features = ["signal", "process", "user", "socket", "hostname"] }
 temp-env = "0.3"
+# Property tests (a test dependency only). The default features fork each
+# case into a process of its own and time it out, which these tests need not.
+proptest = { version = "1", default-features = false, features = ["std"] }
 # Randomly named, owner-only temp files. A production dependency of the CLI
 # (the task editor) and a test dependency elsewhere, so one floor here rather
 # than ten copies that could drift.

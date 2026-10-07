@@ -42,6 +42,7 @@ temp-env = { workspace = true }
 # opt-out it was documented as.
 [lints.rust]
 missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("legacy-runs"))'] }
 
 [lints.clippy]
 string_slice = "deny"

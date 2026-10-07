@@ -57,6 +57,9 @@ pub(crate) enum SetupBlocker {
     ProviderTimedOut,
     /// The provider failed.
     ProviderFailed,
+    /// The run names something this machine no longer has, or has changed
+    /// since it started.
+    MachineChanged,
 }
 
 impl From<&leviath_core::run_meta::SetupBlocker> for SetupBlocker {
@@ -71,6 +74,7 @@ impl From<&leviath_core::run_meta::SetupBlocker> for SetupBlocker {
             Core::ProviderUnreachable => Self::ProviderUnreachable,
             Core::ProviderTimedOut => Self::ProviderTimedOut,
             Core::ProviderFailed => Self::ProviderFailed,
+            Core::MachineChanged => Self::MachineChanged,
         }
     }
 }
@@ -244,12 +248,18 @@ pub(crate) enum StageStatus {
     Pending,
     /// The stage the run is in right now.
     Active,
-    /// Entered, and blocked on a person answering.
+    /// Entered, and parked: on a person answering, or on the runs it
+    /// started.
     WaitingInput,
+    /// The stage a paused run is in, paused by a person or held until the
+    /// machine can take the run back.
+    Paused,
     /// Finished and left.
     Complete,
     /// Ended in a failure. The run's own error carries the message.
     Error,
+    /// The stage a run was in when it was cancelled.
+    Cancelled,
     /// The run finished without ever entering this stage.
     Skipped,
 }
@@ -261,8 +271,10 @@ impl From<&leviath_core::run_meta::StageRunStatus> for StageStatus {
             Core::Pending => Self::Pending,
             Core::Active => Self::Active,
             Core::WaitingInput => Self::WaitingInput,
+            Core::Paused => Self::Paused,
             Core::Complete => Self::Complete,
             Core::Error => Self::Error,
+            Core::Cancelled => Self::Cancelled,
             Core::Skipped => Self::Skipped,
         }
     }
@@ -636,7 +648,7 @@ pub(crate) fn blob_link(
     blob.stored.then(|| {
         super::super::super::signed_url::signed_path(
             &state.signer,
-            &format!("/api/agents/{run_id}/blobs/{}", blob.sha256),
+            &format!("/api/runs/{run_id}/blobs/{}", blob.sha256),
             &[],
             leviath_core::duration::now_secs(),
         )
@@ -720,7 +732,7 @@ pub(crate) fn artifact(
     Artifact {
         url: super::super::super::signed_url::signed_path(
             &state.signer,
-            &format!("/api/agents/{run_id}/artifacts/{}", artifact.name),
+            &format!("/api/runs/{run_id}/artifacts/{}", artifact.name),
             &[],
             leviath_core::duration::now_secs(),
         ),
