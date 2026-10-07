@@ -240,10 +240,11 @@ impl Dashboard {
         let info_h: u16 = 4; // task + workdir/stats strip (2 content + 2 border lines)
         // The stage row: the graph band on a tall terminal, the three-row
         // strip otherwise (the band would cost every other pane its rows).
-        // The band's height follows the run's path, so the archive has to be
-        // read before the rows are handed out - otherwise a run whose path
-        // has already wrapped opens short and jumps a frame later.
-        self.ensure_history(&agent.id);
+        // The band's height follows the run's path, which is read off the
+        // run's history: here for a short run, so the view opens at its
+        // height, and by the loader thread for a long one, so the view opens
+        // on the strip and takes the band when the history lands.
+        self.ensure_history_on_draw(&agent.id);
         let tabs_h: u16 = self.stage_row_height(area, &agent);
         let context_h: u16 = if agent.context_snapshot.is_some() || !agent.stages.is_empty() {
             5
@@ -651,9 +652,18 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph-tabs", AgentDisplayStatus::Active);
         agent.graph = Some(std::sync::Arc::new(
-            crate::tui::flowgraph::StageGraph::from_blueprint(
-                &leviath_core::manifest::parse_manifest("[agent]\nname = \"g\"\n[stages.main]\n")
-                    .unwrap(),
+            crate::tui::flowgraph::model::toml_graph(
+                r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[[graph.stages]]
+name = "main"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
             ),
         ));
         dash.agents.push(agent);
@@ -799,11 +809,24 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-exp", AgentDisplayStatus::Active);
-        let graph = std::sync::Arc::new(crate::tui::flowgraph::StageGraph::from_blueprint(
-            &leviath_core::manifest::parse_manifest(
-                "[agent]\nname = \"g\"\n[stages.a]\n[stages.a.transitions.b]\n[stages.b]\n",
-            )
-            .unwrap(),
+        let graph = std::sync::Arc::new(crate::tui::flowgraph::model::toml_graph(
+            r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[graph]
+edges = [{ name = "b", from = "a", to = "b" }]
+
+[[graph.stages]]
+name = "a"
+
+[[graph.stages]]
+name = "b"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
         ));
         agent.graph = Some(graph.clone());
         dash.agents.push(agent);

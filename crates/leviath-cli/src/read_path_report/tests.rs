@@ -2,34 +2,28 @@ use super::*;
 use crate::config::{Config, ReadPathGrants};
 
 /// A blueprint whose only interesting part is its `[read_paths]` block.
-fn blueprint(name: &str, allow: &[&str]) -> leviath_core::Blueprint {
+fn blueprint(allow: &[&str]) -> leviath_runtime::spec::graph::RunGraph {
     let listed = allow
         .iter()
         .map(|e| format!("\"{e}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    let block = if allow.is_empty() {
-        String::new()
-    } else {
-        format!("[read_paths]\nallow = [{listed}]\n")
-    };
     let toml = format!(
         r#"
-[agent]
-name = "{name}"
+[blueprint]
+name = "a"
 version = "0.1.0"
 description = "test blueprint"
 
-[stages.plan]
-mode = "autonomous"
-
-[context.regions]
-system = {{ kind = "pinned", max_tokens = 1000 }}
-conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
-
-{block}"#
+[graph]
+read_paths = [{listed}]
+stages = [{{ name = "plan" }}]
+layout = {{ total_budget_tokens = 11000, regions = [{{ name = "system", kind = "pinned", budget = 1000 }}] }}
+"#
     );
-    leviath_core::manifest::parse_manifest(&toml).expect("blueprint parses")
+    leviath_blueprint::BlueprintFile::parse(&toml)
+        .expect("blueprint parses")
+        .run_graph()
 }
 
 /// A config granting `machine_wide` to everyone and `per_agent` to `agent`.
@@ -71,7 +65,8 @@ fn statuses(report: &GrantReport) -> Vec<GrantStatus> {
 fn a_blueprint_without_read_paths_has_no_report() {
     assert!(
         build(
-            &blueprint("a", &[]),
+            &blueprint(&[]),
+            "a",
             &Config::default(),
             std::path::Path::new("/work")
         )
@@ -79,22 +74,18 @@ fn a_blueprint_without_read_paths_has_no_report() {
     );
 }
 
-/// `[read_paths]` with no `allow` key parses as present-but-empty; it declares
-/// nothing, so it reports nothing.
-#[test]
-fn an_empty_allow_list_has_no_report() {
-    let mut bp = blueprint("a", &[]);
-    bp.read_paths = Some(leviath_core::ReadPathsConfig { allow: Vec::new() });
-    assert!(build(&bp, &Config::default(), std::path::Path::new("/work")).is_none());
-}
-
 /// The public entry point, on the real home directory and platform flags.
 #[test]
 fn build_reports_every_declared_entry() {
-    let bp = blueprint("cto", &["/data/runs", "/data/docs"]);
-    let report = build(&bp, &Config::default(), std::path::Path::new("/work"))
-        .expect("declares read paths")
-        .expect("grants compile");
+    let bp = blueprint(&["/data/runs", "/data/docs"]);
+    let report = build(
+        &bp,
+        "cto",
+        &Config::default(),
+        std::path::Path::new("/work"),
+    )
+    .expect("declares read paths")
+    .expect("grants compile");
     assert_eq!(report.agent, "cto");
     assert_eq!(report.declared(), 2);
     assert_eq!(report.granted(), 0);

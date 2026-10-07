@@ -493,3 +493,39 @@ async fn speech_and_transcription_refusals_are_errors() {
     .expect("a transcript of nothing");
     assert_eq!(silent.content, "");
 }
+
+/// A call made again after a restart, holding the job it submitted before,
+/// polls that job and submits nothing: the sequence has no create to answer,
+/// and the first poll already finds it done.
+#[tokio::test]
+async fn a_video_call_made_again_polls_the_job_it_submitted() {
+    let (url, bodies) = spawn_mock_sequence(vec![
+        (
+            200,
+            "OK",
+            br#"{"status":"completed","seconds":"4"}"#.to_vec(),
+        ),
+        (200, "OK", b"MP4".to_vec()),
+        (200, "OK", br#"{"deleted":true}"#.to_vec()),
+    ])
+    .await;
+    let log = crate::jobs::JobLog::new(
+        [("openai/sora-2/video".to_string(), "video_1".to_string())].into(),
+    );
+    let response = log
+        .scope(run(
+            &endpoint(&url),
+            Kind::Video,
+            &request("sora-2", "a paper boat", vec![], Value::Null),
+            &unit(0.1, PriceUnit::VideoSecond),
+            FAST,
+        ))
+        .await
+        .expect("the video it paid for");
+    assert_eq!(response.parts[0].bytes, b"MP4");
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        3,
+        "polled, downloaded, deleted"
+    );
+}

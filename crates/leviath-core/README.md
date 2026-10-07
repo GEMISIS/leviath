@@ -1,8 +1,8 @@
 # leviath-core
 
 Core types and traits for Leviath: context regions and memory layouts, token
-budgets, blueprint manifests, tool and network policy, sandbox configuration,
-and lifecycle rules. Every other crate in the runtime builds on this one.
+budgets, run records, tool and network policy, sandbox configuration, and
+lifecycle rules. Every other crate in the runtime builds on this one.
 
 Part of [Leviath](https://github.com/GEMISIS/leviath), a structured
 agent runtime for LLMs. Most applications should depend on the

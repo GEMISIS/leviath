@@ -11,7 +11,6 @@
 //! it can raise are one thing to read, and this is the other.
 
 use super::{FinishReason, ProviderError, Result, UnavailableReason};
-use crate::failure::FailureKind;
 use leviath_net::read_caps::{BodyReadError, JSON_BODY_CAP, read_body_capped, read_text_capped};
 
 /// Map an OpenAI-style `finish_reason` string to a `FinishReason`.
@@ -329,23 +328,11 @@ pub(crate) async fn check_http_response(
         // only passes strings - including a Rhai script, which sees the message
         // and nothing else. A bare status left "their endpoint is down" and
         // "your base_url has a typo" reading identically.
-        let kind = FailureKind::from_status(status.as_u16());
-        let detail = format!(
-            "[{}] HTTP {}: {} - {}",
-            kind.label(),
-            status,
-            error_body,
-            kind.remedy()
-        );
         // An out-of-credits or bad-key response is worth telling apart: the
         // runtime fails over on it and counts it against the provider's
         // circuit breaker, where a plain `ApiError` would just kill the run.
-        return Err(
-            match UnavailableReason::classify(status.as_u16(), &error_body) {
-                Some(reason) => ProviderError::Unavailable { reason, detail },
-                None => ProviderError::ApiError(detail),
-            },
-        );
+        let reason = UnavailableReason::classify(status.as_u16(), &error_body);
+        return Err(ProviderError::from_http(status, &error_body, reason));
     }
     Ok(response)
 }

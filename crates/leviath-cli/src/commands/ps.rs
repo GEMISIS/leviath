@@ -44,8 +44,8 @@ that is not the run's doing - paused, blocked on a person, parked until the
 machine is fixed, finished - so this, not AGE, is the run's duration.
 
 MOVED is how long since the run last actually moved - a new iteration, a new
-stage, or a change of status. It is not the `updated_at` in meta.json, which
-also advances on a 30-second heartbeat and so stays fresh on a wedged run. This
+stage, or a change of status. It is not the run's `updated_at`, which can
+advance without the run moving and so stays fresh on a wedged run. This
 column was headed AGE before; a script reading the table should read --json,
 where every row carries `age_secs` and `working_secs` computed and the raw stamps
 beside them.
@@ -83,7 +83,7 @@ A run stays listed for a few minutes after it finishes, so a script polling on
 an interval learns how a run ended rather than finding it gone. Set
 `[limits] finished_retention_secs` to change the window, or 0 to drop a run the
 moment it finishes. The record is held in memory, so a daemon restart clears it;
-`meta.json` and the REST API keep the durable copy.
+the run's file and the REST API keep the durable copy.
 
 An `out of service` block under the table lists providers the daemon has stopped
 sending work to, because each failed several times in a row for something only
@@ -162,8 +162,8 @@ pub(crate) struct OfflineRun {
     /// Unix seconds when the run last actually moved, when it is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_progress_at: Option<i64>,
-    /// The run's working stopwatch as it was last persisted. `None` on a run
-    /// written before the clock existed.
+    /// The run's working stopwatch as it was last persisted. `None` when the
+    /// record has no clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<leviath_core::run_meta::ActiveClock>,
     /// How long the run has existed, in seconds, at the moment this listing was
@@ -327,6 +327,10 @@ fn status_cell(entry: &RunListEntry) -> String {
         // explaining, so a bare `paused` would be the worst answer here: it
         // reads as a deliberate pause somebody can undo whenever they like.
         (AgentStatus::Paused, Some(reason)) => format!("paused: {reason}"),
+        // A run whose graph has no way out, while it is still going: worth
+        // more than any note about its result, because it is the reason there
+        // may never be one.
+        (status, _) if still_looping(entry) => format!("{status} (may never finish)"),
         (status, _) if entry.empty_output => format!("{status} (no output)"),
         // A script the run needed and could not use is the quietest failure of
         // the lot: a broken output validator is skipped rather than fatal, so
@@ -340,6 +344,13 @@ fn status_cell(entry: &RunListEntry) -> String {
         (status, _) if entry.splits_degraded > 0 => format!("{status} (fan-out empty)"),
         (status, _) => status.to_string(),
     }
+}
+
+/// Whether a run that may never finish has not finished yet. One that has
+/// stopped, however it stopped, is past the warning.
+fn still_looping(entry: &RunListEntry) -> bool {
+    !entry.may_never_finish.is_empty()
+        && !leviath_runtime::pipeline::is_terminal_status(&entry.status)
 }
 
 /// A compact age, in the largest unit that keeps the number small: `12s`, `4m`,
@@ -621,6 +632,21 @@ pub(crate) fn format_runs(
         out.push_str(&format!(
             "\n\npaused until something is fixed:\n{}",
             parked.join("\n")
+        ));
+    }
+    let looping: Vec<String> = runs
+        .iter()
+        .filter(|e| still_looping(e))
+        .flat_map(|e| {
+            e.may_never_finish
+                .iter()
+                .map(move |w| format!("  {}: {w}", e.run_id))
+        })
+        .collect();
+    if !looping.is_empty() {
+        out.push_str(&format!(
+            "\n\n!!! may never finish (stop one with lev cancel <run>):\n{}",
+            looping.join("\n")
         ));
     }
     if let Some(footer) = providers_footer(health) {

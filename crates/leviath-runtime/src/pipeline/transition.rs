@@ -1,64 +1,96 @@
 //! Stage transitions: cursors, gates, stuck detection, spawning, and transition choices.
 
 use super::*;
+use crate::insert::RunSpecC;
+use crate::spec::graph::{EdgeCarry, EdgeCondition, EdgeDef, GateDef, RunGraph, StageDef};
+use crate::spec::names::{EdgeName, StageName};
+use crate::state::TransitionReason;
+use spec_view::StageToolOverrides;
 
 // ─── Stage transition ────────────────────────────────────────────────────────
 
-/// The agent's blueprint (its stage graph), as a component.
-#[derive(Component, Debug, Clone)]
-pub struct AgentBlueprint(pub leviath_core::Blueprint);
-
-/// The index of the agent's current stage within its blueprint.
+/// The index of the agent's current stage within its graph.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct StageCursor {
     /// Current stage index.
     pub index: usize,
 }
 
-/// Pre-resolved [`StageInference`] for every stage of the agent's blueprint,
-/// built once when the agent is spawned (the CLI resolves each stage's provider,
-/// model, and tool definitions). The transition system swaps the agent's
-/// `StageInference` to the entry for its new stage by index.
-#[derive(Component, Debug, Clone)]
-pub(crate) struct StageInferences(pub Vec<StageInference>);
-
 /// How many times the agent has entered each stage (for `max_revisits`).
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct VisitCounts(pub std::collections::HashMap<String, usize>);
 
-/// Pre-resolved per-stage setup, applied by `enter_stage` when an agent enters
-/// a stage: inference parameters, tool-result routing, whether the stage accepts
-/// live user input, an optional stage-specific context layout, and an optional
-/// system prompt. Built once per stage when the agent is spawned (mirrors
-/// [`StageInferences`]) so stage entry stays synchronous and query-friendly.
-/// (Ported from the imperative loop's per-stage setup in the CLI executor.)
-#[derive(Clone)]
+/// What entering a stage sets up: inference parameters, tool-result routing,
+/// whether the stage accepts live user input, an optional stage-specific
+/// context layout, and an optional system prompt. Worked out from the run's
+/// spec by [`stage_setup`](super::spec_view::stage_setup) as the stage is
+/// entered.
+#[derive(Clone, Default)]
 pub(crate) struct StageSetup {
     /// Per-stage inference config (temperature / max output tokens).
     pub inference_config: InferenceConfig,
     /// Optional per-stage tool-result routing.
-    pub routing: Option<leviath_core::ToolResultRouting>,
+    pub routing: Option<crate::spec::graph::ToolRoutingDef>,
     /// Whether the stage delivers live user messages to the agent.
     pub accepts_messages: bool,
-    /// Optional stage-specific context layout to swap to on entry.
-    pub context_layout: Option<leviath_core::ContextLayout>,
-    /// Regions this stage leaves out of its prompt (`[stages.<name>.context] hide`).
+    /// The regions of the stage's own layout, each holding its budget, to swap
+    /// the window to on entry. `None` keeps the window's regions.
+    pub context_layout: Option<Vec<leviath_core::Region>>,
+    /// Regions this stage leaves out of its prompt.
     pub context_hide: Vec<String>,
-    /// Regions this stage empties on entry (`[stages.<name>.context] reset`).
+    /// Regions this stage empties on entry.
     pub context_reset: Vec<String>,
     /// Optional stage instructions injected as pinned context on entry.
     pub system_prompt: Option<String>,
 }
 
-/// Pre-resolved [`StageSetup`] for every stage of the agent's blueprint.
-#[derive(Component, Clone)]
-pub(crate) struct StageSetups(pub Vec<StageSetup>);
-
 /// The stage completed with multiple candidate edges (or a single edge the stage
 /// may decline); an LLM must choose. Holds the choosable edges for the async
 /// transition-choice system.
 #[derive(Component, Debug, Clone)]
-pub(crate) struct AwaitingTransitionChoice(pub Vec<leviath_core::blueprint::TransitionEdge>);
+pub(crate) struct AwaitingTransitionChoice(pub Vec<EdgeDef>);
+
+/// The last edge the run took, and why: the stage it left, the stage it
+/// entered, the edge's name when a declared edge was taken, and the visit it
+/// started. Written by every system that moves a run between stages, and read
+/// when the run's state is taken.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct LastTransition(pub crate::state::TransitionRecord);
+
+/// Where a transition goes and how it gets there.
+#[derive(Debug, Clone)]
+pub(crate) struct NextStage {
+    /// The stage entered, by position.
+    pub idx: usize,
+    /// What happens to the context on the way.
+    pub carry: EdgeCarry,
+    /// What must be true before the run may go.
+    pub gate: Option<GateDef>,
+    /// The edge taken, when a declared one was.
+    pub edge: Option<EdgeName>,
+    /// Why this edge.
+    pub reason: TransitionReason,
+}
+
+impl NextStage {
+    /// Taking `edge` to the stage at `idx`, because its condition held.
+    fn along(idx: usize, edge: &EdgeDef) -> Self {
+        Self {
+            idx,
+            carry: edge.carry.clone(),
+            gate: edge.gate.clone(),
+            edge: Some(edge.name.clone()),
+            reason: TransitionReason::Condition,
+        }
+    }
+
+    /// The same move with no gate: an escape from a stage that already failed
+    /// is never held back.
+    fn ungated(mut self) -> Self {
+        self.gate = None;
+        self
+    }
+}
 
 /// The outcome of synchronously resolving a completed stage's transition.
 pub(crate) enum StageResolution {
@@ -73,19 +105,11 @@ pub(crate) enum StageResolution {
     /// `Complete` is how a run silently ended at stage 2 of 5 with no output -
     /// the resolver routes it down the stage's `error` edge, or fails the run.
     DeadEnd,
-    /// Advance to this stage index, applying the edge's context transform once
-    /// the edge's gate (if any) is satisfied.
-    /// Boxed rather than inline: `TransitionGate` grows every time a gate
-    /// condition is added, and this variant is otherwise a `usize` and a small
-    /// enum - carrying it by value made every `StageResolution` the size of the
-    /// largest gate, including the five variants that hold nothing.
-    Next(
-        usize,
-        leviath_core::blueprint::EdgeTransform,
-        Option<Box<leviath_core::blueprint::TransitionGate>>,
-    ),
+    /// Advance along an edge, once its gate (if any) is satisfied. Boxed so
+    /// the variants that hold nothing stay small.
+    Next(Box<NextStage>),
     /// Multiple candidate edges - an LLM must choose among them.
-    Choose(Vec<leviath_core::blueprint::TransitionEdge>),
+    Choose(Vec<EdgeDef>),
     /// Not a transition after all - put the agent back to work in its current
     /// stage. Only a stuck interrupt produces this: it fires mid-stage, so when
     /// its escape edge is no longer available the stage must simply continue
@@ -93,127 +117,83 @@ pub(crate) enum StageResolution {
     Resume,
 }
 
-/// Find the first available edge with the given `condition` (e.g. `Error` or
-/// `MaxIterations`) whose target exists and hasn't exhausted its revisit budget.
-pub(crate) fn find_conditioned_edge_ref<'a>(
-    blueprint: &leviath_core::Blueprint,
-    stage: &'a leviath_core::Stage,
+/// Whether the stage an edge enters exists and has revisits left.
+fn target_available(
+    graph: &RunGraph,
+    edge: &EdgeDef,
     visits: &std::collections::HashMap<String, usize>,
-    condition: leviath_core::blueprint::TransitionCondition,
-) -> Option<(usize, &'a leviath_core::blueprint::TransitionEdge)> {
-    let transitions = stage.transitions.as_ref()?;
-    transitions.values().find_map(|edge| {
-        if edge.condition != condition {
-            return None;
-        }
-        let idx = blueprint
-            .stages
-            .iter()
-            .position(|s| s.name == edge.target)?;
-        let within_budget = match blueprint.stages[idx].max_revisits {
-            Some(max) => visits.get(&edge.target).copied().unwrap_or(0) <= max,
-            None => true,
-        };
-        within_budget.then_some((idx, edge))
-    })
+) -> Option<usize> {
+    let idx = spec_view::stage_index(graph, edge.to.as_str())?;
+    let within_budget = match graph.stages[idx].max_revisits {
+        Some(max) => visits.get(edge.to.as_str()).copied().unwrap_or(0) <= max as usize,
+        None => true,
+    };
+    within_budget.then_some(idx)
 }
 
-/// As [`find_conditioned_edge_ref`], projected to the target index and a cloned
-/// edge transform - what the transition systems need.
-pub(crate) fn find_conditioned_edge(
-    blueprint: &leviath_core::Blueprint,
-    stage: &leviath_core::Stage,
+/// Find the first available edge leaving `stage` with the given `condition`
+/// (e.g. `Error` or `MaxIterations`) whose target exists and hasn't exhausted
+/// its revisit budget.
+pub(crate) fn find_conditioned_edge_ref<'a>(
+    graph: &'a RunGraph,
+    stage: &'a StageDef,
     visits: &std::collections::HashMap<String, usize>,
-    condition: leviath_core::blueprint::TransitionCondition,
-) -> Option<(usize, leviath_core::blueprint::EdgeTransform)> {
-    find_conditioned_edge_ref(blueprint, stage, visits, condition)
-        .map(|(idx, edge)| (idx, edge.transform.clone()))
+    condition: EdgeCondition,
+) -> Option<(usize, &'a EdgeDef)> {
+    graph
+        .edges_from(stage.name.as_str())
+        .filter(|edge| edge.when == condition)
+        .find_map(|edge| target_available(graph, edge, visits).map(|idx| (idx, edge)))
+}
+
+/// As [`find_conditioned_edge_ref`], as the move the transition systems make.
+/// Never gated: these edges are escapes from a stage that cannot finish.
+pub(crate) fn find_conditioned_edge(
+    graph: &RunGraph,
+    stage: &StageDef,
+    visits: &std::collections::HashMap<String, usize>,
+    condition: EdgeCondition,
+) -> Option<NextStage> {
+    find_conditioned_edge_ref(graph, stage, visits, condition)
+        .map(|(idx, edge)| NextStage::along(idx, edge).ungated())
 }
 
 /// Resolve the next stage for a normally-completed stage without any LLM call.
-/// (Ported from the synchronous portion of `graph::resolve_transition`; the
-/// `Error`/`MaxIterations` auto-transitions don't apply to a normal completion,
-/// and the LLM-choice case is returned as [`StageResolution::Choose`].)
+/// The `Error`/`MaxIterations` edges don't apply to a normal completion, and
+/// the LLM-choice case is returned as [`StageResolution::Choose`]. A stage no
+/// edge leaves ends the run: going on to the next stage is an edge like any
+/// other, which a blueprint's graph writes out as
+/// [`FALL_THROUGH_EDGE`](crate::spec::graph::FALL_THROUGH_EDGE).
 pub(crate) fn resolve_transition_sync(
-    blueprint: &leviath_core::Blueprint,
-    stage: &leviath_core::Stage,
-    stage_idx: usize,
+    graph: &RunGraph,
+    stage: &StageDef,
     visits: &std::collections::HashMap<String, usize>,
 ) -> StageResolution {
-    use leviath_core::blueprint::TransitionCondition;
-    match &stage.transitions {
-        None => {
-            if stage_idx + 1 < blueprint.stages.len() {
-                // A linear fall-through carries context as-is (Direct), and has
-                // no edge to hang a gate on.
-                StageResolution::Next(
-                    stage_idx + 1,
-                    leviath_core::blueprint::EdgeTransform::Direct,
-                    None,
-                )
-            } else {
-                StageResolution::Terminal
-            }
+    let edges = spec_view::edges_from(graph, stage);
+    if edges.is_empty() {
+        return StageResolution::Terminal;
+    }
+    let normal = |e: &EdgeDef| matches!(e.when, EdgeCondition::Always | EdgeCondition::LlmChoice);
+    // Only Always/LlmChoice edges are auto/LLM-followable on completion, and
+    // only while their target has revisits left.
+    let choosable: Vec<(usize, &EdgeDef)> = edges
+        .iter()
+        .filter(|e| normal(e))
+        .filter_map(|e| target_available(graph, e, visits).map(|idx| (idx, *e)))
+        .collect();
+    match choosable.as_slice() {
+        // No followable edge left. If the stage never declared a normal edge,
+        // this is a legitimate terminal whose conditioned edges are alternates.
+        // If it DID - and they were all spent - the graph dead-ended mid-run,
+        // which must not read as success.
+        [] => match edges.iter().any(|e| normal(e)) {
+            true => StageResolution::DeadEnd,
+            false => StageResolution::Terminal,
+        },
+        [(idx, edge)] if !stage.allow_complete => {
+            StageResolution::Next(Box::new(NextStage::along(*idx, edge)))
         }
-        Some(transitions) => {
-            if transitions.is_empty() {
-                return StageResolution::Terminal;
-            }
-            // Filter edges whose target hasn't exhausted its revisit budget.
-            let available: Vec<&leviath_core::blueprint::TransitionEdge> = transitions
-                .values()
-                .filter(|e| match blueprint.find_stage(&e.target) {
-                    Some(ts) => match ts.max_revisits {
-                        Some(max) => visits.get(&e.target).copied().unwrap_or(0) <= max,
-                        None => true,
-                    },
-                    None => false, // unknown target
-                })
-                .collect();
-            // Only Always/LlmChoice edges are auto/LLM-followable on completion.
-            let choosable: Vec<&leviath_core::blueprint::TransitionEdge> = available
-                .into_iter()
-                .filter(|e| {
-                    matches!(
-                        e.condition,
-                        TransitionCondition::Always | TransitionCondition::LlmChoice
-                    )
-                })
-                .collect();
-            match choosable.len() {
-                0 => {
-                    // No followable edge left. If the stage never declared a
-                    // normal (Always/LlmChoice) edge, this is a legitimate
-                    // terminal whose conditioned edges are alternates. If it
-                    // DID - and they were all filtered out above - the graph
-                    // dead-ended mid-run, which must not read as success.
-                    let declared_normal = transitions.values().any(|e| {
-                        matches!(
-                            e.condition,
-                            TransitionCondition::Always | TransitionCondition::LlmChoice
-                        )
-                    });
-                    if declared_normal {
-                        StageResolution::DeadEnd
-                    } else {
-                        StageResolution::Terminal
-                    }
-                }
-                1 if !stage.allow_complete => {
-                    let idx = blueprint
-                        .stages
-                        .iter()
-                        .position(|s| s.name == choosable[0].target)
-                        .unwrap_or(0);
-                    StageResolution::Next(
-                        idx,
-                        choosable[0].transform.clone(),
-                        choosable[0].gate.clone().map(Box::new),
-                    )
-                }
-                _ => StageResolution::Choose(choosable.into_iter().cloned().collect()),
-            }
-        }
+        _ => StageResolution::Choose(choosable.into_iter().map(|(_, e)| e.clone()).collect()),
     }
 }
 
@@ -277,7 +257,7 @@ pub(crate) fn hold_for_gate(
 ///
 /// The one exception, which writes the status directly and says so where it does
 /// it: a run whose journal cannot be written (see
-/// [`fail_runs_with_unwritable_journals`](super::fail_runs_with_unwritable_journals)).
+/// [`super::fail_runs_with_unwritable_journals`]).
 /// A recovery stage is more work done on the same unwritable journal, and the
 /// recovery's own history would go unrecorded too, so that run stops rather than
 /// being routed.
@@ -322,12 +302,11 @@ pub(crate) fn fail_stage_world(world: &mut World, entity: Entity, message: Strin
 /// lifetimes: the borrow is bound when the query is fetched.
 type ResolveTransitionQuery = (
     Entity,
-    &'static AgentBlueprint,
+    &'static RunSpecC,
     &'static mut StageCursor,
     &'static mut AgentState,
     &'static mut StageProgress,
-    &'static StageInferences,
-    &'static StageSetups,
+    Option<&'static StageToolOverrides>,
     &'static mut VisitCounts,
     &'static mut ContextWindow,
     Option<&'static StageOutcome>,
@@ -337,6 +316,36 @@ type ResolveTransitionQuery = (
     Option<&'static mut StageLedger>,
 );
 
+/// How a stage that ended in failure leaves: down its first escape edge of
+/// `first` then `second`, with the failure noted where the next stage reads
+/// it; or, with no escape, as a failed run.
+fn escape(
+    graph: &RunGraph,
+    stage: &StageDef,
+    visits: &VisitCounts,
+    [first, second]: [EdgeCondition; 2],
+    window: &mut ContextWindow,
+    state: &mut AgentState,
+    message: &str,
+) -> StageResolution {
+    let found = find_conditioned_edge(graph, stage, &visits.0, first)
+        .or_else(|| find_conditioned_edge(graph, stage, &visits.0, second));
+    match found {
+        Some(next) => {
+            // Put the error where the recovery stage will read it; without an
+            // escape the run terminates and the status carries the message.
+            note_error(window, stage.name.as_str(), message);
+            StageResolution::Next(Box::new(next))
+        }
+        None => {
+            state.status = AgentStatus::Error {
+                message: message.to_string(),
+            };
+            StageResolution::TerminalError
+        }
+    }
+}
+
 /// Transition-resolution system: for each `ResolveTransition` agent, resolve the
 /// next stage. Terminal ⇒ mark the agent `Complete`. A single/linear target ⇒
 /// enter the new stage (swap its `StageInference`, reset stage progress, bump the
@@ -345,18 +354,17 @@ type ResolveTransitionQuery = (
 pub(crate) fn resolve_transition(
     mut agents: Query<ResolveTransitionQuery, With<ResolveTransition>>,
     sink: Option<Res<crate::host::WorldEventSink>>,
+    persist: Option<Res<crate::pipeline::JournalSender>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    use leviath_core::blueprint::TransitionCondition;
     for (
         entity,
-        bp,
+        spec,
         mut cursor,
         mut state,
         mut progress,
-        stage_infs,
-        setups,
+        overrides,
         mut visits,
         mut window,
         outcome,
@@ -373,124 +381,75 @@ pub(crate) fn resolve_transition(
         if state.status == AgentStatus::Paused {
             continue;
         }
-        let stage = &bp.0.stages[cursor.index];
+        let graph = &spec.0.graph;
+        let stage = &graph.stages[cursor.index];
         // How the stage ended governs the transition: an error/max-iterations
         // outcome follows its conditioned edge (e.g. → error_recovery) if present.
         let resolution = match outcome {
-            // An error/max-iterations edge is never gated: the stage already
-            // failed, and holding it back to demand file changes would strand a
-            // run that can't make any.
-            Some(StageOutcome::Errored(message)) => {
-                // `error` first, then `dead_end`. Both are declarations that this
-                // stage may not be able to go on, and the dead-end arm below
-                // already falls back the other way; a run whose author wrote only
-                // the `dead_end` escape should not die because the thing that
-                // went wrong was spelled "error".
-                let escape =
-                    find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::Error)
-                        .or_else(|| {
-                            find_conditioned_edge(
-                                &bp.0,
-                                stage,
-                                &visits.0,
-                                TransitionCondition::DeadEnd,
-                            )
-                        });
-                match escape {
-                    Some((i, t)) => {
-                        // Put the error where the recovery stage will read it;
-                        // without an error edge the run terminates and the
-                        // status already carries the message.
-                        note_error(&mut window, &stage.name, message);
-                        StageResolution::Next(i, t, None)
-                    }
-                    None => {
-                        // Most errors arrive with the status already set to
-                        // this message; one raised before a call was ever made
-                        // (a prompt that cannot fit) has only the outcome.
-                        state.status = AgentStatus::Error {
-                            message: message.clone(),
-                        };
-                        StageResolution::TerminalError
-                    }
-                }
-            }
+            // `error` first, then `dead_end`. Both declare that this stage may
+            // not be able to go on, and the dead-end arm below falls back the
+            // other way; a run whose author wrote only the `dead_end` escape
+            // should not die because what went wrong was spelled "error".
+            Some(StageOutcome::Errored(message)) => escape(
+                graph,
+                stage,
+                &visits,
+                [EdgeCondition::Error, EdgeCondition::DeadEnd],
+                &mut window,
+                &mut state,
+                message,
+            ),
             Some(StageOutcome::MaxIterations) => {
                 // Whatever runs next - a max_iterations edge target, the normal
                 // successor, or the transition-choice model - should know the
                 // stage was cut off, not finished.
-                note_max_iterations(&mut window, &stage.name, stage.max_iterations.unwrap_or(0));
-                find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::MaxIterations)
-                    .map(|(i, t)| StageResolution::Next(i, t, None))
-                    .unwrap_or_else(|| {
-                        resolve_transition_sync(&bp.0, stage, cursor.index, &visits.0)
-                    })
+                note_max_iterations(
+                    &mut window,
+                    stage.name.as_str(),
+                    stage.max_iterations.unwrap_or(0) as usize,
+                );
+                find_conditioned_edge(graph, stage, &visits.0, EdgeCondition::MaxIterations)
+                    .map(|next| StageResolution::Next(Box::new(next)))
+                    .unwrap_or_else(|| resolve_transition_sync(graph, stage, &visits.0))
             }
             Some(StageOutcome::Stuck(_)) => {
                 // A stuck interrupt is mid-stage, not a stage end. If the escape
                 // hatch went away between detection and here (its target spent
                 // its last revisit), resume - falling through to
                 // `resolve_transition_sync` would end a stage the agent never
-                // said it had finished, e.g. shunting `implement` into `review`
-                // with the work half-done.
-                find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::Stuck)
-                    .map(|(i, t)| StageResolution::Next(i, t, None))
+                // said it had finished.
+                find_conditioned_edge(graph, stage, &visits.0, EdgeCondition::Stuck)
+                    .map(|next| StageResolution::Next(Box::new(next)))
                     .unwrap_or(StageResolution::Resume)
             }
-            None => resolve_transition_sync(&bp.0, stage, cursor.index, &visits.0),
+            None => resolve_transition_sync(graph, stage, &visits.0),
         };
-        // A dead end resolves like a stage error: down the `error` edge when one
-        // has budget left (this is what finally makes `error_recovery` reachable
-        // for exhaustion, not just for provider failures), and otherwise the run
-        // FAILS. Resolving it as `Terminal` instead would report `complete`
-        // from the middle of a graph, with the output stage still pending and
-        // nothing produced - success indistinguishable from the run that
-        // worked.
+        // A dead end resolves like a stage error: down the `dead_end` edge, then
+        // the `error` edge, and otherwise the run FAILS. Resolving it as
+        // `Terminal` would report `complete` from the middle of a graph, with the
+        // output stage still pending and nothing produced.
         let resolution = match resolution {
-            StageResolution::DeadEnd => {
-                let message = format!(
+            StageResolution::DeadEnd => escape(
+                graph,
+                stage,
+                &visits,
+                [EdgeCondition::DeadEnd, EdgeCondition::Error],
+                &mut window,
+                &mut state,
+                &format!(
                     "stage '{}' dead-ended: every declared transition's target has spent \
                      its max_revisits budget before an output or terminal stage was reached",
                     stage.name
-                );
-                // A `dead_end` edge first, then the `error` edge. Both are
-                // escapes from this exact situation, but one was declared *for*
-                // it: an author who wrote both means the specific one to win,
-                // and an `error` edge is also carrying provider failures.
-                let escape =
-                    find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::DeadEnd)
-                        .or_else(|| {
-                            find_conditioned_edge(
-                                &bp.0,
-                                stage,
-                                &visits.0,
-                                TransitionCondition::Error,
-                            )
-                        });
-                match escape {
-                    Some((i, t)) => {
-                        note_error(&mut window, &stage.name, &message);
-                        StageResolution::Next(i, t, None)
-                    }
-                    None => {
-                        state.status = AgentStatus::Error { message };
-                        StageResolution::TerminalError
-                    }
-                }
-            }
+                ),
+            ),
             other => other,
         };
         match resolution {
             StageResolution::Terminal => {
                 // A run that owed a final output and never produced one is not
-                // a success. `require_final_output` forces past the obligation
-                // rather than stranding the run - correct, since a later stage
-                // may still answer - but nothing downgraded the *terminal*
-                // status, so a run ended `complete` with no `final_output` on
-                // disk. `lev result` already exits non-zero there, so the two
-                // disagreed in exactly the case a caller most needs to know
-                // about, and anything polling `status` read it as success.
-                let owed_output = bp.0.stages.iter().any(|s| s.require_output);
+                // a success: `lev result` exits non-zero there, and anything
+                // polling `status` must not read it as success either.
+                let owed_output = graph.stages.iter().any(|s| s.require_output);
                 state.status = match owed_output && submitted.is_none() {
                     true => AgentStatus::Error {
                         message: "the run finished without the final output it \
@@ -515,16 +474,18 @@ pub(crate) fn resolve_transition(
                     .remove::<ResolveTransition>()
                     .remove::<StageOutcome>();
             }
-            StageResolution::Next(idx, transform, gate) => {
+            StageResolution::Next(next) => {
                 // Check the edge's gate BEFORE the transform runs: the transform
                 // compacts/clears regions, and a held stage must keep its context.
-                let gate = outcome.is_none().then_some(gate).flatten();
-                match gate_blocks(gate.as_deref(), stage, &progress, &window) {
+                let gate = outcome.is_none().then_some(next.gate.as_ref()).flatten();
+                let mut reason = next.reason;
+                match gate_blocks(gate, stage, &progress, &window) {
                     GateDecision::Block(nudge) => {
                         hold_for_gate(entity, &nudge, &mut progress, &mut window, &mut commands);
                         continue;
                     }
                     GateDecision::Forced => {
+                        reason = TransitionReason::Gate;
                         if let Some(flags) = flags.as_mut() {
                             flags.0.gates_forced += 1;
                         }
@@ -533,13 +494,14 @@ pub(crate) fn resolve_transition(
                 }
                 // Reshape the outgoing context per the edge transform before the
                 // new stage's layout/prompt setup.
-                let to_compact = apply_edge_transform(&mut window, &transform);
-                let setup = &setups.0[idx];
+                let to_compact = apply_edge_transform(&mut window, &next.carry);
+                let idx = next.idx;
+                let setup = spec_view::stage_setup(&spec.0, idx);
                 let from = state.current_stage.clone();
                 match enter_stage(
                     idx,
-                    &bp.0,
-                    setup,
+                    graph,
+                    &setup,
                     StageEntry {
                         cursor: &mut cursor,
                         state: &mut state,
@@ -553,11 +515,26 @@ pub(crate) fn resolve_transition(
                         // Entering a stage is active work; clears a prior error
                         // status when recovering down an `error` edge.
                         state.status = AgentStatus::Active;
-                        let name = bp.0.stages[idx].name.clone();
-                        emit_stage_transition(&sink, metadata, &state.agent_id, from, &name, visit);
+                        let name = graph.stages[idx].name.to_string();
+                        let taken = transition_record(&from, &state, next.edge.clone(), reason);
+                        journal_transition(persist.as_deref(), metadata, taken.as_ref());
+                        let how = (next.edge.as_ref(), reason);
+                        emit_stage_transition(
+                            &sink,
+                            metadata,
+                            &state.agent_id,
+                            from,
+                            &name,
+                            visit,
+                            how,
+                        );
                         let mut ec = commands.entity(entity);
                         ec.remove::<ResolveTransition>().remove::<StageOutcome>();
-                        attach_stage_components(ec, stage_infs.0[idx].clone(), setup, idx, name);
+                        taken.into_iter().for_each(|t| {
+                            ec.insert(t);
+                        });
+                        let inference = spec_view::stage_inference(&spec.0, idx, overrides);
+                        attach_stage_components(ec, inference, &setup, idx, name);
                         if !to_compact.is_empty() {
                             commands
                                 .entity(entity)
@@ -594,14 +571,48 @@ pub(crate) fn resolve_transition(
     }
 }
 
+/// The record of a move a run just made, from the stage named `from` to the
+/// one `state` is now in. `None` when either name is not a valid stage name,
+/// which a run built from a checked graph never has.
+pub(crate) fn transition_record(
+    from: &str,
+    state: &AgentState,
+    edge: Option<EdgeName>,
+    reason: TransitionReason,
+) -> Option<LastTransition> {
+    Some(LastTransition(crate::state::TransitionRecord {
+        from: StageName::new(from).ok()?,
+        to: StageName::new(state.current_stage.as_str()).ok()?,
+        edge,
+        reason,
+        visit: state.current_visit.clone(),
+    }))
+}
+
+/// Send a move the run just made to the world's journal, so the step that
+/// records it keeps every edge the run took, however many it took in one
+/// tick. A run with no journal, or no record of its own, keeps none.
+pub(crate) fn journal_transition(
+    persist: Option<&crate::pipeline::JournalSender>,
+    metadata: Option<&crate::persistence::RunMetadata>,
+    taken: Option<&LastTransition>,
+) {
+    if let (Some(persist), Some(md), Some(taken)) = (persist, metadata, taken) {
+        persist.record(
+            &md.run_id,
+            crate::runfile::record::RunRecord::Transition(taken.0.clone()),
+        );
+    }
+}
+
 /// Enter the stage at `idx`: update the cursor + current-stage name, reset
 /// per-stage progress, bump the visit count, set `accepts_messages`, and apply the
 /// stage's context setup - swap to its layout (if any) and (re)inject its system
 /// prompt as pinned `[Stage instructions: …]` context, replacing the previous
-/// stage's. (Ported from the imperative loop's per-stage setup.)
+/// stage's.
 ///
-/// Returns `Err` only when the system prompt doesn't fit its region - the same
-/// hard failure the imperative loop raises; the caller marks the agent `Error`.
+/// Returns `Err` only when the system prompt doesn't fit its region, a hard
+/// failure: the caller marks the agent `Error`.
 /// `Ok` carries the stage's updated visit count (this entry included), which the
 /// transition systems stamp into the [`StageTransition`](crate::host::WorldEvent)
 /// event.
@@ -637,7 +648,7 @@ pub(crate) struct StageEntry<'a> {
 
 pub(crate) fn enter_stage(
     idx: usize,
-    blueprint: &leviath_core::Blueprint,
+    graph: &RunGraph,
     setup: &StageSetup,
     entry: StageEntry<'_>,
 ) -> Result<usize, String> {
@@ -668,7 +679,7 @@ pub(crate) fn enter_stage(
         }
     }
     cursor.index = idx;
-    let name = blueprint.stages[idx].name.clone();
+    let name = graph.stages[idx].name.to_string();
     state.current_stage = name.clone();
     state.accepts_messages = setup.accepts_messages;
     *progress = StageProgress::default();
@@ -679,7 +690,7 @@ pub(crate) fn enter_stage(
     let result = apply_stage_context(setup, window).map(|()| visit);
     // After the layout swap, so the digest is of the region this stage will
     // actually work on rather than the one the previous stage left behind.
-    progress.entry_region_digests = watched_region_digests(&blueprint.stages[idx], window);
+    progress.entry_region_digests = watched_region_digests(graph, &graph.stages[idx], window);
     result
 }
 
@@ -691,26 +702,18 @@ pub(crate) fn enter_stage(
 /// here, and an absent digest reads as "no baseline", which the gate treats as
 /// changed - a gate cannot demand an update to something that does not exist.
 pub(crate) fn watched_region_digests(
-    stage: &leviath_core::Stage,
+    graph: &RunGraph,
+    stage: &StageDef,
     window: &ContextWindow,
 ) -> std::collections::HashMap<String, u64> {
-    let mut digests = std::collections::HashMap::new();
-    let Some(transitions) = &stage.transitions else {
-        return digests;
-    };
-    for edge in transitions.values() {
-        let Some(name) = edge
-            .gate
-            .as_ref()
-            .and_then(|g| g.require_region_updated.as_ref())
-        else {
-            continue;
-        };
-        if let Some(region) = window.get_region(name) {
-            digests.insert(name.clone(), region_digest(region));
-        }
-    }
-    digests
+    graph
+        .edges_from(stage.name.as_str())
+        .filter_map(|edge| edge.gate.as_ref()?.require_region_updated.as_ref())
+        .filter_map(|name| {
+            let region = window.get_region(name.as_str())?;
+            Some((name.to_string(), region_digest(region)))
+        })
+        .collect()
 }
 
 /// A hash of everything a region currently holds.
@@ -738,6 +741,7 @@ pub(crate) fn emit_stage_transition(
     from: String,
     to: &str,
     iteration: usize,
+    (edge, reason): (Option<&EdgeName>, TransitionReason),
 ) {
     if let (Some(sink), Some(md)) = (sink.as_ref(), metadata) {
         let _ = sink.0.send(crate::host::WorldEvent::StageTransition {
@@ -746,6 +750,8 @@ pub(crate) fn emit_stage_transition(
             from,
             to: to.to_string(),
             iteration,
+            edge: edge.map(ToString::to_string),
+            reason: Some(reason),
         });
     }
 }
@@ -763,9 +769,9 @@ pub(crate) fn emit_stage_transition(
 /// Otherwise the fallback target: the first pinned region, or `conversation`
 /// when a layout declares no pinned region at all.
 ///
-/// [`STAGE_INSTRUCTIONS_REGION`]: leviath_core::layout::STAGE_INSTRUCTIONS_REGION
+/// [`STAGE_INSTRUCTIONS_REGION`]: crate::spec::graph::STAGE_INSTRUCTIONS_REGION
 fn stage_instructions_target(window: &mut ContextWindow) -> String {
-    let declared = leviath_core::layout::STAGE_INSTRUCTIONS_REGION;
+    let declared = crate::spec::graph::STAGE_INSTRUCTIONS_REGION;
     if let Some(at) = window.regions.iter().position(|r| r.name == declared) {
         if at + 1 < window.regions.len() {
             let region = window.regions.remove(at);
@@ -784,8 +790,8 @@ fn stage_instructions_target(window: &mut ContextWindow) -> String {
 /// Apply a stage's context setup to a window: swap to the stage's layout (if any)
 /// and (re)inject its system prompt as pinned `[Stage instructions: …]` context,
 /// clearing any previous stage's first. Returns `Err` only when the prompt
-/// doesn't fit its region. Shared by [`enter_stage`] (transitions) and
-/// [`build_agent`] (the first stage, at spawn).
+/// doesn't fit its region. Shared by [`enter_stage`] (transitions) and the
+/// placing of a run's first stage at spawn.
 pub(crate) fn apply_stage_context(
     setup: &StageSetup,
     window: &mut ContextWindow,
@@ -797,11 +803,11 @@ pub(crate) fn apply_stage_context(
     // it never asked to lose); and `hide` then removes what this stage's own
     // instructions never read.
     match &setup.context_layout {
-        Some(layout) => crate::context_setup::apply_layout(window, layout),
+        Some(regions) => crate::context_setup::apply_layout(window, regions.clone()),
         None => window.hidden.clear(),
     }
     for name in &setup.context_hide {
-        if !leviath_core::blueprint::ALWAYS_VISIBLE_REGIONS.contains(&name.as_str()) {
+        if !crate::spec::graph::ALWAYS_VISIBLE_REGIONS.contains(&name.as_str()) {
             window.hidden.insert(name.clone());
         }
     }
@@ -817,7 +823,7 @@ pub(crate) fn apply_stage_context(
 
     let target = stage_instructions_target(window);
     if let Some(region) = window.regions.iter_mut().find(|r| r.name == target) {
-        if target == leviath_core::layout::STAGE_INSTRUCTIONS_REGION {
+        if target == crate::spec::graph::STAGE_INSTRUCTIONS_REGION {
             // The whole region is ours, so the previous stage's prompt goes by
             // emptying it. The fallback below cannot do that - it shares a
             // region with the author's own content - and has to identify its
@@ -907,25 +913,23 @@ pub fn force_transition(world: &mut World, agent: crate::world::AgentId, target_
     // Phase 1 (scoped borrow): mutate the agent's own state via `enter_stage`,
     // returning the components Phase 2 must insert - or `None` if the agent is
     // gone or its system prompt overflowed (already marked `Error` in-place).
-    let attach: Option<(StageInference, StageSetup, String)> = {
+    let attach: Option<(StageInference, StageSetup, String, Option<LastTransition>)> = {
         let mut q = world.query::<(
-            &AgentBlueprint,
+            &RunSpecC,
             &mut StageCursor,
             &mut AgentState,
             &mut StageProgress,
-            &StageInferences,
-            &StageSetups,
+            Option<&StageToolOverrides>,
             &mut VisitCounts,
             &mut ContextWindow,
             Option<&mut StageLedger>,
         )>();
         let Ok((
-            bp,
+            spec,
             mut cursor,
             mut state,
             mut progress,
-            stage_infs,
-            setups,
+            overrides,
             mut visits,
             mut window,
             mut ledger,
@@ -933,13 +937,14 @@ pub fn force_transition(world: &mut World, agent: crate::world::AgentId, target_
         else {
             return; // agent despawned
         };
-        let setup = setups.0[target_idx].clone();
-        let stage_inf = stage_infs.0[target_idx].clone();
-        let name = bp.0.stages[target_idx].name.clone();
-        let bp = bp.0.clone();
+        let spec = spec.0.clone();
+        let setup = spec_view::stage_setup(&spec, target_idx);
+        let stage_inf = spec_view::stage_inference(&spec, target_idx, overrides);
+        let name = spec.graph.stages[target_idx].name.to_string();
+        let from = state.current_stage.clone();
         match enter_stage(
             target_idx,
-            &bp,
+            &spec.graph,
             &setup,
             StageEntry {
                 cursor: &mut cursor,
@@ -950,7 +955,10 @@ pub fn force_transition(world: &mut World, agent: crate::world::AgentId, target_
                 ledger: ledger.as_deref_mut(),
             },
         ) {
-            Ok(_) => Some((stage_inf, setup, name)),
+            Ok(_) => {
+                let taken = transition_record(&from, &state, None, TransitionReason::Forced);
+                Some((stage_inf, setup, name, taken))
+            }
             Err(message) => {
                 state.status = AgentStatus::Error { message };
                 None
@@ -959,10 +967,19 @@ pub fn force_transition(world: &mut World, agent: crate::world::AgentId, target_
     };
 
     // Phase 2 (borrow released): attach the new stage's components directly.
-    let Some((stage_inf, setup, name)) = attach else {
+    let Some((stage_inf, setup, name, taken)) = attach else {
         return;
     };
+    journal_transition(
+        world.get_resource::<crate::pipeline::JournalSender>(),
+        world.get::<crate::persistence::RunMetadata>(entity),
+        taken.as_ref(),
+    );
     let mut em = world.entity_mut(entity);
+    taken.into_iter().for_each(|t| {
+        em.insert(t);
+    });
+
     em.insert(stage_inf)
         .insert(setup.inference_config.clone())
         .insert(StageJustEntered {

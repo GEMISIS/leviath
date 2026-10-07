@@ -1,0 +1,70 @@
+{
+  "run_id": "McQueen-1790516734-6d28b7549e95",
+  "agent_name": "McQueen",
+  "agent_path": "/home/user/.leviath/agents/McQueen/agent.leviath",
+  "task": "tell me a joke",
+  "model": "codex/gpt-5.5",
+  "stage_models": [
+    {
+      "provider": "codex",
+      "model": "gpt-5.5"
+    }
+  ],
+  "pid": 0,
+  "status": "complete",
+  "current_stage": "engine",
+  "stage_index": 0,
+  "num_stages": 1,
+  "iteration": 1,
+  "prompt_tokens": 603,
+  "completion_tokens": 76,
+  "cached_tokens": 0,
+  "cache_write_tokens": 0,
+  "tool_calls": 1,
+  "cost_usd": 0.0,
+  "unpriced_calls": 0,
+  "cost_is_exact": false,
+  "cost_priced_usd": 0.0,
+  "workdir": "/home/user/Documents/projects/infra/home-network-setup",
+  "started_at": 1790516734,
+  "updated_at": 1790516739,
+  "last_progress_at": 1790516739,
+  "active": {
+    "banked_secs": 5,
+    "since": null
+  },
+  "error": null,
+  "title": "A Quick Joke",
+  "title_error": null,
+  "metadata": {},
+  "callback_url": null,
+  "callback_secret": null,
+  "parent_run_id": null,
+  "children": [],
+  "depth": 0,
+  "max_child_depth": 0,
+  "flags": {
+    "modified_files": [],
+    "modified_file_count": 0,
+    "empty_output": false,
+    "no_output_tools": true,
+    "searches_run": 0,
+    "searches_empty": 0,
+    "max_iterations_hit": 1,
+    "gates_forced": 0,
+    "required_regions_abandoned": [],
+    "workspace_lost": false,
+    "produced_output": true,
+    "output_forced": 0,
+    "splits_degraded": 0
+  },
+  "yolo": false,
+  "final_output": {
+    "format": "markdown",
+    "stage": "engine",
+    "submitted_at": 1790516739,
+    "bytes": 69,
+    "truncated": false
+  },
+  "blueprint_digest": "86958ba72ca1fd5f84448ad01cecfc4b83ba320f159d47a30ad34e00233544ee"
+}

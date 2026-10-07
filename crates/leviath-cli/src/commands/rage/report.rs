@@ -74,21 +74,40 @@ pub(crate) fn readme(
 
     out.push_str("## How to read a run\n\n");
     out.push_str(
-        "Copy `runs/<id>` into `~/.leviath/runs/` on a machine with `lev` installed (or into \
-         `$LEVIATH_HOME/.leviath/runs/` to keep it apart from your own runs). Then:\n\n",
+        "`runs/<id>/run.lvr` is the run's file, rewritten with its secrets removed. To read it, \
+         copy `runs/<id>` into the `runs` directory of a Leviath home. A home of its own keeps it \
+         apart from your runs: point `LEVIATH_HOME` at an empty directory, such as \
+         `/tmp/rage-home`, in the shell you run these in. No daemon has to be running.\n\n",
     );
-    out.push_str("```bash\nlev context <id>     # the context window at every step\nlev timeline <id>    # where the time went\nlev stages <id>      # per-stage tokens and cost\nlev result <id>      # what the run handed back\n```\n\n");
+    out.push_str(concat!(
+        "```bash\n",
+        "mkdir -p /tmp/rage-home/.leviath/runs\n",
+        "cp -R runs/<id> /tmp/rage-home/.leviath/runs/\n",
+        "lev run show <id>     # the spec it was resolved to\n",
+        "lev timeline <id>     # where the time went\n",
+        "lev stages <id>       # per-stage tokens and cost\n",
+        "lev context <id>      # the context window\n",
+        "lev result <id>       # what the run handed back\n",
+        "```\n\n",
+    ));
     out.push_str(
-        "`run.lvr` is the run's journal: the bytes `LVR1`, a two-byte version, then frames of an \
-         eight-byte big-endian length and a JSON record. The first record is the header with the \
-         run's metadata; the rest are every inference request and reply, every tool call and its \
-         result, and the context window as it changed. The copy here was re-written with its \
-         secrets removed, so a JSON reader gets the same records `lev` does.\n\n",
+        "`runs/<id>/run.json` holds the same values as JSON. `spec` is what the run was resolved \
+         to before it started: its graph, inputs, models and tools. `start` is the state it \
+         started in, `state` the state after its last step, and `steps` every step between, each \
+         with what changed and what happened in it: model calls, tool calls, answers and \
+         messages. `runs/<id>/summary.json` is the run's summary, and `runs/<id>/stages/` holds \
+         each stage's output and log lines.\n\n",
     );
     out.push_str(
-        "`runs/<id>/blueprint/` is the agent that ran, as it was on disk. `lev add <that dir>` \
-         installs it, and `lev run <name> --task \"...\"` with the task from `meta.json` reproduces \
-         the run, model differences aside.\n\n",
+        "To run it again, install the blueprint that ran and send the request it was started \
+         with. `runs/<id>/blueprint/` is that blueprint as it was on disk, and \
+         `runs/<id>/request.json` names it with the same inputs, model and output. The request \
+         is attended and has no webhook, and it works in the directory you start it from:\n\n",
+    );
+    out.push_str(
+        "```bash\nlev add runs/<id>/blueprint\nlev run --request runs/<id>/request.json\n```\n\n\
+         A run whose graph was sent whole has that graph in its request, so there is nothing to \
+         install. An input that named an attached file needs that file attached again.\n\n",
     );
 
     out.push_str("## Redactions\n\n");
@@ -96,8 +115,10 @@ pub(crate) fn readme(
         "Every key the config held, every credential-shaped environment variable, and every \
          token-shaped string (`sk-...`, `AKIA...`, bearer headers, private-key blocks, JWTs) was \
          replaced with `[REDACTED]` or `[REDACTED:<kind>]`. `manifest.json` counts them per file. \
-         A run's `callback_secret` is blanked. `control.token`, `mcp-auth.json`, \
-         `provider-auth.json`, `.env` files and other tools' configs are never copied.\n",
+         A run's webhook secret is in no run file: the `secrets/` store it is kept in is never \
+         copied, its values are scrubbed wherever they appear, and a `callback_secret` an \
+         earlier release recorded is blanked. `control.token`, `mcp-auth.json`, `provider-auth.json`, `.env` files and \
+         other tools' configs are never copied.\n",
     );
     out
 }
@@ -133,7 +154,7 @@ const LAYOUT: &[(&str, &str)] = &[
     ),
     (
         "runs/<id>/",
-        "The chosen run and its sub-agent runs: metadata, stages, context, journal, blobs, blueprint",
+        "The chosen run and its sub-agent runs: run file, the same as JSON, the request that starts it again, summary, stage logs, blobs, blueprint",
     ),
     (
         "blueprint/",

@@ -8,7 +8,7 @@ use leviath_core::taint::{
     GateDecision, GateDecisionSource, GateEvent, SecurityConfig, TaintLevel, ToolClassification,
     builtin_tool_classification,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::components::ContextWindow;
 
@@ -35,10 +35,17 @@ pub type ScriptRuleChecker = dyn Fn(&str, Option<&str>, TaintLevel) -> Option<St
 pub struct TaintGate {
     /// Security configuration.
     config: SecurityConfig,
-    /// Per-tool classification overrides (from agent.leviath or user policy).
+    /// Per-tool classification overrides (from agent.toml or user policy).
     tool_overrides: HashMap<String, ToolClassification>,
     /// Audit log of gate events.
     audit_log: Vec<GateEvent>,
+    /// The stage each event in `audit_log` was decided in, by position.
+    audit_stages: Vec<usize>,
+    /// The stage the run is in, which the next event is decided in.
+    stage: usize,
+    /// Tools a person cleared for the rest of the run ("Allow for this
+    /// session"), kept so a run placed again clears them again.
+    cleared: BTreeSet<String>,
 }
 
 impl TaintGate {
@@ -48,6 +55,9 @@ impl TaintGate {
             config,
             tool_overrides: HashMap::new(),
             audit_log: Vec::new(),
+            audit_stages: Vec::new(),
+            stage: 0,
+            cleared: BTreeSet::new(),
         }
     }
 
@@ -60,6 +70,9 @@ impl TaintGate {
             },
             tool_overrides: HashMap::new(),
             audit_log: Vec::new(),
+            audit_stages: Vec::new(),
+            stage: 0,
+            cleared: BTreeSet::new(),
         }
     }
 
@@ -76,6 +89,19 @@ impl TaintGate {
         classification: ToolClassification,
     ) {
         self.tool_overrides.insert(tool_name, classification);
+    }
+
+    /// Clear `tool_name` for anything the run holds, for the rest of the run.
+    pub(crate) fn clear_for_run(&mut self, tool_name: &str) {
+        let mut cls = self.tool_classification(tool_name);
+        cls.clearance = TaintLevel::Private;
+        self.set_tool_classification(tool_name.to_string(), cls);
+        self.cleared.insert(tool_name.to_string());
+    }
+
+    /// The tools a person cleared for the rest of the run, sorted.
+    pub(crate) fn cleared(&self) -> Vec<String> {
+        self.cleared.iter().cloned().collect()
     }
 
     /// Get the classification for a tool (override first, then built-in default).
@@ -321,9 +347,7 @@ impl TaintGate {
                     clearance,
                     GateDecisionSource::UserAlwaysAllow,
                 );
-                let mut cls = self.tool_classification(tool_name);
-                cls.clearance = TaintLevel::Private;
-                self.set_tool_classification(tool_name.to_string(), cls);
+                self.clear_for_run(tool_name);
                 None
             }
             GateResolution::Deny => {
@@ -351,6 +375,43 @@ impl TaintGate {
         &self.audit_log
     }
 
+    /// Decide what follows in `stage`, the stage the run is in.
+    pub(crate) fn at_stage(&mut self, stage: usize) {
+        self.stage = stage;
+    }
+
+    /// The events decided in `stage`, oldest first: what its audit file
+    /// holds.
+    pub(crate) fn stage_audit(&self, stage: usize) -> Vec<&GateEvent> {
+        self.audit_log
+            .iter()
+            .zip(&self.audit_stages)
+            .filter(|(_, s)| **s == stage)
+            .map(|(event, _)| event)
+            .collect()
+    }
+
+    /// The stages the events from position `from` on were decided in.
+    pub(crate) fn stages_from(&self, from: usize) -> BTreeSet<usize> {
+        self.audit_stages.iter().skip(from).copied().collect()
+    }
+
+    /// Put back what a run's audit file for `stage` held before the run
+    /// stopped, so what the gate decides next is added to it.
+    pub(crate) fn restore_audit(&mut self, stage: usize, events: Vec<GateEvent>) {
+        self.audit_stages
+            .extend(std::iter::repeat_n(stage, events.len()));
+        self.audit_log.extend(events);
+    }
+
+    /// Forget the last event: a call asked about before a restart is checked
+    /// again when its batch comes back, and the block it meets is the one
+    /// already recorded.
+    pub(crate) fn forget_repeat(&mut self) {
+        self.audit_log.pop();
+        self.audit_stages.pop();
+    }
+
     fn log_event(
         &mut self,
         agent_id: &str,
@@ -360,6 +421,7 @@ impl TaintGate {
         allowed: bool,
         decision_source: GateDecisionSource,
     ) {
+        self.audit_stages.push(self.stage);
         self.audit_log.push(GateEvent {
             timestamp: chrono::Utc::now().timestamp(),
             agent_id: agent_id.to_string(),
@@ -443,7 +505,7 @@ mod tests {
 
     /// `submit_output` was classed with the context tools as internal, but
     /// the answer it records is served off-host by `GET
-    /// /api/agents/{id}/result` and shown in the dashboard, so with taint
+    /// /api/runs/{id}/result` and shown in the dashboard, so with taint
     /// tracking on a Private region could reach a remote reader with no
     /// prompt. It is outbound with Public clearance now: the same block
     /// `shell` gets over the same window.

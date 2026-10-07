@@ -45,29 +45,48 @@ async fn every_mirrored_function_runs() {
     .await;
 }
 
-/// `From<leviath_core::output::OutputSpec>` carries the artifacts and the
-/// validator policy across, not just the top-level strings.
+/// A graph's output shape carries the artifacts and the validator policy
+/// across, not just the top-level strings, and a validator is served as the
+/// file it names or the code written inline.
 #[test]
 fn the_conversion_carries_artifacts_and_the_validator_policy() {
-    use leviath_core::output::{ArtifactSpec, OnValidatorError};
+    use leviath_core::output::OnValidatorError;
+    use leviath_runtime::spec::graph::{ArtifactDef, CodeRef, OutputDef};
+    use leviath_runtime::spec::names::MimePattern;
 
-    let core = leviath_core::output::OutputSpec {
+    let def = OutputDef {
         format: Some("json".to_string()),
+        schema: Some(leviath_core::JsonDoc::new(
+            serde_json::json!({ "type": "object" }),
+        )),
+        validator: Some(CodeRef::File("checks/output.rhai".to_string())),
         on_validator_error: Some(OnValidatorError::Accept),
-        artifacts: vec![ArtifactSpec {
+        artifacts: vec![ArtifactDef {
             name: "report".to_string(),
-            mime_type: "text/markdown".to_string(),
+            mime_type: MimePattern::new("text/markdown").unwrap(),
             required: true,
             description: None,
         }],
-        ..leviath_core::output::OutputSpec::default()
+        ..OutputDef::default()
     };
-    let mapped = OutputSpec::from(&core);
+    let mapped = OutputSpec::from(&def);
     assert_eq!(mapped.format, Some("json".to_string()));
     assert_eq!(
         mapped.on_validator_error,
         Some(ValidatorErrorPolicy::Accept)
     );
+    assert_eq!(mapped.validator.as_deref(), Some("checks/output.rhai"));
+    assert_eq!(mapped.schema.unwrap().0["type"], "object");
     assert_eq!(mapped.artifacts.len(), 1);
     assert_eq!(mapped.artifacts[0].name, "report");
+    assert_eq!(mapped.artifacts[0].mime_type, "text/markdown");
+
+    let inline = OutputDef {
+        validator: Some(CodeRef::Inline("fn validate(o) { true }".to_string())),
+        ..OutputDef::default()
+    };
+    assert_eq!(
+        OutputSpec::from(&inline).validator.as_deref(),
+        Some("fn validate(o) { true }")
+    );
 }

@@ -1192,35 +1192,62 @@ fn fit_options(max_stem: f64) -> FitViewOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::flowgraph::model::test_graph;
     use crossterm::event::KeyModifiers;
-    use leviath_core::manifest::parse_manifest;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     fn graph() -> Arc<StageGraph> {
-        Arc::new(StageGraph::from_blueprint(
-            &parse_manifest(
-                r#"
-[agent]
-name = "g"
-[stages.plan]
-[stages.plan.transitions.implement]
-[stages.implement]
-[stages.implement.transitions.review]
-[stages.implement.transitions.recover]
-condition = "error"
-[stages.review]
-[stages.review.transitions.implement]
-condition = "llm_choice"
-[stages.review.transitions.done]
-[stages.recover]
-[stages.recover.transitions.plan]
-[stages.done]
+        Arc::new(test_graph(
+            r#"
+[[graph.stages]]
+name = "plan"
+
+[[graph.stages]]
+name = "implement"
+
+[[graph.stages]]
+name = "review"
+
+[[graph.stages]]
+name = "recover"
+
+[[graph.stages]]
+name = "done"
 mode = "output"
-[stages.done.transitions]
+
+[[graph.edges]]
+name = "implement"
+from = "plan"
+to = "implement"
+
+[[graph.edges]]
+name = "review"
+from = "implement"
+to = "review"
+
+[[graph.edges]]
+name = "recover"
+from = "implement"
+to = "recover"
+when = "error"
+
+[[graph.edges]]
+name = "implement"
+from = "review"
+to = "implement"
+when = "llm_choice"
+
+[[graph.edges]]
+name = "done"
+from = "review"
+to = "done"
+
+[[graph.edges]]
+name = "plan"
+from = "recover"
+to = "plan"
 "#,
-            )
-            .unwrap(),
         ))
     }
 
@@ -1569,20 +1596,20 @@ mode = "output"
 
     #[test]
     fn a_fan_out_current_stage_shows_its_workers() {
-        let g = Arc::new(StageGraph::from_blueprint(
-            &parse_manifest(
-                r#"
-[agent]
-name = "fan"
-[stages.split]
-mode = "fan_out"
-worker_agent = "researcher"
-merge_stage = "merge"
-[stages.split.transitions.merge]
-[stages.merge]
+        let g = Arc::new(test_graph(
+            r#"
+[[graph.stages]]
+name = "split"
+mode = { fan_out = { worker = { blueprint = { name = "researcher" } }, merge_stage = "merge" } }
+
+[[graph.stages]]
+name = "merge"
+
+[[graph.edges]]
+name = "merge"
+from = "split"
+to = "merge"
 "#,
-            )
-            .unwrap(),
         ));
         let mut v = FlowView::new(g, false);
         v.apply_live(&LiveOverlay {
@@ -1765,23 +1792,21 @@ merge_stage = "merge"
     /// canvas and before the word on an editor's.
     #[test]
     fn a_path_that_drops_a_file_is_marked_on_both_canvases() {
-        let g = Arc::new(StageGraph::from_blueprint(
-            &parse_manifest(
-                r#"
-[agent]
-name = "g"
-[stages.render]
-[[stages.render.output.artifacts]]
-name = "final"
-type = "video/mp4"
-[stages.render.transitions.publish]
-[stages.publish]
-[stages.publish.context.regions]
-notes = { kind = "pinned", accepts = ["text/*"] }
-[stages.publish.transitions]
+        let g = Arc::new(test_graph(
+            r#"
+[[graph.stages]]
+name = "render"
+output = { artifacts = [{ name = "final", mime_type = "video/mp4" }] }
+
+[[graph.stages]]
+name = "publish"
+layout = { total_budget_tokens = 0, regions = [{ name = "notes", kind = "pinned", budget = 100, accepts = ["text/*"] }] }
+
+[[graph.edges]]
+name = "publish"
+from = "render"
+to = "publish"
 "#,
-            )
-            .unwrap(),
         ));
         let mut v = FlowView::new(g.clone(), false);
         let (_, text) = draw(&mut v, 220, 50);
@@ -1909,24 +1934,23 @@ notes = { kind = "pinned", accepts = ["text/*"] }
 
     #[test]
     fn a_typed_box_is_wider_than_a_plain_one_left_to_right() {
-        let g = Arc::new(StageGraph::from_blueprint(
-            &parse_manifest(
-                r#"
-[agent]
-name = "img"
-entry_stage = "describe"
-[stages.describe]
-[stages.describe.input]
-accepts = ["image/*"]
-[[stages.describe.output.artifacts]]
-name = "image"
-type = "image/*"
-[stages.describe.transitions.done]
-[stages.done]
-[stages.done.transitions]
+        let g = Arc::new(test_graph(
+            r#"
+entry = "describe"
+
+[[graph.stages]]
+name = "describe"
+input_accepts = ["image/*"]
+output = { artifacts = [{ name = "image", mime_type = "image/*" }] }
+
+[[graph.stages]]
+name = "done"
+
+[[graph.edges]]
+name = "done"
+from = "describe"
+to = "done"
 "#,
-            )
-            .unwrap(),
         ));
         let mut v = FlowView::new(g, false);
         let (_, text) = draw(&mut v, 200, 20);

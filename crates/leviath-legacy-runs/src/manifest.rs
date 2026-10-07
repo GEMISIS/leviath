@@ -1,0 +1,265 @@
+//! Manifest parsing for `agent.leviath` files.
+//!
+//! Pure `TOML` string -> [`Blueprint`] parsing with no filesystem or async
+//! dependencies. Filesystem-based manifest discovery (`find_manifest`) lives in
+//! `leviath-cli`, since it depends on cli-only path helpers.
+
+use crate::old::blueprint::{Blueprint, Stage};
+use crate::old::blueprint::{
+    ContentTransform, ContextTransform, EdgeTransform, ModelConfig, ModelEntry, RegionMapping,
+    StageMode, StuckConfig, ToolRescan, TransitionCondition, TransitionEdge,
+};
+use crate::old::layout::{ContextLayout, RegionDefinition, RegionSeed};
+use leviath_core::error::{Error, Result};
+use leviath_core::lifecycle::CompactionConfig;
+use leviath_core::{EvictionStrategy, RegionKind};
+
+/// Parse an agent.leviath TOML manifest into a Blueprint.
+pub fn parse_manifest(content: &str) -> Result<Blueprint> {
+    let parsed: toml::Value = toml::from_str(content)
+        .map_err(|e| Error::Other(format!("Failed to parse agent.leviath: {e}")))?;
+
+    let agent = parsed
+        .get("agent")
+        .ok_or_else(|| Error::Other("Missing [agent] section".to_string()))?;
+
+    let name = str_of(agent, "name").unwrap_or("unnamed").to_string();
+    let version = str_of(agent, "version").unwrap_or("0.1.0").to_string();
+    let description = str_of(agent, "description").unwrap_or("").to_string();
+
+    let max_child_depth = count_of(agent, "[agent]", "max_child_depth")?;
+
+    let entry_stage = str_of(agent, "entry_stage").map(|s| s.to_string());
+
+    let tool_rescan = parse_tool_rescan(agent)?;
+
+    let mut stages = Vec::new();
+    if let Some(stages_table) = table_of(&parsed, "stages") {
+        for (stage_name, stage_value) in stages_table {
+            stages.push(parse_stage(stage_name, stage_value)?);
+        }
+    }
+
+    if stages.is_empty() {
+        stages.push(Stage::new(
+            "main".to_string(),
+            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
+        ));
+    }
+
+    let (mut regions, mut total_tokens) = match parsed
+        .get("context")
+        .and_then(|v| v.get("regions"))
+        .and_then(|v| v.as_table())
+    {
+        Some(regions_table) => parse_region_layout(regions_table)?,
+        None => (Vec::new(), 0usize),
+    };
+
+    if regions.is_empty() {
+        // 8000 tokens (~32K chars) for the pinned system region so a substantial
+        // stage system_prompt fits in the fallback layout without erroring
+        // (see inject_stage_system_prompt); blueprints that need more should
+        // declare their own [context.regions].
+        regions.push(RegionDefinition::new(
+            "system".to_string(),
+            RegionKind::Pinned,
+            8000,
+        ));
+        regions.push(RegionDefinition::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: EvictionStrategy::default(),
+            },
+            10000,
+        ));
+        total_tokens = 18000;
+    }
+
+    let layout = ContextLayout::new(regions, total_tokens);
+
+    let mut blueprint = Blueprint::new(name, description, stages, layout);
+    blueprint.version = version;
+    blueprint.max_child_depth = max_child_depth;
+    blueprint.entry_stage = entry_stage;
+    blueprint.tool_rescan = tool_rescan;
+
+    if let Some(compaction_table) = table_of(&parsed, "compaction") {
+        blueprint.compaction_config = Some(parse_compaction_config(compaction_table)?);
+    }
+
+    // Parse agent-level security config: [security]
+    if let Some(security_table) = table_of(&parsed, "security") {
+        blueprint.security = Some(parse_security_config(security_table));
+    }
+
+    // Parse agent-level batch_tool_hint override: `[agent] batch_tool_hint`.
+    // Absent ⇒ inherit the global config toggle; a per-stage value overrides it.
+    if let Some(bth) = bool_of(agent, "batch_tool_hint") {
+        blueprint.batch_tool_hint = Some(bth);
+    }
+
+    // Parse agent-level shell_hint override: `[agent] shell_hint`. Absent ⇒
+    // inherit the global config toggle; a per-stage value overrides it.
+    if let Some(sh) = bool_of(agent, "shell_hint") {
+        blueprint.shell_hint = Some(sh);
+    }
+
+    // Parse agent-level nudge defaults: [agent.nudge]. Absent ⇒ each field
+    // inherits the global config's [nudge] section; a per-stage block wins.
+    if let Some(nudge_table) = table_of(agent, "nudge") {
+        blueprint.nudge = Some(parse_nudge_config("[agent.nudge]", nudge_table)?);
+    }
+
+    // Parse the agent's default output shape: [agent.output]. A per-stage
+    // block narrows it, and whoever starts the run overrides both.
+    if let Some(output_table) = table_of(agent, "output") {
+        blueprint.output = Some(parse_output_spec("[agent.output]", output_table)?);
+    }
+
+    // Parse agent-level sandbox config: [sandbox]
+    if let Some(sandbox_table) = table_of(&parsed, "sandbox") {
+        blueprint.sandbox = Some(parse_sandbox_config("", sandbox_table)?);
+    }
+
+    // Parse agent-level read-path declarations: [read_paths]. Entries are
+    // syntax-checked here so a broken one fails `lev validate`/`lev add`/spawn
+    // loudly, instead of degrading the agent at its first out-of-workdir read.
+    if let Some(rp_table) = table_of(&parsed, "read_paths") {
+        blueprint.read_paths = Some(parse_read_paths(rp_table)?);
+    }
+
+    // [safe_commands]: what this agent would like to run unprompted. Inert
+    // until the user opts in, so parsing is permissive - a non-string entry is
+    // still a hard error, because a list that silently loses members reads as a
+    // grant that was made.
+    if let Some(sc_table) = table_of(&parsed, "safe_commands") {
+        blueprint.safe_commands = Some(parse_safe_commands(sc_table)?);
+    }
+
+    // Parse agent-level tool permissions: [tool_permissions]
+    if let Some(tp_table) = table_of(&parsed, "tool_permissions") {
+        blueprint
+            .metadata
+            .extend(tool_permission_metadata(tp_table)?);
+    }
+
+    // Parse file tracking config: [context.file_tracking]
+    if let Some(context_table) = table_of(&parsed, "context")
+        && let Some(ft_table) = table_of(context_table, "file_tracking")
+    {
+        blueprint.file_tracking = Some(parse_file_tracking(ft_table)?);
+    }
+
+    // Parse repetition-detection config: [repetition_detection]
+    if let Some(rd_table) = table_of(&parsed, "repetition_detection") {
+        blueprint.repetition_detection = Some(parse_repetition_detection(rd_table)?);
+    }
+
+    // Parse cross-blueprint context transforms: [[transforms]]. Each maps a
+    // parent (`from_blueprint`) region onto a child (`to_blueprint`) region when
+    // a sub-agent is spawned, optionally transforming the content en route.
+    if let Some(transforms_arr) = array_of(&parsed, "transforms") {
+        blueprint
+            .transforms
+            .extend(transforms_arr.iter().map(parse_context_transform));
+    }
+
+    // The agent's own mime registry rows: [mime_types]. Checked here by
+    // layering them onto an empty registry, so a misspelled field or a key
+    // that is not a type fails `lev validate` and the spawn rather than
+    // being skipped at the first file the agent touches.
+    if let Some(value) = parsed.get("mime_types") {
+        let Some(rows) = value.as_table() else {
+            return Err(Error::Other(
+                "[mime_types] must be a table of \"type/subtype\" rows".to_string(),
+            ));
+        };
+        leviath_core::mime::MimeRegistry::empty()
+            .layer(rows, "blueprint")
+            .map_err(|e| Error::Other(format!("[mime_types]: {e}")))?;
+        blueprint.mime_types = rows.clone();
+    }
+
+    // What the agent needs in place before it runs: [[dependencies]]. Parsed
+    // here so a broken declaration fails `lev validate` and the spawn rather
+    // than being ignored until the agent reaches for the missing thing.
+    if let Some(deps_arr) = array_of(&parsed, "dependencies") {
+        blueprint.dependencies = parse_dependencies(deps_arr)?;
+    }
+
+    Ok(blueprint)
+}
+
+mod model;
+/// Read `[agent] tool_rescan`, or the `dynamic_tools` flag it grew out of.
+///
+/// `dynamic_tools = true` is `after_writes`, which is what it did; `false` is
+/// `at_spawn`. The new key wins where both are written, so a manifest part-way
+/// through a rewrite reads as the author's newer intent.
+///
+/// A word nothing names is refused rather than defaulted: silently running a
+/// blueprint at `at_spawn` because its author misspelled the eager setting is
+/// exactly the failure the strict key checks exist to prevent.
+fn parse_tool_rescan(agent: &toml::Value) -> Result<ToolRescan> {
+    if let Some(word) = str_of(agent, "tool_rescan") {
+        return ToolRescan::parse(word).ok_or_else(|| {
+            Error::Other(format!(
+                "[agent] tool_rescan = \"{word}\" is not a setting (valid: {})",
+                ToolRescan::ALL
+                    .iter()
+                    .map(|value| value.wire())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        });
+    }
+    Ok(match bool_of(agent, "dynamic_tools") {
+        Some(true) => ToolRescan::AfterWrites,
+        Some(false) | None => ToolRescan::AtSpawn,
+    })
+}
+
+mod read;
+mod regions;
+pub mod renamed;
+mod sections;
+mod stage;
+mod tables;
+mod transition;
+mod unread;
+
+pub use tables::read_manifest_tables;
+pub(crate) use unread::unread_keys;
+
+// Glob re-exports, so this split is invisible to every caller and to the
+// test module, exactly as `pipeline/mod.rs` does it.
+use model::*;
+use read::*;
+use regions::*;
+use sections::*;
+use stage::*;
+use transition::*;
+
+/// Every key `parse_manifest` reads off the `[agent]` table, for the schema
+/// guard in `tests.rs` and the unread keys `migrate` reports. The parser
+/// itself ignores what it does not know.
+pub(super) const AGENT_KEYS: &[&str] = &[
+    "batch_tool_hint",
+    "description",
+    "dynamic_tools",
+    "tool_rescan",
+    "entry_stage",
+    "max_child_depth",
+    "name",
+    "nudge",
+    "output",
+    "shell_hint",
+    "version",
+];
+
+#[cfg(test)]
+mod graph_tests;
+#[cfg(test)]
+mod tests;

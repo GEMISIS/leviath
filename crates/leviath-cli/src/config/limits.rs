@@ -236,7 +236,7 @@ pub struct LimitsConfig {
     /// is holding the marker that says so, and is exempt however long it takes.
     /// This only catches an agent holding *no* marker at all, which the engine's
     /// own invariants say cannot happen and which nothing will ever look at
-    /// again. Such a run stays `running` in `meta.json` for the life of the
+    /// again. Such a run stays `running` in its run file for the life of the
     /// daemon and keeps whatever capacity an external scheduler assigned it.
     ///
     /// Defaults to `0`, which is off: this fails runs, and an upgrade that

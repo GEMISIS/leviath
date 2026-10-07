@@ -148,6 +148,9 @@ pub(crate) async fn act(state: &AppState, id: &str, action: Action) -> Result<()
             }
         }
         Ok(ControlResponse::Ok { ok: false }) => Err(ServeError::NotFound(action.refusal(id))),
+        // The run is there and could not be moved, and the daemon said why:
+        // a held run this machine still cannot take back.
+        Ok(ControlResponse::Error { message }) => Err(ServeError::Conflict(message)),
         Ok(other) => Err(ServeError::unexpected_reply(&other)),
         Err(e) => Err(ServeError::from_daemon_io(&e)),
     }

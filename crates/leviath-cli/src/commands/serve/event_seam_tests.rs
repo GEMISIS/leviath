@@ -24,10 +24,9 @@ use leviath_providers::{
 };
 use leviath_runtime::ProviderRegistry;
 use leviath_runtime::control_socket::{
-    ControlClient, ControlResponse, ControlToken, bind_control_listener, control_id,
+    ControlClient, ControlResponse, ControlToken, EventLog, bind_control_listener, control_id,
     handle_connection_as,
 };
-use leviath_runtime::host::{SpawnArgs, WorldEvent};
 use tokio::sync::{Mutex, broadcast};
 
 use super::testutil::WsTestClient;
@@ -87,21 +86,21 @@ impl Provider for AnswersOnce {
 
 /// A one-stage agent that answers and stops.
 fn one_stage_manifest() -> &'static str {
-    r#"[agent]
+    r#"[blueprint]
 name = "seam"
 version = "0.0.0"
 description = "Answers once, then finishes."
-entry_stage = "work"
 
-[stages.work]
-mode = "autonomous"
-model = { provider = "seam", model = "m" }
-description = "Answer"
-system_prompt = "Answer, then stop."
+[graph]
+stages = [{ name = "work", description = "Answer", system_prompt = "Answer, then stop.", model = { models = [{ provider = "seam", model = "m" }] } }]
+inputs = [{ name = "task", type = "text", required = true, binds = [{ region = "task" }] }]
 
-[context.regions]
-task = { kind = "pinned", max_tokens = 500, seed = "task" }
-conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+[graph.layout]
+total_budget_tokens = 10500
+regions = [
+    { name = "task", kind = "pinned", budget = 500 },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 20 }, budget = 10000 },
+]
 "#
 }
 
@@ -112,10 +111,10 @@ struct Seam {
     control: ControlClient,
     /// Where the websocket route is listening.
     addr: std::net::SocketAddr,
-    /// The host's event sender, kept only to ask how many subscribers it has:
+    /// The daemon's event log, kept only to ask how many subscribers it has:
     /// one means the relay's `Subscribe` connection is live, which is the
     /// readiness signal that makes a sleep unnecessary here.
-    events: broadcast::Sender<WorldEvent>,
+    events: EventLog,
     _dir: tempfile::TempDir,
     _tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -145,7 +144,7 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
 
     // The daemon half: the host's own event sender served over a real control
     // socket, wired the way `main.rs` wires it.
-    let events = host.event_sender();
+    let events = EventLog::recording(&host.event_sender());
     let served = events.clone();
     let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel();
     let dir = tempfile::tempdir().expect("socket dir");
@@ -265,8 +264,7 @@ fn last<'a>(frames: &'a [serde_json::Value], tag: &str) -> &'a serde_json::Value
 #[tokio::test]
 async fn a_real_run_reaches_a_websocket_subscriber() {
     let agent_dir = tempfile::tempdir().expect("agent dir");
-    let manifest = agent_dir.path().join("agent.leviath");
-    std::fs::write(&manifest, one_stage_manifest()).expect("write manifest");
+    let manifest = crate::test_support::write_test_agent(agent_dir.path(), one_stage_manifest());
     let workdir = tempfile::tempdir().expect("workdir");
     let runs = tempfile::tempdir().expect("runs dir");
 
@@ -274,33 +272,31 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
     let mut client = WsTestClient::connect(seam.addr, "/ws").await;
 
     // Spawn only once the relay's `Subscribe` is live, so nothing under test
-    // has already happened by the time anyone is listening. A receiver on the
-    // host's broadcast channel is exactly that connection: nothing else in
-    // this chain subscribes.
+    // has already happened by the time anyone is listening. A stream open on
+    // the daemon's log is exactly that connection: nothing else in this chain
+    // subscribes.
     let events = seam.events.clone();
     leviath_testkit::wait_until("the relay subscribed to the daemon", || {
-        events.receiver_count() > 0
+        events.subscribers() > 0
     })
     .await;
 
+    let request = crate::daemon::requests::TaskLaunch {
+        blueprint: manifest.to_string_lossy().to_string(),
+        task: "say something".to_string(),
+        workdir: Some(workdir.path().to_string_lossy().to_string()),
+        ..Default::default()
+    }
+    .into_request()
+    .expect("the request reads");
     let reply = seam
         .control
-        .spawn(SpawnArgs {
-            run_id: "seam-1".to_string(),
-            blueprint_path: manifest.to_string_lossy().to_string(),
-            task: "say something".to_string(),
-            workdir: workdir.path().to_string_lossy().to_string(),
-            ..Default::default()
-        })
+        .spawn(request)
         .await
         .expect("the daemon answered the spawn");
-    assert_eq!(
-        reply,
-        ControlResponse::Spawned {
-            run_id: "seam-1".to_string()
-        },
-        "the spawn was refused"
-    );
+    let ControlResponse::Spawned { run_id, .. } = reply else {
+        panic!("the spawn was refused: {reply:?}");
+    };
 
     let frames = collect_frames(
         &mut client,
@@ -310,7 +306,7 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
 
     // The spawn frame. `parent_id` is null for a root run, and present.
     let spawned = last(&frames, "agent_spawned");
-    assert_eq!(spawned["run_id"], "seam-1");
+    assert_eq!(spawned["run_id"], run_id.as_str());
     assert_eq!(spawned["blueprint"], "seam");
     assert_eq!(spawned["parent_id"], serde_json::Value::Null);
 
@@ -328,7 +324,7 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
         statuses.len()
     );
     let status = last(&frames, "agent_status");
-    assert_eq!(status["run_id"], "seam-1");
+    assert_eq!(status["run_id"], run_id.as_str());
     assert_eq!(status["stage"], "work");
     assert_eq!(status["status"], "complete");
     assert!(status["accepts_messages"].is_boolean());
@@ -338,7 +334,7 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
     // one-shot title generation is its own), so an exact total is a trap that
     // fails the day another call joins.
     let tokens = last(&frames, "tokens");
-    assert_eq!(tokens["run_id"], "seam-1");
+    assert_eq!(tokens["run_id"], run_id.as_str());
     assert!(
         tokens["prompt_tokens"].as_u64().unwrap_or(0) >= 7,
         "the token frame never carried the provider's usage: {tokens}"
@@ -346,7 +342,7 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
     assert!(tokens["completion_tokens"].as_u64().unwrap_or(0) >= 3);
 
     let completed = last(&frames, "agent_completed");
-    assert_eq!(completed["run_id"], "seam-1");
+    assert_eq!(completed["run_id"], run_id.as_str());
     assert_eq!(completed["status"], "complete");
 
     client.send_close().await;

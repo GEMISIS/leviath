@@ -1,0 +1,349 @@
+//! How a run leaves one stage for the next.
+//!
+//! An edge carries a condition (when it may be taken), a transform (what of the
+//! context comes along), and a gate (what must be true first). Nudges and stuck
+//! detection are here too, because both exist to answer the same question: this
+//! stage is not finishing, so what should happen.
+
+use serde::{Deserialize, Serialize};
+
+/// Context transform for converting between agent types.
+///
+/// When spawning a sub-agent with a different blueprint, transforms define
+/// how to map regions from the parent agent's context to the child agent's
+/// context. This enables smooth handoffs between agents with different
+/// memory structures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextTransform {
+    /// Source blueprint name
+    pub from_blueprint: String,
+
+    /// Target blueprint name
+    pub to_blueprint: String,
+
+    /// Region mapping rules
+    pub mappings: Vec<RegionMapping>,
+}
+
+impl ContextTransform {}
+
+/// Mapping rule for a single region in a context transform.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegionMapping {
+    /// Source region name
+    pub from_region: String,
+
+    /// Target region name
+    pub to_region: String,
+
+    /// Optional transformation to apply to content
+    pub transform: Option<ContentTransform>,
+}
+
+/// A directed transition edge from one stage to another.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitionEdge {
+    /// Target stage name (derived from the HashMap key during parsing)
+    pub target: String,
+
+    /// When this edge is available
+    #[serde(default)]
+    pub condition: TransitionCondition,
+
+    /// Human-readable hint for the LLM
+    pub hint: Option<String>,
+
+    /// How context transforms when crossing this edge
+    #[serde(default)]
+    pub transform: EdgeTransform,
+
+    /// Preconditions the agent must satisfy before this edge may be followed.
+    /// Absent ⇒ the edge is unconditional (beyond its `condition`).
+    #[serde(default)]
+    pub gate: Option<TransitionGate>,
+
+    /// Thresholds arming a [`TransitionCondition::Stuck`] edge. `Some` iff the
+    /// condition is `Stuck`: the manifest parser rejects the two
+    /// half-configured shapes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck: Option<StuckConfig>,
+}
+
+/// Thresholds that arm a [`TransitionCondition::Stuck`] edge.
+///
+/// At least one threshold is always set: an edge with none could never fire, so
+/// the manifest parser rejects that shape rather than build a dead edge. Every threshold is evaluated against the *current
+/// stage's* progress counters, which reset on each stage entry - so a blueprint
+/// can arm different stages with different thresholds independently.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StuckConfig {
+    /// `stuck_after_iterations`: inferences run in this stage without finishing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_iterations: Option<usize>,
+
+    /// `stuck_after_minutes`: wall-clock minutes spent in this stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_minutes: Option<usize>,
+
+    /// `stuck_after_same_file_edits`: `write_file`/`edit_file` calls against a
+    /// single path in this stage - the "100 iterations in the wrong file" mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_same_file_edits: Option<usize>,
+
+    /// `stuck_after_tool_calls`: total tool calls made in this stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_tool_calls: Option<usize>,
+}
+
+impl StuckConfig {
+    /// Whether any threshold is set. `false` ⇒ the edge could never fire.
+    pub fn is_armed(&self) -> bool {
+        self.after_iterations.is_some()
+            || self.after_minutes.is_some()
+            || self.after_same_file_edits.is_some()
+            || self.after_tool_calls.is_some()
+    }
+}
+
+/// Preconditions an edge imposes on the stage it leaves, checked once the edge
+/// has been chosen but before its transform runs. A gate that isn't satisfied
+/// re-runs the stage with a `[System]` nudge instead of transitioning.
+///
+/// The motivating case: an agent that reads and reasons about the
+/// codebase entirely through `shell` and reaches the review stage without ever
+/// having called a file-writing tool, producing a run with no output at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionGate {
+    /// Require at least one successful file-modifying tool call in the stage
+    /// being left.
+    #[serde(default)]
+    pub require_modifications: bool,
+
+    /// Nudge injected when the gate blocks. A default explaining the framework's
+    /// change tracking is generated when absent.
+    #[serde(default)]
+    pub message: Option<String>,
+
+    /// Region whose non-emptiness also satisfies the gate. Per-stage tool-call
+    /// counters reset on stage entry and are not restored when a run resumes
+    /// after a daemon restart, but context regions are - so pointing the gate at
+    /// the region the write tools are routed into keeps a resumed run honest.
+    #[serde(default)]
+    pub region: Option<String>,
+
+    /// Tool names counted as modifying beyond the built-in `write_file` /
+    /// `edit_file` - for agents whose writes go through MCP or script tools.
+    #[serde(default)]
+    pub tools: Vec<String>,
+
+    /// How many times the stage is re-run before the gate gives up and lets the
+    /// transition through (with a warning). `None` takes the run's default.
+    #[serde(default)]
+    pub max_attempts: Option<usize>,
+
+    /// Region that must have *changed* during this stage, not merely be present.
+    ///
+    /// Every other gate asks whether something exists. That cannot express a
+    /// revise loop: a stage sent back to redo its work satisfies a presence
+    /// check by re-emitting what it already wrote, so a reviewer's rejection
+    /// can be answered with the same plan and the loop spins until it runs out
+    /// of revisits. Measured, a plan that overrode a documented definition was
+    /// re-confirmed by a verify stage and the run ended confidently wrong.
+    ///
+    /// Compared against the region's content as it stood when the stage was
+    /// entered, so "changed" means changed by *this* pass.
+    #[serde(default)]
+    pub require_region_updated: Option<String>,
+
+    /// Regions that must all hold content before this edge may be taken.
+    ///
+    /// Conjunctive, and that is the point. [`Self::region`] reads as though it
+    /// says this and does not: it is one of several *alternative* ways to
+    /// satisfy [`Self::require_modifications`], so
+    /// `{ require_modifications = true, region = "plan" }` is met by writing
+    /// any file anywhere while `plan` stays empty. That is the right
+    /// shape for what `region` is for - a restart-durable stand-in for
+    /// per-stage counters, which do not survive a daemon restart - and the
+    /// wrong shape for "this stage does not leave without writing X". This key
+    /// is the second thing, ANDed with every other condition on the gate.
+    ///
+    /// A name the window does not hold passes with a warning rather than
+    /// blocking: `lev validate` refuses a gate naming a region no stage
+    /// declares, so reaching that at runtime means a layout moved underneath
+    /// the edge, and stranding a run over it would be worse than the missing
+    /// check. The warning is what keeps the skipped check findable.
+    #[serde(default)]
+    pub require_regions: Vec<String>,
+    /// Checklist region that must have no open items before this edge is taken.
+    ///
+    /// The other gates ask whether a region has content, which cannot tell a
+    /// list of three unfinished items from a list of three finished ones. This
+    /// is the gate a checklist exists for: it makes "did you actually finish"
+    /// a mechanical question rather than one the model answers about itself.
+    #[serde(default)]
+    pub require_no_open_items: Option<String>,
+
+    /// A region that must hold at least so many entries before this edge is
+    /// taken.
+    ///
+    /// The presence gates ask whether a region has *anything*; this asks how
+    /// much. It is what turns a stage whose model cannot call tools - an image
+    /// model that returns however many pictures it likes per reply - into one
+    /// that draws until the set is complete: the gate holds the stage and
+    /// re-runs it with the message, and the next reply adds to the region.
+    /// It is also the honest form of "build from four views": a rule the
+    /// runtime keeps rather than a wish in a prompt.
+    #[serde(default)]
+    pub require_region_entries: Option<RegionCount>,
+}
+
+/// A region and how many entries it must hold, for
+/// [`TransitionGate::require_region_entries`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegionCount {
+    /// The region counted.
+    pub region: String,
+    /// The fewest entries that satisfy the gate.
+    pub at_least: usize,
+}
+
+pub use leviath_core::stage_tools::{FAN_OUT_TOOL, SUBMIT_OUTPUT_TOOL};
+
+/// Settings for the empty-response nudge: the `[System]` message injected when
+/// a stage's model replies with text before making any tool call.
+///
+/// Every field is optional. A field left unset cascades stage → agent → global
+/// config and finally to the built-in default, so a `[stages.<name>.nudge]`
+/// block only has to name what it wants to change. An empty block is inert.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NudgeConfig {
+    /// Whether the nudge fires at all. When unset at every level, the default
+    /// is on - except for a stage with interaction points, whose text response
+    /// is its work product and which is left alone. Setting this explicitly at
+    /// any level overrides that implicit rule in both directions.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+
+    /// How many text-only responses to nudge before accepting the text as
+    /// final. `None` takes the next level's, then the run's default.
+    #[serde(default)]
+    pub max: Option<usize>,
+
+    /// The nudge text, over the next level's. Supports `{stage}`
+    /// (the stage's name) and `{regions}` (comma-separated names of the
+    /// stage's required context regions) placeholders.
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// Condition that determines when a transition edge is available.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionCondition {
+    /// Always available (LLM chooses)
+    #[default]
+    Always,
+    /// Only on error
+    Error,
+    /// Only when max_iterations hit
+    MaxIterations,
+    /// LLM picks from available transitions (default for multi-transition stages)
+    LlmChoice,
+    /// Fires when the graph would otherwise strand here: the stage finished, and
+    /// every normal (`always`/`llm_choice`) edge's target has spent its
+    /// `max_revisits`.
+    ///
+    /// Exists because the alternatives were both bad. Declaring an ordinary edge
+    /// to the output stage silences the `dead-end-possible` lint by adding a
+    /// route the model can take at the end of *every* visit - measured, that
+    /// collapsed pipelines in 10 of 24 runs of one agent and 21 of 36 of
+    /// another. Declaring nothing leaves the run to die with everything it
+    /// established thrown away. This edge is reachable when stuck and invisible
+    /// the rest of the time, which is what "escape" actually means.
+    ///
+    /// Deliberately not `max_iterations`: that fires when a stage burns its
+    /// iteration budget, which is a different event and does not fire here at
+    /// all.
+    DeadEnd,
+    /// Fires *mid-stage* when the stage's runtime metrics cross this edge's
+    /// [`StuckConfig`] thresholds - the agent is burning iterations, wall clock,
+    /// or edits to one file without finishing. Unlike every other condition this
+    /// interrupts a stage the agent never said it had completed, so when the edge
+    /// is unavailable the runtime resumes the stage rather than transitioning.
+    Stuck,
+}
+
+/// How context transforms when crossing a transition edge.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeTransform {
+    /// Copy everything as-is (default for single-transition linear stages)
+    #[default]
+    Direct,
+
+    /// Clear stage-specific regions, keep pinned/system
+    Clear,
+
+    /// LLM-compact stage content into summary
+    Compact {
+        /// What to ask the compaction model for, replacing the built-in
+        /// instruction. `None` uses the default summary prompt.
+        #[serde(default)]
+        prompt: Option<String>,
+    },
+
+    /// Per-region rules
+    Custom {
+        /// Regions copied through untouched.
+        carry: Vec<String>,
+        /// Regions replaced by an LLM summary of themselves.
+        compact: Vec<String>,
+        /// Regions emptied on the way across.
+        clear: Vec<String>,
+        /// The instruction used for everything in `compact`. `None` uses the
+        /// default summary prompt.
+        compact_prompt: Option<String>,
+    },
+}
+
+impl PartialEq for EdgeTransform {
+    #[inline(never)]
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Direct, Self::Direct) | (Self::Clear, Self::Clear) => true,
+            (Self::Compact { prompt: a }, Self::Compact { prompt: b }) => a == b,
+            (
+                Self::Custom {
+                    carry: ca,
+                    compact: coa,
+                    clear: cla,
+                    compact_prompt: cpa,
+                },
+                Self::Custom {
+                    carry: cb,
+                    compact: cob,
+                    clear: clb,
+                    compact_prompt: cpb,
+                },
+            ) => ca == cb && coa == cob && cla == clb && cpa == cpb,
+            _ => false,
+        }
+    }
+}
+impl Eq for EdgeTransform {}
+
+/// Content transformation type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ContentTransform {
+    /// Copy content as-is
+    Direct,
+
+    /// Summarize content to fit target region
+    Summarize,
+
+    /// Extract specific fields
+    Extract {
+        /// Which fields to keep, by name. Anything else is dropped.
+        fields: Vec<String>,
+    },
+}

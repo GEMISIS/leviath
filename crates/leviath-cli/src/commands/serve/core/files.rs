@@ -2,7 +2,7 @@
 //! and one window of one file's text.
 //!
 //! Two genuinely different questions, and neither substitutes for the other.
-//! What the run recorded is free, because it is already in `meta.json`, but it
+//! What the run recorded is free, because it is already in the run's record, but it
 //! is a claim about the run rather than about the disk and it is capped at
 //! record time. What is in the working directory is the truth, read one
 //! directory level per request: that bound is the answer to a repository with a

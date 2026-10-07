@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 use leviath_core::interaction::{ApprovalScope, InteractionKind, Settlement};
-use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+use leviath_runtime::runfile::record::{self, RunRecord};
 
 use super::super::super::connection::Connection;
 use super::super::run::Run;
@@ -22,7 +22,7 @@ fn meta() -> RunMeta {
     let mut meta = RunMeta::new(
         "asked-things".to_string(),
         "coder".to_string(),
-        "/agents/coder/agent.leviath".to_string(),
+        "/agents/coder/agent.toml".to_string(),
         "ask a few things".to_string(),
         None,
         "/tmp".to_string(),
@@ -97,33 +97,10 @@ fn asked(
     }
 }
 
-/// Write a journal of `records` for the run.
+/// Record a run file of `records` for the run, one step per record, the way
+/// the persistence lane would have.
 fn write_journal(records: Vec<RunRecord>) {
-    let meta = meta();
-    let mut buf = Vec::new();
-    run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION)
-        .expect("a preamble");
-    run_archive::write_record(
-        &mut buf,
-        &RunRecord::Header {
-            identity: RunIdentity {
-                run_id: meta.run_id.clone(),
-                machine_id: "m".to_string(),
-                world_id: "w".to_string(),
-                created_at: 0,
-            },
-            meta: Box::new(meta.clone()),
-        },
-    )
-    .expect("a header");
-    for record in &records {
-        run_archive::write_record(&mut buf, record).expect("a record");
-    }
-    std::fs::write(
-        crate::runstate::run_dir(&meta.run_id).join(leviath_core::files::ARCHIVE_FILE),
-        &buf,
-    )
-    .expect("the journal");
+    super::super::journal_fixture::journal(&meta().run_id, &records);
 }
 
 /// Every field reads back typed, and the settlement's detail fields are only
@@ -695,13 +672,12 @@ async fn an_unreadable_journal_says_so() {
         "graphql-interactions-corrupt",
         |_dir| async move {
             create_run(&meta()).expect("run written");
-            std::fs::write(
-                crate::runstate::run_dir("asked-things").join(leviath_core::files::ARCHIVE_FILE),
-                b"not an archive",
-            )
-            .expect("a corrupt journal");
+            crate::commands::serve::core::run_file::tests::garbage(
+                "asked-things",
+                b"not a run file",
+            );
             let message = error("{ run { interactions(first: 10) { total } } }").await;
-            assert!(message.contains("unreadable journal"), "{message}");
+            assert!(message.contains("cannot read"), "{message}");
         },
     )
     .await;
@@ -804,7 +780,7 @@ async fn every_mirrored_function_runs() {
 
     let settled = super::Interaction::settled(
         "asked-things".to_string(),
-        run_archive::InteractionRecord {
+        record::InteractionRecord {
             request_id: "r1".to_string(),
             kind: InteractionKind::FreeText,
             tool: None,

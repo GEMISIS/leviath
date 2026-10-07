@@ -1,30 +1,33 @@
 //! Inter-agent context transforms: seed a freshly-spawned child agent's context
-//! from its parent's, when the blueprints declare a mapping.
+//! from its parent's, when the graphs declare a mapping.
 //!
-//! A [`Blueprint`](leviath_core::Blueprint) may declare
-//! [`ContextTransform`](leviath_core::blueprint::ContextTransform)s - `{from_blueprint,
-//! to_blueprint, mappings}` - describing how a parent's context regions flow into
-//! a child's when the parent (blueprint A) spawns a child (blueprint B). This is
-//! how an agent hands work down the tree: the planner's plan region becomes the
-//! implementer's task region, findings become inputs, etc.
+//! A run graph may declare [`ContextTransformDef`]s - `{from, to, mappings}`,
+//! each end a blueprint name - describing how a parent's context regions flow
+//! into a child's when the parent (blueprint A) spawns a child (blueprint B).
+//! This is how an agent hands work down the tree: the planner's plan region
+//! becomes the implementer's task region, findings become inputs, etc.
 //!
 //! [`apply_context_transforms`] is invoked right after a child is spawned and
 //! linked (sub-agent spawn and fan-out worker start). It looks up a transform
-//! matching `(parent_blueprint → child_blueprint)` in either blueprint's
-//! `transforms`, and for each [`RegionMapping`] copies the parent's `from_region`
-//! into the child's `to_region`, applying the optional [`ContentTransform`].
+//! matching `(parent_blueprint → child_blueprint)` in either run's
+//! `transforms`, and for each [`RegionMappingDef`] copies the parent's `from`
+//! region into the child's `to` region, applying its [`ContentTransform`].
+//!
+//! [`ContextTransformDef`]: crate::spec::graph::ContextTransformDef
 
+use crate::insert::RunSpecC;
+use crate::spec::graph::{ContentTransform, RegionMappingDef};
+use crate::spec::run_spec::RunSpec;
 use bevy_ecs::prelude::*;
-use leviath_core::blueprint::{ContentTransform, RegionMapping};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::compaction_bridge::{CompactionJob, CompactionOutcome, run_compaction_job};
+use crate::compaction_bridge::{CompactionJob, CompactionOutcome};
 use crate::components::{AgentState, AgentStatus, ContextWindow};
-use crate::pipeline::{AgentBlueprint, CompactionSettings, InferenceStage, Providers};
+use crate::pipeline::{CompactionSettings, InferenceStage, Providers};
 
 /// Seed `child`'s context from `parent`'s per a declared blueprint transform.
-/// No-op unless both carry an [`AgentBlueprint`] with different names and a
-/// matching [`ContextTransform`](leviath_core::blueprint::ContextTransform) exists.
+/// No-op unless both runs came from blueprints with different names and a
+/// matching transform exists.
 pub(crate) fn apply_context_transforms(
     world: &mut World,
     parent: crate::world::AgentId,
@@ -46,7 +49,7 @@ pub(crate) fn apply_context_transforms(
     let mut to_summarize: Vec<(String, String)> = Vec::new();
     if let Some(parent_window) = world.get::<ContextWindow>(parent) {
         for m in &mappings {
-            if let Some(region) = parent_window.get_region(&m.from_region) {
+            if let Some(region) = parent_window.get_region(m.from.as_str()) {
                 let joined = region
                     .content
                     .iter()
@@ -55,10 +58,10 @@ pub(crate) fn apply_context_transforms(
                     .join("\n");
                 if !joined.is_empty() {
                     let content = apply_content_transform(&joined, &m.transform);
-                    if matches!(m.transform, Some(ContentTransform::Summarize)) {
-                        to_summarize.push((m.to_region.clone(), content.clone()));
+                    if m.transform == ContentTransform::Summarize {
+                        to_summarize.push((m.to.to_string(), content.clone()));
                     }
-                    writes.push((m.to_region.clone(), content));
+                    writes.push((m.to.to_string(), content));
                 }
             }
         }
@@ -163,7 +166,13 @@ pub(crate) fn dispatch_content_summary(
                 (region.clone(), request)
             })
             .collect();
-        stage.runtime.spawn(run_compaction_job(
+        // Supervised: the child waits `AwaitingContentSummary` until an
+        // outcome lands, so a job that died without one would hold it there.
+        crate::pipeline::spawn_summary_job(
+            &stage,
+            &stage.content_summary_outcomes,
+            "content-summary",
+            entity,
             CompactionJob {
                 entity,
                 provider,
@@ -172,10 +181,7 @@ pub(crate) fn dispatch_content_summary(
                 requests,
                 permit,
             },
-            std::time::Duration::from_secs(leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS),
-            stage.content_summary_outcomes.clone(),
-            stage.wake.clone(),
-        ));
+        );
         commands
             .entity(entity)
             .remove::<PendingContentSummary>()
@@ -214,47 +220,47 @@ pub(crate) fn collect_content_summary(
     }
 }
 
+/// The blueprint a run came from, by name. A run whose graph its caller wrote
+/// has none, so no transform names it.
+fn blueprint_name(spec: &RunSpec) -> Option<&str> {
+    spec.origin.blueprint_name()
+}
+
 /// Find the region mappings for `parent_blueprint → child_blueprint`, searching
-/// the parent's then the child's `transforms`. `None` when either lacks a
-/// blueprint, they share a name (no cross-blueprint mapping), or no non-empty
-/// transform matches.
+/// the parent's then the child's `transforms`. `None` when either did not come
+/// from a blueprint, they share a name (no cross-blueprint mapping), or no
+/// non-empty transform matches.
 fn collect_transform_mappings(
     world: &World,
     parent: Entity,
     child: Entity,
-) -> Option<Vec<RegionMapping>> {
-    let parent_name = world.get::<AgentBlueprint>(parent)?.0.name.clone();
-    let child_name = world.get::<AgentBlueprint>(child)?.0.name.clone();
+) -> Option<Vec<RegionMappingDef>> {
+    let parent_spec = &world.get::<RunSpecC>(parent)?.0;
+    let child_spec = &world.get::<RunSpecC>(child)?.0;
+    let parent_name = blueprint_name(parent_spec)?;
+    let child_name = blueprint_name(child_spec)?;
     if parent_name == child_name {
         return None;
     }
-    for entity in [parent, child] {
-        // Both blueprints are guaranteed present by the `?`s above.
-        let bp = world
-            .get::<AgentBlueprint>(entity)
-            .expect("parent/child blueprint checked above");
-        let found =
-            bp.0.transforms
-                .iter()
-                .find(|t| t.from_blueprint == parent_name && t.to_blueprint == child_name)
-                .map(|t| t.mappings.clone())
-                .filter(|m| !m.is_empty());
-        if found.is_some() {
-            return found;
-        }
-    }
-    None
+    [parent_spec, child_spec].into_iter().find_map(|spec| {
+        spec.graph
+            .transforms
+            .iter()
+            .find(|t| t.from.as_str() == parent_name && t.to.as_str() == child_name)
+            .map(|t| t.mappings.clone())
+            .filter(|m| !m.is_empty())
+    })
 }
 
-/// Apply a region mapping's optional content transform.
-fn apply_content_transform(content: &str, transform: &Option<ContentTransform>) -> String {
+/// Apply a region mapping's content transform.
+fn apply_content_transform(content: &str, transform: &ContentTransform) -> String {
     match transform {
-        None | Some(ContentTransform::Direct) => content.to_string(),
-        Some(ContentTransform::Extract { fields }) => extract_fields(content, fields),
+        ContentTransform::Direct => content.to_string(),
+        ContentTransform::Extract(fields) => extract_fields(content, fields),
         // Summarize needs an async LLM call that isn't available at spawn time;
-        // fall back to a direct copy so the data still transfers. (Follow-up:
-        // route through the compaction lane - tracked separately.)
-        Some(ContentTransform::Summarize) => content.to_string(),
+        // copy directly so the data still transfers, and the summary lane
+        // replaces it once the summary is ready.
+        ContentTransform::Summarize => content.to_string(),
     }
 }
 
@@ -277,22 +283,14 @@ fn extract_fields(content: &str, fields: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::blueprint::{ContextTransform, RegionMapping};
+    use crate::spec::graph::ContextTransformDef;
+    use crate::spec::names::{BlueprintName, RegionName};
     use leviath_core::{Region, RegionKind};
 
-    fn bp_with_transforms(name: &str, transforms: Vec<ContextTransform>) -> AgentBlueprint {
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 10_000);
-        let mut bp = leviath_core::Blueprint::new(
-            name.to_string(),
-            "d".to_string(),
-            vec![leviath_core::Stage::new(
-                "s".to_string(),
-                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-            )],
-            layout,
-        );
-        bp.transforms = transforms;
-        AgentBlueprint(bp)
+    fn bp_with_transforms(name: &str, transforms: Vec<ContextTransformDef>) -> RunSpecC {
+        let mut graph = crate::spec::run_spec::tests::spec().graph;
+        graph.transforms = transforms;
+        crate::test_graph::spec_c(name, graph)
     }
 
     fn window_with(regions: &[(&str, &str)]) -> ContextWindow {
@@ -306,18 +304,22 @@ mod tests {
         w
     }
 
-    fn mapping(from: &str, to: &str, transform: Option<ContentTransform>) -> RegionMapping {
-        RegionMapping {
-            from_region: from.to_string(),
-            to_region: to.to_string(),
-            transform,
+    fn mapping(from: &str, to: &str, transform: Option<ContentTransform>) -> RegionMappingDef {
+        RegionMappingDef {
+            from: RegionName::new(from).unwrap(),
+            to: RegionName::new(to).unwrap(),
+            transform: transform.unwrap_or_default(),
         }
     }
 
-    fn transform(from_bp: &str, to_bp: &str, mappings: Vec<RegionMapping>) -> ContextTransform {
-        ContextTransform {
-            from_blueprint: from_bp.to_string(),
-            to_blueprint: to_bp.to_string(),
+    fn transform(
+        from_bp: &str,
+        to_bp: &str,
+        mappings: Vec<RegionMappingDef>,
+    ) -> ContextTransformDef {
+        ContextTransformDef {
+            from: BlueprintName::new(from_bp).unwrap(),
+            to: BlueprintName::new(to_bp).unwrap(),
             mappings,
         }
     }
@@ -326,20 +328,14 @@ mod tests {
 
     #[test]
     fn apply_content_transform_variants() {
-        assert_eq!(apply_content_transform("x", &None), "x");
+        assert_eq!(apply_content_transform("x", &ContentTransform::Direct), "x");
         assert_eq!(
-            apply_content_transform("x", &Some(ContentTransform::Direct)),
-            "x"
-        );
-        assert_eq!(
-            apply_content_transform("x", &Some(ContentTransform::Summarize)),
+            apply_content_transform("x", &ContentTransform::Summarize),
             "x"
         );
         let out = apply_content_transform(
             r#"{"a":1,"b":2}"#,
-            &Some(ContentTransform::Extract {
-                fields: vec!["a".to_string()],
-            }),
+            &ContentTransform::Extract(vec!["a".to_string()]),
         );
         assert!(out.contains("\"a\""));
         assert!(!out.contains("\"b\""));
@@ -421,6 +417,17 @@ mod tests {
         let p6 = w6.spawn_empty().id();
         let c6 = w6.spawn(bp_with_transforms("coder", vec![])).id();
         assert!(collect_transform_mappings(&w6, p6, c6).is_none());
+
+        // A run whose caller wrote its graph came from no blueprint ⇒ none.
+        let mut w7 = World::new();
+        let mut raw = crate::spec::run_spec::tests::spec();
+        raw.origin = crate::spec::run_spec::SpecOrigin::Raw;
+        raw.graph.transforms = vec![transform("planner", "coder", m.clone())];
+        let p7 = w7.spawn(RunSpecC(std::sync::Arc::new(raw))).id();
+        let c7 = w7.spawn(bp_with_transforms("coder", vec![])).id();
+        assert!(collect_transform_mappings(&w7, p7, c7).is_none());
+        // The same with the raw run as the child.
+        assert!(collect_transform_mappings(&w7, c7, p7).is_none());
     }
 
     // ── end-to-end application ──
@@ -442,9 +449,7 @@ mod tests {
                             mapping(
                                 "data",
                                 "inputs",
-                                Some(ContentTransform::Extract {
-                                    fields: vec!["keep".to_string()],
-                                }),
+                                Some(ContentTransform::Extract(vec!["keep".to_string()])),
                             ),
                         ],
                     )],
@@ -750,6 +755,42 @@ mod tests {
             outcome.result.unwrap(),
             vec![("task".to_string(), "SUMMARY".to_string())]
         );
+    }
+
+    /// A summary job that dies without reporting still hands the lane an
+    /// outcome: the child waits `AwaitingContentSummary` until one lands, so a
+    /// lost job would park it there for good.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_summary_job_reports_an_error_instead_of_vanishing() {
+        let (mut world, mut rx) = summary_world(
+            false,
+            false,
+            InferencePools::new(InferencePoolConfig::new()),
+        );
+        world
+            .resource_mut::<Providers>()
+            .0
+            .register("p".to_string(), Arc::new(crate::test_support::Exploding));
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Active),
+                settings(),
+                PendingContentSummary(vec![("task".to_string(), "raw".to_string())]),
+            ))
+            .id();
+        let _silent = crate::test_support::SilentPanics::install();
+        run_dispatch(&mut world);
+        assert!(world.get::<AwaitingContentSummary>(e).is_some());
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the supervisor reports promptly")
+            .expect("an outcome");
+        assert_eq!(outcome.entity, e);
+        let err = outcome
+            .result
+            .expect_err("a dead job is an error")
+            .to_string();
+        assert!(err.contains("content-summary"), "got: {err}");
     }
 
     #[tokio::test]

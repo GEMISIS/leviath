@@ -8,26 +8,23 @@
 //! more per turn, so the author hears about it at the one moment they are
 //! reading the blueprint.
 
-use leviath_core::blueprint::Blueprint;
+use leviath_runtime::spec::graph::RunGraph;
 
-use super::{LintEnv, LintFinding, LintSeverity};
+use super::{LintEnv, LintFinding, LintSeverity, resolve_budget, route};
 
 /// The note for each model a stage names whose long-context tier its context
 /// budget can reach, once per stage and model.
-pub(super) fn lint_long_context_price(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> {
+pub(super) fn lint_long_context_price(graph: &RunGraph, env: &LintEnv) -> Vec<LintFinding> {
     let mut findings = Vec::new();
-    for stage in &blueprint.stages {
-        let layout = stage
-            .context_layout
-            .as_ref()
-            .unwrap_or(&blueprint.context_layout);
-        for entry in &stage.model.models {
-            let key = (entry.provider.clone(), entry.model.clone());
+    for stage in &graph.stages {
+        let layout = graph.layout_for(stage);
+        for (provider, model) in stage.model.models.iter().map(route) {
+            let key = (provider.to_string(), model.to_string());
             let Some(window) = env.model_windows.get(&key) else {
                 continue;
             };
             let Some((pricing, tier)) =
-                leviath_providers::pricing::published_rates(&entry.provider, &entry.model)
+                leviath_providers::pricing::published_rates(provider, model)
                     .and_then(|p| p.long_context.map(|tier| (p, tier)))
             else {
                 continue;
@@ -35,7 +32,7 @@ pub(super) fn lint_long_context_price(blueprint: &Blueprint, env: &LintEnv) -> V
             let budget: usize = layout
                 .regions
                 .iter()
-                .map(|region| region.budget.resolve(*window))
+                .map(|region| resolve_budget(&region.budget, *window))
                 .sum::<usize>()
                 .min(*window);
             if budget < tier.threshold_tokens {
@@ -46,11 +43,9 @@ pub(super) fn lint_long_context_price(blueprint: &Blueprint, env: &LintEnv) -> V
                     LintSeverity::Note,
                     "long-context-price",
                     format!(
-                        "{}/{} bills a whole request at {:.2} in / {:.2} out per million \
-                         tokens once its prompt reaches {} tokens (against {:.2} / {:.2} \
-                         below), and this stage's context can grow to {budget}",
-                        entry.provider,
-                        entry.model,
+                        "{provider}/{model} bills a whole request at {:.2} in / {:.2} out per \
+                         million tokens once its prompt reaches {} tokens (against {:.2} / \
+                         {:.2} below), and this stage's context can grow to {budget}",
                         tier.input_per_mtok,
                         tier.output_per_mtok,
                         tier.threshold_tokens,
@@ -58,10 +53,10 @@ pub(super) fn lint_long_context_price(blueprint: &Blueprint, env: &LintEnv) -> V
                         pricing.output_per_mtok,
                     ),
                 )
-                .in_stage(&stage.name)
+                .in_stage(stage.name.as_str())
                 .with_fix(format!(
                     "nothing to fix; to stay under the higher rate, give the stage's \
-                     regions a smaller total budget or a max_tokens that keeps it below \
+                     regions a smaller total budget, or caps that keep it below \
                      {} tokens",
                     tier.threshold_tokens
                 )),

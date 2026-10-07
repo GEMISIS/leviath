@@ -1,0 +1,29 @@
+[agent]
+name = "waiter"
+version = "0.1.0"
+description = "A worker that holds at an interaction point for a person"
+entry_stage = "main"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 2000, required = true, seed = "task" }
+plan = { kind = "pinned", max_tokens = 1000 }
+
+[stages.main]
+mode = "interactive_points"
+description = "Answer, then wait for a person to approve"
+model = { models = [{ provider = "openai", model = "gpt-mock" }] }
+available_tools = ["current_time"]
+max_iterations = 3
+system_prompt = """
+Reply "done".
+"""
+
+[[stages.main.interaction_points]]
+name = "approval"
+prompt = "Approve the result?"
+required = true
+unattended = "ask"
+style = "multiple_choice"
+options = ["Approve", "Abort"]
+abort_options = ["Abort"]
+document_region = "plan"

@@ -34,8 +34,8 @@ Per-agent tools live in that agent's own `tools/` directory instead, and are che
 A tool declares itself with leading `// @` directives and reads its arguments from the `params`
 object. The recognized directives:
 
-- `// @tool <name>` is required and names the tool. A stage sees it when its `available_tools`
-  lists that name or includes `@scripts`, the [tool group](/docs/tools#tool-groups) that grants
+- `// @tool <name>` is required and names the tool. A stage sees it when its `tools` list
+  names it or includes `@scripts`, the [tool group](/docs/tools#tool-groups) that grants
   every Rhai tool the install has.
 - `// @description <text>` is an optional one-liner shown to the model.
 - `// @param <name> <type> <required|optional> "<description>"` is repeatable. `<type>` is a JSON
@@ -186,7 +186,7 @@ What differs is who ends up with the tool:
 
 | Built-in | Writes to | Who sees it |
 |---|---|---|
-| `install_self_tool` | the agent's own `tools/` | that agent's runs, and nothing else |
+| `install_self_tool` | the blueprint's own `tools/` | that blueprint's runs, and nothing else |
 | `install_global_tool` | `~/.leviath/tools/` | every agent on the machine that asks for script tools |
 
 Reach for `install_self_tool`. What an agent learns is usually about its own job, and the wide one
@@ -216,8 +216,9 @@ Three things keep the directory yours:
 - Every installed file starts with a `// installed by leviath: agent run in <workdir> at <unix
   seconds>` comment, so `cat` and `lev tools` show which run wrote it. The comment carries no `@`
   directive and compiles as an ordinary comment.
-- Both are `ask` by default, like `write_file` and `shell`. A blueprint or `config.toml` can set
-  `install_self_tool = "allow"` under `[tool_permissions]`, and `--yolo` waives the prompt for
+- Both are `ask` by default, like `write_file` and `shell`. A blueprint can set
+  `install_self_tool = "allow"` under `[graph.tool_permissions]`, `config.toml` under
+  `[tool_permissions]`, and `--yolo` waives the prompt for
   an unattended run. See [Security](/docs/security) for what an unattended run can persist.
 - The script's own calls are still gated when it runs: an installed tool reads the same
   [`[tool_script_permissions]`](/docs/configuration#tool_script_permissions) as a hand-written one.
@@ -227,8 +228,8 @@ decision the model should be making each time ages badly and is hard to notice f
 
 To use an installed tool in the same run, the agent needs
 [`tool_rescan`](/docs/agents#discovering-tools-mid-run): `after_writes` picks the new tool up on its
-next turn, and `before_dispatch` also picks it up in the turn that wrote it. Any later run sees it at spawn, and a stage advertises it when its
-`available_tools` names it or includes `@scripts`. See [Tools](/docs/tools) for how a stage's tool
+next turn, and `before_dispatch` also picks it up in the turn that wrote it. Any later run sees it
+at spawn, and a stage advertises it when its `tools` list names it or includes `@scripts`. See [Tools](/docs/tools) for how a stage's tool
 set is put together.
 
 ## Inspecting the inventory
@@ -242,8 +243,8 @@ lev tools           # human-readable inventory, params, requires, and skipped fi
 lev tools --json    # machine-readable, including param schemas and required capabilities
 ```
 
-See [Tools](/docs/tools) for how a stage's `available_tools` and `tool_permissions` gate which tools
-an agent may actually call.
+See [Tools](/docs/tools) for how a stage's `tools` and `tool_permissions` gate which tools
+a run may actually call.
 
 ## Policy rules
 

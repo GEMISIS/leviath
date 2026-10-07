@@ -383,7 +383,7 @@ mod tests {
         // Nothing staged is left behind.
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         // A fresh file, no mode asked for: created and readable.
-        let plain = dir.path().join("agent.leviath");
+        let plain = dir.path().join("agent.toml");
         write_atomic(&plain, b"[agent]", None).unwrap();
         assert_eq!(std::fs::read(&plain).unwrap(), b"[agent]");
     }

@@ -9,13 +9,12 @@
 
 use std::path::{Path, PathBuf};
 
-use leviath_core::files::{
-    ARCHIVE_FILE, BLOBS_DIR, CONTEXT_FILE, FANOUT_FILE, INTERACTIONS_FILE, MANIFEST_FILENAME,
-    META_FILE, STAGES_FILE,
-};
+use leviath_blueprint::FILE_NAME;
+use leviath_core::files::{BLOBS_DIR, RUN_FILE};
 use leviath_core::run_meta::RunMeta;
 use leviath_core::secrets::is_sensitive_env_name;
 
+use super::replay::{RunJson, request_of};
 use super::scrub::{self, Scrubber};
 use super::{About, RageEnv, report};
 use crate::commands::doctor::{DaemonTarget, DoctorArgs, run_checks};
@@ -30,11 +29,13 @@ pub(crate) const LOG_TAIL: u64 = 2 * 1024 * 1024;
 /// left out: no log of Leviath's grows this large, and one that did is a
 /// finding in its own right.
 pub(crate) const LOG_READ_CAP: u64 = 64 * 1024 * 1024;
-/// The most a run's context snapshot or stage file may weigh before it is
-/// left out.
+/// The most a run's answer or stage file may weigh before it is left out.
 pub(crate) const RUN_FILE_CAP: u64 = 8 * 1024 * 1024;
-/// The most a run journal may weigh before it is left out. A mature run's
-/// journal is tens of megabytes, which is exactly what a reader needs.
+
+/// The bundle member holding a run's summary as `lev ps --json` reads it.
+const SUMMARY_FILE: &str = "summary.json";
+/// The most a run file may weigh before it is left out. A mature run's file
+/// is tens of megabytes, which is exactly what a reader needs.
 pub(crate) const ARCHIVE_CAP: u64 = 64 * 1024 * 1024;
 /// The most one stored part may weigh, and the most all of a bundle's parts
 /// may weigh together.
@@ -266,8 +267,9 @@ pub(crate) async fn collect(env: &RageEnv, sel: &Selection, created_at: &str) ->
 
 /// A scrubber that knows every secret this machine holds: what the loaded
 /// config carries (including keys that come from the environment and are in
-/// no file), every credential-shaped environment variable, and the tokens in
-/// the two auth stores. The stores are read for this alone and never copied.
+/// no file), every credential-shaped environment variable, the tokens in
+/// the two auth stores, and the runs' webhook secrets in the secret store.
+/// The stores are read for this alone and never copied.
 fn scrubber_for(env: &RageEnv, bundle: &mut Bundle) -> Scrubber {
     let mut known = Vec::new();
     match crate::config::Config::load() {
@@ -285,6 +287,8 @@ fn scrubber_for(env: &RageEnv, bundle: &mut Bundle) -> Scrubber {
             scrub::secret_strings_in(&value, &mut known);
         }
     }
+    let kept = leviath_runtime::secret_store::SecretStore::of_runs(&env.runs_dir).secrets();
+    known.extend(kept.iter().map(|s| s.expose().to_string()));
     Scrubber::new(known)
 }
 
@@ -460,9 +464,13 @@ fn copy_run(
 
     match crate::runstate::read_meta_from(&dir) {
         Ok(meta) => {
-            let value = serde_json::to_value(meta.redacted()).unwrap_or_default();
-            bundle.json(format!("{dest}/{META_FILE}"), scrubber, value);
-            let blueprint = blueprint_dir_of(&meta.agent_path);
+            let value = serde_json::to_value(&meta).unwrap_or_default();
+            bundle.json(format!("{dest}/{SUMMARY_FILE}"), scrubber, value);
+            // A run of an installed blueprint names it, not a path.
+            let blueprint = match meta.agent_path.is_empty() {
+                true => env.agents_dir.join(&meta.agent_name),
+                false => blueprint_dir_of(&meta.agent_path),
+            };
             if blueprint.is_dir() {
                 copy_text_tree(
                     &blueprint,
@@ -481,41 +489,23 @@ fn copy_run(
                 );
             }
         }
-        // A meta that will not parse is still worth reading as text.
-        Err(_) => copy_text(
-            &dir.join(META_FILE),
-            &format!("{dest}/{META_FILE}"),
-            RUN_FILE_CAP,
-            scrubber,
-            bundle,
+        Err(e) => bundle.skip(
+            format!("{dest}/{SUMMARY_FILE}"),
+            format!("the run's record could not be read: {e}"),
         ),
     }
-
-    for name in [STAGES_FILE, FANOUT_FILE, INTERACTIONS_FILE, CONTEXT_FILE] {
-        let path = dir.join(name);
-        if path.is_file() {
-            copy_json(
-                &path,
-                &format!("{dest}/{name}"),
-                RUN_FILE_CAP,
-                scrubber,
-                bundle,
-            );
-        }
-    }
-    let final_output = dir.join(leviath_core::FINAL_OUTPUT_FILE);
-    if final_output.is_file() {
-        copy_text(
-            &final_output,
-            &format!("{dest}/{}", leviath_core::FINAL_OUTPUT_FILE),
-            RUN_FILE_CAP,
-            scrubber,
-            bundle,
-        );
-    }
-    copy_stages(&dir, &dest, scrubber, bundle);
-    copy_archive(&dir, &dest, scrubber, bundle);
-    copy_blobs(&dir, &dest, include_blobs, BLOB_CAP, blob_budget, bundle);
+    // The files beside the run file, as the run file names them: under the
+    // same paths in the bundle, so the run's directory unpacks whole.
+    let named = crate::runstate::run_file::tail_in(&dir)
+        .map(|tail| (tail.state.files, tail.state.blobs))
+        .unwrap_or_default();
+    copy_named(&dir, &dest, &named.0, scrubber, bundle);
+    copy_run_file(&dir, &dest, scrubber, bundle, &std::env::temp_dir());
+    let parts = BlobParts {
+        include: include_blobs,
+        per_part: BLOB_CAP,
+    };
+    copy_blobs(&dir, &dest, &named.1, parts, blob_budget, bundle);
 }
 
 /// The directory a run's `agent_path` names. The daemon records the
@@ -530,83 +520,127 @@ fn blueprint_dir_of(agent_path: &str) -> PathBuf {
     }
 }
 
-/// `stages/<n>/`: the per-stage logs, context and taint audit.
-fn copy_stages(dir: &Path, dest: &str, scrubber: &Scrubber, bundle: &mut Bundle) {
-    for stage in sorted_entries(&dir.join("stages")) {
-        let index = file_name(&stage);
-        for name in ["output.log", "logs.log"] {
-            let path = stage.join(name);
-            if path.is_file() {
-                tail_text(
-                    &path,
-                    &format!("{dest}/stages/{index}/{name}"),
-                    RUN_FILE_CAP,
-                    scrubber,
-                    bundle,
-                );
+/// The answer and each stage's logs and taint audit, each at the path the
+/// run file names it by. A path that leaves the run's directory is not
+/// followed.
+fn copy_named(
+    dir: &Path,
+    dest: &str,
+    files: &leviath_runtime::state::RunFiles,
+    scrubber: &Scrubber,
+    bundle: &mut Bundle,
+) {
+    use leviath_runtime::state::StageFile;
+    let stage_files = files.stages.iter().flat_map(|stage| {
+        [StageFile::Output, StageFile::Logs, StageFile::TaintAudit]
+            .into_iter()
+            .filter_map(|which| stage.get(which).map(|file| (Some(which), file)))
+    });
+    let named = files.final_output.iter().map(|file| (None, file));
+    for (which, file) in named.chain(stage_files) {
+        let member = format!("{dest}/{}", file.path);
+        let path = match file.path_in(dir) {
+            Ok(path) => path,
+            Err(e) => {
+                bundle.skip(member, e.to_string());
+                continue;
             }
-        }
-        for name in [CONTEXT_FILE, "taint_audit.json"] {
-            let path = stage.join(name);
-            if path.is_file() {
-                copy_json(
-                    &path,
-                    &format!("{dest}/stages/{index}/{name}"),
-                    RUN_FILE_CAP,
-                    scrubber,
-                    bundle,
-                );
+        };
+        match which {
+            None => copy_text(&path, &member, RUN_FILE_CAP, scrubber, bundle),
+            Some(StageFile::TaintAudit) => {
+                copy_json(&path, &member, RUN_FILE_CAP, scrubber, bundle)
             }
+            Some(_) => tail_text(&path, &member, RUN_FILE_CAP, scrubber, bundle),
         }
     }
 }
 
-/// `run.lvr`, re-encoded with its secrets out.
-fn copy_archive(dir: &Path, dest: &str, scrubber: &Scrubber, bundle: &mut Bundle) {
-    let member = format!("{dest}/{ARCHIVE_FILE}");
-    let bytes = match read_capped(&dir.join(ARCHIVE_FILE), ARCHIVE_CAP) {
-        Ok(bytes) => bytes,
+/// `run.lvr` rewritten with its secrets out, the same values as `run.json`,
+/// and `request.json`, the request that starts the run again. The webhook's
+/// signing secret is never in the run file (the spec names where it is kept),
+/// and the rewritten file is built from the scrubbed values, so it holds
+/// nothing `run.json` does not.
+/// Its stored parts are not in it: they go in beside it, under `blobs/`.
+/// `scratch` is where the file is rewritten before it is read into the
+/// bundle.
+pub(super) fn copy_run_file(
+    dir: &Path,
+    dest: &str,
+    scrubber: &Scrubber,
+    bundle: &mut Bundle,
+    scratch: &Path,
+) {
+    let skipped = format!("{dest}/{RUN_FILE}");
+    let path = dir.join(RUN_FILE);
+    let read = read_capped(&path, ARCHIVE_CAP).and_then(|bytes| {
+        leviath_runtime::runfile::RunFileReader::from_bytes(&path, bytes)
+            .map_err(|e| format!("the run file could not be read: {e}"))
+            .and_then(|reader| RunJson::read(&reader).map(|run| (reader, run)))
+    });
+    let (reader, run) = match read {
+        Ok(read) => read,
         Err(reason) => {
-            bundle.skip(member, reason);
+            bundle.skip(skipped, reason);
             return;
         }
     };
-    match scrubber.scrub_run_archive(&bytes) {
-        Ok(scrubbed) => {
-            if scrubbed.skipped > 0 {
-                bundle.notes.push(format!(
-                    "{member}: {} frame(s) this build could not read were left out",
-                    scrubbed.skipped
-                ));
-            }
-            bundle.bytes(member, scrubbed.bytes, scrubbed.redactions);
+    let mut value = serde_json::to_value(&run).expect("a run file's values serialize");
+    let redactions = scrubber.scrub_json(&mut value);
+    // Back to the run file's own types, which a scrubbed name that no longer
+    // reads as one would refuse.
+    let rewritten = serde_json::from_value::<RunJson>(value.clone())
+        .map_err(|e| format!("a value with a secret taken out no longer reads: {e}"))
+        .and_then(|scrubbed| {
+            scrubbed
+                .rewrite(&reader, scratch)
+                .map(|bytes| (scrubbed, bytes))
+        });
+    match rewritten {
+        Ok((scrubbed, bytes)) => {
+            bundle.bytes(skipped, bytes, redactions);
+            let request = serde_json::to_value(request_of(&scrubbed.spec))
+                .expect("a spawn request serializes");
+            bundle.json(format!("{dest}/request.json"), scrubber, request);
         }
-        Err(e) => bundle.skip(member, format!("the journal could not be re-encoded: {e}")),
+        Err(reason) => bundle.skip(skipped, reason),
     }
+    let text = serde_json::to_string_pretty(&value).expect("a JSON value serializes");
+    bundle.text(format!("{dest}/run.json"), text, redactions, false);
 }
 
-/// `blobs/`: the run's stored parts, each within `per_part`, all within
-/// what is left of `budget`.
+/// Whether a run's stored parts go in the bundle, and the most bytes one
+/// may take.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct BlobParts {
+    /// Whether they go in at all.
+    pub(super) include: bool,
+    /// The most bytes one part may take.
+    pub(super) per_part: u64,
+}
+
+/// `blobs/`: the stored parts the run file names, each within `per_part`,
+/// all within what is left of `budget`. A part whose file is missing is
+/// named as missing.
 pub(super) fn copy_blobs(
     dir: &Path,
     dest: &str,
-    include: bool,
-    per_part: u64,
+    named: &[leviath_runtime::state::BlobFile],
+    parts: BlobParts,
     budget: &mut u64,
     bundle: &mut Bundle,
 ) {
-    let blobs = dir.join(BLOBS_DIR);
-    if !blobs.is_dir() {
+    if named.is_empty() {
         return;
     }
-    if !include {
+    if !parts.include {
         bundle.skip(format!("{dest}/{BLOBS_DIR}/"), "left out (--no-blobs)");
         return;
     }
-    for path in sorted_entries(&blobs) {
-        let member = format!("{dest}/{BLOBS_DIR}/{}", file_name(&path));
-        let cap = per_part.min(*budget);
-        match read_capped(&path, cap) {
+    for blob in named {
+        let member = format!("{dest}/{}", blob.path());
+        let cap = parts.per_part.min(*budget);
+        match read_capped(&leviath_runtime::runfile::blob_path(dir, &blob.digest), cap) {
             Ok(bytes) => {
                 *budget = budget.saturating_sub(bytes.len() as u64);
                 bundle.bytes(member, bytes, 0);
@@ -621,35 +655,32 @@ fn blueprint_under_test(path: &Path, scrubber: &Scrubber, bundle: &mut Bundle) {
     let manifest = if path.is_file() {
         path.to_path_buf()
     } else {
-        path.join(MANIFEST_FILENAME)
+        path.join(FILE_NAME)
     };
     let dir = manifest.parent().map(Path::to_path_buf).unwrap_or_default();
     copy_text_tree(&dir, "blueprint", MAX_TREE_DEPTH, scrubber, bundle);
 
-    let check = match std::fs::read_to_string(&manifest) {
-        Ok(content) => match leviath_core::manifest::parse_manifest(&content) {
-            Ok(blueprint) => {
-                let validation = blueprint.validate();
-                serde_json::json!({
-                    "path": manifest.display().to_string(),
-                    "parses": true,
-                    "name": blueprint.name,
-                    "version": blueprint.version,
-                    "stages": blueprint.stages.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
-                    "validates": validation.is_ok(),
-                    "validation_error": validation.err().map(|e| e.to_string()),
-                })
-            }
-            Err(e) => serde_json::json!({
+    let check = match leviath_blueprint::load(&manifest) {
+        Ok(blueprint) => {
+            let at = leviath_runtime::spec::issues::SpecPath::root().field("graph");
+            let validation = blueprint.graph.validate(&at);
+            serde_json::json!({
                 "path": manifest.display().to_string(),
-                "parses": false,
-                "error": e.to_string(),
-            }),
-        },
+                "parses": true,
+                "name": blueprint.reference.name.as_str(),
+                "version": blueprint.version,
+                "stages": blueprint.graph.stages.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+                "validates": validation.is_ok(),
+                "validation_error": validation.err().map(|issues| {
+                    issues.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
+                }),
+            })
+        }
+        // Unreadable and unparseable alike: the message says which.
         Err(e) => serde_json::json!({
             "path": manifest.display().to_string(),
             "parses": false,
-            "error": format!("cannot read: {e}"),
+            "error": e.to_string(),
         }),
     };
     bundle.json("blueprint-check.json", scrubber, check);
@@ -825,7 +856,7 @@ fn sorted_entries(dir: &Path) -> Vec<PathBuf> {
 
 // ─── Runs and blueprints, for the pickers ───────────────────────────────────
 
-/// Every run under `runs_dir` whose `meta.json` parses, newest first.
+/// Every run under `runs_dir` whose run file reads, newest first.
 pub(crate) fn list_metas(runs_dir: &Path) -> Vec<RunMeta> {
     let mut runs: Vec<RunMeta> = sorted_entries(runs_dir)
         .iter()
@@ -891,12 +922,12 @@ pub(crate) fn resolve_run_id(metas: &[RunMeta], given: &str) -> Result<String, S
     }
 }
 
-/// The installed blueprints: every directory under `agents_dir` holding a
-/// manifest, by name.
+/// The installed blueprints: every directory under `agents_dir` holding an
+/// `agent.toml`, by name.
 pub(crate) fn installed_blueprints(agents_dir: &Path) -> Vec<(String, PathBuf)> {
     sorted_entries(agents_dir)
         .into_iter()
-        .filter(|dir| dir.join(MANIFEST_FILENAME).is_file())
+        .filter(|dir| dir.join(FILE_NAME).is_file())
         .map(|dir| (file_name(&dir), dir))
         .collect()
 }

@@ -69,9 +69,10 @@ At the measured $5 to $9 an agent, a ceiling of 20 is roughly a $100 to $180 run
 
 Two blueprint-side bounds work with it:
 
-- **`max_child_depth`** on the `[agent]` table caps how deep the sub-agent tree goes. Depth 2
-  means workers may fan out once more and their workers may not.
-- **`max_items`** on a `mode = "fan_out"` stage caps how many work items one split may produce.
+- **`max_child_depth`** in the `[graph]` table caps how deep the sub-agent tree goes. Depth 2
+  means workers may fan out once more and their workers may not. Whoever starts the run can set
+  it for that run with `launch.max_depth` (`lev run --max-depth`).
+- **`max_items`** on a fan-out stage caps how many work items one split may produce.
   See [sub-agents and fan-out](/docs/sub-agents).
 
 Both are the blueprint author's statements about the shape of the work. `max_agents_per_run` is
@@ -97,15 +98,18 @@ judgment matters and the cheap one where volume does. A blueprint names models p
 so this can be chosen rather than inherited:
 
 ```toml
-[stages.gather.model]
-models = ["gemini-3.5-flash", "claude-sonnet-5"]
+[[graph.stages]]
+name = "gather"
+model = { models = [{ model = "gemini-3.5-flash" }, { model = "claude-sonnet-5" }] }
 
-[stages.synthesize.model]
-models = ["claude-opus-5", "gpt-5.5"]
+[[graph.stages]]
+name = "synthesize"
+model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }] }
 ```
 
-`lev validate <blueprint>` prints which model each stage would run on your install, and says so
-when a stage cannot run the one it leads with. See [providers](/docs/providers).
+`lev run <blueprint> --check` prints which model each stage would run on your install, so a stage
+that cannot run the one it leads with shows the one it fell back to. See
+[providers](/docs/providers).
 
 > [!NOTE]
 > Cached input is a fifth to a tenth of the price of fresh input, and a multi-stage run re-sends
@@ -120,17 +124,18 @@ inference after it grows. [Structured context](/docs/context) is where this is g
 
 - Percentage budgets scale with the model's window, so a stage that moves to a bigger model does
   not silently start sending four times as much.
-- An edge `transform` decides what crosses a stage boundary. A `clear` on a region the next
+- An edge's `carry` decides what crosses a stage boundary. Clearing a region the next
   stage does not read is the cheapest change available: a report-rewriting stage does not need
   the transcript of the research that produced it.
-- `max_tokens` on a region is a ceiling, not a reservation. Alongside a percentage budget it
-  caps what that percentage resolves to. On every model where it binds, it and not the
+- A `max` in a region's budget (`budget = { percent = "30%", max = 60000 }`) is a ceiling, not a
+  reservation. It caps what that percentage resolves to. On every model where it binds, it and not the
   percentage is what sizes the region. Reach for it only when the region's useful size does not
   grow with the window.
 
 ## Know what you actually paid
 
-Every run records its own accounting in `~/.leviath/runs/<run-id>/meta.json`:
+Every run records its own accounting in its [run file](/docs/run-file), and
+`GET /api/runs/{id}` serves it:
 
 - `cost_usd` is the total, or `null` when some call could not be priced. Never `0` for unknown:
   a total that silently omits what it could not price looks authoritative and understates.
@@ -138,13 +143,14 @@ Every run records its own accounting in `~/.leviath/runs/<run-id>/meta.json`:
 - `cost_is_exact` says whether the priced calls carried the provider's own figure rather than
   one reconstructed from published rates.
 
-`stages.json` breaks the same totals down per stage, which is how you find the one stage that
-spent most of the run.
+`lev stages <run-id>` (or `GET /api/runs/{id}/stages`) breaks the same totals down per stage,
+which is how you find the one stage that spent most of the run.
 
 > [!WARNING]
 > A sub-agent's cost is on the sub-agent's own record. Summing only the top-level run understates
-> a fan-out badly: in the $236 run above, the top-level agent's own record said $15. Add up the
-> tree, following `children` in each `meta.json`.
+> a fan-out badly: in the $236 run above, the top-level agent's own record said $15. Read the
+> whole tree with `GET /api/runs/{id}/tree-status`, whose `subtree_cost_usd` adds up every run
+> below this one.
 
 ## Where the prices come from
 
@@ -257,14 +263,14 @@ Size the region with the percentage and leave it there. A percentage is the mech
 scaling to the model in front of you. 30% is 60,000 tokens on a 200K-token model and 300,000 on
 a 1M-token one, and both are 30% of what that model can hold.
 
-It is tempting to add an absolute `max_tokens` alongside it as insurance. Resist it unless you
+It is tempting to add an absolute `max` alongside it as insurance. Resist it unless you
 mean the cap to be the real limit, because that is what it becomes. A ceiling low enough to
 matter binds on every model above the window it was chosen for. From there up, the percentage
 decides nothing. A region that resolves to the same number on a 200K model and a 1M one is not
 percentage-sized at all. If your region is too big, the percentage is the number to change.
 
 The exception is a region whose useful size genuinely does not grow with the window, such as a
-fixed list or a seeded constant. Those are the ones `max_tokens` is for.
+fixed list or a seeded constant. Those are the ones a fixed `max` is for.
 
 See [structured context](/docs/context) for the full set of region fields.
 
@@ -272,7 +278,8 @@ See [structured context](/docs/context) for the full set of region fields.
 
 1. Set `notify_spend_usd` so a run tells you what it is doing.
 2. Set `max_agents_per_run` if an unbounded fan-out would be a problem on your account.
-3. Check `lev validate` names the models you meant, especially on the expensive stages.
+3. Check `lev run <blueprint> --check` names the models you meant, especially on the expensive
+   stages.
 4. Put the expensive model where judgment happens, not where volume does.
 5. Clear regions the next stage does not read.
 6. Read the whole tree when you add up what a fan-out cost.

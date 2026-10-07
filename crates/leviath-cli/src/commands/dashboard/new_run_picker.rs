@@ -419,18 +419,89 @@ mod tests {
     fn write_agent(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
-            dir.join("agent.leviath"),
-            "[agent]\nname = \"looker\"\nversion = \"0.1.0\"\ndescription = \"looks\"\n\n\
-             [stages.main]\nmode = \"autonomous\"\n\n\
-             [stages.main.model]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-5\"\n\n\
-             [context.regions]\n\
-             task = { kind = \"pinned\", max_tokens = 1000, seed = \"task\" }\n\
-             cover = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"] }\n\
-             gallery = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"] }\n\
-             notes = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"text/*\"] }\n\
-             tight = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"image/*\"] }\n\
-             stream = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"] }\n\
-             conversation = { kind = \"sliding_window\", max_items = 20, max_tokens = 10000 }\n",
+            dir.join("agent.toml"),
+            r#"[blueprint]
+name = "looker"
+version = "0.1.0"
+description = "looks"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+
+[graph.layout]
+total_budget_tokens = 313000
+
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "cover"
+kind = "pinned"
+budget = 100000
+accepts = ["image/*"]
+
+[[graph.layout.regions]]
+name = "gallery"
+kind = "pinned"
+budget = 100000
+accepts = ["image/*"]
+
+[[graph.layout.regions]]
+name = "notes"
+kind = "pinned"
+budget = 1000
+accepts = ["text/*"]
+
+[[graph.layout.regions]]
+name = "tight"
+kind = "pinned"
+budget = 1000
+accepts = ["image/*"]
+
+[[graph.layout.regions]]
+name = "stream"
+kind = "pinned"
+budget = 100000
+accepts = ["image/*"]
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 20 }
+budget = 10000
+
+[[graph.inputs]]
+name = "cover"
+type = { kind = "text", multiline = true }
+binds = [{ region = "cover" }]
+
+[[graph.inputs]]
+name = "gallery"
+type = { kind = "text", multiline = true }
+binds = [{ region = "gallery" }]
+
+[[graph.inputs]]
+name = "notes"
+type = { kind = "text", multiline = true }
+binds = [{ region = "notes" }]
+
+[[graph.inputs]]
+name = "stream"
+type = { kind = "text", multiline = true }
+binds = [{ region = "stream" }]
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+
+[[graph.inputs]]
+name = "tight"
+type = { kind = "text", multiline = true }
+binds = [{ region = "tight" }]
+"#,
         )
         .unwrap();
     }

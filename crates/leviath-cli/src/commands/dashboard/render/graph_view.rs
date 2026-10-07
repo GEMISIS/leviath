@@ -6,7 +6,7 @@
 //! transition taken is animated, revisit loops run along a lane below the
 //! nodes and the escape edges (`error`, `dead_end`, ...) hide behind `e`.
 //! The timeline tab lists each actual visit with its time, duration and
-//! iterations, derived from the run archive.
+//! iterations, derived from the run file.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -89,7 +89,7 @@ impl Dashboard {
             return;
         };
         // Visit counts and the timeline stay live while the explorer is open
-        // (TTL-gated, so this is one archive read a second at most).
+        // (TTL-gated, so this is one run file read a second at most).
         self.ensure_history(&agent.id);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -285,7 +285,7 @@ impl Dashboard {
         let mut lines: Vec<Line<'static>> = Vec::new();
         if visits.is_empty() {
             lines.push(Line::from(Span::styled(
-                " No archived visits yet. The timeline fills in as the run records progress.",
+                " No recorded visits yet. The timeline fills in as the run records progress.",
                 Style::default().fg(C_DIM),
             )));
         }
@@ -349,46 +349,95 @@ mod tests {
     use crate::tui::flowgraph::{FlowView, StageGraph};
     use crate::tui::theme::*;
     use crossterm::event::KeyCode;
-    use leviath_core::manifest::parse_manifest;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     fn stage_graph() -> Arc<StageGraph> {
-        Arc::new(StageGraph::from_blueprint(
-            &parse_manifest(
-                r#"
-[agent]
+        Arc::new(crate::tui::flowgraph::model::toml_graph(
+            r#"[blueprint]
 name = "grapher"
-[stages.plan]
+version = "0.1.0"
+
+[[graph.stages]]
+name = "plan"
 description = "decide what to build"
 max_iterations = 5
-[stages.plan.transitions.implement]
-hint = "ready"
-[stages.implement]
-[stages.implement.context.regions]
-notes = { kind = "pinned", accepts = ["text/*"] }
-[stages.implement.transitions.review]
-[stages.implement.transitions.recover]
-condition = "error"
-[stages.review]
+
+[[graph.stages]]
+name = "implement"
+
+[graph.stages.layout]
+regions = [
+    { name = "notes", kind = "pinned", budget = 5000, accepts = ["text/*"] },
+]
+total_budget_tokens = 5000
+
+[[graph.stages]]
+name = "review"
 max_revisits = 2
-[stages.review.transitions.implement]
-condition = "llm_choice"
-[stages.review.transitions.review]
-[stages.review.transitions.island]
-[stages.recover]
-[[stages.recover.output.artifacts]]
-name = "log"
-type = "application/json"
-[stages.recover.transitions.implement]
-[stages.island]
+
+[[graph.stages]]
+name = "recover"
+output = { artifacts = [{ name = "log", mime_type = "application/json" }] }
+
+[[graph.stages]]
+name = "island"
+tools = ["submit_output"]
 mode = "output"
-[stages.island.context.regions]
-brief = { kind = "pinned", accepts = ["application/pdf"] }
-[stages.island.transitions]
+allow_complete = true
+require_output = true
+
+[graph.stages.layout]
+total_budget_tokens = 5000
+
+[[graph.stages.layout.regions]]
+name = "brief"
+kind = "pinned"
+budget = 5000
+accepts = ["application/pdf"]
+
+[[graph.edges]]
+name = "implement"
+from = "plan"
+to = "implement"
+hint = "ready"
+
+[[graph.edges]]
+name = "recover"
+from = "implement"
+to = "recover"
+when = "error"
+
+[[graph.edges]]
+name = "review"
+from = "implement"
+to = "review"
+
+[[graph.edges]]
+name = "implement"
+from = "review"
+to = "implement"
+when = "llm_choice"
+
+[[graph.edges]]
+name = "island"
+from = "review"
+to = "island"
+
+[[graph.edges]]
+name = "review"
+from = "review"
+to = "review"
+
+[[graph.edges]]
+name = "implement"
+from = "recover"
+to = "implement"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
-            )
-            .unwrap(),
         ))
     }
 
@@ -430,7 +479,7 @@ brief = { kind = "pinned", accepts = ["application/pdf"] }
     }
 
     fn seed(dash: &mut crate::commands::dashboard::state::Dashboard, stages: &[(&str, i64)]) {
-        let points: Vec<leviath_core::run_archive::RunPoint> = stages
+        let points: Vec<leviath_runtime::runfile::history::RunPoint> = stages
             .iter()
             .map(|(stage, at)| {
                 let mut meta = leviath_core::run_meta::RunMeta::new(
@@ -444,7 +493,7 @@ brief = { kind = "pinned", accepts = ["application/pdf"] }
                 );
                 meta.current_stage = stage.to_string();
                 meta.iteration = 2;
-                leviath_core::run_archive::RunPoint {
+                leviath_runtime::runfile::history::RunPoint {
                     meta,
                     context: leviath_core::run_meta::ContextSnapshot {
                         stage_name: stage.to_string(),
@@ -462,6 +511,7 @@ brief = { kind = "pinned", accepts = ["application/pdf"] }
             points,
             checked_at_tick: u64::MAX,
             stamp: None,
+            transitions: None,
         });
     }
 
@@ -748,6 +798,6 @@ brief = { kind = "pinned", accepts = ["application/pdf"] }
         dash.stage_explorer = Some(explorer);
 
         let text = rendered(&mut dash);
-        assert!(text.contains("No archived visits yet"), "{text}");
+        assert!(text.contains("No recorded visits yet"), "{text}");
     }
 }

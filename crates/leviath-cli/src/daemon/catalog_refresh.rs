@@ -5,13 +5,14 @@
 //! capability cache. A list that cannot be read then (the gateway, or a proxy
 //! in front of it, is down) is filled from the cache instead when there is a
 //! copy, so runs resolve straight away against the last list that was read;
-//! with no copy the list stays unread, and a stage that needs it is refused
-//! and a resumed run is held (see `WorldHost::hold_for_catalog`).
+//! with no copy the list stays unread, and a new run whose stage needs it is
+//! refused. A run resumed from its run file does not need it: it chose its
+//! models when it started.
 //!
 //! Either way the live list is still owed, and this asks for it: soon and
-//! often while something is waiting, backing off while the gateway stays
-//! down, and then every few hours for every provider, so a model a gateway
-//! added since the daemon started is served without a restart.
+//! often while it is owed, backing off while the gateway stays down, and then
+//! every few hours for every provider, so a model a gateway added since the
+//! daemon started is served without a restart.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,8 +35,9 @@ pub(crate) struct Pacing {
 
 impl Pacing {
     /// The daemon's pacing. Five seconds first, because a proxy that is
-    /// restarting is back within seconds and a held run should be too;
-    /// never longer than a minute between asks while anything waits; every
+    /// restarting is back within seconds and the runs refused meanwhile
+    /// should not wait long; never longer than a minute between asks while a
+    /// list is owed; every
     /// six hours otherwise, which is often enough to pick up a new model the
     /// day it appears and costs one small `GET` per provider.
     pub(crate) const DAEMON: Pacing = Pacing {
@@ -95,23 +97,21 @@ pub(crate) fn settle_at_start(reload: &ProviderReload) -> Vec<String> {
         let names = still.join(", ");
         tracing::error!(
             providers = %names,
-            "started without these providers' model lists and with no cached copy; a stage \
-             naming a model by bare name that only they could serve is refused, and a run \
-             resumed from before the restart is held, until the list is read; it is asked \
-             for again in the background and before each spawn"
+            "started without these providers' model lists and with no cached copy; a new \
+             run whose stage names a model by bare name that only they could serve is \
+             refused until the list is read; it is asked for again in the background and \
+             before each spawn"
         );
     }
     still
 }
 
 /// Ask for the owed lists, and every list now and then, for as long as the
-/// daemon runs. `waker` is notified whenever a list comes back, so a run held
-/// for it is paged back in at once.
+/// daemon runs.
 pub(crate) fn spawn(
     runtime: &tokio::runtime::Handle,
     reload: Arc<ProviderReload>,
     reloader: Arc<ConfigReloader>,
-    waker: Arc<tokio::sync::Notify>,
     pacing: Pacing,
 ) -> tokio::task::JoinHandle<()> {
     runtime.spawn(async move {
@@ -129,9 +129,6 @@ pub(crate) fn spawn(
                 }
             };
             backoff = pacing.next_backoff(&read, backoff);
-            if !read.is_empty() {
-                waker.notify_one();
-            }
         }
     })
 }
@@ -197,8 +194,8 @@ mod tests {
         .await;
     }
 
-    /// The refresher asks for an owed list until it answers, wakes the host
-    /// when it does, and writes it to the cache as a list the gateway gave.
+    /// The refresher asks for an owed list until it answers, and writes it to
+    /// the cache as a list the gateway gave.
     /// Once nothing is owed it asks every provider again on the refresh
     /// interval, and one that does not answer then is owed again.
     #[tokio::test]
@@ -224,7 +221,6 @@ mod tests {
                 crate::config::Config::config_path(),
                 Config::default(),
             ));
-            let waker = Arc::new(tokio::sync::Notify::new());
             let pacing = Pacing {
                 retry_min: Duration::from_millis(10),
                 retry_max: Duration::from_millis(20),
@@ -234,16 +230,23 @@ mod tests {
                 &tokio::runtime::Handle::current(),
                 reload.clone(),
                 reloader,
-                waker.clone(),
                 pacing,
             );
 
-            tokio::time::timeout(Duration::from_secs(5), waker.notified())
-                .await
-                .expect("the list came back and the host was woken");
-            assert!(reload.registry().unread_catalogs().is_empty());
-            let cache = leviath_providers::CapabilityCache::load(reload.cache_path().unwrap())
-                .expect("the cache was written");
+            // Waits on the cache, which is written just after the list is
+            // installed: a slow runner can see the list before the file.
+            let path = reload.cache_path().unwrap();
+            leviath_testkit::wait_until("the cache was written", || {
+                leviath_providers::CapabilityCache::load(path)
+                    .is_some_and(|cache| cache.check("openrouter").is_some())
+            })
+            .await;
+            assert!(
+                reload.registry().unread_catalogs().is_empty(),
+                "the list came back"
+            );
+            let cache =
+                leviath_providers::CapabilityCache::load(path).expect("the cache was written");
             assert_eq!(
                 cache.check("openrouter").map(|c| &c.outcome),
                 Some(&leviath_providers::CheckOutcome::Reachable { models: 1 })
@@ -251,10 +254,10 @@ mod tests {
 
             // The full refresh finds the gateway gone again: the list it has
             // is kept, and the live one is owed once more.
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            while reload.awaiting_live().is_empty() && tokio::time::Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            leviath_testkit::wait_until("the gateway is owed again", || {
+                !reload.awaiting_live().is_empty()
+            })
+            .await;
             task.abort();
             assert_eq!(reload.awaiting_live(), ["openrouter"]);
             assert!(

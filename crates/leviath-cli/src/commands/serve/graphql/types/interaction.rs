@@ -10,8 +10,8 @@
 //! that paused for somebody looks exactly like one that never asked.
 
 use async_graphql::{Enum, ID, Object, SimpleObject};
-use leviath_core::run_archive::InteractionRecord;
 use leviath_graphql_derive::mirror;
+use leviath_runtime::runfile::record::InteractionRecord;
 
 use super::super::connection::{
     Connection, Paged, PositionQuery, Total, position_order, position_page,
@@ -188,6 +188,35 @@ impl From<&leviath_core::interaction::Settlement> for Settlement {
     }
 }
 
+/// One option an open ask lists, as every surface lists it.
+#[derive(Debug, Clone, SimpleObject)]
+pub(crate) struct AnswerOptionOutput {
+    /// The word that answers with this option, and what
+    /// `answerInteraction(answer: { option: { id } })` takes. Stable: an
+    /// approval's words are `allow`, `allow-stage`, `allow-run`, `deny` and
+    /// `deny-feedback`, a confirm's `yes` and `no`, and a choice's is made
+    /// from its label, so reordering the options does not move it.
+    pub(crate) id: ID,
+    /// The option as the ask words it.
+    pub(crate) label: String,
+    /// Where it is listed, counting from 1, the same number `lev interactions`
+    /// and the dashboard show. Never needed to answer.
+    pub(crate) number: i32,
+    /// The whole `lev respond` command that answers with this option.
+    pub(crate) answer: String,
+}
+
+impl From<leviath_core::interaction::AnswerOption> for AnswerOptionOutput {
+    fn from(option: leviath_core::interaction::AnswerOption) -> Self {
+        Self {
+            id: ID(option.id),
+            label: option.label,
+            number: i32::try_from(option.number).unwrap_or(i32::MAX),
+            answer: option.answer,
+        }
+    }
+}
+
 /// The resolver state behind `InteractionOutput`: one question, open or
 /// settled.
 #[derive(Debug)]
@@ -206,6 +235,9 @@ pub(crate) struct Interaction {
     pub(crate) body: Option<String>,
     /// The choices offered, for a multiple-choice ask. Empty once settled.
     pub(crate) options: Vec<String>,
+    /// Every option the ask lists, with the word that answers with it. Empty
+    /// for a text ask, and once settled.
+    pub(crate) answer_options: Vec<AnswerOptionOutput>,
     /// The call awaiting approval, typed. Null once settled: the journal keeps
     /// the tool's name, not its arguments.
     pub(crate) tool_call: Option<Box<super::tool_calls::ToolCall>>,
@@ -223,6 +255,10 @@ pub(crate) struct Interaction {
     pub(crate) settlement: Option<Settlement>,
     /// When it settled. Null while it is open.
     pub(crate) settled_at: Option<Timestamp>,
+    /// The question as a held run asked it, for one that did. Null for every
+    /// other. Boxed: every open ask an event carries has this field, and none
+    /// of those is held.
+    pub(crate) held: Option<Box<crate::commands::serve::core::held::HeldQuestion>>,
 }
 
 /// The GraphQL name every listing and relation names this type by. The Rust
@@ -250,8 +286,13 @@ impl Interaction {
                     .unwrap_or_else(|| serde_json::Value::Object(Default::default())),
             ))
         });
+        let answer_options = leviath_core::interaction::answer_options(&request)
+            .into_iter()
+            .map(AnswerOptionOutput::from)
+            .collect();
         Self {
             run_id,
+            answer_options,
             id: request.id,
             kind: (&request.kind).into(),
             prompt: request.prompt,
@@ -264,6 +305,36 @@ impl Interaction {
             asked_at: None,
             settlement: None,
             settled_at: None,
+            held: None,
+        }
+    }
+
+    /// A question a run the daemon holds off this machine asked, read off the
+    /// run's file. The file keeps what was asked and the options offered, so
+    /// the kind is read off those: a question with options is a choice, and
+    /// anything else took text.
+    fn held_question(held: crate::commands::serve::core::held::HeldQuestion) -> Self {
+        let question = &held.question;
+        let kind = match question.options.is_empty() {
+            true => InteractionKind::FreeText,
+            false => InteractionKind::MultipleChoice,
+        };
+        Self {
+            run_id: held.run_id.clone(),
+            id: question.id.clone(),
+            kind,
+            prompt: question.prompt.clone(),
+            body: None,
+            options: question.options.clone(),
+            answer_options: Vec::new(),
+            tool_call: None,
+            tool_name: None,
+            stage_name: held.stage.clone(),
+            is_required: true,
+            asked_at: None,
+            settlement: None,
+            settled_at: None,
+            held: Some(Box::new(held)),
         }
     }
 
@@ -276,6 +347,7 @@ impl Interaction {
             prompt: record.prompt,
             body: None,
             options: Vec::new(),
+            answer_options: Vec::new(),
             tool_call: None,
             tool_name: record.tool,
             stage_name: record.stage,
@@ -283,6 +355,7 @@ impl Interaction {
             asked_at: Some(Timestamp(record.asked_at)),
             settlement: Some(Settlement::from(&record.settlement)),
             settled_at: Some(Timestamp(record.at)),
+            held: None,
         }
     }
 }
@@ -341,6 +414,14 @@ impl Interaction {
         &self.options
     }
 
+    /// Every option the ask lists, numbered from 1 in its own order, each with
+    /// the word `answerInteraction` takes for it. Empty for a free-text or
+    /// edit-text ask, which is answered with `text`, and once settled.
+    #[filter(skip)]
+    async fn answer_options(&self) -> &[AnswerOptionOutput] {
+        &self.answer_options
+    }
+
     /// The call awaiting approval, typed. Null for every other kind of ask,
     /// and null once settled: the journal keeps the tool's name, not its
     /// arguments.
@@ -383,6 +464,17 @@ impl Interaction {
     /// open.
     async fn settled_at(&self) -> Option<Timestamp> {
         self.settled_at
+    }
+
+    /// Why nothing can answer this yet, and what to put back, for a question
+    /// asked by a run the daemon holds off this machine (`heldInteractions`
+    /// lists them). Answering one is refused with `RUN_HELD`; once the run is
+    /// back, the question is open again, under the same id unless the model
+    /// asked it with a tool such as `ask_user_text`, which asks it again
+    /// under a new one. Null for every other.
+    #[filter(skip)]
+    async fn held(&self) -> Option<String> {
+        self.held.as_ref().map(|held| held.refusal())
     }
 }
 
@@ -452,24 +544,51 @@ pub(crate) async fn open(
     first: i32,
     after: Option<Cursor>,
 ) -> async_graphql::Result<Connection<Interaction>> {
+    let items = open
+        .into_iter()
+        .map(|(run_id, request)| Interaction::open(run_id, request))
+        .collect();
+    across_runs("open", items, filter, order_by, first, after).await
+}
+
+/// Read one page of the questions asked by runs the daemon holds off this
+/// machine. None of them can be answered until its run is back, which is why
+/// they are not in `openInteractions`: a client reads every entry there as
+/// one it can answer.
+pub(crate) async fn held(
+    held: Vec<crate::commands::serve::core::held::HeldQuestion>,
+    filter: Option<InteractionFilter>,
+    order_by: Option<Vec<InteractionOrder>>,
+    first: i32,
+    after: Option<Cursor>,
+) -> async_graphql::Result<Connection<Interaction>> {
+    let items = held.into_iter().map(Interaction::held_question).collect();
+    across_runs("held", items, filter, order_by, first, after).await
+}
+
+/// One page of a listing across every run, `open` or `held`, which names it
+/// in its cursors and its page-cap refusal.
+async fn across_runs(
+    listing: &str,
+    items: Vec<Interaction>,
+    filter: Option<InteractionFilter>,
+    order_by: Option<Vec<InteractionOrder>>,
+    first: i32,
+    after: Option<Cursor>,
+) -> async_graphql::Result<Connection<Interaction>> {
     let limit = page(
         first,
         interactions::INTERACTIONS_MAX_LIMIT,
-        "the open interactions page cap",
+        &format!("the {listing} interactions page cap"),
     )
     .gql()?;
     let filter = filter.unwrap_or_default();
     let rendered = super::super::paging::digest::canonical(&filter).gql()?;
-    let digest = cursor::filter_digest(&["interactions", "open", rendered.as_str()]);
+    let digest = cursor::filter_digest(&["interactions", listing, rendered.as_str()]);
     let descending = order_by
         .unwrap_or_default()
         .first()
         .is_some_and(|term| term.direction.descending());
-
-    let items: Vec<Interaction> = open
-        .into_iter()
-        .map(|(run_id, request)| Interaction::open(run_id, request))
-        .collect();
     walk(items, &filter, &digest, after, descending, limit).await
 }
 

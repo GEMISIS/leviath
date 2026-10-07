@@ -22,6 +22,13 @@
 //!
 //! [`WorldEvent`]: leviath_runtime::host::WorldEvent
 //!
+//! A `session/new` session runs the configured default blueprint, and its
+//! first prompt's text is the run's `task` input. A host that wants to name
+//! another blueprint, give typed inputs or send a graph of its own uses the
+//! `_leviath/spawn` and `_leviath/validate_spawn` extension methods instead,
+//! which take a whole spawn request (see the `extension` module for what a
+//! host may ask for there).
+//!
 //! The protocol logic is [`serve_over`], which takes its reader/writer generically
 //! and erases them to trait objects internally, so the whole
 //! handshake→prompt→stream sequence is driven in tests over an in-memory duplex
@@ -29,6 +36,7 @@
 //!
 //! [acp]: https://agentclientprotocol.com
 
+mod extension;
 mod links;
 mod session;
 mod translate;
@@ -40,8 +48,8 @@ use leviath_agent_client::{
     AgentCapabilities, AgentInfo, ContentBlock, InitializeParams, InitializeResult, JsonRpcMessage,
     PROTOCOL_VERSION, PromptCapabilities, RequestPermissionResult, SessionCancelParams,
     SessionNewParams, SessionNewResult, SessionPromptParams, SessionPromptResult, SessionUpdate,
-    SessionUpdateParams, StopReason, error_codes, flatten_prompt_with, is_permission_request,
-    parse_region_markers, permission_request, prompt_parts,
+    SessionUpdateParams, StopReason, error_codes, extensions, flatten_prompt_with,
+    is_permission_request, permission_request, prompt_parts,
 };
 use leviath_core::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
 use leviath_core::run_meta::RunStatus;
@@ -52,7 +60,7 @@ use leviath_runtime::host::WorldEvent;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use self::mapping::{PermissionChoice, interpret_permission};
-use self::session::{ResolvedBlueprint, resolve_blueprint, spawn_args};
+use self::session::{ResolvedBlueprint, resolve_blueprint, spawn_request};
 use self::translate::{StageTail, split_chunks};
 
 /// How often, absent a daemon event, the loop flushes newly-written run output.
@@ -74,7 +82,7 @@ const RESUBSCRIBE_PAUSE: std::time::Duration = std::time::Duration::from_millis(
 pub struct AgentClientArgs {
     /// Blueprint to serve: an installed agent name, or a path to one. When
     /// omitted, each session's working directory is searched for an
-    /// `agent.leviath`.
+    /// `agent.toml`.
     #[arg(long)]
     pub agent: Option<String>,
 
@@ -164,16 +172,35 @@ type BoxReader = std::pin::Pin<Box<dyn AsyncBufRead + Send>>;
 type BoxWriter = std::pin::Pin<Box<dyn AsyncWrite + Send>>;
 
 /// The active session's mutable state. Gas City and Zed drive one session per
-/// process, so a single slot suffices; a fresh `session/new` replaces it.
+/// process, so a single slot suffices; a fresh `session/new` or
+/// `_leviath/spawn` replaces it.
 struct ActiveSession {
     /// The protocol session id we minted.
     session_id: String,
-    /// The blueprint this session runs.
-    blueprint: ResolvedBlueprint,
     /// The session's working directory.
     cwd: String,
-    /// The daemon run id, once the first prompt has spawned it.
-    run_id: Option<String>,
+    /// The run this session drives.
+    run: SessionRun,
+}
+
+/// The run behind a session.
+enum SessionRun {
+    /// Not started: the first prompt spawns this blueprint, with its text as
+    /// the `task` input.
+    Pending(ResolvedBlueprint),
+    /// Live under this daemon run id. A prompt with content is delivered to
+    /// it as a message; an empty one only follows it.
+    Running(String),
+}
+
+impl ActiveSession {
+    /// The daemon run id, once the session has a run.
+    fn run_id(&self) -> Option<&str> {
+        match &self.run {
+            SessionRun::Pending(_) => None,
+            SessionRun::Running(run_id) => Some(run_id),
+        }
+    }
 }
 
 /// The protocol server: transport, daemon handle, and session state.
@@ -191,10 +218,10 @@ struct Server {
     session: Option<ActiveSession>,
     /// Monotonic id source for agent→client requests.
     next_request_id: i64,
-    /// Working directory to use when a `session/new` omits (or empties) `cwd` -
-    /// the directory `lev agent-client` was launched from. Without this the
-    /// agent's workdir was an empty string, so it ran in the daemon's directory
-    /// rather than the caller's.
+    /// Working directory to use when a `session/new` omits (or empties) `cwd`,
+    /// or a `_leviath/spawn` request names no workdir: the directory
+    /// `lev agent-client` was launched from, so the agent works where its
+    /// caller is rather than in the daemon's directory.
     default_cwd: String,
     /// Whether the output stream is still writable. Output is best-effort: a
     /// failed write means the client is gone, so this flips to `false` and the
@@ -261,6 +288,10 @@ impl Server {
             (Some("session/prompt"), Some(id)) => {
                 self.on_session_prompt(reader, id, msg.params).await
             }
+            (Some(extensions::SPAWN), Some(id)) => self.on_spawn(id, msg.params).await,
+            (Some(extensions::VALIDATE_SPAWN), Some(id)) => {
+                self.on_validate_spawn(id, msg.params).await
+            }
             (Some(_other), Some(id)) => {
                 self.write(&JsonRpcMessage::error_response(
                     id,
@@ -293,6 +324,7 @@ impl Server {
                     audio: true,
                     embedded_context: true,
                 },
+                meta: Some(extensions::capability_meta()),
             },
             agent_info: AgentInfo {
                 name: "leviath".to_string(),
@@ -331,9 +363,8 @@ impl Server {
                 let session_id = new_session_id(&blueprint.agent_name);
                 self.session = Some(ActiveSession {
                     session_id: session_id.clone(),
-                    blueprint,
                     cwd,
-                    run_id: None,
+                    run: SessionRun::Pending(blueprint),
                 });
                 self.write(&JsonRpcMessage::response(
                     id,
@@ -374,11 +405,14 @@ impl Server {
         let mut parts = prompt_parts(&params.prompt);
         // A `file://` link inside the working directory is read here and
         // rides along as a part; the text says which links were followed.
-        let cwd = self.session.as_ref().expect("checked above").cwd.clone();
+        let session = self.session.as_ref().expect("checked above");
+        let (cwd, running) = (session.cwd.clone(), session.run_id().is_some());
         let (linked, fetched) = links::link_parts(&params.prompt, &cwd);
         parts.extend(linked);
         let mut text = flatten_prompt_with(&params.prompt, &fetched);
-        if text.is_empty() && parts.is_empty() {
+        // An empty prompt has nothing to start a run with, but a session
+        // whose run is already going can be followed without saying anything.
+        if text.is_empty() && parts.is_empty() && !running {
             self.write(&JsonRpcMessage::error_response(
                 id,
                 error_codes::INVALID_PARAMS,
@@ -389,15 +423,11 @@ impl Server {
         }
         // A prompt that is only files still needs words the model can read
         // the files against; naming them is the least that says something.
-        if text.is_empty() {
+        if text.is_empty() && !parts.is_empty() {
             let names: Vec<&str> = parts.iter().map(|p| p.name.as_str()).collect();
             text = format!("Attached: {}", names.join(", "));
         }
-        // Parse `---region:<name>---` markers; with none, the whole text is the
-        // `task` region (back-compat).
-        let regions = parse_region_markers(&text);
-        let task = regions.get("task").cloned().unwrap_or_default();
-        let stop_reason = self.run_turn(reader, task, regions, parts).await;
+        let stop_reason = self.run_turn(reader, text, parts).await;
         self.write(&JsonRpcMessage::response(
             id,
             &SessionPromptResult { stop_reason },
@@ -411,7 +441,11 @@ impl Server {
         let _: SessionCancelParams = params
             .and_then(|p| serde_json::from_value(p).ok())
             .unwrap_or_default();
-        if let Some(run_id) = self.session.as_ref().and_then(|s| s.run_id.clone()) {
+        if let Some(run_id) = self
+            .session
+            .as_ref()
+            .and_then(|s| s.run_id().map(str::to_string))
+        {
             let _ = self
                 .control
                 .request(&ControlRequest::Cancel { run_id })
@@ -425,7 +459,6 @@ impl Server {
         &mut self,
         reader: &mut BoxReader,
         task: String,
-        regions: std::collections::HashMap<String, String>,
         parts: Vec<leviath_core::mime::InboundPart>,
     ) -> StopReason {
         // Subscribe before spawning so no event between spawn and subscribe is
@@ -440,7 +473,7 @@ impl Server {
             .expect("session present")
             .session_id
             .clone();
-        let run_id = match self.start_run(task, regions, parts).await {
+        let run_id = match self.start_run(task, parts).await {
             RunStart::Ready(run_id) => run_id,
             // The agent already finished and won't take another message - the
             // turn is simply over, not a failure.
@@ -475,7 +508,7 @@ impl Server {
                         if silent_drops > MAX_SILENT_DROPS {
                             return StopReason::EndTurn;
                         }
-                        match self.resubscribe(&session_id).await {
+                        match self.resubscribe(&session_id, stream.cursor()).await {
                             Some(fresh) => stream = fresh,
                             None => return StopReason::EndTurn,
                         }
@@ -540,7 +573,9 @@ impl Server {
         StopReason::EndTurn
     }
 
-    /// Reopen the daemon's event stream after it dropped mid-turn.
+    /// Reopen the daemon's event stream after it dropped mid-turn, from
+    /// `cursor`, where the dropped one had got to: an event sent while it was
+    /// down, the run's completion above all, still arrives.
     ///
     /// `None` when no daemon came back within the control client's grace, and
     /// the turn has to end. When one did, and it runs different code than
@@ -548,9 +583,13 @@ impl Server {
     /// the editor is told so in the conversation, since a bridge that stays
     /// on the older code will eventually stop understanding the daemon and
     /// the fix (restart the session) is on the editor's side.
-    async fn resubscribe(&mut self, session_id: &str) -> Option<WorldEventStream> {
+    async fn resubscribe(
+        &mut self,
+        session_id: &str,
+        cursor: Option<leviath_runtime::control_socket::EventCursor>,
+    ) -> Option<WorldEventStream> {
         tokio::time::sleep(RESUBSCRIBE_PAUSE).await;
-        let stream = self.control.subscribe().await.ok()?;
+        let stream = self.control.subscribe_from(cursor.as_ref()).await.ok()?;
         if let Some(mismatch) = self.control.code_mismatch() {
             let notice = format!("\n[leviath: {mismatch}]\n");
             self.emit_chunk(session_id, &notice).await;
@@ -559,7 +598,7 @@ impl Server {
     }
 
     /// Whether the run has reached a state that should end the current turn,
-    /// read from its persisted `meta.json` status. Returns the stop reason to
+    /// read from the status in its run file. Returns the stop reason to
     /// report, or `None` while the run is still starting / running / blocked on
     /// input (`WaitingInput`) - the latter must keep the turn in flight so a
     /// non-interactive client is never told "done" while the agent is actually
@@ -569,60 +608,72 @@ impl Server {
         leviath_agent_client::stop_reason_for(&status)
     }
 
-    /// Spawn the agent on the first prompt, or deliver a message on later ones.
-    /// `regions` seeds named caller-input regions on the first (spawning) prompt;
-    /// on later prompts the text is delivered as a message and `regions` is
-    /// unused. `parts` are the prompt's files, on the task either way.
+    /// Spawn the agent on the first prompt, with `task` as its `task` input,
+    /// or deliver a message on later ones. `parts` are the prompt's files, on
+    /// the task either way. A prompt with neither text nor files on a running
+    /// session sends nothing and only follows the run.
     async fn start_run(
         &mut self,
         task: String,
-        regions: std::collections::HashMap<String, String>,
         parts: Vec<leviath_core::mime::InboundPart>,
     ) -> RunStart {
-        let existing = self
-            .session
-            .as_ref()
-            .expect("session present")
-            .run_id
-            .clone();
-        match existing {
-            Some(run_id) => {
-                let delivered = matches!(
-                    self.control
-                        .request(&ControlRequest::Message {
-                            agent_id: run_id.clone(),
-                            content: task,
-                            target_region: None,
-                            parts,
-                        })
-                        .await,
-                    Ok(ControlResponse::Ok { ok: true })
-                );
-                if delivered {
-                    RunStart::Ready(run_id)
-                } else {
-                    RunStart::MessageUndeliverable
-                }
+        let session = self.session.as_ref().expect("session present");
+        let spawn = match &session.run {
+            SessionRun::Running(run_id) => Err((run_id.clone(), task, parts)),
+            SessionRun::Pending(blueprint) => Ok(spawn_request(
+                blueprint,
+                &task,
+                &session.cwd,
+                &self.args,
+                parts,
+            )),
+        };
+        let request = match spawn {
+            Err((run_id, task, parts)) if task.is_empty() && parts.is_empty() => {
+                return RunStart::Ready(run_id);
             }
-            None => {
-                let session = self.session.as_ref().expect("session present");
-                let spawn = spawn_args(
-                    &session.blueprint,
-                    &task,
-                    &session.cwd,
-                    &self.args,
-                    regions,
+            Err((run_id, task, parts)) => return self.deliver(run_id, task, parts).await,
+            Ok(Err(_)) => return RunStart::SpawnFailed,
+            Ok(Ok(request)) => request,
+        };
+        match self.control.spawn(request).await {
+            Ok(ControlResponse::Spawned { run_id, warnings }) => {
+                let session = self.session.as_mut().expect("session present");
+                session.run = SessionRun::Running(run_id.clone());
+                // Ahead of anything the run says, so a host's user sees why a
+                // run that never stops is not stopping.
+                let session_id = session.session_id.clone();
+                let report = crate::commands::run::request::warnings_report(&warnings);
+                for line in report {
+                    self.emit_chunk(&session_id, &format!("{line}\n")).await;
+                }
+                RunStart::Ready(run_id)
+            }
+            _ => RunStart::SpawnFailed,
+        }
+    }
+
+    /// Deliver a later prompt to the session's run as a message.
+    async fn deliver(
+        &mut self,
+        run_id: String,
+        content: String,
+        parts: Vec<leviath_core::mime::InboundPart>,
+    ) -> RunStart {
+        let delivered = matches!(
+            self.control
+                .request(&ControlRequest::Message {
+                    agent_id: run_id.clone(),
+                    content,
+                    target_region: None,
                     parts,
-                );
-                match self.control.spawn(spawn).await {
-                    Ok(ControlResponse::Spawned { run_id }) => {
-                        self.session.as_mut().expect("session present").run_id =
-                            Some(run_id.clone());
-                        RunStart::Ready(run_id)
-                    }
-                    _ => RunStart::SpawnFailed,
-                }
-            }
+                })
+                .await,
+            Ok(ControlResponse::Ok { ok: true })
+        );
+        match delivered {
+            true => RunStart::Ready(run_id),
+            false => RunStart::MessageUndeliverable,
         }
     }
 
@@ -824,7 +875,7 @@ impl Server {
         let run_id = self
             .session
             .as_ref()
-            .and_then(|s| s.run_id.clone())
+            .and_then(|s| s.run_id().map(str::to_string))
             .unwrap_or_default();
         for artifact in &output.artifacts {
             let path = artifact_location(&cwd, &run_id, artifact);
@@ -897,31 +948,15 @@ fn artifact_location(
         .unwrap_or(in_workdir)
 }
 
-/// Read the persisted `RunStatus` for `run_id` from `<runs_dir>/<run_id>/meta.json`.
-///
-/// Deserializes into a minimal projection that reads only the `status` field, so
-/// it does not depend on the full [`RunMeta`](leviath_core::run_meta::RunMeta)
-/// shape and tolerates a partially-written or older metadata file. Returns
-/// `None` if the file is missing or unreadable (the run hasn't persisted yet).
+/// Read the persisted `RunStatus` for `run_id` from its run file under
+/// `runs_dir`. Returns `None` if the file is missing or unreadable (the run
+/// hasn't persisted yet).
 fn read_run_status(runs_dir: &std::path::Path, run_id: &str) -> Option<RunStatus> {
-    #[derive(serde::Deserialize)]
-    struct StatusOnly {
-        status: RunStatus,
-    }
-    let path = runs_dir.join(run_id).join(leviath_core::files::META_FILE);
-    let json = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<StatusOnly>(&json)
+    crate::runstate::read_meta_from(&runs_dir.join(run_id))
         .ok()
-        .map(|s| s.status)
+        .map(|meta| meta.status)
 }
 
-/// The stop reason to report for a run in `status`, or `None` if the run has not
-/// finished and the turn should keep streaming.
-///
-/// `CompleteInteractive` counts as finished: the agent completed its required
-/// work and is only idling for optional follow-up, so control returns to the
-/// client. `WaitingInput` does **not** - the agent is blocked on an interaction,
-/// which is exactly the state that must not be reported as "done".
 /// Mint a session id from the agent name - reuses the run-id generator's
 /// collision-resistant `<name>-<timestamp>-<suffix>` scheme.
 fn new_session_id(agent_name: &str) -> String {
@@ -995,9 +1030,6 @@ mod mapping {
         }
     }
 
-    /// The stop reason to report for a run whose `WorldEvent::Completed` carried
-    /// `status`. The host emits only the terminal statuses `complete`, `error`,
-    /// and `cancelled`.
     #[cfg(test)]
     mod tests {
         use super::*;

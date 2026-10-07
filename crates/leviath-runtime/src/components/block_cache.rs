@@ -32,9 +32,8 @@ pub(super) const CACHE_CHUNK_TOKENS: usize = 2048;
 /// Chunking gives the region interior boundaries. Entries are packed greedily
 /// and a full chunk is never repacked, so a boundary that existed last turn
 /// exists this turn with the same bytes in front of it - which is precisely the
-/// condition [`mark_breakpoint_eligibility`] looks for. The frozen head of the
-/// region then caches and only the tail is re-sent, which is how the message
-/// path has always behaved.
+/// condition a cache breakpoint needs. The frozen head of the region then
+/// caches and only the tail is re-sent, as on the message path.
 ///
 /// Only for kinds whose entries append. A region that rewrites entries in place
 /// has no stable interior boundary to offer, and gets its protection from

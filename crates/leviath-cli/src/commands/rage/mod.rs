@@ -2,7 +2,7 @@
 //! with every key removed.
 //!
 //! When something goes wrong, the useful evidence is spread over the config
-//! file, the daemon's log, a run's journal and the blueprint that ran, and
+//! file, the daemon's log, a run's file and the blueprint that ran, and
 //! a helper who gets one of them cannot reproduce anything. This builds one
 //! `.zip` holding all of it, scrubbed of API keys, OAuth tokens and header
 //! values (see `scrub`), and says in red what it still holds: the task, the
@@ -25,6 +25,7 @@ use crate::tui::{EventSource, TerminalSetup};
 mod archive;
 mod collect;
 mod render;
+mod replay;
 mod report;
 mod scrub;
 #[cfg(test)]
@@ -41,9 +42,10 @@ pub const RAGE_LONG_ABOUT: &str = "\
 Pack the logs and settings a bug report needs into one zip, with every key removed.
 
 The zip holds `lev doctor --offline`, the daemon's state and log, the config
-file with its keys taken out, every installed blueprint, and, for a run, the
-run's metadata, stages, context, journal and blueprint. API keys, OAuth
-tokens, header values and other credentials are removed. The task text, the
+file with its keys taken out, every installed blueprint, and, for a run, its
+run file, the same as JSON, the request that starts it again, its summary,
+its stage logs and its blueprint. API keys, OAuth tokens, header values and
+other credentials are removed. The task text, the
 model's replies, tool output and file contents are kept: they are what a
 helper needs. Read the zip before you share it.
 
@@ -78,7 +80,7 @@ pub struct RageArgs {
     #[arg(long, conflicts_with = "agent")]
     pub run: Option<String>,
 
-    /// The blueprint you were building: its directory or its `agent.leviath`.
+    /// The blueprint you were building: its directory or its `agent.toml`.
     /// Implies `--about agent`.
     #[arg(long)]
     pub agent: Option<PathBuf>,
@@ -218,7 +220,7 @@ pub(crate) fn selection_from_args(args: &RageArgs, env: &RageEnv) -> anyhow::Res
         _ => None,
     };
     if about == About::Agent && args.agent.is_none() {
-        anyhow::bail!("--about agent needs the blueprint: pass --agent <dir or agent.leviath>");
+        anyhow::bail!("--about agent needs the blueprint: pass --agent <dir or agent.toml>");
     }
     Ok(Selection {
         about,

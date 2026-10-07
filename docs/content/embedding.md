@@ -9,7 +9,7 @@ order: 16
 # Embedding Leviath in a Rust application
 
 Leviath is also a library. The same runtime the `lev` daemon serves can run
-inside your own process: add the `leviath` crate, build a world, spawn agents,
+inside your own process: add the `leviath` crate, build a world, start runs,
 and consume their events as an async stream. No CLI, no daemon, no config
 file, no socket.
 
@@ -26,21 +26,23 @@ use leviath::prelude::*;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let coder = leviath::blueprint::load("coder/agent.toml".as_ref())?;
     let world = AgentWorld::builder()
         .provider(ProviderCreds {
             api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             ..ProviderCreds::simple("anthropic")
         })
+        .blueprint(coder)
+        .workdir(std::env::current_dir()?)
         .build()?;
 
+    // A run is asked for with the same typed request every front door takes:
+    // a blueprint and its inputs here, or a whole graph of your own.
+    let request = SpawnRequest::new(SpawnSource::Blueprint(BlueprintRef::parse("coder")?))
+        .input("task", RawInput::Text("Build a CSV parser".into()));
+
     let mut events = world.events();
-    let run = world
-        .spawn(SpawnSpec::new(
-            BlueprintSource::Path("coder.leviath".into()),
-            "Build a CSV parser",
-            std::env::current_dir()?,
-        ))
-        .await?;
+    let run = world.spawn(request).await?;
 
     while let Some(event) = events.next().await {
         match event {
@@ -76,6 +78,8 @@ returning.
 | Method | What it does |
 | --- | --- |
 | `provider(creds)` | Register a provider from credentials. Repeatable. `ProviderCreds::simple(name)` covers key-free providers like `ollama`. |
+| `blueprint(loaded)` | Offer a blueprint to the world's requests, under its own name. Repeatable. `world.add_blueprint` does the same later. |
+| `workdir(dir)` | The directory a run works in when its request names none. Without it, every request names one. |
 | `register_provider(name, arc)` | Register your own `Provider` implementation, including mocks for tests. Wins over a credentials entry with the same name. |
 | `default_provider(provider)` | The provider bare model names route to. Each stage keeps the model its blueprint names. |
 | `override_model(provider, model)` | The embedded `override_model`. One model every stage that allows a user default starts on. |
@@ -83,7 +87,7 @@ returning.
 | `fallback_route(provider, model)` | Where a run moves when its provider fails mid-run. |
 | `prompt_hints(hints)` | Turn on the batch-tool and shell hints, which are off by default on the embed path. |
 | `tool_service(arc)` | Replace the built-in tool service with your own (see below). |
-| `state_dir(dir)` | Persist runs on disk in the daemon's layout (`dir/runs/<run_id>/`). Without it the world stays in memory. |
+| `state_dir(dir)` | Keep each run's [run file](/docs/run-file) on disk in the daemon's layout (`dir/runs/<run_id>/run.lvr`). Without it the world stays in memory. |
 | `inference_pool(config)` | Per-model inference concurrency limits. |
 | `tool_concurrency(n)` | How many tool batches may execute at once (default 4). |
 | `runtime(handle)` | Run on a specific Tokio runtime instead of the ambient one. |
@@ -91,21 +95,57 @@ returning.
 `override_model` sets the default provider as well. Its model goes ahead of what a stage's
 blueprint names, on every stage that allows a user default. `fallback_model` names a model on the
 default provider, tried after every model a stage names and never ahead of them. `fallback_route`
-is how a single-model blueprint survives an outage, and it carried the name `fallback_model`
-before 0.6.
+is how a single-model blueprint survives an outage.
 
-Blueprints come from three places: `BlueprintSource::Path` for a `.leviath` file,
-`BlueprintSource::Toml` for blueprint text you already have in memory, and
-`BlueprintSource::Inline` for a `Blueprint` value you built yourself.
+## Asking for a run
 
-Not every [seed kind](/docs/context) works when embedded, because some of them are daemon
-behaviour:
+Every run starts from a `SpawnRequest`, the same typed request the CLI, the HTTP API and the agent
+tools take. [Starting a run](/docs/starting-a-run) describes every field. Its `source` says what
+to run:
 
-| Seed kind | Embedded |
+| Source | What it runs |
 |---|---|
-| `caller_input` | Filled from `SpawnSpec::regions`. The task prompt fills the `task` key |
-| `literal` | Resolves as written |
-| `files`, `glob`, `rhai`, `command` | Not run. They only produce an error when the region is `required` |
+| `SpawnSource::Blueprint(BlueprintRef::parse("coder")?)` | A blueprint the world was given with `.blueprint(...)` or `add_blueprint` |
+| `SpawnSource::Raw(Box::new(graph))` | A `RunGraph` you hold, such as one read from text |
+| `SpawnSource::BlueprintFile(path)` | Refused. An embedded world reads no blueprint from a path |
+
+`leviath::blueprint::load(path)` reads an `agent.toml`, or the directory holding one, and pins it
+to the digest of the file's bytes. For blueprint text you already have in memory, read the graph
+out of it and send that. This is how the repository's example does it:
+
+```rust
+let graph = leviath::blueprint::BlueprintFile::parse(BLUEPRINT)?.run_graph();
+let mut request = SpawnRequest::new(SpawnSource::Raw(Box::new(graph))).input(
+    "task",
+    RawInput::Text("Tell me what this project is.".into()),
+);
+request.workdir = Some(std::env::current_dir()?);
+```
+
+`input(name, value)` gives one of the graph's declared [inputs](/docs/starting-a-run#inputs).
+`RawInput` has `Text`, `Int`, `Float`, `Bool`, `List` and `Record`, and the declared type decides
+how a value is read. Every field of the request is public, so set `workdir`, `model`, `output`,
+`launch` and `attachments` directly.
+
+A request that cannot run comes back from `spawn` as `SpawnIssues`: every problem at once, each
+naming the place in the request it is about. `world.validate(request)` makes the same checks
+without starting anything, and answers with a summary of the run it would start.
+
+```rust
+match world.validate(request.clone()).await {
+    Ok(summary) => println!("would run {} on {:?}", summary.title, summary.stages),
+    Err(issues) => {
+        for issue in issues.iter() {
+            println!("{}: {}", issue.path, issue.message);
+        }
+    }
+}
+```
+
+Not every [seed](/docs/context) works when embedded, because some of them are daemon behaviour.
+A `literal` seed resolves as written. A `files`, `glob`, `command`, `code` or `tools` seed is not
+run: it is an issue when the region is `required`, and leaves the region empty otherwise. Pass that
+content as an input instead.
 
 ## Events
 
@@ -141,31 +181,46 @@ reads one of them back from that store, so an embedder never needs to know where
 its files. It answers `None` for a file the store does not hold, such as one too large to store or
 an artifact recorded by path alone.
 
-Files go in the same way. `SpawnSpec::attach` puts an `InboundPart` on the spawn. The run's
-registry types it unless the part declares a type, and it lands in the task region unless it names
-another. `send_message_with` sends a message with files, and an `InteractionResponse::text` answer
-takes files through `with_parts`. A `@path` inside the text is not resolved here, since an
-embedder has no working directory to resolve it against. Attach the file and keep the name in the
-text, and the model reads the same name.
+Files go in through the request's `attachments`. A `file` input names an attachment by its
+`name`, and an attachment with a `region` goes straight into that region. The run's registry types
+it unless it declares a `mime_type`. `send_message_with` sends a message with files, and an
+`InteractionResponse::text` answer takes files through `with_parts`. A `@path` inside the text is
+not resolved here. Attach the file and keep the name in the text, and the model reads the same name.
 
 ```rust
-let spec = SpawnSpec::new(source, "edit @hero.png so the arm is longer", cwd)
-    .attach(InboundPart::from_bytes("hero.png", std::fs::read("hero.png")?));
+use leviath::runtime::spec::names::RegionName;
+use leviath::runtime::spec::request::{Attachment, Bytes};
+
+let mut request = SpawnRequest::new(source)
+    .input("task", RawInput::Text("edit @hero.png so the arm is longer".into()));
+request.attachments.push(Attachment {
+    name: "hero.png".into(),
+    mime_type: None,
+    region: Some(RegionName::new("task")?),
+    deliver: None,
+    caption: None,
+    data: Bytes(std::fs::read("hero.png")?),
+});
 ```
 
 Ask for a shape when you spawn. The label reaches the model untouched, so your own house format
 works with no support from this crate.
 
 ```rust
-let spec = SpawnSpec::new(source, "audit the auth module", cwd)
-    .output("a2ui", Some("One card per finding.".to_string()));
+use leviath::runtime::spec::graph::OutputDef;
+
+request.output = Some(OutputDef {
+    format: Some("a2ui".into()),
+    instructions: Some("One card per finding.".into()),
+    ..Default::default()
+});
 ```
 
 [Final outputs](/docs/outputs) covers the whole cascade, including schema validation.
 
 ## Answering an agent's questions
 
-When a blueprint uses `ask_user_text`, `ask_user_choice`, `ask_user_confirm`,
+When a blueprint's stage uses `ask_user_text`, `ask_user_choice`, `ask_user_confirm`,
 `present_for_review`, or `edit_document`, the call parks on the interaction
 hub and surfaces as an `Interaction` event carrying the request. Answer it and
 the agent resumes:
@@ -184,8 +239,20 @@ rather poll than watch the stream.
 
 `status`, `pause`, `resume`, `cancel`, and `send_message` all address a run by
 its `RunId`. A completed run is unloaded from memory shortly after its
-`Completed` event; with `state_dir` set, its snapshots stay on disk in the
+`Completed` event. With `state_dir` set, its run file stays on disk in the
 same format `lev ps` and the dashboard read.
+
+`world.inspect(&run)` reads a run's whole state: where it is, its context, what it is waiting on
+and what it has spent. It reads live while the run is in the world, and from its run file once it
+has left, when a `state_dir` is set. It answers `None` for a run the world does not know.
+
+```rust
+if let Some(state) = world.inspect(&run).await {
+    println!("{:?} at step {} in {}", state.status, state.seq, state.cursor.stage);
+}
+```
+
+The state is the same one `lev run show` prints. See [Inspecting a run](/docs/inspecting-a-run).
 
 ## What the built-in tool service covers
 

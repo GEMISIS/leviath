@@ -50,15 +50,18 @@ repository at `docs/design/sandboxing-approaches.md`. The section below is what
 Leviath ships today.
 
 ```toml
-[sandbox]
+[graph.sandbox]
 kind    = "container"     # "container" | "namespace" | "none"
 engine  = "docker"        # docker | podman | any Docker-CLI-compatible
 image   = "debian:bookworm-slim"
 network = false
 
-[stages.analyze.sandbox]  # per-stage override
-kind = "none"             # run discovery on the host…
+[[graph.stages]]
+name = "analyze"
+sandbox = { kind = "none" }   # per-stage override: run discovery on the host
 ```
+
+That is a blueprint's sandbox. Your own `[sandbox]` in `config.toml` takes the same keys.
 
 > [!IMPORTANT]
 > **Today the sandbox covers what the agent executes**, and that scope is being widened. Read this
@@ -79,8 +82,8 @@ kind = "none"             # run discovery on the host…
 The sandbox bind-mounts the run's workdir, so sandboxed commands and host-side file tools see the
 same files.
 
-A `[sandbox]` table, at the agent or the stage level, accepts only the keys shown here (`kind`,
-`image`, `engine`, `network`, `mount` or `mounts`, `keep_warm`, `on_unavailable`). Anything else
+A blueprint's sandbox, on the graph or on a stage, accepts only the keys shown here (`kind`,
+`image`, `engine`, `network`, `mounts`, `keep_warm`, `on_unavailable`). Anything else
 fails the load and the error names it, so a misspelled `netwrok = false` cannot leave the sandbox
 looser than the file reads.
 
@@ -113,8 +116,8 @@ a planner that reads run archives, a reviewer that reads design docs kept next t
 that, a blueprint can declare extra read paths:
 
 ```toml
-[read_paths]
-allow = [
+[graph]
+read_paths = [
     "~/.leviath/runs",          # an exact path grants its whole subtree
     "../shared-docs",           # relative entries resolve against the run's workdir
     "glob:~/design-docs/**",    # glob patterns; * stays in one component, ** crosses
@@ -152,7 +155,7 @@ $ lev validate cto
   3 stages, version 1.0.0
   WARN your config does not grant glob:~/design-docs/**: reads matching them will be refused [read-paths-not-granted]
        add to your config.toml: [agent_read_paths.cto] allow = ["glob:~/design-docs/**"]
-  NOTE declares [read_paths] (reads outside the run workdir): 2 declared, 1 granted [read-paths-declared]
+  NOTE declares read_paths (reads outside the run workdir): 2 declared, 1 granted [read-paths-declared]
        ~/.leviath/runs: granted; glob:~/design-docs/**: NOT granted
 ```
 
@@ -193,13 +196,14 @@ The rules that keep this safe:
 - **Taint rises.** When a grant is active, the read tools are classified `Private` for that
   agent, so taint tracking treats out-of-workdir content with more suspicion, not less.
 - **Seeds answer to the same fence.** A `seed` path that resolves outside the workdir is refused
-  at spawn unless a declared and granted `[read_paths]` entry covers it. That covers `files`,
-  `glob` and `rhai` seeds alike. The reasoning is the same as for `read_file`: the blueprint chose
-  that path, not you.
+  at spawn unless a declared and granted `read_paths` entry covers it. That covers `files` and
+  `glob` seeds. The reasoning is the same as for `read_file`: the blueprint chose that path, not
+  you. A `code` seed's script is part of the blueprint, read from its own directory like any
+  script it names.
   A `blueprint:`-prefixed seed reads only from the blueprint's own directory, and no grant can
   let it out, since a blueprint does not ship files outside itself.
 - Rhai script tools have their own `read_file` and it stays workdir-confined; among the tools,
-  `[read_paths]` applies to the built-in file tools only.
+  `read_paths` applies to the built-in file tools only.
 
 Pick the run's workdir itself with `lev run <agent> --workdir <dir>` (defaults to the directory
 you ran the command from).
@@ -234,7 +238,7 @@ with no classification of its own is treated as outbound and gated. Every built-
 own classification, so only the ones that can carry bytes out are ever gated: `shell`,
 `web_search`, `web_fetch`, the HTTP tools, and `submit_output`. The file, context, todo, sub-agent
 and interaction tools are not gated. `submit_output` is on that list because the final output
-counts as leaving the machine. `lev serve` hands it to whoever reads `GET /api/agents/{id}/result`,
+counts as leaving the machine. `lev serve` hands it to whoever reads `GET /api/runs/{id}/result`,
 and the dashboard shows it. So a Private region in a submitted answer raises the same prompt a
 `shell` call would.
 
@@ -253,13 +257,13 @@ lev policy test bash --target example.com
 ### When there is nobody to ask
 
 The prompt above assumes a person. Most runs do not have one, and the gate does not answer the same
-way in each case. What actually happens, measured against a real daemon with a granted `[read_paths]`
+way in each case. What actually happens, measured against a real daemon with a granted `read_paths`
 read (which is Private) flowing into `submit_output` and into `shell`:
 
 | The run | What the gate does | Does the private data leave? |
 | --- | --- | --- |
 | Attended, through `lev serve` or the dashboard | Raises the leak prompt and parks the run in `waiting_input` | Only if you pick **Allow once** or **Allow for this session** |
-| `--yolo`, or the dashboard's unattended toggle | Waives enforcement and lets the call through, with no prompt | **Yes** |
+| `--yolo`, `launch.unattended = "all"`, or the dashboard's unattended toggle | Waives enforcement and lets the call through, with no prompt | **Yes** |
 | `--yolo=<profile>` whose profile sets `gate = "ask"` | Raises the leak prompt as an attended run would; the rest of the profile still applies | Only if you allow it |
 | `--yolo`, and the run calls `install_global_tool` | Installs the script into `~/.leviath/tools/` without a prompt. See below | Not by itself, but the code runs on every later run that advertises it. See [Rhai tools](/docs/rhai-tools#installing-a-tool-from-a-run) |
 | A tool set to `allow` in `[tool_permissions]` | Still prompts. Granting a tool is not granting the data | Only if you allow it |
@@ -269,7 +273,7 @@ read (which is Private) flowing into `submit_output` and into `shell`:
 
 `--yolo` is the row to read twice. It means "run unattended", and the gate's prompt is one of the
 things it stops raising, so an unattended run over private data hands that data to whatever its
-outbound tools reach, `GET /api/agents/{id}/result` included. Nothing is hidden: the gate is still
+outbound tools reach, `GET /api/runs/{id}/result` included. Nothing is hidden: the gate is still
 evaluated, and the waived block is written to the run's `stages/<n>/taint_audit.json` with
 `decision_source: "YoloAutoApprove"` beside the `AutoBlock` it overrode. That file is the record to
 read after an unattended run, and `lev policy test` is how to find out beforehand what a given tool
@@ -279,8 +283,35 @@ An `install_tool` call stamps the file it writes with the run's workdir and the 
 script's provenance.
 
 If you want an unattended run that cannot leak rather than one that reports having done so, keep the
-sensitive paths out of it. Drop the `[read_paths]` grant, or set the outbound tool to `deny` in
+sensitive paths out of it. Drop the `read_paths` grant, or set the outbound tool to `deny` in
 `[tool_permissions]`. No launch flag lifts a `deny`.
+
+## Who may start what
+
+Every run starts from one [spawn request](/docs/starting-a-run#one-request-every-front-door),
+and a few parts of it are not open to every caller.
+
+**A run graph written by a model.** `spawn_agent` can take a whole graph instead of an
+installed blueprint. That graph can declare its own seed commands and MCP servers, so it needs
+the `spawn_raw_graph` permission on top of `spawn_agent`'s. It is `ask` by default. Set it in your
+config's `[tool_permissions]` or a blueprint's `[graph.tool_permissions]`.
+
+**A blueprint read from a directory.** Only a caller on this machine may name a blueprint by its
+directory (`source.blueprint_file`). A remote caller, over HTTP, GraphQL or ACP, names an installed
+blueprint or sends the graph itself. A raw graph whose fan-out names its worker by directory is
+refused the same way.
+
+**Running unattended.** A remote caller asking for `launch.unattended` or a non-empty
+`launch.allow` needs the server's leave:
+
+| Front door | What lets it through |
+| --- | --- |
+| `lev serve` (HTTP and GraphQL) | Allowed unless the server was started with `--no-remote-yolo` |
+| `lev agent-client` (ACP) | `unattended` needs the server started with `--yolo`; an `allow` entry needs `--yolo` or a matching `--allow` |
+
+A refused request names the field and says why, with every other problem it has. A child run
+never gets more than its parent either: see
+[sub-agents](/docs/sub-agents#a-child-never-gets-more-than-its-parent).
 
 ## Response size caps
 

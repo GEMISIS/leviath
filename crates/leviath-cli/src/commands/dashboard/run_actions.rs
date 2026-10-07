@@ -132,7 +132,7 @@ impl Dashboard {
     /// Read off the list on screen rather than off disk. These rows are the
     /// ones the user can see nested under the selection, which is the thing
     /// the dialog is about to describe, and a confirmation must not be the
-    /// thing that stops to parse every `meta.json` on the machine.
+    /// thing that stops to read every run file on the machine.
     fn extra_sub_agent_rows(&self, run_ids: &[String]) -> usize {
         let mut seen: std::collections::HashSet<&str> =
             run_ids.iter().map(String::as_str).collect();
@@ -233,6 +233,7 @@ impl Dashboard {
         // Delete its uploads while the ledger that names them exists, then
         // remove the run directory.
         runstate::forget_provider_files(id);
+        runstate::forget_secrets(id);
         let run_dir = runstate::run_dir(id);
         if let Err(e) = std::fs::remove_dir_all(&run_dir) {
             self.add_log(format!("Delete failed: {}", e));

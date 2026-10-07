@@ -6,8 +6,9 @@
 //! it does not need a second request to find out.
 //!
 //! One file per concern: [`runs`] for the acts a run goes through and the wait
-//! for one to show in its record, [`attachments`] for the files a spawn or a
-//! message brings with it, [`blueprints`] for installing and removing one,
+//! for one to show in its record, [`spawn`] and [`spawn_request`] for starting
+//! one or checking a request, [`attachments`] for the files a message brings
+//! with it, [`blueprints`] for installing and removing one,
 //! [`interactions`] for answering a pending ask, [`exports`] for the bulk
 //! export job, and [`catalog`] for the one write that only refreshes a cache.
 //! `RunMutation` itself stays one `#[Object] impl` with one field per method,
@@ -29,8 +30,10 @@ use runs::{
     CancelRunRequest, CancelRunResult, CancelRunsRequest, CancelRunsResult, DeleteRunsRequest,
     DeleteRunsResult, PauseRunRequest, PauseRunResult, PauseRunsRequest, PauseRunsResult,
     ResumeRunRequest, ResumeRunResult, ResumeRunsRequest, ResumeRunsResult, SendMessageRequest,
-    SendMessageResult, SpawnRunRequest, SpawnRunResult,
+    SendMessageResult,
 };
+use spawn::{SpawnRunResult, ValidateSpawnResult};
+use spawn_request::SpawnRunRequest;
 
 pub(crate) mod attachments;
 pub(crate) mod blueprints;
@@ -38,6 +41,8 @@ pub(crate) mod catalog;
 pub(crate) mod exports;
 pub(crate) mod interactions;
 pub(crate) mod runs;
+pub(crate) mod spawn;
+pub(crate) mod spawn_request;
 
 // Re-exported for the tests below, which build these values directly rather
 // than through a query document.
@@ -126,20 +131,33 @@ impl RunMutation {
 
     /// Start a run.
     ///
-    /// Answers with the run itself, so a client renders the new row without a
-    /// second request. `warnings` names checks the blueprint declared that this
-    /// request's own output shape retires.
-    ///
-    /// The refusals are the server's, not the daemon's: a workdir outside
-    /// `--workdir-root`, an unattended run on a `--no-remote-yolo` server, an
-    /// attachment outside the working directory, or a callback URL the outbound
-    /// policy will not allow.
+    /// Answers `SpawnedOutput` with the new run's id, or `SpawnRejectedOutput`
+    /// with every problem the request has, each at its own path: an input
+    /// that does not fit its declared type, a blueprint pin to another
+    /// revision, a name with a bad character. This server's own refusals are
+    /// issues too: a workdir outside `--workdir-root`, an unattended run on a
+    /// `--no-remote-yolo` server, a callback URL the outbound policy will not
+    /// allow. A GraphQL error means something the request did not cause, such
+    /// as a daemon that cannot be reached.
     async fn spawn_run(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "Everything about the new run.")] request: SpawnRunRequest,
     ) -> async_graphql::Result<SpawnRunResult> {
-        runs::spawn_run(ctx, request).await
+        spawn::spawn_run(ctx, request).await
+    }
+
+    /// Check a spawn request the whole way without starting anything.
+    ///
+    /// Answers `SpawnSummaryOutput` with the run it would start (each stage's
+    /// model and tools, the checked inputs, what it would be trusted with), or
+    /// `SpawnRejectedOutput` with every reason `spawnRun` would refuse it.
+    async fn validate_spawn(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The request `spawnRun` would be sent.")] request: SpawnRunRequest,
+    ) -> async_graphql::Result<ValidateSpawnResult> {
+        spawn::validate_spawn(ctx, request).await
     }
 
     /// Send a message to a run that is going.
@@ -217,7 +235,10 @@ impl RunMutation {
     ///
     /// The first answer wins. A second answer to the same request is not an
     /// error on the client's part: two people clicking one prompt is ordinary,
-    /// and it reads as `ALREADY_SETTLED` rather than as a failure.
+    /// and it reads as `ALREADY_SETTLED` rather than as a failure. A question
+    /// a held run asked (see `heldInteractions`) is an error coded `RUN_HELD`,
+    /// saying what to put back: it is open again once the run is back.
+    /// An id no run on this machine asked is an error coded `NOT_FOUND`.
     async fn answer_interaction(
         &self,
         ctx: &Context<'_>,
@@ -272,14 +293,15 @@ mod tests;
 /// a client that is not.
 ///
 /// Every field takes one argument named `request` and answers with a result
-/// carrying what it changed. Nothing inside a result is a failure: a refusal is
-/// a GraphQL error, and its `extensions.code` is the thing to branch on, from
-/// this vocabulary.
+/// carrying what it changed. `spawnRun` and `validateSpawn` answer a refused
+/// request with a `SpawnRejectedOutput` member listing every issue; everywhere
+/// else a refusal is a GraphQL error, and its `extensions.code` is the thing to
+/// branch on, from this vocabulary.
 ///
 /// | `code` | `httpStatus` | Means |
 /// |---|---|---|
-/// | `BAD_USER_INPUT` | 400 | The request is wrong as written: a negative `maxDepth`, an empty filter on a destructive sweep, an unknown export field. Sending it again unchanged fails the same way. |
-/// | `FORBIDDEN` | 403 | This server is configured to refuse it: a workdir outside `--workdir-root`, an unattended run on a `--no-remote-yolo` server, an attachment path outside the working directory. |
+/// | `BAD_USER_INPUT` | 400 | The request is wrong as written: an empty filter on a destructive sweep, an unknown export field. Sending it again unchanged fails the same way. |
+/// | `FORBIDDEN` | 403 | This server is configured to refuse it: a message's attachment path outside the run's working directory. |
 /// | `NOT_FOUND` | 404 | Nothing by that name, or nothing in the state the act needs: an unknown run id, a blueprint that is not installed. |
 /// | `CONFLICT` | 409 | It exists and its state refuses the change: a finished run cannot be paused, a stale digest pin cannot write. |
 /// | `PAYLOAD_TOO_LARGE` | 413 | An attachment is over this server's `max_upload_bytes`. |

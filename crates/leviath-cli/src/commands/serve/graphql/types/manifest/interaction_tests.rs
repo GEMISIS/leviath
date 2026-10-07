@@ -1,30 +1,26 @@
 //! Tests for the checkpoints a stage raises, and for the mirrors of those
 //! types.
 
-use std::sync::Arc;
-
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 
 use super::{DirectiveEntry, InteractionPoint, InteractionPointStyle, UnattendedPolicy};
 use crate::commands::serve::graphql::filter::testkit::{exercise, exercise_enum, exercise_list};
 
-/// A manifest with one checkpoint that exercises every field: options,
+/// A blueprint with one checkpoint that exercises every field: options,
 /// directives, abort and edit options, and a document region that resolves.
 fn manifest() -> &'static str {
-    r#"
-[agent]
+    r#"[blueprint]
 name = "checked"
 version = "1.0.0"
 description = "one checkpoint"
 
-[context.regions.plan]
-kind = "pinned"
-max_tokens = 1000
+[graph]
+layout = { total_budget_tokens = 1000, regions = [{ name = "plan", kind = "pinned", budget = 1000 }] }
 
-[stages.review]
-mode = "interactive_points"
+[[graph.stages]]
+name = "review"
 
-[[stages.review.interaction_points]]
+[[graph.stages.mode.interactive_points]]
 name = "decide"
 prompt = "which way?"
 required = true
@@ -40,10 +36,14 @@ edit_options = ["ship"]
 
 /// The one checkpoint `manifest` declares, resolved against its blueprint.
 fn point() -> InteractionPoint {
-    let parsed = leviath_core::manifest::parse_manifest(manifest()).expect("the manifest parses");
-    let blueprint = Arc::new(parsed);
-    let core_point = match &blueprint.stages[0].mode {
-        leviath_core::blueprint::StageMode::InteractivePoints { points } => points[0].clone(),
+    point_of(manifest())
+}
+
+/// The first checkpoint of the first stage of the blueprint in `text`.
+fn point_of(text: &str) -> InteractionPoint {
+    let blueprint = super::super::parsed(text);
+    let core_point = match &blueprint.graph.stages[0].mode {
+        leviath_runtime::spec::graph::StageMode::InteractivePoints(points) => points[0].clone(),
         other => panic!("the stage declares interaction points, got {other:?}"),
     };
     InteractionPoint::of(&blueprint, &core_point)
@@ -63,17 +63,11 @@ impl Probe {
     }
 }
 
-/// Ask the schema about one checkpoint, built from manifest text.
+/// Ask the schema about one checkpoint, built from an `agent.toml`.
 async fn ask(text: &str, query: &str) -> serde_json::Value {
-    let parsed = leviath_core::manifest::parse_manifest(text).expect("the manifest parses");
-    let blueprint = Arc::new(parsed);
-    let core_point = match &blueprint.stages[0].mode {
-        leviath_core::blueprint::StageMode::InteractivePoints { points } => points[0].clone(),
-        other => panic!("the stage declares interaction points, got {other:?}"),
-    };
     let schema = Schema::build(
         Probe {
-            point: InteractionPoint::of(&blueprint, &core_point),
+            point: point_of(text),
         },
         EmptyMutation,
         EmptySubscription,
@@ -103,7 +97,7 @@ async fn a_checkpoint_carries_its_fields_and_its_document_region() {
     assert_eq!(point["options"], serde_json::json!(["ship", "hold"]));
     assert_eq!(point["abortOptions"], serde_json::json!(["cancel"]));
     assert_eq!(point["editOptions"], serde_json::json!(["ship"]));
-    // The manifest holds directives in a map, so a fixed order is what lets two
+    // Directives come back by option, so two
     // reads of one blueprint agree.
     assert_eq!(
         point["directives"],

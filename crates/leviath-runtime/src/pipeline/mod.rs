@@ -23,10 +23,10 @@ use crate::components::{
     MessageInbox,
 };
 use crate::fanout::FanOutWaiting;
-use crate::inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
+use crate::inference_bridge::{InferenceJob, InferenceOutcome};
 use crate::inference_pool::InferencePools;
 use crate::interaction_hub::InteractionHub;
-use crate::persistence::{RunMetadata, TokenTotals, build_context_snapshot, build_run_meta};
+use crate::persistence::{RunMetadata, TokenTotals, build_run_meta};
 use crate::persistence_bridge::{PersistJob, PersistMsg};
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::{BoxedToolExec, ToolJob, ToolOutcome};
@@ -34,16 +34,17 @@ use crate::tool_bridge::{BoxedToolExec, ToolJob, ToolOutcome};
 // Sections of the former single-file pipeline, one per concern.
 mod gate_check;
 pub(crate) use gate_check::gate_blocks;
+pub(crate) mod spec_view;
 mod transition;
 #[cfg(test)]
 pub(crate) use transition::find_conditioned_edge;
-pub use transition::{AgentBlueprint, StageCursor, force_transition, is_terminal_status};
 pub(crate) use transition::{
-    AwaitingTransitionChoice, StageEntry, StageInferences, StageSetup, StageSetups, VisitCounts,
-    WaitingForChildren, apply_stage_context, attach_stage_components, emit_stage_transition,
-    enter_stage, fail_stage, fail_stage_world, find_conditioned_edge_ref, hold_for_gate,
-    region_digest, resolve_transition,
+    AwaitingTransitionChoice, StageEntry, StageSetup, VisitCounts, WaitingForChildren,
+    apply_stage_context, attach_stage_components, emit_stage_transition, enter_stage, fail_stage,
+    fail_stage_world, find_conditioned_edge_ref, hold_for_gate, region_digest, resolve_transition,
+    transition_record, watched_region_digests,
 };
+pub use transition::{LastTransition, StageCursor, force_transition, is_terminal_status};
 mod hooks;
 #[cfg(test)]
 pub(crate) use hooks::TerminalHookFired;
@@ -70,17 +71,18 @@ pub(crate) use requirements::{
 };
 mod spawn;
 #[cfg(test)]
-pub(crate) use spawn::spawn_agent;
-#[cfg(test)]
-pub(crate) use spawn::{DEFAULT_CONTEXT_WINDOW_TOKENS, stage_setup_from};
-pub use spawn::{ResolvedStage, SeededSpawn, spawn_agent_seeded};
+pub(crate) use crate::test_graph::{TestRun, place_test_run, place_test_task};
+pub(crate) use spawn::DEFAULT_CONTEXT_WINDOW_TOKENS;
+pub use spawn::ResolvedStage;
 mod transition_choice;
+#[cfg(test)]
+pub(crate) use transition_choice::build_transition_prompt;
+#[cfg(test)]
+pub(crate) use transition_choice::match_transition_choice;
 pub(crate) use transition_choice::{
     AwaitingTransitionResponse, TransitionResults, collect_transition_choice,
     dispatch_transition_choice,
 };
-#[cfg(test)]
-pub(crate) use transition_choice::{build_transition_prompt, match_transition_choice};
 mod tool_stages;
 pub(crate) use tool_stages::{
     poll_dynamic_tool_refresh, refresh_advertised_tools, rescan_before_dispatch, sync_tool_stages,
@@ -89,6 +91,8 @@ mod messaging;
 pub(crate) use messaging::{MessageIntake, deliver_messages};
 mod journal_health;
 pub(crate) use journal_health::{PersistLaneHealth, fail_runs_with_unwritable_journals};
+pub(crate) mod journal;
+pub(crate) use journal::{JournalInbox, JournalSender, RunBlobs, RunJournals};
 mod persist;
 pub use persist::PersistWatermark;
 #[cfg(test)]
@@ -102,23 +106,30 @@ mod compaction;
 pub(crate) use compaction::{
     AwaitingCompaction, CompactionResults, PendingEdgeCompact, apply_edge_transform,
     collect_compaction, compaction_request, dispatch_compaction, dispatch_edge_compact,
+    spawn_summary_job,
 };
 pub use compaction::{CompactionSettings, is_stage_specific};
 mod tool_results;
-pub(crate) use tool_results::{
-    ToolResults, apply_one_tool_result, apply_tool_results, collect_tools,
-};
+pub(crate) use tool_results::{ToolResults, apply_one_tool_result, collect_tools};
 #[cfg(test)]
 pub(crate) use tool_results::{
-    annotate_path_errors, apply_file_tracking, stage_modifying_tools, truncate_file,
+    annotate_path_errors, apply_file_tracking, apply_tool_results, stage_modifying_tools,
+    truncate_file,
 };
 mod gate;
 pub(crate) use gate::taint_block_message;
 pub use gate::{GateScriptRules, PolicyGate, ToolSensitivities};
+pub(crate) mod lane_batch;
+pub(crate) use lane_batch::{dispatch_lane_batches, settle_write_ledgers};
+pub(crate) mod tool_verdicts;
+pub use crate::approval_prompt::{declined_result, unanswered_approval_result};
+pub use tool_verdicts::{DecideCtx, DecidedCall, Decision, ToolGrants, ToolVerdict, WriteLedger};
+mod batch_record;
 mod tools;
 pub(crate) use tools::{
-    AwaitingTools, ContextToolResults, RecoveredResults, ToolServiceRes, ToolStage,
-    ToolsNeedRefresh, call_had_no_effect, dispatch_tools, merge_in_call_order, one_line,
+    AwaitingTools, ContextToolResults, LandedResults, RecoveredResults, ResumedExecutions,
+    ToolServiceRes, ToolStage, ToolsNeedRefresh, call_had_no_effect, dispatch_tools,
+    merge_in_call_order, one_line,
 };
 pub use tools::{DynamicTools, RescanBeforeDispatch, ToolProgress, ToolService, noop_progress};
 #[cfg(test)]
@@ -152,10 +163,11 @@ pub(crate) use inference::{
     InFlightWork, abort_terminal_work, dispatch_inference, retry_policy_for, track_in_flight,
 };
 mod resolve;
+pub(crate) use resolve::resolve_stage_route;
 pub use resolve::{
     HeadSource, ModelDefaults, ToolCatalog, ToolOwners, bare_user_model, expand_connector_grants,
-    filter_tools_for_stage, head_source, is_unread_catalog_refusal, model_key, providers_tried,
-    resolve_stage_model, resolve_stages, tool_source,
+    filter_tools_for_stage, is_unread_catalog_refusal, model_key, providers_tried,
+    resolve_stage_model, tool_source,
 };
 mod stall;
 pub use stall::{DEFAULT_STALL_TIMEOUT_SECS, PausedForSetup, StallTimeout};
@@ -164,10 +176,8 @@ pub(crate) use stall::{
     note_stall,
 };
 mod wedge;
-#[cfg(test)]
-pub(crate) use wedge::Wedged;
-pub(crate) use wedge::fail_wedged_runs;
 pub use wedge::{DEFAULT_WEDGE_TIMEOUT_SECS, WedgeTimeout};
+pub(crate) use wedge::{Wedged, fail_wedged_runs};
 mod circuit;
 pub(crate) use circuit::rotate_open_circuits;
 pub use circuit::{
@@ -196,6 +206,19 @@ pub struct ReadyToInfer;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AwaitingInference;
 
+/// A new run, placed in its entry stage, whose `on_stage_enter` hook has not
+/// run yet.
+///
+/// No transition enters the entry stage, so it never carries
+/// [`StageJustEntered`]; this stands in for it for the hook alone. It is
+/// placed instead of [`ReadyToInfer`], and the hook system swaps it for
+/// `ReadyToInfer` once the hook has run, so the stage's first request is built
+/// from what the hook wrote. The other stage-entry systems do not see it: the
+/// spawn already seeded the window and told the tool service which stage the
+/// run is in.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct EnteringEntryStage;
+
 /// Transient tag: the agent just entered a stage (index + name). The
 /// [`sync_tool_stages`] system reads it to notify the [`ToolService`] of the
 /// stage change, then removes it. Carries the data so the tool service need not
@@ -213,7 +236,7 @@ pub(crate) struct StageJustEntered {
 /// Resolved inference parameters for the agent's current stage, set when it
 /// enters that stage. Pure data - the dispatch system reads it to build the
 /// request.
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, Default)]
 pub struct StageInference {
     /// Registered provider to call.
     pub provider_name: String,
@@ -226,7 +249,7 @@ pub struct StageInference {
     /// Providers to fail over to, best first, when the current one turns out
     /// to be unusable. Consumed from the front by `collect_inference`, so an
     /// exhausted list means "nowhere left to go".
-    pub fallbacks: Vec<leviath_core::blueprint::ModelEntry>,
+    pub fallbacks: Vec<crate::spec::names::ModelRef>,
     /// The output shape resolved for this stage, carried alongside the tools it
     /// was already folded into. Dispatch reads it to know which format label to
     /// record and, when the author supplied a schema, what to validate against.

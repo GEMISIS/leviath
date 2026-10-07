@@ -69,7 +69,7 @@ impl Dashboard {
                 Line::from(name),
                 Line::from(Span::styled(problem, Style::default().fg(C_WARN))),
                 Line::from(Span::styled(
-                    "The directory and the manifest's name change; its arrangement comes along.",
+                    "The directory and the name in its agent.toml change; its arrangement comes along.",
                     Style::default().fg(C_MUTED),
                 )),
             ]),

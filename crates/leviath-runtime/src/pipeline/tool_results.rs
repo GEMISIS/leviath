@@ -121,15 +121,15 @@ fn region_hint(window: &ContextWindow, path: &str) -> Option<String> {
 /// truncation) and, when a per-tool sensitivity is provided, tagging the result
 /// with that taint level. Tool results MUST be added (Anthropic requires a
 /// `tool_result` for every `tool_use`), so an over-budget region truncates or
-/// falls back to a placeholder rather than dropping. Ported from the core of
-/// `AgentEngine::loop_apply_tool_results` (repetition + message draining are
-/// separate systems).
+/// falls back to a placeholder rather than dropping. Repetition and message
+/// draining are separate systems.
+#[cfg(test)]
 pub(crate) fn apply_tool_results(
     window: &mut ContextWindow,
     response_content: &str,
     tool_calls: &[crate::components::ToolCall],
     tool_results: &[crate::tool_bridge::ToolResult],
-    routing: Option<&leviath_core::blueprint::ToolResultRouting>,
+    routing: Option<&crate::spec::graph::ToolRoutingDef>,
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
     reasoning: Option<String>,
 ) {
@@ -160,21 +160,21 @@ pub(crate) struct Reply<'a> {
     /// The stage this reply came from, when its `output_routing` should send
     /// some produced parts to regions of their own. `None` keeps every part
     /// in the conversation.
-    pub(crate) stage: Option<&'a leviath_core::blueprint::Stage>,
+    pub(crate) stage: Option<&'a crate::spec::graph::StageDef>,
     /// Where text over `[mime] inline_text_bytes` is stored, for the reply
     /// and for each tool result. `None` keeps every text inline: the restore
     /// path replays a batch with no store at hand.
     pub(crate) sink: Option<&'a crate::context_setup::PartSink<'a>>,
 }
 
-/// [`apply_tool_results`] for a reply that produced mime beside its tool
+/// Land a batch's results for a reply that produced mime beside its tool
 /// calls: the parts ride the assistant turn ahead of the tool results.
 pub(crate) fn apply_tool_results_with_parts(
     window: &mut ContextWindow,
     reply: Reply<'_>,
     tool_calls: &[crate::components::ToolCall],
     tool_results: &[crate::tool_bridge::ToolResult],
-    routing: Option<&leviath_core::blueprint::ToolResultRouting>,
+    routing: Option<&crate::spec::graph::ToolRoutingDef>,
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
     reasoning: Option<String>,
 ) {
@@ -229,7 +229,7 @@ pub(crate) fn apply_tool_results_with_parts(
 /// Land one tool result: cap it, route it, and leave the pointer that says where
 /// it went.
 ///
-/// Split out of [`apply_tool_results`] because a fan-out started from a tool call
+/// Split out of the batch's own landing because a fan-out started from a tool call
 /// parks its parent and delivers its result long after the rest of the batch has
 /// landed. That result has to be stored exactly as any other - same caps, same
 /// routing, same pointer - and a second copy of this logic would not have stayed
@@ -239,7 +239,7 @@ pub(crate) fn apply_one_tool_result(
     tool_name: &str,
     tool_call_id: &str,
     result: leviath_core::region::EntryContent,
-    routing: Option<&leviath_core::blueprint::ToolResultRouting>,
+    routing: Option<&crate::spec::graph::ToolRoutingDef>,
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
     sink: Option<&crate::context_setup::PartSink<'_>>,
 ) {
@@ -256,15 +256,16 @@ pub(crate) fn apply_one_tool_result(
 
     // The tool's own ceiling when it has one, else the stage's.
     let tool_cap = routing.and_then(|r| {
-        // Both sides canonicalized, exactly as `tool_overrides` below: the
+        // Both sides canonicalized, exactly as `tool_regions` below: the
         // author writes `bash`, the model calls `shell`, and a literal
         // comparison would silently miss in either direction.
         let canon = leviath_tools::canonical_tool_name(&tool_name);
         r.tool_max_result_tokens
             .iter()
-            .find(|(k, _)| leviath_tools::canonical_tool_name(k) == canon)
+            .find(|(k, _)| leviath_tools::canonical_tool_name(k.as_str()) == canon)
             .map(|(_, v)| *v)
             .or(r.max_result_tokens)
+            .map(|n| n as usize)
     });
     if let Some(max_tokens) = tool_cap {
         let max_chars = max_tokens * 4;
@@ -290,9 +291,9 @@ pub(crate) fn apply_one_tool_result(
             // routes the `shell` tool (bash is an alias - the model calls the
             // canonical `shell`, so a literal-key lookup would silently miss).
             let canon = leviath_tools::canonical_tool_name(&tool_name);
-            r.tool_overrides
+            r.tool_regions
                 .iter()
-                .find(|(k, _)| leviath_tools::canonical_tool_name(k) == canon)
+                .find(|(k, _)| leviath_tools::canonical_tool_name(k.as_str()) == canon)
                 .map(|(_, v)| v.as_str())
                 .unwrap_or(r.default_region.as_str())
         }
@@ -489,7 +490,7 @@ pub(crate) fn truncate_file(content: String, max_tokens: Option<usize>) -> Strin
 }
 
 /// File tracking: for each `read_file`/`write_file` result (per the stage's
-/// [`FileTrackingConfig`](leviath_core::blueprint::FileTrackingConfig)), upsert
+/// [`FileTrackingDef`](crate::spec::graph::FileTrackingDef)), upsert
 /// the file body into the configured HashMap region (keyed by path, so re-reads
 /// de-dup) and replace the inline tool result with a short reference - keeping
 /// large file bodies out of the rolling conversation. No-op unless the region
@@ -497,12 +498,12 @@ pub(crate) fn truncate_file(content: String, max_tokens: Option<usize>) -> Strin
 /// its `content` argument (no re-read needed in the ECS).
 pub(crate) fn apply_file_tracking(
     window: &mut ContextWindow,
-    ft: &leviath_core::blueprint::FileTrackingConfig,
+    ft: &crate::spec::graph::FileTrackingDef,
     tool_calls: &[crate::components::ToolCall],
     merged: &mut [crate::tool_bridge::ToolResult],
 ) {
     let is_hashmap = window
-        .get_region(&ft.region)
+        .get_region(ft.region.as_str())
         .is_some_and(|r| matches!(r.kind, leviath_core::RegionKind::HashMap { .. }));
     if !is_hashmap {
         return;
@@ -526,7 +527,7 @@ pub(crate) fn apply_file_tracking(
                 let prior = appended
                     .then(|| {
                         window
-                            .get_region(&ft.region)
+                            .get_region(ft.region.as_str())
                             .and_then(|region| region.get_by_key(path))
                     })
                     .flatten()
@@ -536,11 +537,11 @@ pub(crate) fn apply_file_tracking(
             }
             _ => continue,
         };
-        let body = truncate_file(body, ft.max_file_tokens);
+        let body = truncate_file(body, ft.max_file_tokens.map(|n| n as usize));
         let tokens = leviath_core::estimate_tokens(&body);
-        let before = window.begin_change(&ft.region);
+        let before = window.begin_change(ft.region.as_str());
         window
-            .get_region_mut(&ft.region)
+            .get_region_mut(ft.region.as_str())
             .expect("region presence checked above")
             .upsert_by_key(path, body, tokens)
             .ok();
@@ -558,31 +559,29 @@ pub(crate) fn apply_file_tracking(
 }
 
 /// The tool names that count as a file modification for the agent's current
-/// stage: the built-in [`MODIFYING_TOOLS`](leviath_core::blueprint::MODIFYING_TOOLS)
+/// stage: the built-in [`MODIFYING_TOOLS`](crate::spec::graph::MODIFYING_TOOLS)
 /// plus any extra names declared by that stage's outgoing transition gates (for
 /// agents whose writes go through MCP or script tools). All canonical, so a
 /// `bash`-style alias in a gate's `tools` list still matches its real tool.
 pub(crate) fn stage_modifying_tools(
-    blueprint: Option<&AgentBlueprint>,
+    spec: Option<&crate::insert::RunSpecC>,
     cursor: Option<&StageCursor>,
 ) -> Vec<String> {
-    let mut names: Vec<String> = leviath_core::blueprint::MODIFYING_TOOLS
+    let mut names: Vec<String> = crate::spec::graph::MODIFYING_TOOLS
         .iter()
         .map(|t| (*t).to_string())
         .collect();
-    let (Some(bp), Some(cursor)) = (blueprint, cursor) else {
+    let (Some(spec), Some(cursor)) = (spec, cursor) else {
         return names;
     };
-    let Some(stage) = bp.0.stages.get(cursor.index) else {
+    let graph = &spec.0.graph;
+    let Some(stage) = graph.stages.get(cursor.index) else {
         return names;
     };
-    let Some(transitions) = &stage.transitions else {
-        return names;
-    };
-    for edge in transitions.values() {
+    for edge in graph.edges_from(stage.name.as_str()) {
         let Some(gate) = &edge.gate else { continue };
         for tool in &gate.tools {
-            let canonical = leviath_tools::canonical_tool_name(tool).to_string();
+            let canonical = leviath_tools::canonical_tool_name(tool.as_str()).to_string();
             if !names.contains(&canonical) {
                 names.push(canonical);
             }
@@ -805,7 +804,7 @@ type ToolQuery = (
     Option<&'static ContextToolResults>,
     Option<&'static StageCursor>,
     Option<&'static mut StageIoBuffer>,
-    Option<&'static AgentBlueprint>,
+    Option<&'static crate::insert::RunSpecC>,
     Option<&'static mut crate::repetition::RepetitionDetector>,
     Option<&'static mut StageProgress>,
     Option<&'static mut crate::persistence::RunOutcomeFlags>,
@@ -953,9 +952,10 @@ pub(crate) fn collect_tools(
         annotate_path_errors(&window, &infer.tool_calls, &mut merged);
         // File tracking: sync read/write results into the configured HashMap
         // region and replace the inline result with a reference (de-dup context).
-        if let Some(ft) = blueprint.and_then(|bp| bp.0.file_tracking.as_ref()) {
+        if let Some(ft) = blueprint.and_then(|spec| spec.0.graph.file_tracking.as_ref()) {
             apply_file_tracking(&mut window, ft, &infer.tool_calls, &mut merged);
         }
+
         // Buffer one readable `[tool] name: result` line per call for the stage's
         // logs (merged is in call order, so it zips with the calls by index).
         if let Some(mut buffer) = buffer {
@@ -1011,6 +1011,7 @@ pub(crate) fn collect_tools(
             .remove::<AwaitingTools>()
             .remove::<ContextToolResults>()
             .remove::<super::tools::RecoveredResults>()
+            .remove::<super::tools::LandedResults>()
             .remove::<InFlightWork>()
             .insert(ReadyToInfer);
     }

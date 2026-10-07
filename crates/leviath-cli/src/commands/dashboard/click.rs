@@ -218,21 +218,26 @@ mod tests {
 
     /// Where the long-form editor's `B` button landed in the drawn frame.
     ///
-    /// Found in the buffer rather than computed from the layout, so the test
-    /// clicks the cell a person would click and not the cell the test thinks
-    /// the renderer should have used. The row reads `" B  i  S  U "`, so a `B`
-    /// with an `i` three columns later is the toolbar and nothing else is.
+    /// The editor's own record of the frame says which cells are the button
+    /// (what a press is matched against), and the drawn buffer must show the
+    /// `B` there, so the test clicks the cell a person would click. Scanning
+    /// the whole screen for a `B` instead would take any text above the box
+    /// that happens to read like the toolbar.
     fn find_bold_button(dash: &mut Dashboard, width: u16, height: u16) -> (u16, u16) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| dash.draw(f)).unwrap();
         let buf = terminal.backend().buffer().clone();
-        let at = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string());
-        (0..height)
-            .flat_map(|y| (0..width.saturating_sub(3)).map(move |x| (x, y)))
-            .find(|&(x, y)| {
-                at(x, y).as_deref() == Some("B") && at(x + 3, y).as_deref() == Some("i")
-            })
-            .expect("a formatting toolbar was drawn")
+        let editor = match dash.new_run_screen {
+            true => &dash.new_run_task,
+            false => &dash.input_textarea,
+        };
+        let button = editor
+            .button(crate::tui::widgets::markdown_edit::MdAction::Bold)
+            .expect("a formatting toolbar was drawn");
+        let x = (button.x..button.x + button.width)
+            .find(|&x| buf.cell((x, button.y)).is_some_and(|c| c.symbol() == "B"))
+            .expect("the bold button shows its B");
+        (x, button.y)
     }
 
     /// The cell holding `glyph`. Scanned cell by cell rather than by searching

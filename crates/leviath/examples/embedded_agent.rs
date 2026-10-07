@@ -12,30 +12,45 @@
 
 use leviath::prelude::*;
 
-/// A self-contained blueprint: explore the workdir, ask one clarifying
-/// question if needed, and report. No manifest file required.
-const BLUEPRINT: &str = r#"[agent]
+/// A self-contained blueprint in the `agent.toml` format: explore the
+/// workdir, ask one clarifying question if needed, and report. Its one
+/// declared input, `task`, lands in the `task` region.
+const BLUEPRINT: &str = r#"[blueprint]
 name = "explorer"
 version = "0.1.0"
 description = "Looks around the working directory and reports what it finds."
-entry_stage = "explore"
 
-[stages.explore]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+[graph]
+entry = "explore"
+
+[[graph.stages]]
+name = "explore"
 description = "Explore and summarize"
-available_tools = ["read_file", "list_dir", "ask_user_text"]
-allow_complete = true
 system_prompt = """
 Look at the files in the working directory and produce a short summary of
 what this project is. Use list_dir and read_file. If something important is
 ambiguous, ask the user one question with ask_user_text. Finish with a
-plain-text summary.
-"""
+plain-text summary."""
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+tools = ["read_file", "list_dir", "ask_user_text"]
 
-[context.regions]
-task = { kind = "pinned", max_tokens = 2000, seed = "task_input" }
-conversation = { kind = "sliding_window", max_items = 60, max_tokens = 60000 }
+[graph.layout]
+total_budget_tokens = 62000
+
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = 2000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 60 }
+budget = 60000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
 "#;
 
 #[tokio::main]
@@ -55,14 +70,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         })
         .build()?;
 
+    // The graph goes in the request whole; the task is its typed input. A
+    // request that cannot run comes back with every problem at once, each
+    // naming the place in the request it is about.
+    let graph = leviath::blueprint::BlueprintFile::parse(BLUEPRINT)?.run_graph();
+    let mut request = SpawnRequest::new(SpawnSource::Raw(Box::new(graph))).input(
+        "task",
+        RawInput::Text("Tell me what this project is.".into()),
+    );
+    request.workdir = Some(std::env::current_dir()?);
+
     let mut events = world.events();
-    let run = world
-        .spawn(SpawnSpec::new(
-            BlueprintSource::Toml(BLUEPRINT.to_string()),
-            "Tell me what this project is.",
-            std::env::current_dir()?,
-        ))
-        .await?;
+    let run = world.spawn(request).await?;
     println!("spawned {run}");
 
     while let Some(event) = events.next().await {

@@ -22,19 +22,30 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 
 use crate::components::AgentStatus;
-use crate::host::{ControlOp, DaemonHealth, RunListEntry, SpawnArgs, WorldEvent};
+use crate::host::{ControlOp, DaemonHealth, RunListEntry};
+use crate::spec::issues::SpawnIssues;
+use crate::spec::request::SpawnRequest;
+use crate::spec::summary::SpawnSummary;
+use crate::state::RunState;
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 mod client;
-pub use client::{CodeMismatch, ControlClient, LinkStatus, RESTART_GRACE, WorldEventStream};
+pub use client::{
+    CodeMismatch, ControlClient, LinkStatus, RESTART_GRACE, StartupEvent, StartupWatch,
+    WorldEventStream,
+};
+mod startup;
+mod stream;
 #[cfg(test)]
 use client::{
     DEFAULT_CONTROL_TIMEOUT_SECS, SPAWN_CONTROL_TIMEOUT_SECS, is_transient, request_timeout,
     timeout_for,
 };
+pub use startup::{ControlGate, StartupBoard, StartupProgress};
+pub use stream::{EventCursor, EventLog, KEPT};
 
 #[cfg(unix)]
 mod unix;
@@ -231,11 +242,23 @@ pub enum ControlRequest {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         hello: bool,
     },
-    /// Spawn a new agent.
+    /// Start a run. The daemon mints its id.
     Spawn {
-        /// The spawn request. Boxed because it is much larger than the other
+        /// What to run. Boxed because it is much larger than the other
         /// variants' payloads.
-        args: Box<SpawnArgs>,
+        request: Box<SpawnRequest>,
+    },
+    /// Resolve a run without starting it: a dry run that answers with a
+    /// summary of the run, or every reason it would be refused.
+    ValidateSpawn {
+        /// What would run.
+        request: Box<SpawnRequest>,
+    },
+    /// Read a run's state: live while the daemon holds it, else the last
+    /// state its run file recorded.
+    Inspect {
+        /// The run to read.
+        run_id: String,
     },
     /// Query a run's status.
     Status {
@@ -286,9 +309,19 @@ pub enum ControlRequest {
     },
     /// Shut the daemon down.
     Shutdown,
-    /// Switch this connection to an event stream: the daemon writes newline-JSON
-    /// [`WorldEvent`]s until the client disconnects. No per-request reply.
+    /// Switch this connection to an event stream: the daemon answers
+    /// [`ControlResponse::Subscribed`], then writes newline-JSON
+    /// [`WorldEvent`](crate::host::WorldEvent)s, each numbered in a `seq` field, until the client
+    /// disconnects. Sent only what happens from then on.
     Subscribe,
+    /// [`Subscribe`](Self::Subscribe), picking up a stream that dropped:
+    /// sent first the kept events it missed (see [`EventLog`]).
+    Resubscribe {
+        /// The session the dropped stream was reading.
+        session: String,
+        /// The number of the last event it was sent.
+        after: u64,
+    },
 }
 
 impl ControlRequest {
@@ -306,9 +339,12 @@ impl ControlRequest {
             self,
             Self::Authenticate { .. }
                 | Self::Status { .. }
+                | Self::ValidateSpawn { .. }
+                | Self::Inspect { .. }
                 | Self::List
                 | Self::ListInteractions
                 | Self::Subscribe
+                | Self::Resubscribe { .. }
         )
     }
 }
@@ -321,6 +357,26 @@ pub enum ControlResponse {
     Spawned {
         /// The new run's id.
         run_id: String,
+        /// What may keep the run from ever finishing. The run started
+        /// anyway; a caller shows these loudly.
+        #[serde(default, skip_serializing_if = "SpawnIssues::is_empty")]
+        warnings: SpawnIssues,
+    },
+    /// A spawn or a dry run was refused: every problem with the request, each
+    /// with its path and how to fix it.
+    Rejected {
+        /// The problems.
+        issues: SpawnIssues,
+    },
+    /// A dry run found nothing wrong: what the run would be.
+    Valid {
+        /// The run, in brief.
+        summary: Box<SpawnSummary>,
+    },
+    /// A run's state.
+    State {
+        /// The state. Boxed: it holds the run's whole context.
+        state: Box<RunState>,
     },
     /// A run's status (or `None` if there is no such run).
     Status {
@@ -370,6 +426,20 @@ pub enum ControlResponse {
     Welcome {
         /// The daemon's identity.
         daemon: DaemonIdentity,
+    },
+    /// The daemon is still starting and did nothing with the request: what
+    /// it is doing, and how far along. Ask again in a moment.
+    Starting {
+        /// The start-up step under way.
+        progress: StartupProgress,
+    },
+    /// The first line of an event stream: the daemon session its events are
+    /// numbered in, and the number it starts after.
+    Subscribed {
+        /// The daemon session.
+        session: String,
+        /// The stream's first event is numbered after this.
+        after: u64,
     },
 }
 
@@ -500,14 +570,43 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
         // Handled by `handle_connection` before dispatch is ever reached: it is
         // about the connection, not about the world.
         ControlRequest::Authenticate { .. } => ControlResponse::Ok { ok: true },
-        ControlRequest::Spawn { args } => {
+        ControlRequest::Spawn { request } => {
             let (reply, rx) = oneshot::channel();
-            let _ = op_tx.send(ControlOp::Spawn { args, reply });
+            let _ = op_tx.send(ControlOp::Spawn { request, reply });
             match rx.await {
-                Ok(Ok(run_id)) => ControlResponse::Spawned { run_id },
-                Ok(Err(message)) => ControlResponse::Error { message },
+                Ok(Ok(spawned)) => ControlResponse::Spawned {
+                    run_id: spawned.run_id.to_string(),
+                    warnings: spawned.warnings,
+                },
+                Ok(Err(issues)) => ControlResponse::Rejected { issues },
                 Err(_) => ControlResponse::Error {
                     message: SHUTTING_DOWN.to_string(),
+                },
+            }
+        }
+        ControlRequest::ValidateSpawn { request } => {
+            let (reply, rx) = oneshot::channel();
+            let _ = op_tx.send(ControlOp::ValidateSpawn { request, reply });
+            match rx.await {
+                Ok(Ok(summary)) => ControlResponse::Valid {
+                    summary: Box::new(summary),
+                },
+                Ok(Err(issues)) => ControlResponse::Rejected { issues },
+                Err(_) => ControlResponse::Error {
+                    message: SHUTTING_DOWN.to_string(),
+                },
+            }
+        }
+        ControlRequest::Inspect { run_id } => {
+            let (reply, rx) = oneshot::channel();
+            let _ = op_tx.send(ControlOp::Inspect {
+                run_id: run_id.clone(),
+                reply,
+            });
+            match rx.await.ok().flatten() {
+                Some(state) => ControlResponse::State { state },
+                None => ControlResponse::Error {
+                    message: format!("no run '{run_id}' is live or has a run file"),
                 },
             }
         }
@@ -528,9 +627,7 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
         ControlRequest::Resume { run_id } => {
             let (reply, rx) = oneshot::channel();
             let _ = op_tx.send(ControlOp::Resume { run_id, reply });
-            ControlResponse::Ok {
-                ok: rx.await.unwrap_or(false),
-            }
+            refusable(rx.await)
         }
         ControlRequest::Cancel { run_id } => {
             let (reply, rx) = oneshot::channel();
@@ -591,53 +688,11 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
                 ok: rx.await.unwrap_or(false),
             }
         }
-        // `Subscribe` is intercepted by `handle_connection` (it streams rather
-        // than replies once); reaching here would be a routing bug.
-        ControlRequest::Subscribe => ControlResponse::Error {
+        // A subscription is intercepted by `handle_connection` (it streams
+        // rather than replies once); reaching here would be a routing bug.
+        ControlRequest::Subscribe | ControlRequest::Resubscribe { .. } => ControlResponse::Error {
             message: "subscribe is a streaming request, not a single-reply op".to_string(),
         },
-    }
-}
-
-/// Stream [`WorldEvent`]s to a subscribed client until it disconnects or the
-/// broadcast channel closes. Lagged events are skipped.
-///
-/// The read half is watched alongside the writes: a subscriber that hangs up
-/// is otherwise only noticed when the *next* event's write fails, and an idle
-/// daemon may not produce one for hours - each such half-dead connection
-/// parked a task and a `broadcast::Receiver` here for the daemon's life
-/// (serve's polling loop re-subscribes every 500ms after a drop, and the ACP
-/// client subscribes once per prompt turn, so these accumulated fast).
-async fn stream_events<R, W>(
-    read: &mut tokio::io::Lines<BufReader<R>>,
-    write: &mut W,
-    mut rx: broadcast::Receiver<WorldEvent>,
-) -> std::io::Result<()>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    loop {
-        tokio::select! {
-            event = rx.recv() => match event {
-                Ok(event) => {
-                    let mut line = serde_json::to_string(&event).expect("WorldEvent serializes");
-                    line.push('\n');
-                    if write.write_all(line.as_bytes()).await.is_err() {
-                        return Ok(()); // client hung up
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => return Ok(()),
-            },
-            line = read.next_line() => match line {
-                // A subscriber has nothing left to say; any line it does send
-                // is ignored chatter, not a request.
-                Ok(Some(_)) => continue,
-                // EOF or a read error: the client is gone.
-                Ok(None) | Err(_) => return Ok(()),
-            },
-        }
     }
 }
 
@@ -653,16 +708,20 @@ where
 pub(crate) async fn handle_connection<S>(
     stream: S,
     op_tx: UnboundedSender<ControlOp>,
-    events: broadcast::Sender<WorldEvent>,
+    events: tokio::sync::broadcast::Sender<crate::host::WorldEvent>,
     token: Option<ControlToken>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Recorded from here, and the sender let go, so the stream ends once the
+    // test's own sender goes.
+    let log = EventLog::recording(&events);
+    drop(events);
     handle_connection_as(
         stream,
         op_tx,
-        events,
+        log,
         token,
         DaemonIdentity::this_process(DaemonIdentity::unknown_build()),
     )
@@ -675,14 +734,23 @@ where
 pub async fn handle_connection_as<S>(
     stream: S,
     op_tx: UnboundedSender<ControlOp>,
-    events: broadcast::Sender<WorldEvent>,
+    events: EventLog,
     token: Option<ControlToken>,
     identity: DaemonIdentity,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_capped(stream, op_tx, events, token, identity, MAX_REQUEST_BYTES).await
+    handle_connection_capped(
+        stream,
+        op_tx,
+        events,
+        token,
+        identity,
+        MAX_REQUEST_BYTES,
+        None,
+    )
+    .await
 }
 
 /// The reply to a successful `authenticate`: `Welcome` when the client asked
@@ -696,7 +764,9 @@ fn authenticated_reply(hello: bool, identity: &DaemonIdentity) -> ControlRespons
     }
 }
 
-/// [`handle_connection_as`] with the per-request cap injected.
+/// [`handle_connection_as`] with the per-request cap injected, answering
+/// every request but `authenticate` from `starting` while the daemon is
+/// still starting.
 ///
 /// The cap is a parameter purely so a test can cross it without pushing tens
 /// of MiB through a duplex - and crossing it is the only way to tell a
@@ -704,10 +774,11 @@ fn authenticated_reply(hello: bool, identity: &DaemonIdentity) -> ControlRespons
 async fn handle_connection_capped<S>(
     stream: S,
     op_tx: UnboundedSender<ControlOp>,
-    events: broadcast::Sender<WorldEvent>,
+    events: EventLog,
     token: Option<ControlToken>,
     identity: DaemonIdentity,
     max_request_bytes: u64,
+    starting: Option<&StartupBoard>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -798,22 +869,33 @@ where
             continue;
         }
 
-        let response = match serde_json::from_str::<ControlRequest>(&line) {
-            // Subscribe switches this connection to an event stream and never
-            // returns to the request loop. Drop this connection's sender clone
-            // after subscribing so the channel closes once the world's sender
-            // does (a clean end on daemon shutdown).
-            Ok(ControlRequest::Subscribe) => {
-                let rx = events.subscribe();
-                drop(events);
-                return stream_events(&mut lines, &mut write_half, rx).await;
-            }
+        let request = serde_json::from_str::<ControlRequest>(&line);
+        let response = match (request, starting) {
             // Already authenticated: a repeat is harmless, not an error. On a
             // tokenless daemon this is also the only way a client's `hello`
             // gets answered, since no handshake gate ran.
-            Ok(ControlRequest::Authenticate { hello, .. }) => authenticated_reply(hello, &identity),
-            Ok(req) => dispatch(req, &op_tx).await,
-            Err(e) => ControlResponse::Error {
+            (Ok(ControlRequest::Authenticate { hello, .. }), _) => {
+                authenticated_reply(hello, &identity)
+            }
+            // A subscription switches this connection to an event stream and
+            // never returns to the request loop. Taken while the daemon is
+            // still starting too: the log is there from the start, and its
+            // first events are the world's first.
+            (Ok(ControlRequest::Subscribe), _) => {
+                return stream::stream_events(&mut lines, &mut write_half, events, None).await;
+            }
+            (Ok(ControlRequest::Resubscribe { session, after }), _) => {
+                let from = EventCursor { session, after };
+                return stream::stream_events(&mut lines, &mut write_half, events, Some(from))
+                    .await;
+            }
+            // Still starting: nothing reaches the world yet, and the client
+            // asks again.
+            (Ok(_), Some(board)) => ControlResponse::Starting {
+                progress: board.current(),
+            },
+            (Ok(req), None) => dispatch(req, &op_tx).await,
+            (Err(e), _) => ControlResponse::Error {
                 message: format!("{INVALID_REQUEST}: {e}"),
             },
         };
@@ -959,7 +1041,8 @@ mod tests {
         assert!(!err.contains("no control token was found"), "{err}");
     }
     use super::*;
-    use tokio::sync::mpsc;
+    use crate::host::WorldEvent;
+    use tokio::sync::{broadcast, mpsc};
 
     /// An event sender with no live world behind it (tests that don't stream).
     fn no_events() -> broadcast::Sender<WorldEvent> {
@@ -984,12 +1067,51 @@ mod tests {
             iteration: 3,
             tool_calls: 7,
             last_progress_at: Some(1_000),
-            unattended: false,
-            yolo_profile: None,
+            unattended: leviath_core::Unattended::Off,
             empty_output: false,
             read_paths: None,
             has_final_output: false,
+            may_never_finish: Vec::new(),
         }
+    }
+
+    /// A request whose `task` input is `task`: the fake host's run id.
+    fn request(task: &str) -> SpawnRequest {
+        SpawnRequest::new(crate::spec::request::SpawnSource::Blueprint(
+            crate::spec::names::BlueprintRef::parse("x").unwrap(),
+        ))
+        .input(
+            "task",
+            crate::spec::inputs::RawInput::Text(task.to_string()),
+        )
+    }
+
+    /// The `task` a request carries: every request these tests send has one.
+    fn task_of(request: &SpawnRequest) -> String {
+        serde_json::to_value(&request.inputs["task"])
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// The fake host's refusal.
+    fn refused() -> SpawnIssues {
+        crate::spec::issues::SpawnIssue::new(
+            crate::spec::issues::SpecPath::root(),
+            crate::spec::issues::IssueCode::Invalid,
+            "bad blueprint",
+        )
+        .into()
+    }
+
+    /// The warning a run that can never finish starts with.
+    fn looping() -> SpawnIssues {
+        SpawnIssues(vec![crate::spec::issues::SpawnIssue::new(
+            crate::spec::issues::SpecPath::root().field("edges"),
+            crate::spec::issues::IssueCode::MayNeverFinish,
+            "this run can never finish",
+        )])
     }
 
     /// A fake host: drains ControlOps and replies with scripted values.
@@ -997,14 +1119,36 @@ mod tests {
         tokio::spawn(async move {
             while let Some(op) = rx.recv().await {
                 match op {
-                    ControlOp::Spawn { args, reply } => {
-                        // A sentinel run id makes the fake host fail the spawn.
-                        let result = if args.run_id == "FAIL" {
-                            Err("bad blueprint".to_string())
-                        } else {
-                            Ok(args.run_id)
+                    ControlOp::Spawn { request, reply } => {
+                        // A sentinel task makes the fake host refuse the spawn.
+                        // `loops` starts with a warning, as a run whose
+                        // graph cannot finish does.
+                        let result = match task_of(&request).as_str() {
+                            "FAIL" => Err(refused()),
+                            id => Ok(crate::spec::summary::Spawned {
+                                run_id: crate::spec::names::RunId::new(id).unwrap(),
+                                warnings: match id {
+                                    "loops" => looping(),
+                                    _ => SpawnIssues::default(),
+                                },
+                            }),
                         };
                         let _ = reply.send(result);
+                    }
+                    ControlOp::ValidateSpawn { request, reply } => {
+                        let result = match task_of(&request).as_str() {
+                            "FAIL" => Err(refused()),
+                            _ => Ok(SpawnSummary::of(&crate::spec::run_spec::tests::spec())),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    ControlOp::Inspect { run_id, reply } => {
+                        let state = (run_id != "ghost").then(|| {
+                            Box::new(crate::insert::initial_state(
+                                &crate::spec::run_spec::tests::spec(),
+                            ))
+                        });
+                        let _ = reply.send(state);
                     }
                     ControlOp::Status { reply, .. } => {
                         let _ = reply.send(Some(AgentStatus::Active));
@@ -1018,10 +1162,11 @@ mod tests {
                     ControlOp::Blob { reply, .. } => {
                         let _ = reply.send(None);
                     }
-                    ControlOp::Pause { reply, .. }
-                    | ControlOp::Resume { reply, .. }
-                    | ControlOp::Cancel { reply, .. } => {
+                    ControlOp::Pause { reply, .. } | ControlOp::Cancel { reply, .. } => {
                         let _ = reply.send(true);
+                    }
+                    ControlOp::Resume { reply, .. } => {
+                        let _ = reply.send(Ok(true));
                     }
                     ControlOp::Message { reply, .. }
                     | ControlOp::AnswerInteraction { reply, .. } => {
@@ -1105,10 +1250,11 @@ mod tests {
             handle_connection_capped(
                 stream,
                 op_tx,
-                no_events(),
+                EventLog::new(),
                 None,
                 DaemonIdentity::this_process("test"),
                 40,
+                None,
             )
             .await
         });
@@ -1180,10 +1326,11 @@ mod tests {
             handle_connection_capped(
                 stream,
                 op_tx,
-                no_events(),
+                EventLog::new(),
                 None,
                 DaemonIdentity::this_process("test"),
                 40,
+                None,
             )
             .await
         });
@@ -1249,10 +1396,11 @@ mod tests {
             handle_connection_capped(
                 stream,
                 op_tx,
-                no_events(),
+                EventLog::new(),
                 None,
                 DaemonIdentity::this_process("test"),
                 40,
+                None,
             )
             .await
         });
@@ -1372,51 +1520,87 @@ mod tests {
     #[tokio::test]
     async fn spawn_request_round_trips() {
         let resp = round_trip(&ControlRequest::Spawn {
-            args: Box::new(SpawnArgs {
-                run_id: "run-9".to_string(),
-                blueprint_path: "/agents/x".to_string(),
-                task: "do it".to_string(),
-                regions: Default::default(),
-                model: None,
-                workdir: "/w".to_string(),
-                metadata: Default::default(),
-                callback_url: None,
-                callback_secret: None,
-                yolo: false,
-                yolo_profile: None,
-                no_seed_commands: false,
-                allow: Vec::new(),
-                max_depth: None,
-                parent_run_id: None,
-                worker_stage: None,
-                output: None,
-                parts: Vec::new(),
-                capture_model_input: true,
-            }),
+            request: Box::new(request("run-9")),
         })
         .await;
         assert_eq!(
             resp,
             ControlResponse::Spawned {
-                run_id: "run-9".to_string()
+                run_id: "run-9".to_string(),
+                warnings: SpawnIssues::default(),
             }
         );
     }
 
+    /// A run that started with warnings carries them back over the socket;
+    /// one with none leaves the field out of the wire form.
     #[tokio::test]
-    async fn spawn_error_from_host_becomes_error_response() {
+    async fn a_spawn_carries_its_warnings_back() {
         let resp = round_trip(&ControlRequest::Spawn {
-            args: Box::new(SpawnArgs {
-                run_id: "FAIL".to_string(),
-                ..Default::default()
-            }),
+            request: Box::new(request("loops")),
         })
         .await;
         assert_eq!(
-            std::mem::discriminant(&resp),
-            std::mem::discriminant(&ControlResponse::Error {
-                message: String::new()
-            })
+            resp,
+            ControlResponse::Spawned {
+                run_id: "loops".to_string(),
+                warnings: looping(),
+            }
+        );
+        let quiet = serde_json::to_value(ControlResponse::Spawned {
+            run_id: "r".to_string(),
+            warnings: SpawnIssues::default(),
+        })
+        .unwrap();
+        assert_eq!(
+            quiet,
+            serde_json::json!({"result": "spawned", "run_id": "r"})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_spawn_comes_back_with_its_issues() {
+        let resp = round_trip(&ControlRequest::Spawn {
+            request: Box::new(request("FAIL")),
+        })
+        .await;
+        assert_eq!(resp, ControlResponse::Rejected { issues: refused() });
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_comes_back_with_a_summary_or_the_issues() {
+        let resp = round_trip(&ControlRequest::ValidateSpawn {
+            request: Box::new(request("ok")),
+        })
+        .await;
+        assert_eq!(
+            resp,
+            ControlResponse::Valid {
+                summary: Box::new(SpawnSummary::of(&crate::spec::run_spec::tests::spec()))
+            }
+        );
+        let resp = round_trip(&ControlRequest::ValidateSpawn {
+            request: Box::new(request("FAIL")),
+        })
+        .await;
+        assert_eq!(resp, ControlResponse::Rejected { issues: refused() });
+    }
+
+    #[tokio::test]
+    async fn inspect_comes_back_with_the_state_or_says_there_is_none() {
+        let resp = round_trip(&ControlRequest::Inspect {
+            run_id: "t-1".to_string(),
+        })
+        .await;
+        let wire = serde_json::to_value(&resp).unwrap();
+        assert_eq!(wire["state"]["cursor"]["stage"], "plan", "{wire}");
+        let resp = round_trip(&ControlRequest::Inspect {
+            run_id: "ghost".to_string(),
+        })
+        .await;
+        assert!(
+            matches!(&resp, ControlResponse::Error { message } if message.contains("ghost")),
+            "{resp:?}"
         );
     }
 
@@ -1482,110 +1666,21 @@ mod tests {
     #[tokio::test]
     async fn dispatch_rejects_subscribe_as_a_single_reply_op() {
         let (op_tx, _rx) = mpsc::unbounded_channel();
-        let resp = dispatch(ControlRequest::Subscribe, &op_tx).await;
-        assert_eq!(
-            std::mem::discriminant(&resp),
-            std::mem::discriminant(&ControlResponse::Error {
-                message: String::new()
-            })
-        );
-    }
-
-    /// A quiet inbound half for driving `stream_events` directly: the returned
-    /// guard keeps the peer's write side open so `next_line` stays pending.
-    fn quiet_read_half() -> (
-        tokio::io::Lines<BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
-        tokio::io::WriteHalf<tokio::io::DuplexStream>,
-    ) {
-        let (client, server) = tokio::io::duplex(4096);
-        let (server_read, _server_write) = tokio::io::split(server);
-        let (_client_read, client_write) = tokio::io::split(client);
-        // Leak the unused halves' drop by returning the write guard only; the
-        // client read half closing is invisible to the server's reader.
-        std::mem::forget(_server_write);
-        std::mem::forget(_client_read);
-        (BufReader::new(server_read).lines(), client_write)
-    }
-
-    #[tokio::test]
-    async fn stream_events_skips_lagged_writes_ok_and_stops_on_closed() {
-        use tokio::io::AsyncReadExt;
-        let (tx, rx) = broadcast::channel::<WorldEvent>(1);
-        // Overflow the 1-slot buffer so the receiver lags, then leave one to read.
-        tx.send(completed("first")).unwrap();
-        tx.send(completed("second")).unwrap();
-        tx.send(completed("third")).unwrap();
-        drop(tx); // no more senders → Closed once drained
-
-        let (mut lines, _keep_open) = quiet_read_half();
-        let (mut w, mut r) = tokio::io::duplex(4096);
-        let server = tokio::spawn(async move { stream_events(&mut lines, &mut w, rx).await });
-        let mut buf = String::new();
-        r.read_to_string(&mut buf).await.unwrap();
-        server.await.unwrap().unwrap();
-        // The lagged-past earliest events were skipped; the latest was written.
-        assert!(buf.contains("third"));
-        assert!(!buf.contains("first"));
-    }
-
-    #[tokio::test]
-    async fn stream_events_returns_when_the_client_hangs_up() {
-        let (tx, rx) = broadcast::channel::<WorldEvent>(4);
-        tx.send(completed("x")).unwrap();
-        let (mut lines, _keep_open) = quiet_read_half();
-        let (mut w, r) = tokio::io::duplex(64);
-        drop(r); // reader gone → the write fails, ending the stream
-        stream_events(&mut lines, &mut w, rx).await.unwrap();
-        drop(tx);
-    }
-
-    /// A subscriber that closes its half of the connection ends the stream
-    /// even when no event ever arrives. Waiting for the next write to fail
-    /// instead keeps the daemon-side task, and its broadcast receiver, alive
-    /// for ever on an idle daemon.
-    #[tokio::test]
-    async fn stream_events_returns_on_client_eof_without_any_event() {
-        let (tx, rx) = broadcast::channel::<WorldEvent>(4);
-        let (client, server) = tokio::io::duplex(4096);
-        let (server_read, _server_write) = tokio::io::split(server);
-        let mut lines = BufReader::new(server_read).lines();
-        drop(client); // EOF on the read half, nothing was ever sent
-
-        let (mut w, _r) = tokio::io::duplex(4096);
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            stream_events(&mut lines, &mut w, rx),
-        )
-        .await
-        .expect("EOF must end the stream promptly")
-        .unwrap();
-        drop(tx);
-    }
-
-    /// A line the subscriber sends mid-stream is chatter, not a request: the
-    /// stream keeps delivering events after it.
-    #[tokio::test]
-    async fn stream_events_ignores_subscriber_chatter() {
-        use tokio::io::AsyncReadExt;
-        let (tx, rx) = broadcast::channel::<WorldEvent>(4);
-        let (client, server) = tokio::io::duplex(4096);
-        let (server_read, _server_write) = tokio::io::split(server);
-        let (_client_read, mut client_write) = tokio::io::split(client);
-        std::mem::forget(_server_write);
-        std::mem::forget(_client_read);
-        let mut lines = BufReader::new(server_read).lines();
-
-        client_write.write_all(b"hello?\n").await.unwrap();
-        let (mut w, mut r) = tokio::io::duplex(4096);
-        let server = tokio::spawn(async move { stream_events(&mut lines, &mut w, rx).await });
-        // Give the chatter a chance to be read, then deliver a real event.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        tx.send(completed("after-chatter")).unwrap();
-        drop(tx);
-        let mut buf = String::new();
-        r.read_to_string(&mut buf).await.unwrap();
-        server.await.unwrap().unwrap();
-        assert!(buf.contains("after-chatter"));
+        for request in [
+            ControlRequest::Subscribe,
+            ControlRequest::Resubscribe {
+                session: "s".to_string(),
+                after: 1,
+            },
+        ] {
+            let resp = dispatch(request, &op_tx).await;
+            assert_eq!(
+                std::mem::discriminant(&resp),
+                std::mem::discriminant(&ControlResponse::Error {
+                    message: String::new()
+                })
+            );
+        }
     }
 
     /// `create` reports rather than panicking when its directory cannot be
@@ -2121,17 +2216,12 @@ mod tests {
         });
         let client = ControlClient::new(id);
 
-        let spawned = client
-            .spawn(SpawnArgs {
-                run_id: "r-c".to_string(),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+        let spawned = client.spawn(request("r-c")).await.unwrap();
         assert_eq!(
             spawned,
             ControlResponse::Spawned {
-                run_id: "r-c".to_string()
+                run_id: "r-c".to_string(),
+                warnings: SpawnIssues::default(),
             }
         );
 
@@ -2289,7 +2379,7 @@ mod tests {
     #[test]
     fn spawn_gets_a_longer_deadline_than_other_ops() {
         let spawn = ControlRequest::Spawn {
-            args: Box::new(SpawnArgs::default()),
+            request: Box::new(request("r")),
         };
         let cancel = ControlRequest::Cancel {
             run_id: "r".to_string(),
@@ -2392,7 +2482,7 @@ mod tests {
             std::mem::discriminant(
                 &dispatch(
                     ControlRequest::Spawn {
-                        args: Box::new(SpawnArgs::default())
+                        request: Box::new(request("r"))
                     },
                     &op_tx
                 )
@@ -2429,7 +2519,7 @@ mod tests {
             for _ in 0..connections {
                 let stream = listener.accept().await.unwrap().unwrap();
                 let op_tx = op_tx.clone();
-                let events = server_events.clone();
+                let events = EventLog::recording(&server_events);
                 let token = token.clone();
                 let identity = identity.clone();
                 served.push(tokio::spawn(async move {
@@ -2597,7 +2687,7 @@ mod tests {
         ];
         let mutating = [
             ControlRequest::Spawn {
-                args: Box::new(SpawnArgs::default()),
+                request: Box::new(request("r")),
             },
             ControlRequest::Pause { run_id: run() },
             ControlRequest::Resume { run_id: run() },
@@ -2859,7 +2949,7 @@ mod tests {
         });
         let started = std::time::Instant::now();
         let err = client
-            .spawn(SpawnArgs::default())
+            .spawn(request("r"))
             .await
             .expect_err("a spawn that got no reply is reported, not repeated");
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
@@ -2889,7 +2979,7 @@ mod tests {
             let _ = handle_connection_as(
                 stream,
                 op_tx,
-                no_events(),
+                EventLog::new(),
                 Some(draining_token),
                 same_code(1),
             )
@@ -2904,18 +2994,15 @@ mod tests {
             let (_events, server) = identified_daemon(listener, token, same_code(2), 1);
             server.await.unwrap();
         });
-        let args = SpawnArgs {
-            run_id: "run-x".to_string(),
-            ..Default::default()
-        };
         let response = client
-            .spawn(args)
+            .spawn(request("run-x"))
             .await
             .expect("spawned by the replacement");
         assert_eq!(
             response,
             ControlResponse::Spawned {
-                run_id: "run-x".to_string()
+                run_id: "run-x".to_string(),
+                warnings: SpawnIssues::default(),
             }
         );
         late.await.unwrap();
@@ -2934,11 +3021,40 @@ mod tests {
             drop(op_rx);
             let _ = handle_connection(stream, op_tx, no_events(), Some(token)).await;
         });
-        let response = client.spawn(SpawnArgs::default()).await.unwrap();
+        let response = client.spawn(request("r")).await.unwrap();
         assert_eq!(
             response,
             ControlResponse::Error {
                 message: SHUTTING_DOWN.to_string()
+            }
+        );
+        draining.await.unwrap();
+    }
+
+    /// A check asked of a daemon that is going away says so, as a spawn
+    /// does; an inspect finds no run there.
+    #[tokio::test]
+    async fn a_check_and_an_inspect_say_the_daemon_is_shutting_down() {
+        let (mut listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+        let client =
+            ControlClient::for_home(id, dir.path()).with_reconnect_grace(std::time::Duration::ZERO);
+        let draining = tokio::spawn(async move {
+            for _ in 0..2 {
+                let stream = listener.accept().await.unwrap().unwrap();
+                let (op_tx, op_rx) = mpsc::unbounded_channel();
+                drop(op_rx);
+                let _ = handle_connection(stream, op_tx, no_events(), Some(token.clone())).await;
+            }
+        });
+        let shutting = ControlResponse::Error {
+            message: SHUTTING_DOWN.to_string(),
+        };
+        assert_eq!(client.validate_spawn(request("r")).await.unwrap(), shutting);
+        assert_eq!(
+            client.inspect("r").await.unwrap(),
+            ControlResponse::Error {
+                message: "no run 'r' is live or has a run file".to_string()
             }
         );
         draining.await.unwrap();

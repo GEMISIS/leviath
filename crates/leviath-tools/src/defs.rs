@@ -12,7 +12,17 @@ pub const SUBAGENT_TOOLS: &[&str] = &[
     "wait_for_agent",
     "send_to_agent",
     "kill_agent",
+    "spawn_schema",
+    "describe_blueprint",
+    "validate_spawn",
+    "run_history",
 ];
+
+/// The permission a `spawn_agent` call that carries a whole graph is checked
+/// against, as well as `spawn_agent`'s own. Not a tool anyone calls: a name
+/// `[tool_permissions]` can set, which defaults to `ask` because a graph the
+/// model wrote can declare its own seed commands and MCP servers.
+pub const SPAWN_RAW_GRAPH_PERMISSION: &str = "spawn_raw_graph";
 
 /// Whether `name` is a sub-agent tool.
 pub fn is_subagent_tool(name: &str) -> bool {
@@ -117,7 +127,9 @@ const FAN_OUT_DESCRIPTION: &str = "Run many sub-agents at once, one per item, an
      other - separate topics to research, separate files to change, separate \
      questions to answer.\n\nEach worker is a separate agent with a clean \
      context window: it never sees this conversation, so everything it needs has \
-     to be inside its own `context`. Name each item precisely enough that two \
+     to be inside its own `inputs`. A worker takes the inputs its blueprint \
+     declares (`describe_blueprint` lists them); `task` is the usual one, the \
+     text of the work. Name each item precisely enough that two \
      workers cannot end up doing the same thing.\n\nPut all the work in ONE \
      call, however many items that is - they are paced for you, and a second \
      call would just wait for the first to finish. This call blocks until every \
@@ -588,7 +600,7 @@ impl BuiltinTools {
                     "properties": {
                         "agent": {
                             "type": "string",
-                            "description": "Name of the installed agent to run for every item. Omit only inside a fan_out stage, which names its worker in the blueprint."
+                            "description": "The blueprint to run for every item: an installed blueprint's name, or the absolute directory of one outside your working directory. Omit only inside a fan_out stage, which names its worker in the blueprint."
                         },
                         "items": {
                             "type": "array",
@@ -600,17 +612,19 @@ impl BuiltinTools {
                                         "type": "string",
                                         "description": "Short slug identifying this item. Labels its worker in the merged report, so make it distinct and readable."
                                     },
-                                    "context": {
+                                    "inputs": {
                                         "type": "object",
-                                        "description": "Everything the worker gets. It runs as a separate agent with a clean context and never sees yours, so this has to stand alone."
+                                        "description": "Everything the worker gets, as the inputs its blueprint declares, by name: usually {\"task\": \"<the work, in full>\"}. Each value is checked against its declared type before any worker starts. The worker runs as a separate agent with a clean context and never sees yours, so this has to stand alone."
                                     }
                                 },
-                                "required": ["id", "context"]
+                                "required": ["id"],
+                                "additionalProperties": false
                             }
                         },
                         "max_workers": {
                             "type": "integer",
-                            "description": "How many run at once. Optional; the rest queue and start as slots free up."
+                            "minimum": 1,
+                            "description": "How many run at once, at least 1; the rest queue and start as slots free up. Leave it out to start every item at once."
                         }
                     },
                     "required": ["items"]
@@ -722,134 +736,6 @@ impl BuiltinTools {
         ];
         defs.retain(|t| self.available(&t.name));
         defs
-    }
-
-    /// Tool definitions for sub-agent management tools.
-    ///
-    /// These are advertised to the LLM but executed externally (by the CLI's
-    /// tool registry) since they require access to the AgentEngine.
-    pub fn subagent_tool_defs() -> Vec<Tool> {
-        vec![
-            Tool {
-                name: "spawn_agent".to_string(),
-                description: "Spawn a sub-agent from a blueprint to work on a task. Returns the new agent's ID. If wait=true, blocks until the sub-agent completes and returns its result.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "blueprint": {
-                            "type": "string",
-                            "description": "Name of the agent blueprint to spawn"
-                        },
-                        "task": {
-                            "type": "string",
-                            "description": "Task prompt for the sub-agent"
-                        },
-                        "wait": {
-                            "type": "boolean",
-                            "description": "If true, block until the sub-agent completes and return its result. Default: false",
-                            "default": false
-                        },
-                        "seed_context": {
-                            "type": "string",
-                            "description": "Optional initial context to inject into the sub-agent's first Pinned region"
-                        },
-                        "parts": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Optional stored parts of this run to hand the sub-agent, each by name or by a prefix of its sha256 (as listed in your context). Each lands in the child's task region as a typed part."
-                        },
-                        "max_child_depth": {
-                            "type": "integer",
-                            "description": "Optional max depth for the sub-agent's own children"
-                        },
-                        "output_format": {
-                            "type": "string",
-                            "description": "Optional shape to ask the sub-agent for its final answer in, overriding its blueprint's. Any label works (markdown, json, xml, a mime type, your own); it is passed to the sub-agent, not interpreted here."
-                        },
-                        "output_instructions": {
-                            "type": "string",
-                            "description": "Optional extra guidance about that shape, passed to the sub-agent alongside output_format."
-                        }
-                    },
-                    "required": ["blueprint", "task"]
-                }),
-            },
-            Tool {
-                name: "check_agent".to_string(),
-                description: "Check the status of a sub-agent. Returns its current status and result if complete. Non-blocking.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "agent_id": {
-                            "type": "string",
-                            "description": "ID of the agent to check"
-                        }
-                    },
-                    "required": ["agent_id"]
-                }),
-            },
-            Tool {
-                name: "wait_for_agent".to_string(),
-                description: "Block until a sub-agent completes, then return its final result.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "agent_id": {
-                            "type": "string",
-                            "description": "ID of the agent to wait for"
-                        }
-                    },
-                    "required": ["agent_id"]
-                }),
-            },
-            Tool {
-                name: "send_to_agent".to_string(),
-                description: "Send a message to a running sub-agent's context window.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "agent_id": {
-                            "type": "string",
-                            "description": "ID of the target agent"
-                        },
-                        "message": {
-                            "type": "string",
-                            "description": "Message content to send"
-                        },
-                        "target_region": {
-                            "type": "string",
-                            "description": "Context region to deliver to (default: conversation)"
-                        }
-                    },
-                    "required": ["agent_id", "message"]
-                }),
-            },
-            Tool {
-                name: "kill_agent".to_string(),
-                description: "Kill a sub-agent and all its descendants. Sets their cancellation tokens and marks them as cancelled.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "agent_id": {
-                            "type": "string",
-                            "description": "ID of the agent to kill"
-                        }
-                    },
-                    "required": ["agent_id"]
-                }),
-            },
-        ]
-    }
-
-    /// Names of sub-agent tools.
-    pub fn subagent_tool_names() -> Vec<String> {
-        vec![
-            "spawn_agent".to_string(),
-            "check_agent".to_string(),
-            "wait_for_agent".to_string(),
-            "send_to_agent".to_string(),
-            "kill_agent".to_string(),
-        ]
     }
 
     /// Names of all built-in tools, including every alias in [`TOOL_ALIASES`].

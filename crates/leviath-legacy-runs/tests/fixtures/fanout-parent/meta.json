@@ -1,0 +1,69 @@
+{
+  "run_id": "fanner-1790811839-97bde36542db",
+  "agent_name": "fanner",
+  "agent_path": "/home/user/lve/.leviath/agents/fanner/agent.leviath",
+  "task": "Split the work in two.",
+  "model": "openai/gpt-mock",
+  "stage_models": [
+    {
+      "provider": "openai",
+      "model": "gpt-mock"
+    }
+  ],
+  "pid": 0,
+  "status": "waiting_input",
+  "current_stage": "main",
+  "stage_index": 0,
+  "num_stages": 1,
+  "iteration": 1,
+  "prompt_tokens": 24,
+  "completion_tokens": 6,
+  "cached_tokens": 0,
+  "cache_write_tokens": 0,
+  "tool_calls": 1,
+  "cost_usd": null,
+  "unpriced_calls": 2,
+  "cost_is_exact": false,
+  "cost_priced_usd": 0.0,
+  "workdir": "/home/user/lve/work",
+  "started_at": 1790811839,
+  "updated_at": 1790811839,
+  "last_progress_at": 1790811839,
+  "active": {
+    "banked_secs": 0,
+    "since": 1790811839
+  },
+  "error": null,
+  "title": null,
+  "title_error": "openai/gpt-mock replied with nothing usable as a title",
+  "metadata": {},
+  "callback_url": null,
+  "callback_secret": null,
+  "parent_run_id": null,
+  "children": [
+    "waiter-1790811839-36428b065732"
+  ],
+  "depth": 0,
+  "max_child_depth": 2,
+  "flags": {
+    "modified_files": [],
+    "modified_file_count": 0,
+    "empty_output": false,
+    "no_output_tools": true,
+    "searches_run": 0,
+    "searches_empty": 0,
+    "max_iterations_hit": 0,
+    "gates_forced": 0,
+    "required_regions_abandoned": [],
+    "workspace_lost": false,
+    "produced_output": false,
+    "output_forced": 0,
+    "splits_degraded": 0
+  },
+  "yolo": true,
+  "waiting_on": {
+    "reason": "fan_out_workers",
+    "outstanding": 2
+  },
+  "blueprint_digest": "d354119df57c10a00a2b7086d2fff3a51113258d6c0c22a3d2d0b1739b6874dc"
+}

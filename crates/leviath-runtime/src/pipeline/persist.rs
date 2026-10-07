@@ -48,16 +48,17 @@ pub struct PersistWatermark {
     ///
     /// `last_written_at` cannot answer that: the heartbeat advances it whether
     /// or not anything happened, which is the whole point of the heartbeat and
-    /// exactly why `meta.json`'s `updated_at` is not evidence of progress: a
-    /// wedged run keeps a fresh one. This is the timestamp `lev ps` ages its
+    /// exactly why a run's `updated_at` is not evidence of progress: a wedged
+    /// run keeps a fresh one. This is the timestamp `lev ps` ages its
     /// rows against.
     last_progress_at: Option<i64>,
-    /// The taint audit already on disk, as `(stage index, event count)`.
+    /// How many of the taint gate's events a snapshot has already carried.
     ///
-    /// The audit file is only rewritten when the gate recorded a new event.
-    /// Without it every snapshot re-serializes the whole (append-only) log,
-    /// an O(events) allocation per tick that grows with the run.
-    last_taint: Option<(usize, usize)>,
+    /// A stage's audit file is only rewritten when the gate recorded a new
+    /// event in that stage. Without it every snapshot re-serializes the whole
+    /// (append-only) log, an O(events) allocation per tick that grows with
+    /// the run.
+    taint_carried: usize,
     /// The run's `(title, title_error)` as of the last snapshot.
     ///
     /// A title arrives on its own schedule: it is generated beside the run's
@@ -66,6 +67,37 @@ pub struct PersistWatermark {
     /// heartbeat, which a finished run is unloaded before reaching, and the
     /// name is lost. Compared by reference below; only a write clones.
     last_title: Option<(Option<String>, Option<String>)>,
+    /// Whether the run had a tool batch in flight as of the last snapshot.
+    ///
+    /// A batch is dispatched without the iteration, stage or status moving,
+    /// and the run's file has to hold it while it runs: a restart then sends
+    /// the same calls again, with the results that came back carried over,
+    /// rather than asking the model a second time.
+    last_awaiting_tools: Option<bool>,
+    /// The fan-out's progress as of the last snapshot: its queued, running,
+    /// done and failed workers, counted.
+    ///
+    /// A worker finishing moves nothing else about its parent, and the
+    /// parent's file has to say which workers are done: a restart reads the
+    /// workers it lists as running and counts any it cannot find as failed.
+    last_fan_out: Option<[usize; 4]>,
+    /// Where the run was among its stage's checkpoints as of the last
+    /// snapshot: the checkpoint, its revision round, and whether it was being
+    /// put to a person.
+    ///
+    /// An answer moves these without the iteration, stage or status moving
+    /// when the run is paused, and the run's file has to hold the answer's
+    /// effect: a run brought back from its file asks the checkpoint again
+    /// otherwise, and the answer is lost.
+    last_point: Option<(usize, usize, bool)>,
+    /// How many times the run's log of remote jobs had changed as of the last
+    /// snapshot.
+    ///
+    /// A provider records a job it submits while its call is still out,
+    /// moving nothing else, and the run's file has to hold it at once: a
+    /// restart before the call ends otherwise submits, and pays for, the
+    /// same job again.
+    last_jobs: Option<u64>,
 }
 
 impl PersistWatermark {
@@ -108,20 +140,23 @@ pub(crate) struct PersistenceStage(pub UnboundedSender<PersistMsg>);
 /// Put every settled interaction in the journal.
 ///
 /// The hub is answered from outside the tick - over the control socket, by `lev
-/// respond`, by a dashboard - so it cannot reach the lane itself; it buffers
-/// what settled and this drains the buffer. Every tick, unconditionally: an
-/// append is never coalesced, and a run whose last act was answering a prompt
+/// respond`, by a dashboard - so it cannot reach the journal itself; it buffers
+/// what settled and this drains the buffer. Every tick, unconditionally: a
+/// record is never coalesced, and a run whose last act was answering a prompt
 /// must not lose the record because nothing else about it changed.
 ///
 /// The record carries the run it belongs to, so this needs no per-agent query
 /// and works for an agent that has already gone.
-pub(crate) fn journal_interactions(hub: Option<Res<InteractionHub>>, stage: Res<PersistenceStage>) {
+pub(crate) fn journal_interactions(
+    hub: Option<Res<InteractionHub>>,
+    journal: Res<super::JournalSender>,
+) {
     crate::tick_scope::clear();
     let Some(hub) = hub else { return };
     for (run_id, record) in hub.take_settled() {
-        let _ = stage.0.send(PersistMsg::Append {
-            run_id,
-            record: Box::new(leviath_core::run_archive::RunRecord::Interaction {
+        journal.record(
+            &run_id,
+            crate::runfile::record::RunRecord::Interaction {
                 request_id: record.request_id,
                 kind: record.kind,
                 tool: record.tool,
@@ -130,9 +165,8 @@ pub(crate) fn journal_interactions(hub: Option<Res<InteractionHub>>, stage: Res<
                 settlement: record.settlement,
                 asked_at: record.asked_at,
                 at: record.at,
-            }),
-            ack: None,
-        });
+            },
+        );
     }
 }
 
@@ -165,18 +199,13 @@ fn fold_broken_scripts(
     }
 }
 
-/// Persistence-dispatch system: for each agent carrying run metadata whose
-/// (iteration, stage, status) has changed since its last snapshot, build the
-/// `meta.json` + `context.json` value snapshot and hand it to the persistence
-/// lane. Fire-and-forget - no result to collect; the single-worker lane keeps a
-/// given agent's writes ordered. Agents without [`RunMetadata`] aren't persisted.
 /// Interaction-status reflection system: mirror the shared [`InteractionHub`]'s
 /// open requests into agent status so a blocked agent shows as `Waiting` (and
 /// the dashboard / `lev ps` surface its prompt) instead of a silent `Active`.
 ///
 /// An agent's `ask_user_*` / tool-approval / plan-approval call blocks deep in
 /// the async tool lane, invisible to the ECS - which otherwise leaves the agent
-/// `Active` with meta.json written `running`, so the dashboard (gated on
+/// `Active` and reported `running`, so the dashboard (gated on
 /// `WaitingInput`) never shows the prompt and the run looks frozen. This system
 /// closes that gap: an agent whose id has an open hub request flips
 /// `Active → Waiting` (tagged [`AwaitingInteraction`]); when the request clears
@@ -211,13 +240,22 @@ pub(crate) fn reflect_interaction_status(
     for (entity, mut state, marked, progress) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         match (pending.contains(&state.agent_id), marked.is_some()) {
-            // Newly blocked on a prompt: surface it as Waiting.
-            (true, false) => {
+            // Blocked on a prompt: surface it as Waiting. Read from what is
+            // open now rather than from a change since the last tick, because
+            // one prompt can close and the next open between two reflections:
+            // a stage's second interaction point is asked by a task on another
+            // thread, which can register it before this system runs on the
+            // tick that set the agent `Active` for the first answer. The
+            // marker is still on from the first prompt then, and the agent is
+            // `Active` with a question open.
+            (true, _) => {
                 if state.status == AgentStatus::Active {
                     state.status = AgentStatus::Waiting;
                     commands.entity(entity).insert(AwaitingInteraction);
                     if let Some(mut progress) = progress {
-                        progress.waiting_since = Some(now);
+                        // A run that resumed asking again has been waiting
+                        // since it first asked, so that start is kept.
+                        progress.waiting_since.get_or_insert(now);
                     }
                 }
             }
@@ -232,7 +270,7 @@ pub(crate) fn reflect_interaction_status(
                     credit_wait_to_stage_clock(&mut progress, now);
                 }
             }
-            _ => {}
+            (false, false) => {}
         }
     }
 }
@@ -352,7 +390,6 @@ type PersistenceQuery = (
     Entity,
     &'static RunMetadata,
     &'static AgentState,
-    &'static ContextWindow,
     &'static StageCursor,
     &'static TokenTotals,
     &'static mut PersistWatermark,
@@ -364,22 +401,24 @@ type PersistenceQuery = (
     Option<&'static crate::fanout::FanOutWaiting>,
     (
         Option<&'static crate::interaction_points::AwaitingInteractionPoint>,
-        Option<&'static crate::interaction_points::InteractionPointCursor>,
-        Option<&'static crate::interaction_points::InteractionPointRounds>,
+        Option<&'static super::AwaitingTools>,
         Option<&'static crate::persistence::RunOutcomeFlags>,
         Option<&'static crate::components::OutputValidators>,
         Option<&'static crate::persistence::FinalOutput>,
         // The remaining reasons a run can be parked. Read here because this is
-        // where they are queryable, and recorded on `meta.json` so a client
-        // does not have to reconstruct them from what it can see.
+        // where they are queryable, and recorded on the run's summary so a
+        // client does not have to reconstruct them from what it can see.
         Option<&'static crate::gate_prompt::AwaitingGatePrompt>,
         Option<&'static super::WaitingForChildren>,
         Option<&'static crate::components::AwaitingInteraction>,
         Option<&'static super::PausedForSetup>,
+        Option<&'static crate::interaction_points::InteractionPointCursor>,
+        Option<&'static crate::interaction_points::InteractionPointRounds>,
         // Optional so a world that builds agents by hand (tests, embedded
         // hosts) still persists; those runs simply keep no working clock and
         // fall back to wall-clock age when read.
         Option<&'static mut crate::persistence::RunClock>,
+        Option<&'static crate::inference_call::RemoteJobs>,
     ),
 );
 
@@ -389,18 +428,64 @@ type PersistenceQuery = (
 /// Coalescing lives here rather than in the lane: an agent whose digest has not
 /// changed since its last send is skipped, so a world full of idle runs costs
 /// nothing per tick.
-pub(crate) fn dispatch_persistence(
+///
+/// A run placed from a spec also gets its state read by
+/// [`inspect`](crate::state::inspect::inspect) at the same moments, with the
+/// events folded from what happened to it since its last step, and carried to
+/// the lane inside its snapshot as the step its run file records. What
+/// happened to a run with no snapshot due goes to the lane as a step of its
+/// own. Both reads need the whole world, which is why this is an exclusive
+/// system wrapped around the query that builds the snapshots.
+pub(crate) fn dispatch_persistence(world: &mut World) {
+    let mut happened = super::journal::drain(world);
+    let jobs = world.run_system_cached(build_snapshots).unwrap_or_default();
+    for (entity, mut job) in jobs {
+        job.run_file =
+            run_file_step(world, entity, &job.run_id, job.meta.updated_at).map(|mut step| {
+                let run = happened.remove(&job.run_id).unwrap_or_default();
+                (step.events, step.acks) = (run.events, run.acks);
+                step
+            });
+        let _ = world
+            .resource::<PersistenceStage>()
+            .0
+            .send(PersistMsg::Snapshot(job));
+    }
+    super::journal::send(world, happened);
+}
+
+/// The run-file step for the run on `entity`, when it was placed from a spec:
+/// its state now, with nothing yet said about what happened.
+fn run_file_step(
+    world: &mut World,
+    entity: Entity,
+    run_id: &str,
+    at: i64,
+) -> Option<Box<crate::runfile::lane::RunFileStep>> {
+    let now = super::journal::run_now(world, entity)?;
+    Some(Box::new(crate::runfile::lane::RunFileStep {
+        run_id: run_id.to_string(),
+        now: Some(now),
+        at,
+        events: Vec::new(),
+        acks: Vec::new(),
+    }))
+}
+
+/// Build each agent's snapshot, returning the ones to send. Lines with no
+/// snapshot behind them go to the lane from here.
+fn build_snapshots(
     mut agents: Query<PersistenceQuery>,
     stage: Res<PersistenceStage>,
     hub: Option<Res<InteractionHub>>,
     sink: Option<Res<crate::host::WorldEventSink>>,
-) {
+) -> Vec<(Entity, Box<PersistJob>)> {
     crate::tick_scope::clear();
+    let mut jobs = Vec::new();
     for (
         entity,
         md,
         state,
-        window,
         cursor,
         totals,
         mut watermark,
@@ -412,8 +497,7 @@ pub(crate) fn dispatch_persistence(
         fan_out_waiting,
         (
             awaiting_point,
-            ip_cursor,
-            ip_rounds,
+            awaiting_tools,
             outcome_flags,
             validators,
             final_output,
@@ -421,7 +505,10 @@ pub(crate) fn dispatch_persistence(
             waiting_for_children,
             awaiting_interaction,
             paused_for_setup,
+            point_cursor,
+            point_rounds,
             clock,
+            remote_jobs,
         ),
     ) in agents.iter_mut()
     {
@@ -430,8 +517,8 @@ pub(crate) fn dispatch_persistence(
 
         let status = crate::persistence::run_status_from(&state.status);
         // The parking markers, gathered here because this is where they are
-        // queryable, and recorded on `meta.json` so a client does not have to
-        // reconstruct them from what it can see.
+        // queryable, and recorded on the run's summary so a client does not
+        // have to reconstruct them from what it can see.
         //
         // `interaction` is left for the write path below. Naming which prompt is
         // holding the run costs a scan of the hub, and it only ever refines a
@@ -498,12 +585,33 @@ pub(crate) fn dispatch_persistence(
             .as_ref()
             .map(|(t, e)| (t.as_deref(), e.as_deref()))
             != Some(title_now);
+        // A tool batch starting or settling is not progress either, but the
+        // run's file has to hold it; see `last_awaiting_tools`.
+        let awaiting_tools = awaiting_tools.is_some();
+        let tools_changed = watermark.last_awaiting_tools != Some(awaiting_tools);
+        let fan_out_now = fan_out_waiting.map(crate::fanout::FanOutWaiting::progress);
+        let fan_out_changed = watermark.last_fan_out != fan_out_now;
+        let point_now = (
+            point_cursor.map_or(0, |c| c.0),
+            point_rounds.map_or(0, |r| r.0),
+            awaiting_point.is_some(),
+        );
+        let point_changed = watermark.last_point != Some(point_now);
+        let jobs_now = remote_jobs.map(|j| j.0.version());
+        let jobs_changed = watermark.last_jobs != jobs_now;
         // Beat even when nothing changed, so `updated_at` distinguishes a run
         // that is slow from one that nothing is driving.
         let due_for_heartbeat = watermark
             .last_written_at
             .is_none_or(|at| now.saturating_sub(at) >= PERSIST_HEARTBEAT_SECS);
-        if !watermark_changed && !title_changed && !has_appends && !due_for_heartbeat {
+        let due = watermark_changed
+            || title_changed
+            || tools_changed
+            || fan_out_changed
+            || point_changed
+            || jobs_changed
+            || due_for_heartbeat;
+        if !due && !has_appends {
             continue; // nothing meaningful changed, nothing buffered, beat not due
         }
 
@@ -531,7 +639,7 @@ pub(crate) fn dispatch_persistence(
         // window per snapshot, and tool activity buffers lines several times
         // per iteration - snapshotting on each batch multiplied the lane's
         // biggest allocation by the run's tool traffic for no new state.
-        if !watermark_changed && !title_changed && !due_for_heartbeat {
+        if !due {
             let _ = stage.0.send(PersistMsg::StageLines {
                 run_id: md.run_id.clone(),
                 output_appends,
@@ -547,6 +655,10 @@ pub(crate) fn dispatch_persistence(
         if title_changed {
             watermark.last_title = Some((md.title.clone(), md.title_error.clone()));
         }
+        watermark.last_awaiting_tools = Some(awaiting_tools);
+        watermark.last_fan_out = fan_out_now;
+        watermark.last_point = Some(point_now);
+        watermark.last_jobs = jobs_now;
         watermark.last_written_at = Some(now);
 
         // Tree links, for a deterministic restart-time rebuild of the graph.
@@ -557,8 +669,8 @@ pub(crate) fn dispatch_persistence(
         // Read the progress stamp *after* the update above, so a write that
         // carried progress reports `now` and a heartbeat-only write reports
         // whenever the run last moved. That difference is the whole signal: it is
-        // what lets an observer reading `meta.json` tell a slow run from a wedged
-        // one, which `updated_at` (which is `now` either way) cannot.
+        // what lets an observer reading `lev ps` or the API tell a slow run
+        // from a wedged one, which `updated_at` (which is `now` either way) cannot.
         // Now name the prompt, on the path that writes it.
         parked.interaction = hub.as_ref().and_then(|h| {
             h.pending()
@@ -566,9 +678,9 @@ pub(crate) fn dispatch_persistence(
                 .find(|(agent_id, _)| *agent_id == state.agent_id)
                 .map(|(_, req)| req.kind)
         });
-        // Rolled up from the ledger rather than tracked separately, so the set
-        // on `meta.json` and the per-stage lists in `stages.json` are the same
-        // fact written twice and cannot drift into two answers.
+        // Rolled up from the ledger rather than tracked separately, so the
+        // run's set and the per-stage lists in its ledger are the same fact
+        // read twice and cannot drift into two answers.
         let stage_models = ledger
             .as_deref()
             .map(|l| leviath_core::run_meta::stage_models_of(&l.0))
@@ -592,71 +704,35 @@ pub(crate) fn dispatch_persistence(
                 active,
             },
         );
-        let context = build_context_snapshot(window, &state.current_stage);
-        let stages = ledger.as_deref().map(|l| l.0.clone()).unwrap_or_default();
-        // Persist the taint gate's audit log (per-stage) when it gained events
-        // since the last write, so security decisions are inspectable after
-        // the fact. The log is append-only, so an unchanged (stage, count)
-        // means the file on disk is already current - re-serializing the whole
-        // log every heartbeat was an O(events) allocation that grew with the
-        // run.
+        // Persist the taint gate's audit, one file per stage holding the events
+        // decided in that stage, for each stage that gained events since the
+        // last snapshot, so security decisions are inspectable after the fact.
+        // The log is append-only, so a stage with no new events has its file
+        // current already. The lane carries a superseded snapshot's audit files
+        // over to the snapshot that replaces it, so none is lost to coalescing.
         //
-        // ...except on the snapshot that records the run going terminal, which
-        // always carries the whole log. The watermark advances when the job is
-        // *built*, but the lane coalesces superseded snapshots away (keeping
-        // only the newest per run), so a job whose audit was dropped there
-        // leaves the watermark claiming a write that never happened. Mid-run
-        // that self-heals: the next gate event makes the count differ again and
-        // the whole log is rewritten. The last events before the run ends have
-        // no "next event", so without this they were lost for good - which is
-        // how a `--yolo` run's waived block (`YoloAutoApprove`) reached disk
-        // after a `shell` call and not after an inline `submit_output`, the one
-        // finishing fast enough to be coalesced. Same failure shape as issue
-        // #276, which fixed it for the `final_output` sidecar.
+        // The snapshot that records the run going terminal carries every
+        // stage's file whatever the count says, so the run's last word on disk
+        // is the whole audit.
         let final_snapshot = is_terminal_status(&state.status) && watermark_changed;
         let taint_audit = taint_gate
-            .filter(|g| !g.audit_log().is_empty())
-            .and_then(|g| {
-                let key = (cursor.index, g.audit_log().len());
-                if watermark.last_taint == Some(key) && !final_snapshot {
-                    return None;
-                }
-                watermark.last_taint = Some(key);
-                Some((
-                    cursor.index,
-                    serde_json::to_string(g.audit_log())
-                        .expect("GateEvent slice always serializes"),
-                ))
-            });
-        // A parent parked mid fan-out: persist its waiting state so the
-        // split/merge resumes after a restart (removed once it's no longer
-        // waiting - see the writer).
-        let fanout = fan_out_waiting
-            .map(|w| serde_json::to_string(&w.to_state()).expect("FanOutState always serializes"));
-        // An agent parked at a stage-boundary interaction point: persist the open
-        // point (cursor/round + the reviewed document) so a restart re-presents the
-        // same prompt rather than dropping it and re-inferring. The
-        // document comes from the open request in the hub - which is present by the
-        // time `reflect_interaction_status` (running just before this system) has
-        // flipped the agent to `Waiting`. If the request isn't registered yet, skip
-        // this tick; the next persist captures it (removing any stale sidecar).
-        let interactions = awaiting_point.and_then(|_| {
-            // By prefix rather than by substring: every id this run raises
-            // starts with the run id, and a blueprint whose name holds `point`
-            // would let an approval request read as a point.
-            let point_ids = leviath_core::interaction::request_id_prefix(&state.agent_id, "point");
-            let request = hub
-                .as_ref()?
-                .pending()
-                .into_iter()
-                .find(|(aid, req)| aid == &state.agent_id && req.id.starts_with(&point_ids))?;
-            let ip_state = crate::interaction_points::InteractionPointState {
-                cursor: ip_cursor.map_or(0, |c| c.0),
-                round: ip_rounds.map_or(0, |r| r.0),
-                body: request.1.body.unwrap_or_default(),
-            };
-            Some(serde_json::to_string(&ip_state).expect("InteractionPointState always serializes"))
-        });
+            .map(|g| {
+                let from = match final_snapshot {
+                    true => 0,
+                    false => watermark.taint_carried,
+                };
+                watermark.taint_carried = g.audit_log().len();
+                g.stages_from(from)
+                    .into_iter()
+                    .map(|stage| {
+                        let events = g.stage_audit(stage);
+                        let json = serde_json::to_string(&events)
+                            .expect("GateEvent slice always serializes");
+                        (stage, json)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         // Always carry the answer's bytes when the agent holds them; the
         // persistence lane decides whether they still need writing.
         //
@@ -665,9 +741,8 @@ pub(crate) fn dispatch_persistence(
         // that: it coalesces queued snapshots per run and keeps only the
         // newest. A run that finishes inside one persistence window would have
         // the job carrying the body dropped as superseded, while every later
-        // job carries `None` and still rewrites `meta.json` with the
-        // descriptor - leaving the descriptor and the sidecar permanently
-        // disagreeing, which `read_final_output` reads as "no answer".
+        // job carries `None` and still carries the descriptor - leaving the
+        // descriptor and the sidecar permanently disagreeing, which `read_final_output` reads as "no answer".
         //
         // The skip lives in the lane instead, past the coalescing, where "did
         // this get written" is a fact rather than an assumption; it stops a
@@ -675,19 +750,20 @@ pub(crate) fn dispatch_persistence(
         // The cost here is one clone of the answer per snapshot, on a path
         // that already deep-clones the whole context window.
         let final_output_body = final_output.map(|o| o.0.content.clone());
-        let _ = stage.0.send(PersistMsg::Snapshot(Box::new(PersistJob {
-            run_id: md.run_id.clone(),
-            meta,
-            context,
-            stages,
-            output_appends,
-            log_appends,
-            taint_audit,
-            final_output: final_output_body,
-            fanout,
-            interactions,
-        })));
+        jobs.push((
+            entity,
+            Box::new(PersistJob {
+                run_id: md.run_id.clone(),
+                meta,
+                output_appends,
+                log_appends,
+                taint_audit,
+                final_output: final_output_body,
+                run_file: None,
+            }),
+        ));
     }
+    jobs
 }
 
 #[cfg(test)]
@@ -707,7 +783,7 @@ mod broken_script_tests {
     }
 
     /// The names the component collected reach the run's flags, which is what
-    /// puts them on `meta.json`, `lev ps`, the API and the dashboard.
+    /// puts them on the run's summary: `lev ps`, the API and the dashboard.
     #[test]
     fn the_components_names_reach_the_flags() {
         let validators = OutputValidators::new(std::collections::HashMap::new());
@@ -747,3 +823,7 @@ mod broken_script_tests {
         assert!(flags.0.broken_scripts.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "persist_tests.rs"]
+mod run_file_tests;

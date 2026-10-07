@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use async_graphql::{Context, Enum, ID, Object};
+use async_graphql::{Context, ID, Object};
 use leviath_graphql_derive::mirror;
 
 use super::super::super::blocking::blocking;
@@ -33,16 +33,23 @@ use super::run_detail::{
     StageRecordOrder, WaitReason,
 };
 use super::run_files::{FileEntry, FileEntryFilter, FileListingExtras, FileSource, FileWindow};
+use super::runfile::delta::StateDelta;
+use super::runfile::graph::RunGraph;
+use super::runfile::read as run_file;
+use super::runfile::spec::RunSpec;
+use super::runfile::state::RunState;
 use crate::commands::serve::cursor;
 use crate::runstate::RunMeta;
+pub(crate) use status::RunStatus;
 use support::{
     BoundedPageArgs, ContextSnapshotPoint, ContextSnapshotPointFilter, CurrentStage,
-    LogStageOptions, LogStream, MetadataEntry, RunTreeStatus, as_i32, bounded_page, signed,
-    snapshot_point, tail_logs, unfiltered_history,
+    LogStageOptions, LogStream, RunTreeStatus, as_i32, bounded_page, signed, snapshot_point,
+    tail_logs, unfiltered_history,
 };
-pub(crate) use support::{CostBreakdown, TokenUsage, WorkingClock};
+pub(crate) use support::{CostBreakdown, MetadataEntry, TokenUsage, WorkingClock};
 
 mod reads;
+mod status;
 mod support;
 
 /// Where a run's own file reads are reported, for the test that counts them.
@@ -52,80 +59,6 @@ pub(crate) use reads::record_file_reads;
 
 impl Paged for Run {
     const NAME: &'static str = "Run";
-}
-
-/// The lifecycle states a run moves through.
-///
-/// One state per variant of the daemon's own `RunStatus`, so the two cannot
-/// drift: the conversion below is exhaustive and a new daemon state will not
-/// compile until it is named here.
-#[mirror]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
-pub(crate) enum RunStatus {
-    /// Spawned but not yet running.
-    Starting,
-    /// Moving: inferring, calling tools, transitioning.
-    Running,
-    /// Parked: on a prompt somebody has to answer, or holding for children.
-    WaitingInput,
-    /// Paused by `lev pause`; resumes with `lev resume`.
-    Paused,
-    /// Finished with an answer or a terminal state.
-    Complete,
-    /// Every required stage finished but the run still accepts messages.
-    CompleteInteractive,
-    /// Unrecoverable failure; `Run.error` carries what went wrong.
-    Error,
-    /// Stopped from outside. Nothing went wrong; somebody decided.
-    Cancelled,
-    /// A state this build has no name for, which is what a newer daemon's new
-    /// state looks like from here.
-    ///
-    /// Only ever reached through a live frame, where the status arrives as the
-    /// daemon's own word rather than as a value this build chose. A run read
-    /// from disk is parsed into one of the states above or not read at all.
-    Unknown,
-}
-
-impl From<&leviath_core::run_meta::RunStatus> for RunStatus {
-    fn from(status: &leviath_core::run_meta::RunStatus) -> Self {
-        use leviath_core::run_meta::RunStatus as Daemon;
-        match status {
-            Daemon::Starting => Self::Starting,
-            Daemon::Running => Self::Running,
-            Daemon::WaitingInput => Self::WaitingInput,
-            Daemon::Paused => Self::Paused,
-            Daemon::Complete => Self::Complete,
-            Daemon::CompleteInteractive => Self::CompleteInteractive,
-            Daemon::Error => Self::Error,
-            Daemon::Cancelled => Self::Cancelled,
-        }
-    }
-}
-
-impl RunStatus {
-    /// The state one of the daemon's own words names.
-    ///
-    /// The live frames carry the word rather than a parsed state, and the
-    /// daemon on the other end of the socket may be a newer build than this
-    /// one. [`Unknown`](Self::Unknown) is what a word this build does not know
-    /// becomes, so one new state does not cost a subscriber the whole frame.
-    pub(crate) fn from_wire(word: &str) -> Self {
-        use leviath_core::run_meta::RunStatus as Daemon;
-        [
-            Daemon::Starting,
-            Daemon::Running,
-            Daemon::WaitingInput,
-            Daemon::Paused,
-            Daemon::Complete,
-            Daemon::CompleteInteractive,
-            Daemon::Error,
-            Daemon::Cancelled,
-        ]
-        .iter()
-        .find(|status| status.wire() == word)
-        .map_or(Self::Unknown, Self::from)
-    }
 }
 
 /// The resolver state behind the `Run` type.
@@ -262,12 +195,12 @@ impl Run {
     /// Whether the run was spawned unattended, so approvals resolve without
     /// a person.
     async fn unattended(&self) -> bool {
-        self.meta.yolo
+        self.meta.unattended.is_on()
     }
 
     /// The yolo profile this run was spawned with, when it named one.
     async fn yolo_profile_name(&self) -> Option<&str> {
-        self.meta.yolo_profile.as_deref()
+        self.meta.unattended.profile().map(|p| p.as_str())
     }
 
     /// The working directory the run executes in.
@@ -334,42 +267,35 @@ impl Run {
 
     /// The blueprint this run executed.
     ///
-    /// The run's own snapshot of the manifest, taken at spawn, so it answers
-    /// for the run even after the installed blueprint is edited or deleted.
-    /// For a run recorded before snapshots existed there is no copy, and this
-    /// falls back to the installed file: `blueprint.source` says which, and
-    /// `blueprintDigest` is set only for a run that carries its own.
+    /// The graph in the run's own file, as it was resolved at spawn with the
+    /// run's inputs applied, so it answers for the run even after the
+    /// installed blueprint is edited or deleted.
     ///
-    /// Null, with an error naming the file, when neither can be read. Nullable
-    /// on purpose: one unreadable blueprint in a page of fifty runs must not
-    /// cost a client the other forty-nine.
+    /// Null, with an error, when the run's file cannot be read. Nullable on
+    /// purpose: one unreadable run in a page of fifty must not cost a client
+    /// the other forty-nine.
     #[filter(skip)]
-    async fn blueprint(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<Blueprint>> {
-        let state = ctx.data_unchecked::<AppState>();
+    async fn blueprint(&self) -> async_graphql::Result<Option<Blueprint>> {
         counted(&self.meta.run_id);
-        let meta = Arc::clone(&self.meta);
-        // One `meta.json`-sized read, off the async runtime: a selection set
-        // that asks fifty runs for their blueprints is fifty small reads, and
-        // the parse behind them is shared by digest.
-        let manifest = blocking(move || {
-            blueprints::manifest_for_run(&blueprints::run_dir(&meta.run_id), &meta)
-        })
-        .await
-        .gql()?;
-        let parsed = state.caches.blueprints.parse(&manifest).gql()?;
+        let run_id = self.meta.run_id.clone();
+        // The run file is read off the async runtime.
+        let read = blocking(move || blueprints::blueprint_for_run(&run_id))
+            .await
+            .gql()?;
         Ok(Some(Blueprint {
-            parsed,
-            digest: manifest.digest,
-            source: manifest.source.into(),
+            parsed: read.parsed,
+            digest: read.digest,
+            source: read.source.into(),
         }))
     }
 
-    /// The digest of the manifest this run executed, lowercase hex SHA-256.
+    /// The digest of the installed blueprint revision this run was spawned
+    /// from, lowercase hex SHA-256.
     ///
     /// Recorded at spawn. Compare it with the installed blueprint's digest to
     /// tell "this run executed what is installed now" from "this run executed
-    /// something else". Null for a run recorded before snapshots existed,
-    /// where the answer is unknown rather than "the same".
+    /// something else". Null for a run of a graph its caller wrote, which
+    /// came from no installed revision.
     async fn blueprint_digest(&self) -> Option<&str> {
         self.meta.blueprint_digest.as_deref()
     }
@@ -439,14 +365,15 @@ impl Run {
 
     /// The run's context window as it stands right now.
     ///
-    /// Null for a run that has not written one yet, and for a finished run
-    /// whose window was never persisted. Region contents are their own field,
+    /// Null for a run that never held one: a run converted from an earlier
+    /// release whose record kept no window. Region contents are their own field,
     /// so asking for the shape of the window does not read its text.
     #[filter(io)]
     async fn context(&self) -> Option<ContextWindow> {
         counted(&self.meta.run_id);
         let run_id = self.meta.run_id.clone();
-        let snapshot = blocking(move || crate::runstate::read_context_snapshot(&run_id)).await;
+        let snapshot =
+            blocking(move || super::super::super::core::inspect::context(&run_id).ok()).await;
         snapshot.map(|snapshot| ContextWindow {
             snapshot: Arc::new(snapshot),
         })
@@ -698,7 +625,7 @@ impl Run {
         download: bool,
     ) -> String {
         let state = ctx.data_unchecked::<AppState>();
-        let route = format!("/api/agents/{}/files/raw", self.meta.run_id);
+        let route = format!("/api/runs/{}/files/raw", self.meta.run_id);
         let mut query = vec![("path", path.as_str())];
         if download {
             query.push(("download", "1"));
@@ -1002,7 +929,7 @@ impl Run {
     /// the cheaper direction to read.
     ///
     /// Unfiltered, only the page's own windows are read, exactly as
-    /// `GET /api/agents/{id}/context/history` reads them. A `filter` is a
+    /// `GET /api/runs/{id}/context/history` reads them. A `filter` is a
     /// question about each point, and answering it means opening that point's
     /// window, so a filtered page reads the run's whole history to decide what
     /// is on it. Page first and filter in the client where the history is long.
@@ -1103,7 +1030,7 @@ impl Run {
         let state = ctx.data_unchecked::<AppState>();
         signed(
             state,
-            &format!("/api/agents/{}/blobs/{sha256}", self.meta.run_id),
+            &format!("/api/runs/{}/blobs/{sha256}", self.meta.run_id),
             download,
         )
     }
@@ -1123,7 +1050,7 @@ impl Run {
         let state = ctx.data_unchecked::<AppState>();
         signed(
             state,
-            &format!("/api/agents/{}/artifacts/{name}", self.meta.run_id),
+            &format!("/api/runs/{}/artifacts/{name}", self.meta.run_id),
             download,
         )
     }
@@ -1135,26 +1062,17 @@ impl Run {
     /// unknown is not the same as no, and a console that greyed out its box on a
     /// failed read would be wrong half the time.
     #[filter(skip)]
-    async fn accepts_messages(&self, ctx: &Context<'_>) -> Option<bool> {
-        let state = ctx.data_unchecked::<AppState>();
-        let meta = Arc::clone(&self.meta);
-        let manifest = blocking(move || {
-            blueprints::manifest_for_run(&blueprints::run_dir(&meta.run_id), &meta)
-        })
-        .await
-        .ok()?;
-        let parsed = state.caches.blueprints.parse(&manifest).ok()?;
+    async fn accepts_messages(&self) -> Option<bool> {
+        let run_id = self.meta.run_id.clone();
+        let read = blocking(move || blueprints::blueprint_for_run(&run_id))
+            .await
+            .ok()?;
+        let graph = &read.parsed.graph;
         let stage = match self.meta.current_stage.is_empty() {
             // Before the first stage is entered, the answer is the entry
             // stage's: that is the stage a message would arrive in.
-            true => {
-                let entry = parsed.resolve_entry_stage_name();
-                parsed.stages.iter().find(|stage| stage.name == entry)
-            }
-            false => parsed
-                .stages
-                .iter()
-                .find(|stage| stage.name == self.meta.current_stage),
+            true => graph.entry_stage(),
+            false => graph.stage(&self.meta.current_stage),
         };
         stage.map(|stage| stage.accepts_messages)
     }
@@ -1180,6 +1098,51 @@ impl Run {
             .collect();
         entries.sort_by(|a, b| a.key.cmp(&b.key));
         entries
+    }
+
+    /// The run as it was resolved: the request decided against the machine it
+    /// started on. Null for a run with no run file.
+    #[filter(skip)]
+    async fn spec(&self) -> async_graphql::Result<Option<RunSpec>> {
+        run_file::spec(&self.meta.run_id).await.gql()
+    }
+
+    /// The run's whole state at step `at`, or now. Now is the daemon's own
+    /// view while it holds the run, and the run file's last step otherwise.
+    /// Null for a run with no run file.
+    #[filter(skip)]
+    async fn state(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(
+            desc = "The step to read the state after. Step 0 is the state the run \
+                          started in. Omitted means now."
+        )]
+        at: Option<i32>,
+    ) -> async_graphql::Result<Option<RunState>> {
+        let state = ctx.data_unchecked::<AppState>();
+        run_file::state(state, &self.meta.run_id, at).await.gql()
+    }
+
+    /// The run's steps from `from` to `to`, both included, as its run file
+    /// records them: what each changed and what happened during it. At most
+    /// 200 steps per call. Empty for a run with no run file.
+    #[filter(skip)]
+    async fn deltas(
+        &self,
+        #[graphql(desc = "The first step. Omitted means step 1.")] from: Option<i32>,
+        #[graphql(desc = "The last step. Omitted means 199 steps after `from`, or the \
+                          run's last step if that comes first.")]
+        to: Option<i32>,
+    ) -> async_graphql::Result<Vec<StateDelta>> {
+        run_file::deltas(&self.meta.run_id, from, to).await.gql()
+    }
+
+    /// The run's stages and edges, with how often it entered each stage and
+    /// took each edge. Null for a run with no run file.
+    #[filter(skip)]
+    async fn graph(&self) -> async_graphql::Result<Option<RunGraph>> {
+        run_file::graph(&self.meta.run_id).await.gql()
     }
 }
 

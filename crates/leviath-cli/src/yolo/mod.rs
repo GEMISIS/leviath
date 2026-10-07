@@ -73,7 +73,7 @@ impl fmt::Display for YoloError {
             ),
             YoloError::NoFile { name, path } => write!(
                 f,
-                "--yolo={name} names a profile, but {} does not exist; `lev yolo init` writes an \
+                "the yolo profile {name:?} was asked for, but {} does not exist; `lev yolo init` writes an \
                  example to start from",
                 path.display()
             ),
@@ -293,19 +293,16 @@ pub(crate) fn load_current() -> Result<YoloFile, YoloError> {
 /// file that does not load, fails the spawn: the person asked for a specific
 /// set of rules and did not get them.
 pub(crate) fn resolve_for_spawn(
-    yolo: bool,
-    name: Option<&str>,
+    unattended: &leviath_core::Unattended,
 ) -> Result<Option<Arc<YoloProfile>>, YoloError> {
-    if !yolo {
-        return Ok(None);
-    }
-    let named = name.filter(|n| !n.is_empty());
-    if named.is_none() {
-        return Ok(Some(YoloProfile::builtin_default()));
-    }
+    let name = match unattended {
+        leviath_core::Unattended::Off => return Ok(None),
+        leviath_core::Unattended::All => return Ok(Some(YoloProfile::builtin_default())),
+        leviath_core::Unattended::Profile(name) => name.as_str(),
+    };
     let path = yolo_path();
     let file = YoloFile::load_from(&path)?;
-    file.resolve(named, &path).map(Some)
+    file.resolve(Some(name), &path).map(Some)
 }
 
 /// What a run needs to know about its home for `~` in a profile's paths.

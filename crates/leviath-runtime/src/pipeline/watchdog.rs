@@ -43,7 +43,8 @@ pub(crate) fn check_workspace_health(
         if progress.iterations % WORKSPACE_CHECK_INTERVAL != 0 {
             continue;
         }
-        if std::fs::metadata(&md.workdir).is_ok_and(|m| m.is_dir()) {
+        // A run placed with no workdir has none to lose.
+        if md.workdir.is_empty() || std::fs::metadata(&md.workdir).is_ok_and(|m| m.is_dir()) {
             continue;
         }
         tracing::error!(
@@ -74,7 +75,7 @@ pub(crate) fn check_workspace_health(
 type MaxIterationQuery = (
     Entity,
     &'static AgentState,
-    &'static AgentBlueprint,
+    &'static crate::insert::RunSpecC,
     &'static StageCursor,
     &'static StageProgress,
     Option<&'static mut crate::persistence::RunOutcomeFlags>,
@@ -83,18 +84,18 @@ type MaxIterationQuery = (
 /// Max-iterations guard: for each `ReadyToInfer` agent whose per-stage inference
 /// count has reached the stage's `max_iterations`, end the stage (routing to a
 /// `max_iterations` edge if one exists, else a normal transition) instead of
-/// running another inference. Ported from the imperative `run_autonomous` cap.
+/// running another inference.
 pub(crate) fn enforce_max_iterations(
     mut agents: Query<MaxIterationQuery, With<ReadyToInfer>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, bp, cursor, progress, flags) in agents.iter_mut() {
+    for (entity, state, spec, cursor, progress, flags) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue;
         }
-        let stage = &bp.0.stages[cursor.index];
+        let stage = &spec.0.graph.stages[cursor.index];
         // A fan-out stage is bounded by `max_attempts`, not by iterations. Its
         // "iterations" are the framework asking again for the one call the stage
         // exists to make, and letting the iteration cap count them means two
@@ -108,13 +109,10 @@ pub(crate) fn enforce_max_iterations(
         // discarded. `lev validate` has always held that a fan_out stage needs no
         // `max_iterations` (see the lint's `counts_iterations`); the runtime was
         // enforcing one anyway.
-        if matches!(
-            stage.mode,
-            leviath_core::blueprint::StageMode::FanOut { .. }
-        ) {
+        if matches!(stage.mode, crate::spec::graph::StageMode::FanOut(_)) {
             continue;
         }
-        let max = stage.max_iterations.unwrap_or(0);
+        let max = stage.max_iterations.unwrap_or(0) as usize;
         if max > 0 && progress.iterations >= max {
             // Record it on the run: a stage that ran out of iterations is one of
             // the ways a run ends up with nothing to show.
@@ -141,7 +139,7 @@ pub(crate) const STUCK_REPORT_REGION: &str = "stuck_report";
 /// stage that has to act on it.
 pub(crate) const ERROR_REPORT_REGION: &str = "error_report";
 
-/// The per-stage numbers a [`StuckConfig`](leviath_core::blueprint::StuckConfig)
+/// The per-stage numbers a [`StuckDef`](crate::spec::graph::StuckDef)
 /// is evaluated against.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct StuckMetrics {
@@ -160,11 +158,10 @@ pub(crate) struct StuckMetrics {
 ///
 /// Ordered most-diagnostic first: file churn names the actual mistake, while
 /// iterations, tool calls and wall clock are only symptoms of it.
-pub(crate) fn detect_stuck(
-    cfg: &leviath_core::blueprint::StuckConfig,
-    m: &StuckMetrics,
-) -> Option<String> {
-    if let (Some(limit), Some((path, hits))) = (cfg.after_same_file_edits, m.hottest_edit.as_ref())
+pub(crate) fn detect_stuck(cfg: &crate::spec::graph::StuckDef, m: &StuckMetrics) -> Option<String> {
+    let limit = |n: Option<u32>| n.map(|n| n as usize);
+    if let (Some(limit), Some((path, hits))) =
+        (limit(cfg.after_same_file_edits), m.hottest_edit.as_ref())
         && *hits >= limit
     {
         return Some(format!(
@@ -172,7 +169,7 @@ pub(crate) fn detect_stuck(
              resolving the task - the problem is very likely not in that file"
         ));
     }
-    if let Some(limit) = cfg.after_iterations
+    if let Some(limit) = limit(cfg.after_iterations)
         && m.iterations >= limit
     {
         return Some(format!(
@@ -180,7 +177,7 @@ pub(crate) fn detect_stuck(
             m.iterations
         ));
     }
-    if let Some(limit) = cfg.after_tool_calls
+    if let Some(limit) = limit(cfg.after_tool_calls)
         && m.tool_calls >= limit
     {
         return Some(format!(
@@ -310,7 +307,7 @@ pub(crate) fn note_max_iterations(window: &mut ContextWindow, stage: &str, cap: 
 type StuckStageQuery = (
     Entity,
     &'static AgentState,
-    &'static AgentBlueprint,
+    &'static crate::insert::RunSpecC,
     &'static StageCursor,
     &'static mut StageProgress,
     &'static VisitCounts,
@@ -333,18 +330,19 @@ pub(crate) fn detect_stuck_stage(
     mut agents: Query<StuckStageQuery, With<ReadyToInfer>>,
     mut commands: Commands,
 ) {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::graph::EdgeCondition;
     let now = chrono::Utc::now().timestamp();
     crate::tick_scope::clear();
-    for (entity, state, bp, cursor, mut progress, visits, mut window, buffer) in agents.iter_mut() {
+    for (entity, state, spec, cursor, mut progress, visits, mut window, buffer) in agents.iter_mut()
+    {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active || progress.stuck_fired {
             continue; // paused/waiting, or this stage already used its escape
         }
-        let stage = &bp.0.stages[cursor.index];
-        let Some(cfg) =
-            find_conditioned_edge_ref(&bp.0, stage, &visits.0, TransitionCondition::Stuck)
-                .and_then(|(_, edge)| edge.stuck)
+        let graph = &spec.0.graph;
+        let stage = &graph.stages[cursor.index];
+        let Some(cfg) = find_conditioned_edge_ref(graph, stage, &visits.0, EdgeCondition::Stuck)
+            .and_then(|(_, edge)| edge.stuck.clone())
         else {
             continue; // no stuck edge here, or its escape hatch is spent
         };
@@ -362,7 +360,8 @@ pub(crate) fn detect_stuck_stage(
             continue;
         };
         progress.stuck_fired = true;
-        note_stuck(&mut window, &stage.name, &reason);
+        note_stuck(&mut window, stage.name.as_str(), &reason);
+
         if let Some(mut buffer) = buffer {
             buffer
                 .logs

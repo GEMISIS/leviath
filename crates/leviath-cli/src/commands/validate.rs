@@ -3,12 +3,19 @@
 use clap::Args;
 use std::path::PathBuf;
 
-use crate::lint::{LintEnv, LintFinding, LintSeverity, lint_manifest};
+use leviath_runtime::spec::graph::RunGraph;
+use leviath_runtime::spec::names::ModelRef;
+
+use crate::lint::{LintEnv, LintFinding, LintSeverity, lint_blueprint};
+
+#[path = "validate_toml.rs"]
+mod toml_blueprint;
+use toml_blueprint::{BlueprintSummary, CheckError, Checked};
 
 /// Arguments for `lev validate`.
 #[derive(Args)]
 pub struct ValidateArgs {
-    /// Path to the agent directory or agent.leviath file
+    /// Path to the agent directory or its agent.toml
     #[arg(default_value = ".")]
     pub(crate) path: String,
 
@@ -31,119 +38,18 @@ pub struct ValidateArgs {
     pub(crate) width: u16,
 }
 
-/// The blueprint itself, for a caller that wants to know what it just validated.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct BlueprintSummary {
-    /// The blueprint's `[agent] name`.
-    pub name: String,
-    /// Its declared version.
-    pub version: String,
-    /// Its one-line description.
-    pub description: String,
-    /// Null when the manifest names no `entry_stage`, in which case the first
-    /// stage is the entry.
-    pub entry_stage: Option<String>,
-    /// Stage names in blueprint order.
-    pub stages: Vec<String>,
-    /// Whether `lev run <agent> --task <text>` is accepted. False means a run
-    /// handing this agent a task is refused at spawn, so a harness can check
-    /// here instead of discovering it from the run-time error.
-    pub accepts_task: bool,
-    /// Every caller-settable input, in declaration order: which flag seeds
-    /// which region, and whether a run can start without it.
-    pub inputs: Vec<InputSummary>,
-}
-
-/// One caller-settable input: a `--<key>` flag on `lev run` (equally the
-/// `regions.<key>` field over the API, or an ACP `---region:<key>---` block)
-/// and the region its value seeds.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct InputSummary {
-    /// The caller key. `task` is the `--task` flag; anything else is a
-    /// blueprint-defined `--<key>` flag.
-    pub key: String,
-    /// The region the value lands in. Often the same as `key`, but a seed may
-    /// name a shorter key for a longer region (`criteria` for
-    /// `review_criteria`).
-    pub region: String,
-    /// True when the region is required, so a spawn without this input fails.
-    pub required: bool,
-}
-
-/// The caller-settable inputs a blueprint declares, in declaration order.
-///
-/// The prose and JSON halves of the report both read from this one walk, so
-/// they cannot disagree about what the agent takes.
-fn input_summaries(blueprint: &leviath_core::Blueprint) -> Vec<InputSummary> {
-    blueprint
-        .context_layout
-        .regions
-        .iter()
-        .filter_map(|r| match &r.seed {
-            Some(leviath_core::layout::RegionSeed::CallerInput { name }) => Some(InputSummary {
-                key: name.clone(),
-                region: r.name.clone(),
-                required: r.required,
-            }),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The "Inputs:" lines `print_success` shows, answering at validate time what
-/// `lev run` would otherwise only reveal by refusing at spawn:
-/// which flags this agent takes, and explicitly that `--task` is not among
-/// them when no region is seeded from the task.
-fn input_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
-    let inputs = input_summaries(blueprint);
-    if inputs.is_empty() {
-        return vec![
-            "  Inputs: none - this agent takes no --task or other caller input".to_string(),
-        ];
-    }
-    let flags: Vec<String> = inputs
-        .iter()
-        .map(|i| {
-            let mut flag = format!("--{}", i.key);
-            let mut notes = Vec::new();
-            if i.required {
-                notes.push("required".to_string());
-            }
-            if i.key != i.region {
-                notes.push(format!("seeds region '{}'", i.region));
-            }
-            if !notes.is_empty() {
-                flag.push_str(&format!(" ({})", notes.join(", ")));
-            }
-            flag
-        })
-        .collect();
-    let mut lines = vec![format!("  Inputs: {}", flags.join(", "))];
-    if !blueprint.accepts_task() {
-        lines.push(format!(
-            "  Note: this agent takes no --task; give it input via {}",
-            inputs
-                .iter()
-                .map(|i| format!("--{}", i.key))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    lines
-}
-
 /// What `lev validate --json` prints.
 ///
 /// One shape for every outcome, so a caller parses once and branches on
-/// `valid`. A manifest that did not parse fills `error` and leaves `blueprint`
-/// null; one that did fills `blueprint` and leaves `error` null. `code` on each
-/// finding is a stable slug to branch on, where the prose line is written to be
-/// read.
+/// `valid`. A blueprint that did not read or hold together fills `error` and
+/// leaves `blueprint` null; one that did fills `blueprint` and leaves `error`
+/// null. `code` on each finding is a stable slug to branch on, where the
+/// prose line is written to be read.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct ValidateReport {
     /// True when nothing would have failed the command.
     pub valid: bool,
-    /// Present when the manifest parsed and validated.
+    /// Present when the blueprint read and held together.
     pub blueprint: Option<BlueprintSummary>,
     /// Present when it did not.
     pub error: Option<String>,
@@ -155,38 +61,42 @@ pub(crate) struct ValidateReport {
     pub warnings: usize,
     /// How many are notes: things worth seeing that are not problems.
     pub notes: usize,
+    /// Stages a run of this blueprint could reach and never leave, one line
+    /// each. The blueprint still runs; `--deny-warnings` fails on these too.
+    pub may_never_finish: Vec<String>,
+    /// The keys upgrading this blueprint from `agent.leviath` dropped, until
+    /// its owner edits it. Shown, never counted: the blueprint is as it
+    /// should be, these say what the old one held.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub upgrade_warnings: Vec<String>,
 }
 
 impl ValidateReport {
-    /// The report for a manifest that got as far as linting.
+    /// The report for a blueprint that got as far as linting.
     fn linted(
-        blueprint: &leviath_core::Blueprint,
+        blueprint: BlueprintSummary,
         findings: Vec<LintFinding>,
+        may_never_finish: Vec<String>,
         deny_warnings: bool,
     ) -> Self {
         let count = |want: LintSeverity| findings.iter().filter(|f| f.severity == want).count();
         let (errors, warnings) = (count(LintSeverity::Error), count(LintSeverity::Warning));
+        let warned = warnings + may_never_finish.len();
         Self {
             // Mirrors the exit-status rule exactly: notes never fail a build.
-            valid: errors == 0 && !(deny_warnings && warnings > 0),
-            blueprint: Some(BlueprintSummary {
-                name: blueprint.name.clone(),
-                version: blueprint.version.clone(),
-                description: blueprint.description.clone(),
-                entry_stage: blueprint.entry_stage.clone(),
-                stages: blueprint.stages.iter().map(|s| s.name.clone()).collect(),
-                accepts_task: blueprint.accepts_task(),
-                inputs: input_summaries(blueprint),
-            }),
+            valid: errors == 0 && !(deny_warnings && warned > 0),
+            blueprint: Some(blueprint),
             error: None,
             errors,
             warnings,
             notes: count(LintSeverity::Note),
             findings,
+            may_never_finish,
+            upgrade_warnings: Vec::new(),
         }
     }
 
-    /// The report for a manifest that never parsed or never validated.
+    /// The report for a blueprint that never read or never held together.
     fn failed(error: String) -> Self {
         Self {
             valid: false,
@@ -196,6 +106,8 @@ impl ValidateReport {
             errors: 1,
             warnings: 0,
             notes: 0,
+            may_never_finish: Vec::new(),
+            upgrade_warnings: Vec::new(),
         }
     }
 
@@ -209,224 +121,15 @@ impl ValidateReport {
     }
 }
 
-/// Resolve, read, parse, and validate the manifest at `path`. Distinguishes
-/// I/O failures (propagated as a normal error) from parse/validation
-/// failures (which `execute()` reports specially and exits(1) on) so the
-/// core logic can be unit tested without killing the test process.
-#[derive(Debug)]
-enum ManifestCheckError {
-    Io(anyhow::Error),
-    Parse(String),
-    Validation(String),
-}
-
-/// A manifest that parsed and validated, kept alongside the text it came from
-/// so the linter can ask what the author actually wrote.
-#[derive(Debug)]
-struct CheckedManifest {
-    blueprint: leviath_core::Blueprint,
-    content: String,
-    /// The directory holding the manifest: where its `tools/` live.
-    agent_dir: PathBuf,
-}
-
-/// The manifest a validate target names: the file itself, or the `agent.leviath`
-/// inside a directory.
-///
-/// Pure, and shared by [`check_manifest`] and the stale-install suffix, so both
-/// resolve a target the same way. Says nothing about whether the file exists.
-fn manifest_path_for(path: &std::path::Path) -> std::path::PathBuf {
-    if path.is_file() {
-        path.to_path_buf()
-    } else {
-        path.join(leviath_core::files::MANIFEST_FILENAME)
-    }
-}
-
-fn check_manifest(path: &std::path::Path) -> Result<CheckedManifest, ManifestCheckError> {
-    let manifest_path = manifest_path_for(path);
-    if !manifest_path.exists() {
-        return Err(ManifestCheckError::Io(anyhow::anyhow!(
-            "No agent.leviath found at {}",
-            path.display()
-        )));
-    }
-
-    let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        ManifestCheckError::Io(anyhow::anyhow!(
-            "Failed to read {}: {}",
-            manifest_path.display(),
-            e
-        ))
-    })?;
-
-    let blueprint = leviath_core::manifest::parse_manifest(&content)
-        .map_err(|e| ManifestCheckError::Parse(e.to_string()))?;
-
-    blueprint
-        .validate()
-        .map_err(|e| ManifestCheckError::Validation(e.to_string()))?;
-
-    // Custom regions' Rhai scripts must resolve to readable, compilable
-    // files with a well-formed `fn render(ctx)` - the same check a spawn
-    // performs, surfaced here where a typo'd path or syntax error is cheap
-    // to find.
-    crate::daemon::spawn::resolve_region_scripts(&blueprint, &manifest_path.to_string_lossy())
-        .map_err(ManifestCheckError::Validation)?;
-    // Output validators and stage hook scripts get the same treatment, for the
-    // same reason: both are hard spawn errors, and the docs promise this
-    // command finds them without starting anything.
-    crate::daemon::spawn::resolve_output_validators(&blueprint, &manifest_path.to_string_lossy())
-        .map_err(ManifestCheckError::Validation)?;
-    crate::daemon::spawn::resolve_stage_hook_scripts(&blueprint, &manifest_path.to_string_lossy())
-        .map_err(ManifestCheckError::Validation)?;
-
-    let agent_dir = manifest_path
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
-    Ok(CheckedManifest {
-        blueprint,
-        content,
-        agent_dir,
-    })
-}
-
-/// Print the "valid blueprint" summary + non-fatal warnings.
-fn print_success(blueprint: &leviath_core::Blueprint) {
-    println!("✓ Blueprint '{}' is valid.", blueprint.name);
-    println!(
-        "  {} stages, version {}",
-        blueprint.stages.len(),
-        blueprint.version
-    );
-    for line in input_lines(blueprint) {
-        println!("{line}");
-    }
-    for line in mime_lines(blueprint) {
-        println!("{line}");
-    }
-
-    let is_graph = blueprint.stages.iter().any(|s| s.transitions.is_some());
-    if is_graph {
-        let entry = blueprint.resolve_entry_stage_name();
-        println!("  Graph mode: entry stage '{}'", entry);
-
-        for stage in &blueprint.stages {
-            let transitions_info = match &stage.transitions {
-                Some(t) if !t.is_empty() => {
-                    let targets: Vec<&str> = t.keys().map(|k| k.as_str()).collect();
-                    format!(" → {}", targets.join(", "))
-                }
-                Some(_) => " (terminal)".to_string(),
-                None => " (linear)".to_string(),
-            };
-            let revisits = stage
-                .max_revisits
-                .map(|n| format!(" (max_revisits: {})", n))
-                .unwrap_or_default();
-            println!("  - {}{}{}", stage.name, transitions_info, revisits);
-        }
-    } else {
-        println!(
-            "  Linear mode: {}",
-            blueprint
-                .stages
-                .iter()
-                .map(|s| s.name.as_str())
-                .collect::<Vec<_>>()
-                .join(" → ")
-        );
-    }
-}
-
-/// One line per stage that takes mime or hands back declared artifacts:
-/// what `lev run --attach` may aim at it, and what `lev result` will list.
-fn mime_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
-    let mut lines = Vec::new();
-    if !blueprint.mime_types.is_empty() {
-        let rows: Vec<String> = blueprint
-            .mime_types
-            .iter()
-            .map(
-                |(key, row)| match row.get("check").and_then(|v| v.as_str()) {
-                    Some(check) if !check.is_empty() => format!("{key} (check {check})"),
-                    _ => key.clone(),
-                },
-            )
-            .collect();
-        lines.push(format!(
-            "  Mime types: adds {} row{} for its runs: {}",
-            rows.len(),
-            match rows.len() {
-                1 => "",
-                _ => "s",
-            },
-            rows.join(", ")
-        ));
-    }
-    for stage in &blueprint.stages {
-        let takes: Vec<String> = blueprint
-            .stage_inputs(stage)
-            .into_iter()
-            .filter(|p| p != "*/*")
-            .collect();
-        let hands_back: Vec<String> = stage
-            .output
-            .as_ref()
-            .map(|o| {
-                o.artifacts
-                    .iter()
-                    .map(|a| {
-                        format!(
-                            "{} ({}{})",
-                            a.name,
-                            a.mime_type,
-                            if a.required { ", required" } else { "" }
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let limits: Vec<String> = stage
-            .tool_accepts
-            .iter()
-            .map(|(tool, list)| format!("{tool} to [{}]", list.join(", ")))
-            .collect();
-        if takes.is_empty() && hands_back.is_empty() && limits.is_empty() {
-            continue;
-        }
-        let mut parts = Vec::new();
-        if !takes.is_empty() {
-            parts.push(format!("takes {}", takes.join(", ")));
-        }
-        if !stage.input_as_text.is_empty() {
-            parts.push(format!("as text: {}", stage.input_as_text.join(", ")));
-        }
-        if !hands_back.is_empty() {
-            parts.push(format!("hands back {}", hands_back.join(", ")));
-        }
-        if !limits.is_empty() {
-            parts.push(format!("limits {}", limits.join(", ")));
-        }
-        lines.push(format!(
-            "  Mime, stage '{}': {}",
-            stage.name,
-            parts.join("; ")
-        ));
-    }
-    lines
-}
-
 /// Outcome of the real, testable logic in [`execute`]. Kept distinct from
 /// the actual failure reporting so `execute_reporting_outcome` - and therefore
-/// every branch of `check_manifest`'s error handling - can be unit tested.
+/// every branch of the check's error handling - can be unit tested.
 #[derive(Debug)]
 enum ValidateOutcome {
     Success,
     ParseError(String),
     ValidationError(String),
-    /// The manifest is structurally fine but the lint found something fatal:
+    /// The blueprint is structurally fine but the lint found something fatal:
     /// how many errors, and how many warnings (which only count when
     /// `--deny-warnings` was passed).
     LintFailed {
@@ -474,16 +177,16 @@ fn execute_reporting_outcome(
 ) -> anyhow::Result<ValidateOutcome> {
     let path = PathBuf::from(&args.path);
 
-    let checked = match check_manifest(&path) {
+    let checked = match toml_blueprint::check(&path) {
         Ok(c) => c,
-        Err(ManifestCheckError::Io(e)) => return Err(e),
-        Err(ManifestCheckError::Parse(e)) => {
+        Err(CheckError::Io(e)) => return Err(e),
+        Err(CheckError::Parse(e)) => {
             if args.json {
                 ValidateReport::failed(format!("parse error: {e}")).print();
             }
             return Ok(ValidateOutcome::ParseError(e));
         }
-        Err(ManifestCheckError::Validation(e)) => {
+        Err(CheckError::Validation(e)) => {
             if args.json {
                 ValidateReport::failed(format!("validation failed: {e}")).print();
             }
@@ -491,49 +194,51 @@ fn execute_reporting_outcome(
         }
     };
 
-    // The human report is three separate printers. JSON is one document, so it
-    // is built after the lint and emitted once, and none of these run.
+    // A blueprint whose runs may never finish is valid, and said so at the
+    // top of the report where it cannot be missed.
+    let never = checked
+        .graph
+        .warnings(&leviath_runtime::spec::issues::SpecPath::root().field("graph"));
+    let may_never_finish: Vec<String> = never.iter().map(ToString::to_string).collect();
+    let upgrade_warnings = crate::upgrade_warnings::read(&checked.agent_dir);
+    // The human report is several separate printers. JSON is one document, so
+    // it is built after the lint and emitted once, and none of these run.
     if !args.json {
-        print_success(&checked.blueprint);
-        print_script_tool_report(&path);
+        for line in crate::commands::run::request::warnings_report(&never) {
+            println!("{line}");
+        }
+        for line in upgrade_lines(&upgrade_warnings, &checked.agent_dir) {
+            println!("{line}");
+        }
+        for line in toml_blueprint::success_lines(&checked) {
+            println!("{line}");
+        }
+        print_script_tool_report(&checked.agent_dir);
         print_global_script_report();
         if args.graph {
             println!();
-            println!("{}", graph_text(&checked.blueprint, args.width));
+            println!("{}", graph_text(&checked.graph, args.width));
         }
     }
 
-    let mut env = LintEnv::offline(&checked.agent_dir);
-    if let Some(config) = config {
-        // The directory the command was run from is the workdir a `lev run`
-        // would default to, so it is what relative `[read_paths]` entries
-        // resolve against.
-        let workdir = crate::commands::resolve_cwd().unwrap_or_default();
-        if !args.json {
-            print_model_resolution(&checked.blueprint, config, registry);
-            print_dependencies(&checked.blueprint, config, &checked.agent_dir);
-        }
-        env = env
-            .with_providers(&checked.blueprint, config)
-            .with_read_paths(&checked.blueprint, config, &workdir);
-        // The primed registry, not a fresh one. A provider that has not been
-        // asked what it serves has no catalogue to report, and a check reading
-        // an empty catalogue would call every model wrong - so this is the one
-        // builder that takes the registry the caller already warmed.
-        if let Some(registry) = registry {
-            env = env
-                .with_provider_catalogs(&checked.blueprint, config, registry)
-                .with_retention(&checked.blueprint, config, registry);
-        }
-    }
-    let findings = lint_manifest(&checked.content, &checked.blueprint, &env);
+    let env = lint_env(&checked, args.json, config, registry);
+    let findings = lint_blueprint(&checked.file, &env);
     let (errors, warnings) = match args.json {
         true => {
-            let report = ValidateReport::linted(&checked.blueprint, findings, args.deny_warnings);
+            let mut report = ValidateReport::linted(
+                BlueprintSummary::of(&checked),
+                findings,
+                may_never_finish,
+                args.deny_warnings,
+            );
+            report.upgrade_warnings = upgrade_warnings;
             report.print();
-            (report.errors, report.warnings)
+            (report.errors, report.warnings + never.len())
         }
-        false => print_findings(&findings),
+        false => {
+            let (errors, warnings) = print_findings(&findings);
+            (errors, warnings + never.len())
+        }
     };
 
     if errors > 0 || (args.deny_warnings && warnings > 0) {
@@ -542,20 +247,74 @@ fn execute_reporting_outcome(
     Ok(ValidateOutcome::Success)
 }
 
+/// A `warning:` line for each key upgrading the blueprint in `dir` dropped,
+/// and how to dismiss them.
+fn upgrade_lines(warnings: &[String], dir: &std::path::Path) -> Vec<String> {
+    let mut lines: Vec<String> = warnings.iter().map(|w| format!("warning: {w}")).collect();
+    if !lines.is_empty() {
+        lines.push(format!(
+            "  ({})",
+            crate::upgrade_warnings::dismiss_hint(dir)
+        ));
+    }
+    lines
+}
+
+/// What the lint knows about this machine: the blueprint's own tools always,
+/// and with a config the providers it can reach, the read paths it grants and,
+/// with a primed registry, what each provider serves and keeps. The prose
+/// report's model and dependency blocks print on the way, since they need the
+/// same config.
+fn lint_env(
+    checked: &Checked,
+    json: bool,
+    config: Option<&crate::config::Config>,
+    registry: Option<&leviath_runtime::ProviderRegistry>,
+) -> LintEnv {
+    let env = LintEnv::offline(&checked.agent_dir);
+    let Some(config) = config else {
+        return env;
+    };
+    let graph = &checked.graph;
+    // The directory the command was run from is the workdir a `lev run` would
+    // default to, so it is what relative read paths resolve against.
+    let workdir = crate::commands::resolve_cwd().unwrap_or_default();
+    if !json {
+        print_model_resolution(graph, config, registry);
+        print_dependencies(graph, config, &checked.agent_dir);
+    }
+    let env = env.with_providers(graph, config).with_read_paths(
+        graph,
+        checked.file.blueprint.name.as_str(),
+        config,
+        &workdir,
+    );
+    // The primed registry, not a fresh one. A provider that has not been asked
+    // what it serves has no catalogue to report, and a check reading an empty
+    // catalogue would call every model wrong - so these are the builders that
+    // take the registry the caller already warmed.
+    match registry {
+        Some(registry) => env
+            .with_provider_catalogs(graph, config, registry)
+            .with_retention(graph, config, registry),
+        None => env,
+    }
+}
+
 /// Print each declared dependency and whether this machine satisfies it, the
 /// same check the spawn gate makes. Non-fatal: an unmet dependency is a
 /// machine-setup fact, not a blueprint error, so it is shown rather than
 /// counted as a finding. A blueprint that declares none prints nothing.
 fn print_dependencies(
-    blueprint: &leviath_core::Blueprint,
+    graph: &RunGraph,
     config: &crate::config::Config,
     agent_dir: &std::path::Path,
 ) {
-    if blueprint.dependencies.is_empty() {
+    if graph.dependencies.is_empty() {
         return;
     }
     let report = crate::dependencies::evaluate(
-        &blueprint.dependencies,
+        &graph.dependencies,
         &config.mcp_servers,
         agent_dir,
         &crate::dependencies::SystemProbe,
@@ -569,25 +328,23 @@ fn print_dependencies(
 
 /// What each stage would actually dispatch to on this machine, and why.
 ///
-/// A blueprint lists an ordered set of models per stage, and the resolver
+/// A graph lists an ordered set of models per stage, and the resolver
 /// reorders it: registered candidates on `default_provider` move to the front,
-/// `override_model` first among them. Nothing surfaced the result, so a config
-/// line could silently move every stage onto a fallback model and the only
-/// evidence was in a finished run's metadata. The line under each stage is the
-/// blueprint's own order, so the promotion is visible as a difference rather
+/// `override_model` first among them. The line under each stage is the
+/// blueprint's own order, so a promotion is visible as a difference rather
 /// than something to take on trust.
 fn print_model_resolution(
-    blueprint: &leviath_core::Blueprint,
+    graph: &RunGraph,
     config: &crate::config::Config,
     registry: Option<&leviath_runtime::ProviderRegistry>,
 ) {
     // A registry that will not build says nothing here rather than failing the
     // validation: this block is extra information about an install, and the
-    // lint below has its own thing to say about unreachable providers.
+    // lint has its own thing to say about unreachable providers.
     let Some(registry) = registry else {
         return;
     };
-    for line in model_resolution_lines(blueprint, config, registry) {
+    for line in model_resolution_lines(graph, config, registry) {
         println!("{line}");
     }
 }
@@ -598,14 +355,14 @@ fn print_model_resolution(
 /// in the preference to claim the model, which is the same question the
 /// resolver asks: a provider outside the preference never serves a bare name.
 fn model_is_reachable(
-    entry: &leviath_core::blueprint::ModelEntry,
+    entry: &ModelRef,
     defaults: &leviath_runtime::pipeline::ModelDefaults,
     registry: &leviath_runtime::ProviderRegistry,
 ) -> bool {
-    if !entry.provider.is_empty() {
-        return registry.has(&entry.provider);
+    if let Some(provider) = &entry.provider {
+        return registry.has(provider.as_str());
     }
-    let key = model_key(&entry.model);
+    let key = model_key(entry.model.as_str());
     registry
         .native_providers()
         .iter()
@@ -619,26 +376,39 @@ fn model_is_reachable(
 /// `openai/gpt-5.5` on a gateway), so comparing the full ids would report a
 /// substitution every time a gateway serves the model the blueprint named.
 fn model_key(model: &str) -> &str {
-    model.rsplit('/').next().unwrap_or(model)
+    leviath_runtime::pipeline::model_key(model)
 }
 
 /// The lines [`print_model_resolution`] prints, so they can be asserted
 /// without capturing stdout.
 fn model_resolution_lines(
-    blueprint: &leviath_core::Blueprint,
+    graph: &RunGraph,
     config: &crate::config::Config,
     registry: &leviath_runtime::ProviderRegistry,
 ) -> Vec<String> {
     let defaults = crate::daemon::spawn::model_defaults(config);
     let mut lines = vec![String::new(), "Models this install would use:".to_string()];
-    for stage in &blueprint.stages {
-        // `resolve_stage_model` rather than the candidate list: it carries the
-        // "always at least one entry" invariant, so there is no empty case to
-        // write a branch for and then never reach.
-        let (provider, model) =
-            leviath_runtime::pipeline::resolve_stage_model(&stage.model, None, &defaults, registry);
-        let head = format!("{provider}/{model}");
-        lines.push(format!("  {:<16} {head}", stage.name));
+    for stage in &graph.stages {
+        // The same choice a spawn makes. A stage it refuses is named with the
+        // reason, which is what the spawn would say.
+        let model =
+            match leviath_runtime::bind::host::choose_model(stage, None, &defaults, registry) {
+                Ok(plan) => {
+                    lines.push(format!(
+                        "  {:<16} {}/{}",
+                        stage.name, plan.provider, plan.model
+                    ));
+                    plan.model.to_string()
+                }
+                Err(issue) => {
+                    lines.push(format!(
+                        "  {:<16} cannot run here: {}",
+                        stage.name, issue.message
+                    ));
+                    continue;
+                }
+            };
+        let models = &stage.model.models;
 
         // The blueprint's own first choice, and whether this machine can run
         // it. An entry nothing serves is skipped silently at resolution, so the
@@ -651,13 +421,11 @@ fn model_resolution_lines(
         // bundled blueprint ends with Ollama so a machine running one can use it,
         // and listing that as unserved on a machine that is not would read as a
         // fault list and bury the one line that matters.
-        let reachable = stage
-            .model
-            .models
+        let reachable = models
             .iter()
             .filter(|e| model_is_reachable(e, &defaults, registry))
             .count();
-        if let Some(first) = stage.model.models.first()
+        if let Some(first) = models.first()
             && !model_is_reachable(first, &defaults, registry)
         {
             lines.push(format!(
@@ -673,31 +441,35 @@ fn model_resolution_lines(
                 ""
             ));
         }
-        // Written the way the blueprint writes them: a bare name for an entry
-        // that left the route open, `provider/model` for one that pinned it.
-        // Rendering an open entry as `/gpt-5.5` would show a route it does not
-        // claim to have.
-        let listed: Vec<String> = stage
-            .model
-            .models
+        // What a provider outage moves the stage on to, in the order it tries
+        // them: the other entries this install can run.
+        let fallbacks: Vec<String> = models
             .iter()
-            .map(|e| {
-                if e.provider.is_empty() {
-                    e.model.clone()
-                } else {
-                    format!("{}/{}", e.provider, e.model)
-                }
+            .filter(|e| {
+                model_key(e.model.as_str()) != model_key(&model)
+                    && model_is_reachable(e, &defaults, registry)
             })
+            .map(ToString::to_string)
             .collect();
+        if !fallbacks.is_empty() {
+            lines.push(format!(
+                "  {:<16}   falls back to: {}",
+                "",
+                fallbacks.join(", ")
+            ));
+        }
         // Only when the install disagrees with the blueprint: printing the
         // list under every stage that already got its first choice is noise,
         // and the point of the line is to make a substitution visible.
         //
         // Compared by MODEL, not by the whole route. An open entry names no
-        // provider, so comparing the rendered strings would differ every time
-        // and print the list under every stage.
-        let first_model = stage.model.models.first().map(|e| e.model.as_str());
-        if first_model.is_some_and(|first| model_key(first) != model_key(&model)) {
+        // provider, so comparing the rendered routes would differ every time.
+        // Each entry is written the way the blueprint writes it: a bare name
+        // for an open route, `provider/model` for a pinned one.
+        if let Some(first) = models.first()
+            && model_key(first.model.as_str()) != model_key(&model)
+        {
+            let listed: Vec<String> = models.iter().map(ToString::to_string).collect();
             lines.push(format!(
                 "  {:<16}   blueprint order: {}",
                 "",
@@ -718,8 +490,8 @@ fn model_resolution_lines(
 
 /// The stage graph as text, the way the dashboard's stage explorer draws it
 /// (escape edges included, since there is no key to reveal them here).
-fn graph_text(blueprint: &leviath_core::Blueprint, width: u16) -> String {
-    let graph = crate::tui::flowgraph::StageGraph::from_blueprint(blueprint);
+fn graph_text(graph: &RunGraph, width: u16) -> String {
+    let graph = crate::tui::flowgraph::StageGraph::from_graph(graph);
     crate::tui::flowgraph::text::render_to_text(&graph, width)
 }
 
@@ -747,13 +519,7 @@ fn plural(n: usize) -> &'static str {
 /// directory's `tools/` and report how many compiled, warning (non-fatal, like
 /// the daemon's own skip-and-warn) about any that failed. A missing `tools/` dir
 /// prints nothing.
-fn print_script_tool_report(path: &std::path::Path) {
-    // The agent dir is the manifest's parent (file path) or the path itself (dir).
-    let agent_dir = if path.is_file() {
-        path.parent().unwrap_or(path).to_path_buf()
-    } else {
-        path.to_path_buf()
-    };
+fn print_script_tool_report(agent_dir: &std::path::Path) {
     let tools_dir = agent_dir.join("tools");
     if !tools_dir.is_dir() {
         return;
@@ -904,13 +670,12 @@ async fn primed_registry(
 /// which would leave the very entries that named it unchecked. Priming exactly
 /// the ones this blueprint mentions costs a compile of a script the author is
 /// already using.
-fn pinned_providers(blueprint: &leviath_core::Blueprint) -> Vec<String> {
-    let mut names: Vec<String> = blueprint
+fn pinned_providers(graph: &RunGraph) -> Vec<String> {
+    let mut names: Vec<String> = graph
         .stages
         .iter()
         .flat_map(|s| s.model.models.iter())
-        .filter(|e| !e.provider.is_empty())
-        .map(|e| e.provider.clone())
+        .filter_map(|e| e.provider.as_ref().map(ToString::to_string))
         .collect();
     names.sort_unstable();
     names.dedup();
@@ -1040,7 +805,7 @@ pub(crate) async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     // answer is "reinstall it", not "debug your graph".
     let stale = || {
         crate::bundled::stale_install_suffix(
-            &manifest_path_for(std::path::Path::new(&args.path)),
+            &toml_blueprint::blueprint_path(std::path::Path::new(&args.path)),
             crate::bundled::real_agents_dir_opt().as_deref(),
             "\n\n",
         )
@@ -1050,11 +815,11 @@ pub(crate) async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     // table until it is asked. Without this, `validate` and the daemon disagree
     // about which model a stage runs, and the tool whose job is saying what will
     // happen is the one that does not know.
-    // Parsed here only to learn which providers to prime; the real parse, with
+    // Read here only to learn which providers to prime; the real check, with
     // its error reporting, happens inside `execute_reporting_outcome`. A
-    // manifest that will not parse primes nothing extra and is reported there.
-    let pinned = check_manifest(std::path::Path::new(&args.path))
-        .map(|c| pinned_providers(&c.blueprint))
+    // blueprint that will not read primes nothing extra and is reported there.
+    let pinned = toml_blueprint::check(std::path::Path::new(&args.path))
+        .map(|c| pinned_providers(&c.graph))
         .unwrap_or_default();
     let registry = primed_registry(config.as_ref(), &pinned).await;
 
@@ -1075,51 +840,135 @@ mod tests {
     use super::*;
     use crate::test_support::write_test_agent;
 
-    /// The line that would have answered "why is this run on deepseek".
+    /// The layout most fixtures share: a pinned system region and a
+    /// conversation.
+    pub(super) const LAYOUT: &str = "layout = { total_budget_tokens = 11000, regions = [\
+        { name = \"system\", kind = \"pinned\", budget = 1000 }, \
+        { name = \"conversation\", kind = { kind = \"sliding_window\", max_items = 50 }, budget = 10000 }] }";
+
+    /// A minimal blueprint that lints clean, so a test can add exactly the one
+    /// defect it is about. Its one stage is the last table, so a test appends
+    /// stage keys by replacing `max_iterations = 5`.
     ///
-    /// `default_provider` moves its registered candidates to the front of a
-    /// stage's list, so an install can dispatch somewhere the blueprint did
-    /// not ask for first. Nothing surfaced that, so the substitution is shown
-    /// against the blueprint's own order - and only when they differ, because
-    /// repeating the list under a stage that got its first choice is noise.
-    /// A blueprint leading with a model nothing configured serves falls through
-    /// to the next one, and the listing says so. That fallthrough is the only
-    /// thing that substitutes: `default_provider` chooses between routes to a
-    /// model, never between models.
-    #[test]
-    fn model_resolution_explains_falling_through_to_the_next_model() {
-        let manifest = r#"
-[agent]
+    /// Ollama is last in the models list because it registers with no
+    /// credential: under the isolated config these tests run against, a
+    /// blueprint naming only keyed providers would (correctly) warn that
+    /// nothing in its list is reachable.
+    pub(super) fn clean_manifest() -> String {
+        format!(
+            r#"
+[blueprint]
+name = "ok-agent"
+version = "0.1.0"
+description = "Valid"
+
+[graph]
+{LAYOUT}
+
+[[graph.stages]]
+name = "main"
+description = "Main"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}, {{ provider = "ollama", model = "qwen3.5:9b" }}] }}
+max_iterations = 5
+"#
+        )
+    }
+
+    /// A blueprint naming an entry stage it does not have: it parses, and
+    /// its graph does not hold together.
+    pub(super) fn bad_entry_manifest() -> String {
+        clean_manifest().replace("[graph]\n", "[graph]\nentry = \"does-not-exist\"\n")
+    }
+
+    /// A blueprint whose one stage lists `models` (the TOML of a model list).
+    fn model_manifest(models: &str) -> String {
+        format!(
+            r#"
+[blueprint]
 name = "m"
 version = "0.1.0"
-entry_stage = "one"
 
-[stages.one]
-model = { models = ["a-model-nobody-serves", "claude-sonnet-5"] }
+[graph]
+entry = "one"
+{LAYOUT}
+
+[[graph.stages]]
+name = "one"
+model = {{ models = [{models}] }}
 system_prompt = "hi"
-"#;
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_test_agent(dir.path(), manifest);
-        let checked = check_manifest(&path).expect("the manifest parses");
-        let blueprint = &checked.blueprint;
+"#
+        )
+    }
 
-        let config = crate::config::Config {
-            default_provider: "anthropic".to_string(),
+    pub(super) fn write_manifest(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
+        write_test_agent(dir, content)
+    }
+
+    /// The graph of a checked blueprint in `dir`.
+    fn checked_graph(content: &str) -> RunGraph {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), content);
+        toml_blueprint::check(dir.path())
+            .expect("the blueprint checks out")
+            .graph
+    }
+
+    fn args_for(dir: &std::path::Path) -> ValidateArgs {
+        ValidateArgs {
+            path: dir.to_str().unwrap().to_string(),
+            deny_warnings: false,
+            json: false,
+            graph: false,
+            width: 120,
+        }
+    }
+
+    fn json_args_for(dir: &std::path::Path) -> ValidateArgs {
+        ValidateArgs {
+            json: true,
+            ..args_for(dir)
+        }
+    }
+
+    /// A registry with an Anthropic key and, when asked, an OpenRouter one.
+    /// Ollama is probed away: whether this machine runs it is not part of
+    /// what these tests are about.
+    fn keyed_config(default_provider: &str) -> crate::config::Config {
+        crate::config::Config {
+            default_provider: default_provider.to_string(),
             override_model: None,
+            openrouter_api_key: Some("test-key".to_string()),
             providers: crate::config::ProviderConfig {
                 anthropic_api_key: Some("test-key".to_string()),
                 ..Default::default()
             },
             ..crate::config::Config::default()
-        };
-        let registry = crate::commands::run::build_provider_registry_from_config_probing(
-            &config,
+        }
+    }
+
+    fn registry_for(config: &crate::config::Config) -> leviath_runtime::ProviderRegistry {
+        crate::commands::run::build_provider_registry_from_config_probing(
+            config,
             &leviath_providers::provider::build_http_client,
             &|_| false,
         )
-        .expect("an HTTPS client builds in tests");
+        .expect("an HTTPS client builds in tests")
+    }
 
-        let lines = model_resolution_lines(blueprint, &config, &registry);
+    /// A blueprint leading with a model nothing configured serves falls
+    /// through to the next one, and the listing says so. That fallthrough is
+    /// the only thing that substitutes: `default_provider` chooses between
+    /// routes to a model, never between models.
+    #[test]
+    fn model_resolution_explains_falling_through_to_the_next_model() {
+        let graph = checked_graph(&model_manifest(
+            "{ model = \"a-model-nobody-serves\" }, { model = \"claude-sonnet-5\" }",
+        ));
+        let config = crate::config::Config {
+            openrouter_api_key: None,
+            ..keyed_config("anthropic")
+        };
+        let lines = model_resolution_lines(&graph, &config, &registry_for(&config));
         assert!(
             lines.iter().any(|l| l.contains("blueprint order")),
             "the substitution is explained: {lines:#?}"
@@ -1130,8 +979,6 @@ system_prompt = "hi"
         );
         // The open-route entries are printed as the blueprint wrote them, not
         // as `/claude-sonnet-5` with an empty provider in front.
-        // Checked on the blueprint-order line alone: the resolved line above it
-        // legitimately shows the route the run will take.
         let order = lines
             .iter()
             .find(|l| l.contains("blueprint order"))
@@ -1139,6 +986,24 @@ system_prompt = "hi"
         assert!(
             !order.contains("/claude-sonnet-5"),
             "an entry that pinned no route is not shown with one: {order}"
+        );
+    }
+
+    /// A stage the resolver refuses is named with the reason rather than
+    /// dropped from the list.
+    #[test]
+    fn model_resolution_names_a_stage_that_cannot_run_here() {
+        let graph = checked_graph(&model_manifest("{ provider = \"nowhere\", model = \"m\" }"));
+        let config = crate::config::Config {
+            default_provider: String::new(),
+            ..crate::config::Config::default()
+        };
+        let lines = model_resolution_lines(&graph, &config, &registry_for(&config));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("one") && l.contains("cannot run here")),
+            "{lines:#?}"
         );
     }
 
@@ -1161,13 +1026,8 @@ system_prompt = "hi"
     #[tokio::test]
     async fn a_machine_with_no_https_client_has_no_registry_to_prime() {
         // Both providers are pinned, because a client is only ever built for a
-        // provider that registers. A default config registers whichever ones the
-        // machine happens to offer: the key comes from the environment, and
-        // Ollama registers on answering at its default address. On a developer
-        // machine running Ollama that is enough to reach the failure; on CI,
-        // where neither is present, nothing registers, no client is asked for,
-        // and an empty registry builds cleanly. Naming a key and an address that
-        // resolves nowhere makes the test the same everywhere.
+        // provider that registers. Naming a key and an address that resolves
+        // nowhere makes the test the same everywhere.
         let config = crate::config::Config {
             providers: crate::config::ProviderConfig {
                 anthropic_api_key: Some("sk-ant-test".to_string()),
@@ -1176,9 +1036,6 @@ system_prompt = "hi"
             ollama_base_url: Some("http://127.0.0.1:1/".to_string()),
             ..Default::default()
         };
-        // The purpose-built error rather than a TLS-backend trick: which
-        // backend refuses a bogus configuration differs by platform, so that
-        // version passed on macOS and failed on Linux.
         let no_client = |_: Option<u64>| Err(leviath_providers::provider::malformed_url_error());
         assert!(
             primed_registry_with(Some(&config), &[], &no_client)
@@ -1190,53 +1047,16 @@ system_prompt = "hi"
 
     #[test]
     fn model_resolution_shows_where_the_install_overrides_the_blueprint() {
-        let manifest = r#"
-[agent]
-name = "m"
-version = "0.1.0"
-entry_stage = "one"
-
-[stages.one]
-model = { models = [
-  { provider = "anthropic", model = "claude-sonnet-5" },
-  { provider = "openrouter", model = "deepseek/deepseek-v4-flash" },
-] }
-system_prompt = "hi"
-"#;
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_test_agent(dir.path(), manifest);
-        let checked = check_manifest(&path).expect("the manifest parses");
-        let blueprint = &checked.blueprint;
-
-        // A key is all it takes to register, and registration is all the
-        // resolver asks about - so the real providers stand in for themselves
-        // rather than a fake that would need a whole trait impl to answer one
-        // question. Ollama is probed away: whether this machine is running it
-        // is not part of what the test is about.
-        let with_keys = |default_provider: &str| crate::config::Config {
-            default_provider: default_provider.to_string(),
-            override_model: None,
-            openrouter_api_key: Some("test-key".to_string()),
-            providers: crate::config::ProviderConfig {
-                anthropic_api_key: Some("test-key".to_string()),
-                ..Default::default()
-            },
-            ..crate::config::Config::default()
-        };
-        let registry_for = |config: &crate::config::Config| {
-            crate::commands::run::build_provider_registry_from_config_probing(
-                config,
-                &leviath_providers::provider::build_http_client,
-                &|_| false,
-            )
-            .expect("an HTTPS client builds in tests")
-        };
+        let graph = checked_graph(&model_manifest(
+            "{ provider = \"anthropic\", model = \"claude-sonnet-5\" }, \
+             { provider = \"openrouter\", model = \"deepseek/deepseek-v4-flash\" }",
+        ));
 
         // Preferring anthropic: the blueprint already leads with it, so there
         // is nothing to report and no second line.
-        let anthropic_first = with_keys("anthropic");
-        let registry = registry_for(&anthropic_first);
-        let lines = model_resolution_lines(blueprint, &anthropic_first, &registry);
+        let anthropic_first = keyed_config("anthropic");
+        let lines =
+            model_resolution_lines(&graph, &anthropic_first, &registry_for(&anthropic_first));
         assert!(
             lines
                 .iter()
@@ -1247,14 +1067,18 @@ system_prompt = "hi"
             !lines.iter().any(|l| l.contains("blueprint order")),
             "no substitution, so nothing to explain: {lines:#?}"
         );
+        // The entry an outage would move the stage on to is named.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("falls back to: openrouter/deepseek/deepseek-v4-flash")),
+            "{lines:#?}"
+        );
 
-        // Preferring openrouter does not substitute a different MODEL. The
-        // blueprint asked for claude-sonnet-5 first and a route to it exists,
-        // so that is what runs: `default_provider` chooses between routes to a
-        // model, not between models.
-        let openrouter_first = with_keys("openrouter");
-        let registry = registry_for(&openrouter_first);
-        let lines = model_resolution_lines(blueprint, &openrouter_first, &registry);
+        // Preferring openrouter does not substitute a different MODEL.
+        let openrouter_first = keyed_config("openrouter");
+        let lines =
+            model_resolution_lines(&graph, &openrouter_first, &registry_for(&openrouter_first));
         assert!(
             lines.iter().any(|l| l.contains("claude-sonnet-5")),
             "the blueprint's first model still wins: {lines:#?}"
@@ -1262,6 +1086,7 @@ system_prompt = "hi"
         assert!(
             !lines
                 .iter()
+                .filter(|l| !l.contains("falls back to"))
                 .any(|l| l.contains("openrouter/deepseek/deepseek-v4-flash")),
             "a preference for a provider must not pick a different model: {lines:#?}"
         );
@@ -1277,10 +1102,9 @@ system_prompt = "hi"
         // there is no setting to name, so the trailing line is omitted.
         let no_preference = crate::config::Config {
             default_provider: String::new(),
-            ..with_keys("anthropic")
+            ..keyed_config("anthropic")
         };
-        let registry = registry_for(&no_preference);
-        let lines = model_resolution_lines(blueprint, &no_preference, &registry);
+        let lines = model_resolution_lines(&graph, &no_preference, &registry_for(&no_preference));
         assert!(
             lines
                 .iter()
@@ -1293,67 +1117,38 @@ system_prompt = "hi"
         );
     }
 
-    /// A minimal manifest that lints clean, so a test can add exactly the one
-    /// defect it is about.
-    ///
-    /// Ollama is last in the models list because it registers with no
-    /// credential: under the isolated config these tests run against, a
-    /// blueprint naming only keyed providers would (correctly) warn that
-    /// nothing in its list is reachable.
-    const CLEAN_MANIFEST: &str = r#"
-[agent]
-name = "ok-agent"
-version = "0.1.0"
-description = "Valid"
-
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
-description = "Main"
-max_iterations = 5
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
-"#;
-
-    fn write_manifest(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
-        let path = dir.join("agent.leviath");
-        std::fs::write(&path, content).unwrap();
-        path
-    }
-
-    fn args_for(dir: &std::path::Path) -> ValidateArgs {
-        ValidateArgs {
-            path: dir.to_str().unwrap().to_string(),
-            deny_warnings: false,
-            json: false,
-            graph: false,
-            width: 120,
-        }
-    }
-
     #[test]
     fn graph_text_draws_every_stage_and_the_flag_prints_it() {
-        let toml = make_blueprint_toml(
+        let graph = checked_graph(&format!(
             r#"
-[stages.plan]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-[stages.plan.transitions.implement]
-[stages.implement]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-[stages.implement.transitions.plan]
-condition = "error"
-[stages.implement.transitions.done]
-[stages.done]
+[blueprint]
+name = "test"
+version = "0.1.0"
+
+[graph]
+{LAYOUT}
+edges = [
+    {{ name = "implement", from = "plan", to = "implement" }},
+    {{ name = "plan", from = "implement", to = "plan", when = "error" }},
+    {{ name = "done", from = "implement", to = "done" }},
+]
+
+[[graph.stages]]
+name = "plan"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-4-6" }}] }}
+
+[[graph.stages]]
+name = "implement"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-4-6" }}] }}
+
+[[graph.stages]]
+name = "done"
 mode = "output"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-[stages.done.transitions]
-"#,
-        );
-        let text = graph_text(&parse(&toml), 200);
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-4-6" }}] }}
+tools = ["submit_output"]
+"#
+        ));
+        let text = graph_text(&graph, 200);
         for stage in ["plan", "implement", "done"] {
             assert!(text.contains(stage), "{stage}: {text}");
         }
@@ -1361,7 +1156,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         // Through the command: the flag prints after the report and the
         // outcome is unchanged.
         let dir = tempfile::tempdir().unwrap();
-        write_manifest(dir.path(), CLEAN_MANIFEST);
+        write_manifest(dir.path(), &clean_manifest());
         let args = ValidateArgs {
             graph: true,
             width: 80,
@@ -1377,37 +1172,28 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     /// With a config in hand, the report also says which model each stage
     /// would actually go to. Driven through the command so the `--json` guard
     /// is exercised: the resolution block is prose, and a caller parsing JSON
-    /// must not find it spliced into the document.
+    /// must not find it spliced into the document. A primed registry adds the
+    /// catalogue and retention answers to the lint.
     #[test]
     fn a_config_adds_the_model_resolution_to_the_prose_report() {
         let dir = tempfile::tempdir().unwrap();
-        write_manifest(dir.path(), CLEAN_MANIFEST);
+        write_manifest(dir.path(), &clean_manifest());
         let config = crate::config::Config {
-            default_provider: "anthropic".to_string(),
-            providers: crate::config::ProviderConfig {
-                anthropic_api_key: Some("test-key".to_string()),
-                ..Default::default()
-            },
-            ..crate::config::Config::default()
+            openrouter_api_key: None,
+            ..keyed_config("anthropic")
         };
-        assert!(
-            execute_reporting_outcome(&args_for(dir.path()), Some(&config), None)
-                .unwrap()
-                .is_success()
-        );
-        // The same run as JSON: the block is suppressed, and the outcome is
-        // the same either way.
-        assert!(
-            execute_reporting_outcome(&json_args_for(dir.path()), Some(&config), None)
-                .unwrap()
-                .is_success()
-        );
-    }
-
-    // ─── print_success ───────────────────────────────────────────────────
-
-    fn parse(toml: &str) -> leviath_core::Blueprint {
-        leviath_core::manifest::parse_manifest(toml).unwrap()
+        let registry = registry_for(&config);
+        for (args, registry) in [
+            (args_for(dir.path()), None),
+            (args_for(dir.path()), Some(&registry)),
+            (json_args_for(dir.path()), Some(&registry)),
+        ] {
+            assert!(
+                execute_reporting_outcome(&args, Some(&config), registry)
+                    .unwrap()
+                    .is_success()
+            );
+        }
     }
 
     #[test]
@@ -1415,287 +1201,13 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         let cfg = crate::config::Config::default();
         let dir = std::path::Path::new(".");
         // A blueprint with no dependencies prints nothing and must not panic.
-        let none = parse("[agent]\nname = \"n\"\n");
-        print_dependencies(&none, &cfg, dir);
+        print_dependencies(&checked_graph(&clean_manifest()), &cfg, dir);
         // One with a dependency reaches the listing loop.
-        let some = parse(
-            "[agent]\nname = \"a\"\n\n\
-             [[dependencies]]\nname = \"e\"\nkind = \"env\"\nvar = \"LEVIATH_VALIDATE_UNSET_XYZ\"\n",
+        let some = clean_manifest().replace(
+            "[graph]\n",
+            "[graph]\ndependencies = [{ name = \"e\", needs = { env = \"LEVIATH_VALIDATE_UNSET_XYZ\" } }]\n",
         );
-        print_dependencies(&some, &cfg, dir);
-    }
-
-    /// Helper to create a minimal valid blueprint TOML with given stages.
-    fn make_blueprint_toml(stages_toml: &str) -> String {
-        format!(
-            r#"
-[agent]
-name = "test"
-version = "0.1.0"
-description = "test blueprint"
-
-{stages_toml}
-
-[context.regions]
-system = {{ kind = "pinned", max_tokens = 1000 }}
-conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
-"#
-        )
-    }
-
-    #[test]
-    fn mime_lines_say_what_each_stage_takes_and_hands_back() {
-        let toml = make_blueprint_toml(
-            r#"
-[stages.plan]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "Plan"
-max_iterations = 5
-
-[stages.cut]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "Cut"
-max_iterations = 5
-[stages.cut.input]
-accepts = ["audio/*", "image/*"]
-as_text = ["model/obj"]
-[stages.cut.tool_accepts]
-spawn_agent = ["image/*"]
-[[stages.cut.output.artifacts]]
-name = "final"
-type = "video/mp4"
-required = true
-[[stages.cut.output.artifacts]]
-name = "notes"
-type = "text/*"
-
-[stages.ship]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "Ship"
-max_iterations = 5
-[[stages.ship.output.artifacts]]
-name = "bundle"
-type = "application/zip"
-
-[stages.hear]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "Hear"
-max_iterations = 5
-[stages.hear.input]
-accepts = ["audio/*"]
-
-[mime_types."application/x-acme-scene"]
-family = "model"
-check = "checks/scene.rhai"
-[mime_types."model/obj"]
-text = true
-"#,
-        );
-        let lines = mime_lines(&parse(&toml));
-        assert_eq!(
-            lines,
-            vec![
-                "  Mime types: adds 2 rows for its runs: application/x-acme-scene (check \
-                 checks/scene.rhai), model/obj"
-                    .to_string(),
-                "  Mime, stage 'cut': takes audio/*, image/*; as text: model/obj; hands back \
-                 final (video/mp4, required), notes (text/*); limits spawn_agent to [image/*]"
-                    .to_string(),
-                "  Mime, stage 'ship': hands back bundle (application/zip)".to_string(),
-                "  Mime, stage 'hear': takes audio/*".to_string(),
-            ]
-        );
-        print_success(&parse(&toml));
-        // One row, and a check lifted with an empty name, read as a bare key.
-        let one = make_blueprint_toml(
-            "[stages.plan]\nmode = \"autonomous\"\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
-             description = \"Plan\"\nmax_iterations = 5\n\n[mime_types.\"image/gif\"]\ncheck = \"\"\n",
-        );
-        assert_eq!(
-            mime_lines(&parse(&one)),
-            vec!["  Mime types: adds 1 row for its runs: image/gif".to_string()]
-        );
-    }
-
-    #[test]
-    fn print_success_linear_mode_no_panic() {
-        let toml = make_blueprint_toml(
-            r#"
-[stages.main]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "Main stage"
-max_iterations = 5
-
-[stages.review]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "Review stage"
-max_iterations = 5
-"#,
-        );
-        print_success(&parse(&toml));
-    }
-
-    #[test]
-    fn print_success_graph_mode_with_terminal_and_revisits_no_panic() {
-        let toml = make_blueprint_toml(
-            r#"
-[stages.a]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "A"
-max_iterations = 5
-max_revisits = 3
-[stages.a.transitions]
-b = "true"
-
-[stages.b]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "B"
-max_iterations = 5
-"#,
-        );
-        // Exercises: graph mode header, an edge with a target ("-> b"), and
-        // stage "b" which has transitions = None ("(linear)" branch) as well
-        // as the max_revisits formatting on stage "a".
-        print_success(&parse(&toml));
-    }
-
-    #[test]
-    fn print_success_graph_mode_terminal_stage_no_panic() {
-        let toml = make_blueprint_toml(
-            r#"
-[stages.a]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "A"
-max_iterations = 5
-[stages.a.transitions]
-b = "true"
-
-[stages.b]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "B"
-max_iterations = 5
-[stages.b.transitions]
-"#,
-        );
-        let bp = parse(&toml);
-        // Stage "b" has an explicitly-empty transitions table -> Some(empty
-        // map) -> exercises the "(terminal)" formatting branch.
-        let b = bp.find_stage("b").unwrap();
-        assert!(matches!(&b.transitions, Some(t) if t.is_empty()));
-        print_success(&bp);
-    }
-
-    // ─── input_lines / input_summaries ───────────────────────────────────
-
-    /// A reviewer-shaped manifest: no task region, one required input whose
-    /// key differs from its region, one optional renamed input, and one bare
-    /// optional input. Together the flags exercise every annotation
-    /// combination the formatter has.
-    const NAMED_INPUTS_MANIFEST: &str = r#"
-[agent]
-name = "inputs-agent"
-version = "0.1.0"
-description = "Named inputs"
-
-[stages.main]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-5" }
-description = "Main"
-max_iterations = 5
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-patch = { kind = "pinned", max_tokens = 2000, required = true, seed = "diff" }
-review_criteria = { kind = "pinned", max_tokens = 1000, seed = "criteria" }
-focus = { kind = "pinned", max_tokens = 500, seed = "input" }
-conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
-"#;
-
-    /// Validate says what `lev run` would accept, including that `--task` is
-    /// not among the flags.
-    #[test]
-    fn input_lines_name_every_flag_and_the_missing_task() {
-        let lines = input_lines(&parse(NAMED_INPUTS_MANIFEST));
-        assert_eq!(
-            lines,
-            vec![
-                "  Inputs: --diff (required, seeds region 'patch'), \
-                 --criteria (seeds region 'review_criteria'), --focus"
-                    .to_string(),
-                "  Note: this agent takes no --task; give it input via --diff, \
-                 --criteria, --focus"
-                    .to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn input_lines_of_a_task_taking_agent_skip_the_refusal_note() {
-        let toml = CLEAN_MANIFEST.replace(
-            "[context.regions]",
-            "[context.regions]\ntask = { kind = \"pinned\", max_tokens = 2000, \
-             required = true, seed = \"task\" }",
-        );
-        let blueprint = parse(&toml);
-        assert!(blueprint.accepts_task());
-        assert_eq!(
-            input_lines(&blueprint),
-            vec!["  Inputs: --task (required)".to_string()],
-            "an agent that takes a task needs no note about refusing one"
-        );
-    }
-
-    #[test]
-    fn input_lines_without_any_caller_input_say_so() {
-        assert_eq!(
-            input_lines(&parse(CLEAN_MANIFEST)),
-            vec!["  Inputs: none - this agent takes no --task or other caller input".to_string()]
-        );
-    }
-
-    /// The summaries feed the JSON report, so a harness can check an agent's
-    /// inputs before spawning it instead of discovering the refusal at run
-    /// time.
-    #[test]
-    fn input_summaries_carry_key_region_and_required() {
-        let summaries = input_summaries(&parse(NAMED_INPUTS_MANIFEST));
-        assert_eq!(
-            summaries,
-            vec![
-                InputSummary {
-                    key: "diff".to_string(),
-                    region: "patch".to_string(),
-                    required: true,
-                },
-                InputSummary {
-                    key: "criteria".to_string(),
-                    region: "review_criteria".to_string(),
-                    required: false,
-                },
-                InputSummary {
-                    key: "focus".to_string(),
-                    region: "focus".to_string(),
-                    required: false,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn print_success_prints_the_input_lines_without_panicking() {
-        // The formatting is asserted in the input_lines tests; this pins the
-        // wiring, so the lines cannot silently drop out of the report.
-        print_success(&parse(NAMED_INPUTS_MANIFEST));
+        print_dependencies(&checked_graph(&some), &cfg, dir);
     }
 
     // ─── print_findings ──────────────────────────────────────────────────
@@ -1768,25 +1280,11 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
     async fn execute_validation_error_returns_error() {
         crate::config::with_isolated_config_path_async("validate-validation-error", |_| async {
             let dir = tempfile::tempdir().unwrap();
-            let manifest = r#"
-[agent]
-name = "bad-entry-agent"
-version = "0.1.0"
-description = "Entry stage does not exist"
-entry_stage = "does-not-exist"
-
-[stages.main]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "Main"
-max_iterations = 5
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-"#;
-            write_manifest(dir.path(), manifest);
-            let err = execute(args_for(dir.path())).await.unwrap_err();
-            assert!(err.to_string().contains("Validation failed"));
+            write_manifest(dir.path(), &bad_entry_manifest());
+            let err = execute(args_for(dir.path())).await.unwrap_err().to_string();
+            assert!(err.contains("Validation failed"), "{err}");
+            // Every problem is listed with its path.
+            assert!(err.contains("graph.entry"), "{err}");
         })
         .await;
     }
@@ -1798,9 +1296,9 @@ system = { kind = "pinned", max_tokens = 1000 }
             let dir = tempfile::tempdir().unwrap();
             write_manifest(
                 dir.path(),
-                &CLEAN_MANIFEST.replace(
+                &clean_manifest().replace(
                     "max_iterations = 5",
-                    "max_iterations = 5\navailable_tools = [\"raed_file\"]",
+                    "max_iterations = 5\ntools = [\"raed_file\"]",
                 ),
             );
             let err = execute(args_for(dir.path())).await.unwrap_err();
@@ -1809,7 +1307,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         .await;
     }
 
-    /// A warning alone exits zero, and the same manifest fails under
+    /// A warning alone exits zero, and the same blueprint fails under
     /// `--deny-warnings`. Asserted as a pair, since the whole point of the flag
     /// is the difference between the two.
     #[tokio::test]
@@ -1818,10 +1316,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             "validate-deny-warnings",
             |cfg_dir| async move {
                 // A key, so the blueprint's Anthropic entry is a reachable
-                // provider. Ollama registers only when something answers at its
-                // address, so without this key a machine with no local Ollama
-                // draws a second warning that nothing in the list is reachable,
-                // and the count this test is about becomes two.
+                // provider and the one warning is the one this test is about.
                 std::fs::write(
                     cfg_dir.join("config.toml"),
                     "[providers]\nanthropic_api_key = \"test-key\"\n",
@@ -1831,7 +1326,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 // No max_iterations on the one stage: exactly one warning, no errors.
                 write_manifest(
                     dir.path(),
-                    &CLEAN_MANIFEST.replace("max_iterations = 5", ""),
+                    &clean_manifest().replace("max_iterations = 5", ""),
                 );
 
                 let mut args = args_for(dir.path());
@@ -1861,12 +1356,12 @@ system = { kind = "pinned", max_tokens = 1000 }
         .await;
     }
 
-    /// The manifest may be named directly rather than by its directory.
+    /// The blueprint may be named directly rather than by its directory.
     #[tokio::test]
     async fn execute_valid_manifest_file_path() {
         crate::config::with_isolated_config_path_async("validate-file-path", |_| async {
             let dir = tempfile::tempdir().unwrap();
-            let manifest_path = write_manifest(dir.path(), CLEAN_MANIFEST);
+            let manifest_path = write_manifest(dir.path(), &clean_manifest());
             let args = ValidateArgs {
                 path: manifest_path.to_str().unwrap().to_string(),
                 deny_warnings: false,
@@ -1883,7 +1378,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     async fn execute_valid_manifest_directory_path() {
         crate::config::with_isolated_config_path_async("validate-dir-path", |_| async {
             let dir = tempfile::tempdir().unwrap();
-            write_test_agent(dir.path(), CLEAN_MANIFEST);
+            write_test_agent(dir.path(), clean_manifest());
             assert!(execute(args_for(dir.path())).await.is_ok());
         })
         .await;
@@ -1926,13 +1421,6 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     // ─── --json ──────────────────────────────────────────────────────────
 
-    fn json_args_for(dir: &std::path::Path) -> ValidateArgs {
-        ValidateArgs {
-            json: true,
-            ..args_for(dir)
-        }
-    }
-
     /// A finding of a given severity. `LintFinding::new` is private to `lint`,
     /// but the fields are public, so the report can be exercised from here
     /// without widening that API for a test.
@@ -1946,14 +1434,23 @@ system = { kind = "pinned", max_tokens = 1000 }
         }
     }
 
+    /// The summary of a blueprint's text.
+    fn summary(content: &str) -> BlueprintSummary {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), content);
+        BlueprintSummary::of(&toml_blueprint::check(dir.path()).unwrap())
+    }
+
     #[test]
     fn json_report_of_a_clean_manifest_is_valid_and_names_its_stages() {
-        let blueprint = parse(CLEAN_MANIFEST);
-        let report = ValidateReport::linted(&blueprint, Vec::new(), false);
+        let report =
+            ValidateReport::linted(summary(&clean_manifest()), Vec::new(), Vec::new(), false);
         assert!(report.valid);
         assert_eq!(report.error, None);
-        let summary = report.blueprint.expect("a parsed manifest has a summary");
+        let summary = report.blueprint.expect("a checked blueprint has a summary");
         assert_eq!(summary.name, "ok-agent");
+        assert_eq!(summary.description, "Valid");
+        assert_eq!(summary.entry_stage, None);
         assert_eq!(summary.stages, vec!["main".to_string()]);
         assert!(!summary.accepts_task);
         assert_eq!(summary.inputs, Vec::new());
@@ -1962,13 +1459,13 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     #[test]
     fn json_report_counts_each_severity_separately() {
-        let blueprint = parse(CLEAN_MANIFEST);
         let findings = vec![
             finding(LintSeverity::Error, "a"),
             finding(LintSeverity::Warning, "b"),
             finding(LintSeverity::Note, "c"),
         ];
-        let report = ValidateReport::linted(&blueprint, findings, false);
+        let report =
+            ValidateReport::linted(summary(&clean_manifest()), findings, Vec::new(), false);
         assert_eq!((report.errors, report.warnings, report.notes), (1, 1, 1));
         // An error is fatal whatever --deny-warnings says.
         assert!(!report.valid);
@@ -1976,19 +1473,58 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     #[test]
     fn json_report_is_valid_with_a_warning_until_deny_warnings() {
-        let blueprint = parse(CLEAN_MANIFEST);
         let warning = || vec![finding(LintSeverity::Warning, "b")];
-        assert!(ValidateReport::linted(&blueprint, warning(), false).valid);
-        assert!(!ValidateReport::linted(&blueprint, warning(), true).valid);
+        assert!(
+            ValidateReport::linted(summary(&clean_manifest()), warning(), Vec::new(), false).valid
+        );
+        assert!(
+            !ValidateReport::linted(summary(&clean_manifest()), warning(), Vec::new(), true).valid
+        );
+    }
+
+    /// A blueprint whose runs can never finish is still valid: 0.6.4 refused
+    /// it, and now it is warned about, at the top of the report and in the
+    /// JSON, and `--deny-warnings` fails on it.
+    #[test]
+    fn a_blueprint_that_never_finishes_is_valid_and_warned_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let looping = format!(
+            "{}\n[[graph.edges]]\nname = \"again\"\nfrom = \"main\"\nto = \"main\"\n",
+            clean_manifest()
+        );
+        write_manifest(dir.path(), &looping);
+        for json in [false, true] {
+            let mut args = args_for(dir.path());
+            args.json = json;
+            let outcome = execute_reporting_outcome(&args, None, None).unwrap();
+            assert_eq!(format!("{outcome:?}"), "Success");
+            args.deny_warnings = true;
+            let outcome = execute_reporting_outcome(&args, None, None).unwrap();
+            assert_eq!(
+                format!("{outcome:?}"),
+                "LintFailed { errors: 0, warnings: 2 }"
+            );
+        }
+        let report = ValidateReport::linted(
+            summary(&clean_manifest()),
+            Vec::new(),
+            vec!["graph.edges: may never finish: it loops".to_string()],
+            true,
+        );
+        assert!(!report.valid);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["may_never_finish"],
+            serde_json::json!(["graph.edges: may never finish: it loops"])
+        );
     }
 
     #[test]
     fn json_report_of_a_note_stays_valid_under_deny_warnings() {
         // Notes never fail a build. This is the rule most likely to drift, since
         // the JSON `valid` flag restates it in a second place.
-        let blueprint = parse(CLEAN_MANIFEST);
         let notes = vec![finding(LintSeverity::Note, "c")];
-        assert!(ValidateReport::linted(&blueprint, notes, true).valid);
+        assert!(ValidateReport::linted(summary(&clean_manifest()), notes, Vec::new(), true).valid);
     }
 
     #[test]
@@ -2001,10 +1537,10 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     #[test]
     fn json_report_serializes_every_key_a_caller_reads() {
-        let blueprint = parse(CLEAN_MANIFEST);
         let report = ValidateReport::linted(
-            &blueprint,
+            summary(&clean_manifest()),
             vec![finding(LintSeverity::Error, "unknown-tool")],
+            Vec::new(),
             false,
         );
         let value: serde_json::Value =
@@ -2025,14 +1561,30 @@ system = { kind = "pinned", max_tokens = 1000 }
     /// parsing the run-time refusal.
     #[test]
     fn json_report_names_the_accepted_inputs() {
-        let blueprint = parse(NAMED_INPUTS_MANIFEST);
-        let report = ValidateReport::linted(&blueprint, Vec::new(), false);
+        let report = ValidateReport::linted(
+            summary(&toml_blueprint::tests::named_inputs_manifest()),
+            Vec::new(),
+            Vec::new(),
+            false,
+        );
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
         assert_eq!(value["blueprint"]["accepts_task"], serde_json::json!(false));
         assert_eq!(
             value["blueprint"]["inputs"][0],
-            serde_json::json!({"key": "diff", "region": "patch", "required": true})
+            serde_json::json!({
+                "key": "diff",
+                "region": "patch",
+                "type": "text",
+                "regions": ["patch"],
+                "required": true,
+            })
+        );
+        // `region` is the key 0.6.4 wrote, the one region the input fills,
+        // kept for the scripts that read it.
+        assert_eq!(
+            value["blueprint"]["inputs"][1]["region"],
+            serde_json::json!("review_criteria")
         );
         assert_eq!(
             value["blueprint"]["inputs"][1]["key"],
@@ -2053,28 +1605,8 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     #[test]
     fn json_mode_still_reports_a_validation_error_through_the_outcome() {
-        // A manifest that parses but names an entry stage that does not exist:
-        // the other half of the failure path, and a different report line.
         let dir = tempfile::tempdir().unwrap();
-        write_manifest(
-            dir.path(),
-            r#"
-[agent]
-name = "bad-entry-agent"
-version = "0.1.0"
-description = "Entry stage does not exist"
-entry_stage = "does-not-exist"
-
-[stages.main]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "Main"
-max_iterations = 5
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-"#,
-        );
+        write_manifest(dir.path(), &bad_entry_manifest());
         assert!(
             execute_reporting_outcome(&json_args_for(dir.path()), None, None)
                 .unwrap()
@@ -2085,12 +1617,46 @@ system = { kind = "pinned", max_tokens = 1000 }
     #[test]
     fn json_mode_still_succeeds_on_a_clean_manifest() {
         let dir = tempfile::tempdir().unwrap();
-        write_manifest(dir.path(), CLEAN_MANIFEST);
+        write_manifest(dir.path(), &clean_manifest());
         assert!(
             execute_reporting_outcome(&json_args_for(dir.path()), None, None)
                 .unwrap()
                 .is_success()
         );
+    }
+
+    /// A blueprint an upgrade dropped keys from is validated with a warning
+    /// for each, which never fails it, until its file changes.
+    #[test]
+    fn an_upgraded_blueprint_warns_what_it_dropped_without_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), &clean_manifest());
+        assert!(upgrade_lines(&[], dir.path()).is_empty());
+        std::fs::create_dir_all(dir.path().join("legacy")).unwrap();
+        let dropped = "[agent]: `colour = \"blue\"` was dropped".to_string();
+        crate::upgrade_warnings::record(dir.path(), std::slice::from_ref(&dropped)).unwrap();
+        let lines = upgrade_lines(std::slice::from_ref(&dropped), dir.path());
+        assert_eq!(lines[0], format!("warning: {dropped}"));
+        assert!(lines[1].contains("upgrade-warnings.json"), "{lines:?}");
+        let mut deny = args_for(dir.path());
+        deny.deny_warnings = true;
+        for args in [deny, json_args_for(dir.path())] {
+            assert!(
+                execute_reporting_outcome(&args, None, None)
+                    .unwrap()
+                    .is_success()
+            );
+        }
+        let mut report = ValidateReport::failed("x".to_string());
+        assert!(
+            serde_json::to_value(&report)
+                .unwrap()
+                .get("upgrade_warnings")
+                .is_none()
+        );
+        report.upgrade_warnings = vec![dropped.clone()];
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["upgrade_warnings"][0], dropped.as_str());
     }
 
     #[test]
@@ -2107,23 +1673,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     #[test]
     fn execute_reporting_outcome_bad_entry_stage_is_validation_error() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = r#"
-[agent]
-name = "bad-entry-agent"
-version = "0.1.0"
-description = "Entry stage does not exist"
-entry_stage = "does-not-exist"
-
-[stages.main]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "Main"
-max_iterations = 5
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-"#;
-        write_manifest(dir.path(), manifest);
+        write_manifest(dir.path(), &bad_entry_manifest());
         assert!(
             execute_reporting_outcome(&args_for(dir.path()), None, None)
                 .unwrap()
@@ -2140,7 +1690,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     #[test]
     fn execute_reporting_outcome_valid_manifest_is_success() {
         let dir = tempfile::tempdir().unwrap();
-        write_manifest(dir.path(), CLEAN_MANIFEST);
+        write_manifest(dir.path(), &clean_manifest());
         assert!(
             execute_reporting_outcome(&args_for(dir.path()), None, None)
                 .unwrap()
@@ -2153,29 +1703,17 @@ system = { kind = "pinned", max_tokens = 1000 }
     #[test]
     fn command_seed_regions_are_noted_without_failing() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = r#"
-[agent]
-name = "scanner"
-version = "0.1.0"
-
-[stages.main]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-5" }
-description = "Main stage"
-max_iterations = 5
-
-[context.regions]
-facts = { kind = "pinned", max_tokens = 1000, seed = { command = "git ls-files" } }
-conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
-"#;
-        write_manifest(dir.path(), manifest);
+        write_manifest(
+            dir.path(),
+            &clean_manifest().replace(
+                "regions = [",
+                "regions = [{ name = \"facts\", kind = \"pinned\", budget = 1000, seed = { command = \"git ls-files\" } }, ",
+            ),
+        );
         // Even under --deny-warnings, a note is not a warning.
         let args = ValidateArgs {
-            path: dir.path().to_str().unwrap().to_string(),
             deny_warnings: true,
-            json: false,
-            graph: false,
-            width: 120,
+            ..args_for(dir.path())
         };
         assert!(
             execute_reporting_outcome(&args, None, None)
@@ -2190,7 +1728,7 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         // validation still succeeds, and the script report's count + warning
         // branches both run.
         let dir = tempfile::tempdir().unwrap();
-        write_manifest(dir.path(), CLEAN_MANIFEST);
+        write_manifest(dir.path(), &clean_manifest());
         let tools = dir.path().join("tools");
         std::fs::create_dir(&tools).unwrap();
         std::fs::write(tools.join("ok.rhai"), "// @tool ok\nparams.x").unwrap();
@@ -2212,9 +1750,9 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         let dir = tempfile::tempdir().unwrap();
         write_manifest(
             dir.path(),
-            &CLEAN_MANIFEST.replace(
+            &clean_manifest().replace(
                 "max_iterations = 5",
-                "max_iterations = 5\navailable_tools = [\"stub_search\"]",
+                "max_iterations = 5\ntools = [\"stub_search\"]",
             ),
         );
         let tools = dir.path().join("tools");
@@ -2329,12 +1867,8 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 
     #[test]
     fn print_script_tool_report_no_tools_dir_is_silent() {
-        // No `tools/` dir → the early return (covered by most success tests, but
-        // asserted here directly against a file path, which exercises the
-        // `path.is_file()` → parent arm).
         let dir = tempfile::tempdir().unwrap();
-        let manifest = write_manifest(dir.path(), "unused");
-        print_script_tool_report(&manifest);
+        print_script_tool_report(dir.path());
     }
 
     #[test]
@@ -2348,164 +1882,14 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         print_script_tool_report(dir.path());
     }
 
-    // ─── check_manifest ──────────────────────────────────────────────────
-
+    /// Only the providers a blueprint pins are primed for it, once each.
     #[test]
-    fn check_manifest_verifies_custom_region_scripts() {
-        // A custom region's script must exist and compile; the same failure a
-        // spawn would hit, surfaced by `lev validate`.
-        let dir = tempfile::tempdir().unwrap();
-        let toml = r#"
-[agent]
-name = "custom-validate"
-version = "0.1.0"
-description = "d"
-
-[stages.main]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-5" }
-description = "Main stage"
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
-brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
-"#;
-        let manifest_path = write_manifest(dir.path(), toml);
-
-        // Missing script file → validation error naming region + path.
-        let err = format!("{:?}", check_manifest(&manifest_path).unwrap_err());
-        assert!(err.starts_with("Validation"), "{err}");
-        assert!(err.contains("region 'brain'"), "{err}");
-
-        // Present + compilable → passes.
-        std::fs::create_dir(dir.path().join("hooks")).unwrap();
-        std::fs::write(
-            dir.path().join("hooks/brain.rhai"),
-            "fn render(ctx) { \"ok\" }",
-        )
-        .unwrap();
-        let checked = check_manifest(&manifest_path).unwrap();
-        assert_eq!(checked.blueprint.name, "custom-validate");
-        // The text is carried through for the linter, and the agent dir points
-        // at the manifest's own directory rather than the manifest file.
-        assert!(checked.content.contains("custom-validate"));
-        assert_eq!(checked.agent_dir, dir.path());
-    }
-
-    /// Extract the inner `anyhow::Error` from a `ManifestCheckError::Io`,
-    /// panicking with a diagnostic message for any other variant.
-    fn unwrap_io_err(err: ManifestCheckError) -> anyhow::Error {
-        let ManifestCheckError::Io(e) = err else {
-            panic!("expected ManifestCheckError::Io, got {err:?}");
-        };
-        e
-    }
-
-    #[test]
-    #[should_panic(expected = "expected ManifestCheckError::Io")]
-    fn unwrap_io_err_panics_on_parse_variant() {
-        let dir = tempfile::tempdir().unwrap();
-        write_manifest(dir.path(), "not valid toml [[[");
-        let err = check_manifest(dir.path()).unwrap_err();
-        // err is ManifestCheckError::Parse - this should panic
-        unwrap_io_err(err);
-    }
-
-    #[test]
-    fn check_manifest_missing_directory_manifest_is_io_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = check_manifest(dir.path()).unwrap_err();
-        let e = unwrap_io_err(err);
-        assert!(e.to_string().contains("No agent.leviath found"));
-    }
-
-    #[test]
-    fn check_manifest_unreadable_file_path_is_io_error() {
-        let dir = tempfile::tempdir().unwrap();
-        // Pass a path to a file that doesn't exist directly (is_file() is
-        // false, and it's not a directory either) - falls through to the
-        // "join agent.leviath" branch, which also won't exist.
-        let missing = dir.path().join("nonexistent-subdir");
-        let err = check_manifest(&missing).unwrap_err();
-        unwrap_io_err(err);
-    }
-
-    // Distinct from the two "file doesn't exist" IO-error cases above: this
-    // exercises `std::fs::read_to_string`'s own `Err` arm (a manifest file
-    // that *is* found via `path.is_file()`/`.exists()`, but can't actually
-    // be read), which no other test reaches.
-    #[test]
-    fn check_manifest_unreadable_file_is_io_error() {
-        // `agent.leviath` exists but is a *directory*, so it's found via
-        // `.exists()` yet `read_to_string` fails on every platform, exercising
-        // the read_to_string map_err arm.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("agent.leviath")).unwrap();
-
-        let err = check_manifest(dir.path()).unwrap_err();
-        let e = unwrap_io_err(err);
-        assert!(e.to_string().contains("Failed to read"));
-    }
-
-    impl ManifestCheckError {
-        /// Whether this is a parse failure. A method rather than an inline
-        /// `matches!` in the test: the arm the passing run does not take reads
-        /// to llvm-cov as an uncovered region, and so does a `{err:?}` argument
-        /// that only a failing assertion would format.
-        fn is_parse(&self) -> bool {
-            matches!(self, Self::Parse(_))
-        }
-    }
-
-    #[test]
-    fn check_manifest_malformed_toml_is_parse_error() {
-        let dir = tempfile::tempdir().unwrap();
-        write_manifest(dir.path(), "not valid toml [[[");
-        assert!(check_manifest(dir.path()).unwrap_err().is_parse());
-        // And the other arm: a missing manifest is an I/O failure, not a parse
-        // one, so the predicate is deciding rather than always agreeing.
-        let empty = tempfile::tempdir().unwrap();
-        assert!(!check_manifest(empty.path()).unwrap_err().is_parse());
-    }
-
-    /// docs/content/rhai-validators.md promises `lev validate <path>` compiles
-    /// output validators. Before this check existed, a blueprint whose
-    /// validator did not compile passed `lev validate` and died at spawn - the
-    /// exact failure the command exists to find early.
-    #[test]
-    fn check_manifest_rejects_an_output_validator_that_does_not_compile() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("shape.rhai"), "fn validate(content) { ][ }").unwrap();
-        let manifest = format!(
-            "{CLEAN_MANIFEST}\n[stages.main.output]\nformat = \"a2ui\"\nvalidator = \"shape.rhai\"\n"
-        );
-        write_manifest(dir.path(), &manifest);
-        let err = check_manifest(dir.path()).unwrap_err();
-        let text = format!("{err:?}");
-        assert!(text.contains("output validator"), "{text}");
-    }
-
-    /// Stage hook scripts are resolved exactly as a spawn resolves them, so a
-    /// hook file that is not there fails `lev validate` rather than the run.
-    #[test]
-    fn check_manifest_rejects_a_stage_hook_script_that_is_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest =
-            format!("{CLEAN_MANIFEST}\n[stages.main.hooks]\non_stage_enter = \"missing.rhai\"\n");
-        write_manifest(dir.path(), &manifest);
-        let err = check_manifest(dir.path()).unwrap_err();
-        let text = format!("{err:?}");
-        assert!(text.contains("stage hook script"), "{text}");
-    }
-
-    #[test]
-    fn check_manifest_direct_file_path_is_accepted() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest_path = write_manifest(dir.path(), CLEAN_MANIFEST);
-        // Pass the *file* path directly, not the directory.
-        let checked = check_manifest(&manifest_path).unwrap();
-        assert_eq!(checked.blueprint.name, "ok-agent");
+    fn pinned_providers_are_the_named_ones_once_each() {
+        let graph = checked_graph(&model_manifest(
+            "{ provider = \"openai\", model = \"a\" }, { model = \"b\" }, \
+             { provider = \"anthropic\", model = \"c\" }, { provider = \"openai\", model = \"d\" }",
+        ));
+        assert_eq!(pinned_providers(&graph), vec!["anthropic", "openai"]);
     }
 
     /// The blueprint is still validated when the config file will not load,
@@ -2521,7 +1905,7 @@ brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
                 )
                 .unwrap();
                 let manifest_dir = tempfile::tempdir().unwrap();
-                write_test_agent(manifest_dir.path(), CLEAN_MANIFEST);
+                write_test_agent(manifest_dir.path(), clean_manifest());
                 assert!(
                     execute(args_for(manifest_dir.path())).await.is_ok(),
                     "a blueprint is checked whether or not the config loads"
@@ -2533,8 +1917,7 @@ brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
 
     /// A config that loads can still hold problems `lev doctor` would name -
     /// a key nothing reads, a script provider whose `.rhai` file is not on
-    /// disk. `lev validate` used to pass such a config in silence, so its
-    /// clean verdict and the daemon's behaviour disagreed.
+    /// disk - and `lev validate` names them too.
     #[test]
     fn loaded_config_notes_name_stale_keys_and_missing_script_providers() {
         let dir = tempfile::tempdir().unwrap();
@@ -2587,9 +1970,8 @@ brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
         );
     }
 
-    /// The other side of the coin: a config that loads but holds a stale key
-    /// gets its warning printed on the way past, and the blueprint check
-    /// still runs and still passes. A warning, never a refusal.
+    /// A config that loads but holds a stale key gets its warning printed on
+    /// the way past, and the blueprint check still runs and still passes.
     #[tokio::test]
     async fn execute_warns_about_a_loaded_config_with_stale_keys_and_still_checks() {
         crate::config::with_isolated_config_path_async(
@@ -2601,7 +1983,7 @@ brain = { kind = "custom", script = "hooks/brain.rhai", max_tokens = 1000 }
                 )
                 .unwrap();
                 let manifest_dir = tempfile::tempdir().unwrap();
-                write_test_agent(manifest_dir.path(), CLEAN_MANIFEST);
+                write_test_agent(manifest_dir.path(), clean_manifest());
                 assert!(
                     execute(args_for(manifest_dir.path())).await.is_ok(),
                     "a stale config key is a warning, not a refusal"

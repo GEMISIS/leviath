@@ -11,7 +11,7 @@ order: 7
 Every [agent](/docs/agents) advertises a set of tools to its LLM. The runtime ships a fixed catalog
 of **built-in tools** (file access, a shell, context memory, human-in-the-loop prompts, review
 surfaces, and sub-agent management) that need no configuration to exist. A [stage](/docs/stages)
-decides which of them the model may actually call via `available_tools`, and `tool_permissions`
+decides which of them the model may actually call via its `tools` list, and `tool_permissions`
 gates each call at `allow` / `ask` / `deny`.
 
 For tools beyond this catalog you have two options: connect an [MCP server](/docs/mcp), or write
@@ -49,7 +49,7 @@ tool's name. See [installing a tool from a run](/docs/rhai-tools#installing-a-to
 | --- | --- | --- |
 | `shell` | Run a shell command in the working directory, using the system shell. It has a 60-second timeout. | `command` |
 
-`bash` is an accepted alias for `shell`: a stage's `available_tools` may name either, and both
+`bash` is an accepted alias for `shell`: a stage's `tools` may name either, and both
 resolve to the same tool advertised to the model.
 
 ### Which shell you get
@@ -206,13 +206,14 @@ stage, before the first inference. The model never sees them and decides for its
 A stage that genuinely needs a person can opt out, tool by tool:
 
 ```toml
-[stages.plan]
-available_tools = ["read_file", "ask_user_text", "ask_user_choice"]
+[[graph.stages]]
+name = "plan"
+tools = ["read_file", "ask_user_text", "ask_user_choice"]
 # Kept even when the run is unattended.
 required_tools = ["ask_user_text", "ask_user_choice"]
 ```
 
-`required_tools` entries must also appear in `available_tools`. `lev validate` rejects a blueprint
+`required_tools` entries must also appear in `tools`. `lev validate` rejects a blueprint
 where they do not. It also warns (`blocking-tool-in-autonomous-stage`) about an autonomous stage
 that grants one of these tools without saying it meant to. Naming the tool in `required_tools`
 settles that, and keeps the tool through an unattended run; `allow_blocking_tools = true` on the
@@ -229,17 +230,24 @@ model but executed by the engine's tool registry, since they act on the shared a
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `spawn_agent` | Spawn a sub-agent from a blueprint; returns its ID (blocks and returns the result when `wait` is true). | `blueprint`, `task`, `wait` (default false), `seed_context` (optional), `parts` (optional), `max_child_depth` (optional), `output_format` (optional), `output_instructions` (optional) |
+| `spawn_agent` | Start a sub-agent and return its ID, or its result when `wait` is true. | `source`, `inputs`, `wait`, `max_child_depth`, `output`, `parts`, all but `source` optional |
+| `validate_spawn` | Check `spawn_agent`'s arguments without starting anything. | as `spawn_agent` |
+| `describe_blueprint` | An installed blueprint's stages and declared inputs. | `blueprint` |
+| `spawn_schema` | One part of the spawn request's JSON Schema. | `part` (optional; the top level when left out) |
+| `run_history` | A run in the caller's tree: its summary, state, or edges taken. | `run_id`, `view` (optional), `at` (optional) |
 | `check_agent` | Non-blocking status check; returns the child's answer once it is done. | `agent_id` |
 | `wait_for_agent` | Block until a sub-agent completes, then return its answer. | `agent_id` |
 | `send_to_agent` | Send a message into a running sub-agent's context. | `agent_id`, `message`, `target_region` (optional; defaults to the conversation) |
 | `kill_agent` | Kill a sub-agent and all its descendants. | `agent_id` |
 
-`parts` names stored parts of this run to hand the child, by name or sha256 prefix.
+`source` is `{"blueprint": "<name>"}` or `{"graph": {...}}`, and `inputs` holds the values the
+blueprint or graph declares. A spawn of a whole graph also needs the `spawn_raw_graph` permission,
+which asks by default. `parts` names stored parts of this run to hand the child, by name or sha256
+prefix. See [Sub-agents](/docs/sub-agents) for every form `source` takes.
 
 A child reports whatever it submitted through [`submit_output`](/docs/outputs). A child that
-submitted nothing says so, rather than returning an empty result. `output_format` asks the child for
-a particular shape, overriding what its blueprint declares. A label that differs retires the
+submitted nothing says so, rather than returning an empty result. `output.format` asks the child
+for a particular shape, overriding what its blueprint declares. A label that differs retires the
 child's declared validator and schema, and the warning appears only in the daemon log.
 
 ## Environment
@@ -288,7 +296,7 @@ so an agent can tell `ANTHROPIC_API_KEY` is set without seeing it. Name it in
 `system_info` reports the machine's hostname, and `environment_info` reports absolute paths that
 usually contain the user's account name. Both travel to whichever provider the stage calls, like
 everything else in the context window. Neither is granted to a stage that does not list it in
-`available_tools`.
+`tools`.
 
 Not every platform answers every question. `os_version` is read from `/etc/os-release` on Linux and
 `SystemVersion.plist` on macOS; Windows publishes neither, so it reports `null` there rather than
@@ -354,7 +362,7 @@ handed an empty result set, cannot tell it apart from "nobody has written about 
 the gap from its training data, citing what it remembers. The report comes out confident and
 fully referenced. Three things make that visible now: `web_search` returns prose naming the
 problem instead of `[]`, `lev doctor` runs a `search` check, and every run records `searches_run`
-and `searches_empty` in its `meta.json`. Equal counts, with a non-zero total, mean the run saw
+and `searches_empty` among the flags in its [run file](/docs/run-file). Equal counts, with a non-zero total, mean the run saw
 nothing and wrote a report anyway.
 
 > [!WARNING]
@@ -368,33 +376,31 @@ nothing and wrote a report anyway.
 A tool existing in the catalog does not mean an agent can call it. Two independent settings on each
 stage control access:
 
-- **`available_tools`**: the allowlist of tool names advertised to the model in that stage. A tool
+- **`tools`**: the allowlist of tool names advertised to the model in that stage. A tool
   not listed here is invisible to the LLM, and a call to one it guessed is refused before it runs,
   with the refusal returned as that call's result. Names may use aliases (e.g. `bash` for `shell`).
 - **`tool_permissions`**: a per-tool map whose values are `allow`, `ask`, or `deny`. `allow` runs
   the call outright, `ask` requires user approval first, and `deny` blocks it. Stage-level entries
-  are narrower than agent-level `[tool_permissions]` and wider than launch-time flags. Any other
-  value is a load error, because a misspelled `deny` that quietly resolved to `ask` would hand
+  are narrower than the blueprint's `[graph.tool_permissions]` and wider than launch-time
+  flags. Any other value is a load error, because a misspelled `deny` that quietly resolved to `ask` would hand
   the author of the typo a prompt where they had written a refusal.
 
 ```toml
-[stages.implement]
-available_tools = ["read_file", "read_files", "edit_file", "shell"]
-
-[stages.implement.tool_permissions]
-shell     = "ask"      # require approval before running commands
-edit_file = "allow"    # apply edits without prompting
+[[graph.stages]]
+name = "implement"
+tools = ["read_file", "read_files", "edit_file", "shell"]
+tool_permissions = { shell = "ask", edit_file = "allow" }   # ask before commands, edit freely
 ```
 
 > [!NOTE]
-> `available_tools` and `tool_permissions` are separate gates: a tool must be listed in
-> `available_tools` to be offered at all, and its `tool_permissions` value then decides whether a
+> `tools` and `tool_permissions` are separate gates: a tool must be listed in
+> `tools` to be offered at all, and its `tool_permissions` value then decides whether a
 > call is allowed, prompted, or refused.
 
 ### Tool groups
 
 Listing twenty-eight built-ins by hand to say "everything" is a chore, and a list written that way
-goes stale the day a tool is added. An `available_tools` entry that starts with `@` names a whole
+goes stale the day a tool is added. A `tools` entry that starts with `@` names a whole
 kind of tool instead of one:
 
 | Token | Grants |
@@ -408,15 +414,15 @@ kind of tool instead of one:
 Groups and names mix freely. The four shapes people actually want are each one line:
 
 ```toml
-available_tools = ["read_file", "edit_file", "shell"]          # a hand-picked set
-available_tools = ["@builtin", "summarize", "tracker__search"] # every built-in, plus a few others by name
-available_tools = ["@builtin", "@scripts", "tracker__search"]  # every built-in and script, one MCP tool
-available_tools = ["@all"]                                     # everything this install has
+tools = ["read_file", "edit_file", "shell"]          # a hand-picked set
+tools = ["@builtin", "summarize", "tracker__search"] # every built-in, plus a few others by name
+tools = ["@builtin", "@scripts", "tracker__search"]  # every built-in and script, one MCP tool
+tools = ["@all"]                                     # everything this install has
 ```
 
 A group is resolved when the stage runs, not when the blueprint is written. A script dropped into
 `~/.leviath/tools/` or a server added with `lev mcp add` is offered to a stage granting `@scripts`
-or `@mcp` without touching the manifest. Two things a group never grants: `submit_output` and
+or `@mcp` without touching the blueprint. Two things a group never grants: `submit_output` and
 `fan_out`, which decide what a stage *is* rather than what it can do. Name those, or use the mode
 that carries them.
 
@@ -452,7 +458,7 @@ grounds as the file readers.
 
 ### How a policy is resolved
 
-Narrowest scope wins: **launch flag, then stage, then agent, then `config.toml`, then the built-in
+Narrowest scope wins: **launch flag, then stage, then blueprint, then `config.toml`, then the built-in
 default above.**
 
 Two rules constrain that:
@@ -473,7 +479,7 @@ Permissions are only one of them. A tool call has to get past all four, in this 
 
 ```mermaid
 flowchart TD
-  M["The model asks for a tool"] --> V{"1. available_tools<br/>Is the stage offering it?"}
+  M["The model asks for a tool"] --> V{"1. tools<br/>Is the stage offering it?"}
   V -->|no| R1["Refused. The stage never advertised it"]
   V -->|yes| S{"2. Argument schema<br/>Do the arguments fit?"}
   S -->|no| R2["Refused, with the violations named"]
@@ -490,7 +496,7 @@ Each gate answers a different question:
 
 | Gate | Asks | Configured by |
 |---|---|---|
-| 1. Visibility | Does this stage offer the tool at all? | `available_tools` on the stage |
+| 1. Visibility | Does this stage offer the tool at all? | `tools` on the stage |
 | 2. Schema | Are the arguments the right shape? | The tool's own schema, nothing to set |
 | 3. Approval | Is this call allowed, and does a person need to say so? | `tool_permissions` |
 | 4. Data flow | Would this carry sensitive data off the machine? | The [taint gate](/docs/security#taint-tracking-experimental) |

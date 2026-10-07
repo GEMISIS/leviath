@@ -1,0 +1,1 @@
+{"config":{"worker_agent":"waiter","max_workers":1,"on_worker_failure":"continue","split_prompt":""},"max_workers":1,"pending":[{"id":"beta","context":{"n":2}}],"active":[["alpha","waiter-1790811839-36428b065732"]],"summaries":[],"failures":[],"parts":[],"paused":false,"origin":{"Tool":{"call_id":"call_1"}}}

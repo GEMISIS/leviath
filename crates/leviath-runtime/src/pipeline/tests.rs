@@ -4,6 +4,223 @@
 
 use super::*;
 use crate::inference_pool::{InferencePoolConfig, InferencePools};
+use crate::insert::RunSpecC;
+use crate::spec::graph::EdgeCarry;
+use crate::spec::graph::EdgeCondition;
+use crate::test_graph::{self as tg, spec_of, spec_with};
+use crate::test_support::Exploding;
+
+/// `edge`, renamed `name`.
+fn named(name: &str, edge: crate::spec::graph::EdgeDef) -> crate::spec::graph::EdgeDef {
+    crate::spec::graph::EdgeDef {
+        name: crate::spec::names::EdgeName::new(name).unwrap(),
+        ..edge
+    }
+}
+
+/// How many times a stage owing a final output is re-run before it is let
+/// through: the cap `require_final_output` holds every stage to.
+const OUTPUT_REENTRY_CAP: usize = 3;
+
+/// A seed tool call to `tool` with no arguments.
+fn seed_call(tool: &str) -> crate::spec::graph::SeedToolCall {
+    crate::spec::graph::SeedToolCall {
+        tool: crate::spec::names::ToolName::new(tool).unwrap(),
+        args: leviath_core::JsonDoc::new(serde_json::json!({})),
+    }
+}
+
+/// A region marked required (or not), with an optional custom message.
+trait WithRequired {
+    fn with_required(self, required: bool, message: Option<String>) -> Self;
+}
+
+impl WithRequired for crate::spec::graph::RegionDef {
+    fn with_required(mut self, required: bool, message: Option<String>) -> Self {
+        self.required = required;
+        self.required_message = message;
+        self
+    }
+}
+
+/// `edges` as edges leaving a stage named `s`.
+fn edges_of(edges: &[crate::spec::graph::EdgeDef]) -> Vec<crate::spec::graph::EdgeDef> {
+    edges
+        .iter()
+        .map(|e| crate::spec::graph::EdgeDef {
+            from: crate::spec::names::StageName::new("s").unwrap(),
+            ..e.clone()
+        })
+        .collect()
+}
+
+/// [`super::find_conditioned_edge`] for the stage `stage` of `graph`: the
+/// target's position and the edge's context transform.
+fn find_conditioned_edge(
+    graph: &crate::spec::graph::RunGraph,
+    stage: &crate::spec::graph::StageDef,
+    visits: &std::collections::HashMap<String, usize>,
+    c: crate::spec::graph::EdgeCondition,
+) -> Option<(usize, crate::spec::graph::EdgeCarry)> {
+    super::find_conditioned_edge(graph, stage, visits, c).map(|next| (next.idx, next.carry))
+}
+
+/// The digests [`crate::pipeline::transition::watched_region_digests`] takes
+/// for `stage` on entry, as the only stage of a graph.
+fn watched_region_digests(
+    stage: &Staged,
+    window: &ContextWindow,
+) -> std::collections::HashMap<String, u64> {
+    let graph = graph_of_staged(vec![stage.clone()], tg::layout(Vec::new(), 1000));
+    crate::pipeline::transition::watched_region_digests(&graph, &graph.stages[0], window)
+}
+
+/// How `stage` is entered, as a one-stage spawn of it would enter it: `agent`
+/// is the graph's own hint settings, `global` the operator's, and `output`
+/// the stage's resolved output shape.
+fn stage_setup_from(
+    stage: &crate::spec::graph::StageDef,
+    global: leviath_core::config::PromptHints,
+    agent: leviath_core::config::PromptHintOverrides,
+    output: Option<leviath_core::output::OutputSpec>,
+) -> StageSetup {
+    let mut graph = tg::graph(vec![stage.clone()], tg::layout(Vec::new(), 1000));
+    graph.batch_tool_hint = agent.batch_tool;
+    graph.shell_hint = agent.shell;
+    let mut inference = tg::plan_inference(0);
+    inference.output = output;
+    let mut spec = spec_with(graph, &[inference]);
+    let graph = &mut Arc::make_mut(&mut spec.0).graph;
+    graph.batch_tool_hint = Some(graph.batch_tool_hint.unwrap_or(global.batch_tool));
+    graph.shell_hint = Some(graph.shell_hint.unwrap_or(global.shell));
+    crate::pipeline::spec_view::stage_setup(&spec.0, 0)
+}
+
+/// A provider setting as a graph writes it.
+fn param_scalar(v: &serde_json::Value) -> crate::spec::graph::ParamScalar {
+    use crate::spec::graph::ParamScalar;
+    match v {
+        serde_json::Value::Bool(b) => ParamScalar::Bool(*b),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(i) => ParamScalar::Int(i),
+            None => ParamScalar::Float(n.as_f64().unwrap()),
+        },
+        serde_json::Value::Array(items) => ParamScalar::TextList(
+            items
+                .iter()
+                .map(|i| i.as_str().unwrap().to_string())
+                .collect(),
+        ),
+        other => ParamScalar::Text(other.as_str().unwrap().to_string()),
+    }
+}
+
+/// A window region as a graph declares it, holding its budget.
+fn region_def_of(r: &Region) -> crate::spec::graph::RegionDef {
+    let mut def = tg::region(&r.name, r.kind.clone(), r.max_tokens as u32);
+    def.summarizable = r.summarizable;
+    def.admission = r.admission;
+    def.volatility = r.volatility;
+    def.description = r.description.clone();
+    def.describe_in_prompt = r.describe_in_prompt;
+    def
+}
+
+/// A stage named `name` that a spawn would enter with `setup`.
+fn stage_from_setup(name: &str, setup: &StageSetup) -> crate::spec::graph::StageDef {
+    let mut s = tg::stage(name);
+    s.system_prompt = setup.system_prompt.clone();
+    let cfg = &setup.inference_config;
+    s.model.params.temperature = cfg.temperature.map(f64::from);
+    s.model.params.max_output_tokens = cfg.max_output_tokens.clone();
+    for (k, v) in &cfg.extra_params {
+        s.model.params.extra.insert(k.clone(), param_scalar(v));
+    }
+    s.model.request_timeout_secs = cfg.request_timeout_secs;
+    s.batch_tool_hint = Some(cfg.batch_tool_hint);
+    s.shell_hint = Some(cfg.shell_hint);
+    s.input_as_text = cfg
+        .as_text
+        .iter()
+        .map(|m| crate::spec::names::MimePattern::new(m).unwrap())
+        .collect();
+    s.tool_routing = setup.routing.clone();
+    s.accepts_messages = setup.accepts_messages;
+    s.layout = setup.context_layout.as_ref().map(|regions| {
+        tg::layout(
+            regions.iter().map(region_def_of).collect(),
+            regions.iter().map(|r| r.max_tokens as u32).sum(),
+        )
+    });
+    s.hide = setup
+        .context_hide
+        .iter()
+        .map(|h| tg::region_name(h))
+        .collect();
+    s.reset = setup
+        .context_reset
+        .iter()
+        .map(|h| tg::region_name(h))
+        .collect();
+    s
+}
+
+#[test]
+fn a_setup_reads_back_through_the_stage_written_for_it() {
+    use crate::spec::graph::OutputCap as Cap;
+    let mut setup = StageSetup::default();
+    setup
+        .inference_config
+        .extra_params
+        .insert("top_p".to_string(), serde_json::json!(0.9));
+    setup
+        .inference_config
+        .extra_params
+        .insert("seed".to_string(), serde_json::json!(7));
+    setup
+        .inference_config
+        .extra_params
+        .insert("stream".to_string(), serde_json::json!(true));
+    setup
+        .inference_config
+        .extra_params
+        .insert("stop".to_string(), serde_json::json!(["x"]));
+    setup
+        .inference_config
+        .extra_params
+        .insert("mode".to_string(), serde_json::json!("fast"));
+    let read = stage_from_setup("s", &setup);
+    assert_eq!(read.model.params.extra.len(), 5);
+    for cap in [
+        Cap::Tokens(9),
+        Cap::WindowPercent(0.5),
+        Cap::RegionPercent {
+            percent: 0.25,
+            region: tg::region_name("task"),
+        },
+    ] {
+        setup.inference_config.max_output_tokens = Some(cap.clone());
+        let read = stage_from_setup("s", &setup);
+        assert_eq!(read.model.params.max_output_tokens, Some(cap));
+    }
+}
+
+/// A region with its budget replaced.
+trait WithBudget {
+    fn with_budget(self, budget: crate::spec::graph::Budget) -> Self;
+}
+
+impl WithBudget for crate::spec::graph::RegionDef {
+    fn with_budget(mut self, budget: crate::spec::graph::Budget) -> Self {
+        self.budget = budget;
+        self
+    }
+}
+
+/// The graph of a test run's spec, to change before the run is spawned.
+fn graph_mut(spec: &mut RunSpecC) -> &mut crate::spec::graph::RunGraph {
+    &mut std::sync::Arc::make_mut(&mut spec.0).graph
+}
 use crate::test_support::hints;
 use leviath_core::{Region, RegionKind};
 use leviath_providers::LimitsSource;
@@ -481,7 +698,7 @@ fn build_request_threads_stage_meta_into_custom_region_render() {
 fn build_request_filters_tools_and_uses_config_overrides() {
     let cfg = InferenceConfig {
         temperature: Some(0.1),
-        max_output_tokens: Some(leviath_core::blueprint::OutputCap::Tokens(42)),
+        max_output_tokens: Some(crate::spec::graph::OutputCap::Tokens(42)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -891,6 +1108,113 @@ async fn dispatch_uses_the_configured_retry_schedule() {
     assert!(outcome.result.is_ok());
 }
 
+/// A failed trip is decided on in the world: collect leaves the agent waiting
+/// with its call held, and once the backoff is over the next trip answers and
+/// the turn is applied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collect_waits_on_a_retried_trip_and_applies_the_answer() {
+    let (mut world, rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    world.resource_mut::<Providers>().0.register(
+        "cfg".to_string(),
+        Arc::new(crate::inference_call::tests::Flaky::failing(1)),
+    );
+    world.insert_resource(InferenceRetryTuning {
+        max_attempts: 3,
+        base_delay_ms: 1,
+    });
+    world.insert_resource(InferenceResults(rx));
+    let e = world
+        .spawn((
+            agent_state(),
+            window(),
+            stage("m", vec![], None),
+            ReadyToInfer,
+        ))
+        .id();
+    run(&mut world);
+    let mut schedule = Schedule::default();
+    schedule.add_systems((crate::inference_call::fire_due_calls, collect_inference).chain());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut waited = false;
+    while world.get::<ProcessResponse>(e).is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn never landed"
+        );
+        schedule.run(&mut world);
+        waited |= world
+            .get::<crate::inference_call::InferenceCall>(e)
+            .is_some_and(|c| c.waiting());
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(waited, "the failed trip waited in the world");
+    assert!(
+        world
+            .get::<crate::inference_call::InferenceCall>(e)
+            .is_none()
+    );
+    assert_eq!(world.get::<AgentState>(e).unwrap().iteration, 1);
+}
+
+/// The routing lane's collect waits on a failed trip the same way: the agent
+/// stays mid-route with its call held rather than failing the stage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collect_choice_waits_on_a_retried_trip() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    world.resource_mut::<Providers>().0.register(
+        "cfg".to_string(),
+        Arc::new(crate::inference_call::tests::Flaky::failing(1)),
+    );
+    let (ttx, trx) = mpsc::unbounded_channel();
+    world.resource_mut::<InferenceStage>().transition_outcomes = ttx;
+    world.insert_resource(TransitionResults(trx));
+    let bp = blueprint(vec![stage_named("a", None, false, None)]);
+    let e = spawn_choosing_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
+    let mut schedule = Schedule::default();
+    schedule.add_systems(dispatch_transition_choice);
+    schedule.run(&mut world);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        run_collect_transition(&mut world);
+        if world
+            .get::<crate::inference_call::InferenceCall>(e)
+            .is_some_and(|c| c.waiting())
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the trip never came back"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(world.get::<AwaitingTransitionResponse>(e).is_some());
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Active
+    );
+}
+
+/// Settle `outcome` against the call its agent holds, as the collect systems
+/// do, for a test that reads the lane directly and still wants what the world
+/// records when a trip comes back.
+fn settle(world: &mut World, outcome: &mut InferenceOutcome) -> crate::inference_call::Next {
+    let mut state = bevy_ecs::system::SystemState::<(
+        Query<&mut crate::inference_call::InferenceCall>,
+        Option<Res<InferenceStage>>,
+        Commands,
+    )>::new(world);
+    let (mut calls, stage, mut commands) = state.get_mut(world).expect("the params");
+    let next = crate::inference_call::settle_call(
+        calls.get_mut(outcome.entity).ok(),
+        outcome,
+        stage.as_deref(),
+        &mut commands,
+    );
+    state.apply(world);
+    next
+}
+
 /// A dispatched job journals its attempt, carrying the run, the stage and the
 /// name the run calls the provider by - none of which the retry loop knows on
 /// its own, which is why the dispatch system hands them over with the request.
@@ -901,7 +1225,7 @@ async fn dispatch_uses_the_configured_retry_schedule() {
 async fn a_dispatched_call_journals_the_attempt_it_makes() {
     let (mut world, mut rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
     let (lane, mut journal) = mpsc::unbounded_channel();
-    world.insert_resource(crate::pipeline::PersistenceStage(lane.clone()));
+    world.insert_resource(crate::pipeline::JournalSender::new(lane.clone(), None));
     world.spawn((
         agent_state(),
         window(),
@@ -910,26 +1234,27 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
     ));
 
     run(&mut world);
-    assert!(rx.recv().await.expect("outcome").result.is_ok());
+    let mut outcome = rx.recv().await.expect("outcome");
+    settle(&mut world, &mut outcome);
+    assert!(outcome.result.is_ok());
 
-    // One lane carries every kind of record the run makes - a usage record lands
-    // on this one from the response system, a context change from the window - so
-    // reading the attempts back has to skip the rest rather than trip over it.
-    lane.send(crate::persistence_bridge::PersistMsg::Append {
+    // One journal carries every kind of record the run makes - a usage record
+    // lands on this one from the response system, a context change from the
+    // window - so reading the attempts back has to skip the rest rather than
+    // trip over it.
+    lane.send(crate::pipeline::journal::Journaled {
         run_id: "r".to_string(),
-        record: Box::new(leviath_core::run_archive::RunRecord::Message {
-            message: leviath_core::run_archive::MessageRecord {
-                role: "user".to_string(),
-                content: "not an attempt".to_string(),
-            },
+        record: Box::new(crate::runfile::record::RunRecord::ArtifactsProduced {
+            execution_id: "not an attempt".to_string(),
+            artifacts: Vec::new(),
             at: 0,
         }),
         ack: None,
     })
     .expect("the journal is still open");
 
-    // The attempt record is appended before the outcome is reported, so the
-    // outcome arriving means the append has already been sent.
+    // The world appends the attempt record when it settles the trip, so the
+    // settling above means the append has already been sent.
     let records = crate::inference_bridge::journaled_attempts(&mut journal);
     assert_eq!(records.len(), 1, "{records:?}");
     let record = &records[0];
@@ -939,7 +1264,7 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
     assert_eq!(record.model, "m");
     assert_eq!(
         record.outcome,
-        leviath_core::run_archive::AttemptOutcome::Succeeded
+        crate::runfile::record::AttemptOutcome::Succeeded
     );
     // The digest is what the request was, counted rather than copied: one tool
     // was advertised and the stage's own budget was asked for.
@@ -953,7 +1278,7 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
     let input = record.model_input.as_ref().expect("a model input");
     assert_eq!(
         input.capture_status,
-        leviath_core::run_archive::CaptureStatus::NotCaptured
+        crate::runfile::record::CaptureStatus::NotCaptured
     );
     assert!(input.request.is_none(), "{input:?}");
     assert_eq!(input.bytes, 0);
@@ -978,7 +1303,7 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
 async fn a_captured_run_journals_the_request_it_sent_and_the_window_it_came_from() {
     let (mut world, mut rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
     let (lane, mut journal) = mpsc::unbounded_channel();
-    world.insert_resource(crate::pipeline::PersistenceStage(lane));
+    world.insert_resource(crate::pipeline::JournalSender::new(lane, None));
     world.spawn((
         agent_state(),
         window(),
@@ -988,14 +1313,16 @@ async fn a_captured_run_journals_the_request_it_sent_and_the_window_it_came_from
     ));
 
     run(&mut world);
-    assert!(rx.recv().await.expect("outcome").result.is_ok());
+    let mut outcome = rx.recv().await.expect("outcome");
+    settle(&mut world, &mut outcome);
+    assert!(outcome.result.is_ok());
 
     let records = crate::inference_bridge::journaled_attempts(&mut journal);
     assert_eq!(records.len(), 1, "{records:?}");
     let input = records[0].model_input.as_ref().expect("a model input");
     assert_eq!(
         input.capture_status,
-        leviath_core::run_archive::CaptureStatus::Retained
+        crate::runfile::record::CaptureStatus::Retained
     );
     let body = input.request.as_ref().expect("a retained body");
     // The request Leviath assembled, field for field: the model it named and the
@@ -1209,48 +1536,12 @@ impl StageInference {
     }
 }
 
-/// A provider whose `infer` panics, standing in for any bug that kills a lane
-/// task before it can report - the case that would otherwise leave the agent
-/// waiting on an outcome that never arrives.
-struct Exploding;
-#[async_trait::async_trait]
-impl Provider for Exploding {
-    async fn infer(
-        &self,
-        _r: &InferenceRequest,
-    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-        panic!("provider adapter blew up")
-    }
-    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
-        1
-    }
-    fn max_context_tokens(&self, _m: &str) -> usize {
-        100_000
-    }
-    fn name(&self) -> &str {
-        "exploding"
-    }
-    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
-        leviath_providers::ModelCapabilities::default()
-    }
-}
-
 /// Register [`Exploding`] under `"exploding"` in an already-built test world.
 fn register_exploding(world: &mut World) {
     world
         .resource_mut::<Providers>()
         .0
         .register("exploding".to_string(), Arc::new(Exploding));
-}
-
-#[tokio::test]
-async fn exploding_provider_metadata_is_exercised() {
-    // Keep the mock's non-`infer` trait methods measured.
-    let p = Exploding;
-    assert_eq!(p.name(), "exploding");
-    assert_eq!(p.count_tokens("t", "m").await, 1);
-    assert_eq!(p.max_context_tokens("m"), 100_000);
-    let _ = p.capabilities("m");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1348,6 +1639,7 @@ fn collect_applies_ok_and_advances_to_process_response() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1381,6 +1673,7 @@ fn collect_holds_a_success_that_lands_on_a_paused_agent() {
         attempt_id: String::new(),
         result: Ok(resp("hi")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1431,6 +1724,7 @@ fn collect_holds_a_failure_that_lands_on_a_paused_agent() {
             "reading response body: error decoding response body".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1475,6 +1769,7 @@ fn collect_choice_parks_without_a_stage_log_to_write_to() {
             "refused",
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect_transition(&mut world);
@@ -1531,6 +1826,7 @@ fn collect_parks_a_run_whose_provider_is_unreachable() {
             "reading response body: error decoding response body".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1592,6 +1888,7 @@ fn a_run_with_no_stage_log_still_parks_on_an_unreachable_provider() {
             "reading response body: error decoding response body".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1614,6 +1911,7 @@ fn collect_marks_error_on_failure() {
         attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1645,10 +1943,7 @@ fn stage_with_fallback() -> StageInference {
         model: "model-a".to_string(),
         tools: Vec::new(),
         tool_filter: None,
-        fallbacks: vec![leviath_core::blueprint::ModelEntry::new(
-            "alive".to_string(),
-            "model-b".to_string(),
-        )],
+        fallbacks: vec![crate::spec::names::ModelRef::parse("alive/model-b").unwrap()],
         output: None,
     }
 }
@@ -1672,6 +1967,7 @@ fn an_unusable_provider_fails_over_instead_of_killing_the_run() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1713,6 +2009,7 @@ fn failover_is_recorded_in_the_stage_log() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1736,7 +2033,7 @@ fn failover_is_recorded_in_the_stage_log() {
 fn a_failover_is_journaled_with_the_provider_it_left_and_the_one_it_took() {
     let (mut world, tx) = world_with_results();
     let (lane, mut journal) = mpsc::unbounded_channel();
-    world.insert_resource(crate::pipeline::PersistenceStage(lane));
+    world.insert_resource(crate::pipeline::JournalSender::new(lane, None));
     let e = world
         .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
         .id();
@@ -1751,6 +2048,7 @@ fn a_failover_is_journaled_with_the_provider_it_left_and_the_one_it_took() {
             "[timeout] the provider went quiet".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1758,9 +2056,7 @@ fn a_failover_is_journaled_with_the_provider_it_left_and_the_one_it_took() {
 
     let mut records = Vec::new();
     while let Ok(msg) = journal.try_recv() {
-        if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg
-            && let leviath_core::run_archive::RunRecord::InferenceFailover(failover) = *record
-        {
+        if let crate::runfile::record::RunRecord::InferenceFailover(failover) = *msg.record {
             records.push(failover);
         }
     }
@@ -1785,7 +2081,7 @@ fn a_failover_is_journaled_with_the_provider_it_left_and_the_one_it_took() {
 fn a_failover_on_an_unclassified_failure_journals_an_empty_kind() {
     let (mut world, tx) = world_with_results();
     let (lane, mut journal) = mpsc::unbounded_channel();
-    world.insert_resource(crate::pipeline::PersistenceStage(lane));
+    world.insert_resource(crate::pipeline::JournalSender::new(lane, None));
     let e = world
         .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
         .id();
@@ -1795,6 +2091,7 @@ fn a_failover_on_an_unclassified_failure_journals_an_empty_kind() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1802,9 +2099,7 @@ fn a_failover_on_an_unclassified_failure_journals_an_empty_kind() {
 
     let mut records = Vec::new();
     while let Ok(msg) = journal.try_recv() {
-        if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg
-            && let leviath_core::run_archive::RunRecord::InferenceFailover(failover) = *record
-        {
+        if let crate::runfile::record::RunRecord::InferenceFailover(failover) = *msg.record {
             records.push(failover);
         }
     }
@@ -1835,6 +2130,7 @@ fn an_exhausted_fallback_list_pauses_on_credits_instead_of_dying() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1883,7 +2179,7 @@ fn an_unattended_run_out_of_credits_parks_instead_of_losing_its_work() {
     let mut si = stage_with_fallback();
     si.fallbacks.clear();
     let mut md = run_metadata();
-    md.unattended = true;
+    md.unattended = leviath_core::Unattended::All;
     let e = world.spawn((agent_state(), AwaitingInference, si, md)).id();
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
@@ -1891,6 +2187,7 @@ fn an_unattended_run_out_of_credits_parks_instead_of_losing_its_work() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1930,6 +2227,7 @@ fn a_credits_pause_records_the_remedy_on_the_run() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1960,6 +2258,7 @@ fn the_credits_pause_copes_without_a_stage_log_buffer() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1990,6 +2289,7 @@ fn an_exhausted_fallback_list_still_terminates_on_a_dead_key() {
             detail: "HTTP 401 Unauthorized".to_string(),
         }),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2019,6 +2319,7 @@ fn an_ordinary_error_does_not_burn_a_fallback() {
             "HTTP 400: bad request".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2053,6 +2354,7 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
             attempt_id: String::new(),
             result: Err(credits_exhausted()),
             pricing: None,
+            attempt: None,
         })
         .unwrap();
         run_collect(&mut world);
@@ -2074,6 +2376,7 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
         attempt_id: String::new(),
         result: Ok(resp("hi")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -2121,6 +2424,7 @@ fn a_success_between_failures_clears_the_count_end_to_end() {
             attempt_id: String::new(),
             result,
             pricing: None,
+            attempt: None,
         })
         .unwrap();
         run_collect(world);
@@ -2184,6 +2488,7 @@ fn a_slow_provider_keeps_its_place_where_a_refused_one_loses_it() {
                 attempt_id: String::new(),
                 result: Err(fail_with(label)),
                 pricing: None,
+                attempt: None,
             })
             .unwrap();
             run_collect(&mut world);
@@ -2230,6 +2535,7 @@ fn an_ordinary_error_does_not_count_against_the_provider() {
             "HTTP 400: bad request".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2256,6 +2562,7 @@ fn collect_works_without_the_breaker_installed() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2284,6 +2591,7 @@ fn an_unusable_provider_without_a_stage_component_still_terminates() {
             detail: "HTTP 401 Unauthorized".to_string(),
         }),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2492,6 +2800,49 @@ fn reconcile_stage_ledger_completes_current_stage_on_run_complete() {
     assert_eq!(led.0[0].ended_at, Some(50));
 }
 
+/// The stage a run stops or holds in reads as the run does: a cancelled run's
+/// stage is cancelled rather than failed, a paused run's is paused rather
+/// than running, and so on for every status a run can stand in.
+#[test]
+fn the_stage_a_run_stops_or_holds_in_reads_as_the_run_does() {
+    for (status, word) in [
+        (AgentStatus::Idle, "active"),
+        (AgentStatus::Active, "active"),
+        (AgentStatus::Waiting, "waiting_input"),
+        (AgentStatus::Paused, "paused"),
+        (AgentStatus::Complete, "complete"),
+        (
+            AgentStatus::Error {
+                message: "boom".to_string(),
+            },
+            "error",
+        ),
+        (AgentStatus::Cancelled, "cancelled"),
+    ] {
+        let mut led = three_stage_ledger();
+        reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 10, true);
+        reconcile_stage_ledger(&mut led, 1, &status, 20, false);
+        let said = serde_json::to_value(&led.0[1].status).expect("a status serializes");
+        assert_eq!(said, serde_json::json!(word), "{status:?}");
+        let before = serde_json::to_value(&led.0[0].status).expect("a status serializes");
+        assert_eq!(before, serde_json::json!("complete"), "{status:?}");
+    }
+}
+
+/// A paused stage goes back to running when its run is resumed.
+#[test]
+fn a_paused_stage_runs_again_on_resume() {
+    let mut led = three_stage_ledger();
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Paused, 10, false);
+    let paused = serde_json::to_value(&led.0[0].status).expect("a status serializes");
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 20, true);
+    let resumed = serde_json::to_value(&led.0[0].status).expect("a status serializes");
+    assert_eq!(
+        (paused, resumed),
+        (serde_json::json!("paused"), serde_json::json!("active"))
+    );
+}
+
 /// A produced part the run cannot keep leaves its note in the stage log, after
 /// the token line, so the log says why a stage has nothing to hand back.
 #[test]
@@ -2523,6 +2874,7 @@ fn collect_inference_logs_a_produced_part_the_run_dropped() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2572,6 +2924,7 @@ fn collect_inference_buffers_output_token_line_and_stage_tokens() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2834,6 +3187,7 @@ fn collect_does_not_learn_the_cost_of_the_bytes_a_request_sent() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2862,6 +3216,7 @@ fn collect_learns_the_drift_between_what_was_believed_and_what_was_charged() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2897,6 +3252,7 @@ fn collect_folds_a_worse_call_into_an_existing_calibration() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2932,6 +3288,7 @@ fn collect_learns_from_a_refused_request_too() {
             max: 1_350,
         }),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2958,6 +3315,7 @@ fn collect_calibrates_nothing_when_there_was_no_estimate() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3074,6 +3432,7 @@ fn collect_inference_drops_a_response_for_a_cancelled_run() {
         attempt_id: String::new(),
         result: Ok(resp("too late")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3109,6 +3468,7 @@ fn collect_inference_skips_empty_output_but_logs_tokens() {
         attempt_id: String::new(),
         result: Ok(resp("   ")), // whitespace-only ⇒ no output line
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3136,6 +3496,7 @@ fn collect_inference_error_buffers_error_line() {
         attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3163,6 +3524,7 @@ fn collect_inference_tolerates_cursor_beyond_ledger() {
         attempt_id: String::new(),
         result: Ok(resp("x")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3290,9 +3652,86 @@ fn a_landed_title_is_a_write_but_not_progress() {
     );
 }
 
+/// A parent parked on its fan-out is snapshotted like any run, its
+/// outstanding workers counted for its listing.
 #[test]
-fn dispatch_persistence_emits_stage_index_and_drains_io_buffer() {
-    use leviath_core::run_meta::StageRunStatus;
+fn dispatch_persistence_reads_a_parent_parked_on_its_fan_out() {
+    let (mut world, mut rx) = world_with_persistence();
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+        ))
+        .id();
+    // Attach a (minimal) FanOutWaiting via the public restore path.
+    crate::fanout::restore_fan_out_waiting(
+        &mut world,
+        e,
+        crate::fanout::FanOutState {
+            origin: crate::fanout::FanOutOrigin::Stage,
+            parts: Vec::new(),
+            config: crate::spec::graph::FanOutDef {
+                worker: crate::spec::graph::WorkerSource::Stage(
+                    crate::spec::names::StageName::new("w").unwrap(),
+                ),
+                merge_stage: None,
+                max_workers: Some(1),
+                on_worker_failure: Default::default(),
+                split_prompt: String::new(),
+                results_region: None,
+                max_items: None,
+                max_attempts: None,
+            },
+            max_workers: Some(1),
+            pending: vec![],
+            active: vec![],
+            summaries: vec![],
+            failures: vec![],
+            paused: false,
+        },
+        &|_| None,
+    );
+
+    run_dispatch_persistence(&mut world);
+    let job = snapshot_job(rx.try_recv().expect("job sent"));
+    assert_eq!(job.run_id, "run-1");
+}
+
+/// A tool batch going out, and settling, is snapshotted even though the
+/// iteration, stage and status stay where they were: the run's file has to
+/// hold the batch while it runs, so a restart sends the same calls again.
+#[test]
+fn dispatch_persistence_snapshots_a_tool_batch_going_out_and_settling() {
+    let (mut world, mut rx) = world_with_persistence();
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+        ))
+        .id();
+    run_dispatch_persistence(&mut world);
+    snapshot_job(rx.try_recv().expect("the first snapshot"));
+    run_dispatch_persistence(&mut world);
+    assert!(rx.try_recv().is_err(), "nothing moved");
+
+    world.entity_mut(e).insert(AwaitingTools);
+    run_dispatch_persistence(&mut world);
+    snapshot_job(rx.try_recv().expect("the batch going out"));
+    world.entity_mut(e).remove::<AwaitingTools>();
+    run_dispatch_persistence(&mut world);
+    snapshot_job(rx.try_recv().expect("the batch settling"));
+}
+
+#[test]
+fn dispatch_persistence_drains_io_buffer() {
     let (mut world, mut rx) = world_with_persistence();
     let mut buf = StageIoBuffer::default();
     buf.output.push((0, "hello".to_string()));
@@ -3313,61 +3752,10 @@ fn dispatch_persistence_emits_stage_index_and_drains_io_buffer() {
     run_dispatch_persistence(&mut world);
 
     let job = snapshot_job(rx.try_recv().expect("job sent"));
-    assert_eq!(job.stages.len(), 2);
-    assert_eq!(job.stages[0].name, "plan");
-    assert_eq!(job.stages[0].status, StageRunStatus::Active);
     assert_eq!(job.output_appends, vec![(0, "hello".to_string())]);
     assert_eq!(job.log_appends, vec![(0, "[tool] x: y".to_string())]);
     // The buffer was drained in place.
     assert!(world.get::<StageIoBuffer>(e).unwrap().output.is_empty());
-}
-
-/// The persist tick rewrites `stages.json` whole, so what the reload leaves in
-/// the ledger is what lands on disk. A reload that leaves the spawn-seeded
-/// zeros there does not merely lose the run's stage history, it erases the copy
-/// still on disk.
-#[test]
-fn a_restored_ledger_reaches_the_persist_tick_instead_of_the_seeded_zeros() {
-    let (mut world, mut rx) = world_with_persistence();
-    let e = world
-        .spawn((
-            run_metadata(),
-            agent_state(),
-            conv_window(),
-            StageCursor { index: 1 },
-            TokenTotals::default(),
-            PersistWatermark::default(),
-            // What `spawn_agent` seeds: names and nothing else.
-            ledger2(),
-        ))
-        .id();
-
-    // The reload as it was: no ledger restore, so the tick ships zeros over the
-    // real record of the run's first stage.
-    run_dispatch_persistence(&mut world);
-    let before = snapshot_job(rx.try_recv().expect("job sent"));
-    assert_eq!(before.stages[0].prompt_tokens, 0);
-
-    // The reload as it is: the persisted records go back on first.
-    let mut plan = leviath_core::run_meta::StageRecord::new("plan".to_string(), 0);
-    plan.entered = true;
-    plan.prompt_tokens = 4_096;
-    plan.completion_tokens = 128;
-    crate::restore::restore_stage_ledger(&mut world, e, &[plan]);
-    world
-        .get_mut::<PersistWatermark>(e)
-        .expect("watermark present")
-        .backdate(0);
-
-    run_dispatch_persistence(&mut world);
-    let after = snapshot_job(rx.try_recv().expect("job sent"));
-    assert_eq!(after.stages[0].prompt_tokens, 4_096);
-    assert_eq!(after.stages[0].completion_tokens, 128);
-    assert_eq!(
-        after.stages[0].status,
-        leviath_core::run_meta::StageRunStatus::Complete,
-        "a stage the run had entered and left reconciles as complete, not skipped"
-    );
 }
 
 /// Every snapshot carries the answer's bytes whenever the agent holds them.
@@ -3619,168 +4007,6 @@ fn dispatch_persistence_records_tree_links() {
 }
 
 #[test]
-fn dispatch_persistence_serializes_fan_out_waiting() {
-    use leviath_core::blueprint::{FanOutConfig, WorkerFailurePolicy};
-    let (mut world, mut rx) = world_with_persistence();
-    let e = world
-        .spawn((
-            run_metadata(),
-            agent_state(),
-            conv_window(),
-            StageCursor { index: 0 },
-            TokenTotals::default(),
-            PersistWatermark::default(),
-        ))
-        .id();
-    // Attach a (minimal) FanOutWaiting via the public restore path.
-    crate::fanout::restore_fan_out_waiting(
-        &mut world,
-        e,
-        crate::fanout::FanOutState {
-            origin: crate::fanout::FanOutOrigin::Stage,
-            parts: Vec::new(),
-            config: FanOutConfig {
-                worker_agent: None,
-                worker_stage: Some("w".to_string()),
-                worker_query: None,
-                merge_stage: None,
-                max_workers: 1,
-                on_worker_failure: WorkerFailurePolicy::Continue,
-                split_prompt: "s".to_string(),
-                results_region: None,
-                max_items: None,
-                max_attempts: None,
-            },
-            max_workers: 1,
-            pending: vec![],
-            active: vec![],
-            summaries: vec![],
-            failures: vec![],
-            paused: false,
-        },
-        &|_| None,
-    );
-
-    run_dispatch_persistence(&mut world);
-    let job = snapshot_job(rx.try_recv().expect("job sent"));
-    assert!(job.fanout.is_some(), "fan-out waiting state persisted");
-}
-
-#[tokio::test]
-async fn dispatch_persistence_serializes_interaction_point() {
-    use crate::dynamic_interaction::InteractionBackend;
-    let (mut world, mut rx) = world_with_persistence();
-    let hub = InteractionHub::new();
-    world.insert_resource(hub.clone());
-    world.spawn((
-        run_metadata(),
-        agent_state(), // agent_id = "a"
-        conv_window(),
-        StageCursor { index: 0 },
-        TokenTotals::default(),
-        PersistWatermark::default(),
-        crate::interaction_points::AwaitingInteractionPoint,
-        crate::interaction_points::InteractionPointCursor(1),
-        crate::interaction_points::InteractionPointRounds(3),
-    ));
-
-    // Open the point request for this agent in the hub, carrying the document.
-    let backend = hub.backend_for("a".to_string());
-    let ask = tokio::spawn(async move {
-        let mut req = leviath_core::interaction::InteractionRequest::multiple_choice(
-            "a-point-plan_approval-3",
-            "Approve?",
-            vec!["Approve".to_string(), "Abort".to_string()],
-            "plan",
-        );
-        req.body = Some("the plan".to_string());
-        backend.ask(req).await
-    });
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
-
-    run_dispatch_persistence(&mut world);
-    let job = snapshot_job(rx.try_recv().expect("job sent"));
-    let json = job.interactions.expect("interaction-point state persisted");
-    let state: crate::interaction_points::InteractionPointState =
-        serde_json::from_str(&json).unwrap();
-    assert_eq!(state.cursor, 1);
-    assert_eq!(state.round, 3);
-    assert_eq!(state.body, "the plan");
-
-    // Let the still-blocked ask complete so its task ends cleanly.
-    assert!(
-        hub.answer(leviath_core::interaction::InteractionResponse::choice(
-            "a-point-plan_approval-3",
-            0,
-        ))
-    );
-    ask.await.unwrap();
-}
-
-#[test]
-fn dispatch_persistence_omits_interactions_when_not_at_a_point() {
-    let (mut world, mut rx) = world_with_persistence();
-    world.spawn((
-        run_metadata(),
-        agent_state(),
-        conv_window(),
-        StageCursor { index: 0 },
-        TokenTotals::default(),
-        PersistWatermark::default(),
-    ));
-    run_dispatch_persistence(&mut world);
-    let job = snapshot_job(rx.try_recv().expect("job sent"));
-    assert!(job.interactions.is_none());
-}
-
-#[test]
-fn dispatch_persistence_omits_interactions_without_a_hub() {
-    // Awaiting a point but no hub resource (e.g. a test world) ⇒ nothing to read
-    // the open request from, so no sidecar is written.
-    let (mut world, mut rx) = world_with_persistence();
-    world.spawn((
-        run_metadata(),
-        agent_state(),
-        conv_window(),
-        StageCursor { index: 0 },
-        TokenTotals::default(),
-        PersistWatermark::default(),
-        crate::interaction_points::AwaitingInteractionPoint,
-    ));
-    run_dispatch_persistence(&mut world);
-    assert!(
-        snapshot_job(rx.try_recv().expect("job sent"))
-            .interactions
-            .is_none()
-    );
-}
-
-#[test]
-fn dispatch_persistence_omits_interactions_when_request_not_yet_registered() {
-    // Awaiting a point with a hub present, but the ask task hasn't registered the
-    // request yet ⇒ skip this tick (the next persist captures it).
-    let (mut world, mut rx) = world_with_persistence();
-    world.insert_resource(InteractionHub::new()); // empty
-    world.spawn((
-        run_metadata(),
-        agent_state(),
-        conv_window(),
-        StageCursor { index: 0 },
-        TokenTotals::default(),
-        PersistWatermark::default(),
-        crate::interaction_points::AwaitingInteractionPoint,
-    ));
-    run_dispatch_persistence(&mut world);
-    assert!(
-        snapshot_job(rx.try_recv().expect("job sent"))
-            .interactions
-            .is_none()
-    );
-}
-
-#[test]
 fn dispatch_persistence_flushes_buffered_io_without_a_watermark_change() {
     let (mut world, mut rx) = world_with_persistence();
     let e = world
@@ -3818,7 +4044,7 @@ fn dispatch_persistence_flushes_buffered_io_without_a_watermark_change() {
             assert!(output_appends.is_empty());
             assert_eq!(log_appends, vec![(0, "late log".to_string())]);
         }
-        PersistMsg::Snapshot(_) | PersistMsg::Append { .. } => {
+        PersistMsg::Snapshot(_) | PersistMsg::Step(_) => {
             panic!("buffered lines alone must not force a whole-window snapshot")
         }
     }
@@ -3985,14 +4211,72 @@ fn dispatch_persistence_persists_taint_audit_when_the_gate_has_events() {
     // Run the tool dispatch so the gate blocks the outbound call and records
     // an audit event, then persist.
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
 
     let job = next_snapshot(&mut prx);
-    let (idx, json) = job.taint_audit.expect("taint audit persisted");
-    assert_eq!(idx, 1);
+    let [(idx, json)] = &job.taint_audit[..] else {
+        panic!("one stage's audit: {:?}", job.taint_audit);
+    };
+    assert_eq!(*idx, 1);
     assert!(json.contains("shell"));
+}
+
+/// Each stage's audit file holds what the gate decided in that stage, and
+/// a snapshot carries only the files of the stages that gained events.
+#[test]
+fn dispatch_persistence_writes_each_stage_its_own_audit() {
+    let (mut world, mut prx) = world_with_persistence();
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            infer_with(vec![tc("c_shell", "shell")]),
+            tainted_conv_window(),
+            ReadyForTools,
+            enabled_gate(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
+    s.run(&mut world);
+    run_dispatch_persistence(&mut world);
+    let first = next_snapshot(&mut prx);
+    assert_eq!(
+        first
+            .taint_audit
+            .iter()
+            .map(|(i, _)| *i)
+            .collect::<Vec<_>>(),
+        [0]
+    );
+
+    // The run moves on to stage 1 and the gate decides again there.
+    world.entity_mut(e).insert((
+        StageCursor { index: 1 },
+        infer_with(vec![tc("c_shell2", "shell")]),
+        ReadyForTools,
+    ));
+    world.get_mut::<AgentState>(e).unwrap().iteration += 1;
+    s.run(&mut world);
+    run_dispatch_persistence(&mut world);
+    let second = next_snapshot(&mut prx);
+    let [(idx, json)] = &second.taint_audit[..] else {
+        panic!("only stage 1's audit: {:?}", second.taint_audit);
+    };
+    assert_eq!(*idx, 1);
+    let events: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+    assert_eq!(events.len(), 1, "stage 1 holds only its own: {json}");
+    let gate = world.get::<crate::taint::TaintGate>(e).unwrap();
+    assert_eq!(gate.stage_audit(0).len(), 1);
+    assert_eq!(gate.audit_log().len(), 2);
 }
 
 /// An unchanged audit log is not re-serialized on the next snapshot: the file
@@ -4018,11 +4302,14 @@ fn dispatch_persistence_taint_audit_is_not_rewritten_when_unchanged() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
     let first = next_snapshot(&mut prx);
-    assert!(first.taint_audit.is_some(), "first write carries the audit");
+    assert!(
+        !first.taint_audit.is_empty(),
+        "first write carries the audit"
+    );
 
     // Force a heartbeat snapshot with no new gate events: the audit rides
     // along exactly once.
@@ -4034,7 +4321,7 @@ fn dispatch_persistence_taint_audit_is_not_rewritten_when_unchanged() {
     run_dispatch_persistence(&mut world);
     let second = snapshot_job(prx.try_recv().expect("heartbeat job"));
     assert!(
-        second.taint_audit.is_none(),
+        second.taint_audit.is_empty(),
         "an unchanged audit log is not re-serialized"
     );
 }
@@ -4069,23 +4356,23 @@ fn dispatch_persistence_resends_the_taint_audit_on_the_terminal_snapshot() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
     // This is the snapshot the lane would coalesce away: it carried the audit,
     // and it advanced the watermark past it.
     let coalesced = next_snapshot(&mut prx);
-    assert!(coalesced.taint_audit.is_some());
+    assert!(!coalesced.taint_audit.is_empty());
 
     // The run finishes with no further gate events.
     world.get_mut::<AgentState>(e).unwrap().status = AgentStatus::Complete;
     run_dispatch_persistence(&mut world);
 
     let terminal = snapshot_job(prx.try_recv().expect("terminal job"));
-    let (idx, json) = terminal
-        .taint_audit
-        .expect("the terminal snapshot re-sends the audit");
-    assert_eq!(idx, 0);
+    let [(idx, json)] = &terminal.taint_audit[..] else {
+        panic!("the terminal snapshot re-sends the audit");
+    };
+    assert_eq!(*idx, 0);
     assert!(json.contains("shell"), "{json}");
 }
 
@@ -4103,25 +4390,20 @@ fn dispatch_persistence_skips_taint_audit_when_the_gate_is_empty() {
     ));
     run_dispatch_persistence(&mut world);
     let job = snapshot_job(prx.try_recv().expect("persist job"));
-    assert!(job.taint_audit.is_none());
+    assert!(job.taint_audit.is_empty());
 }
 
 #[test]
 fn spawn_agent_seeds_the_stage_ledger_with_names() {
-    let mk = |name: &str| {
-        leviath_core::Stage::new(
-            name.to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-        )
-    };
+    let mk = |name: &str| tg::stage(name);
     let mut bp = blueprint(vec![mk("plan"), mk("build")]);
-    bp.repetition_detection = Some(leviath_core::blueprint::RepetitionDetectionConfig {
+    bp.repetition = Some(crate::spec::graph::RepetitionDef {
         max_repeat_calls: Some(2),
         max_readonly_streak: None,
         enabled: Some(true),
     });
     let mut world = World::new();
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "run-led".to_string(),
         bp,
@@ -4143,23 +4425,19 @@ fn spawn_agent_seeds_the_stage_ledger_with_names() {
     );
 }
 
-fn percent_region_blueprint(percent: f64) -> leviath_core::Blueprint {
-    let layout = leviath_core::layout::ContextLayout::new(
-        vec![
-            leviath_core::layout::RegionDefinition::new("sys".to_string(), RegionKind::Pinned, 0)
-                .with_budget(leviath_core::BudgetSpec::Percent {
-                    percent,
-                    min: None,
-                    max: None,
-                }),
-        ],
+fn percent_region_blueprint(percent: f64) -> crate::spec::graph::RunGraph {
+    let layout = tg::layout(
+        vec![tg::region("sys", RegionKind::Pinned, 0).with_budget(
+            crate::spec::graph::Budget::Percent {
+                percent,
+                min: None,
+                max: None,
+            },
+        )],
         0,
     );
-    let stages = vec![leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    )];
-    leviath_core::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+    let stages = vec![tg::stage("main")];
+    graph_of_staged(stages, layout)
 }
 
 fn world_with_provider() -> World {
@@ -4171,11 +4449,11 @@ fn world_with_provider() -> World {
 }
 
 #[test]
-fn spawn_agent_seeded_resolves_percent_region_against_provider_window() {
-    // Provider "p" (Cfg) reports a 100_000-token window; a 35% region must
-    // resolve to 35_000, and the window total becomes the model window.
+fn a_placed_run_sizes_a_percent_region_against_its_models_window() {
+    // Provider "p" (Cfg) reports a 100_000-token window; the resolver sizes a
+    // 35% region to 35_000, and the window total is the model window.
     let mut world = world_with_provider();
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "run".to_string(),
         percent_region_blueprint(0.35),
@@ -4190,37 +4468,12 @@ fn spawn_agent_seeded_resolves_percent_region_against_provider_window() {
 }
 
 #[test]
-fn spawn_agent_seeded_falls_back_when_provider_missing() {
-    // No Providers resource → percentage resolves against the 8192 default
-    // window (and warns). 35% of 8192 ≈ 2867.
-    crate::test_support::with_tracing(|| {
-        let mut world = World::new();
-        let e = spawn_agent(
-            &mut world,
-            "run".to_string(),
-            percent_region_blueprint(0.35),
-            "task",
-            vec![resolved("m")],
-            hints(true),
-        )
-        .expect("spawn");
-        let w = world.get::<ContextWindow>(e).expect("window");
-        let expected = (8192f64 * 0.35).round() as usize;
-        assert_eq!(w.get_region("sys").unwrap().max_tokens, expected);
-        assert_eq!(w.max_tokens, DEFAULT_CONTEXT_WINDOW_TOKENS);
-    });
-}
-
-#[test]
-fn spawn_agent_seeded_absolute_blueprint_is_unchanged() {
-    // A pure-absolute blueprint resolves to itself: region max_tokens and the
-    // window total match the declared values, provider or not.
+fn a_placed_run_keeps_token_budgets_as_written() {
+    // A layout of token budgets resolves to itself: region max_tokens and the
+    // window total match the declared values.
     let mut world = world_with_provider();
-    let bp = blueprint(vec![leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    )]);
-    let e = spawn_agent(
+    let bp = blueprint(vec![tg::stage("main")]);
+    let e = place_test_task(
         &mut world,
         "run".to_string(),
         bp,
@@ -4230,42 +4483,31 @@ fn spawn_agent_seeded_absolute_blueprint_is_unchanged() {
     )
     .expect("spawn");
     let w = world.get::<ContextWindow>(e).expect("window");
-    // The `blueprint` helper declares total_budget_tokens = 12_000 (legacy sum
-    // behavior preserved for absolute layouts).
+    // The `blueprint` helper declares total_budget_tokens = 12_000.
     assert_eq!(w.max_tokens, 12_000);
     assert_eq!(w.get_region("conversation").unwrap().max_tokens, 10_000);
 }
 
 #[test]
-fn spawn_agent_seeded_resolves_per_stage_layout() {
-    // Stage 0 carries its own percentage layout; it must be resolved against
-    // that stage's model window and applied on entry (swapping the global one).
+fn a_placed_stage_with_its_own_layout_sizes_it_against_its_window() {
+    // Stage 0 carries its own percentage layout; the resolver sizes it against
+    // that stage's model window and it is applied on entry in place of the
+    // graph's.
     let mut world = world_with_provider();
-    let global = leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
-            "sys".to_string(),
-            RegionKind::Pinned,
-            5000,
+    let global = tg::layout(vec![tg::region("sys", RegionKind::Pinned, 5000)], 5000);
+    let mut stage = tg::stage("main");
+    stage.layout = Some(tg::layout(
+        vec![tg::region("sys", RegionKind::Pinned, 0).with_budget(
+            crate::spec::graph::Budget::Percent {
+                percent: 0.10,
+                min: None,
+                max: None,
+            },
         )],
-        5000,
-    );
-    let mut stage = leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    stage.context_layout = Some(leviath_core::layout::ContextLayout::new(
-        vec![
-            leviath_core::layout::RegionDefinition::new("sys".to_string(), RegionKind::Pinned, 0)
-                .with_budget(leviath_core::BudgetSpec::Percent {
-                    percent: 0.10,
-                    min: None,
-                    max: None,
-                }),
-        ],
         0,
     ));
-    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], global);
-    let e = spawn_agent(
+    let bp = graph_of_staged(vec![stage], global);
+    let e = place_test_task(
         &mut world,
         "run".to_string(),
         bp,
@@ -4280,12 +4522,12 @@ fn spawn_agent_seeded_resolves_per_stage_layout() {
 }
 
 #[test]
-fn spawn_agent_seeded_errors_when_resolved_global_layout_is_invalid() {
+fn a_placed_run_whose_layout_starves_its_stage_is_refused() {
     // A pinned region at 95% of the 100_000 window resolves to 95_000, leaving
-    // only 5_000 working tokens (< MIN_WORKING_TOKENS). Post-resolution
-    // validation must fail the spawn with an actionable message.
+    // only 5_000 working tokens (under the resolver's 8000 floor), so the
+    // spawn is refused with an actionable message.
     let mut world = world_with_provider();
-    let err = spawn_agent(
+    let err = place_test_task(
         &mut world,
         "run".to_string(),
         percent_region_blueprint(0.95),
@@ -4298,35 +4540,27 @@ fn spawn_agent_seeded_errors_when_resolved_global_layout_is_invalid() {
 }
 
 #[test]
-fn spawn_agent_seeded_errors_when_resolved_per_stage_layout_is_invalid() {
+fn a_placed_run_whose_stage_layout_starves_it_is_refused() {
     // The global layout is valid, but stage 0's per-stage layout resolves to a
     // starved working budget → the per-stage validation branch fails the spawn.
     let mut world = world_with_provider();
-    let global = leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
-            "scratch".to_string(),
-            RegionKind::Clearable,
-            5000,
-        )],
+    let global = tg::layout(
+        vec![tg::region("scratch", RegionKind::Clearable, 5000)],
         5000,
     );
-    let mut stage = leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    stage.context_layout = Some(leviath_core::layout::ContextLayout::new(
-        vec![
-            leviath_core::layout::RegionDefinition::new("sys".to_string(), RegionKind::Pinned, 0)
-                .with_budget(leviath_core::BudgetSpec::Percent {
-                    percent: 0.95,
-                    min: None,
-                    max: None,
-                }),
-        ],
+    let mut stage = tg::stage("main");
+    stage.layout = Some(tg::layout(
+        vec![tg::region("sys", RegionKind::Pinned, 0).with_budget(
+            crate::spec::graph::Budget::Percent {
+                percent: 0.95,
+                min: None,
+                max: None,
+            },
+        )],
         0,
     ));
-    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], global);
-    let err = spawn_agent(
+    let bp = graph_of_staged(vec![stage], global);
+    let err = place_test_task(
         &mut world,
         "run".to_string(),
         bp,
@@ -4378,7 +4612,7 @@ impl Provider for FixedWindow {
 }
 
 /// Two stages, a wide entry model and a narrow later one, sharing the global
-/// layout. This is the world the two footgun tests below spawn into.
+/// layout. This is the world the two tests below spawn into.
 fn world_with_wide_and_narrow() -> World {
     let mut world = World::new();
     let mut reg = ProviderRegistry::new();
@@ -4388,13 +4622,12 @@ fn world_with_wide_and_narrow() -> World {
     world
 }
 
-fn pct_region(name: &str, percent: f64) -> leviath_core::layout::RegionDefinition {
-    leviath_core::layout::RegionDefinition::new(name.to_string(), RegionKind::Pinned, 0)
-        .with_budget(leviath_core::BudgetSpec::Percent {
-            percent,
-            min: None,
-            max: None,
-        })
+fn pct_region(name: &str, percent: f64) -> crate::spec::graph::RegionDef {
+    tg::region(name, RegionKind::Pinned, 0).with_budget(crate::spec::graph::Budget::Percent {
+        percent,
+        min: None,
+        max: None,
+    })
 }
 
 fn wide_then_narrow_stages() -> Vec<ResolvedStage> {
@@ -4420,31 +4653,21 @@ fn wide_then_narrow_stages() -> Vec<ResolvedStage> {
 
 #[test]
 fn spawn_sizes_a_region_against_the_smallest_window_that_actually_sees_it() {
-    // The footgun fix. A region only the wide stage reads (the narrow stage
+    // A region only the wide stage reads (the narrow stage
     // hides it) is sized against the wide window - not shrunk to the narrow
     // stage that never sees it - and the narrow stage's working-room floor is
     // judged over just the regions it does see, so the spawn succeeds.
     let mut world = world_with_wide_and_narrow();
-    let layout = leviath_core::layout::ContextLayout::new(
-        vec![pct_region("big", 0.80), pct_region("small", 0.05)],
-        0,
-    );
-    let mk = |name: &str, provider: &str| {
-        leviath_core::Stage::new(
-            name.to_string(),
-            leviath_core::blueprint::ModelConfig::new(provider.to_string(), "m".to_string()),
-        )
+    let layout = tg::layout(vec![pct_region("big", 0.80), pct_region("small", 0.05)], 0);
+    let mk = |name: &str, provider: &str| crate::spec::graph::StageDef {
+        model: tg::model(provider, "m"),
+        ..tg::stage(name)
     };
     let mut narrow = mk("b", "narrow");
     // The narrow stage never reads the big region.
-    narrow.context_hide = vec!["big".to_string()];
-    let bp = leviath_core::Blueprint::new(
-        "t".to_string(),
-        "d".to_string(),
-        vec![mk("a", "wide"), narrow],
-        layout,
-    );
-    let e = spawn_agent(
+    narrow.hide = tg::regions(&["big"]);
+    let bp = graph_of_staged(vec![mk("a", "wide"), narrow], layout);
+    let e = place_test_task(
         &mut world,
         "run".to_string(),
         bp,
@@ -4471,27 +4694,20 @@ fn spawn_fails_when_a_shared_region_starves_the_narrow_stage() {
     // that catches the starvation. This is the branch the single-window check
     // cannot make.
     let mut world = world_with_wide_and_narrow();
-    let layout = leviath_core::layout::ContextLayout::new(
+    let layout = tg::layout(
         vec![pct_region("shared", 0.80), pct_region("wideonly", 0.10)],
         0,
     );
-    let mk = |name: &str, provider: &str| {
-        leviath_core::Stage::new(
-            name.to_string(),
-            leviath_core::blueprint::ModelConfig::new(provider.to_string(), "m".to_string()),
-        )
+    let mk = |name: &str, provider: &str| crate::spec::graph::StageDef {
+        model: tg::model(provider, "m"),
+        ..tg::stage(name)
     };
     let mut narrow = mk("b", "narrow");
     // The narrow stage never sees the wide-only region, so it does not count
     // against its floor - only the shared region does.
-    narrow.context_hide = vec!["wideonly".to_string()];
-    let bp = leviath_core::Blueprint::new(
-        "t".to_string(),
-        "d".to_string(),
-        vec![mk("a", "wide"), narrow],
-        layout,
-    );
-    let err = spawn_agent(
+    narrow.hide = tg::regions(&["wideonly"]);
+    let bp = graph_of_staged(vec![mk("a", "wide"), narrow], layout);
+    let err = place_test_task(
         &mut world,
         "run".to_string(),
         bp,
@@ -4513,6 +4729,7 @@ fn collect_drops_outcome_for_non_awaiting_agent() {
         attempt_id: String::new(),
         result: Ok(resp("x")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -4548,6 +4765,7 @@ fn collect_inference_accumulates_token_totals() {
         attempt_id: String::new(),
         result: Ok(r),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -4709,26 +4927,24 @@ fn run_empty(world: &mut World) {
 
 /// A one-stage blueprint whose stage either presents its output for review
 /// or runs autonomously.
-fn nudge_bp(reviewed: bool) -> AgentBlueprint {
+fn nudge_bp(reviewed: bool) -> RunSpecC {
     let mut stage = stage_named("a", None, false, None);
     if reviewed {
-        let point = leviath_core::blueprint::InteractionPoint {
+        let point = crate::spec::graph::InteractionPointDef {
             name: "plan_approval".to_string(),
             prompt: "Review the plan above.".to_string(),
             required: true,
-            unattended: leviath_core::blueprint::UnattendedPolicy::AutoApprove,
-            style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
+            unattended: crate::spec::graph::UnattendedPoint::AutoApprove,
+            style: crate::spec::graph::AnswerStyle::MultipleChoice,
             options: vec!["Approve".to_string()],
-            directives: std::collections::HashMap::new(),
+            directives: std::collections::BTreeMap::new(),
             abort_options: Vec::new(),
             edit_options: Vec::new(),
-            document_region: Some("plan".to_string()),
+            document_region: Some(tg::region_name("plan")),
         };
-        stage.mode = leviath_core::blueprint::StageMode::InteractivePoints {
-            points: vec![point],
-        };
+        stage.mode = crate::spec::graph::StageMode::InteractivePoints(vec![point]);
     }
-    AgentBlueprint(blueprint(vec![stage]))
+    spec_of(blueprint(vec![stage]))
 }
 
 #[test]
@@ -4766,7 +4982,7 @@ fn a_reply_and_the_nudge_answering_it_record_different_causes() {
     let mut window = ctx(&[("conversation", 10_000)]);
     // Held for the test: a window's handle on the lane is weak, exactly so that
     // it cannot keep the lane open past the world that owns it.
-    let stage = crate::pipeline::PersistenceStage(tx);
+    let stage = crate::pipeline::JournalSender::new(tx, None);
     window.attach_journal("run-r", Some(&stage));
     let mut world = World::new();
     world.spawn((
@@ -4780,8 +4996,8 @@ fn a_reply_and_the_nudge_answering_it_record_different_causes() {
     run_empty(&mut world);
 
     let mut moved = Vec::new();
-    while let Ok(crate::persistence_bridge::PersistMsg::Append { record, .. }) = rx.try_recv() {
-        if let leviath_core::run_archive::RunRecord::ContextTransaction { regions, cause, .. } =
+    while let Ok(crate::pipeline::journal::Journaled { record, .. }) = rx.try_recv() {
+        if let crate::runfile::record::RunRecord::ContextTransaction { regions, cause, .. } =
             *record
         {
             for region in regions {
@@ -4809,7 +5025,7 @@ fn empty_response_finishes_after_max_nudges() {
     let mut world = World::new();
     let progress = StageProgress {
         total_tool_calls: 0,
-        text_only_nudges: leviath_core::blueprint::DEFAULT_MAX_NUDGES,
+        text_only_nudges: crate::spec::graph::DEFAULT_MAX_NUDGES,
         iterations: 0,
         ..Default::default()
     };
@@ -4944,7 +5160,7 @@ fn empty_response_nudges_and_loops_back_when_text_only() {
     let injected = conversation_text(&world, e);
     assert!(injected.contains(&format!(
         "[System] {}",
-        leviath_core::blueprint::DEFAULT_NUDGE_TEXT
+        crate::spec::graph::DEFAULT_NUDGE_TEXT
     )));
 }
 
@@ -4952,7 +5168,7 @@ fn empty_response_nudges_and_loops_back_when_text_only() {
 fn empty_response_respects_a_stage_that_disables_its_nudge() {
     // The stage knows its deliverable is text and says so.
     let mut bp = nudge_bp(false);
-    bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
+    graph_mut(&mut bp).stages[0].nudge = Some(crate::spec::graph::NudgeDef {
         enabled: Some(false),
         ..Default::default()
     });
@@ -4979,12 +5195,12 @@ fn empty_response_respects_a_stage_that_disables_its_nudge() {
 /// A one-stage blueprint whose stage produces an image (declared through
 /// `output_routing`), so a text-only reply reads as a likely image-generation
 /// failure.
-fn image_bp() -> AgentBlueprint {
+fn image_bp() -> RunSpecC {
     let mut stage = stage_named("draw", None, false, None);
     stage
         .output_routing
-        .insert("image/*".to_string(), "conversation".to_string());
-    AgentBlueprint(blueprint(vec![stage]))
+        .insert("image/*".to_string(), tg::region_name("conversation"));
+    spec_of(blueprint(vec![stage]))
 }
 
 /// A text-only reply that also carries one produced image part.
@@ -5001,37 +5217,39 @@ fn infer_with_image() -> crate::components::InferenceResult {
 fn stage_expected_media_reads_format_and_routing() {
     assert_eq!(stage_expected_media(None), None);
     let plain = stage_named("a", None, false, None);
-    assert_eq!(stage_expected_media(Some(&plain)), None);
+    assert_eq!(stage_expected_media(Some(&*plain)), None);
 
     let mut routed = stage_named("b", None, false, None);
-    routed.output_routing.insert("image/*".into(), "r".into());
-    assert_eq!(stage_expected_media(Some(&routed)), Some("image"));
+    routed
+        .output_routing
+        .insert("image/*".to_string(), tg::region_name("r"));
+    assert_eq!(stage_expected_media(Some(&*routed)), Some("image"));
 
     let mut fmt_image = stage_named("c", None, false, None);
-    fmt_image.output = Some(leviath_core::output::OutputSpec {
+    fmt_image.output = Some(crate::spec::graph::OutputDef {
         format: Some("image/*".into()),
         ..Default::default()
     });
-    assert_eq!(stage_expected_media(Some(&fmt_image)), Some("image"));
+    assert_eq!(stage_expected_media(Some(&*fmt_image)), Some("image"));
 
     let mut fmt_text = stage_named("d", None, false, None);
-    fmt_text.output = Some(leviath_core::output::OutputSpec {
+    fmt_text.output = Some(crate::spec::graph::OutputDef {
         format: Some("markdown".into()),
         ..Default::default()
     });
-    assert_eq!(stage_expected_media(Some(&fmt_text)), None);
+    assert_eq!(stage_expected_media(Some(&*fmt_text)), None);
 
     let mut video = stage_named("e", None, false, None);
     video
         .output_routing
-        .insert("video/mp4".into(), "clip".into());
-    assert_eq!(stage_expected_media(Some(&video)), Some("video"));
+        .insert("video/mp4".to_string(), tg::region_name("clip"));
+    assert_eq!(stage_expected_media(Some(&*video)), Some("video"));
     let mut speech = stage_named("f", None, false, None);
-    speech.output = Some(leviath_core::output::OutputSpec {
+    speech.output = Some(crate::spec::graph::OutputDef {
         format: Some("audio/mpeg".into()),
         ..Default::default()
     });
-    assert_eq!(stage_expected_media(Some(&speech)), Some("audio"));
+    assert_eq!(stage_expected_media(Some(&*speech)), Some("audio"));
 }
 
 #[test]
@@ -5097,7 +5315,7 @@ fn image_stage_lets_go_once_its_image_nudge_budget_is_spent() {
     // end rather than loop. The stage's nudge is off, so the fall-through
     // resolves rather than nudging on text alone.
     let mut bp = image_bp();
-    bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
+    graph_mut(&mut bp).stages[0].nudge = Some(crate::spec::graph::NudgeDef {
         enabled: Some(false),
         ..Default::default()
     });
@@ -5129,7 +5347,7 @@ fn image_stage_lets_go_once_its_image_nudge_budget_is_spent() {
 fn empty_response_honors_an_agent_level_max() {
     // `[agent.nudge] max = 0`: the very first text-only response is final.
     let mut bp = nudge_bp(false);
-    bp.0.nudge = Some(leviath_core::NudgeConfig {
+    graph_mut(&mut bp).nudge = Some(crate::spec::graph::NudgeDef {
         max: Some(0),
         ..Default::default()
     });
@@ -5153,18 +5371,13 @@ fn empty_response_honors_an_agent_level_max() {
 fn empty_response_interpolates_custom_text_placeholders() {
     // A custom text names the stage and its required regions.
     let mut bp = nudge_bp(false);
-    bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
+    graph_mut(&mut bp).stages[0].nudge = Some(crate::spec::graph::NudgeDef {
         text: Some("Populate {regions} to finish stage {stage}.".to_string()),
         ..Default::default()
     });
-    bp.0.context_layout
-        .regions
-        .push(leviath_core::layout::RegionDefinition::new(
-            "plan".to_string(),
-            RegionKind::Pinned,
-            1_000,
-        ));
-    bp.0.context_layout.regions[1].required = true;
+    let mut plan = crate::spec::graph::tests::region("plan");
+    plan.required = true;
+    graph_mut(&mut bp).layout.regions.push(plan);
     let mut world = World::new();
     let e = world
         .spawn((
@@ -5190,7 +5403,7 @@ fn empty_response_explicit_enabled_overrides_review_suppression() {
     // _reviewed`: the suppression is only the default, and a stage author who
     // explicitly asks for nudging on a reviewed stage gets it.
     let mut bp = nudge_bp(true);
-    bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
+    graph_mut(&mut bp).stages[0].nudge = Some(crate::spec::graph::NudgeDef {
         enabled: Some(true),
         ..Default::default()
     });
@@ -5223,7 +5436,7 @@ fn empty_response_reads_the_global_nudge_component() {
             nudge_bp(false),
             StageCursor { index: 0 },
             ReadyForTransition,
-            GlobalNudge(leviath_core::NudgeConfig {
+            GlobalNudge(crate::spec::graph::NudgeDef {
                 enabled: Some(false),
                 ..Default::default()
             }),
@@ -5252,7 +5465,7 @@ fn empty_response_with_an_out_of_range_cursor_uses_blueprint_defaults() {
         .id();
     run_empty(&mut world);
     assert!(world.get::<ReadyToInfer>(e).is_some());
-    assert!(conversation_text(&world, e).contains(leviath_core::blueprint::DEFAULT_NUDGE_TEXT));
+    assert!(conversation_text(&world, e).contains(crate::spec::graph::DEFAULT_NUDGE_TEXT));
 }
 
 // ── tool-dispatch ──
@@ -5435,6 +5648,27 @@ impl ToolService for StaleService {
     }
 }
 
+/// Tool lists looked up again since spawn, by stage position.
+fn overrides(stages: &[(usize, &[&str])]) -> super::spec_view::StageToolOverrides {
+    super::spec_view::StageToolOverrides(
+        stages
+            .iter()
+            .map(|(i, names)| (*i, stage_inf(names).tools))
+            .collect(),
+    )
+}
+
+/// The names of the tools recorded for stage `i`, or none.
+fn override_names(world: &World, entity: Entity, i: usize) -> Vec<String> {
+    world
+        .get::<super::spec_view::StageToolOverrides>(entity)
+        .unwrap()
+        .0
+        .get(&i)
+        .map(|tools| tools.iter().map(|t| t.name.clone()).collect())
+        .unwrap_or_default()
+}
+
 fn run_rescan(world: &mut World) {
     let mut schedule = Schedule::default();
     schedule.add_systems(rescan_before_dispatch);
@@ -5458,7 +5692,7 @@ fn a_stale_scan_is_re_advertised_before_the_batch() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"]), stage_inf(&["other"])]),
+            overrides(&[(1, &["other"])]),
             ReadyForTools,
             RescanBeforeDispatch,
         ))
@@ -5474,15 +5708,12 @@ fn a_stale_scan_is_re_advertised_before_the_batch() {
         .map(|t| t.name.clone())
         .collect();
     assert_eq!(live, vec!["just_written".to_string()]);
-    // The catalog too, or re-entering this stage would silently advertise the
-    // set the run started with.
+    // The overrides too, or re-entering this stage would silently advertise
+    // the set the run started with.
+    assert_eq!(override_names(&world, entity, 0), vec!["just_written"]);
     assert_eq!(
-        world.get::<StageInferences>(entity).unwrap().0[0].tools[0].name,
-        "just_written"
-    );
-    assert_eq!(
-        world.get::<StageInferences>(entity).unwrap().0[1].tools[0].name,
-        "other",
+        override_names(&world, entity, 1),
+        vec!["other"],
         "another stage is not touched"
     );
     // No marker is consumed: the agent looks again before its next batch too.
@@ -5503,7 +5734,7 @@ fn an_unchanged_scan_leaves_the_advertised_set_alone() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"])]),
+            overrides(&[]),
             ReadyForTools,
             RescanBeforeDispatch,
         ))
@@ -5533,7 +5764,7 @@ fn only_an_agent_that_asked_and_is_dispatching_is_looked_at() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"])]),
+            overrides(&[]),
             ReadyForTools,
         ))
         .id();
@@ -5542,7 +5773,7 @@ fn only_an_agent_that_asked_and_is_dispatching_is_looked_at() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"])]),
+            overrides(&[]),
             RescanBeforeDispatch,
         ))
         .id();
@@ -5576,7 +5807,7 @@ fn a_service_without_a_staleness_check_never_rescans() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"])]),
+            overrides(&[]),
             ReadyForTools,
             RescanBeforeDispatch,
         ))
@@ -5605,7 +5836,7 @@ fn refresh_advertised_tools_updates_live_and_catalog() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"]), stage_inf(&["other"])]),
+            overrides(&[(1, &["other"])]),
             ToolsNeedRefresh,
         ))
         .id();
@@ -5620,19 +5851,66 @@ fn refresh_advertised_tools_updates_live_and_catalog() {
         .map(|t| t.name.clone())
         .collect();
     assert_eq!(names, vec!["new_tool".to_string()]);
-    let cat0: Vec<String> = world.get::<StageInferences>(entity).unwrap().0[0]
-        .tools
-        .iter()
-        .map(|t| t.name.clone())
-        .collect();
-    assert_eq!(cat0, vec!["new_tool".to_string()]);
-    // Other stages in the catalog are untouched.
-    assert_eq!(
-        world.get::<StageInferences>(entity).unwrap().0[1].tools[0].name,
-        "other"
-    );
+    assert_eq!(override_names(&world, entity, 0), vec!["new_tool"]);
+    // Other stages' overrides are untouched.
+    assert_eq!(override_names(&world, entity, 1), vec!["other"]);
     // Marker consumed.
     assert!(world.get::<ToolsNeedRefresh>(entity).is_none());
+}
+
+/// A stage told the shape of its answer keeps being told it after its tools
+/// are looked up again: the fresh list comes from the catalog, which knows the
+/// tool and not the shape, so `submit_output` keeps the description its plan
+/// gave it. A stage that never had the tool has nothing to keep.
+#[test]
+fn a_refresh_keeps_the_output_shape_in_submit_outputs_description() {
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(RefreshService(vec![
+        "submit_output",
+        "new_tool",
+    ]))));
+    let mut told = stage_inf(&["submit_output"]);
+    told.tools[0].description = "Submit a2ui: follow this example".to_string();
+    let shaped = world
+        .spawn((
+            StageCursor { index: 0 },
+            told,
+            overrides(&[]),
+            ToolsNeedRefresh,
+        ))
+        .id();
+    let plain = world
+        .spawn((
+            StageCursor { index: 0 },
+            stage_inf(&["old"]),
+            overrides(&[]),
+            ToolsNeedRefresh,
+        ))
+        .id();
+    run_refresh(&mut world);
+    let described = |e: Entity| -> Vec<(String, String)> {
+        world
+            .get::<StageInference>(e)
+            .unwrap()
+            .tools
+            .iter()
+            .map(|t| (t.name.clone(), t.description.clone()))
+            .collect()
+    };
+    assert_eq!(
+        described(shaped),
+        vec![
+            (
+                "submit_output".to_string(),
+                "Submit a2ui: follow this example".to_string()
+            ),
+            ("new_tool".to_string(), String::new()),
+        ]
+    );
+    assert_eq!(
+        described(plain)[0],
+        ("submit_output".to_string(), String::new())
+    );
 }
 
 #[test]
@@ -5645,7 +5923,7 @@ fn refresh_advertised_tools_none_leaves_tools_but_clears_marker() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["keep"]),
-            StageInferences(vec![stage_inf(&["keep"])]),
+            overrides(&[]),
             ToolsNeedRefresh,
         ))
         .id();
@@ -5718,16 +5996,15 @@ fn poll_leaves_dynamic_agent_untagged_when_no_refresh_wanted() {
 }
 
 #[test]
-fn refresh_advertised_tools_tolerates_cursor_past_catalog() {
-    // A cursor index beyond the catalog updates only the live component
-    // (the `get_mut(index)` None arm), never panicking.
+fn refresh_advertised_tools_records_the_cursor_stage_alone() {
+    // The refreshed set is recorded for the stage the run is in and no other.
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(RefreshService(vec!["fresh"]))));
     let entity = world
         .spawn((
             StageCursor { index: 5 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"])]),
+            overrides(&[]),
             ToolsNeedRefresh,
         ))
         .id();
@@ -5736,11 +6013,8 @@ fn refresh_advertised_tools_tolerates_cursor_past_catalog() {
         world.get::<StageInference>(entity).unwrap().tools[0].name,
         "fresh"
     );
-    // The single catalog entry is untouched (index 5 doesn't exist).
-    assert_eq!(
-        world.get::<StageInferences>(entity).unwrap().0[0].tools[0].name,
-        "old"
-    );
+    assert_eq!(override_names(&world, entity, 5), vec!["fresh"]);
+    assert!(override_names(&world, entity, 0).is_empty());
 }
 
 #[tokio::test]
@@ -5759,7 +6033,7 @@ async fn dispatch_tools_enqueues_runnable_job_and_advances() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<AwaitingTools>(e).is_some());
@@ -5799,35 +6073,26 @@ impl ToolService for ReportingService {
     }
 }
 
-/// Unwrap the Append message a journaling test expects on the persistence lane.
+/// The parts of a record a journaling test reads off the world's journal.
 fn append_msg(
-    msg: PersistMsg,
+    msg: crate::pipeline::journal::Journaled,
 ) -> (
     String,
-    leviath_core::run_archive::RunRecord,
+    crate::runfile::record::RunRecord,
     Option<tokio::sync::oneshot::Sender<crate::persistence_bridge::Appended>>,
 ) {
-    match msg {
-        PersistMsg::Append {
-            run_id,
-            record,
-            ack,
-        } => (run_id, *record, ack),
-        PersistMsg::Snapshot(_) | PersistMsg::StageLines { .. } => {
-            panic!("expected an append on the lane")
-        }
-    }
+    (msg.run_id, *msg.record, msg.ack)
 }
 
 #[tokio::test]
 async fn dispatch_journals_the_batch_then_each_completion() {
-    use leviath_core::run_archive::RunRecord;
+    use crate::runfile::record::RunRecord;
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let (ptx, mut prx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(ReportingService)));
     world.insert_resource(ToolStage::detached(jtx));
-    world.insert_resource(PersistenceStage(ptx));
+    world.insert_resource(crate::pipeline::JournalSender::new(ptx, None));
     // A batch mixing an inline-resolved call (a context tool) and a lane call.
     let e = world
         .spawn((
@@ -5843,7 +6108,7 @@ async fn dispatch_journals_the_batch_then_each_completion() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert!(world.get::<AwaitingTools>(e).is_some());
 
@@ -5888,6 +6153,7 @@ async fn dispatch_journals_the_batch_then_each_completion() {
         iteration,
         call_id,
         result,
+        outcome,
         ..
     } = record
     else {
@@ -5896,6 +6162,11 @@ async fn dispatch_journals_the_batch_then_each_completion() {
     assert_eq!(iteration, agent_state().iteration);
     assert_eq!(call_id, "c_lane");
     assert_eq!(result, "ran read_file");
+    assert_eq!(
+        outcome,
+        Some(leviath_core::execution::ToolOutcome::Succeeded),
+        "a call that ran and answered says so"
+    );
 }
 
 /// The files a submission produced are journaled against the execution that
@@ -5907,7 +6178,7 @@ async fn dispatch_journals_the_batch_then_each_completion() {
 #[test]
 fn produced_files_are_journaled_against_the_call_that_made_them() {
     let (ptx, mut prx) = mpsc::unbounded_channel();
-    let stage = PersistenceStage(ptx);
+    let stage = crate::pipeline::JournalSender::new(ptx, None);
     let made = |name: &str| leviath_core::output::Artifact {
         name: name.to_string(),
         path: format!("out/{name}"),
@@ -5915,7 +6186,7 @@ fn produced_files_are_journaled_against_the_call_that_made_them() {
         size: 12,
         sha256: "abc".to_string(),
     };
-    super::tools::journal_artifacts(
+    super::batch_record::journal_artifacts(
         &stage,
         "run-a",
         &[
@@ -5925,9 +6196,9 @@ fn produced_files_are_journaled_against_the_call_that_made_them() {
     );
 
     let mut produced = Vec::new();
-    while let Ok(PersistMsg::Append { run_id, record, .. }) = prx.try_recv() {
+    while let Ok(crate::pipeline::journal::Journaled { run_id, record, .. }) = prx.try_recv() {
         assert_eq!(run_id, "run-a");
-        if let leviath_core::run_archive::RunRecord::ArtifactsProduced {
+        if let crate::runfile::record::RunRecord::ArtifactsProduced {
             execution_id,
             artifacts,
             ..
@@ -5951,7 +6222,7 @@ fn produced_files_are_journaled_against_the_call_that_made_them() {
     );
     // Nothing produced is nothing written: a run whose answer named no file has
     // no artifact records rather than an empty one.
-    super::tools::journal_artifacts(&stage, "run-a", &[]);
+    super::batch_record::journal_artifacts(&stage, "run-a", &[]);
     assert!(prx.try_recv().is_err());
 }
 
@@ -5970,8 +6241,8 @@ async fn a_dispatched_batch_records_what_it_belongs_to() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
-    world.insert_resource(PersistenceStage(ptx.clone()));
-    let stage = PersistenceStage(ptx);
+    world.insert_resource(crate::pipeline::JournalSender::new(ptx.clone(), None));
+    let stage = crate::pipeline::JournalSender::new(ptx, None);
     let mut state = agent_state();
     state.current_visit = "v-second-stay".to_string();
     let (offers, mut result) = infer_with(vec![ctx_call("c1", "notes", "hi")]);
@@ -5988,20 +6259,20 @@ async fn a_dispatched_batch_records_what_it_belongs_to() {
         ReadyForTools,
     ));
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let mut batch = None;
     let mut committed = Vec::new();
-    while let Ok(PersistMsg::Append { record, .. }) = prx.try_recv() {
+    while let Ok(crate::pipeline::journal::Journaled { record, .. }) = prx.try_recv() {
         match *record {
-            leviath_core::run_archive::RunRecord::ToolBatch {
+            crate::runfile::record::RunRecord::ToolBatch {
                 calls,
                 visit_id,
                 requested_by,
                 ..
             } => batch = Some((calls, visit_id, requested_by)),
-            leviath_core::run_archive::RunRecord::ContextTransaction {
+            crate::runfile::record::RunRecord::ContextTransaction {
                 execution_id,
                 cause,
                 ..
@@ -6047,7 +6318,7 @@ async fn dispatch_journals_a_batch_it_resolved_itself() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
-    world.insert_resource(PersistenceStage(ptx));
+    world.insert_resource(crate::pipeline::JournalSender::new(ptx, None));
     let e = world
         .spawn((
             agent_state(),
@@ -6059,14 +6330,12 @@ async fn dispatch_journals_a_batch_it_resolved_itself() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert!(world.get::<ReadyToInfer>(e).is_some());
     assert!(jrx.try_recv().is_err(), "nothing went to the lane");
-    let PersistMsg::Append { record, .. } = prx.try_recv().expect("a batch record") else {
-        panic!("the dispatcher appends, it does not snapshot")
-    };
-    let leviath_core::run_archive::RunRecord::ToolBatch { calls, .. } = *record else {
+    let record = prx.try_recv().expect("a batch record").record;
+    let crate::runfile::record::RunRecord::ToolBatch { calls, .. } = *record else {
         panic!("a batch record")
     };
     assert_eq!(calls.len(), 1);
@@ -6108,7 +6377,7 @@ async fn dispatch_logs_an_all_inline_batch_it_would_otherwise_swallow() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<ReadyToInfer>(e).is_some(), "nothing to await");
@@ -6151,7 +6420,7 @@ async fn dispatch_all_inline_without_a_buffer_still_advances() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert!(world.get::<ReadyToInfer>(e).is_some());
 }
@@ -6165,7 +6434,7 @@ async fn dispatch_without_run_metadata_is_unjournaled() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(ReportingService)));
     world.insert_resource(ToolStage::detached(jtx));
-    world.insert_resource(PersistenceStage(ptx));
+    world.insert_resource(crate::pipeline::JournalSender::new(ptx, None));
     world.spawn((
         agent_state(),
         infer_with(vec![tc("c1", "read_file")]),
@@ -6173,7 +6442,7 @@ async fn dispatch_without_run_metadata_is_unjournaled() {
         ReadyForTools,
     ));
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let job = jrx.try_recv().expect("job still enqueued");
@@ -6193,7 +6462,7 @@ async fn gate_held_batch_is_not_journaled_until_it_dispatches() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
-    world.insert_resource(PersistenceStage(ptx));
+    world.insert_resource(crate::pipeline::JournalSender::new(ptx, None));
     world.insert_resource(crate::interaction_hub::InteractionHub::new());
     world.insert_resource(crate::gate_prompt::GatePromptStage {
         outcomes: gtx,
@@ -6212,7 +6481,7 @@ async fn gate_held_batch_is_not_journaled_until_it_dispatches() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -6312,7 +6581,7 @@ async fn dispatch_tools_skips_non_active_agent() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<ReadyForTools>(e).is_some()); // cancelled ⇒ not enqueued
@@ -6395,12 +6664,12 @@ fn a_fan_out_call_is_read_inline_and_never_reaches_the_lane() {
     let mut call = tc("c1", "fan_out");
     call.arguments = serde_json::json!({
         "agent": "researcher",
-        "items": [{"id": "a", "context": {"question": "q"}}]
+        "items": [{"id": "a", "inputs": {"task": "q"}}]
     });
     let e = ready_for_tools(&mut world, vec![call]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(jrx.try_recv().is_err(), "must not reach the tool lane");
@@ -6430,7 +6699,7 @@ fn parking_on_a_fan_out_writes_no_result_for_it_yet() {
     let mut fan = tc("c1", "fan_out");
     fan.arguments = serde_json::json!({
         "agent": "researcher",
-        "items": [{"id": "a", "context": {"question": "q"}}]
+        "items": [{"id": "a", "inputs": {"task": "q"}}]
     });
     // A context tool in the same turn: it lands now, proving the filter removes
     // only the fan-out's entry rather than suppressing the whole batch.
@@ -6439,7 +6708,7 @@ fn parking_on_a_fan_out_writes_no_result_for_it_yet() {
     let e = ready_for_tools(&mut world, vec![fan, note]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let w = world.get::<ContextWindow>(e).unwrap();
@@ -6479,7 +6748,7 @@ fn a_malformed_fan_out_call_is_refused_and_the_agent_carries_on() {
     let e = ready_for_tools(&mut world, vec![call]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<crate::fanout::PendingFanOut>(e).is_none());
@@ -6506,7 +6775,7 @@ fn a_second_fan_out_call_in_one_turn_is_refused() {
     let e = ready_for_tools(&mut world, vec![first, second]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert_eq!(
@@ -6530,7 +6799,7 @@ fn a_fan_out_call_sharing_a_turn_with_lane_work_is_refused() {
     let e = ready_for_tools(&mut world, vec![call, tc("c2", "read_file")]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -6556,28 +6825,25 @@ fn runtime_info_is_answered_from_the_world_and_never_reaches_the_lane() {
     world.insert_resource(ToolStage::detached(jtx));
     let (offers, result) = infer_with(vec![tc("c1", "runtime_info")]);
     let mut metadata = run_metadata();
-    metadata.unattended = true;
+    metadata.unattended = leviath_core::Unattended::All;
     metadata.num_stages = 4;
     // Four stages, and the one under the cursor caps its iterations. The cap is
     // read from the blueprint at the cursor's index rather than from the agent,
     // so a blueprint with distinct caps is what proves the right one is read.
-    let stages: Vec<leviath_core::Stage> = ["a", "b", "gather", "d"]
+    let stages: Vec<Staged> = ["a", "b", "gather", "d"]
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            let mut st = leviath_core::Stage::new(
-                (*name).to_string(),
-                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-            );
-            st.max_iterations = Some(10 + i);
-            st
+            let mut st = tg::stage(name);
+            st.max_iterations = Some(10 + i as u32);
+            Staged::from(st)
         })
         .collect();
     let e = world
         .spawn((
             agent_state(),
             metadata,
-            AgentBlueprint(blueprint(stages)),
+            spec_of(blueprint(stages)),
             offers,
             result,
             conv_window(),
@@ -6591,7 +6857,7 @@ fn runtime_info_is_answered_from_the_world_and_never_reaches_the_lane() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Nothing was queued: the whole point is that it is answered inline.
@@ -6665,39 +6931,24 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
     world.insert_resource(ToolStage::detached(jtx));
 
     // One region that refreshes, one that does not.
-    let mut layout = leviath_core::layout::ContextLayout::new(
+    let mut layout = tg::layout(
         vec![
-            leviath_core::layout::RegionDefinition::new(
-                "conversation".to_string(),
-                RegionKind::Clearable,
-                10_000,
-            ),
-            leviath_core::layout::RegionDefinition::new(
-                "environment".to_string(),
-                RegionKind::Pinned,
-                1000,
-            ),
-            leviath_core::layout::RegionDefinition::new(
-                "machine".to_string(),
-                RegionKind::Pinned,
-                1000,
-            ),
+            tg::region("conversation", RegionKind::Clearable, 10_000),
+            tg::region("environment", RegionKind::Pinned, 1000),
+            tg::region("machine", RegionKind::Pinned, 1000),
         ],
         12_000,
     );
-    layout.regions[1].seed = Some(leviath_core::layout::RegionSeed::Tools {
-        calls: vec![leviath_core::layout::SeedToolCall::new("current_time")],
-        refresh: leviath_core::layout::SeedRefresh::EachStage,
+    layout.regions[1].seed = Some(crate::spec::graph::Seed::Tools {
+        calls: vec![seed_call("current_time")],
+        refresh: crate::spec::graph::SeedRefresh::EachStage,
     });
-    layout.regions[2].seed = Some(leviath_core::layout::RegionSeed::Tools {
-        calls: vec![leviath_core::layout::SeedToolCall::new("system_info")],
-        refresh: leviath_core::layout::SeedRefresh::Once,
+    layout.regions[2].seed = Some(crate::spec::graph::Seed::Tools {
+        calls: vec![seed_call("system_info")],
+        refresh: crate::spec::graph::SeedRefresh::Once,
     });
-    let stages = vec![leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    )];
-    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), stages, layout);
+    let stages = vec![tg::stage("main")];
+    let bp = graph_of_staged(stages, layout);
 
     let mut window = ContextWindow::new(12_000);
     window.add_region(Region::new(
@@ -6717,7 +6968,7 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
     let e = world
         .spawn((
             agent_state(),
-            AgentBlueprint(bp),
+            spec_of(bp.clone()),
             window,
             StageJustEntered {
                 index: 0,
@@ -6728,7 +6979,7 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(start_stage_seeds);
+    s.add_systems((start_stage_seeds, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // The stage is held, and the calls went out.
@@ -6864,10 +7115,7 @@ fn a_stage_entry_with_nothing_to_refresh_is_not_held() {
     let e = world
         .spawn((
             agent_state(),
-            AgentBlueprint(blueprint(vec![leviath_core::Stage::new(
-                "main".to_string(),
-                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-            )])),
+            spec_of(blueprint(vec![tg::stage("main")])),
             conv_window(),
             StageJustEntered {
                 index: 0,
@@ -6921,7 +7169,7 @@ async fn dispatch_tools_applies_all_context_inline() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // All-context batch: nothing enqueued, applied inline, ready to infer.
@@ -6978,7 +7226,7 @@ async fn dispatch_records_a_submitted_output_inline() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Nothing reached the lane, and the agent goes back to work rather than
@@ -7037,7 +7285,7 @@ async fn a_submitted_artifact_is_stored_when_the_world_has_a_store() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     let recorded = world
         .get::<crate::persistence::FinalOutput>(e)
@@ -7121,7 +7369,7 @@ async fn the_blueprint_overwrite_policy_wins_over_the_operators() {
             ))
             .id();
         let mut s = Schedule::default();
-        s.add_systems(dispatch_tools);
+        s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
         s.run(&mut world);
         let recorded = world
             .get::<crate::persistence::FinalOutput>(e)
@@ -7177,7 +7425,7 @@ async fn artifacts_are_checked_against_the_run_workdir() {
             .id();
 
         let mut s = Schedule::default();
-        s.add_systems(dispatch_tools);
+        s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
         s.run(&mut world);
 
         assert_eq!(
@@ -7227,7 +7475,7 @@ async fn a_refused_submission_leaves_an_earlier_answer_alone() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert_eq!(
@@ -7286,7 +7534,7 @@ async fn dispatch_tools_refuses_a_tool_the_stage_never_offered() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let stashed = &world.get::<ContextToolResults>(e).unwrap().0;
@@ -7329,7 +7577,7 @@ async fn dispatch_tools_tells_a_toolless_stage_to_answer_directly() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -7366,7 +7614,7 @@ async fn dispatch_tools_matches_an_offered_tool_through_its_alias() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -7393,7 +7641,7 @@ async fn dispatch_tools_honours_the_stage_tool_filter() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -7416,7 +7664,7 @@ async fn dispatch_tools_treats_an_empty_tool_filter_as_no_narrowing() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -7447,7 +7695,7 @@ async fn dispatch_tools_refuses_an_unoffered_context_tool() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -7473,7 +7721,7 @@ async fn dispatch_tools_partitions_context_and_lane() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Context result stashed; the non-context call went to the lane.
@@ -7548,7 +7796,7 @@ async fn dispatch_tools_refuses_arguments_that_fail_the_advertised_schema() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let stashed = &world.get::<ContextToolResults>(e).unwrap().0;
@@ -7595,7 +7843,7 @@ async fn dispatch_tools_skips_validation_when_the_schema_does_not_compile() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -7643,7 +7891,7 @@ async fn dispatch_tools_validates_through_a_tool_alias() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -7698,7 +7946,7 @@ async fn dispatch_tools_validates_an_mcp_style_schema() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let stashed = &world.get::<ContextToolResults>(e).unwrap().0;
@@ -7781,7 +8029,7 @@ async fn dispatch_tools_gate_blocks_outbound_leak_but_allows_inbound() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<AwaitingTools>(e).is_some());
@@ -7819,7 +8067,7 @@ async fn dispatch_tools_holds_batch_for_an_interactive_gate_prompt() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     // Blocked + interactive ⇒ held for a prompt, not dispatched or [blocked].
     assert_eq!(
@@ -7832,6 +8080,160 @@ async fn dispatch_tools_holds_batch_for_an_interactive_gate_prompt() {
     assert!(world.get::<crate::gate_prompt::GateResolved>(e).is_some());
     assert!(world.get::<ReadyForTools>(e).is_none());
     assert!(world.get::<AwaitingTools>(e).is_none());
+}
+
+/// A world over `EchoService` with a hub and a gate-prompt lane, and the hub.
+fn gate_prompt_world() -> (World, crate::interaction_hub::InteractionHub) {
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let (gtx, _grx) = mpsc::unbounded_channel();
+    let hub = crate::interaction_hub::InteractionHub::new();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    world.insert_resource(hub.clone());
+    world.insert_resource(crate::gate_prompt::GatePromptStage {
+        outcomes: gtx,
+        wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        runtime: tokio::runtime::Handle::current(),
+    });
+    (world, hub)
+}
+
+/// A batch held on the taint gate reads back as held, with the questions it
+/// waits on by their ids, what a person cleared and what they refused.
+/// Placed again (a restart), it asks the same questions under the same ids,
+/// and keeps what it carried.
+#[tokio::test]
+async fn a_batch_held_on_the_gate_comes_back_asking_under_the_same_ids() {
+    let (mut world, _hub) = gate_prompt_world();
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![tc("c_shell", "shell"), tc("c_web", "shell")]),
+            tainted_conv_window(),
+            ReadyForTools,
+            enabled_gate(),
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
+    s.run(&mut world);
+    let asked = world
+        .get::<crate::gate_prompt::GateResolved>(e)
+        .unwrap()
+        .asked
+        .clone();
+    assert_eq!(asked.len(), 2);
+    // One answered: refused. It is the batch's result from now on.
+    {
+        let mut resolved = world
+            .get_mut::<crate::gate_prompt::GateResolved>(e)
+            .unwrap();
+        resolved.asked.remove("c_web");
+        resolved
+            .denied
+            .insert("c_web".to_string(), "[blocked] no".to_string());
+    }
+    let mut batch = crate::state::inspect::pending_of(&world, e).expect("a batch in hand");
+    let hold = batch.held.clone().expect("held on a person");
+    assert_eq!(
+        hold.asked,
+        [("c_shell".to_string(), asked["c_shell"].clone())].into()
+    );
+    assert!(hold.cleared.is_empty() && hold.allowed.is_empty());
+    assert_eq!(batch.done["c_web"].text, "[blocked] no");
+    assert!(batch.executions.is_empty(), "nothing was journaled");
+
+    // What a restart places: the batch, carrying a call it had cleared.
+    batch.calls.push(crate::state::context::ToolCallState {
+        id: "c_ok".to_string(),
+        name: "shell".to_string(),
+        args: leviath_core::JsonDoc::new(serde_json::Value::Null),
+        thought_signature: None,
+    });
+    let held = batch.held.as_mut().unwrap();
+    held.cleared.push("c_ok".to_string());
+    held.allowed.push("c_ok".to_string());
+    let (mut again, hub) = gate_prompt_world();
+    let placed = again
+        .spawn((
+            agent_state(),
+            infer_with(vec![tc("c_shell", "shell"), tc("c_ok", "shell")]),
+            tainted_conv_window(),
+            enabled_gate(),
+        ))
+        .id();
+    crate::insert::place::pending_batch(&mut again.entity_mut(placed), &batch);
+    let mut s = Schedule::default();
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
+    s.run(&mut again);
+    let reasked = again
+        .get::<crate::gate_prompt::GateResolved>(placed)
+        .unwrap();
+    assert_eq!(reasked.asked["c_shell"], asked["c_shell"]);
+    assert_eq!(reasked.asked.len(), 1, "a cleared call is not asked again");
+    let gate = again.get::<crate::taint::TaintGate>(placed).unwrap();
+    assert_eq!(
+        gate.audit_log().len(),
+        0,
+        "the block it is asked over again is already in its audit"
+    );
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    let open: Vec<String> = hub.pending().into_iter().map(|(_, r)| r.id).collect();
+    assert_eq!(open, [asked["c_shell"].clone()]);
+    let now = crate::state::inspect::pending_of(&again, placed)
+        .expect("a batch in hand")
+        .held
+        .expect("held on a person");
+    assert_eq!(now.allowed, ["c_ok"], "what it carried is kept");
+    assert_eq!(now.cleared, ["c_ok"]);
+}
+
+/// A paused run starts no new batch, but one it was holding on a person when
+/// the daemon stopped puts its questions again while it stays paused, and
+/// reads back as held until then.
+#[tokio::test]
+async fn a_paused_run_dispatches_only_a_batch_it_was_holding() {
+    let (mut world, _hub) = gate_prompt_world();
+    let paused = || AgentState {
+        status: AgentStatus::Paused,
+        ..agent_state()
+    };
+    let holding = world
+        .spawn((
+            paused(),
+            infer_with(vec![tc("c1", "read_file")]),
+            conv_window(),
+            ReadyForTools,
+            crate::pipeline::lane_batch::ResumedHold(crate::state::HeldBatch {
+                asked: [("c1".to_string(), "a-approve-1".to_string())].into(),
+                ..Default::default()
+            }),
+        ))
+        .id();
+    let idle = world
+        .spawn((
+            paused(),
+            infer_with(vec![tc("c1", "read_file")]),
+            conv_window(),
+            ReadyForTools,
+        ))
+        .id();
+    let held = crate::state::inspect::pending_of(&world, holding)
+        .and_then(|b| b.held)
+        .expect("a batch brought back held reads back held");
+    assert_eq!(held.asked["c1"], "a-approve-1");
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+    assert!(
+        world
+            .get::<crate::pipeline::lane_batch::PendingBatch>(holding)
+            .is_some()
+    );
+    assert!(world.get::<ReadyForTools>(idle).is_some(), "no new work");
 }
 
 /// A taint-tracking output window over Internal data: what a stage that read
@@ -7866,7 +8268,7 @@ async fn dispatch_tools_gates_a_submission_over_tainted_context() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(jrx.try_recv().is_err(), "nothing reaches the lane");
@@ -7909,7 +8311,7 @@ async fn dispatch_tools_prompts_for_a_tainted_submission_and_applies_it_once_app
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert_eq!(
         world
@@ -7967,7 +8369,7 @@ async fn dispatch_tools_auto_approves_a_gate_block_under_yolo() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     // No gate prompt was raised; the call went to the lane.
     assert!(
@@ -8029,7 +8431,7 @@ async fn dispatch_tools_under_yolo_submits_over_tainted_context_and_records_it()
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -8086,7 +8488,7 @@ async fn dispatch_tools_executes_a_gate_approved_call_and_blocks_a_denied_one() 
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // The approved call was enqueued to the lane; the denied one was not.
@@ -8126,7 +8528,7 @@ async fn dispatch_tools_falls_through_for_a_resolved_agents_unprompted_call() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     // Inbound read_file is gate-allowed ⇒ reaches the lane.
     let job = jrx.try_recv().expect("allowed call enqueued");
@@ -8161,7 +8563,7 @@ async fn dispatch_tools_gate_allows_outbound_via_allowlist() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Allowlisted ⇒ the outbound call reaches the lane instead of `[blocked]`.
@@ -8192,7 +8594,7 @@ async fn dispatch_tools_gate_allows_outbound_via_scripted_rule() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // The scripted rule allows it ⇒ reaches the lane, not `[blocked]`.
@@ -8258,28 +8660,29 @@ fn routing(
     default: &str,
     overrides: &[(&str, &str)],
     keep_results: bool,
-    max_result: Option<usize>,
-) -> leviath_core::blueprint::ToolResultRouting {
-    leviath_core::blueprint::ToolResultRouting {
-        default_region: default.to_string(),
-        tool_overrides: overrides
+    max_result: Option<u32>,
+) -> crate::spec::graph::ToolRoutingDef {
+    crate::spec::graph::ToolRoutingDef {
+        default_region: tg::region_name(default),
+        tool_regions: overrides
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(k, v)| {
+                (
+                    crate::spec::names::ToolName::new(*k).unwrap(),
+                    tg::region_name(v),
+                )
+            })
             .collect(),
         keep_results,
         max_result_tokens: max_result,
-        tool_max_result_tokens: std::collections::HashMap::new(),
+        tool_max_result_tokens: std::collections::BTreeMap::new(),
     }
 }
 
 // ── Per-tool result ceilings ──
 
 /// The text a tool's result ends up as, after routing applied its ceiling.
-fn routed_result(
-    routing: &leviath_core::blueprint::ToolResultRouting,
-    tool: &str,
-    text: &str,
-) -> String {
+fn routed_result(routing: &crate::spec::graph::ToolRoutingDef, tool: &str, text: &str) -> String {
     let mut w = ctx(&[("conversation", 1_000_000), ("results", 1_000_000)]);
     apply_tool_results(
         &mut w,
@@ -8306,9 +8709,10 @@ fn routed_result(
 #[test]
 fn a_per_tool_ceiling_overrides_the_stage_one() {
     let mut routing = routing("results", &[], true, Some(10));
-    routing
-        .tool_max_result_tokens
-        .insert("read_file".to_string(), 1000);
+    routing.tool_max_result_tokens.insert(
+        crate::spec::names::ToolName::new("read_file").unwrap(),
+        1000,
+    );
 
     // 400 chars is ~100 tokens: over the stage's 10, under read_file's 1000.
     let text = "a".repeat(400);
@@ -8322,14 +8726,14 @@ fn a_per_tool_ceiling_overrides_the_stage_one() {
     );
 }
 
-/// Keyed by canonical name, like `tool_overrides`: `bash` is an alias of
+/// Keyed by canonical name, like `tool_regions`: `bash` is an alias of
 /// `shell`, and a literal lookup would silently miss the tool the model calls.
 #[test]
 fn a_per_tool_ceiling_is_matched_by_canonical_name() {
     let mut routing = routing("results", &[], true, Some(10));
     routing
         .tool_max_result_tokens
-        .insert("bash".to_string(), 1000);
+        .insert(crate::spec::names::ToolName::new("bash").unwrap(), 1000);
     let text = "a".repeat(400);
     assert!(
         !routed_result(&routing, "shell", &text).contains("[...truncated]"),
@@ -8813,6 +9217,7 @@ fn collect_tools_drops_stale_outcome() {
 fn msg(agent_id: &str, content: &str, region: Option<&str>) -> AgentMessage {
     AgentMessage {
         agent_id: agent_id.to_string(),
+        from: crate::components::FROM_PERSON.to_string(),
         content: content.to_string(),
         target_region: region.map(String::from),
         parts: Vec::new(),
@@ -8928,51 +9333,103 @@ fn deliver_honors_target_region() {
 
 // ── transition resolution ──
 
-fn edge(
-    target: &str,
-    cond: leviath_core::blueprint::TransitionCondition,
-) -> (String, leviath_core::blueprint::TransitionEdge) {
-    (
-        target.to_string(),
-        leviath_core::blueprint::TransitionEdge {
-            target: target.to_string(),
-            condition: cond,
-            hint: None,
-            transform: leviath_core::blueprint::EdgeTransform::Direct,
-            gate: None,
-            stuck: None,
-        },
-    )
+/// An edge to `target`, taken when `cond`. The stage it leaves is filled in
+/// by [`blueprint`], from the [`Staged`] that holds it.
+fn edge(target: &str, cond: crate::spec::graph::EdgeCondition) -> crate::spec::graph::EdgeDef {
+    tg::edge_when(target, target, cond)
+}
+
+/// A stage of a test graph, with the edges leaving it. `None` goes on to the
+/// stage after it; an empty list leaves it nowhere to go.
+#[derive(Clone)]
+struct Staged {
+    def: crate::spec::graph::StageDef,
+    edges: Option<Vec<crate::spec::graph::EdgeDef>>,
+}
+
+impl From<crate::spec::graph::StageDef> for Staged {
+    fn from(def: crate::spec::graph::StageDef) -> Self {
+        Self { def, edges: None }
+    }
+}
+
+impl std::ops::Deref for Staged {
+    type Target = crate::spec::graph::StageDef;
+    fn deref(&self) -> &Self::Target {
+        &self.def
+    }
+}
+
+impl std::ops::DerefMut for Staged {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.def
+    }
 }
 
 fn stage_named(
     name: &str,
-    edges: Option<Vec<(String, leviath_core::blueprint::TransitionEdge)>>,
+    edges: Option<Vec<crate::spec::graph::EdgeDef>>,
     allow_complete: bool,
-    max_revisits: Option<usize>,
-) -> leviath_core::Stage {
-    let mut s = leviath_core::Stage::new(
-        name.to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    max_revisits: Option<u32>,
+) -> Staged {
+    let mut s = tg::stage(name);
     s.allow_complete = allow_complete;
     s.max_revisits = max_revisits;
-    if let Some(edges) = edges {
-        s.transitions = Some(edges.into_iter().collect());
-    }
-    s
+    Staged { def: s, edges }
 }
 
-fn blueprint(stages: Vec<leviath_core::Stage>) -> leviath_core::Blueprint {
-    let layout = leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
-            "conversation".to_string(),
-            RegionKind::Clearable,
-            10_000,
-        )],
+/// A graph of `stages` over `layout`: each stage's edges leave it, in name
+/// order, and a stage with no list goes on to the one after it and may not
+/// end the run.
+fn graph_of_staged<S: Into<Staged>>(
+    stages: Vec<S>,
+    layout: crate::spec::graph::RegionLayoutDef,
+) -> crate::spec::graph::RunGraph {
+    let stages: Vec<Staged> = stages.into_iter().map(Into::into).collect();
+    let mut edges = Vec::new();
+    for (i, s) in stages.iter().enumerate() {
+        match &s.edges {
+            None => {
+                if let Some(next) = stages.get(i + 1) {
+                    edges.push(crate::spec::graph::EdgeDef {
+                        name: crate::spec::names::EdgeName::new(
+                            crate::spec::graph::FALL_THROUGH_EDGE,
+                        )
+                        .unwrap(),
+                        ..tg::edge(s.def.name.as_str(), next.def.name.as_str())
+                    });
+                }
+            }
+            Some(own) => {
+                let mut own = own.clone();
+                own.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+                for mut e in own {
+                    e.from = s.def.name.clone();
+                    edges.push(e);
+                }
+            }
+        }
+    }
+    let mut graph = tg::graph(Vec::new(), layout);
+    // A stage that only falls through has no choice to make, so it may not end
+    // the run on its own: going on is the one way out it was given.
+    graph.stages = stages
+        .into_iter()
+        .map(|s| crate::spec::graph::StageDef {
+            allow_complete: s.def.allow_complete && s.edges.is_some(),
+            ..s.def
+        })
+        .collect();
+    graph.edges = edges;
+    graph
+}
+
+fn blueprint<S: Into<Staged>>(stages: Vec<S>) -> crate::spec::graph::RunGraph {
+    let layout = tg::layout(
+        vec![tg::region("conversation", RegionKind::Clearable, 10_000)],
         12_000,
     );
-    leviath_core::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+    graph_of_staged(stages, layout)
 }
 
 fn si(model: &str) -> StageInference {
@@ -9007,20 +9464,15 @@ fn setup() -> StageSetup {
     }
 }
 
-fn setups(n: usize) -> StageSetups {
-    StageSetups((0..n).map(|_| setup()).collect())
-}
-
 fn spawn_transition_agent(
     world: &mut World,
-    bp: leviath_core::Blueprint,
+    bp: crate::spec::graph::RunGraph,
     stage_infs: Vec<StageInference>,
     visits: VisitCounts,
 ) -> Entity {
-    let n = stage_infs.len();
     world
         .spawn((
-            AgentBlueprint(bp),
+            spec_with(bp, &stage_infs),
             StageCursor { index: 0 },
             agent_state(),
             StageProgress {
@@ -9029,8 +9481,6 @@ fn spawn_transition_agent(
                 iterations: 0,
                 ..Default::default()
             },
-            StageInferences(stage_infs),
-            setups(n),
             conv_window(),
             visits,
             ResolveTransition,
@@ -9122,11 +9572,10 @@ fn transition_terminal_marks_complete() {
 
 #[test]
 fn transition_single_graph_edge_advances() {
-    use leviath_core::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
-            Some(vec![edge("b", TransitionCondition::Always)]),
+            Some(vec![edge("b", EdgeCondition::Always)]),
             false,
             None,
         ),
@@ -9160,15 +9609,87 @@ fn transition_empty_transitions_is_terminal() {
     );
 }
 
+/// The three stage endings a blueprint can write without naming an edge, in
+/// one graph: `a` has no `transitions` table, `b` has an empty one, and `c`
+/// is the last stage and has no table.
+fn fall_through_blueprint(allow_complete: bool) -> crate::spec::graph::RunGraph {
+    blueprint(vec![
+        stage_named("a", None, allow_complete, None),
+        stage_named("b", Some(vec![]), false, None),
+        stage_named("c", None, false, None),
+    ])
+}
+
+/// Resolve one completed stage of [`fall_through_blueprint`], starting at
+/// `index`, and hand back the world and the run.
+fn resolve_fall_through_at(index: usize, allow_complete: bool) -> (World, Entity) {
+    let mut world = World::new();
+    let e = spawn_transition_agent(
+        &mut world,
+        fall_through_blueprint(allow_complete),
+        vec![si("m0"), si("m1"), si("m2")],
+        VisitCounts::default(),
+    );
+    world.get_mut::<StageCursor>(e).unwrap().index = index;
+    run_transition(&mut world);
+    (world, e)
+}
+
+/// A stage with no `transitions` table goes on to the next stage in order,
+/// along the edge the graph writes for it.
+#[test]
+fn a_stage_with_no_transitions_table_falls_through_to_the_next() {
+    let (world, e) = resolve_fall_through_at(0, false);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    let moved = &world.get::<LastTransition>(e).unwrap().0;
+    assert_eq!(moved.to.as_str(), "b");
+    assert_eq!(
+        moved.edge.as_ref().map(|n| n.as_str()),
+        Some(crate::spec::graph::FALL_THROUGH_EDGE)
+    );
+}
+
+/// Falling through is not a choice, so a stage that may end the run still
+/// falls through rather than asking its model.
+#[test]
+fn a_stage_with_no_table_falls_through_even_when_it_may_complete() {
+    let (world, e) = resolve_fall_through_at(0, true);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    assert!(world.get::<AwaitingTransitionChoice>(e).is_none());
+}
+
+/// A stage with an explicitly empty `transitions` table ends the run, even
+/// with a stage after it.
+#[test]
+fn a_stage_with_an_empty_transitions_table_ends_the_run() {
+    let (world, e) = resolve_fall_through_at(1, false);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Complete
+    );
+}
+
+/// The last stage with no table has nowhere to fall, and ends the run.
+#[test]
+fn the_last_stage_with_no_transitions_table_ends_the_run() {
+    let (world, e) = resolve_fall_through_at(2, false);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 2);
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Complete
+    );
+}
+
 #[test]
 fn transition_multiple_edges_awaits_choice() {
-    use leviath_core::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
             Some(vec![
-                edge("b", TransitionCondition::Always),
-                edge("c", TransitionCondition::Always),
+                edge("b", EdgeCondition::Always),
+                edge("c", EdgeCondition::Always),
             ]),
             false,
             None,
@@ -9194,11 +9715,10 @@ fn transition_multiple_edges_awaits_choice() {
 
 #[test]
 fn transition_allow_complete_single_edge_awaits_choice() {
-    use leviath_core::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
-            Some(vec![edge("b", TransitionCondition::Always)]),
+            Some(vec![edge("b", EdgeCondition::Always)]),
             true, // allow_complete: LLM must be asked (can say DONE)
             None,
         ),
@@ -9220,7 +9740,7 @@ fn transition_allow_complete_single_edge_awaits_choice() {
 // ─── A run that owed an answer and gave none is not complete ─────────────────
 
 /// A stage requiring an output that no stage ever produced.
-fn owing_output(require: bool) -> leviath_core::Blueprint {
+fn owing_output(require: bool) -> crate::spec::graph::RunGraph {
     let mut stages = vec![stage_named("only", None, false, None)];
     stages[0].require_output = require;
     blueprint(stages)
@@ -9315,7 +9835,7 @@ fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
     stage.require_output = true;
     stage
         .output_routing
-        .insert("model/*".to_string(), "model".to_string());
+        .insert("model/*".to_string(), tg::region_name("model"));
     let bp = blueprint(vec![stage]);
 
     // The routed mesh sits in the model region; the pinned final_output region
@@ -9366,7 +9886,7 @@ fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
     let mut world = World::new();
     let e = world
         .spawn((
-            AgentBlueprint(bp),
+            spec_of(bp),
             StageCursor { index: 0 },
             agent_state(),
             window,
@@ -9391,11 +9911,10 @@ fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
 
 #[test]
 fn transition_visit_exhausted_edge_is_a_dead_end_error() {
-    use leviath_core::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
-            Some(vec![edge("b", TransitionCondition::Always)]),
+            Some(vec![edge("b", EdgeCondition::Always)]),
             false,
             None,
         ),
@@ -9427,13 +9946,12 @@ fn transition_visit_exhausted_edge_is_a_dead_end_error() {
 /// with everything it established thrown away.
 #[test]
 fn a_dead_end_edge_catches_the_strand() {
-    use leviath_core::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
             Some(vec![
-                edge("b", TransitionCondition::Always),
-                edge("answer", TransitionCondition::DeadEnd),
+                edge("b", EdgeCondition::Always),
+                edge("answer", EdgeCondition::DeadEnd),
             ]),
             false,
             None,
@@ -9466,13 +9984,12 @@ fn a_dead_end_edge_catches_the_strand() {
 /// offered on every visit, which is what collapsed the measured pipelines.
 #[test]
 fn a_dead_end_edge_is_not_offered_while_the_graph_is_healthy() {
-    use leviath_core::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
             Some(vec![
-                edge("b", TransitionCondition::Always),
-                edge("answer", TransitionCondition::DeadEnd),
+                edge("b", EdgeCondition::Always),
+                edge("answer", EdgeCondition::DeadEnd),
             ]),
             false,
             None,
@@ -9502,14 +10019,13 @@ fn a_dead_end_edge_is_not_offered_while_the_graph_is_healthy() {
 /// edge is also carrying provider failures and may want to go elsewhere.
 #[test]
 fn a_dead_end_edge_wins_over_an_error_edge() {
-    use leviath_core::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
             Some(vec![
-                edge("b", TransitionCondition::Always),
-                edge("recover", TransitionCondition::Error),
-                edge("answer", TransitionCondition::DeadEnd),
+                edge("b", EdgeCondition::Always),
+                edge("recover", EdgeCondition::Error),
+                edge("answer", EdgeCondition::DeadEnd),
             ]),
             false,
             None,
@@ -9541,13 +10057,12 @@ fn a_dead_end_edge_wins_over_an_error_edge() {
 /// now a failure mode `error_recovery` can actually catch.
 #[test]
 fn transition_dead_end_routes_down_the_error_edge_when_present() {
-    use leviath_core::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
             Some(vec![
-                edge("b", TransitionCondition::Always),
-                edge("rescue", TransitionCondition::Error),
+                edge("b", EdgeCondition::Always),
+                edge("rescue", EdgeCondition::Error),
             ]),
             false,
             None,
@@ -9577,13 +10092,12 @@ fn transition_dead_end_routes_down_the_error_edge_when_present() {
 
 #[test]
 fn transition_non_choosable_edge_is_terminal() {
-    use leviath_core::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         // Only an Error-condition edge, which isn't followable on a normal
         // completion ⇒ filtered out of the choosable set ⇒ terminal.
         stage_named(
             "a",
-            Some(vec![edge("b", TransitionCondition::Error)]),
+            Some(vec![edge("b", EdgeCondition::Error)]),
             false,
             None,
         ),
@@ -9607,10 +10121,9 @@ fn transition_non_choosable_edge_is_terminal() {
 
 #[test]
 fn transition_unknown_target_edge_is_a_dead_end_error() {
-    use leviath_core::blueprint::TransitionCondition;
     let bp = blueprint(vec![stage_named(
         "a",
-        Some(vec![edge("ghost", TransitionCondition::Always)]),
+        Some(vec![edge("ghost", EdgeCondition::Always)]),
         false,
         None,
     )]);
@@ -9646,16 +10159,14 @@ fn pinned_window() -> ContextWindow {
 fn spawn_setup_agent(world: &mut World, dest_setup: StageSetup, window: ContextWindow) -> Entity {
     let bp = blueprint(vec![
         stage_named("a", None, false, None),
-        stage_named("b", None, false, None),
+        stage_from_setup("b", &dest_setup).into(),
     ]);
     world
         .spawn((
-            AgentBlueprint(bp),
+            spec_with(bp, &[si("m0"), si("m1")]),
             StageCursor { index: 0 },
             agent_state(),
             StageProgress::default(),
-            StageInferences(vec![si("m0"), si("m1")]),
-            StageSetups(vec![setup(), dest_setup]),
             VisitCounts::default(),
             window,
             ResolveTransition,
@@ -9689,7 +10200,7 @@ fn enter_stage_injects_system_prompt_and_config() {
     s.system_prompt = Some("be terse".to_string());
     s.inference_config = InferenceConfig {
         temperature: Some(0.3),
-        max_output_tokens: Some(leviath_core::blueprint::OutputCap::Tokens(99)),
+        max_output_tokens: Some(crate::spec::graph::OutputCap::Tokens(99)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -9715,7 +10226,7 @@ fn enter_stage_injects_system_prompt_and_config() {
     let cfg = world.get::<InferenceConfig>(e).unwrap();
     assert_eq!(
         cfg.max_output_tokens,
-        Some(leviath_core::blueprint::OutputCap::Tokens(99))
+        Some(crate::spec::graph::OutputCap::Tokens(99))
     );
     assert!(!world.get::<AgentState>(e).unwrap().accepts_messages);
     assert!(world.get::<ReadyToInfer>(e).is_some());
@@ -9724,14 +10235,11 @@ fn enter_stage_injects_system_prompt_and_config() {
 #[test]
 fn enter_stage_swaps_context_layout() {
     let mut s = setup();
-    s.context_layout = Some(leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
-            "scratch".to_string(),
-            RegionKind::Clearable,
-            5000,
-        )],
-        8000,
-    ));
+    s.context_layout = Some(vec![Region::new(
+        "scratch".to_string(),
+        RegionKind::Clearable,
+        5000,
+    )]);
     let mut world = World::new();
     let e = spawn_setup_agent(&mut world, s, pinned_window());
 
@@ -9757,8 +10265,6 @@ fn enter_stage_swaps_context_layout() {
 /// contents back, rather than an empty region.
 #[test]
 fn a_region_hidden_by_one_stage_comes_back_with_its_content() {
-    use leviath_core::layout::{ContextLayout, RegionDefinition};
-
     let mut w = pinned_window();
     w.add_to_region("sys", "the data preview".to_string(), 4)
         .expect("seeded");
@@ -9766,14 +10272,11 @@ fn a_region_hidden_by_one_stage_comes_back_with_its_content() {
     // A stage that does not declare `sys`.
     crate::context_setup::apply_layout(
         &mut w,
-        &ContextLayout::new(
-            vec![RegionDefinition::new(
-                "scratch".to_string(),
-                RegionKind::Clearable,
-                5000,
-            )],
-            8000,
-        ),
+        vec![Region::new(
+            "scratch".to_string(),
+            RegionKind::Clearable,
+            5000,
+        )],
     );
     assert!(w.hidden.contains("sys"));
     assert!(
@@ -9784,14 +10287,7 @@ fn a_region_hidden_by_one_stage_comes_back_with_its_content() {
     // A later stage that declares it again.
     crate::context_setup::apply_layout(
         &mut w,
-        &ContextLayout::new(
-            vec![RegionDefinition::new(
-                "sys".to_string(),
-                RegionKind::Pinned,
-                5000,
-            )],
-            8000,
-        ),
+        vec![Region::new("sys".to_string(), RegionKind::Pinned, 5000)],
     );
     assert!(!w.hidden.contains("sys"), "declared again, so shown again");
     let restored = w.get_region("sys").expect("still there");
@@ -9837,8 +10333,6 @@ fn a_hidden_region_is_not_assembled_into_the_prompt() {
 /// typed turns have to attach to.
 #[test]
 fn the_message_regions_are_never_hidden() {
-    use leviath_core::layout::{ContextLayout, RegionDefinition};
-
     let mut w = ContextWindow::new(10_000);
     w.add_region(Region::new(
         "conversation".to_string(),
@@ -9852,14 +10346,11 @@ fn the_message_regions_are_never_hidden() {
 
     crate::context_setup::apply_layout(
         &mut w,
-        &ContextLayout::new(
-            vec![RegionDefinition::new(
-                "scratch".to_string(),
-                RegionKind::Clearable,
-                5000,
-            )],
-            8000,
-        ),
+        vec![Region::new(
+            "scratch".to_string(),
+            RegionKind::Clearable,
+            5000,
+        )],
     );
 
     assert!(!w.hidden.contains("conversation"));
@@ -9869,10 +10360,7 @@ fn the_message_regions_are_never_hidden() {
 #[test]
 fn enter_stage_inserts_tool_result_routing() {
     let mut s = setup();
-    s.routing = Some(leviath_core::ToolResultRouting {
-        default_region: "notes".to_string(),
-        ..Default::default()
-    });
+    s.routing = Some(routing("notes", &[], true, None));
     let mut world = World::new();
     let e = spawn_setup_agent(&mut world, s, pinned_window());
 
@@ -9881,7 +10369,7 @@ fn enter_stage_inserts_tool_result_routing() {
     let routing = world
         .get::<crate::components::ToolResultRoutingComponent>(e)
         .unwrap();
-    assert_eq!(routing.routing.default_region, "notes");
+    assert_eq!(routing.routing.default_region.as_str(), "notes");
 }
 
 #[test]
@@ -9924,23 +10412,21 @@ fn enter_stage_without_target_region_skips_injection() {
 #[test]
 fn collect_choice_errors_when_system_prompt_overflows() {
     let (mut world, tx) = world_with_transition_results();
-    let bp = blueprint(vec![
-        stage_named("a", None, false, None),
-        stage_named("b", None, false, None),
-    ]);
     let mut dest = setup();
     dest.system_prompt = Some("x".repeat(100_000));
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_from_setup("b", &dest).into(),
+    ]);
     let e = world
         .spawn((
-            AgentBlueprint(bp),
+            spec_with(bp, &[si("m0"), si("m1")]),
             StageCursor { index: 0 },
             agent_state(),
             StageProgress::default(),
-            StageInferences(vec![si("m0"), si("m1")]),
-            StageSetups(vec![setup(), dest]),
             VisitCounts::default(),
             pinned_window(),
-            AwaitingTransitionResponse(vec![plain_edge("b")]),
+            AwaitingTransitionResponse(edges_of(&[plain_edge("b")])),
         ))
         .id();
     tx.send(InferenceOutcome {
@@ -9949,6 +10435,7 @@ fn collect_choice_errors_when_system_prompt_overflows() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -9981,23 +10468,17 @@ fn resolved(model: &str) -> ResolvedStage {
 /// settings made is the first thing a reader of the log sees.
 #[test]
 fn spawn_agent_seeds_the_stage_log_with_each_stages_notes() {
-    let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
-    let s0 = leviath_core::Stage::new(
-        "plan".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    let s1 = leviath_core::Stage::new(
-        "fix".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s0, s1], layout);
+    let layout = tg::layout(vec![], 1000);
+    let s0 = tg::stage("plan");
+    let s1 = tg::stage("fix");
+    let bp = graph_of_staged(vec![s0, s1], layout);
     let mut noted = resolved("m");
     noted.notes = vec![
         "[model] stage 'fix' starts on p/m (override_model); blueprint asked for q/n".to_string(),
     ];
 
     let mut world = World::new();
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "agent-x".to_string(),
         bp,
@@ -10023,36 +10504,22 @@ fn spawn_agent_seeds_the_stage_log_with_each_stages_notes() {
 fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
     // A stage with model parameters, routing, and a system prompt should
     // produce a ready agent carrying all of them.
-    let layout = leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
-            "task".to_string(),
-            RegionKind::Pinned,
-            4000,
-        )],
+    let layout = tg::layout(
+        vec![
+            tg::region("task", RegionKind::Pinned, 4000),
+            tg::region("notes", RegionKind::Clearable, 2000),
+        ],
         8000,
     );
-    let mut s = leviath_core::Stage::new(
-        "start".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    s.model
-        .parameters
-        .insert("temperature".to_string(), serde_json::json!(0.5));
-    s.model
-        .parameters
-        .insert("max_output_tokens".to_string(), serde_json::json!(128));
-    s.config.insert(
-        "system_prompt".to_string(),
-        serde_json::Value::String("be helpful".to_string()),
-    );
-    s.tool_result_routing = Some(leviath_core::ToolResultRouting {
-        default_region: "notes".to_string(),
-        ..Default::default()
-    });
-    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
+    let mut s = tg::stage("start");
+    s.model.params.temperature = Some(0.5);
+    s.model.params.max_output_tokens = Some(crate::spec::graph::OutputCap::Tokens(128));
+    s.system_prompt = Some("be helpful".to_string());
+    s.tool_routing = Some(routing("notes", &[], true, None));
+    let bp = graph_of_staged(vec![s], layout);
 
     let mut world = World::new();
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "agent-x".to_string(),
         bp,
@@ -10068,14 +10535,15 @@ fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
     assert_eq!(cfg.temperature, Some(0.5));
     assert_eq!(
         cfg.max_output_tokens,
-        Some(leviath_core::blueprint::OutputCap::Tokens(128))
+        Some(crate::spec::graph::OutputCap::Tokens(128))
     );
     assert_eq!(
         world
             .get::<crate::components::ToolResultRoutingComponent>(e)
             .unwrap()
             .routing
-            .default_region,
+            .default_region
+            .as_str(),
         "notes"
     );
     assert_eq!(world.get::<AgentState>(e).unwrap().agent_id, "agent-x");
@@ -10102,7 +10570,7 @@ fn spawn_agent_defaults_config_and_no_routing() {
     // routing component.
     let bp = blueprint(vec![stage_named("only", None, false, None)]);
     let mut world = World::new();
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "a".to_string(),
         bp,
@@ -10124,29 +10592,18 @@ fn spawn_agent_defaults_config_and_no_routing() {
 
 #[test]
 fn stage_setup_from_folds_fanout_split_prompt() {
-    use leviath_core::blueprint::{FanOutConfig, StageMode, WorkerFailurePolicy};
-    let fanout = |split: &str| StageMode::FanOut {
-        config: FanOutConfig {
-            worker_agent: None,
-            worker_stage: Some("w".to_string()),
-            worker_query: None,
-            merge_stage: None,
-            max_workers: 4,
-            on_worker_failure: WorkerFailurePolicy::Continue,
+    use crate::spec::graph::{FanOutDef, StageMode};
+    let fanout = |split: &str| {
+        StageMode::FanOut(FanOutDef {
             split_prompt: split.to_string(),
-            results_region: None,
-            max_items: None,
-            max_attempts: None,
-        },
+            ..FanOutDef::same_graph(crate::spec::names::StageName::new("w").unwrap())
+        })
     };
 
     // Fan-out stage with a base prompt: split prompt is appended.
     let mut s = stage_named("fan", None, false, None);
     s.mode = fanout("SPLIT NOW");
-    s.config.insert(
-        "system_prompt".to_string(),
-        serde_json::Value::String("base instructions".to_string()),
-    );
+    s.system_prompt = Some("base instructions".to_string());
     let sp = stage_setup_from(&s, hints(true), Default::default(), None)
         .system_prompt
         .unwrap();
@@ -10212,24 +10669,22 @@ fn stage_setup_from_collects_extra_model_parameters() {
     let mut s = stage_named("plan", None, false, None);
     // temperature/max_output_tokens are consumed specially; everything else
     // is collected as pass-through extra_params.
+    s.model.params.temperature = Some(0.3);
+    s.model.params.max_output_tokens = Some(crate::spec::graph::OutputCap::Tokens(256));
     s.model
-        .parameters
-        .insert("temperature".to_string(), serde_json::json!(0.3));
+        .params
+        .extra
+        .insert("top_p".to_string(), param_scalar(&serde_json::json!(0.9)));
     s.model
-        .parameters
-        .insert("max_output_tokens".to_string(), serde_json::json!(256));
-    s.model
-        .parameters
-        .insert("top_p".to_string(), serde_json::json!(0.9));
-    s.model
-        .parameters
-        .insert("seed".to_string(), serde_json::json!(11));
+        .params
+        .extra
+        .insert("seed".to_string(), param_scalar(&serde_json::json!(11)));
 
     let setup = stage_setup_from(&s, hints(true), Default::default(), None);
     assert_eq!(setup.inference_config.temperature, Some(0.3));
     assert_eq!(
         setup.inference_config.max_output_tokens,
-        Some(leviath_core::blueprint::OutputCap::Tokens(256))
+        Some(crate::spec::graph::OutputCap::Tokens(256))
     );
     let extra = &setup.inference_config.extra_params;
     assert_eq!(extra.len(), 2);
@@ -10329,26 +10784,13 @@ fn the_default_retry_tuning_is_the_shipped_schedule() {
 
 #[test]
 fn spawn_agent_errors_on_oversized_system_prompt() {
-    let layout = leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
-            "task".to_string(),
-            RegionKind::Pinned,
-            40,
-        )],
-        1000,
-    );
-    let mut s = leviath_core::Stage::new(
-        "only".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    s.config.insert(
-        "system_prompt".to_string(),
-        serde_json::Value::String("z".repeat(100_000)),
-    );
-    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
+    let layout = tg::layout(vec![tg::region("task", RegionKind::Pinned, 40)], 1000);
+    let mut s = tg::stage("only");
+    s.system_prompt = Some("z".repeat(100_000));
+    let bp = graph_of_staged(vec![s], layout);
 
     let mut world = World::new();
-    let err = spawn_agent(
+    let err = place_test_task(
         &mut world,
         "a".to_string(),
         bp,
@@ -10499,6 +10941,73 @@ async fn compaction_skips_non_active_agent() {
             compacting_window(),
             compaction_settings("cfg", "m"),
             st,
+            ReadyToInfer,
+        ))
+        .id();
+
+    run_dispatch_compaction(&mut world);
+
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(world.get::<AwaitingCompaction>(e).is_none());
+}
+
+/// `compact_at` is the region's own threshold: a compacting region past it is
+/// summarized before the next request even when the window as a whole has
+/// room. Waiting for the window to fill left the region to roll its oldest
+/// entries off on write, which is eviction, the thing the kind exists to
+/// avoid.
+#[tokio::test]
+async fn a_compacting_region_past_its_own_threshold_is_summarized() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    let mut w = ContextWindow::new(10_000);
+    let mut log = Region::new(
+        "log".to_string(),
+        RegionKind::Compacting {
+            threshold_tokens: 30,
+        },
+        60,
+    );
+    let _ = log.add_entry("first read", 20);
+    let _ = log.add_entry("second read", 20);
+    w.add_region(log);
+    w.current_tokens = w.calculate_tokens();
+    let e = world
+        .spawn((
+            w,
+            compaction_settings("cfg", "m"),
+            agent_state(),
+            ReadyToInfer,
+        ))
+        .id();
+
+    run_dispatch_compaction(&mut world);
+
+    assert!(world.get::<AwaitingCompaction>(e).is_some());
+}
+
+/// A region holding one entry past its threshold is left alone until the
+/// window needs the room: summarizing a single entry in place would leave a
+/// single entry, and one still past the threshold would be summarized again
+/// before every request.
+#[tokio::test]
+async fn a_compacting_region_holding_one_entry_waits_for_window_pressure() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    let mut w = ContextWindow::new(10_000);
+    let mut log = Region::new(
+        "log".to_string(),
+        RegionKind::Compacting {
+            threshold_tokens: 30,
+        },
+        60,
+    );
+    let _ = log.add_entry("one long summary", 40);
+    w.add_region(log);
+    w.current_tokens = w.calculate_tokens();
+    let e = world
+        .spawn((
+            w,
+            compaction_settings("cfg", "m"),
+            agent_state(),
             ReadyToInfer,
         ))
         .id();
@@ -10668,8 +11177,6 @@ async fn compaction_skips_region_with_empty_content() {
 
 // ── edge transforms ──
 
-use leviath_core::blueprint::EdgeTransform;
-
 /// A window with a pinned `sys` region and a stage-specific `scratch` region,
 /// both with content.
 fn transform_window() -> ContextWindow {
@@ -10688,7 +11195,7 @@ fn transform_window() -> ContextWindow {
 fn apply_edge_transform_direct_is_a_noop() {
     let mut w = transform_window();
     let before = w.current_tokens;
-    assert!(apply_edge_transform(&mut w, &EdgeTransform::Direct).is_empty());
+    assert!(apply_edge_transform(&mut w, &EdgeCarry::Direct).is_empty());
     assert_eq!(w.current_tokens, before);
     assert!(w.get_region("scratch").unwrap().current_tokens > 0);
 }
@@ -10696,7 +11203,7 @@ fn apply_edge_transform_direct_is_a_noop() {
 #[test]
 fn apply_edge_transform_clear_wipes_stage_specific_keeps_pinned() {
     let mut w = transform_window();
-    assert!(apply_edge_transform(&mut w, &EdgeTransform::Clear).is_empty());
+    assert!(apply_edge_transform(&mut w, &EdgeCarry::Clear).is_empty());
     assert_eq!(w.get_region("scratch").unwrap().current_tokens, 0);
     assert!(w.get_region("sys").unwrap().current_tokens > 0);
 }
@@ -10728,7 +11235,7 @@ fn edge_transforms_respect_custom_region_persistence() {
     w.add_region(vault);
     w.current_tokens = w.calculate_tokens();
 
-    assert!(apply_edge_transform(&mut w, &EdgeTransform::Clear).is_empty());
+    assert!(apply_edge_transform(&mut w, &EdgeCarry::Clear).is_empty());
     assert_eq!(w.get_region("scratch_custom").unwrap().current_tokens, 0);
     assert!(w.get_region("vault").unwrap().current_tokens > 0);
 }
@@ -10738,7 +11245,7 @@ fn apply_edge_transform_compact_returns_stage_specific_with_content() {
     let mut w = transform_window();
     // Pinned excluded; scratch (stage-specific, has content) returned; not cleared.
     assert_eq!(
-        apply_edge_transform(&mut w, &EdgeTransform::Compact { prompt: None }),
+        apply_edge_transform(&mut w, &EdgeCarry::Compact { prompt: None }),
         vec!["scratch".to_string()]
     );
     assert!(w.get_region("scratch").unwrap().current_tokens > 0);
@@ -10755,20 +11262,12 @@ fn apply_edge_transform_custom_respects_carry_clear_and_compact() {
     w.add_region(drop);
     w.current_tokens = w.calculate_tokens();
 
-    let transform = EdgeTransform::Custom {
-        carry: vec!["keep".to_string()],
+    let transform = EdgeCarry::Custom {
+        carry: tg::regions(&["keep"]),
         // scratch has content ⇒ kept; keep excluded (carry); ghost absent ⇒ filtered.
-        compact: vec![
-            "scratch".to_string(),
-            "keep".to_string(),
-            "ghost".to_string(),
-        ],
+        compact: tg::regions(&["scratch", "keep", "ghost"]),
         // drop cleared; keep protected by carry; missing region is a no-op.
-        clear: vec![
-            "drop".to_string(),
-            "keep".to_string(),
-            "missing".to_string(),
-        ],
+        clear: tg::regions(&["drop", "keep", "missing"]),
         compact_prompt: None,
     };
     let out = apply_edge_transform(&mut w, &transform);
@@ -10907,25 +11406,20 @@ async fn edge_compact_drops_marker_when_pool_full() {
     assert!(world.get::<AwaitingCompaction>(e).is_none());
 }
 
-fn clear_edge(target: &str) -> leviath_core::blueprint::TransitionEdge {
-    leviath_core::blueprint::TransitionEdge {
-        target: target.to_string(),
-        condition: leviath_core::blueprint::TransitionCondition::Always,
+fn clear_edge(target: &str) -> crate::spec::graph::EdgeDef {
+    crate::spec::graph::EdgeDef {
+        when: crate::spec::graph::EdgeCondition::Always,
         hint: None,
-        transform: EdgeTransform::Clear,
+        carry: EdgeCarry::Clear,
         gate: None,
         stuck: None,
+        ..tg::edge(target, target)
     }
 }
 
 #[test]
 fn resolve_transition_applies_the_edge_clear_transform() {
-    let a = stage_named(
-        "a",
-        Some(vec![("go".to_string(), clear_edge("b"))]),
-        false,
-        None,
-    );
+    let a = stage_named("a", Some(vec![named("go", clear_edge("b"))]), false, None);
     let b = stage_named("b", None, false, None);
     let bp = blueprint(vec![a, b]);
     let mut world = World::new();
@@ -10959,8 +11453,8 @@ fn resolve_transition_applies_the_edge_clear_transform() {
 #[test]
 fn resolve_transition_with_compact_transform_marks_pending_edge_compact() {
     let mut edge = clear_edge("b");
-    edge.transform = EdgeTransform::Compact { prompt: None };
-    let a = stage_named("a", Some(vec![("go".to_string(), edge)]), false, None);
+    edge.carry = EdgeCarry::Compact { prompt: None };
+    let a = stage_named("a", Some(vec![named("go", edge)]), false, None);
     let b = stage_named("b", None, false, None);
     let bp = blueprint(vec![a, b]);
     let mut world = World::new();
@@ -10985,20 +11479,15 @@ fn resolve_transition_with_compact_transform_marks_pending_edge_compact() {
 
 // ── max_iterations + error/max-iter edges (#3+#4) ──
 
-use leviath_core::blueprint::TransitionCondition;
-
-fn conditioned_edge(
-    target: &str,
-    condition: TransitionCondition,
-) -> leviath_core::blueprint::TransitionEdge {
+fn conditioned_edge(target: &str, condition: EdgeCondition) -> crate::spec::graph::EdgeDef {
     let mut e = plain_edge(target);
-    e.condition = condition;
+    e.when = condition;
     e
 }
 
 fn spawn_ready_agent(
     world: &mut World,
-    max_iterations: Option<usize>,
+    max_iterations: Option<u32>,
     iterations: usize,
     status: AgentStatus,
 ) -> Entity {
@@ -11007,7 +11496,7 @@ fn spawn_ready_agent(
     let bp = blueprint(vec![s]);
     world
         .spawn((
-            AgentBlueprint(bp),
+            spec_of(bp),
             StageCursor { index: 0 },
             AgentState {
                 status,
@@ -11073,22 +11562,21 @@ fn enforce_max_iterations_leaves_a_fan_out_stage_alone() {
     let e = spawn_ready_agent(&mut world, Some(4), 4, AgentStatus::Active);
     // Same agent, same spent budget - only the mode differs.
     let capped = spawn_ready_agent(&mut world, Some(4), 4, AgentStatus::Active);
-    let mut bp = world.get::<AgentBlueprint>(e).unwrap().0.clone();
-    bp.stages[0].mode = leviath_core::blueprint::StageMode::FanOut {
-        config: leviath_core::blueprint::FanOutConfig {
-            worker_agent: Some("w".to_string()),
-            worker_stage: None,
-            worker_query: None,
+    let mut spec = world.get::<RunSpecC>(e).unwrap().clone();
+    graph_mut(&mut spec).stages[0].mode =
+        crate::spec::graph::StageMode::FanOut(crate::spec::graph::FanOutDef {
+            worker: crate::spec::graph::WorkerSource::Blueprint(
+                crate::spec::names::BlueprintRef::parse("w").unwrap(),
+            ),
             merge_stage: None,
-            max_workers: 4,
-            on_worker_failure: leviath_core::blueprint::WorkerFailurePolicy::Continue,
+            max_workers: Some(4),
+            on_worker_failure: crate::spec::graph::WorkerFailure::Continue,
             split_prompt: "split".to_string(),
             results_region: None,
             max_items: None,
             max_attempts: None,
-        },
-    };
-    world.entity_mut(e).insert(AgentBlueprint(bp));
+        });
+    world.entity_mut(e).insert(spec);
 
     run_enforce(&mut world);
 
@@ -11122,12 +11610,12 @@ fn enforce_max_iterations_below_limit_or_unlimited_or_paused_is_noop() {
 // ── stuck detection ─────────────────────────────────────────────────────
 
 fn stuck_cfg(
-    iterations: Option<usize>,
-    minutes: Option<usize>,
-    edits: Option<usize>,
-    tool_calls: Option<usize>,
-) -> leviath_core::blueprint::StuckConfig {
-    leviath_core::blueprint::StuckConfig {
+    iterations: Option<u32>,
+    minutes: Option<u32>,
+    edits: Option<u32>,
+    tool_calls: Option<u32>,
+) -> crate::spec::graph::StuckDef {
+    crate::spec::graph::StuckDef {
         after_iterations: iterations,
         after_minutes: minutes,
         after_same_file_edits: edits,
@@ -11357,22 +11845,22 @@ fn note_max_iterations_prefers_the_error_report_region_then_conversation() {
 /// `stuck` edge to `b` armed on `cfg`.
 fn spawn_stuck_agent(
     world: &mut World,
-    cfg: Option<leviath_core::blueprint::StuckConfig>,
+    cfg: Option<crate::spec::graph::StuckDef>,
     progress: StageProgress,
     status: AgentStatus,
-    target_max_revisits: Option<usize>,
+    target_max_revisits: Option<u32>,
     visits: VisitCounts,
 ) -> Entity {
     let edges = cfg.map(|cfg| {
-        let mut e = conditioned_edge("b", TransitionCondition::Stuck);
+        let mut e = conditioned_edge("b", EdgeCondition::Stuck);
         e.stuck = Some(cfg);
-        vec![("b".to_string(), e)]
+        vec![named("b", e)]
     });
     let a = stage_named("a", edges, false, None);
     let b = stage_named("b", None, false, target_max_revisits);
     world
         .spawn((
-            AgentBlueprint(blueprint(vec![a, b])),
+            spec_of(blueprint(vec![a, b])),
             StageCursor { index: 0 },
             AgentState {
                 status,
@@ -11538,64 +12026,48 @@ fn detect_stuck_stage_is_a_noop_without_an_available_stuck_edge() {
 
 #[test]
 fn find_conditioned_edge_matches_condition_target_and_budget() {
-    let err = conditioned_edge("recovery", TransitionCondition::Error);
-    let a = stage_named("a", Some(vec![("e".to_string(), err)]), false, None);
+    let err = conditioned_edge("recovery", EdgeCondition::Error);
+    let a = stage_named("a", Some(vec![named("e", err)]), false, None);
     let recovery = stage_named("recovery", None, false, None);
     let bp = blueprint(vec![a, recovery]);
     let visits = std::collections::HashMap::new();
     assert_eq!(
-        find_conditioned_edge(&bp, &bp.stages[0], &visits, TransitionCondition::Error)
-            .map(|(i, _)| i),
+        find_conditioned_edge(&bp, &bp.stages[0], &visits, EdgeCondition::Error).map(|(i, _)| i),
         Some(1)
     );
     // No max_iterations edge present.
     assert!(
-        find_conditioned_edge(
-            &bp,
-            &bp.stages[0],
-            &visits,
-            TransitionCondition::MaxIterations
-        )
-        .is_none()
+        find_conditioned_edge(&bp, &bp.stages[0], &visits, EdgeCondition::MaxIterations).is_none()
     );
     // A stage with no transitions at all yields nothing.
     let none_bp = blueprint(vec![stage_named("solo", None, false, None)]);
     assert!(
-        find_conditioned_edge(
-            &none_bp,
-            &none_bp.stages[0],
-            &visits,
-            TransitionCondition::Error
-        )
-        .is_none()
+        find_conditioned_edge(&none_bp, &none_bp.stages[0], &visits, EdgeCondition::Error)
+            .is_none()
     );
 }
 
 #[test]
 fn find_conditioned_edge_skips_unknown_target_and_exhausted_revisits() {
-    let ghost = conditioned_edge("nope", TransitionCondition::Error);
-    let a = stage_named("a", Some(vec![("g".to_string(), ghost)]), false, None);
+    let ghost = conditioned_edge("nope", EdgeCondition::Error);
+    let a = stage_named("a", Some(vec![named("g", ghost)]), false, None);
     let bp = blueprint(vec![a]);
     let visits = std::collections::HashMap::new();
-    assert!(
-        find_conditioned_edge(&bp, &bp.stages[0], &visits, TransitionCondition::Error).is_none()
-    );
+    assert!(find_conditioned_edge(&bp, &bp.stages[0], &visits, EdgeCondition::Error).is_none());
 
     // Target exists but its revisit budget is exhausted.
-    let err = conditioned_edge("recovery", TransitionCondition::Error);
-    let a2 = stage_named("a", Some(vec![("e".to_string(), err)]), false, None);
+    let err = conditioned_edge("recovery", EdgeCondition::Error);
+    let a2 = stage_named("a", Some(vec![named("e", err)]), false, None);
     let recovery = stage_named("recovery", None, false, Some(0));
     let bp2 = blueprint(vec![a2, recovery]);
     let mut visited = std::collections::HashMap::new();
     visited.insert("recovery".to_string(), 1);
-    assert!(
-        find_conditioned_edge(&bp2, &bp2.stages[0], &visited, TransitionCondition::Error).is_none()
-    );
+    assert!(find_conditioned_edge(&bp2, &bp2.stages[0], &visited, EdgeCondition::Error).is_none());
 }
 
 fn spawn_outcome_agent(
     world: &mut World,
-    bp: leviath_core::Blueprint,
+    bp: crate::spec::graph::RunGraph,
     outcome: StageOutcome,
     status: AgentStatus,
 ) -> Entity {
@@ -11636,8 +12108,8 @@ fn fail_stage_world_survives_a_gone_or_stateless_entity() {
 
 #[test]
 fn resolve_transition_routes_error_to_error_edge() {
-    let err = conditioned_edge("recovery", TransitionCondition::Error);
-    let a = stage_named("a", Some(vec![("e".to_string(), err)]), false, None);
+    let err = conditioned_edge("recovery", EdgeCondition::Error);
+    let a = stage_named("a", Some(vec![named("e", err)]), false, None);
     let recovery = stage_named("recovery", None, false, None);
     let bp = blueprint(vec![a, recovery]);
     let mut world = World::new();
@@ -11669,8 +12141,8 @@ fn resolve_transition_routes_error_to_error_edge() {
 /// author who declared only the one escape should get it either way.
 #[test]
 fn resolve_transition_routes_error_down_a_dead_end_edge_when_that_is_the_only_escape() {
-    let escape = conditioned_edge("recovery", TransitionCondition::DeadEnd);
-    let a = stage_named("a", Some(vec![("e".to_string(), escape)]), false, None);
+    let escape = conditioned_edge("recovery", EdgeCondition::DeadEnd);
+    let a = stage_named("a", Some(vec![named("e", escape)]), false, None);
     let recovery = stage_named("recovery", None, false, None);
     let bp = blueprint(vec![a, recovery]);
     let mut world = World::new();
@@ -11716,12 +12188,7 @@ fn an_error_outcome_with_no_escape_becomes_the_run_status() {
 #[test]
 fn resolve_transition_errors_terminally_without_an_error_edge() {
     // Stage 'a' has only an Always edge to 'b' - no error edge.
-    let a = stage_named(
-        "a",
-        Some(vec![("go".to_string(), plain_edge("b"))]),
-        false,
-        None,
-    );
+    let a = stage_named("a", Some(vec![named("go", plain_edge("b"))]), false, None);
     let b = stage_named("b", None, false, None);
     let bp = blueprint(vec![a, b]);
     let mut world = World::new();
@@ -11751,8 +12218,8 @@ fn resolve_transition_errors_terminally_without_an_error_edge() {
 #[test]
 fn resolve_transition_routes_max_iterations_edge_else_falls_through() {
     // With a max_iterations edge → follow it.
-    let mi = conditioned_edge("recovery", TransitionCondition::MaxIterations);
-    let mut a = stage_named("a", Some(vec![("m".to_string(), mi)]), false, None);
+    let mi = conditioned_edge("recovery", EdgeCondition::MaxIterations);
+    let mut a = stage_named("a", Some(vec![named("m", mi)]), false, None);
     a.max_iterations = Some(7);
     let recovery = stage_named("recovery", None, false, None);
     let bp = blueprint(vec![a, recovery]);
@@ -11797,9 +12264,9 @@ fn resolve_transition_routes_max_iterations_edge_else_falls_through() {
 
 #[test]
 fn resolve_transition_routes_stuck_down_the_stuck_edge() {
-    let mut stuck = conditioned_edge("reassess", TransitionCondition::Stuck);
+    let mut stuck = conditioned_edge("reassess", EdgeCondition::Stuck);
     stuck.stuck = Some(stuck_cfg(Some(20), None, None, None));
-    let a = stage_named("a", Some(vec![("s".to_string(), stuck)]), false, None);
+    let a = stage_named("a", Some(vec![named("s", stuck)]), false, None);
     let reassess = stage_named("reassess", None, false, Some(2));
     let bp = blueprint(vec![a, reassess]);
     let mut world = World::new();
@@ -11822,12 +12289,7 @@ fn resolve_transition_routes_stuck_down_the_stuck_edge() {
 fn resolve_transition_resumes_the_stage_when_the_stuck_edge_is_gone() {
     // Stage 'a' has only an ordinary edge to 'b' - no stuck edge at all,
     // which is what an exhausted revisit budget looks like from here.
-    let a = stage_named(
-        "a",
-        Some(vec![("n".to_string(), plain_edge("b"))]),
-        false,
-        None,
-    );
+    let a = stage_named("a", Some(vec![named("n", plain_edge("b"))]), false, None);
     let b = stage_named("b", None, false, None);
     let bp = blueprint(vec![a, b]);
     let mut world = World::new();
@@ -11854,20 +12316,14 @@ fn resolve_transition_resumes_the_stage_when_the_stuck_edge_is_gone() {
 
 // ── required-region gating ───────
 
-fn required_bp(tools: &[&str], custom_msg: Option<&str>) -> AgentBlueprint {
-    let region =
-        leviath_core::layout::RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000)
-            .with_required(true, custom_msg.map(str::to_string));
-    let layout = leviath_core::layout::ContextLayout::new(vec![region], 10_000);
+fn required_bp(tools: &[&str], custom_msg: Option<&str>) -> RunSpecC {
+    let region = tg::region("plan", RegionKind::Pinned, 4000)
+        .with_required(true, custom_msg.map(str::to_string));
+    let layout = tg::layout(vec![region], 10_000);
     let mut stage = stage_named("a", None, false, None);
-    stage.available_tools = tools.iter().map(|s| s.to_string()).collect();
-    stage.context_layout = Some(layout.clone());
-    AgentBlueprint(leviath_core::Blueprint::new(
-        "t".to_string(),
-        "d".to_string(),
-        vec![stage],
-        layout,
-    ))
+    stage.tools = tg::tools(tools);
+    stage.layout = Some(layout.clone());
+    spec_of(graph_of_staged(vec![stage], layout))
 }
 
 fn window_with_plan(filled: bool) -> ContextWindow {
@@ -11888,20 +12344,33 @@ fn window_with_plan(filled: bool) -> ContextWindow {
 fn unmet_required_regions_flags_empty_clears_when_filled_and_skips_without_tool() {
     let bp = required_bp(&["context_write"], None);
     assert_eq!(
-        unmet_required_regions(&bp.0, &bp.0.stages[0], &window_with_plan(false)).len(),
+        super::unmet_required_regions(&bp.0.graph, &bp.0.graph.stages[0], &window_with_plan(false))
+            .len(),
         1
     );
-    assert!(unmet_required_regions(&bp.0, &bp.0.stages[0], &window_with_plan(true)).is_empty());
+    assert!(
+        super::unmet_required_regions(&bp.0.graph, &bp.0.graph.stages[0], &window_with_plan(true))
+            .is_empty()
+    );
     // No context-writing tool ⇒ never gated (would loop pointlessly).
     let no_tool = required_bp(&["read_file"], None);
     assert!(
-        unmet_required_regions(&no_tool.0, &no_tool.0.stages[0], &window_with_plan(false))
-            .is_empty()
+        super::unmet_required_regions(
+            &no_tool.0.graph,
+            &no_tool.0.graph.stages[0],
+            &window_with_plan(false)
+        )
+        .is_empty()
     );
     // A built-in group carries the writing tools without naming them.
     let grouped = required_bp(&["@builtin"], None);
     assert_eq!(
-        unmet_required_regions(&grouped.0, &grouped.0.stages[0], &window_with_plan(false)).len(),
+        super::unmet_required_regions(
+            &grouped.0.graph,
+            &grouped.0.graph.stages[0],
+            &window_with_plan(false)
+        )
+        .len(),
         1
     );
     // A required region absent from the window entirely counts as unmet.
@@ -11912,7 +12381,7 @@ fn unmet_required_regions_flags_empty_clears_when_filled_and_skips_without_tool(
         10_000,
     ));
     assert_eq!(
-        unmet_required_regions(&bp.0, &bp.0.stages[0], &bare).len(),
+        super::unmet_required_regions(&bp.0.graph, &bp.0.graph.stages[0], &bare).len(),
         1
     );
 }
@@ -11922,24 +12391,20 @@ fn unmet_required_regions_skips_caller_input_seeded_regions() {
     // A required region whose content comes from the caller at spawn must NOT
     // be flagged by the agent-facing gate, even when empty and the stage can
     // write context - the caller owns it, not the agent.
-    let region =
-        leviath_core::layout::RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000)
-            .with_required(true, None)
-            .with_seed(leviath_core::layout::RegionSeed::CallerInput {
-                name: "plan".to_string(),
-            });
-    let layout = leviath_core::layout::ContextLayout::new(vec![region], 10_000);
+    let region = tg::region("plan", RegionKind::Pinned, 4000).with_required(true, None);
+    let layout = tg::layout(vec![region], 10_000);
     let mut stage = stage_named("a", None, false, None);
-    stage.available_tools = vec!["context_write".to_string()];
-    stage.context_layout = Some(layout.clone());
-    let bp = AgentBlueprint(leviath_core::Blueprint::new(
-        "t".to_string(),
-        "d".to_string(),
-        vec![stage],
-        layout,
-    ));
+    stage.tools = tg::tools(&["context_write"]);
+    stage.layout = Some(layout.clone());
+    let mut graph = graph_of_staged(vec![stage], layout);
+    graph.inputs.push(
+        toml::from_str("name = \"plan\"\ntype = \"text\"\nbinds = [{ region = \"plan\" }]\n")
+            .unwrap(),
+    );
+    let bp = spec_of(graph);
     assert!(
-        unmet_required_regions(&bp.0, &bp.0.stages[0], &window_with_plan(false)).is_empty(),
+        super::unmet_required_regions(&bp.0.graph, &bp.0.graph.stages[0], &window_with_plan(false))
+            .is_empty(),
         "caller-input region is validated at spawn, not gated here"
     );
 }
@@ -11948,9 +12413,10 @@ fn unmet_required_regions_skips_caller_input_seeded_regions() {
 fn unmet_required_regions_falls_back_to_blueprint_layout() {
     // The stage has no per-stage layout, so the blueprint's layout is used.
     let mut bp = required_bp(&["context_write"], None);
-    bp.0.stages[0].context_layout = None;
+    graph_mut(&mut bp).stages[0].layout = None;
     assert_eq!(
-        unmet_required_regions(&bp.0, &bp.0.stages[0], &window_with_plan(false)).len(),
+        super::unmet_required_regions(&bp.0.graph, &bp.0.graph.stages[0], &window_with_plan(false))
+            .len(),
         1
     );
 }
@@ -12078,9 +12544,9 @@ fn require_context_regions_proceeds_when_met_capped_or_errored() {
 // ── transition gates: require_region_updated ─────────
 
 /// A gate that watches a region for change rather than for content.
-fn change_gate(region: &str) -> leviath_core::blueprint::TransitionGate {
-    leviath_core::blueprint::TransitionGate {
-        require_region_updated: Some(region.to_string()),
+fn change_gate(region: &str) -> crate::spec::graph::GateDef {
+    crate::spec::graph::GateDef {
+        require_region_updated: Some(tg::region_name(region)),
         ..Default::default()
     }
 }
@@ -12164,7 +12630,7 @@ fn a_gate_on_a_missing_region_passes() {
 fn an_unchanged_region_gives_up_after_the_budget() {
     let w = plan_window("unchanged");
     let mut progress = progress_with_baseline(&w);
-    progress.gate_reentries = leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS;
+    progress.gate_reentries = crate::spec::graph::GateDef::DEFAULT_MAX_ATTEMPTS;
     let stage = stage_named("plan", None, false, None);
 
     assert!(matches!(
@@ -12195,37 +12661,35 @@ fn a_custom_message_is_used() {
 /// selectivity is what these four cases pin.
 #[test]
 fn only_watched_regions_get_a_baseline() {
-    use leviath_core::blueprint::TransitionCondition;
-
     let w = plan_window("the plan");
 
     // No transitions at all.
     let bare = stage_named("plan", None, false, None);
-    assert!(crate::pipeline::transition::watched_region_digests(&bare, &w).is_empty());
+    assert!(watched_region_digests(&bare, &w).is_empty());
 
     // An edge with no gate.
     let ungated = stage_named(
         "plan",
-        Some(vec![edge("compute", TransitionCondition::Always)]),
+        Some(vec![edge("compute", EdgeCondition::Always)]),
         false,
         None,
     );
-    assert!(crate::pipeline::transition::watched_region_digests(&ungated, &w).is_empty());
+    assert!(watched_region_digests(&ungated, &w).is_empty());
 
     // An edge whose gate watches a region the window holds.
-    let mut watching_edge = edge("compute", TransitionCondition::Always);
-    watching_edge.1.gate = Some(change_gate("plan"));
+    let mut watching_edge = edge("compute", EdgeCondition::Always);
+    watching_edge.gate = Some(change_gate("plan"));
     let watching = stage_named("plan", Some(vec![watching_edge]), false, None);
-    let digests = crate::pipeline::transition::watched_region_digests(&watching, &w);
+    let digests = watched_region_digests(&watching, &w);
     assert_eq!(digests.len(), 1);
     assert!(digests.contains_key("plan"));
 
     // And one that watches a region it does not hold: no baseline, which the
     // gate reads as "cannot demand an update to something absent".
-    let mut missing_edge = edge("compute", TransitionCondition::Always);
-    missing_edge.1.gate = Some(change_gate("nope"));
+    let mut missing_edge = edge("compute", EdgeCondition::Always);
+    missing_edge.gate = Some(change_gate("nope"));
     let missing = stage_named("plan", Some(vec![missing_edge]), false, None);
-    assert!(crate::pipeline::transition::watched_region_digests(&missing, &w).is_empty());
+    assert!(watched_region_digests(&missing, &w).is_empty());
 }
 
 // ── the runaway-context warning ─────────
@@ -12287,10 +12751,9 @@ fn a_zero_baseline_cannot_run_away() {
 /// from too few views on exactly that path.
 #[test]
 fn a_hyphenated_target_is_matched_whole() {
-    use leviath_core::blueprint::TransitionCondition;
     let edges = vec![
-        edge("build-model", TransitionCondition::LlmChoice).1,
-        edge("generate-more", TransitionCondition::LlmChoice).1,
+        edge("build-model", EdgeCondition::LlmChoice),
+        edge("generate-more", EdgeCondition::LlmChoice),
     ];
     assert_eq!(
         match_transition_choice("generate-more", &edges, false).as_deref(),
@@ -12318,10 +12781,10 @@ fn counted_window(n: usize) -> ContextWindow {
     w
 }
 
-fn count_gate(at_least: usize, message: Option<&str>) -> leviath_core::blueprint::TransitionGate {
-    leviath_core::blueprint::TransitionGate {
-        require_region_entries: Some(leviath_core::blueprint::RegionCount {
-            region: "views".to_string(),
+fn count_gate(at_least: u32, message: Option<&str>) -> crate::spec::graph::GateDef {
+    crate::spec::graph::GateDef {
+        require_region_entries: Some(crate::spec::graph::RegionCount {
+            region: tg::region_name("views"),
             at_least,
         }),
         message: message.map(str::to_string),
@@ -12403,9 +12866,9 @@ fn checklist_window(open: usize, done: usize) -> ContextWindow {
     w
 }
 
-fn items_gate() -> leviath_core::blueprint::TransitionGate {
-    leviath_core::blueprint::TransitionGate {
-        require_no_open_items: Some("todos".to_string()),
+fn items_gate() -> crate::spec::graph::GateDef {
+    crate::spec::graph::GateDef {
+        require_no_open_items: Some(tg::region_name("todos")),
         ..Default::default()
     }
 }
@@ -12454,7 +12917,7 @@ fn an_empty_checklist_gate_passes() {
 fn open_items_give_up_after_the_budget() {
     let w = checklist_window(2, 0);
     let progress = StageProgress {
-        gate_reentries: leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS,
+        gate_reentries: crate::spec::graph::GateDef::DEFAULT_MAX_ATTEMPTS,
         ..Default::default()
     };
     let stage = stage_named("implement", None, false, None);
@@ -12607,11 +13070,11 @@ fn the_checklist_path_holds_together() {
 
 // ── transition gates: require_modifications ─────────
 
-fn gate(region: Option<&str>, message: Option<&str>) -> leviath_core::blueprint::TransitionGate {
-    leviath_core::blueprint::TransitionGate {
+fn gate(region: Option<&str>, message: Option<&str>) -> crate::spec::graph::GateDef {
+    crate::spec::graph::GateDef {
         require_modifications: true,
         message: message.map(str::to_string),
-        region: region.map(str::to_string),
+        region: region.map(tg::region_name),
         tools: Vec::new(),
         max_attempts: None,
         require_region_updated: None,
@@ -12622,30 +13085,20 @@ fn gate(region: Option<&str>, message: Option<&str>) -> leviath_core::blueprint:
 }
 
 /// A stage that can write files, with `edges` attached.
-fn writing_stage(
-    name: &str,
-    edges: Vec<(String, leviath_core::blueprint::TransitionEdge)>,
-) -> leviath_core::Stage {
+fn writing_stage(name: &str, edges: Vec<crate::spec::graph::EdgeDef>) -> Staged {
     let mut s = stage_named(name, Some(edges), false, None);
-    s.available_tools = vec!["write_file".to_string(), "bash".to_string()];
+    s.tools = tg::tools(&["write_file", "bash"]);
     s
 }
 
 fn gated_edge(
     target: &str,
-    gate: Option<leviath_core::blueprint::TransitionGate>,
-) -> (String, leviath_core::blueprint::TransitionEdge) {
-    (
-        target.to_string(),
-        leviath_core::blueprint::TransitionEdge {
-            target: target.to_string(),
-            condition: leviath_core::blueprint::TransitionCondition::Always,
-            hint: None,
-            transform: leviath_core::blueprint::EdgeTransform::Direct,
-            gate,
-            stuck: None,
-        },
-    )
+    gate: Option<crate::spec::graph::GateDef>,
+) -> crate::spec::graph::EdgeDef {
+    crate::spec::graph::EdgeDef {
+        gate,
+        ..tg::edge(target, target)
+    }
 }
 
 /// The nudge a gate would show, or `None` when it let the transition
@@ -12682,7 +13135,7 @@ fn gate_blocks_only_an_unsatisfied_require_modifications_edge() {
         gate_blocks(None, &stage, &zero, &window),
         GateDecision::Pass
     );
-    let off = leviath_core::blueprint::TransitionGate::default();
+    let off = crate::spec::graph::GateDef::default();
     assert_eq!(
         gate_blocks(Some(&off), &stage, &zero, &window),
         GateDecision::Pass
@@ -12740,7 +13193,7 @@ fn gate_passes_a_stage_that_cannot_modify_anything() {
     // Gating a stage with no write tool would loop pointlessly; the blueprint
     // validator rejects that combination, but the runtime never relies on it.
     let mut stage = writing_stage("review", vec![]);
-    stage.available_tools = vec!["read_file".to_string()];
+    stage.tools = tg::tools(&["read_file"]);
     let g = gate(None, None);
     assert_eq!(
         gate_blocks(Some(&g), &stage, &progress_with(0, 0, 0), &conv_window()),
@@ -12748,7 +13201,7 @@ fn gate_passes_a_stage_that_cannot_modify_anything() {
     );
     // ...unless the gate itself names the tool the stage does have.
     let mut custom = gate(None, None);
-    custom.tools = vec!["read_file".to_string()];
+    custom.tools = vec![crate::spec::names::ToolName::new("read_file").unwrap()];
     assert!(
         block_message(gate_blocks(
             Some(&custom),
@@ -12760,7 +13213,7 @@ fn gate_passes_a_stage_that_cannot_modify_anything() {
     );
     // ...or the stage grants the built-ins as a group, which carries the
     // modifying tools without naming them.
-    stage.available_tools = vec!["@builtin".to_string()];
+    stage.tools = tg::tools(&["@builtin"]);
     assert!(
         block_message(gate_blocks(
             Some(&g),
@@ -12890,11 +13343,10 @@ fn resolve_transition_records_a_forced_gate_and_advances() {
 
 #[test]
 fn resolve_transition_skips_the_gate_on_an_error_edge() {
-    use leviath_core::blueprint::TransitionCondition;
     // The error edge is followed even with zero modifications: a failed stage
     // must be able to reach recovery.
     let mut error_edge = gated_edge("recover", Some(gate(None, None)));
-    error_edge.1.condition = TransitionCondition::Error;
+    error_edge.when = EdgeCondition::Error;
     let bp = blueprint(vec![
         writing_stage("impl", vec![error_edge]),
         stage_named("recover", None, false, None),
@@ -12919,13 +13371,9 @@ fn resolve_transition_skips_the_gate_on_an_error_edge() {
 
 // ── file tracking ───────
 
-fn ftc(
-    reads: bool,
-    writes: bool,
-    max: Option<usize>,
-) -> leviath_core::blueprint::FileTrackingConfig {
-    leviath_core::blueprint::FileTrackingConfig {
-        region: "files".to_string(),
+fn ftc(reads: bool, writes: bool, max: Option<u32>) -> crate::spec::graph::FileTrackingDef {
+    crate::spec::graph::FileTrackingDef {
+        region: tg::region_name("files"),
         track_reads: reads,
         track_writes: writes,
         max_file_tokens: max,
@@ -13114,13 +13562,8 @@ fn collect_tools_applies_file_tracking_from_blueprint() {
         10_000,
     ));
     // A blueprint carrying a file_tracking config.
-    let layout = leviath_core::layout::ContextLayout::new(vec![], 10_000);
-    let mut bp = leviath_core::Blueprint::new(
-        "t".to_string(),
-        "d".to_string(),
-        vec![stage_named("a", None, false, None)],
-        layout,
-    );
+    let layout = tg::layout(vec![], 10_000);
+    let mut bp = graph_of_staged(vec![stage_named("a", None, false, None)], layout);
     bp.file_tracking = Some(ftc(true, true, None));
     let e = world
         .spawn((
@@ -13131,7 +13574,7 @@ fn collect_tools_applies_file_tracking_from_blueprint() {
                 serde_json::json!({"path": "a.rs"}),
             )]),
             AwaitingTools,
-            AgentBlueprint(bp),
+            spec_of(bp),
         ))
         .id();
     tx.send(ToolOutcome {
@@ -13167,7 +13610,10 @@ fn count_modifications(
     let mut world = World::new();
     world.insert_resource(ToolResults(rx));
     let mut g = gate(None, None);
-    g.tools = extra_tools.iter().map(|t| (*t).to_string()).collect();
+    g.tools = extra_tools
+        .iter()
+        .map(|t| crate::spec::names::ToolName::new(*t).unwrap())
+        .collect();
     let bp = blueprint(vec![writing_stage(
         "impl",
         vec![gated_edge("review", Some(g))],
@@ -13183,7 +13629,7 @@ fn count_modifications(
                     .collect(),
             ),
             AwaitingTools,
-            AgentBlueprint(bp),
+            spec_of(bp),
             StageCursor { index: 0 },
             StageProgress::default(),
             crate::persistence::RunOutcomeFlags::default(),
@@ -13382,7 +13828,7 @@ fn stage_modifying_tools_defaults_without_a_blueprint_or_stage() {
     // No blueprint / no cursor.
     assert_eq!(stage_modifying_tools(None, None), defaults);
     // A cursor pointing past the end of the blueprint's stages.
-    let bp = AgentBlueprint(blueprint(vec![stage_named("a", None, false, None)]));
+    let bp = spec_of(blueprint(vec![stage_named("a", None, false, None)]));
     assert_eq!(
         stage_modifying_tools(Some(&bp), Some(&StageCursor { index: 9 })),
         defaults
@@ -13393,7 +13839,7 @@ fn stage_modifying_tools_defaults_without_a_blueprint_or_stage() {
         defaults
     );
     // An edge with no gate.
-    let ungated = AgentBlueprint(blueprint(vec![writing_stage(
+    let ungated = spec_of(blueprint(vec![writing_stage(
         "a",
         vec![gated_edge("b", None)],
     )]));
@@ -13403,8 +13849,8 @@ fn stage_modifying_tools_defaults_without_a_blueprint_or_stage() {
     );
     // A gate that re-lists a built-in doesn't duplicate it.
     let mut dup = gate(None, None);
-    dup.tools = vec!["write_file".to_string()];
-    let deduped = AgentBlueprint(blueprint(vec![writing_stage(
+    dup.tools = vec![crate::spec::names::ToolName::new("write_file").unwrap()];
+    let deduped = spec_of(blueprint(vec![writing_stage(
         "a",
         vec![gated_edge("b", Some(dup))],
     )]));
@@ -13458,6 +13904,20 @@ fn workspace_check_fails_a_run_whose_directory_is_gone() {
             .workspace_lost
     );
     assert!(world.get::<ReadyToInfer>(e).is_none());
+}
+
+/// A run placed with no workdir (one spawned without a host, from a spec that
+/// names none) has no workspace to lose, so it is never failed for one.
+#[test]
+fn workspace_check_leaves_a_run_with_no_workdir_alone() {
+    let mut world = World::new();
+    let e = spawn_workspace_agent(&mut world, "", 0);
+    run_workspace_check(&mut world);
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Active
+    );
+    assert!(world.get::<ReadyToInfer>(e).is_some());
 }
 
 #[test]
@@ -13564,10 +14024,10 @@ fn state_with(status: AgentStatus) -> AgentState {
     }
 }
 
-fn requires_children_bp(req: bool) -> AgentBlueprint {
+fn requires_children_bp(req: bool) -> RunSpecC {
     let mut s = stage_named("a", None, false, None);
     s.requires_children = req;
-    AgentBlueprint(blueprint(vec![s]))
+    spec_of(blueprint(vec![s]))
 }
 
 fn children(entities: Vec<Entity>) -> SubAgentChildren {
@@ -14019,10 +14479,11 @@ fn collect_compaction_drops_stale_outcome() {
     run_collect_compaction(&mut world); // no matching agent ⇒ dropped
 }
 
+/// A compacting region summarizes instead of evicting, so with no
+/// `compact_history` region to roll the summary into, the summary stays in
+/// the region it summarizes: older content is summarized, not lost.
 #[test]
-fn collect_compaction_summary_for_unpaired_region_is_skipped() {
-    // A summary for a region with no paired CompactHistory still clears the
-    // source (exercises the None history branch).
+fn collect_compaction_keeps_the_summary_of_an_unpaired_region_in_place() {
     let (mut world, tx) = world_with_compaction_results();
     let mut w = ContextWindow::new(100);
     let mut lone = Region::new(
@@ -14052,16 +14513,11 @@ fn collect_compaction_summary_for_unpaired_region_is_skipped() {
     .unwrap();
 
     run_collect_compaction(&mut world);
-
-    assert_eq!(
-        world
-            .get::<ContextWindow>(e)
-            .unwrap()
-            .get_region("lone")
-            .unwrap()
-            .current_tokens,
-        0
-    );
+    let window = world.get::<ContextWindow>(e).unwrap();
+    let lone = window.get_region("lone").unwrap();
+    let held: Vec<&str> = lone.content.iter().map(|x| x.content.as_str()).collect();
+    assert_eq!(held, vec!["s"], "the summary replaces what it summarizes");
+    assert_eq!(window.current_tokens, window.calculate_tokens());
 }
 
 // ── persistence dispatch ──
@@ -14079,12 +14535,10 @@ fn run_metadata() -> RunMetadata {
         parent_run_id: None,
         metadata: std::collections::HashMap::new(),
         callback_url: None,
-        callback_secret: None,
         title: None,
         title_error: None,
         blueprint_digest: None,
-        unattended: false,
-        yolo_profile: None,
+        unattended: leviath_core::Unattended::Off,
         read_paths: None,
         output_request: None,
         model_override: None,
@@ -14102,7 +14556,7 @@ fn world_with_persistence() -> (World, mpsc::UnboundedReceiver<PersistMsg>) {
 fn snapshot_job(msg: PersistMsg) -> PersistJob {
     match msg {
         PersistMsg::Snapshot(job) => *job,
-        PersistMsg::Append { .. } | PersistMsg::StageLines { .. } => {
+        PersistMsg::Step(_) | PersistMsg::StageLines { .. } => {
             panic!("expected a snapshot on the lane")
         }
     }
@@ -14116,7 +14570,7 @@ fn next_snapshot(rx: &mut mpsc::UnboundedReceiver<PersistMsg>) -> PersistJob {
     loop {
         match rx.try_recv().expect("a snapshot on the lane") {
             PersistMsg::Snapshot(job) => return *job,
-            PersistMsg::Append { .. } | PersistMsg::StageLines { .. } => continue,
+            PersistMsg::Step(_) | PersistMsg::StageLines { .. } => continue,
         }
     }
 }
@@ -14540,14 +14994,14 @@ fn last_progress_at_tracks_progress_and_not_the_heartbeat() {
 
 // ── async LLM-choice transition ──
 
-fn plain_edge(target: &str) -> leviath_core::blueprint::TransitionEdge {
-    leviath_core::blueprint::TransitionEdge {
-        target: target.to_string(),
-        condition: leviath_core::blueprint::TransitionCondition::LlmChoice,
+fn plain_edge(target: &str) -> crate::spec::graph::EdgeDef {
+    crate::spec::graph::EdgeDef {
+        when: crate::spec::graph::EdgeCondition::LlmChoice,
         hint: None,
-        transform: leviath_core::blueprint::EdgeTransform::Direct,
+        carry: crate::spec::graph::EdgeCarry::Direct,
         gate: None,
         stuck: None,
+        ..tg::edge(target, target)
     }
 }
 
@@ -14637,7 +15091,7 @@ fn match_choice_reads_decision_from_the_concluding_line() {
 
 #[test]
 fn build_transition_prompt_default_variants() {
-    let mut with_complete = stage_named("s", None, true, None);
+    let mut with_complete = stage_named("s", Some(vec![]), true, None);
     with_complete.transition_prompt = None;
     let edges = vec![{
         let mut e = plain_edge("next");
@@ -14657,7 +15111,7 @@ fn build_transition_prompt_default_variants() {
 
 #[test]
 fn build_transition_prompt_custom_variants() {
-    let mut custom = stage_named("s", None, true, None);
+    let mut custom = stage_named("s", Some(vec![]), true, None);
     custom.transition_prompt = Some("Pick wisely.".to_string());
     let edges = vec![plain_edge("a")];
     let p = build_transition_prompt(&custom, &edges);
@@ -14683,21 +15137,20 @@ fn conv_window() -> ContextWindow {
 
 fn spawn_choosing_agent(
     world: &mut World,
-    bp: leviath_core::Blueprint,
+    bp: crate::spec::graph::RunGraph,
     stage_infs: Vec<StageInference>,
-    edges: Vec<leviath_core::blueprint::TransitionEdge>,
+    edges: Vec<crate::spec::graph::EdgeDef>,
 ) -> Entity {
     world
         .spawn((
-            AgentBlueprint(bp),
+            spec_with(bp, &stage_infs),
             StageCursor { index: 0 },
             agent_state(),
             StageProgress::default(),
-            StageInferences(stage_infs),
             VisitCounts::default(),
             conv_window(),
             stage_infs_head(),
-            AwaitingTransitionChoice(edges),
+            AwaitingTransitionChoice(edges_of(&edges)),
         ))
         .id()
 }
@@ -14863,22 +15316,19 @@ fn world_with_transition_results() -> (World, mpsc::UnboundedSender<InferenceOut
 
 fn spawn_responding_agent(
     world: &mut World,
-    bp: leviath_core::Blueprint,
+    bp: crate::spec::graph::RunGraph,
     stage_infs: Vec<StageInference>,
-    edges: Vec<leviath_core::blueprint::TransitionEdge>,
+    edges: Vec<crate::spec::graph::EdgeDef>,
 ) -> Entity {
-    let n = stage_infs.len();
     world
         .spawn((
-            AgentBlueprint(bp),
+            spec_with(bp, &stage_infs),
             StageCursor { index: 0 },
             agent_state(),
             StageProgress::default(),
-            StageInferences(stage_infs),
-            setups(n),
             VisitCounts::default(),
             conv_window(),
-            AwaitingTransitionResponse(edges),
+            AwaitingTransitionResponse(edges_of(&edges)),
         ))
         .id()
 }
@@ -14926,6 +15376,7 @@ fn a_routing_call_is_billed_to_the_stage_it_leaves_and_cuts_the_visit() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: Some(leviath_providers::ModelPricing::flat(1_000_000.0, 0.0)),
+        attempt: None,
     })
     .unwrap();
 
@@ -14969,6 +15420,7 @@ fn a_self_transition_starts_a_second_visit_of_the_same_stage() {
         attempt_id: String::new(),
         result: Ok(resp("a")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15005,6 +15457,7 @@ fn collect_choice_holds_an_outcome_that_lands_on_a_paused_agent() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15065,6 +15518,7 @@ fn collect_choice_parks_a_run_the_provider_could_not_be_reached_for() {
             "the provider never answered",
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15130,6 +15584,7 @@ fn collect_choice_still_fails_a_stage_on_an_error_nobody_can_resume_past() {
             "not JSON".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15161,6 +15616,7 @@ fn collect_choice_enters_chosen_stage() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15207,6 +15663,7 @@ fn a_routing_call_is_counted_against_the_run() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15247,6 +15704,7 @@ fn collect_choice_does_not_resurrect_or_complete_a_cancelled_run() {
             attempt_id: String::new(),
             result: Ok(resp(choice)),
             pricing: None,
+            attempt: None,
         })
         .unwrap();
 
@@ -15274,7 +15732,7 @@ fn collect_choice_applies_the_chosen_edge_transform() {
         stage_named("b", None, false, None),
     ]);
     let mut edge = plain_edge("b");
-    edge.transform = EdgeTransform::Compact { prompt: None };
+    edge.carry = EdgeCarry::Compact { prompt: None };
     let e = spawn_responding_agent(&mut world, bp, vec![si("m0"), si("m1")], vec![edge]);
     world
         .get_mut::<ContextWindow>(e)
@@ -15287,6 +15745,7 @@ fn collect_choice_applies_the_chosen_edge_transform() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15310,7 +15769,7 @@ fn collect_choice_holds_the_stage_when_the_chosen_edge_is_gated() {
         stage_named("review", None, false, None),
     ]);
     let mut edge = plain_edge("review");
-    edge.transform = EdgeTransform::Compact { prompt: None };
+    edge.carry = EdgeCarry::Compact { prompt: None };
     edge.gate = Some(gate(None, None));
     let e = spawn_responding_agent(&mut world, bp, vec![si("m0"), si("m1")], vec![edge]);
     world
@@ -15322,6 +15781,7 @@ fn collect_choice_holds_the_stage_when_the_chosen_edge_is_gated() {
         attempt_id: String::new(),
         result: Ok(resp("review")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15366,6 +15826,7 @@ fn collect_choice_records_a_forced_gate_and_enters_the_stage() {
             attempt_id: String::new(),
             result: Ok(resp("review")),
             pricing: None,
+            attempt: None,
         })
         .unwrap();
     }
@@ -15387,7 +15848,7 @@ fn collect_choice_records_a_forced_gate_and_enters_the_stage() {
 #[test]
 fn collect_choice_done_completes() {
     let (mut world, tx) = world_with_transition_results();
-    let bp = blueprint(vec![stage_named("a", None, true, None)]); // allow_complete
+    let bp = blueprint(vec![stage_named("a", Some(vec![]), true, None)]); // allow_complete
     let e = spawn_responding_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
@@ -15395,6 +15856,7 @@ fn collect_choice_done_completes() {
         attempt_id: String::new(),
         result: Ok(resp("DONE")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15421,6 +15883,7 @@ fn collect_choice_unknown_target_falls_back_to_first_stage() {
         attempt_id: String::new(),
         result: Ok(resp("ghost")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15442,6 +15905,7 @@ fn collect_choice_marks_error_on_failure() {
         attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15466,6 +15930,7 @@ fn collect_choice_drops_stale_outcome() {
         attempt_id: String::new(),
         result: Ok(resp("x")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     // No matching AwaitingTransitionResponse agent ⇒ silently dropped.
@@ -15498,6 +15963,7 @@ fn collect_inference_records_activity_with_provider_and_latency() {
         attempt_id: String::new(),
         result: Ok(resp("hi")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15537,6 +16003,7 @@ fn collect_inference_records_a_failed_call_without_stage_inference() {
         attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15690,6 +16157,8 @@ fn resolve_transition_emits_a_stage_transition_event() {
             from: "s".to_string(), // the fixture agent's starting stage name
             to: "b".to_string(),
             iteration: 1,
+            edge: Some("next".to_string()),
+            reason: Some(crate::state::TransitionReason::Condition),
         }
     );
     assert!(sink_rx.try_recv().is_err(), "exactly one event");
@@ -15743,6 +16212,7 @@ fn collect_choice_emits_a_stage_transition_event() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15758,8 +16228,54 @@ fn collect_choice_emits_a_stage_transition_event() {
             from: "s".to_string(),
             to: "b".to_string(),
             iteration: 1,
+            edge: Some("b".to_string()),
+            reason: Some(crate::state::TransitionReason::ModelChoice),
         }
     );
+}
+
+/// A reply that names no edge, in a stage that may not end the run, moves the
+/// run along its first edge: the model chose nothing, and the reason says so.
+#[test]
+fn a_choice_that_names_no_edge_is_recorded_as_a_fallback() {
+    use crate::host::{WorldEvent, WorldEventSink};
+    for (reply, reason) in [
+        ("DONE", crate::state::TransitionReason::Fallback),
+        ("c", crate::state::TransitionReason::ModelChoice),
+    ] {
+        let (mut world, tx) = world_with_transition_results();
+        let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+        world.insert_resource(WorldEventSink(sink_tx));
+        let bp = blueprint(vec![
+            stage_named("a", None, false, None),
+            stage_named("b", None, false, None),
+            stage_named("c", None, false, None),
+        ]);
+        let e = spawn_responding_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1"), si("m2")],
+            vec![plain_edge("b"), plain_edge("c")],
+        );
+        world.entity_mut(e).insert(run_metadata());
+        tx.send(InferenceOutcome {
+            latency: std::time::Duration::ZERO,
+            entity: e,
+            attempt_id: String::new(),
+            result: Ok(resp(reply)),
+            pricing: None,
+            attempt: None,
+        })
+        .unwrap();
+
+        run_collect_transition(&mut world);
+
+        let ev = sink_rx.try_recv().expect("stage transition event");
+        let WorldEvent::StageTransition { reason: got, .. } = ev else {
+            panic!("a stage transition");
+        };
+        assert_eq!(got, Some(reason), "{reply}");
+    }
 }
 
 #[tokio::test]
@@ -15782,7 +16298,7 @@ async fn dispatch_tools_announces_lane_calls() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<AwaitingTools>(e).is_some());
@@ -15955,10 +16471,7 @@ fn stage_setup_from_folds_a_required_output_into_the_system_prompt() {
     };
     let mut s = stage_named("summary", None, false, None);
     s.require_output = true;
-    s.config.insert(
-        "system_prompt".to_string(),
-        serde_json::Value::String("base instructions".to_string()),
-    );
+    s.system_prompt = Some("base instructions".to_string());
     let prompt = stage_setup_from(&s, hints(true), Default::default(), Some(spec))
         .system_prompt
         .expect("a required output always produces instructions");
@@ -15983,10 +16496,7 @@ fn a_required_outputs_shape_comes_after_the_stage_prompt_and_outranks_it() {
     };
     let mut s = stage_named("summary", None, false, None);
     s.require_output = true;
-    s.config.insert(
-        "system_prompt".to_string(),
-        serde_json::Value::String("Lead with the diagnosis.".to_string()),
-    );
+    s.system_prompt = Some("Lead with the diagnosis.".to_string());
     let prompt = stage_setup_from(&s, hints(true), Default::default(), Some(spec))
         .system_prompt
         .expect("a required output always produces instructions");
@@ -16012,10 +16522,7 @@ fn stage_setup_from_leaves_an_unrequired_stage_prompt_alone() {
         ..Default::default()
     };
     let mut s = stage_named("plan", None, false, None);
-    s.config.insert(
-        "system_prompt".to_string(),
-        serde_json::Value::String("base instructions".to_string()),
-    );
+    s.system_prompt = Some("base instructions".to_string());
     let prompt = stage_setup_from(&s, hints(true), Default::default(), Some(spec))
         .system_prompt
         .expect("the base prompt survives");
@@ -16042,17 +16549,12 @@ fn stage_setup_from_demands_an_output_even_with_no_declared_shape() {
 // ── Required-output gate ─────────────────────────────────────────────────────
 
 /// A blueprint whose single stage owes a final output.
-fn owing_bp(max_revisits: Option<usize>) -> AgentBlueprint {
+fn owing_bp(max_revisits: Option<u32>) -> RunSpecC {
     let mut stage = stage_named("summary", None, true, max_revisits);
-    stage.available_tools = vec![leviath_tools::SUBMIT_OUTPUT_TOOL.to_string()];
+    stage.tools = tg::tools(&[leviath_tools::SUBMIT_OUTPUT_TOOL]);
     stage.require_output = true;
-    let layout = leviath_core::layout::ContextLayout::new(vec![], 10_000);
-    AgentBlueprint(leviath_core::Blueprint::new(
-        "t".to_string(),
-        "d".to_string(),
-        vec![stage],
-        layout,
-    ))
+    let layout = tg::layout(vec![], 10_000);
+    spec_of(graph_of_staged(vec![stage], layout))
 }
 
 fn owing_state() -> AgentState {
@@ -16081,28 +16583,24 @@ fn submitted_in(stage: &str) -> crate::persistence::FinalOutput {
 }
 
 /// A blueprint whose stage 0 is a fan-out, for `require_fan_out`.
-fn fanning_bp() -> AgentBlueprint {
+fn fanning_bp() -> RunSpecC {
     fanning_bp_with(None)
 }
 
 /// The same, with an explicit `max_attempts`.
-fn fanning_bp_with(max_attempts: Option<usize>) -> AgentBlueprint {
+fn fanning_bp_with(max_attempts: Option<u32>) -> RunSpecC {
     let mut stage = stage_named("investigate", None, false, None);
-    stage.mode = leviath_core::blueprint::StageMode::FanOut {
-        config: leviath_core::blueprint::FanOutConfig {
-            worker_agent: Some("researcher".to_string()),
-            worker_stage: None,
-            worker_query: None,
-            merge_stage: None,
-            max_workers: 4,
-            on_worker_failure: leviath_core::blueprint::WorkerFailurePolicy::Continue,
-            split_prompt: "split it".to_string(),
-            results_region: None,
-            max_items: None,
-            max_attempts,
-        },
-    };
-    AgentBlueprint(blueprint(vec![stage]))
+    stage.mode = crate::spec::graph::StageMode::FanOut(crate::spec::graph::FanOutDef {
+        worker: crate::spec::graph::WorkerSource::Blueprint(
+            crate::spec::names::BlueprintRef::parse("researcher").unwrap(),
+        ),
+        split_prompt: "split it".to_string(),
+        max_attempts,
+        ..crate::spec::graph::FanOutDef::same_graph(
+            crate::spec::names::StageName::new("x").unwrap(),
+        )
+    });
+    spec_of(blueprint(vec![stage]))
 }
 
 fn run_require_fan_out(world: &mut World) {
@@ -16259,7 +16757,7 @@ fn a_fan_out_stage_uses_its_own_max_attempts() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            FanOutReentries(leviath_core::blueprint::DEFAULT_FAN_OUT_ATTEMPTS + 1),
+            FanOutReentries(crate::spec::graph::FanOutDef::DEFAULT_MAX_ATTEMPTS + 1),
         ))
         .id();
 
@@ -16413,7 +16911,7 @@ fn an_output_from_an_earlier_stage_does_not_satisfy_this_one() {
 fn a_stage_that_owes_nothing_is_never_held() {
     let mut world = World::new();
     let mut bp = owing_bp(None);
-    bp.0.stages[0].require_output = false;
+    graph_mut(&mut bp).stages[0].require_output = false;
     let e = world
         .spawn((
             bp,
@@ -16446,7 +16944,7 @@ fn a_generous_max_revisits_does_not_buy_more_output_retries() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            OutputReentries(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
+            OutputReentries(OUTPUT_REENTRY_CAP),
             crate::persistence::RunOutcomeFlags::default(),
         ))
         .id();
@@ -16475,7 +16973,7 @@ fn an_exhausted_budget_proceeds_and_records_that_it_was_forced() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            OutputReentries(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
+            OutputReentries(OUTPUT_REENTRY_CAP),
             crate::persistence::RunOutcomeFlags::default(),
         ))
         .id();
@@ -16508,7 +17006,7 @@ fn an_exhausted_budget_proceeds_even_with_nowhere_to_record_it() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            OutputReentries(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
+            OutputReentries(OUTPUT_REENTRY_CAP),
         ))
         .id();
     run_require_output(&mut world);
@@ -16589,7 +17087,7 @@ fn an_errored_or_capped_stage_still_records_the_missing_output() {
 fn an_errored_stage_that_owes_nothing_is_not_flagged() {
     let mut world = World::new();
     let mut bp = owing_bp(None);
-    bp.0.stages[0].require_output = false;
+    graph_mut(&mut bp).stages[0].require_output = false;
     let e = world
         .spawn((
             bp,
@@ -16618,7 +17116,7 @@ fn an_errored_stage_that_owes_nothing_is_not_flagged() {
 fn entering_a_stage_clears_the_output_reentry_count() {
     let mut world = World::new();
     let bp = owing_bp(None);
-    let setup = stage_setup_from(&bp.0.stages[0], hints(true), Default::default(), None);
+    let setup = super::spec_view::stage_setup(&bp.0, 0);
     let e = world.spawn((OutputReentries(3),)).id();
     let inf = StageInference {
         provider_name: "p".to_string(),
@@ -16647,13 +17145,10 @@ fn hook_scripts(src: &str, wanted: &[&str]) -> crate::components::StageHookScrip
 }
 
 /// A one-stage blueprint whose stage names `h.rhai` for `on_stage_enter`.
-fn hooked_bp() -> AgentBlueprint {
-    let mut stage = leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    stage.hooks.on_stage_enter = Some("h.rhai".to_string());
-    AgentBlueprint(blueprint(vec![stage]))
+fn hooked_bp() -> RunSpecC {
+    let mut stage = tg::stage("main");
+    stage.hooks.on_stage_enter = Some(crate::spec::graph::CodeRef::File("h.rhai".to_string()));
+    spec_of(blueprint(vec![stage]))
 }
 
 fn spawn_hooked(world: &mut World, src: &str) -> Entity {
@@ -16662,6 +17157,7 @@ fn spawn_hooked(world: &mut World, src: &str) -> Entity {
             hooked_bp(),
             agent_state(),
             conv_window(),
+            StageCursor { index: 0 },
             StageJustEntered {
                 index: 0,
                 name: "main".to_string(),
@@ -16840,6 +17336,7 @@ fn an_agent_without_hooks_is_untouched() {
             hooked_bp(),
             agent_state(),
             conv_window(),
+            StageCursor { index: 0 },
             StageJustEntered {
                 index: 0,
                 name: "main".to_string(),
@@ -16860,6 +17357,7 @@ fn an_out_of_range_stage_index_is_skipped() {
             hooked_bp(),
             agent_state(),
             conv_window(),
+            StageCursor { index: 0 },
             StageJustEntered {
                 index: 99,
                 name: "gone".to_string(),
@@ -16882,15 +17380,13 @@ fn an_out_of_range_stage_index_is_skipped() {
 #[test]
 fn a_stage_that_declares_no_hook_does_not_run_one() {
     let mut world = World::new();
-    let stage = leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    let stage = tg::stage("main");
     let e = world
         .spawn((
-            AgentBlueprint(blueprint(vec![stage])),
+            spec_of(blueprint(vec![stage])),
             agent_state(),
             conv_window(),
+            StageCursor { index: 0 },
             StageJustEntered {
                 index: 0,
                 name: "main".to_string(),
@@ -16923,6 +17419,7 @@ fn a_region_write_that_does_not_fit_errors() {
             hooked_bp(),
             agent_state(),
             window,
+            StageCursor { index: 0 },
             StageJustEntered {
                 index: 0,
                 name: "main".to_string(),
@@ -16959,6 +17456,7 @@ fn writing_an_empty_string_clears_the_region() {
             hooked_bp(),
             agent_state(),
             window,
+            StageCursor { index: 0 },
             StageJustEntered {
                 index: 0,
                 name: "main".to_string(),
@@ -17000,14 +17498,14 @@ fn a_refusal_without_a_reason_still_says_it_was_refused() {
 // ─── before_inference / after_inference ──────────────────────────────────────
 
 fn stage_hooked(
-    field: impl FnOnce(&mut leviath_core::blueprint::StageHooks, String),
-) -> AgentBlueprint {
-    let mut stage = leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+    field: impl FnOnce(&mut crate::spec::graph::StageHooks, crate::spec::graph::CodeRef),
+) -> RunSpecC {
+    let mut stage = tg::stage("main");
+    field(
+        &mut stage.hooks,
+        crate::spec::graph::CodeRef::File("h.rhai".to_string()),
     );
-    field(&mut stage.hooks, "h.rhai".to_string());
-    AgentBlueprint(blueprint(vec![stage]))
+    spec_of(blueprint(vec![stage]))
 }
 
 fn run_before_hooks(world: &mut World) {
@@ -17172,13 +17670,10 @@ fn before_inference_skips_an_out_of_range_stage() {
 #[test]
 fn before_inference_skips_a_stage_that_declared_none() {
     let mut world = World::new();
-    let stage = leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    let stage = tg::stage("main");
     let e = world
         .spawn((
-            AgentBlueprint(blueprint(vec![stage])),
+            spec_of(blueprint(vec![stage])),
             agent_state(),
             conv_window(),
             StageCursor { index: 0 },
@@ -17382,13 +17877,10 @@ fn after_inference_skips_an_out_of_range_stage() {
 #[test]
 fn after_inference_skips_a_stage_that_declared_none() {
     let mut world = World::new();
-    let stage = leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    let stage = tg::stage("main");
     let e = world
         .spawn((
-            AgentBlueprint(blueprint(vec![stage])),
+            spec_of(blueprint(vec![stage])),
             agent_state(),
             StageCursor { index: 0 },
             ProcessResponse,
@@ -17759,13 +18251,10 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
             ),
         ))
         .id();
-    let stage = leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    let stage = tg::stage("main");
     let undeclared = world
         .spawn((
-            AgentBlueprint(blueprint(vec![stage])),
+            spec_of(blueprint(vec![stage])),
             agent_state(),
             StageCursor { index: 0 },
             ReadyForTools,
@@ -17845,6 +18334,38 @@ fn on_completion_can_rewrite_the_answer() {
     );
     run_terminal(&mut world);
     assert_eq!(answer_of(&world, e), "tidied: raw answer");
+}
+
+/// `on_completion` fires as the run finishes, whichever stage it finishes
+/// in. A graph that declares it on the stage that submits the answer and then
+/// moves on to another stage still has it run: the stage it finished in
+/// declares none, so the first stage in the graph that does is used.
+#[test]
+fn on_completion_declared_on_an_earlier_stage_still_fires() {
+    let mut world = World::new();
+    let mut first = tg::stage("a");
+    first.hooks.on_completion = Some(crate::spec::graph::CodeRef::File("h.rhai".to_string()));
+    let mut state = agent_state();
+    state.status = AgentStatus::Complete;
+    let e = world
+        .spawn((
+            spec_of(blueprint(vec![first, tg::stage("b")])),
+            state,
+            StageCursor { index: 1 },
+            hook_scripts(
+                r#"fn on_completion(ctx) { #{ action: "modify", value: ctx.stage + ": " + ctx.output } }"#,
+                &["on_completion"],
+            ),
+            crate::persistence::FinalOutput(leviath_core::output::FinalOutput::new(
+                "raw answer",
+                None,
+                "a".to_string(),
+                10,
+            )),
+        ))
+        .id();
+    run_terminal(&mut world);
+    assert_eq!(answer_of(&world, e), "b: raw answer");
 }
 
 #[test]
@@ -18055,13 +18576,10 @@ fn a_terminal_run_with_no_hook_is_marked_so_it_is_not_rechecked() {
     let mut world = World::new();
     let mut state = agent_state();
     state.status = AgentStatus::Complete;
-    let stage = leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    let stage = tg::stage("main");
     let undeclared = world
         .spawn((
-            AgentBlueprint(blueprint(vec![stage])),
+            spec_of(blueprint(vec![stage])),
             state.clone(),
             StageCursor { index: 0 },
             hook_scripts("fn on_completion(ctx) { () }", &["on_completion"]),
@@ -18229,13 +18747,10 @@ fn on_stage_exit_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
             ),
         ))
         .id();
-    let stage = leviath_core::Stage::new(
-        "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    let stage = tg::stage("main");
     let undeclared = world
         .spawn((
-            AgentBlueprint(blueprint(vec![stage])),
+            spec_of(blueprint(vec![stage])),
             agent_state(),
             conv_window(),
             StageCursor { index: 0 },
@@ -18449,18 +18964,13 @@ fn a_stage_without_a_prompt_clears_the_previous_one() {
 /// run, which is why the test exists.
 #[test]
 fn stage_instructions_survive_a_stage_layout_that_does_not_declare_them() {
-    use leviath_core::{ContextLayout, RegionDefinition};
-
     let mut window = instructions_window(&["stage_instructions", "task"]);
     // A stage layout naming only `task`.
-    let layout = ContextLayout::new(
-        vec![RegionDefinition::new(
-            "task".to_string(),
-            leviath_core::RegionKind::Pinned,
-            10_000,
-        )],
+    let layout = vec![leviath_core::Region::new(
+        "task".to_string(),
+        leviath_core::RegionKind::Pinned,
         10_000,
-    );
+    )];
     let setup = StageSetup {
         context_layout: Some(layout),
         ..setup_carrying_prompt("still visible")
@@ -18507,11 +19017,8 @@ fn routed_window(regions: &[&str], hidden: &[&str]) -> ContextWindow {
     window
 }
 
-fn routed_to(region: &str) -> leviath_core::blueprint::ToolResultRouting {
-    leviath_core::blueprint::ToolResultRouting {
-        default_region: region.to_string(),
-        ..Default::default()
-    }
+fn routed_to(region: &str) -> crate::spec::graph::ToolRoutingDef {
+    routing(region, &[], true, None)
 }
 
 fn one_read_call() -> (
@@ -18998,9 +19505,9 @@ fn a_pointer_to_a_hidden_region_says_it_cannot_be_read_here() {
 
 /// A gate that asks only for regions, so these tests isolate the new condition
 /// from `require_modifications`. The two together are covered separately.
-fn requiring_gate(regions: &[&str]) -> leviath_core::blueprint::TransitionGate {
-    leviath_core::blueprint::TransitionGate {
-        require_regions: regions.iter().map(|s| (*s).to_string()).collect(),
+fn requiring_gate(regions: &[&str]) -> crate::spec::graph::GateDef {
+    crate::spec::graph::GateDef {
+        require_regions: tg::regions(regions),
         require_modifications: false,
         ..gate(None, None)
     }
@@ -19100,7 +19607,7 @@ fn require_regions_gives_up_with_the_shared_budget() {
     let stage = writing_stage("plan", Vec::new());
     let window = gate_window(&["plan"], &[]);
     let progress = StageProgress {
-        gate_reentries: leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS,
+        gate_reentries: crate::spec::graph::GateDef::DEFAULT_MAX_ATTEMPTS,
         ..Default::default()
     };
     let decision = gate_blocks(Some(&requiring_gate(&["plan"])), &stage, &progress, &window);
@@ -19132,8 +19639,8 @@ fn require_regions_passes_when_the_window_does_not_hold_the_region() {
 #[test]
 fn require_regions_and_require_modifications_must_both_hold() {
     let stage = writing_stage("plan", Vec::new());
-    let both = leviath_core::blueprint::TransitionGate {
-        require_regions: vec!["plan".to_string()],
+    let both = crate::spec::graph::GateDef {
+        require_regions: tg::regions(&["plan"]),
         ..gate(None, None) // require_modifications: true
     };
 
@@ -19332,8 +19839,8 @@ fn compact_window(results_summarizable: bool) -> ContextWindow {
     window
 }
 
-fn bare_compact() -> leviath_core::blueprint::EdgeTransform {
-    leviath_core::blueprint::EdgeTransform::Compact { prompt: None }
+fn bare_compact() -> crate::spec::graph::EdgeCarry {
+    crate::spec::graph::EdgeCarry::Compact { prompt: None }
 }
 
 /// The bug: a bare `compact` hands every non-pinned region to the summarizer,
@@ -19372,9 +19879,9 @@ fn a_region_declared_not_summarizable_is_left_alone() {
 fn a_custom_compact_list_cannot_override_the_region_flag() {
     let _guard = leviath_testkit::tracing_guard();
     let mut window = compact_window(false);
-    let custom = leviath_core::blueprint::EdgeTransform::Custom {
+    let custom = crate::spec::graph::EdgeCarry::Custom {
         carry: Vec::new(),
-        compact: vec!["results".to_string(), "conversation".to_string()],
+        compact: tg::regions(&["results", "conversation"]),
         clear: Vec::new(),
         compact_prompt: None,
     };
@@ -19391,7 +19898,7 @@ fn a_custom_compact_list_cannot_override_the_region_flag() {
 #[test]
 fn not_summarizable_does_not_protect_a_region_from_clear() {
     let mut window = compact_window(false);
-    let cleared = apply_edge_transform(&mut window, &leviath_core::blueprint::EdgeTransform::Clear);
+    let cleared = apply_edge_transform(&mut window, &crate::spec::graph::EdgeCarry::Clear);
     assert!(cleared.is_empty(), "clear compacts nothing");
     assert!(
         window
@@ -19416,7 +19923,7 @@ async fn dispatch_tools_refuses_a_submission_that_is_only_a_stage_name() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
-    let mut call = tc("c1", leviath_core::blueprint::SUBMIT_OUTPUT_TOOL);
+    let mut call = tc("c1", leviath_core::stage_tools::SUBMIT_OUTPUT_TOOL);
     call.arguments = serde_json::json!({ "content": "analyze" });
     let (_, result) = infer_with(vec![call]);
     let bp = blueprint(vec![
@@ -19427,16 +19934,16 @@ async fn dispatch_tools_refuses_a_submission_that_is_only_a_stage_name() {
     let e = world
         .spawn((
             agent_state(),
-            offering(&[leviath_core::blueprint::SUBMIT_OUTPUT_TOOL]),
+            offering(&[leviath_core::stage_tools::SUBMIT_OUTPUT_TOOL]),
             result,
             conv_window(),
-            AgentBlueprint(bp),
+            spec_of(bp),
             ReadyForTools,
         ))
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Nothing went to the async lane, so the window is the only record.
@@ -19454,23 +19961,23 @@ async fn dispatch_tools_records_a_real_submission_with_the_blueprint_present() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
-    let mut call = tc("c1", leviath_core::blueprint::SUBMIT_OUTPUT_TOOL);
+    let mut call = tc("c1", leviath_core::stage_tools::SUBMIT_OUTPUT_TOOL);
     call.arguments = serde_json::json!({ "content": "Three regressions, listed below." });
     let (_, result) = infer_with(vec![call]);
     let bp = blueprint(vec![stage_named("analyze", None, true, None)]);
     let e = world
         .spawn((
             agent_state(),
-            offering(&[leviath_core::blueprint::SUBMIT_OUTPUT_TOOL]),
+            offering(&[leviath_core::stage_tools::SUBMIT_OUTPUT_TOOL]),
             result,
             conv_window(),
-            AgentBlueprint(bp),
+            spec_of(bp),
             ReadyForTools,
         ))
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let recorded = world
@@ -19685,7 +20192,7 @@ fn process_response_arms_the_raised_cap_when_the_reply_was_cut_off() {
 fn build_request_raises_the_cap_to_the_model_maximum_after_a_cut_off() {
     let cfg = InferenceConfig {
         temperature: None,
-        max_output_tokens: Some(leviath_core::blueprint::OutputCap::Tokens(100)),
+        max_output_tokens: Some(crate::spec::graph::OutputCap::Tokens(100)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -19833,7 +20340,7 @@ async fn dispatch_tools_refuses_a_call_whose_arguments_were_cut_off() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -19872,7 +20379,7 @@ async fn dispatch_tools_escalates_the_refusal_with_the_cut_offs_in_a_row() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     let text = conversation_text(&world, e);
     assert!(text.contains("That is 2 replies in a row"), "{text}");
@@ -19979,7 +20486,7 @@ async fn a_refused_cut_off_call_assembles_as_an_object_the_provider_accepts() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let assembled = world.get::<ContextWindow>(e).unwrap().assemble();
@@ -20229,7 +20736,7 @@ fn empty_response_keeps_the_reply_it_accepts() {
 /// and a region the stage does not carry falls back to that maximum.
 #[test]
 fn build_request_resolves_relative_output_caps() {
-    use leviath_core::blueprint::OutputCap;
+    use crate::spec::graph::OutputCap;
     let cfg = |cap: OutputCap| InferenceConfig {
         temperature: None,
         max_output_tokens: Some(cap),
@@ -20261,14 +20768,14 @@ fn build_request_resolves_relative_output_caps() {
     assert_eq!(
         cap_of(OutputCap::RegionPercent {
             percent: 0.5,
-            region: "claims".to_string()
+            region: tg::region_name("claims")
         }),
         1_500
     );
     assert_eq!(
         cap_of(OutputCap::RegionPercent {
             percent: 1.0,
-            region: "no_such_region".to_string()
+            region: tg::region_name("no_such_region")
         }),
         4_000
     );
@@ -20415,6 +20922,7 @@ fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -20435,6 +20943,7 @@ fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
         attempt_id: String::new(),
         result: Ok(resp("done")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -20463,6 +20972,7 @@ fn collect_warns_in_the_stage_log_about_an_unrecognised_stop() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -20482,6 +20992,7 @@ fn collect_warns_in_the_stage_log_about_an_unrecognised_stop() {
         attempt_id: String::new(),
         result: Ok(resp("done")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -20491,35 +21002,6 @@ fn collect_warns_in_the_stage_log_about_an_unrecognised_stop() {
         "{:?}",
         buf.logs
     );
-}
-
-/// `spawn_agent_seeded` is `pub`, so a hand-built `Blueprint` can reach it
-/// without `parse_manifest`'s "at least one stage" guarantee. Both invariants
-/// it indexes by are refused up front rather than panicking on `stages[0]`.
-#[test]
-fn spawning_refuses_a_blueprint_with_no_stages_or_a_stage_count_mismatch() {
-    let mut world = World::new();
-    let err = spawn_agent(
-        &mut world,
-        "r".to_string(),
-        blueprint(vec![]),
-        "task",
-        vec![],
-        hints(true),
-    )
-    .unwrap_err();
-    assert!(err.contains("no stages"), "{err}");
-
-    let err = spawn_agent(
-        &mut world,
-        "r".to_string(),
-        blueprint(vec![stage_named("a", None, false, None)]),
-        "task",
-        vec![],
-        hints(true),
-    )
-    .unwrap_err();
-    assert!(err.contains("0 resolved stages"), "{err}");
 }
 
 // ── message delivery with parts ──
@@ -20545,6 +21027,7 @@ mod message_parts {
     fn with_parts(content: &str, parts: Vec<InboundPart>) -> AgentMessage {
         AgentMessage {
             agent_id: "a1".to_string(),
+            from: crate::components::FROM_PERSON.to_string(),
             content: content.to_string(),
             target_region: None,
             parts,
@@ -20660,152 +21143,6 @@ mod message_parts {
     }
 }
 
-// ── spawn with attached parts ──
-
-mod spawn_parts {
-    use super::*;
-    use std::collections::HashMap;
-
-    use crate::blob_store::{BlobStoreHandle, MimeRegistryHandle};
-    use crate::pipeline::spawn::{SeededSpawn, spawn_agent_seeded};
-    use leviath_core::mime::{InboundPart, MemoryBlobStore};
-
-    fn task_blueprint() -> leviath_core::Blueprint {
-        let layout = leviath_core::layout::ContextLayout::new(
-            vec![leviath_core::layout::RegionDefinition::new(
-                "task".to_string(),
-                RegionKind::Pinned,
-                4000,
-            )],
-            8000,
-        );
-        let s = leviath_core::Stage::new(
-            "start".to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-        );
-        leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
-    }
-
-    fn seeded(parts: Vec<InboundPart>) -> SeededSpawn {
-        SeededSpawn {
-            agent_id: "run-parts".to_string(),
-            blueprint: task_blueprint(),
-            seeds: HashMap::from([("task".to_string(), "edit @hero.png".to_string())]),
-            parts,
-            stages: vec![resolved("m")],
-            global_hints: hints(true),
-            global_nudge: leviath_core::NudgeConfig::default(),
-            region_scripts: HashMap::new(),
-            mime_registry: None,
-        }
-    }
-
-    fn png() -> InboundPart {
-        InboundPart::from_bytes("hero.png", b"\x89PNG\r\n\x1a\nbody".to_vec())
-    }
-
-    #[test]
-    fn attached_parts_land_after_the_seeds_in_the_task_region() {
-        let mut world = World::new();
-        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
-        world.insert_resource(MimeRegistryHandle::default());
-        let e = spawn_agent_seeded(&mut world, seeded(vec![png()])).expect("spawn");
-        let task = world
-            .get::<ContextWindow>(e)
-            .unwrap()
-            .get_region("task")
-            .unwrap()
-            .clone();
-        assert_eq!(task.content.len(), 2);
-        assert_eq!(task.content[0].content, "edit @hero.png");
-        assert_eq!(task.content[1].content, "[image/png, 12 B] hero.png");
-        assert_eq!(task.stored_count(), 1);
-    }
-
-    #[test]
-    fn a_world_without_a_store_refuses_a_part_and_a_bad_part_refuses_the_spawn() {
-        let mut world = World::new();
-        let err = spawn_agent_seeded(&mut world, seeded(vec![png()])).unwrap_err();
-        assert!(err.contains("no blob store"), "{err}");
-        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
-        world.insert_resource(MimeRegistryHandle::default());
-        world.insert_resource(crate::blob_store::MimeLimits {
-            max_part_bytes: 2,
-            ..Default::default()
-        });
-        let err = spawn_agent_seeded(&mut world, seeded(vec![png()])).unwrap_err();
-        assert!(err.contains("over the 2 byte ceiling"), "{err}");
-        // No parts: the store is never consulted.
-        assert!(spawn_agent_seeded(&mut world, seeded(Vec::new())).is_ok());
-    }
-
-    /// A spawn builds the run's registry from the world's rows and the
-    /// blueprint's own, and types the attached parts by it; a host-built one
-    /// is taken as is, and rows that will not layer refuse the spawn.
-    #[test]
-    fn a_spawn_carries_the_blueprints_mime_rows_onto_the_run() {
-        use crate::blob_store::RunMimeRegistry;
-        use leviath_core::mime::{MimeRegistry, MimeType};
-        let mut world = World::new();
-        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
-        world.insert_resource(MimeRegistryHandle::default());
-        let mut spawn = seeded(vec![InboundPart::from_bytes(
-            "a.scene",
-            b"ACME\x00\x00\x00\x01".to_vec(),
-        )]);
-        spawn.blueprint.mime_types = toml::from_str(
-            "[\"application/x-acme-scene\"]\nfamily = \"model\"\nextensions = [\"scene\"]\n",
-        )
-        .unwrap();
-        let e = spawn_agent_seeded(&mut world, spawn).expect("spawn");
-        let scene = MimeType::parse("application/x-acme-scene").unwrap();
-        let run = world
-            .get::<RunMimeRegistry>(e)
-            .expect("the run has a registry");
-        assert_eq!(run.registry().info(&scene).source, "blueprint");
-        let task = world
-            .get::<ContextWindow>(e)
-            .unwrap()
-            .get_region("task")
-            .unwrap()
-            .clone();
-        assert_eq!(
-            task.content[1].content.stored().next().unwrap().mime_type,
-            scene,
-            "the attached part is typed by the blueprint's extension row"
-        );
-
-        // A host-built registry is used as handed over.
-        let rows: toml::Table = toml::from_str("[\"model/obj\"]\nfamily = \"scene\"\n").unwrap();
-        let mut spawn = seeded(Vec::new());
-        spawn.mime_registry =
-            Some(RunMimeRegistry::new(&MimeRegistry::builtin(), rows, Default::default()).unwrap());
-        let e = spawn_agent_seeded(&mut world, spawn).expect("spawn");
-        let obj = MimeType::parse("model/obj").unwrap();
-        assert_eq!(
-            world
-                .get::<RunMimeRegistry>(e)
-                .unwrap()
-                .registry()
-                .info(&obj)
-                .family,
-            "scene"
-        );
-
-        // Rows the registry refuses (an embedder's hand-built blueprint) are
-        // the spawn's error.
-        let mut spawn = seeded(Vec::new());
-        spawn.blueprint.mime_types = toml::from_str("[png]\nfamily = \"image\"\n").unwrap();
-        let err = spawn_agent_seeded(&mut world, spawn).unwrap_err();
-        assert!(err.starts_with("[mime_types]:"), "{err}");
-
-        // A world with no registry at all spawns without one.
-        let mut bare = World::new();
-        let e = spawn_agent_seeded(&mut bare, seeded(Vec::new())).expect("spawn");
-        assert!(bare.get::<RunMimeRegistry>(e).is_none());
-    }
-}
-
 // ── mime tools and typed tool results ──
 
 mod typed_tool_results {
@@ -20831,7 +21168,7 @@ mod typed_tool_results {
         call.arguments = serde_json::json!({});
         let e = ready_for_tools(&mut world, vec![call]);
         let mut s = Schedule::default();
-        s.add_systems(dispatch_tools);
+        s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
         s.run(&mut world);
         assert!(jrx.try_recv().is_err(), "must not reach the tool lane");
         let conv = world
@@ -20853,19 +21190,17 @@ mod typed_tool_results {
         // With a blueprint on the agent, the stage's limit for the tool is
         // looked up before the tool answers; the answer is the same here,
         // since there is still no store to read from.
-        let mut stage = leviath_core::Stage::new(
-            "main".to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        let mut stage = tg::stage("main");
+        stage.tool_accepts.insert(
+            crate::spec::names::ToolName::new("context_export").unwrap(),
+            vec![crate::spec::names::MimePattern::new("text/*").unwrap()],
         );
-        stage
-            .tool_accepts
-            .insert("context_export".to_string(), vec!["text/*".to_string()]);
         let mut call = tc("c2", "context_export");
         call.arguments = serde_json::json!({"name": "shot.png"});
         let limited = ready_for_tools(&mut world, vec![call]);
         world
             .entity_mut(limited)
-            .insert(AgentBlueprint(blueprint(vec![stage])));
+            .insert(spec_of(blueprint(vec![stage])));
         s.run(&mut world);
         assert!(jrx.try_recv().is_err(), "must not reach the tool lane");
         let conv = world
@@ -21158,13 +21493,11 @@ mod model_parts {
         let stored =
             Part::stored(png("hero.png").describe(&leviath_core::mime::MimeRegistry::builtin()))
                 .named("hero.png");
-        let mut stage = leviath_core::blueprint::Stage::new(
-            "draw".to_string(),
-            leviath_core::blueprint::ModelConfig::new("openrouter".to_string(), "m".to_string()),
-        );
+        let mut stage = tg::stage("draw");
+        stage.model = tg::model("openrouter", "m");
         stage
             .output_routing
-            .insert("image/*".to_string(), "artwork".to_string());
+            .insert("image/*".to_string(), tg::region_name("artwork"));
 
         let mut w = ctx(&[("conversation", 100_000), ("artwork", 100_000)]);
         apply_tool_results_with_parts(
@@ -21198,13 +21531,13 @@ mod model_parts {
 /// second crash still sees them finished.
 #[tokio::test]
 async fn a_recovered_batch_runs_only_what_had_not_finished() {
-    use leviath_core::run_archive::RunRecord;
+    use crate::runfile::record::RunRecord;
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let (ptx, mut prx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(ReportingService)));
     world.insert_resource(ToolStage::detached(jtx));
-    world.insert_resource(PersistenceStage(ptx));
+    world.insert_resource(crate::pipeline::JournalSender::new(ptx, None));
     let e = world
         .spawn((
             agent_state(),
@@ -21224,7 +21557,7 @@ async fn a_recovered_batch_runs_only_what_had_not_finished() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert!(world.get::<AwaitingTools>(e).is_some());
     assert!(
@@ -21301,7 +21634,7 @@ fn a_recovered_batch_resolved_inline_applies_its_recovered_results() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(jrx.try_recv().is_err(), "nothing went to the lane");
@@ -21359,4 +21692,185 @@ fn collect_tools_merges_recovered_results() {
         .collect();
     assert!(text.contains("the file"), "{text}");
     assert!(text.contains("User answered: blue"), "{text}");
+}
+
+// ── moving a run from outside the transition systems ──
+
+/// A three-stage run whose middle stage routes its tool results, at `a`.
+fn spawn_forceable(world: &mut World, dest: StageSetup) -> Entity {
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_from_setup("b", &dest).into(),
+        stage_named("c", None, false, None),
+    ]);
+    world
+        .spawn((
+            spec_with(bp, &[si("m0"), si("m1"), si("m2")]),
+            StageCursor { index: 0 },
+            agent_state(),
+            StageProgress::default(),
+            VisitCounts::default(),
+            pinned_window(),
+        ))
+        .id()
+}
+
+/// A forced move enters the stage it names, with that stage's inference and
+/// routing, and is recorded as forced along no declared edge.
+#[test]
+fn force_transition_enters_the_stage_and_records_a_forced_move() {
+    let mut routed = setup();
+    routed.routing = Some(routing("tool_results", &[], true, None));
+    let mut world = World::new();
+    let e = spawn_forceable(&mut world, routed);
+    let agent = crate::world::AgentId::in_world(&world, e);
+
+    force_transition(&mut world, agent, 1);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    assert_eq!(world.get::<StageInference>(e).unwrap().model, "m1");
+    assert!(
+        world
+            .get::<crate::components::ToolResultRoutingComponent>(e)
+            .is_some()
+    );
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    let moved = &world.get::<LastTransition>(e).unwrap().0;
+    assert_eq!((moved.to.as_str(), moved.edge.clone()), ("b", None));
+    assert_eq!(moved.reason, crate::state::TransitionReason::Forced);
+
+    // The next stage routes nothing, so the routing goes.
+    force_transition(&mut world, agent, 2);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 2);
+    assert!(
+        world
+            .get::<crate::components::ToolResultRoutingComponent>(e)
+            .is_none()
+    );
+    assert_eq!(world.get::<LastTransition>(e).unwrap().0.from.as_str(), "b");
+}
+
+/// A stage whose instructions cannot fit fails the run where it stands, and a
+/// run that is gone or carries no stage graph is left alone.
+#[test]
+fn force_transition_fails_an_overflowing_stage_and_skips_what_it_cannot_move() {
+    let mut huge = setup();
+    huge.system_prompt = Some("x".repeat(100_000));
+    let mut world = World::new();
+    let e = spawn_forceable(&mut world, huge);
+    let agent = crate::world::AgentId::in_world(&world, e);
+    force_transition(&mut world, agent, 1);
+    assert!(matches!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Error { .. }
+    ));
+    assert!(world.get::<LastTransition>(e).is_none());
+
+    let bare = world.spawn(agent_state()).id();
+    let agent = crate::world::AgentId::in_world(&world, bare);
+    force_transition(&mut world, agent, 1);
+    assert!(world.get::<StageCursor>(bare).is_none());
+    let gone = crate::world::AgentId::in_world(
+        &world,
+        Entity::from_raw_u32(9191).expect("a small literal index is always a valid entity id"),
+    );
+    force_transition(&mut world, gone, 1);
+}
+
+/// A move between names no graph could hold is not recorded: there is no edge
+/// of any graph it could have been.
+#[test]
+fn a_move_between_names_no_graph_could_hold_records_nothing() {
+    use crate::state::TransitionReason::Forced;
+    let mut state = agent_state();
+    state.current_stage = "b".to_string();
+    assert!(crate::pipeline::transition_record("", &state, None, Forced).is_none());
+    state.current_stage = String::new();
+    assert!(crate::pipeline::transition_record("a", &state, None, Forced).is_none());
+    state.current_stage = "b".to_string();
+    let record = crate::pipeline::transition_record("a", &state, None, Forced).unwrap();
+    assert_eq!((record.0.from.as_str(), record.0.to.as_str()), ("a", "b"));
+}
+
+/// A stage's required regions are re-run for as many revisits as the stage
+/// allows; one that allows none moves on at once.
+#[test]
+fn a_required_region_gate_takes_its_cap_from_the_stage_revisits() {
+    let mut spec = required_bp(&["context_write"], None);
+    graph_mut(&mut spec).stages[0].max_revisits = Some(0);
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            spec,
+            StageCursor { index: 0 },
+            window_with_plan(false),
+            ResolveTransition,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(require_context_regions);
+    s.run(&mut world);
+    assert!(
+        world.get::<ResolveTransition>(e).is_some(),
+        "the stage moves on"
+    );
+    assert!(world.get::<RequiredReentries>(e).is_none());
+}
+
+fn resolved_on(provider: &str, model: &str) -> ResolvedStage {
+    ResolvedStage {
+        provider_name: provider.to_string(),
+        model: model.to_string(),
+        tools: vec![],
+        fallbacks: vec![],
+        output: None,
+        notes: vec![],
+    }
+}
+
+/// A blueprint spawn seeds each region its seeds name, drops a seed that names
+/// none, and takes the operator's nudge settings where the blueprint has none.
+#[test]
+fn a_blueprint_spawn_seeds_by_region_and_takes_the_operators_nudge() {
+    let mut world = World::new();
+    let e = place_test_run(
+        &mut world,
+        TestRun {
+            agent_id: "r".to_string(),
+            graph: blueprint(vec![stage_named("a", None, false, None)]),
+            seeds: [
+                ("conversation".to_string(), "seeded".to_string()),
+                ("nowhere".to_string(), "dropped".to_string()),
+            ]
+            .into(),
+            stages: vec![resolved_on("p", "m")],
+            global_hints: hints(false),
+            global_nudge: crate::spec::graph::NudgeDef {
+                enabled: Some(false),
+                max: Some(2),
+                text: Some("go on".into()),
+            },
+            region_scripts: Default::default(),
+        },
+    )
+    .unwrap();
+    let window = world.get::<ContextWindow>(e).unwrap();
+    assert_eq!(
+        window.get_region("conversation").unwrap().content[0]
+            .content
+            .as_str(),
+        "seeded"
+    );
+    let spec = &world.get::<RunSpecC>(e).unwrap().0;
+    assert_eq!(spec.seeded.len(), 1);
+    let nudge = spec.graph.nudge.clone().unwrap();
+    assert_eq!(
+        (nudge.enabled, nudge.max, nudge.text.as_deref()),
+        (Some(false), Some(2), Some("go on"))
+    );
+    assert_eq!(
+        (spec.graph.batch_tool_hint, spec.graph.shell_hint),
+        (Some(false), Some(false))
+    );
+    let config = world.get::<InferenceConfig>(e).unwrap();
+    assert!(!config.batch_tool_hint && !config.shell_hint);
 }

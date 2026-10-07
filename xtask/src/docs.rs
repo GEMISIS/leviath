@@ -295,6 +295,8 @@ pub const SCHEMAS: &[&str] = &[
     "blueprint.schema.json",
     "config.schema.json",
     "openapi.json",
+    "run-file.schema.json",
+    "spawn-request.schema.json",
 ];
 
 /// Published beside the schemas but not JSON: checked for existence only.

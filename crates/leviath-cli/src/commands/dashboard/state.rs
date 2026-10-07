@@ -83,15 +83,17 @@ pub(crate) struct Dashboard {
     pub(super) stage_explorer: Option<ExplorerState>,
     /// Cursor + expansion state of the structured Context view.
     pub(super) context_tree: ContextTreeState,
-    /// Cached archive of the selected run (points + visit timeline).
+    /// Cached history of the selected run (points + visit timeline).
     pub(super) history: Option<super::history::RunHistoryCache>,
-    /// Loads a run's archived points. Injected (mirroring `clock`/`yank_fn`)
-    /// so tests can count loads and pin that `,`/`.` read the archive once
+    /// Loads a run's recorded points. Injected (mirroring `clock`/`yank_fn`)
+    /// so tests can count loads and pin that `,`/`.` read the run file once
     /// per run, not once per keypress.
-    pub(super) history_loader: fn(&str) -> Vec<leviath_core::run_archive::RunPoint>,
-    /// A run's archive stat, which decides whether `history` is still
+    pub(super) history_loader: fn(&str) -> runstate::RunHistory,
+    /// A run file's stat, which decides whether `history` is still
     /// current. Injected beside `history_loader` for the same reason.
     pub(super) history_stamp: fn(&str) -> Option<runstate::FileStamp>,
+    /// The selected run's answer, as last read (see `answers`).
+    pub(super) answers: super::answers::AnswerCache,
     /// Scroll offset for detail view content: 0 = bottom (auto-scroll), >0 = scrolled up
     pub(super) detail_scroll: usize,
     /// Selected option index for MultipleChoice/ToolApproval/Confirm input
@@ -101,7 +103,7 @@ pub(crate) struct Dashboard {
     /// Whether the content pane shows Output or Logs - global across all stage tabs.
     pub(super) stage_content_mode: StageContentMode,
     /// Which historical context point is being viewed: `None` = the live current
-    /// window (the default), `Some(i)` = archived point `i` in the cached
+    /// window (the default), `Some(i)` = recorded point `i` in the cached
     /// history (see `history`).
     pub(super) context_history_idx: Option<usize>,
     /// True after the first sync completes; suppresses startup toasts for pre-existing state.
@@ -217,13 +219,16 @@ pub(crate) struct Dashboard {
     /// Workdir-relative file paths the `@` completion offers, walked once when
     /// the screen opens rather than per keystroke.
     pub(super) new_run_files: Vec<String>,
-    /// One slot per caller-input region of the selected blueprint.
+    /// One row per input the selected blueprint declares beside its task.
     pub(super) new_run_inputs: Vec<super::new_run_inputs::NewRunInput>,
-    /// The slot the Inputs pane's cursor is on.
+    /// The row the Inputs pane's cursor is on.
     pub(super) new_run_input_selected: usize,
-    /// The agent path the slots were built for, so a selection that has not
+    /// The agent path the rows were built for, so a selection that has not
     /// moved keeps what was typed.
     pub(super) new_run_inputs_key: String,
+    /// A run the daemon refused for its inputs, waiting for the new-run
+    /// screen to open on it again with each problem beside its row.
+    pub(super) new_run_refused: Option<super::types::RefusedRun>,
     /// True while an `@` file reference is being typed, so the completion
     /// popup has the keys.
     pub(super) new_run_file_ref: bool,
@@ -249,11 +254,10 @@ pub(crate) struct Dashboard {
     /// Off every time the screen opens is deliberate: the state carries real
     /// consequences, and a toggle that survives out of sight is one a user can
     /// leave on and forget.
-    pub(super) new_run_yolo: bool,
-    /// The yolo profile runs started from this screen run under, when
-    /// unattended is on and `Ctrl-Y` has stepped past plain yolo. `None` with
-    /// `new_run_yolo` set is the bare flag.
-    pub(super) new_run_yolo_profile: Option<String>,
+    ///
+    /// `Ctrl-Y` steps from off to plain yolo, then through the profiles in
+    /// `yolo.toml`, then back to off.
+    pub(super) new_run_unattended: leviath_core::Unattended,
     /// The profiles `yolo.toml` defined when the screen opened, in file
     /// order, which `Ctrl-Y` steps through after plain yolo.
     pub(super) new_run_profiles: Vec<std::sync::Arc<crate::yolo::YoloProfile>>,
@@ -281,14 +285,14 @@ pub(crate) struct Dashboard {
     /// this process made, with a name nobody can guess, closes both.
     pub(super) external_edit_scratch: Option<tempfile::TempDir>,
     /// Sends resolve-and-spawn work to the background lane.
-    pub(super) spawn_cmd_tx: mpsc::UnboundedSender<SpawnCommand>,
+    pub(super) spawn_cmd_tx: mpsc::UnboundedSender<NewRunCommand>,
     /// Receives spawn results, drained into toasts each tick.
     pub(super) spawn_outcome_rx: mpsc::UnboundedReceiver<SpawnOutcome>,
     /// The background loop's ends of the spawn channels, taken by
     /// `init_dashboard`; tests keep them to assert dispatches and inject
     /// outcomes.
     pub(super) spawn_bg_ends: Option<(
-        mpsc::UnboundedReceiver<SpawnCommand>,
+        mpsc::UnboundedReceiver<NewRunCommand>,
         mpsc::UnboundedSender<SpawnOutcome>,
     )>,
     /// Receives the daemon's answer to each [`DaemonCommand`], drained each tick
@@ -511,20 +515,20 @@ impl Dashboard {
     }
 
     /// Leave context-history browsing and go back to the live current window.
-    /// The cached archive is kept: it invalidates by run id and TTL, not here.
+    /// The cached history is kept: it invalidates by run id and TTL, not here.
     pub(super) fn reset_context_history(&mut self) {
         self.context_history_idx = None;
     }
 
-    /// Make sure the cached archive covers `run_id` and holds everything in
-    /// it. This is the ONLY place the archive is loaded, so `,`/`.` step
+    /// Make sure the cached history covers `run_id` and holds everything in
+    /// it. This is the ONLY place the run file is loaded, so `,`/`.` step
     /// through memory rather than replaying `run.lvr` per keypress.
     ///
-    /// The archive is looked at once per TTL and read again only when its
-    /// stat moved: a finished run's archive cannot change, and it can be tens
+    /// The run file is looked at once per TTL and read again only when its
+    /// stat moved: a finished run's run file cannot change, and it can be tens
     /// of MB to replay on the draw loop.
     pub(super) fn ensure_history(&mut self, run_id: &str) {
-        use super::history::{HISTORY_TTL_TICKS, RunHistoryCache};
+        use super::history::HISTORY_TTL_TICKS;
         let tick = self.tick_count;
         let stamp_of = self.history_stamp;
         if let Some(h) = self.history.as_mut().filter(|h| h.run_id == run_id) {
@@ -536,22 +540,20 @@ impl Dashboard {
                 return;
             }
         }
-        // A run switch drops any browsed position along with the old archive.
-        if self.history.as_ref().is_some_and(|h| h.run_id != run_id) {
-            self.context_history_idx = None;
-        }
         // Stat before reading: an append that lands during the read makes the
         // next check read again, rather than hiding behind a newer stamp.
         let stamp = stamp_of(run_id);
-        let points = (self.history_loader)(run_id);
-        let visits = super::history::derive_visits(&points);
-        self.history = Some(RunHistoryCache {
-            run_id: run_id.to_string(),
-            points,
-            visits,
-            checked_at_tick: tick,
-            stamp,
-        });
+        let history = (self.history_loader)(run_id);
+        self.keep_history(run_id, stamp, history);
+    }
+
+    /// [`Self::ensure_history`] on the draw loop, for a run whose history
+    /// is read there (see [`Self::history_on_draw_loop`]); the loader
+    /// thread reads any other's.
+    pub(super) fn ensure_history_on_draw(&mut self, run_id: &str) {
+        if self.history_on_draw_loop(run_id) {
+            self.ensure_history(run_id);
+        }
     }
 
     /// The cached history, if it belongs to the selected run.
@@ -560,10 +562,10 @@ impl Dashboard {
         self.history.as_ref().filter(|h| h.run_id == id)
     }
 
-    /// Step through the selected run's archived context-window history in the
+    /// Step through the selected run's recorded context-window history in the
     /// Context view: `delta > 0` moves to a later point, `delta < 0` to an
-    /// earlier one. Reads the cached archive; stepping past the newest point
-    /// returns to the live window. No-op if the run has no archived history.
+    /// earlier one. Reads the cached history; stepping past the newest point
+    /// returns to the live window. No-op if the run has no recorded history.
     pub(super) fn step_context_history(&mut self, delta: isize) {
         let Some(run_id) = self.selected_agent().map(|a| a.id.clone()) else {
             return;
@@ -596,7 +598,7 @@ impl Dashboard {
         // same spot across two points is the whole reason to browse history.
     }
 
-    /// Jump the Context view straight to archived point `idx` (the timeline's
+    /// Jump the Context view straight to recorded point `idx` (the timeline's
     /// Enter). Clamped; assumes `ensure_history` ran for the selected run.
     pub(super) fn jump_to_history_point(&mut self, idx: usize) {
         let len = self.selected_history().map(|h| h.points.len()).unwrap_or(0);
@@ -608,14 +610,14 @@ impl Dashboard {
     }
 
     /// The snapshot the Context view is showing right now: the browsed
-    /// archived point, else the selected stage's on-disk snapshot, else the
+    /// recorded point, else the selected stage's on-disk snapshot, else the
     /// run's live snapshot - the same fallback chain the renderer uses, so
     /// the key handler and the drawn tree can never disagree.
     pub(super) fn current_context_snapshot(&self) -> Option<runstate::ContextSnapshot> {
         let agent = self.selected_agent()?;
         self.browsed_context_point()
             .map(|p| p.context.clone())
-            .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
+            .or_else(|| self.selected_stage_context(agent))
             .or_else(|| agent.context_snapshot.as_deref().cloned())
     }
 
@@ -627,10 +629,12 @@ impl Dashboard {
             .unwrap_or_default()
     }
 
-    /// The context snapshot to render in the Context view: the selected archived
+    /// The context snapshot to render in the Context view: the selected recorded
     /// history point when browsing, else `None` (callers fall back to the live
     /// current window).
-    pub(super) fn browsed_context_point(&self) -> Option<&leviath_core::run_archive::RunPoint> {
+    pub(super) fn browsed_context_point(
+        &self,
+    ) -> Option<&leviath_runtime::runfile::history::RunPoint> {
         let idx = self.context_history_idx?;
         let id = self.selected_agent().map(|a| a.id.as_str())?;
         self.history
@@ -1219,39 +1223,40 @@ mod tests {
 
     /// Write a `run.lvr` for `run_id` with `points` context checkpoints.
     fn write_history_archive(run_id: &str, points: usize) {
-        use leviath_core::run_archive::{self, RunIdentity, RunRecord};
-        std::fs::create_dir_all(runstate::run_dir(run_id)).unwrap();
-        let mut buf = Vec::new();
-        run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
-        run_archive::write_record(
-            &mut buf,
-            &RunRecord::Header {
-                identity: RunIdentity {
-                    run_id: run_id.to_string(),
-                    machine_id: "m".to_string(),
-                    world_id: "w".to_string(),
-                    created_at: 0,
-                },
-                meta: Box::new(fixtures::run_meta(run_id)),
-            },
-        )
-        .unwrap();
-        for i in 0..points {
-            run_archive::write_record(
-                &mut buf,
-                &RunRecord::ContextCheckpoint {
-                    snapshot: runstate::ContextSnapshot {
-                        stage_name: format!("stage{i}"),
-                        total_tokens: i,
+        let mut meta = fixtures::run_meta(run_id);
+        meta.num_stages = points;
+        meta.current_stage = "stage0".to_string();
+        runstate::create_run(&meta).unwrap();
+        for i in 1..points {
+            meta.current_stage = format!("stage{i}");
+            meta.stage_index = i;
+            runstate::write_meta(&meta).unwrap();
+            runstate::write_context_snapshot(
+                run_id,
+                &runstate::ContextSnapshot {
+                    stage_name: format!("stage{i}"),
+                    total_tokens: i,
+                    max_tokens: 100,
+                    regions: vec![runstate::RegionSnapshot {
+                        name: "notes".to_string(),
+                        kind: "pinned".to_string(),
+                        current_tokens: i,
                         max_tokens: 100,
-                        regions: vec![],
-                    },
-                    at: i as i64,
+                        entries: vec![runstate::RegionEntrySnapshot {
+                            content: format!("point {i}").into(),
+                            tokens: i,
+                            kind: leviath_core::region::EntryKind::Text,
+                            metadata: None,
+                            key: None,
+                            taint: Default::default(),
+                            reasoning: None,
+                        }],
+                        description: None,
+                    }],
                 },
             )
             .unwrap();
         }
-        std::fs::write(runstate::run_dir(run_id).join("run.lvr"), &buf).unwrap();
     }
 
     #[test]
@@ -1321,11 +1326,11 @@ mod tests {
     fn stepping_history_loads_the_archive_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static LOADS: AtomicUsize = AtomicUsize::new(0);
-        fn counting_loader(_run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
+        fn counting_loader(_run_id: &str) -> crate::runstate::RunHistory {
             LOADS.fetch_add(1, Ordering::SeqCst);
             let mut meta = fixtures::run_meta("run-1");
             meta.current_stage = "main".to_string();
-            let point = |at: i64| leviath_core::run_archive::RunPoint {
+            let point = |at: i64| leviath_runtime::runfile::history::RunPoint {
                 meta: meta.clone(),
                 context: leviath_core::run_meta::ContextSnapshot {
                     stage_name: "main".to_string(),
@@ -1335,7 +1340,10 @@ mod tests {
                 },
                 at,
             };
-            vec![point(1), point(2), point(3)]
+            crate::runstate::RunHistory {
+                points: vec![point(1), point(2), point(3)],
+                transitions: None,
+            }
         }
 
         LOADS.store(0, Ordering::SeqCst);
@@ -1384,18 +1392,21 @@ mod tests {
     /// a cache for another run never serves the browsed point.
     #[test]
     fn a_run_switch_invalidates_the_cache_and_the_browsed_point() {
-        fn one_point_loader(_run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
+        fn one_point_loader(_run_id: &str) -> crate::runstate::RunHistory {
             let meta = fixtures::run_meta("x");
-            vec![leviath_core::run_archive::RunPoint {
-                meta,
-                context: leviath_core::run_meta::ContextSnapshot {
-                    stage_name: "s".to_string(),
-                    total_tokens: 0,
-                    max_tokens: 100,
-                    regions: vec![],
-                },
-                at: 1,
-            }]
+            crate::runstate::RunHistory {
+                points: vec![leviath_runtime::runfile::history::RunPoint {
+                    meta,
+                    context: leviath_core::run_meta::ContextSnapshot {
+                        stage_name: "s".to_string(),
+                        total_tokens: 0,
+                        max_tokens: 100,
+                        regions: vec![],
+                    },
+                    at: 1,
+                }],
+                transitions: None,
+            }
         }
         let mut dash = make_test_dashboard();
         dash.history_loader = one_point_loader;
@@ -2532,12 +2543,10 @@ mod tests {
 
     /// The context window is read only for the run the cursor is on.
     ///
-    /// It is the largest file in a run directory by a wide margin, and the only
-    /// thing that draws it is the detail view's context card - which draws one
-    /// run. Reading every run's made launching the dashboard cost the whole
-    /// history: measured on 750 runs holding 194 MB of `context.json` between
-    /// them, the list took 1.4s to appear and the process sat at 267 MB, all to
-    /// show one run's window.
+    /// It is the largest thing in a run by a wide margin, and the only thing
+    /// that draws it is the detail view's context card - which draws one run.
+    /// Reading every run's would make launching the dashboard cost the whole
+    /// history, all to show one run's window.
     #[test]
     fn only_the_run_on_screen_has_its_context_read() {
         crate::runstate::with_isolated_runs_dir("sync-context-one-run", |_d| {
@@ -2545,7 +2554,7 @@ mod tests {
                 stage_name: "main".to_string(),
                 total_tokens: 10,
                 max_tokens: 100,
-                regions: vec![],
+                regions: vec![crate::test_fixtures::fixtures::region("task")],
             };
             for run_id in ["run-shown", "run-offscreen"] {
                 runstate::create_run(&make_run_meta(run_id, RunStatus::Complete)).unwrap();
@@ -2596,7 +2605,7 @@ mod tests {
         1_000 + crate::runstate::STALE_AFTER_SECS - 1
     }
 
-    /// The reported bug's shape: a run whose `meta.json` claims `starting` /
+    /// The reported bug's shape: a run whose record claims `starting` /
     /// `running`, which the daemon does not hold and which has not been touched
     /// in a long time, is not ACTIVE - nothing is driving it.
     #[test]
@@ -3230,36 +3239,6 @@ mod tests {
     }
 
     #[test]
-    fn sync_from_run_state_new_agent_complete_interactive() {
-        crate::runstate::with_isolated_runs_dir(
-            "sync_from_run_state_new_agent_complete_interactive",
-            |_d| {
-                let run_id = "test-sync-new-complete-interactive";
-                cleanup_run(run_id);
-                let meta = make_run_meta(run_id, RunStatus::CompleteInteractive);
-                runstate::create_run(&meta).unwrap();
-                let req = interaction::InteractionRequest::free_text(
-                    "req1",
-                    "Any feedback?",
-                    "review",
-                    false,
-                );
-
-                let mut dash = make_test_dashboard();
-                dash.pending_interactions
-                    .insert(run_id.to_string(), req.clone());
-                dash.sync_from_run_state();
-
-                let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-                assert_eq!(agent.status, AgentDisplayStatus::CompleteInteractive);
-                assert!(agent.waiting_prompt.is_some());
-
-                cleanup_run(run_id);
-            },
-        );
-    }
-
-    #[test]
     fn sync_from_run_state_new_agent_toasts_after_initial_sync_waiting() {
         crate::runstate::with_isolated_runs_dir(
             "sync_from_run_state_new_agent_toasts_after_initial_sync_waiting",
@@ -3701,6 +3680,109 @@ mod tests {
         );
     }
 
+    /// A snapshot holding exactly these run records, as a list-only pass
+    /// would read them.
+    fn snapshot_of(metas: &[runstate::RunMeta]) -> super::super::run_loader::RunSnapshot {
+        super::super::run_loader::RunSnapshot {
+            taken_at: std::time::Instant::now(),
+            runs: metas
+                .iter()
+                .cloned()
+                .map(super::super::run_loader::RunEntry::listed)
+                .collect(),
+            context: None,
+        }
+    }
+
+    /// A run that finished and still takes a follow-up shows as such and
+    /// offers its open question, but it does not ask for input in a toast:
+    /// answering it is optional.
+    #[test]
+    fn a_complete_interactive_run_offers_its_question_without_a_toast() {
+        let mut dash = make_test_dashboard();
+        dash.initial_sync_done = true;
+        let meta = make_run_meta("snap-ci", RunStatus::CompleteInteractive);
+        let req = interaction::InteractionRequest::free_text("req1", "More?", "review", false);
+        dash.pending_interactions.insert("snap-ci".to_string(), req);
+
+        let snapshot = snapshot_of(&[meta]);
+        dash.apply_run_snapshot(&snapshot);
+
+        let agent = &dash.agents[0];
+        assert_eq!(agent.status, AgentDisplayStatus::CompleteInteractive);
+        assert_eq!(agent.waiting_prompt.as_deref(), Some("More?"));
+        assert!(
+            !dash
+                .toasts
+                .iter()
+                .any(|t| t.message.contains("needs input"))
+        );
+
+        // With no question open it still takes a follow-up, and keeps
+        // offering what it last asked.
+        dash.pending_interactions.clear();
+        dash.apply_run_snapshot(&snapshot);
+        assert_eq!(dash.agents[0].waiting_prompt.as_deref(), Some("More?"));
+    }
+
+    /// A running run that opens a question (a tool asking for approval, say)
+    /// takes the question, but only a run parked on its input is announced
+    /// as needing it.
+    #[test]
+    fn a_running_run_that_opens_a_question_is_not_announced_as_waiting() {
+        let mut dash = make_test_dashboard();
+        let snapshot = snapshot_of(&[make_run_meta("snap-run", RunStatus::Running)]);
+        dash.apply_run_snapshot(&snapshot);
+        let req = interaction::InteractionRequest::free_text("req1", "Allow?", "main", true);
+        dash.pending_interactions
+            .insert("snap-run".to_string(), req);
+
+        dash.apply_run_snapshot(&snapshot);
+
+        assert_eq!(dash.agents[0].waiting_prompt.as_deref(), Some("Allow?"));
+        assert!(dash.toasts.is_empty());
+    }
+
+    /// A question already answered here is not offered again while the run
+    /// has yet to move past it.
+    #[test]
+    fn an_answered_question_is_not_offered_again() {
+        let mut dash = make_test_dashboard();
+        let snapshot = snapshot_of(&[make_run_meta("snap-answered", RunStatus::WaitingInput)]);
+        dash.apply_run_snapshot(&snapshot);
+        dash.agents[0].last_answered_request_id = Some("req1".to_string());
+        let req = interaction::InteractionRequest::free_text("req1", "Q?", "main", true);
+        dash.pending_interactions
+            .insert("snap-answered".to_string(), req);
+
+        dash.apply_run_snapshot(&snapshot);
+
+        assert!(dash.agents[0].waiting_prompt.is_none());
+        assert!(dash.agents[0].pending_request.is_none());
+    }
+
+    /// The first snapshot lists the runs before any graph is read; a run's
+    /// graph arrives with a later one and is taken by the row already there.
+    #[test]
+    fn a_listed_run_takes_its_graph_from_a_later_snapshot() {
+        let mut dash = make_test_dashboard();
+        let meta = make_run_meta("snap-graph", RunStatus::Complete);
+        dash.apply_run_snapshot(&snapshot_of(std::slice::from_ref(&meta)));
+        assert!(dash.agents[0].graph.is_none());
+
+        let graph = std::sync::Arc::new(crate::tui::flowgraph::model::toml_graph(
+            "[blueprint]\nname = \"g\"\nversion = \"0.1.0\"\n\n[[graph.stages]]\nname = \"main\"\n\n\
+             [graph.layout]\ntotal_budget_tokens = 0\nregions = []\n",
+        ));
+        let mut later = snapshot_of(&[meta]);
+        later.runs[0].graph = Some(graph.clone());
+        dash.apply_run_snapshot(&later);
+        assert!(std::sync::Arc::ptr_eq(
+            dash.agents[0].graph.as_ref().expect("taken"),
+            &graph
+        ));
+    }
+
     #[test]
     fn sync_from_run_state_no_reptoast_when_already_waiting() {
         crate::runstate::with_isolated_runs_dir(
@@ -3832,69 +3914,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sync_from_run_state_existing_agent_enters_complete_interactive_no_needs_input_toast() {
-        crate::runstate::with_isolated_runs_dir(
-            "sync_from_run_state_existing_agent_enters_complete_interactive_no_needs_input_toast",
-            |_d| {
-                // Exercise the branch where:
-                //   agent.waiting_prompt.is_none()          -> true  (agent was Active, no prompt yet)
-                //   && waiting_prompt.is_some()              -> true  (a pending request is present)
-                //   && matches!(run.status, WaitingInput)    -> FALSE (status is CompleteInteractive)
-                //
-                // The full condition is false, so no "needs input" toast is emitted
-                // (CompleteInteractive input is optional, unlike WaitingInput).
-                let run_id = "test-sync-ci-no-toast";
-                cleanup_run(run_id);
-                let meta = make_run_meta(run_id, RunStatus::Running);
-                runstate::create_run(&meta).unwrap();
-
-                let mut dash = make_test_dashboard();
-                dash.sync_from_run_state(); // first sync: agent is Active, waiting_prompt=None
-
-                // Transition to CompleteInteractive and write a pending request
-                let meta2 = make_run_meta(run_id, RunStatus::CompleteInteractive);
-                runstate::write_meta(&meta2).unwrap();
-                let req = interaction::InteractionRequest::free_text(
-                    "req-ci",
-                    "Any final feedback?",
-                    "review",
-                    false,
-                );
-                dash.pending_interactions
-                    .insert(run_id.to_string(), req.clone());
-
-                dash.toasts.clear(); // clear any earlier toasts
-                dash.sync_from_run_state();
-
-                let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-                assert_eq!(agent.status, AgentDisplayStatus::CompleteInteractive);
-                // waiting_prompt is populated (the request exists)
-                assert!(agent.waiting_prompt.is_some());
-                // Seed a toast that *does* contain `run_id` (but not "needs input")
-                // so the closure below's `has_id && has_tag` actually evaluates
-                // `has_tag` at least once - the real "completed" toast pushed by
-                // `sync_from_run_state` uses `truncate(&agent.blueprint_name, 20)`,
-                // and `run_id` here is longer than 20 chars, so it never contains
-                // the full `run_id` substring on its own.
-                dash.toasts.push(Toast {
-                    message: format!("{run_id}: unrelated toast"),
-                    remaining_ticks: 1,
-                    level: ToastLevel::Info,
-                });
-                // But no "needs input" toast because CompleteInteractive input is optional
-                let needs_input_toast = dash.toasts.iter().find(|t| {
-                    let has_id = t.message.contains(run_id);
-                    let has_tag = t.message.contains("needs input");
-                    has_id && has_tag
-                });
-                assert!(needs_input_toast.is_none());
-
-                cleanup_run(run_id);
-            },
-        );
-    }
-
     // ── Marks for group kill / delete ─────────────────────────────────────
 
     #[test]
@@ -3944,7 +3963,7 @@ mod tests {
     fn a_fed_list_loads_from_its_snapshots() {
         crate::runstate::with_isolated_runs_dir("dash-fed-list", |_d| {
             runstate::create_run(&make_run_meta("fed-run", RunStatus::Complete)).unwrap();
-            let (feed, snapshots, shown) = super::super::run_loader::RunFeed::detached();
+            let (feed, ends) = super::super::run_loader::RunFeed::new();
             let mut dash = make_test_dashboard();
             dash.run_feed = Some(feed);
             dash.runs_loading = true;
@@ -3954,7 +3973,9 @@ mod tests {
             assert!(dash.runs_loading);
 
             let snapshot = super::super::run_loader::RunLoader::default().collect(None, true);
-            snapshots.send(Some(std::sync::Arc::new(snapshot))).unwrap();
+            ends.snapshots
+                .send(Some(std::sync::Arc::new(snapshot)))
+                .unwrap();
             dash.sync_from_run_state();
             assert_eq!(dash.agents.len(), 1);
             assert!(!dash.runs_loading);
@@ -3963,8 +3984,183 @@ mod tests {
             // the run now under the cursor is named to the loader.
             dash.sync_from_run_state();
             assert_eq!(dash.agents.len(), 1);
-            assert_eq!(shown.try_recv().unwrap(), Some("fed-run".to_string()));
+            let shown: Vec<_> = ends.showing.try_iter().collect();
+            assert_eq!(shown.last(), Some(&(Some("fed-run".to_string()), false)));
         });
+    }
+
+    /// With a loader thread feeding it, the detail view asks the thread for
+    /// the run's history and never reads the run file on the draw loop; a
+    /// history the thread sends is kept, and one it already holds, read at
+    /// the same stat, changes nothing.
+    #[test]
+    fn a_fed_detail_view_takes_its_history_from_the_loader() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        fn long_run(_run_id: &str) -> Option<crate::runstate::FileStamp> {
+            Some(crate::runstate::FileStamp {
+                mtime: std::time::UNIX_EPOCH,
+                len: 2 << 20,
+            })
+        }
+        fn short_run(_run_id: &str) -> Option<crate::runstate::FileStamp> {
+            Some(crate::runstate::FileStamp {
+                mtime: std::time::UNIX_EPOCH,
+                len: 1,
+            })
+        }
+        static LOADS: AtomicUsize = AtomicUsize::new(0);
+        fn counting_loader(_run_id: &str) -> crate::runstate::RunHistory {
+            LOADS.fetch_add(1, Ordering::SeqCst);
+            crate::runstate::RunHistory::default()
+        }
+        let point = |stage: &str, at: i64| {
+            let mut meta = fixtures::run_meta("fed");
+            meta.current_stage = stage.to_string();
+            leviath_runtime::runfile::history::RunPoint {
+                meta,
+                context: leviath_core::run_meta::ContextSnapshot {
+                    stage_name: stage.to_string(),
+                    total_tokens: 0,
+                    max_tokens: 100,
+                    regions: vec![],
+                },
+                at,
+            }
+        };
+        let loaded = |points| super::super::run_loader::LoadedHistory {
+            run_id: "fed".to_string(),
+            stamp: None,
+            history: crate::runstate::RunHistory {
+                points,
+                transitions: None,
+            },
+        };
+        crate::runstate::with_isolated_runs_dir("dash-fed-history", |_d| {
+            LOADS.store(0, Ordering::SeqCst);
+            let (feed, ends) = super::super::run_loader::RunFeed::new();
+            let mut dash = make_test_dashboard();
+            dash.history_loader = counting_loader;
+            dash.history_stamp = long_run;
+            dash.run_feed = Some(feed);
+            dash.detail_view = true;
+            assert!(!dash.owes_history(), "no run is selected");
+            dash.detail_view = false;
+            runstate::create_run(&make_run_meta("fed", RunStatus::Complete)).unwrap();
+            let snapshot = super::super::run_loader::RunLoader::default().collect(None, true);
+            ends.snapshots
+                .send(Some(std::sync::Arc::new(snapshot)))
+                .unwrap();
+            dash.sync_from_run_state();
+            assert!(!dash.owes_history(), "the list owes nothing");
+            dash.detail_view = true;
+            assert!(dash.owes_history(), "the detail view waits on the loader");
+
+            dash.ensure_history_on_draw("fed");
+            assert_eq!(
+                LOADS.load(Ordering::SeqCst),
+                0,
+                "the draw loop read nothing"
+            );
+            assert!(dash.history.is_none());
+
+            ends.histories
+                .send(loaded(vec![point("plan", 1), point("build", 2)]))
+                .unwrap();
+            dash.sync_from_run_state();
+            assert_eq!(dash.selected_history().unwrap().visits.len(), 2);
+            assert!(!dash.owes_history(), "it has it now");
+            // The loader is told the history is wanted, and once it is held,
+            // at what stat: here a run with no run file.
+            dash.sync_from_run_state();
+            let shown: Vec<_> = ends.showing.try_iter().collect();
+            assert_eq!(shown, [(Some("fed".to_string()), true)]);
+            assert_eq!(
+                *leviath_core::sync::lock(&ends.held),
+                (Some("fed".to_string()), Some(None))
+            );
+
+            // The same history again, at the same stat: what is held stays.
+            dash.context_history_idx = Some(1);
+            ends.histories.send(loaded(vec![])).unwrap();
+            dash.sync_from_run_state();
+            assert_eq!(dash.selected_history().unwrap().points.len(), 2);
+            assert_eq!(dash.context_history_idx, Some(1));
+            assert_eq!(LOADS.load(Ordering::SeqCst), 0);
+
+            // A short run's the draw loop reads itself, and owes nothing.
+            dash.history = None;
+            dash.history_stamp = short_run;
+            assert!(!dash.owes_history());
+            dash.ensure_history_on_draw("fed");
+            assert_eq!(LOADS.load(Ordering::SeqCst), 1);
+            dash.sync_from_run_state();
+            let shown: Vec<_> = ends.showing.try_iter().collect();
+            assert_eq!(shown, [(Some("fed".to_string()), false)], "not asked for");
+            // So is any run's without a feed.
+            dash.run_feed = None;
+            dash.history_stamp = long_run;
+            dash.history = None;
+            assert!(!dash.owes_history());
+            dash.ensure_history_on_draw("fed");
+            assert_eq!(LOADS.load(Ordering::SeqCst), 2);
+        });
+    }
+
+    /// The wait for input: one look a tick long when nothing is loading, a
+    /// short one while the list loads, and while the detail view waits on its
+    /// run's history, short looks that end on input, when the history lands
+    /// (taken there and then), or when the tick is up.
+    #[test]
+    fn the_wait_for_input_ends_when_what_it_waits_on_lands() {
+        use crate::tui::{TestEventSource, key};
+        use crossterm::event::KeyCode;
+        let wait = super::super::wait_for_input;
+        let tick = std::time::Duration::from_secs(3600);
+        let mut dash = make_test_dashboard();
+        let mut events = TestEventSource::new_with_nones(vec![None, Some(key(KeyCode::Char('x')))]);
+        assert!(wait(&mut dash, &mut events, tick).unwrap().is_none());
+        dash.runs_loading = true;
+        assert!(wait(&mut dash, &mut events, tick).unwrap().is_some());
+        dash.runs_loading = false;
+
+        fn long_run(_run_id: &str) -> Option<crate::runstate::FileStamp> {
+            Some(crate::runstate::FileStamp {
+                mtime: std::time::UNIX_EPOCH,
+                len: 2 << 20,
+            })
+        }
+        let (feed, ends) = super::super::run_loader::RunFeed::new();
+        dash.run_feed = Some(feed);
+        dash.history_stamp = long_run;
+        dash.agents
+            .push(make_test_agent("owed", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        assert!(dash.owes_history());
+        // Input ends it, after looks that found nothing.
+        let mut events =
+            TestEventSource::new_with_nones(vec![None, None, Some(key(KeyCode::Char('x')))]);
+        assert!(wait(&mut dash, &mut events, tick).unwrap().is_some());
+        // So does the tick running out.
+        assert!(
+            wait(&mut dash, &mut events, std::time::Duration::ZERO)
+                .unwrap()
+                .is_none()
+        );
+        // And the history landing.
+        ends.histories
+            .send(super::super::run_loader::LoadedHistory {
+                run_id: "owed".to_string(),
+                stamp: None,
+                history: crate::runstate::RunHistory::default(),
+            })
+            .unwrap();
+        assert!(wait(&mut dash, &mut events, tick).unwrap().is_none());
+        assert!(!dash.owes_history(), "it was taken");
+        // A source that fails is an error.
+        dash.history = None;
+        let mut failing = TestEventSource::failing();
+        assert!(wait(&mut dash, &mut failing, tick).is_err());
     }
 
     /// A run deleted here is left out of a snapshot read before the delete,

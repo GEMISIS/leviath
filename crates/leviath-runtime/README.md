@@ -1,8 +1,10 @@
 # leviath-runtime
 
-Leviath's execution engine. Agents live as entities in an ECS world, and the
-stage pipeline, persistence, fan-out to sub-agents, provider wiring, and
-taint tracking are systems that run over them.
+Leviath's execution engine. It resolves a spawn request (a blueprint and
+its typed inputs, or a whole run graph) into a run spec, and keeps each run
+in one run file (`run.lvr`) it can resume from. Runs live as entities in an
+ECS world, and the stage pipeline, persistence, fan-out to sub-agents,
+provider wiring, and taint tracking are systems that run over them.
 
 Part of [Leviath](https://github.com/GEMISIS/leviath), a structured
 agent runtime for LLMs. Most applications should depend on the

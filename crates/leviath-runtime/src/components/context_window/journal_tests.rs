@@ -1,9 +1,7 @@
 //! Tests for [`super`].
 //!
 //! A sibling file rather than an inline `mod tests`, which is what this repo
-//! does with a test module whose own arms cannot all be driven: the
-//! `unreachable!` guarding "the window sends nothing else" is one the lane
-//! cannot produce, and llvm-cov excludes this layout by default
+//! does with a test module, and llvm-cov excludes this layout by default
 //! (see CONTRIBUTING, "Where a test module lives").
 
 use super::*;
@@ -23,22 +21,18 @@ fn window_with_two_regions() -> ContextWindow {
     window
 }
 
-/// A window recording into `tx`, with the stage the caller must hold for as
-/// long as it wants writes to land.
-fn attached(
-    tx: tokio::sync::mpsc::UnboundedSender<PersistMsg>,
-) -> crate::pipeline::PersistenceStage {
-    crate::pipeline::PersistenceStage(tx)
+/// A window recording into `tx`, with the journal the caller must hold for
+/// as long as it wants writes to land.
+fn attached(tx: tokio::sync::mpsc::UnboundedSender<Journaled>) -> crate::pipeline::JournalSender {
+    crate::pipeline::JournalSender::new(tx, None)
 }
 
-/// The one transaction the lane received, as the record's own fields.
+/// The one transaction the journal received, as the record's own fields.
 fn one_transaction(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistMsg>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Journaled>,
 ) -> (String, RunRecord) {
-    let PersistMsg::Append { run_id, record, .. } = rx.try_recv().expect("one record") else {
-        unreachable!("the window sends nothing else")
-    };
-    (run_id, *record)
+    let sent = rx.try_recv().expect("one record");
+    (sent.run_id, *sent.record)
 }
 
 /// The parts of a transaction record a test asserts on.
@@ -68,7 +62,6 @@ fn parts(record: RunRecord) -> (String, String, ContextCause, Vec<RegionCommit>,
 fn what_each_kind_of_push_reports() {
     assert_eq!(Pushed::Nothing.into_region(4, 1), 0);
     assert_eq!(Pushed::Into(2).into_region(4, 6), 2);
-    assert_eq!(Pushed::Everything.into_region(0, 7), 7);
     // A keyed write that took a new key grew the region; one that replaced a key
     // where it stood did not, and nothing the caller holds tells them apart.
     assert_eq!(Pushed::Upsert.into_region(3, 4), 1);
@@ -82,9 +75,9 @@ fn what_each_kind_of_push_reports() {
 fn an_attached_window_records_the_transaction_a_write_committed() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut window = window_with_region();
-    // The stage is held for the whole test, as the world holds it for the whole
-    // run: a window's handle on the lane is weak and writes nothing once the
-    // lane's owner has let go.
+    // The journal is held for the whole test, as the world holds it for the
+    // whole run: a window's handle on it is weak and writes nothing once the
+    // journal's owner has let go.
     let stage = attached(tx);
     window.attach_journal("run-c", Some(&stage));
     let empty = window.revision_now();
@@ -340,14 +333,9 @@ fn a_write_that_moved_nothing_records_nothing() {
 }
 
 /// The invariant the weak handle exists for: a window that has been given a
-/// journal must not keep the persistence lane open.
-///
-/// A clean shutdown closes the lane by dropping the world's sender and waiting
-/// for the worker to finish draining what is queued. A window holding a live
-/// sender keeps that wait going for ever, one per agent, so `lev daemon stop`
-/// never returns and neither does any test that stands up a host.
+/// journal must not keep the world's journal open once the world lets go.
 #[tokio::test]
-async fn an_attached_window_does_not_hold_the_lane_open() {
+async fn an_attached_window_does_not_hold_the_journal_open() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut window = window_with_region();
     window.attach_journal("run-c", Some(&attached(tx.clone())));
@@ -355,9 +343,9 @@ async fn an_attached_window_does_not_hold_the_lane_open() {
     // What a clean shutdown does: drop the world's own sender. The window's
     // handle is all that is left, and it must not count.
     drop(tx);
-    assert!(rx.recv().await.is_none(), "the lane closed");
+    assert!(rx.recv().await.is_none(), "the journal closed");
 
-    // A write down a closed lane records nothing and is otherwise a normal write.
+    // A write to a closed journal records nothing and is otherwise a normal write.
     window
         .add_to_region_caused(ContextCause::Seed, "plan", "late".to_string(), 4)
         .expect("the write fits");

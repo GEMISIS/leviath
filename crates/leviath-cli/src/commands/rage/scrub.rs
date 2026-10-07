@@ -14,8 +14,6 @@
 //! contents, paths. That is the bundle's whole point, and the docs say so in
 //! red before anyone uploads one.
 
-use std::io::{self, Write};
-
 use regex::Regex;
 
 use leviath_core::secrets::{is_secret_header, is_sensitive_env_name};
@@ -96,8 +94,8 @@ impl Scrubber {
     }
 
     /// Scrub every string in a JSON value, and blank any `callback_secret`
-    /// (a run's webhook signing key, which `RunMeta::redacted` drops the same
-    /// way). Returns how many replacements were made.
+    /// (the webhook signing key an earlier release's run record held).
+    /// Returns how many replacements were made.
     pub(crate) fn scrub_json(&self, value: &mut serde_json::Value) -> usize {
         match value {
             serde_json::Value::String(text) => {
@@ -151,53 +149,6 @@ impl Scrubber {
         let (out, textual) = self.scrub(&structural);
         (out, count + textual)
     }
-
-    /// Re-encode a `run.lvr` with its secrets out: every record is scrubbed
-    /// as JSON and written back frame by frame, so the copy reads with the
-    /// same tools as the original. A frame this build cannot parse is
-    /// dropped rather than copied blind, and counted in the returned skips.
-    pub(crate) fn scrub_run_archive(&self, bytes: &[u8]) -> io::Result<ScrubbedArchive> {
-        use leviath_core::run_archive::{
-            Frame, read_archive_start, read_frame, write_archive_start,
-        };
-
-        let mut reader: &[u8] = bytes;
-        let version = read_archive_start(&mut reader)?;
-        let mut out = Vec::with_capacity(bytes.len());
-        write_archive_start(&mut out, version).expect("a Vec accepts writes");
-        let mut redactions = 0;
-        let mut skipped = 0;
-        while let Some(frame) = read_frame(&mut reader)? {
-            match frame {
-                Frame::Record(record) => {
-                    // A record that came off the wire serializes: it is the
-                    // codec's own model, with nothing map-keyed to refuse.
-                    let mut value =
-                        serde_json::to_value(&*record).expect("a run record serializes");
-                    redactions += self.scrub_json(&mut value);
-                    let payload = value.to_string();
-                    out.write_all(&(payload.len() as u64).to_be_bytes())
-                        .expect("a Vec accepts writes");
-                    out.write_all(payload.as_bytes())
-                        .expect("a Vec accepts writes");
-                }
-                Frame::Unreadable { .. } => skipped += 1,
-            }
-        }
-        Ok(ScrubbedArchive {
-            bytes: out,
-            redactions,
-            skipped,
-        })
-    }
-}
-
-/// A re-encoded run archive and what happened on the way.
-pub(crate) struct ScrubbedArchive {
-    pub bytes: Vec<u8>,
-    pub redactions: usize,
-    /// Frames this build could not parse, and so did not copy.
-    pub skipped: usize,
 }
 
 /// Whether a key names a credential: the header rule, minus the few keys

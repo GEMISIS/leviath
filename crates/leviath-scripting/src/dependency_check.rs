@@ -67,6 +67,27 @@ pub fn compile(path: &str, source: &str) -> crate::Result<DependencyCheck> {
     })
 }
 
+/// Compile a dependency's install script and check its shape: it must
+/// define `fn install()` with no parameters, which `lev deps install` calls
+/// with `sh(command)` in hand. Nothing runs here.
+pub fn compile_install(path: &str, source: &str) -> crate::Result<()> {
+    let mut engine = rhai::Engine::new();
+    crate::harden(&mut engine, CHECK_MAX_OPERATIONS);
+    let ast = engine
+        .compile(source)
+        .map_err(|e| crate::Error::CompilationFailed(format!("{path}: {e}")))?;
+    match ast.iter_functions().find(|f| f.name == "install") {
+        Some(f) if f.params.is_empty() => Ok(()),
+        Some(f) => Err(crate::Error::ValidationFailed(format!(
+            "{path}: fn install must take no parameters, found {}",
+            f.params.len()
+        ))),
+        None => Err(crate::Error::ValidationFailed(format!(
+            "{path}: script must define fn install()"
+        ))),
+    }
+}
+
 /// What a check said about a dependency.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -94,6 +115,17 @@ mod tests {
 
     fn compiled(source: &str) -> DependencyCheck {
         compile("deps/check.rhai", source).expect("fixture compiles")
+    }
+
+    #[test]
+    fn an_install_script_must_define_install_with_no_parameters() {
+        assert!(compile_install("i.rhai", "fn install() { sh(\"true\"); }").is_ok());
+        let wrong = compile_install("i.rhai", "fn install(x) { }").unwrap_err();
+        assert!(wrong.to_string().contains("found 1"), "{wrong}");
+        let none = compile_install("i.rhai", "fn check() { }").unwrap_err();
+        assert!(none.to_string().contains("fn install()"), "{none}");
+        let broken = compile_install("i.rhai", "fn install( {").unwrap_err();
+        assert!(broken.to_string().contains("i.rhai"), "{broken}");
     }
 
     #[test]

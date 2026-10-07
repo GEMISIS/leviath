@@ -1,11 +1,16 @@
 //! On-disk run state for background agent executions.
 //!
 //! Each run lives under `~/.leviath/runs/<run-id>/` with:
-//! - `meta.json`    - run metadata, updated atomically (tmp + rename)
-//! - `stages.json` - index of per-stage records
+//! - `run.lvr` - the run file: its spec, its steps and its state (see
+//!   `run_file` for how it is read)
+//! - `final_output` - the answer it handed back
 //! - `stages/<idx>/output.log` - readable agent output for that stage
 //! - `stages/<idx>/logs.log`   - operational events + tool activity
-//! - `stages/<idx>/context.json` - context snapshot for that stage
+//! - `stages/<idx>/taint_audit.json` - the taint gate's decisions
+//! - `blobs/<sha256>` - its stored parts
+//!
+//! The run file names every other file there, and each is found through
+//! what it names (see `beside`), never by a path worked out here.
 //!
 //! The dashboard's activity log is persisted separately at:
 //! - `~/.leviath/dashboard.log` - never cleared, appended across sessions
@@ -21,21 +26,36 @@
 //! bug, and every reconciliation of that gap goes through `looks_abandoned`.
 //!
 //! The runtime's `persistence_bridge` is the only thing that writes a live
-//! run's state. The writers in this module are `#[cfg(test)]` so that stays
-//! true by compilation rather than by convention: a test can lay down a run
-//! directory to read back, and production has no second path to the same files.
+//! run's state. The writers tests lay run directories down with live in
+//! `fixtures_tests` and are `#[cfg(test)]`, so that stays true by compilation
+//! rather than by convention.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use leviath_runtime::state::StageFile;
+
+mod beside;
 mod dashboard_log;
+#[cfg(test)]
+mod fixtures_tests;
 mod force;
+pub(crate) mod run_file;
+pub(crate) use beside::{final_output_path, stage_file_path};
+pub(crate) use run_file::RunHistory;
+#[cfg(test)]
+mod run_file_tests;
 #[cfg(test)]
 pub(crate) use dashboard_log::append_dashboard_log;
 #[cfg(test)]
 use dashboard_log::*;
 pub(crate) use dashboard_log::{append_dashboard_log_to, dashboard_log_path};
-pub(crate) use force::{ForceCancelOutcome, force_cancel, force_cancel_in, force_error_in};
+#[cfg(test)]
+pub(crate) use fixtures_tests::{
+    create_run, create_run_in, create_signed_run, create_signed_run_in, write_context_snapshot,
+    write_meta, write_meta_to, write_stages_index,
+};
+pub(crate) use force::{ForceCancelOutcome, force_cancel, force_cancel_in};
 
 // The plain run-state data types (RunMeta, RunStatus, the snapshot structs, and
 // the per-stage records) live in `leviath_core::run_meta`. Re-exported here so
@@ -47,66 +67,24 @@ pub(crate) use leviath_core::run_meta::{
 #[cfg(test)]
 pub(crate) use leviath_core::run_meta::{RegionEntrySnapshot, RegionSnapshot};
 
-/// Atomically write a context snapshot for the run.
-///
-/// Test-only. Production writes go through the runtime's `persistence_bridge`,
-/// which is the sole writer of a live run's on-disk state; this exists so a
-/// test can lay down a run directory to read back. See the module doc.
-#[cfg(test)]
-pub(crate) fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> anyhow::Result<()> {
-    write_context_snapshot_to(&run_dir(run_id), snap)
-}
-
-/// Atomically write pre-serialized `json` to `path` (via a `.json.tmp`
-/// sibling + rename).
-///
-/// Non-generic (takes an already-serialized string) so it has a single
-/// monomorphization and every region - including the `std::fs` error `?`
-/// arms - is exercised by real tests. Serialization is performed by the
-/// callers, whose concrete production types
-/// (`ContextSnapshot`/`RunMeta`/`&[StageRecord]`) are provably infallible to
-/// serialize (see the `.expect` sites).
-/// Write `body` to `path` atomically, readable only by this user.
-///
-/// Not JSON-specific despite where it started: the final-output sidecar is raw
-/// content, and wants the same private-then-rename treatment for the same
-/// reason.
-pub(crate) fn write_private_atomic(path: &std::path::Path, body: &str) -> anyhow::Result<()> {
-    let tmp = path.with_extension("tmp");
-    // `write_private`: these files carry the run's full task prompt,
-    // conversation and tool output - and `meta.json` carries the webhook
-    // signing secret. They were written with a plain `fs::write` at the umask
-    // default (typically 0644), protected only by the 0700 on the enclosing run
-    // directory. That is one `chmod` away from being readable, and defence in
-    // depth is the whole point of a mode on the file itself.
-    leviath_sys::write_private(&tmp, body.as_bytes())?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-#[cfg(test)]
-fn write_context_snapshot_to(dir: &std::path::Path, snap: &ContextSnapshot) -> anyhow::Result<()> {
-    let json = serde_json::to_string_pretty(snap)
-        .expect("infallible: ContextSnapshot always serializes to JSON");
-    write_private_atomic(&dir.join(leviath_core::files::CONTEXT_FILE), &json)
-}
-
-/// Read the context snapshot for a run, if present.
+/// Read the context snapshot for a run, if present: its window as of its last
+/// step.
 pub(crate) fn read_context_snapshot(run_id: &str) -> Option<ContextSnapshot> {
-    let path = run_dir(run_id).join(leviath_core::files::CONTEXT_FILE);
-    let json = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&json).ok()
+    read_context_in(&run_dir(run_id))
+}
+
+/// [`read_context_snapshot`] for a run directory the caller already holds.
+fn read_context_in(dir: &Path) -> Option<ContextSnapshot> {
+    run_file::context_in(dir)
 }
 
 /// A parse cache keyed by a file's `(mtime, len)`: the file is re-read and
 /// re-parsed only when its stat changes.
 ///
-/// For pollers reading run state on a tick. The dashboard synced at 10Hz by
-/// re-parsing every run's `meta.json`, `stages.json`, and whole
-/// `context.json`; with 50 runs on disk that was on the order of 100 MB/s of
-/// allocate-and-parse-and-free for files that change at most once per persist
-/// tick. A `stat` costs microseconds; this turns the steady-state tick into
-/// stats plus clones of shared `Arc`s.
+/// For pollers reading run state on a tick. A dashboard syncing at 10Hz
+/// would otherwise decode every run's file every tick, for files that change
+/// at most once per persist tick. A `stat` costs microseconds; this turns the
+/// steady-state tick into stats plus clones of shared `Arc`s.
 ///
 /// `(mtime, len)` rather than mtime alone: the persistence lane's atomic
 /// rename gives every update a fresh temp inode and mtime, but coarse mtime
@@ -135,44 +113,24 @@ impl<T> Default for StatCache<T> {
 }
 
 impl<T> StatCache<T> {
-    /// The value parsed from `path`, re-reading only when the file's stat
-    /// changed since the last call. `None` when the file is missing,
-    /// unreadable, or `parse` rejects it - negative results are cached too, so
-    /// a persistently-bad file costs one stat per tick, not one parse.
-    pub(crate) fn get_with(
-        &mut self,
-        path: &Path,
-        parse: impl FnOnce(&str) -> Option<T>,
-    ) -> Option<Arc<T>> {
-        self.get_with_recheck(path, parse, std::time::Duration::ZERO)
-    }
-
-    /// [`get_with`](Self::get_with), skipping the stat when the entry was
-    /// checked less than `recheck_after` ago.
+    /// The value `read` works out for `path`, worked out again only when the
+    /// file's stat changed since the last call. `None` when the file is
+    /// missing, or `read` finds nothing; negative results are cached too, so
+    /// a persistently-bad file costs one stat per tick, not one read.
     ///
-    /// The stat is the cost. A dashboard over 750 runs stat'ed 1,500 files
-    /// ten times a second to learn that 1,490 of them, belonging to runs that
-    /// finished days ago, had not changed; two thirds of its idle CPU was that
+    /// The stat is skipped while the entry was checked less than
+    /// `recheck_after` ago, the window worked out from what the cache holds
+    /// for `path` (`None` for nothing, or a file that did not read). The stat
+    /// is the cost. A dashboard over 750 runs stat'ed 1,500 files ten times a
+    /// second to learn that 1,490 of them, belonging to runs that finished
+    /// days ago, had not changed; two thirds of its idle CPU was that
     /// question. A caller that knows a file has settled (a finished run's
     /// record) asks it once a second instead, and a file it knows is live
-    /// passes `Duration::ZERO` and is stat'ed every time, as before.
-    pub(crate) fn get_with_recheck(
+    /// passes `Duration::ZERO` and is stat'ed every time.
+    pub(crate) fn get_reading(
         &mut self,
         path: &Path,
-        parse: impl FnOnce(&str) -> Option<T>,
-        recheck_after: std::time::Duration,
-    ) -> Option<Arc<T>> {
-        self.get_with_recheck_by(path, parse, |_| recheck_after)
-    }
-
-    /// [`get_with_recheck`](Self::get_with_recheck), with the window worked
-    /// out from what the cache holds for `path` (`None` for nothing, or a file
-    /// that did not parse), in one lookup: a poller over thousands of settled
-    /// runs does little else per run but hash its path.
-    pub(crate) fn get_with_recheck_by(
-        &mut self,
-        path: &Path,
-        parse: impl FnOnce(&str) -> Option<T>,
+        read: impl FnOnce() -> Option<T>,
         recheck_after: impl FnOnce(Option<&T>) -> std::time::Duration,
     ) -> Option<Arc<T>> {
         if let Some(entry) = self.entries.get(path)
@@ -194,10 +152,7 @@ impl<T> StatCache<T> {
             entry.checked = checked;
             return entry.value.clone();
         }
-        let value = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| parse(&text))
-            .map(Arc::new);
+        let value = read().map(Arc::new);
         self.entries.insert(
             path.to_path_buf(),
             CacheEntry {
@@ -220,24 +175,6 @@ impl<T> StatCache<T> {
     }
 }
 
-/// Read + parse a run's portable archive (`<run_dir>/run.lvr`), returning its
-/// records, or `None` if the archive is missing or unreadable.
-///
-/// Materializes the whole journal. For anything that only walks the timeline
-/// (the history API, journal search highlights), prefer [`visit_run_archive`]:
-/// a mature run's journal is tens of MB, and parsing it whole per request was
-/// the API's single largest transient allocation.
-pub(crate) fn read_run_archive(run_id: &str) -> Option<Vec<leviath_core::run_archive::RunRecord>> {
-    let path = run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE);
-    let bytes = std::fs::read(&path).ok()?;
-    // Lenient, not strict: this reads an archive some other build may have
-    // written, so a record kind added later must be stepped over rather than
-    // rejecting the file (or, worse, truncating it silently).
-    leviath_core::run_archive::read_archive_lenient(&mut bytes.as_slice())
-        .ok()
-        .map(|(_version, records)| records)
-}
-
 /// A file's size and modification time: what tells a reader whether it has
 /// changed since it was last read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,83 +183,52 @@ pub(crate) struct FileStamp {
     pub(crate) len: u64,
 }
 
-/// The stamp of a run's archive (`<run_dir>/run.lvr`), or `None` when it has
-/// none.
-pub(crate) fn archive_stamp(run_id: &str) -> Option<FileStamp> {
-    let meta = std::fs::metadata(run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE)).ok()?;
+/// The stamp of the file at `path`, or `None` when there is none.
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
     Some(FileStamp {
         mtime: meta.modified().unwrap_or(std::time::UNIX_EPOCH),
         len: meta.len(),
     })
 }
 
-/// Stream a run's raw journal records through `visit`, one at a time, without
-/// materializing the archive. Same lenient tail handling as
-/// [`visit_run_archive`]. For consumers that inspect records rather than
-/// replayed points (journal search).
-pub(crate) fn visit_run_records(
-    run_id: &str,
-    visit: &mut dyn FnMut(&leviath_core::run_archive::RunRecord) -> std::ops::ControlFlow<()>,
-) -> Option<()> {
-    let path = run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE);
-    let file = std::fs::File::open(&path).ok()?;
-    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
-    leviath_core::run_archive::read_archive_start(&mut reader).ok()?;
-    // A frame this build cannot parse is skipped, not treated as the end: it
-    // was written by a later version and the records after it are still ours.
-    while let Ok(Some(frame)) = leviath_core::run_archive::read_frame(&mut reader) {
-        let leviath_core::run_archive::Frame::Record(record) = frame else {
-            continue;
-        };
-        if visit(&record).is_break() {
-            break;
-        }
-    }
-    Some(())
+/// The stamp of a run's file (`<run_dir>/run.lvr`), or `None` when it has
+/// none.
+pub(crate) fn run_file_stamp(run_id: &str) -> Option<FileStamp> {
+    file_stamp(&run_file::path_in(&run_dir(run_id)))
 }
 
-/// Stream a run's archive through a [`visit_points`] visitor without ever
-/// materializing the journal: one buffered pass over `run.lvr`, one record and
-/// one running window in memory. Returns `None` if the archive is missing or
-/// its preamble is invalid; a torn tail (a live run mid-append) just ends the
-/// walk with the points already visited.
-///
-/// [`visit_points`]: leviath_core::run_archive::visit_points
-pub(crate) fn visit_run_archive(
-    run_id: &str,
-    visit: &mut dyn FnMut(leviath_core::run_archive::PointRef<'_>) -> std::ops::ControlFlow<()>,
-) -> Option<()> {
-    let path = run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE);
-    let file = std::fs::File::open(&path).ok()?;
-    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
-    leviath_core::run_archive::visit_archive_points(&mut reader, visit).ok()
+/// The stamps of the two files a run's answer is read from: its run file,
+/// which says whether it has one and names the file that holds it, and that
+/// file.
+pub(crate) fn answer_stamps(run_id: &str) -> (Option<FileStamp>, Option<FileStamp>) {
+    let dir = run_dir(run_id);
+    (
+        file_stamp(&run_file::path_in(&dir)),
+        final_output_path(&dir).and_then(|path| file_stamp(&path)),
+    )
 }
 
 /// A run's context-window history: the full window (+ metadata) at each recorded
-/// point over time, oldest first. Empty when there's no readable archive.
-///
-/// Every point's `meta` is [`RunMeta::redacted`]. The journal stores `RunMeta`
-/// whole - including `callback_secret`, which the daemon needs to keep signing
-/// webhooks for a run it reloads - so a replayed point carries the secret unless
-/// it is stripped here. `GET /api/agents/{id}/context/history` serialized these
-/// points directly, which handed the webhook signing key to any holder of the
-/// API token: the same disclosure `redacted()` was introduced for on
-/// `/api/agents`, re-opened through the archive.
-///
-/// Redacted in this shared reader rather than in that one handler so the next
-/// consumer of a run's history inherits the fix instead of having to remember
-/// it. No caller needs the secret: the CLI printer, the dashboard, and the API
-/// all only display these points.
-pub(crate) fn context_history(run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
-    read_run_archive(run_id)
-        .map(|records| leviath_core::run_archive::replay_points(&records))
-        .unwrap_or_default()
-        .into_iter()
-        .map(|point| leviath_core::run_archive::RunPoint {
-            meta: point.meta.redacted(),
-            ..point
-        })
-        .collect()
+/// point over time, oldest first. Empty when there's no readable run file.
+/// See [`run_file::history_in`].
+pub(crate) fn context_history(run_id: &str) -> Vec<leviath_runtime::runfile::history::RunPoint> {
+    run_history(run_id).points
+}
+
+/// [`context_history`] a point at a time, each handed to `each` as it is
+/// reached rather than all held at once. False when the run has no history.
+pub(crate) fn each_context_point(
+    run_id: &str,
+    each: impl FnMut(leviath_runtime::runfile::history::RunPoint),
+) -> bool {
+    run_file::walk_history_in(&run_dir(run_id), each).is_some()
+}
+
+/// A run's history: its window over time (see [`context_history`]) and the
+/// edges it took, read off its run file. Empty when there is none.
+pub(crate) fn run_history(run_id: &str) -> RunHistory {
+    run_file::history_in(&run_dir(run_id)).unwrap_or_default()
 }
 
 /// Inner implementation of `runs_dir`, parameterised so it can be tested
@@ -353,7 +259,7 @@ pub fn runs_dir() -> PathBuf {
 /// A `run_id` that is not a single safe path component resolves to
 /// `<runs_dir>/<invalid>`, a name that cannot exist - so a caller that passes an
 /// attacker-supplied id gets a miss rather than a traversal. `run_id` reaches
-/// this from URL segments on `GET /api/agents/{id}/logs` and friends, where
+/// this from URL segments on `GET /api/runs/{id}/logs` and friends, where
 /// `Path::join` would otherwise happily accept `../../` or an absolute path.
 ///
 /// Returning a definitely-missing path rather than an `Option` keeps every
@@ -365,6 +271,12 @@ pub(crate) fn run_dir(run_id: &str) -> PathBuf {
         return runs_dir().join("<invalid>");
     }
     runs_dir().join(run_id)
+}
+
+/// Forget the secrets the run `run_id` keeps in the secret store, as the run
+/// is deleted: nothing signs with them once it is gone.
+pub(crate) fn forget_secrets(run_id: &str) {
+    leviath_runtime::secret_store::SecretStore::of_runs(&runs_dir()).forget_run(run_id);
 }
 
 /// Delete what the run `run_id` put in providers' file storage, reading its
@@ -416,7 +328,7 @@ const RUN_ID_ENTROPY_BITS: u32 = 48;
 /// `lev run` invocations all mint `fetcher-1785127214-8b48` and silently share
 /// one run directory. Nothing downstream detects that - `create_dir_all` is a
 /// no-op on an existing directory and the persistence worker then
-/// last-writer-wins over `meta.json` / `context.json` / `run.lvr`, interleaving
+/// last-writer-wins over the run file and the files beside it, interleaving
 /// two runs' state irrecoverably.
 ///
 /// The `<name>-<secs>-<hex>` shape is preserved: the timestamp keeps IDs sorting
@@ -441,43 +353,6 @@ pub(crate) fn new_run_id(agent_name: &str) -> String {
     )
 }
 
-/// Create the run directory and write initial metadata.
-#[cfg(test)]
-pub(crate) fn create_run(meta: &RunMeta) -> anyhow::Result<()> {
-    create_run_in(&run_dir(&meta.run_id), meta)
-}
-
-/// Create an explicit run directory and write initial metadata into it.
-///
-/// Callers that already know the directory should prefer this over
-/// [`create_run`], which resolves it from the home directory - the daemon's
-/// spawner stakes out the run dir under its own configured `runs_dir`.
-pub(crate) fn create_run_in(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dir)?;
-
-    // Restrict the run directory to owner-only (no-op on non-Unix).
-    let _ = leviath_sys::secure_dir_perms(dir);
-
-    write_meta_to(dir, meta)
-}
-
-/// Atomically write run metadata (write to tmp, then rename).
-#[cfg(test)]
-pub(crate) fn write_meta(meta: &RunMeta) -> anyhow::Result<()> {
-    write_meta_to(&run_dir(&meta.run_id), meta)
-}
-
-/// Atomically write `meta.json` into an explicit run directory.
-///
-/// Callers that already know the directory should prefer this over
-/// [`write_meta`], which resolves it from the home directory - the daemon's
-/// recovery pass works from its configured `runs_dir` instead.
-pub(crate) fn write_meta_to(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
-    let json =
-        serde_json::to_string_pretty(meta).expect("infallible: RunMeta always serializes to JSON");
-    write_private_atomic(&dir.join(leviath_core::files::META_FILE), &json)
-}
-
 /// Read run metadata for a given run ID.
 pub(crate) fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
     read_meta_from(&run_dir(run_id))
@@ -485,27 +360,46 @@ pub(crate) fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
 
 /// Read a run's final output, content included.
 ///
-/// The descriptor in `meta.json` says whether there is one and how big it is;
-/// this fetches the bytes from the sidecar beside it. Returns `None` when the
-/// run produced no answer, or when the sidecar is missing (a run written by a
-/// build that stored the answer inline, or one whose directory was pruned).
+/// The run's file says whether there is one, how big it is, and which file
+/// beside it holds it. Returns `None` when the run produced no answer, or
+/// when the file it names does not read.
 pub(crate) fn read_final_output(run_id: &str) -> Option<leviath_core::FinalOutput> {
-    let meta = read_meta(run_id).ok()?;
-    read_final_output_in(&run_dir(run_id), &meta)
+    read_meta_and_answer(run_id).ok()?.1
 }
 
 /// [`read_final_output`] for a run directory the caller already resolved,
-/// with the metadata it already read. The daemon's recovery works from its
-/// configured runs directory rather than the home one, which is what this
-/// entry point is for.
+/// with the metadata it already read.
+#[cfg(test)]
 pub(crate) fn read_final_output_in(
     dir: &std::path::Path,
     meta: &RunMeta,
 ) -> Option<leviath_core::FinalOutput> {
+    answer_in(dir, meta, &beside::named_files(dir))
+}
+
+/// A run's record and its answer, with its run file read once for both.
+/// See [`read_meta`] and [`read_final_output`].
+pub(crate) fn read_meta_and_answer(
+    run_id: &str,
+) -> anyhow::Result<(RunMeta, Option<leviath_core::FinalOutput>)> {
+    let dir = run_dir(run_id);
+    let tail = run_file::tail_in(&dir)?;
+    let meta = leviath_runtime::runfile::summary_of(&tail.spec, &tail.state, tail.updated_at);
+    let answer = answer_in(&dir, &meta, &tail.state.files);
+    Ok((meta, answer))
+}
+
+/// The answer `meta` says the run in `dir` handed back, from the file
+/// `files` names for it.
+fn answer_in(
+    dir: &std::path::Path,
+    meta: &RunMeta,
+    files: &leviath_runtime::state::RunFiles,
+) -> Option<leviath_core::FinalOutput> {
     let descriptor = meta.final_output.clone()?;
-    let content = std::fs::read_to_string(final_output_path(dir)).ok()?;
+    let bytes = beside::read_named(dir, files.final_output.as_ref()?)?;
     Some(leviath_core::FinalOutput {
-        content,
+        content: String::from_utf8_lossy(&bytes).into_owned(),
         format: descriptor.format,
         stage: descriptor.stage,
         submitted_at: descriptor.submitted_at,
@@ -514,20 +408,20 @@ pub(crate) fn read_final_output_in(
     })
 }
 
-/// Where a run's answer lives, beside its `meta.json`.
-pub(crate) fn final_output_path(dir: &std::path::Path) -> PathBuf {
-    dir.join(leviath_core::FINAL_OUTPUT_FILE)
-}
-
-/// Write a run's answer to its sidecar, atomically.
-///
-/// Raw content with no wrapper: serving it is a read, and `lev result --raw` is
-/// a copy. The descriptor in `meta.json` is what says it exists.
-///
-/// Test-only; see [`write_context_snapshot`].
+/// Write a run's answer beside its run file, and name it there, as the
+/// runtime's persistence lane does for a live run.
 #[cfg(test)]
 pub(crate) fn write_final_output(dir: &std::path::Path, content: &str) -> anyhow::Result<()> {
-    write_private_atomic(&final_output_path(dir), content)
+    let name = leviath_core::FINAL_OUTPUT_FILE;
+    leviath_sys::write_private(&dir.join(name), content.as_bytes())
+        .expect("a test's run directory takes its answer");
+    fixtures_tests::name_files(dir, |files| {
+        files.final_output = Some(leviath_runtime::state::FileRef::whole(
+            name,
+            content.as_bytes(),
+        ));
+    });
+    Ok(())
 }
 
 /// Whether an on-disk run status means the run has finished and should be left
@@ -561,9 +455,8 @@ pub const STALE_AFTER_SECS: i64 = 300;
 /// alone would condemn a run that is working. `None` therefore answers `false`
 /// for everything: no answer is not evidence.
 ///
-/// Ages against `last_progress_at`, falling back to `updated_at` for runs
-/// written before that field existed. The fallback preserves the older, weaker
-/// behavior for old runs rather than declaring them all stale at once.
+/// Ages against `last_progress_at`, falling back to `updated_at` for a record
+/// without it, rather than declaring every such run stale at once.
 ///
 /// One definition, shared by the dashboard's STALE badge and by `lev ps --all`,
 /// so what an operator sees and what a harness reconciles against cannot drift.
@@ -583,39 +476,27 @@ pub(crate) fn looks_abandoned(
 }
 
 /// Read run metadata out of an explicit run directory (the daemon works from its
-/// own configured `runs_dir` rather than the home-resolved one).
+/// own configured `runs_dir` rather than the home-resolved one): its run file
+/// as of its last step.
 pub(crate) fn read_meta_from(dir: &std::path::Path) -> anyhow::Result<RunMeta> {
-    let path = dir.join(leviath_core::files::META_FILE);
-    let json = std::fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&json)?)
+    let tail = run_file::tail_in(dir)?;
+    Ok(leviath_runtime::runfile::summary_of(
+        &tail.spec,
+        &tail.state,
+        tail.updated_at,
+    ))
 }
 
-/// Inner implementation of `list_runs`, parameterised so the early-return
-/// branch can be exercised in tests without deleting real on-disk state.
+/// Inner implementation of `list_runs`, parameterised so a missing runs
+/// directory can be exercised in tests without deleting real on-disk state.
 fn list_runs_in_dir(dir: PathBuf) -> Vec<RunMeta> {
-    if !dir.exists() {
-        return Vec::new();
-    }
-
-    let mut runs = Vec::new();
-
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let meta_path = entry.path().join(leviath_core::files::META_FILE);
-            if let Ok(json) = std::fs::read_to_string(&meta_path)
-                && let Ok(meta) = serde_json::from_str::<RunMeta>(&json)
-            {
-                runs.push(meta);
-            }
-        }
-    }
-
-    runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
-    runs
+    crate::run_index::list(&dir)
 }
 
-/// List all runs, sorted by started_at descending (most recent first).
-/// Silently skips any runs whose metadata cannot be read.
+/// List all runs, sorted by started_at descending (most recent first),
+/// through the run index (see [`crate::run_index`]), so a run file is read
+/// only when it changed since the index last saw it. Silently skips any runs
+/// whose metadata cannot be read.
 pub(crate) fn list_runs() -> Vec<RunMeta> {
     list_runs_in_dir(runs_dir())
 }
@@ -636,9 +517,9 @@ pub(crate) fn list_runs() -> Vec<RunMeta> {
 /// this exists to prevent.
 ///
 /// Two sources, unioned, because neither sees the whole tree on its own: the
-/// scan over every run's `parent_run_id` misses a child whose `meta.json` will
-/// not parse (`list_runs` skips it), and a parent's own `children` list misses
-/// one spawned by a build that did not persist that field. An id named only by
+/// scan over every run's `parent_run_id` misses a child whose run file will
+/// not read (`list_runs` skips it), and a parent's own `children` list misses
+/// one whose file says nothing of its parent. An id named only by
 /// `children` counts only if its directory is really there, so a pruned or
 /// never-created child is not reported as something to delete.
 ///
@@ -702,8 +583,8 @@ pub(crate) fn family_of(root_id: &str) -> Vec<String> {
     ids
 }
 
-/// [`list_runs`] through a [`StatCache`], for pollers: each `meta.json` is
-/// re-parsed only when its stat changes, the runs directory is listed again
+/// [`list_runs`] through a [`StatCache`], for pollers: each run's file is
+/// re-read only when its stat changes, the runs directory is listed again
 /// only when it may have gained or lost a run (see [`RunDirListing`]), and
 /// cache entries for deleted runs are dropped. Same ordering and
 /// skip-unreadable behavior as `list_runs`.
@@ -711,21 +592,32 @@ pub(crate) fn list_runs_cached(
     cache: &mut StatCache<RunMeta>,
     listing: &mut RunDirListing,
 ) -> Vec<Arc<RunMeta>> {
-    if listing.refresh(&runs_dir()) {
+    let root = runs_dir();
+    if listing.refresh(&root) {
         cache.retain_under(&listing.dir_set());
     }
     let mut runs = Vec::with_capacity(listing.dirs.len());
+    // Loaded the first time a run has to be read, so a warm poll that only
+    // stats never opens it.
+    let mut index: Option<crate::run_index::RunIndex> = None;
     for dir in &listing.dirs {
-        let meta_path = dir.join(leviath_core::files::META_FILE);
         // A run this poller already knows to be finished is asked about
         // once a second; a live one (or one never seen) every time.
-        if let Some(meta) = cache.get_with_recheck_by(
-            &meta_path,
-            |json| serde_json::from_str::<RunMeta>(json).ok(),
+        if let Some(meta) = cache.get_reading(
+            &run_file::path_in(dir),
+            || {
+                index
+                    .get_or_insert_with(|| crate::run_index::RunIndex::load(&root))
+                    .run(dir)
+            },
             |meta| meta.map_or(std::time::Duration::ZERO, settle_window),
         ) {
             runs.push(meta);
         }
+    }
+    if let Some(mut index) = index {
+        index.keep_only(&listing.dir_set());
+        index.save();
     }
     runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
     runs
@@ -842,9 +734,13 @@ pub(crate) fn read_stages_index_settled(
     cache: &mut StatCache<Vec<StageRecord>>,
     recheck_after: std::time::Duration,
 ) -> Arc<Vec<StageRecord>> {
-    let path = run_dir(run_id).join(leviath_core::files::STAGES_FILE);
+    let dir = run_dir(run_id);
     cache
-        .get_with_recheck(&path, |json| serde_json::from_str(json).ok(), recheck_after)
+        .get_reading(
+            &run_file::path_in(&dir),
+            || read_stages_in(&dir),
+            |_| recheck_after,
+        )
         .unwrap_or_default()
 }
 
@@ -855,8 +751,12 @@ pub(crate) fn read_context_snapshot_cached(
     run_id: &str,
     cache: &mut StatCache<ContextSnapshot>,
 ) -> Option<Arc<ContextSnapshot>> {
-    let path = run_dir(run_id).join(leviath_core::files::CONTEXT_FILE);
-    cache.get_with(&path, |json| serde_json::from_str(json).ok())
+    let dir = run_dir(run_id);
+    cache.get_reading(
+        &run_file::path_in(&dir),
+        || read_context_in(&dir),
+        |_| std::time::Duration::ZERO,
+    )
 }
 
 /// Read the last `max_bytes` of any file on disk, returning UTF-8 text.
@@ -899,40 +799,21 @@ pub(crate) fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
 // ─── Per-stage persistence ────────────────────────────────────────────────────
 
 /// Directory for per-stage files within a run.
+#[cfg(test)]
 pub(crate) fn stage_dir(run_id: &str, stage_idx: usize) -> PathBuf {
     run_dir(run_id).join("stages").join(stage_idx.to_string())
 }
 
-/// Atomically write the stages index for a run.
-///
-/// Test-only; see [`write_context_snapshot`].
-#[cfg(test)]
-pub(crate) fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow::Result<()> {
-    write_stages_index_to(&run_dir(run_id), stages)
-}
-
-#[cfg(test)]
-fn write_stages_index_to(dir: &std::path::Path, stages: &[StageRecord]) -> anyhow::Result<()> {
-    let json = serde_json::to_string_pretty(&stages)
-        .expect("infallible: StageRecord slice always serializes to JSON");
-    write_private_atomic(&dir.join(leviath_core::files::STAGES_FILE), &json)
-}
-
-/// Read the stages index for a run, or return an empty vec on any error.
+/// Read a run's per-stage ledger as of its last step, or return an empty vec
+/// on any error.
 pub(crate) fn read_stages_index(run_id: &str) -> Vec<StageRecord> {
-    read_stages_index_from(&run_dir(run_id))
+    read_stages_in(&run_dir(run_id)).unwrap_or_default()
 }
 
-/// [`read_stages_index`] for a run directory the caller already holds.
-///
-/// Restart recovery works from its configured runs directory rather than the
-/// home one, so it cannot resolve the path itself.
-pub(crate) fn read_stages_index_from(dir: &std::path::Path) -> Vec<StageRecord> {
-    let json = match std::fs::read_to_string(dir.join(leviath_core::files::STAGES_FILE)) {
-        Ok(j) => j,
-        Err(_) => return Vec::new(),
-    };
-    serde_json::from_str(&json).unwrap_or_default()
+/// [`read_stages_index`] for a run directory the caller already holds,
+/// `None` when it records no ledger.
+fn read_stages_in(dir: &Path) -> Option<Vec<StageRecord>> {
+    run_file::stages_in(dir)
 }
 
 /// Ensure the per-stage directory exists (called before first write).
@@ -942,66 +823,57 @@ fn ensure_stage_dir(run_id: &str, stage_idx: usize) {
     let _ = leviath_sys::create_private_dir_all(&dir);
 }
 
-/// Append a line of readable agent output to the per-stage output log.
+/// Append a line of readable agent output to the per-stage output log, and
+/// name the log in the run's file when it has one.
 ///
-/// Test-only; see [`write_context_snapshot`].
+/// Test-only; the runtime's persistence lane writes a live run's.
 #[cfg(test)]
 pub(crate) fn append_stage_output(run_id: &str, stage_idx: usize, text: &str) {
-    use std::io::Write;
-    ensure_stage_dir(run_id, stage_idx);
-    let path = stage_dir(run_id, stage_idx).join("output.log");
-    if let Ok(mut file) = leviath_sys::open_private_append(&path) {
-        let _ = writeln!(file, "{}", text);
-    }
+    append_stage_line(run_id, stage_idx, StageFile::Output, text);
 }
 
-/// Append a line of operational/tool-activity log to the per-stage logs file.
+/// Append a line of operational/tool-activity log to the per-stage logs
+/// file, and name the log in the run's file when it has one.
 ///
-/// Test-only; see [`write_context_snapshot`].
+/// Test-only; the runtime's persistence lane writes a live run's.
 #[cfg(test)]
 pub(crate) fn append_stage_log(run_id: &str, stage_idx: usize, text: &str) {
+    append_stage_line(run_id, stage_idx, StageFile::Logs, text);
+}
+
+#[cfg(test)]
+fn append_stage_line(run_id: &str, stage_idx: usize, which: StageFile, text: &str) {
     use std::io::Write;
     ensure_stage_dir(run_id, stage_idx);
-    let path = stage_dir(run_id, stage_idx).join("logs.log");
+    let index = stage_idx as u32;
+    let path = leviath_runtime::state::under(&run_dir(run_id), &which.path(index));
     if let Ok(mut file) = leviath_sys::open_private_append(&path) {
         let _ = writeln!(file, "{}", text);
     }
-}
-
-/// Atomically write a context snapshot for a specific stage.
-///
-/// Test-only; see [`write_context_snapshot`].
-#[cfg(test)]
-pub(crate) fn write_stage_context(
-    run_id: &str,
-    stage_idx: usize,
-    snap: &ContextSnapshot,
-) -> anyhow::Result<()> {
-    ensure_stage_dir(run_id, stage_idx);
-    write_context_snapshot_to(&stage_dir(run_id, stage_idx), snap)
-}
-
-/// Read the context snapshot for a specific stage, if present.
-pub(crate) fn read_stage_context(run_id: &str, stage_idx: usize) -> Option<ContextSnapshot> {
-    let path = stage_dir(run_id, stage_idx).join(leviath_core::files::CONTEXT_FILE);
-    let json = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&json).ok()
+    let len = std::fs::metadata(&path).map_or(0, |m| m.len());
+    fixtures_tests::name_files(&run_dir(run_id), |files| {
+        files.set_stage_file(
+            index,
+            which,
+            leviath_runtime::state::FileRef::log(which.path(index), len),
+        );
+    });
 }
 
 /// Read the last `max_bytes` of the readable output log for a specific stage.
 pub(crate) fn tail_stage_output(run_id: &str, stage_idx: usize, max_bytes: u64) -> String {
-    tail_file(&stage_dir(run_id, stage_idx).join("output.log"), max_bytes)
+    beside::tail_stage_file(&run_dir(run_id), stage_idx, StageFile::Output, max_bytes)
 }
 
 /// Read the last `max_bytes` of the operational log for a specific stage.
 pub(crate) fn tail_stage_log(run_id: &str, stage_idx: usize, max_bytes: u64) -> String {
-    tail_file(&stage_dir(run_id, stage_idx).join("logs.log"), max_bytes)
+    beside::tail_stage_file(&run_dir(run_id), stage_idx, StageFile::Logs, max_bytes)
 }
 
 /// Which stage's logs to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StageSelector {
-    /// The stage the run is on now - the last entry in `stages.json`. What a
+    /// The stage the run is on now - the last entry in its ledger. What a
     /// caller tailing a live run wants, and what `agent_result` already picked.
     Current,
     /// One specific stage by index.
@@ -1021,13 +893,13 @@ pub(crate) enum LogStream {
 
 /// Read a run's logs, choosing the stage and the stream.
 ///
-/// The one answer to "where is a run's output" for `GET /api/agents/{id}/logs`
+/// The one answer to "where is a run's output" for `GET /api/runs/{id}/logs`
 /// and `agent_result` alike: logs live per stage under `stages/<idx>/`, and a
 /// run with no stage recorded yet has none.
 ///
-/// Stages come from `stages.json` rather than a `read_dir` of `stages/`, because
-/// that index is the record of which stages exist and in what order - the
-/// directory is just where their bytes landed.
+/// Stages come from the run's ledger rather than a `read_dir` of `stages/`,
+/// because the ledger is the record of which stages exist and in what order -
+/// the directory is just where their bytes landed.
 ///
 /// `max_bytes` applies to what is returned, so for [`StageSelector::All`] it
 /// bounds the joined text rather than each stage separately: "the last N bytes
@@ -1153,7 +1025,7 @@ mod tests {
     use super::*;
     use crate::test_support::fixtures;
 
-    /// `run_id` arrives from URL segments on `GET /api/agents/{id}/logs` and
+    /// `run_id` arrives from URL segments on `GET /api/runs/{id}/logs` and
     /// friends. `Path::join` neither normalizes `..` nor resists an absolute
     /// path, so an unvalidated id read files anywhere. An unsafe one resolves to
     /// a name that cannot exist, giving the caller a plain miss.
@@ -1263,7 +1135,7 @@ mod tests {
 
     /// The progress stamp wins over the heartbeat. A wedged run keeps rewriting
     /// `updated_at` every 30 seconds, so judging on it would never age anything
-    /// out; the stamp is the only field on meta.json that separates a run that
+    /// out; the stamp is the only field on the run's record that separates a run that
     /// is working from one that is only ticking.
     #[test]
     fn a_fresh_heartbeat_does_not_rescue_a_run_that_stopped_moving() {
@@ -1274,8 +1146,8 @@ mod tests {
         assert!(looks_abandoned(&meta, Some(&held(&[])), now));
     }
 
-    /// A run written before the stamp existed falls back to `updated_at`, so old
-    /// runs keep the older, weaker behavior instead of all reading as stale.
+    /// A record without the stamp falls back to `updated_at`, instead of
+    /// reading as stale.
     #[test]
     fn a_run_without_the_stamp_falls_back_to_updated_at() {
         let mut meta = live_on_disk("r1");
@@ -1292,16 +1164,6 @@ mod tests {
             Some(&held(&[])),
             1_000 + STALE_AFTER_SECS + 1
         ));
-    }
-
-    #[test]
-    fn write_json_atomic_fs_write_failure() {
-        // Drive the `std::fs::write(&tmp, json)?` error arm: writing the
-        // `.json.tmp` sibling into a directory that does not exist fails.
-        let path = std::path::Path::new("/nonexistent/leviath/runstate-cov/out.json");
-        let result = write_private_atomic(path, "{}");
-        assert!(result.is_err());
-        assert!(!path.exists());
     }
 
     // ─── RunStatus ──────────────────────────────────────────────────────────
@@ -1431,7 +1293,7 @@ mod tests {
 
     #[test]
     fn run_meta_optional_fields_deserialize() {
-        // Simulate a meta.json without optional fields (e.g., from older version)
+        // A record without its optional fields.
         let json = serde_json::json!({
             "run_id": "r1",
             "agent_name": "a",
@@ -1457,15 +1319,14 @@ mod tests {
         assert!(meta.metadata.is_empty());
         assert!(meta.callback_url.is_none());
         assert!(meta.parent_run_id.is_none());
-        // A run written before the progress stamp existed has no answer, which is
+        // A record without the progress stamp has no answer, which is
         // why the field is an Option: `Some(0)` would read as "last moved in 1970"
         // and invite a reconciler to declare it abandoned.
         assert!(meta.last_progress_at.is_none());
     }
 
-    /// `pid` is written by every daemon there has ever been, and is always 0 in
-    /// the shared world. A file that omits it entirely must still load, so the
-    /// field can be dropped in a future major without stranding old runs.
+    /// `pid` is always 0 in the shared world. A record that omits it entirely
+    /// must still load, so the field can be dropped without stranding a run.
     #[test]
     fn run_meta_without_a_pid_still_loads() {
         let json = serde_json::json!({
@@ -1615,11 +1476,10 @@ mod tests {
 
     // ─── read_final_output ──────────────────────────────────────────────────
 
-    /// The descriptor in `meta.json` and the sidecar beside it have to agree.
-    /// Each way they can disagree reads as "no answer", which is the only safe
-    /// reading: half an answer is worse than none.
+    /// A run's answer is read from the file its run file names; a run with
+    /// none, or whose file is not there, has none.
     #[test]
-    fn read_final_output_needs_both_the_descriptor_and_the_sidecar() {
+    fn read_final_output_needs_both_the_descriptor_and_the_named_file() {
         with_isolated_runs_dir("read-final-output", |_| {
             // No run at all.
             assert!(read_final_output("no-such-run").is_none());
@@ -1629,9 +1489,7 @@ mod tests {
             create_run(&meta).expect("run dir");
             assert!(read_final_output("run-silent").is_none());
 
-            // A descriptor saying there is one, with the sidecar missing: a run
-            // written by a build that stored the answer inline, or one whose
-            // directory was pruned.
+            // No file named: no answer, though the record claims one.
             let answer = leviath_core::output::FinalOutput::new(
                 "the answer",
                 Some("markdown".to_string()),
@@ -1643,12 +1501,27 @@ mod tests {
             create_run(&claimed).expect("run dir");
             assert!(read_final_output("run-claimed").is_none());
 
-            // And both together: the answer comes back whole.
-            write_final_output(&run_dir("run-claimed"), &answer.content).expect("sidecar");
+            // Written and named, it reads.
+            write_final_output(&run_dir("run-claimed"), &answer.content).expect("the answer");
             let read = read_final_output("run-claimed").expect("both halves are there");
             assert_eq!(read.content, "the answer");
             assert_eq!(read.format.as_deref(), Some("markdown"));
             assert_eq!(read.stage, "present");
+            // The record and the answer read together say the same.
+            let (record, together) = read_meta_and_answer("run-claimed").expect("it reads");
+            assert_eq!(record.run_id, "run-claimed");
+            assert_eq!(together, Some(read));
+            assert!(read_final_output_in(&run_dir("run-claimed"), &record).is_some());
+
+            // Named and gone, it does not.
+            std::fs::remove_file(run_dir("run-claimed").join(leviath_core::FINAL_OUTPUT_FILE))
+                .unwrap();
+            assert!(read_final_output("run-claimed").is_none());
+
+            // A record that claims an answer, read against a directory with
+            // no run file naming one, has none.
+            let empty = tempfile::tempdir().unwrap();
+            assert!(read_final_output_in(empty.path(), &claimed).is_none());
         });
     }
 
@@ -1757,7 +1630,7 @@ mod tests {
                 "test-agent".into(),
                 "/agents/test".into(),
                 "unit test".into(),
-                Some("model-x".into()),
+                Some("mock/model-x".into()),
                 "/tmp".into(),
                 2,
             );
@@ -1767,19 +1640,17 @@ mod tests {
             assert_eq!(back.run_id, "test-roundtrip-unit");
             assert_eq!(back.agent_name, "test-agent");
             assert_eq!(back.task, "unit test");
-            assert_eq!(back.model.as_deref(), Some("model-x"));
+            assert_eq!(back.model.as_deref(), Some("mock/model-x"));
         });
     }
 
     #[test]
-    fn read_meta_returns_err_on_corrupted_json() {
-        // Exercises `read_meta_from`'s `serde_json::from_str(&json)?` Err
-        // arm: a `meta.json` that exists but doesn't parse as a `RunMeta`.
+    fn read_meta_returns_err_on_a_run_file_that_will_not_read() {
         with_isolated_runs_dir("read-meta-returns-err-on-corrupted-json", |_d| {
             let run_id = "corrupted-meta-run";
             let dir = run_dir(run_id);
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("meta.json"), "not valid json").unwrap();
+            std::fs::write(run_file::path_in(&dir), "not a run file").unwrap();
 
             let result = read_meta(run_id);
             assert!(result.is_err());
@@ -1826,12 +1697,11 @@ mod tests {
                 stage_name: "test".into(),
                 total_tokens: 42,
                 max_tokens: 8192,
-                regions: vec![],
+                regions: vec![crate::test_fixtures::fixtures::region("task")],
             };
             write_context_snapshot(run_id, &snap).unwrap();
             let back = read_context_snapshot(run_id).unwrap();
-            assert_eq!(back.stage_name, "test");
-            assert_eq!(back.total_tokens, 42);
+            assert_eq!(back.stage_name, "stage0", "the stage the run is in");
         });
     }
 
@@ -1840,76 +1710,20 @@ mod tests {
         assert!(read_context_snapshot("nonexistent-ctx-run").is_none());
     }
 
-    #[test]
-    fn read_run_archive_roundtrips_and_context_history_replays() {
-        with_isolated_runs_dir("read-run-archive-roundtrip", |_d| {
-            use leviath_core::run_archive::{self, RunIdentity, RunRecord};
-            let run_id = "archive-unit";
-            std::fs::create_dir_all(run_dir(run_id)).unwrap();
-            let mut buf = Vec::new();
-            run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
-            let meta = fixtures::run_meta(run_id);
-            run_archive::write_record(
-                &mut buf,
-                &RunRecord::Header {
-                    identity: RunIdentity {
-                        run_id: run_id.to_string(),
-                        machine_id: "m".to_string(),
-                        world_id: "w".to_string(),
-                        created_at: 0,
-                    },
-                    meta: Box::new(meta),
-                },
-            )
-            .unwrap();
-            run_archive::write_record(
-                &mut buf,
-                &RunRecord::ContextCheckpoint {
-                    snapshot: ContextSnapshot {
-                        stage_name: "plan".to_string(),
-                        total_tokens: 3,
-                        max_tokens: 100,
-                        regions: vec![],
-                    },
-                    at: 1,
-                },
-            )
-            .unwrap();
-            std::fs::write(run_dir(run_id).join("run.lvr"), &buf).unwrap();
-
-            let records = read_run_archive(run_id).expect("archive read");
-            assert_eq!(records.len(), 2);
-            let history = context_history(run_id);
-            assert_eq!(history.len(), 1);
-            assert_eq!(history[0].context.stage_name, "plan");
-
-            // The streaming visitors see the same journal without ever
-            // materializing it.
-            let mut streamed_points = Vec::new();
-            visit_run_archive(run_id, &mut |p| {
-                streamed_points.push((p.index, p.context.stage_name.to_string()));
-                std::ops::ControlFlow::Continue(())
-            })
-            .expect("streamed replay");
-            assert_eq!(streamed_points, vec![(0, "plan".to_string())]);
-
-            let mut streamed_records = 0usize;
-            visit_run_records(run_id, &mut |_| {
-                streamed_records += 1;
-                std::ops::ControlFlow::Continue(())
-            })
-            .expect("streamed records");
-            assert_eq!(streamed_records, 2);
-
-            // And a visitor can stop early.
-            let mut first_only = 0usize;
-            visit_run_records(run_id, &mut |_| {
-                first_only += 1;
-                std::ops::ControlFlow::Break(())
-            })
-            .expect("streamed records with break");
-            assert_eq!(first_only, 1);
-        });
+    /// Read `path` as text through `cache`, parsed by `parse`, rechecked
+    /// after `window`.
+    fn cached_text<T>(
+        cache: &mut StatCache<T>,
+        path: &Path,
+        parse: impl FnOnce(&str) -> Option<T>,
+        window: std::time::Duration,
+    ) -> Option<Arc<T>> {
+        let read = || {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| parse(&text))
+        };
+        cache.get_reading(path, read, |_| window)
     }
 
     /// The stat cache's contract: parse once, serve from cache while the stat
@@ -1923,12 +1737,16 @@ mod tests {
         let mut cache: StatCache<i64> = StatCache::default();
         let mut parses = 0;
         let get = |cache: &mut StatCache<i64>, path: &std::path::Path, parses: &mut usize| {
-            cache
-                .get_with(path, |text| {
+            cached_text(
+                cache,
+                path,
+                |text| {
                     *parses += 1;
                     text.trim().parse().ok()
-                })
-                .map(|v| *v)
+                },
+                std::time::Duration::ZERO,
+            )
+            .map(|v| *v)
         };
 
         assert_eq!(get(&mut cache, &path, &mut parses), Some(41));
@@ -1965,8 +1783,19 @@ mod tests {
         std::fs::write(live.join("meta.json"), "1").unwrap();
         std::fs::write(dead.join("meta.json"), "2").unwrap();
         let mut cache: StatCache<i64> = StatCache::default();
-        cache.get_with(&live.join("meta.json"), |t| t.trim().parse().ok());
-        cache.get_with(&dead.join("meta.json"), |t| t.trim().parse().ok());
+        let now = std::time::Duration::ZERO;
+        cached_text(
+            &mut cache,
+            &live.join("meta.json"),
+            |t| t.trim().parse().ok(),
+            now,
+        );
+        cached_text(
+            &mut cache,
+            &dead.join("meta.json"),
+            |t| t.trim().parse().ok(),
+            now,
+        );
         assert_eq!(cache.entries.len(), 2);
 
         let keep: std::collections::HashSet<PathBuf> = [live.clone()].into_iter().collect();
@@ -2004,7 +1833,7 @@ mod tests {
                     stage_name: "plan".to_string(),
                     total_tokens: 3,
                     max_tokens: 100,
-                    regions: vec![],
+                    regions: vec![crate::test_fixtures::fixtures::region("task")],
                 },
             )
             .unwrap();
@@ -2049,11 +1878,11 @@ mod tests {
             assert_eq!(listed.len(), 2);
             assert_eq!(listed[0].run_id, "cached-run-2", "newest first");
 
-            // A run dir with a garbled meta.json is skipped, not fatal - and
+            // A run dir with a garbled run file is skipped, not fatal - and
             // skipped cheaply on every later tick (the negative result is
             // cached until the file changes).
             std::fs::create_dir_all(run_dir("garbled-run")).unwrap();
-            std::fs::write(run_dir("garbled-run").join("meta.json"), "not json {{").unwrap();
+            std::fs::write(run_file::path_in(&run_dir("garbled-run")), "not json {{").unwrap();
             assert_eq!(list_runs_cached(&mut metas, &mut listing).len(), 2);
 
             // A run whose dir disappears falls out of the cached listing.
@@ -2114,21 +1943,18 @@ mod tests {
         std::fs::write(&path, "1").unwrap();
         let mut cache: StatCache<String> = StatCache::default();
         let parse = |s: &str| Some(s.to_string());
+        let read = || std::fs::read_to_string(&path).ok();
         let mut seen = Vec::new();
         let mut window_for = |cached: Option<&String>| {
             seen.push(cached.cloned());
             std::time::Duration::from_secs(3600)
         };
         assert_eq!(
-            *cache
-                .get_with_recheck_by(&path, parse, &mut window_for)
-                .unwrap(),
+            *cache.get_reading(&path, read, &mut window_for).unwrap(),
             "1"
         );
         assert_eq!(
-            *cache
-                .get_with_recheck_by(&path, parse, &mut window_for)
-                .unwrap(),
+            *cache.get_reading(&path, read, &mut window_for).unwrap(),
             "1"
         );
         // Nothing was cached for the first read, so it had no window to ask
@@ -2142,17 +1968,18 @@ mod tests {
         // ticks) is invisible to it by design.
         std::fs::write(&path, "22").unwrap();
         let hour = std::time::Duration::from_secs(3600);
-        assert_eq!(*cache.get_with_recheck(&path, parse, hour).unwrap(), "1");
-        assert_eq!(*cache.get_with(&path, parse).unwrap(), "22");
+        let now = std::time::Duration::ZERO;
+        assert_eq!(*cached_text(&mut cache, &path, parse, hour).unwrap(), "1");
+        assert_eq!(*cached_text(&mut cache, &path, parse, now).unwrap(), "22");
         // A stat that finds the same stamp refreshes the check time without a
         // parse, so the next windowed read is answered from memory too.
-        assert_eq!(*cache.get_with(&path, parse).unwrap(), "22");
-        assert_eq!(*cache.get_with_recheck(&path, parse, hour).unwrap(), "22");
+        assert_eq!(*cached_text(&mut cache, &path, parse, now).unwrap(), "22");
+        assert_eq!(*cached_text(&mut cache, &path, parse, hour).unwrap(), "22");
 
         // A missing file is forgotten, and a window does not resurrect it.
         std::fs::remove_file(&path).unwrap();
-        assert!(cache.get_with(&path, parse).is_none());
-        assert!(cache.get_with_recheck(&path, parse, hour).is_none());
+        assert!(cached_text(&mut cache, &path, parse, now).is_none());
+        assert!(cached_text(&mut cache, &path, parse, hour).is_none());
     }
 
     /// A finished run settles; a live, waiting or paused one does not.
@@ -2241,7 +2068,7 @@ mod tests {
             // `iteration: 7` without the file changing length, so a rewrite
             // inside one filesystem clock tick is a stat the cache cannot tell
             // from the one it already holds.
-            touch_newer(&run_dir("live").join(leviath_core::files::META_FILE));
+            touch_newer(&run_file::path_in(&run_dir("live")));
             let listed = list_runs_cached(&mut metas, &mut listing);
             let by_id = |id: &str| listed.iter().find(|m| m.run_id == id).unwrap().clone();
             assert_eq!(by_id("live").iteration, 7, "a live run is read every tick");
@@ -2275,223 +2102,13 @@ mod tests {
             // Outside the window (forced here by asking with no window) the
             // rename is seen.
             let fresh = metas
-                .get_with(&run_dir("done").join("meta.json"), |json| {
-                    serde_json::from_str::<RunMeta>(json).ok()
-                })
+                .get_reading(
+                    &run_file::path_in(&run_dir("done")),
+                    || read_meta_from(&run_dir("done")).ok(),
+                    |_| std::time::Duration::ZERO,
+                )
                 .unwrap();
             assert_eq!(fresh.title.as_deref(), Some("renamed"));
-        });
-    }
-
-    #[test]
-    fn streaming_visitors_return_none_when_the_archive_is_missing() {
-        with_isolated_runs_dir("streaming-visitors-missing", |_d| {
-            // One visitor closure of each kind, shared across every call in
-            // this test - the last pair of calls (on a real archive) executes
-            // them, so a missing/invalid archive is proven by the counters
-            // staying put, not by never-run closures.
-            let points_seen = std::cell::Cell::new(0usize);
-            let mut on_point = |_: leviath_core::run_archive::PointRef<'_>| {
-                points_seen.set(points_seen.get() + 1);
-                std::ops::ControlFlow::Continue(())
-            };
-            let records_seen = std::cell::Cell::new(0usize);
-            let mut on_record = |_: &leviath_core::run_archive::RunRecord| {
-                records_seen.set(records_seen.get() + 1);
-                std::ops::ControlFlow::Continue(())
-            };
-
-            assert!(visit_run_archive("no-such-run", &mut on_point).is_none());
-            assert!(visit_run_records("no-such-run", &mut on_record).is_none());
-            // A file that is not an archive fails the preamble check.
-            let run_id = "bad-preamble";
-            std::fs::create_dir_all(run_dir(run_id)).unwrap();
-            std::fs::write(run_dir(run_id).join("run.lvr"), b"junk").unwrap();
-            assert!(visit_run_archive(run_id, &mut on_point).is_none());
-            assert!(visit_run_records(run_id, &mut on_record).is_none());
-            assert_eq!((points_seen.get(), records_seen.get()), (0, 0));
-
-            // The same closures over a real archive do run.
-            let real = "streaming-visitors-real";
-            std::fs::create_dir_all(run_dir(real)).unwrap();
-            write_minimal_archive(real);
-            assert!(visit_run_archive(real, &mut on_point).is_some());
-            assert!(visit_run_records(real, &mut on_record).is_some());
-            assert_eq!(points_seen.get(), 1);
-            assert_eq!(records_seen.get(), 2);
-        });
-    }
-
-    /// A record kind written by a later build is stepped over, so the records
-    /// after it still reach the caller.
-    ///
-    /// This is the CLI half of the guarantee. The reader here has its own loop
-    /// over frames, separate from the ones in `leviath-core`, so "every reader
-    /// skips" is a claim that has to be checked per reader rather than assumed
-    /// from the primitive being right.
-    #[test]
-    fn streaming_records_steps_over_a_record_kind_from_a_later_build() {
-        with_isolated_runs_dir("visit-records-unknown-kind", |_dir| {
-            use leviath_core::run_archive::{self, RunRecord};
-
-            let run_id = "unknown-kind";
-            std::fs::create_dir_all(run_dir(run_id)).unwrap();
-            write_minimal_archive(run_id);
-
-            // Append a well-framed record this build has no variant for, then
-            // one it does.
-            let mut extra = Vec::new();
-            let payload =
-                serde_json::to_vec(&serde_json::json!({ "FromTheFuture": { "x": 1 } })).unwrap();
-            extra.extend_from_slice(&(payload.len() as u64).to_be_bytes());
-            extra.extend_from_slice(&payload);
-            run_archive::write_record(
-                &mut extra,
-                &RunRecord::Message {
-                    message: leviath_core::run_archive::MessageRecord {
-                        role: "user".to_string(),
-                        content: "after the gap".to_string(),
-                    },
-                    at: 2,
-                },
-            )
-            .unwrap();
-            let path = run_dir(run_id).join("run.lvr");
-            let mut bytes = std::fs::read(&path).unwrap();
-            bytes.extend_from_slice(&extra);
-            std::fs::write(&path, bytes).unwrap();
-
-            let seen = std::cell::RefCell::new(Vec::new());
-            let visited = visit_run_records(run_id, &mut |record| {
-                if let RunRecord::Message { message, .. } = record {
-                    seen.borrow_mut().push(message.content.clone());
-                }
-                std::ops::ControlFlow::Continue(())
-            });
-            assert!(visited.is_some());
-            assert_eq!(
-                seen.into_inner(),
-                vec!["after the gap".to_string()],
-                "the readable record past the unknown one still arrives"
-            );
-        });
-    }
-
-    /// Write a two-record archive (Header + one ContextCheckpoint) for `run_id`.
-    fn write_minimal_archive(run_id: &str) {
-        use leviath_core::run_archive::{self, RunIdentity, RunRecord};
-        let mut buf = Vec::new();
-        run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
-        let meta = fixtures::run_meta(run_id);
-        run_archive::write_record(
-            &mut buf,
-            &RunRecord::Header {
-                identity: RunIdentity {
-                    run_id: run_id.to_string(),
-                    machine_id: "m".to_string(),
-                    world_id: "w".to_string(),
-                    created_at: 0,
-                },
-                meta: Box::new(meta),
-            },
-        )
-        .unwrap();
-        run_archive::write_record(
-            &mut buf,
-            &RunRecord::ContextCheckpoint {
-                snapshot: ContextSnapshot {
-                    stage_name: "plan".to_string(),
-                    total_tokens: 3,
-                    max_tokens: 100,
-                    regions: vec![],
-                },
-                at: 1,
-            },
-        )
-        .unwrap();
-        std::fs::write(run_dir(run_id).join("run.lvr"), &buf).unwrap();
-    }
-
-    /// The journal keeps `callback_secret` (the daemon re-signs webhooks for a
-    /// run it reloads), so a replayed point carries it unless the reader strips
-    /// it. `GET /api/agents/{id}/context/history` serves these points straight
-    /// out, so an unstripped one hands the webhook signing key to any API token
-    /// holder.
-    ///
-    /// Asserts against the *archive* as well as the history, so the test still
-    /// means something if the journal ever stops storing the secret: were that
-    /// to happen, the first assertion fails rather than the second silently
-    /// passing on a field that is no longer there to leak.
-    #[test]
-    fn context_history_redacts_the_webhook_secret_the_journal_keeps() {
-        with_isolated_runs_dir("context-history-redacts-secret", |_d| {
-            use leviath_core::run_archive::{self, RunIdentity, RunRecord};
-            let run_id = "archive-secret-unit";
-            std::fs::create_dir_all(run_dir(run_id)).unwrap();
-            let mut buf = Vec::new();
-            run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
-            let mut meta = fixtures::run_meta(run_id);
-            meta.callback_url = Some("https://example.invalid/hook".to_string());
-            meta.callback_secret = Some("super-secret-signing-key".to_string());
-            run_archive::write_record(
-                &mut buf,
-                &RunRecord::Header {
-                    identity: RunIdentity {
-                        run_id: run_id.to_string(),
-                        machine_id: "m".to_string(),
-                        world_id: "w".to_string(),
-                        created_at: 0,
-                    },
-                    meta: Box::new(meta),
-                },
-            )
-            .unwrap();
-            run_archive::write_record(
-                &mut buf,
-                &RunRecord::ContextCheckpoint {
-                    snapshot: ContextSnapshot {
-                        stage_name: "plan".to_string(),
-                        total_tokens: 3,
-                        max_tokens: 100,
-                        regions: vec![],
-                    },
-                    at: 1,
-                },
-            )
-            .unwrap();
-            std::fs::write(run_dir(run_id).join("run.lvr"), &buf).unwrap();
-
-            // The secret really is on disk, so redaction has work to do. Read
-            // the raw bytes rather than matching over parsed records: a match
-            // that stops at the Header leaves its other arm unreachable, and
-            // this says the thing that actually matters anyway.
-            let raw = std::fs::read(run_dir(run_id).join("run.lvr")).unwrap();
-            assert!(String::from_utf8_lossy(&raw).contains("super-secret-signing-key"));
-
-            // What the reader hands out has it stripped, and keeps the rest.
-            let history = context_history(run_id);
-            assert_eq!(history.len(), 1);
-            assert_eq!(history[0].meta.callback_secret, None);
-            assert_eq!(
-                history[0].meta.callback_url.as_deref(),
-                Some("https://example.invalid/hook")
-            );
-            assert_eq!(history[0].context.stage_name, "plan");
-        });
-    }
-
-    #[test]
-    fn read_run_archive_missing_or_corrupt_returns_none() {
-        with_isolated_runs_dir("read-run-archive-corrupt", |_d| {
-            // Missing archive.
-            assert!(read_run_archive("no-such-archive-run").is_none());
-            assert!(context_history("no-such-archive-run").is_empty());
-            // Corrupt archive (bad magic) → None, not a panic.
-            let run_id = "corrupt-archive-unit";
-            std::fs::create_dir_all(run_dir(run_id)).unwrap();
-            std::fs::write(run_dir(run_id).join("run.lvr"), b"not an archive").unwrap();
-            assert!(read_run_archive(run_id).is_none());
-            assert!(context_history(run_id).is_empty());
         });
     }
 
@@ -2508,6 +2125,7 @@ mod tests {
     fn append_and_tail_stage_output() {
         with_isolated_runs_dir("append-and-tail-stage-output", |_d| {
             let run_id = "test-stage-output-unit";
+            create_run(&fixtures::run_meta(run_id)).unwrap();
             append_stage_output(run_id, 0, "line 1");
             append_stage_output(run_id, 0, "line 2");
             let output = tail_stage_output(run_id, 0, 4096);
@@ -2520,35 +2138,13 @@ mod tests {
     fn append_and_tail_stage_log() {
         with_isolated_runs_dir("append-and-tail-stage-log", |_d| {
             let run_id = "test-stage-log-unit";
+            create_run(&fixtures::run_meta(run_id)).unwrap();
             append_stage_log(run_id, 0, "event A");
             append_stage_log(run_id, 0, "event B");
             let log = tail_stage_log(run_id, 0, 4096);
             assert!(log.contains("event A"));
             assert!(log.contains("event B"));
         });
-    }
-
-    // ─── write/read stage context ───────────────────────────────────────────
-
-    #[test]
-    fn write_and_read_stage_context_roundtrip() {
-        with_isolated_runs_dir("write-and-read-stage-context-roundtrip", |_d| {
-            let run_id = "test-stage-ctx-unit";
-            let snap = ContextSnapshot {
-                stage_name: "stage-0".into(),
-                total_tokens: 100,
-                max_tokens: 4096,
-                regions: vec![],
-            };
-            write_stage_context(run_id, 0, &snap).unwrap();
-            let back = read_stage_context(run_id, 0).unwrap();
-            assert_eq!(back.stage_name, "stage-0");
-        });
-    }
-
-    #[test]
-    fn read_stage_context_missing_returns_none() {
-        assert!(read_stage_context("nonexistent-run", 99).is_none());
     }
 
     // ─── append_dashboard_log ─────────────────────────────────────────────
@@ -2915,6 +2511,7 @@ mod tests {
     fn append_stage_output_multiple_stages() {
         with_isolated_runs_dir("append-stage-output-multiple-stages", |_d| {
             let run_id = "test-multi-stage-out";
+            create_run(&fixtures::run_meta(run_id)).unwrap();
             append_stage_output(run_id, 0, "stage 0 output");
             append_stage_output(run_id, 1, "stage 1 output");
             append_stage_output(run_id, 2, "stage 2 output");
@@ -3130,53 +2727,6 @@ mod tests {
     // ─── hermetic write/read coverage tests (use _to/_from/_in helpers) ───────
 
     #[test]
-    fn write_context_snapshot_to_hermetic() {
-        let dir = tempfile::tempdir().unwrap();
-        let snap = ContextSnapshot {
-            stage_name: "cov-stage".into(),
-            total_tokens: 42,
-            max_tokens: 8192,
-            regions: vec![],
-        };
-        write_context_snapshot_to(dir.path(), &snap).unwrap();
-        let json = std::fs::read_to_string(dir.path().join("context.json")).unwrap();
-        let back: ContextSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.total_tokens, 42);
-    }
-
-    #[test]
-    fn write_context_snapshot_to_fails_without_dir() {
-        let snap = ContextSnapshot {
-            stage_name: "s".into(),
-            total_tokens: 1,
-            max_tokens: 100,
-            regions: vec![],
-        };
-        let nonexistent = std::path::Path::new("/nonexistent-cov-dir-xyzzy-abc");
-        let result = write_context_snapshot_to(nonexistent, &snap);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_context_snapshot_to_fails_when_rename_target_is_a_dir() {
-        // Covers the `std::fs::rename(&tmp, &path)?` `Err` arm: the tmp file
-        // write succeeds (its directory is writable), but the final rename
-        // fails because `context.json` already exists as a *directory* --
-        // `rename(2)` on POSIX refuses to replace a directory with a
-        // regular file, unlike a plain overwrite of an existing file.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("context.json")).unwrap();
-        let snap = ContextSnapshot {
-            stage_name: "s".into(),
-            total_tokens: 1,
-            max_tokens: 100,
-            regions: vec![],
-        };
-        let result = write_context_snapshot_to(dir.path(), &snap);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn create_run_in_hermetic() {
         let tmpdir = tempfile::tempdir().unwrap();
         let run_dir = tmpdir.path().join("cov-run");
@@ -3240,76 +2790,9 @@ mod tests {
     }
 
     #[test]
-    fn write_meta_to_fails_without_dir() {
-        let meta = RunMeta::new(
-            "cov-no-dir".into(),
-            "a".into(),
-            "/".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        let bad = std::path::Path::new("/nonexistent-cov-write-meta-xyzzy");
-        let result = write_meta_to(bad, &meta);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_meta_to_fails_when_rename_target_is_a_dir() {
-        // See `write_context_snapshot_to_fails_when_rename_target_is_a_dir`:
-        // same `std::fs::rename(&tmp_path, &final_path)?` `Err` arm, forced
-        // by pre-creating `meta.json` as a directory.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("meta.json")).unwrap();
-        let meta = RunMeta::new(
-            "cov-rename-fail".into(),
-            "a".into(),
-            "/".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        let result = write_meta_to(dir.path(), &meta);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn read_meta_from_fails_on_missing_file() {
         let tmpdir = tempfile::tempdir().unwrap();
         let result = read_meta_from(tmpdir.path());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_stages_index_to_hermetic() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let stages = vec![StageRecord::new("cov-stage".into(), 0)];
-        write_stages_index_to(tmpdir.path(), &stages).unwrap();
-        let json = std::fs::read_to_string(tmpdir.path().join("stages.json")).unwrap();
-        let back: Vec<StageRecord> = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.len(), 1);
-        assert_eq!(back[0].name, "cov-stage");
-    }
-
-    #[test]
-    fn write_stages_index_to_fails_without_dir() {
-        let stages = vec![StageRecord::new("s".into(), 0)];
-        let bad = std::path::Path::new("/nonexistent-cov-stages-xyzzy");
-        let result = write_stages_index_to(bad, &stages);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn write_stages_index_to_fails_when_rename_target_is_a_dir() {
-        // See `write_context_snapshot_to_fails_when_rename_target_is_a_dir`:
-        // same `std::fs::rename(&tmp, &path)?` `Err` arm, forced by
-        // pre-creating `stages.json` as a directory.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("stages.json")).unwrap();
-        let stages = vec![StageRecord::new("s".into(), 0)];
-        let result = write_stages_index_to(dir.path(), &stages);
         assert!(result.is_err());
     }
 
@@ -3328,20 +2811,16 @@ mod tests {
             "/tmp".into(),
             1,
         );
-        let json = serde_json::to_string_pretty(&meta).unwrap();
-        std::fs::write(run_subdir.join("meta.json"), &json).unwrap();
+        create_run_in(&run_subdir, &meta).unwrap();
 
-        // list_runs_in_dir now reads meta.json directly from the dir, no env var needed
         let runs = list_runs_in_dir(tmpdir.path().to_path_buf());
         assert!(runs.iter().any(|r| r.run_id == run_id));
     }
 
     #[test]
     fn list_runs_in_dir_skips_entry_with_corrupted_meta_json() {
-        // Exercises the `if let Ok(meta) = serde_json::from_str::<RunMeta>(...)`
-        // else arm: a subdirectory whose meta.json exists and is readable as
-        // a string, but doesn't parse as a `RunMeta`, is silently skipped
-        // rather than propagating an error.
+        // A subdirectory whose run file does not read, and one with none, are
+        // skipped rather than failing the listing.
         let tmpdir = tempfile::tempdir().unwrap();
         let good_run_id = "cov-listed-good-run";
         let bad_run_id = "cov-listed-corrupted-run";
@@ -3357,17 +2836,12 @@ mod tests {
             "/tmp".into(),
             1,
         );
-        let json = serde_json::to_string_pretty(&meta).unwrap();
-        std::fs::write(good_subdir.join("meta.json"), &json).unwrap();
+        create_run_in(&good_subdir, &meta).unwrap();
 
         let bad_subdir = tmpdir.path().join(bad_run_id);
         std::fs::create_dir_all(&bad_subdir).unwrap();
-        std::fs::write(bad_subdir.join("meta.json"), "not valid json").unwrap();
+        std::fs::write(run_file::path_in(&bad_subdir), "not a run file").unwrap();
 
-        // A subdirectory with NO meta.json exercises the *other* skip branch:
-        // the `if let Ok(json) = read_to_string(&meta_path)` else arm (the file
-        // can't be read), distinct from the parse-fails arm above. Covering
-        // both here keeps list_runs_in_dir at 100% on every OS deterministically.
         let no_meta_run_id = "cov-listed-no-meta-run";
         std::fs::create_dir_all(tmpdir.path().join(no_meta_run_id)).unwrap();
 
@@ -3409,12 +2883,7 @@ mod tests {
     #[test]
     fn force_cancel_leaves_a_finished_run_alone() {
         let base = tempfile::tempdir().unwrap();
-        for status in [
-            RunStatus::Complete,
-            RunStatus::CompleteInteractive,
-            RunStatus::Error,
-            RunStatus::Cancelled,
-        ] {
+        for status in [RunStatus::Complete, RunStatus::Error, RunStatus::Cancelled] {
             let dir = run_dir_with(base.path(), &format!("done-{status}"), status.clone());
             assert_eq!(
                 force_cancel_in(&dir, 99),
@@ -3433,133 +2902,20 @@ mod tests {
         assert!(!outcome.found_run(), "nothing to cancel");
     }
 
-    /// A run dir whose metadata can't be parsed still gets terminated. Such a run
-    /// is skipped by `list_runs`, so leaving it alone makes it both invisible and
-    /// permanent - the one state from which there is no way back.
-    #[test]
-    fn force_cancel_writes_a_record_over_unreadable_metadata() {
-        let base = tempfile::tempdir().unwrap();
-        let dir = base.path().join("corrupt-run");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("meta.json"), "{ not json").unwrap();
-
-        assert_eq!(force_cancel_in(&dir, 99), ForceCancelOutcome::Terminated);
-        let meta = read_meta_from(&dir).expect("now parses");
-        assert_eq!(meta.status, RunStatus::Cancelled);
-        assert_eq!(meta.run_id, "corrupt-run", "recovered from the dir name");
-        assert!(meta.error.is_some(), "records why it was synthesized");
-    }
-
-    /// A directory that exists but can't be written still counts as "found" - the
-    /// caller must not report "no such run" for a run that plainly exists.
+    /// A directory whose run file cannot be written still counts as "found" -
+    /// the caller must not report "no such run" for a run that plainly exists.
     #[test]
     fn force_cancel_reports_a_write_failure_but_still_found_the_run() {
         crate::test_support::with_tracing(|| {
             let base = tempfile::tempdir().unwrap();
             let dir = base.path().join("blocked-run");
             std::fs::create_dir_all(&dir).unwrap();
-            // A directory where `meta.json` must go: the rename can't succeed.
-            std::fs::create_dir_all(dir.join("meta.json")).unwrap();
+            std::fs::write(run_file::path_in(&dir), "not a run file").unwrap();
 
             let outcome = force_cancel_in(&dir, 99);
             assert_eq!(outcome, ForceCancelOutcome::WriteFailed);
             assert!(outcome.found_run());
         });
-    }
-
-    /// The spawn that never became a run: the placeholder is `Starting`, which
-    /// is not terminal, so it has to be rewritten or it claims to be alive for
-    /// ever.
-    #[test]
-    fn force_error_records_the_failure_over_a_starting_placeholder() {
-        let base = tempfile::tempdir().unwrap();
-        let dir = base.path().join("stillborn-run");
-        let meta = RunMeta::new(
-            "stillborn-run".to_string(),
-            "agent".to_string(),
-            "/no/such/agent.leviath".to_string(),
-            "t".to_string(),
-            None,
-            "/tmp".to_string(),
-            0,
-        );
-        create_run_in(&dir, &meta).unwrap();
-        assert_eq!(read_meta_from(&dir).unwrap().status, RunStatus::Starting);
-
-        assert_eq!(
-            force_error_in(&dir, "blueprint not found", 99),
-            ForceCancelOutcome::Terminated
-        );
-
-        let written = read_meta_from(&dir).unwrap();
-        assert_eq!(written.status, RunStatus::Error);
-        assert_eq!(written.error.as_deref(), Some("blueprint not found"));
-        assert_eq!(written.updated_at, 99);
-        // The rest of the placeholder survives, so the run still explains itself.
-        assert_eq!(written.task, "t");
-    }
-
-    #[test]
-    fn force_error_leaves_a_run_that_already_finished_alone() {
-        let base = tempfile::tempdir().unwrap();
-        let dir = base.path().join("done-run");
-        let mut meta = RunMeta::new(
-            "done-run".to_string(),
-            "agent".to_string(),
-            String::new(),
-            "t".to_string(),
-            None,
-            "/tmp".to_string(),
-            0,
-        );
-        meta.status = RunStatus::Complete;
-        create_run_in(&dir, &meta).unwrap();
-
-        assert_eq!(
-            force_error_in(&dir, "too late", 99),
-            ForceCancelOutcome::AlreadyTerminal
-        );
-        assert_eq!(read_meta_from(&dir).unwrap().status, RunStatus::Complete);
-    }
-
-    #[test]
-    fn force_cancel_keeps_an_error_the_run_had_already_recorded() {
-        // Cancelling passes no message of its own, so whatever the run managed
-        // to say about itself before it was killed must survive.
-        let base = tempfile::tempdir().unwrap();
-        let dir = base.path().join("noisy-run");
-        let mut meta = RunMeta::new(
-            "noisy-run".to_string(),
-            "agent".to_string(),
-            String::new(),
-            "t".to_string(),
-            None,
-            "/tmp".to_string(),
-            0,
-        );
-        meta.error = Some("a provider hiccup".to_string());
-        create_run_in(&dir, &meta).unwrap();
-
-        assert_eq!(force_cancel_in(&dir, 99), ForceCancelOutcome::Terminated);
-        let written = read_meta_from(&dir).unwrap();
-        assert_eq!(written.status, RunStatus::Cancelled);
-        assert_eq!(written.error.as_deref(), Some("a provider hiccup"));
-    }
-
-    #[test]
-    fn force_error_writes_its_message_over_unreadable_metadata() {
-        let base = tempfile::tempdir().unwrap();
-        let dir = base.path().join("corrupt-stillborn");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("meta.json"), "{ not json").unwrap();
-
-        assert_eq!(
-            force_error_in(&dir, "blueprint not found", 99),
-            ForceCancelOutcome::Terminated
-        );
-        let written = read_meta_from(&dir).expect("now parses");
-        assert_eq!(written.status, RunStatus::Error);
-        assert_eq!(written.error.as_deref(), Some("blueprint not found"));
     }
 
     #[test]
@@ -3641,7 +2997,7 @@ mod tests {
         });
     }
 
-    /// A child whose `meta.json` will not parse is skipped by `list_runs`, so
+    /// A child whose run file will not parse is skipped by `list_runs`, so
     /// the parent-scan cannot see it. The parent's own `children` list can, and
     /// that is the half that keeps a corrupt child from being left behind.
     #[test]
@@ -3649,7 +3005,7 @@ mod tests {
         with_isolated_runs_dir("descendants-unparseable-child", |_d| {
             plant_run("root", None, &["broken-kid", "never-existed"]);
             plant_run("broken-kid", Some("root"), &[]);
-            std::fs::write(run_dir("broken-kid").join("meta.json"), "{not json")
+            std::fs::write(run_file::path_in(&run_dir("broken-kid")), "{not json")
                 .expect("garble the child's record");
 
             let found = descendant_run_ids("root");

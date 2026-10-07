@@ -55,7 +55,7 @@ pub enum WorldEvent {
         /// still be a reconstruction, so neither answers for the other.
         complete: bool,
         /// The stage the run was in when it crossed - the one doing the
-        /// spending. The full per-stage breakdown is in `stages.json`.
+        /// spending. The full per-stage breakdown is in the run's stage ledger.
         stage: String,
     },
 
@@ -169,7 +169,7 @@ pub enum WorldEvent {
         ///
         /// Carried on the event rather than left for the consumer to read off
         /// disk: this fires the moment the run goes terminal, and the persist
-        /// tick that writes `meta.json` has not necessarily run yet. A webhook
+        /// tick that writes the run file has not necessarily run yet. A webhook
         /// or websocket consumer reading the file would race it and report a
         /// finished run with no answer.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,6 +190,13 @@ pub enum WorldEvent {
         /// How many times the destination stage has been entered, this entry
         /// included.
         iteration: usize,
+        /// The edge taken. `None` when the move took no declared edge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge: Option<String>,
+        /// Why that edge: its condition held, a gate let the run through, the
+        /// model picked it, and so on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::state::TransitionReason>,
     },
     /// A tool call was handed to the async tool lane for execution. Inline
     /// calls (context tools, refusals, gate blocks) resolve without touching
@@ -250,6 +257,14 @@ pub(super) fn usd_to_micros(usd: f64) -> u64 {
         return 0;
     }
     (usd * 1_000_000.0).round() as u64
+}
+
+/// The spend, in millionths of a dollar, at which a run has passed the
+/// threshold `usd`: [`usd_to_micros`], and at least one micro, so that a
+/// positive threshold below a micro is passed by the first micro spent
+/// rather than rounding to a zero no total is ever below.
+pub(super) fn threshold_micros(usd: f64) -> u64 {
+    usd_to_micros(usd).max(1)
 }
 
 impl WorldEvent {
@@ -345,6 +360,14 @@ mod spend_tests {
         assert_eq!(usd_to_micros(f64::NAN), 0);
         assert_eq!(usd_to_micros(f64::INFINITY), 0);
         assert_eq!(usd_to_micros(0.0), 0);
+    }
+
+    /// A threshold is at least one micro, and otherwise what its dollars are.
+    #[test]
+    fn a_threshold_is_at_least_one_micro() {
+        assert_eq!(threshold_micros(0.000_000_4), 1);
+        assert_eq!(threshold_micros(0.000_001), 1);
+        assert_eq!(threshold_micros(5.0), 5_000_000);
     }
 
     /// Every event names the run it is about, which is what a per-run

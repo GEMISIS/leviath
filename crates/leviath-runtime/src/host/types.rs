@@ -7,163 +7,20 @@
 //! They are re-exported from the parent, so every existing `host::ControlOp`
 //! path is unchanged.
 
-use std::collections::HashMap;
-
 use bevy_ecs::entity::Entity;
 
-use crate::world::AgentId;
+use crate::spec::env::Caller;
+use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+
+use crate::spec::request::SpawnRequest;
+use crate::spec::run_spec::RunSpec;
+use crate::spec::summary::SpawnSummary;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use crate::components::{AgentStatus, WaitReason};
 use crate::world::PipelineWorld;
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
-
-/// The parameters for spawning an agent into the world. The runtime doesn't know
-/// how to load blueprints or resolve tools - that policy lives in the
-/// `Spawner` the daemon installs - so this just carries the raw request.
-///
-/// `Debug` is hand-written (below) so `callback_secret` cannot reach a log
-/// line; `Serialize` keeps it, because the secret has to cross the control
-/// socket to the daemon that signs the webhook.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct SpawnArgs {
-    /// The run id to give the new agent (its directory / control key).
-    pub run_id: String,
-    /// Path to the agent manifest directory or bundle.
-    pub blueprint_path: String,
-    /// The task prompt. Seeded into the region keyed `task` (see
-    /// `crate::context_setup::init_window_seeded`); a matching `regions`
-    /// entry, if present, overrides it.
-    pub task: String,
-    /// Literal seed content for named caller-input regions, keyed by the
-    /// region's caller-input name. Merged over `task` at spawn. `#[serde(default)]`
-    /// keeps older requests (which never sent this) deserializing to an empty map.
-    #[serde(default)]
-    pub regions: HashMap<String, String>,
-    /// Files the caller attached: each lands in its region (or the task
-    /// region) as a stored part, beside the text it came with. Bytes ride
-    /// base64 here; the run's blob store holds them from spawn on.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parts: Vec<leviath_core::mime::InboundPart>,
-    /// Optional model override (`provider/model` or `model`).
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Working directory for tool execution.
-    pub workdir: String,
-    /// Custom key/value metadata from the request.
-    #[serde(default)]
-    pub metadata: HashMap<String, String>,
-    /// Webhook to POST on completion/error (surfaced in the run metadata).
-    #[serde(default)]
-    pub callback_url: Option<String>,
-    /// Optional shared secret for HMAC-SHA256 signing the webhook body.
-    #[serde(default)]
-    pub callback_secret: Option<String>,
-    /// Run this agent unattended (the `--yolo` launch override): approve every
-    /// tool call, waive the taint gate, and auto-answer the agent's own prompts
-    /// (`ask_user_*`, blueprint interaction points) rather than parking on the
-    /// interaction hub for a person who isn't there.
-    ///
-    /// An interaction point may opt out with `unattended = "ask"`, and then it
-    /// parks anyway: the point exists precisely because auto-approving it is
-    /// the wrong answer. Such a run waits until somebody answers (or until
-    /// `[limits] interaction_timeout_secs`, when one is set), and from the
-    /// outside that `Waiting` is indistinguishable from a hang.
-    #[serde(default)]
-    pub yolo: bool,
-    /// The named yolo profile (`--yolo=<name>`) that says which parts of
-    /// `yolo` a person still wants: the profile's own tool and shell rules,
-    /// and whether questions, checkpoints and the taint gate still reach
-    /// someone. `None` with `yolo` set is the bare flag. Meaningless without
-    /// `yolo`.
-    #[serde(default)]
-    pub yolo_profile: Option<String>,
-    /// Refuse this run's `seed = { command = ... }` regions (the
-    /// `--no-seed-commands` launch override). Command seeds execute at spawn,
-    /// before any approval prompt, so this is the per-run counterpart to the
-    /// `[security] allow_seed_commands` config switch.
-    #[serde(default)]
-    pub no_seed_commands: bool,
-    /// Tools to allow outright for this run (the `--allow` launch override).
-    #[serde(default)]
-    pub allow: Vec<String>,
-    /// Override the blueprint's max sub-agent tree depth.
-    #[serde(default)]
-    pub max_depth: Option<usize>,
-    /// The run id of this agent's parent, when it is a sub-agent / fan-out
-    /// worker. Persisted in the run metadata so observers (dashboard, `serve`
-    /// tree) can nest children under their parent. `None` for a top-level run.
-    #[serde(default)]
-    pub parent_run_id: Option<String>,
-    /// The stage this run enters as one of its own blueprint's fan-out
-    /// workers. Its input is the work item in `task`, so the caller inputs
-    /// the blueprint requires of a run started from the outside (a `--diff`)
-    /// are not demanded of it: the parent met that contract.
-    #[serde(default)]
-    pub worker_stage: Option<String>,
-    /// The shape this caller wants the run's final output in, overriding what
-    /// the blueprint declares.
-    ///
-    /// A request, not a contract: it changes what the model is asked to produce
-    /// and what gets recorded, and nothing converts between shapes. Naming a
-    /// format without also supplying a schema drops the blueprint's declared
-    /// schema, since a check written for one shape says nothing about another
-    /// (see [`leviath_core::resolve_output_spec`]).
-    #[serde(default)]
-    pub output: Option<leviath_core::output::OutputSpec>,
-    /// Write the exact request this run sends the model into its journal, once
-    /// per provider attempt, whatever `[observability] capture_model_input`
-    /// says machine-wide.
-    ///
-    /// A captured request is the whole prompt, so this is consent for one run
-    /// rather than a setting: it is the switch to reach for when the question
-    /// is about a single run, and it leaves every other run alone. The journal
-    /// then grows by roughly the context size per attempt, with no cap.
-    ///
-    /// Not carried across a daemon restart, for the reason `allow` and
-    /// `max_depth` are not: losing it writes less rather than more, which is
-    /// the harmless direction. A machine-wide setting still applies to the
-    /// reloaded run.
-    #[serde(default)]
-    pub capture_model_input: bool,
-}
-
-/// Every field, with the webhook secret shown as present-or-absent only.
-///
-/// A `#[derive(Debug)]` here meant one `tracing::debug!(?args)` on the spawn
-/// path - there is none today - would print the HMAC key a caller shares
-/// with the daemon. `provider_creds.rs` does the same for API keys.
-impl std::fmt::Debug for SpawnArgs {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SpawnArgs")
-            .field("run_id", &self.run_id)
-            .field("blueprint_path", &self.blueprint_path)
-            .field("task", &self.task)
-            .field("regions", &self.regions)
-            .field("model", &self.model)
-            .field("workdir", &self.workdir)
-            .field("metadata", &self.metadata)
-            .field("callback_url", &self.callback_url)
-            .field(
-                "callback_secret",
-                match self.callback_secret {
-                    Some(_) => &"<set>",
-                    None => &"<unset>",
-                },
-            )
-            .field("yolo", &self.yolo)
-            .field("yolo_profile", &self.yolo_profile)
-            .field("no_seed_commands", &self.no_seed_commands)
-            .field("allow", &self.allow)
-            .field("max_depth", &self.max_depth)
-            .field("parent_run_id", &self.parent_run_id)
-            .field("worker_stage", &self.worker_stage)
-            .field("output", &self.output)
-            .field("capture_model_input", &self.capture_model_input)
-            .finish()
-    }
-}
 
 /// One row of a run listing (`ControlRequest::List`): a live run, its status,
 /// and enough context to judge whether that status is a problem.
@@ -175,16 +32,15 @@ impl std::fmt::Debug for SpawnArgs {
 /// A run id and a status word are not enough: `waiting` on its own says nothing
 /// about whether a person is needed, and gives no way to tell a run that moved a
 /// second ago from one stopped for an hour. Everything here is read straight off
-/// the live world, so it is the daemon's own view, not a re-read of `meta.json`.
+/// the live world, so it is the daemon's own view, not a re-read of the run file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunListEntry {
     /// The run id (`lev ps`'s first column, and what `lev kill` takes).
     pub run_id: String,
     /// The generated one-line title, once there is one.
     ///
-    /// Absent from this listing until now, which meant `lev ps` could only ever
-    /// print a run id and an agent name while the dashboard - reading the same
-    /// runs off disk - had a title for them.
+    /// Carried here so `lev ps` names a run the way the dashboard, reading the
+    /// same run off disk, does.
     #[serde(default)]
     pub title: Option<String>,
     /// The agent's live status.
@@ -207,7 +63,7 @@ pub struct RunListEntry {
     pub tool_calls: usize,
     /// Unix seconds when this run last actually moved (see
     /// [`PersistWatermark`](crate::pipeline::PersistWatermark)). Distinct from
-    /// `meta.json`'s `updated_at`, which also advances on a heartbeat and so
+    /// the run record's `updated_at`, which also advances on a heartbeat and so
     /// cannot be used to tell a working run from a wedged one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_progress_at: Option<i64>,
@@ -227,18 +83,16 @@ pub struct RunListEntry {
     /// working time rather than as zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<leviath_core::run_meta::ActiveClock>,
-    /// Whether this run is unattended (`--yolo`). An unattended run should never
-    /// be sitting on a prompt; if it is, something dropped the flag.
-    #[serde(default)]
-    pub unattended: bool,
-    /// The yolo profile the run was launched under, when it named one.
-    /// Omitted by a daemon older than profiles, and for the bare flag.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo_profile: Option<String>,
+    /// How much of this run goes ahead without a person. A run that is
+    /// unattended outright should never be sitting on a prompt; if it is,
+    /// something dropped the setting. Written as an `unattended` flag and a
+    /// `yolo_profile` beside it, which a daemon older than profiles omits.
+    #[serde(flatten, with = "unattended_keys")]
+    pub unattended: leviath_core::Unattended,
     /// Whether this run finished having modified nothing, when its blueprint
     /// gave it a way to. Only ever true for a run that has stopped.
     ///
-    /// Carried on the row rather than left in `meta.json`, which is read back
+    /// Carried on the row rather than left in the run file, which is read back
     /// only on restart: a run that finished with no work to show for it
     /// otherwise looks exactly like one that succeeded. Defaulted for the same
     /// reason as `unattended` - an older daemon simply omits it.
@@ -271,6 +125,11 @@ pub struct RunListEntry {
     /// `lev result <run-id>` fetches it.
     #[serde(default)]
     pub has_final_output: bool,
+    /// What may keep this run from ever finishing, one line each: stages its
+    /// graph can reach and never leave. Read off the run's spec, so it is the
+    /// same list its spawn answered with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub may_never_finish: Vec<String>,
 }
 
 /// Everything one [`ControlOp::List`] answers with: the live runs, the runs that
@@ -340,21 +199,93 @@ pub struct DaemonHealth {
     pub journal: crate::persist_stats::JournalHealth,
 }
 
-/// The daemon-installed function that turns [`SpawnArgs`] into a live agent:
-/// loads the blueprint, resolves stages/tools, spawns into the world, and
-/// returns the new entity (the host records the run-id mapping). Returns `Err`
-/// with a human-readable message on failure.
-pub(crate) type Spawner =
-    Box<dyn FnMut(&mut PipelineWorld, &SpawnArgs) -> Result<Entity, String> + Send>;
+/// What a host asks of whoever starts its runs: the daemon, or an embedder.
+///
+/// The host owns the world and nothing else. Resolving a request against the
+/// machine, writing the run's file and binding its live handles all happen
+/// here, off the world, on a task of their own; the host only places what
+/// comes back, with [`crate::insert::insert`], which cannot fail.
+#[async_trait::async_trait]
+pub trait RunStarter: Send + Sync {
+    /// Resolve `request` for `caller`, record it, and bind it.
+    async fn start(
+        &self,
+        request: SpawnRequest,
+        caller: Caller,
+    ) -> Result<PreparedRun, SpawnIssues>;
+
+    /// Resolve `request` for `caller` as a dry run: nothing is written and no
+    /// seed with side effects runs.
+    async fn check(
+        &self,
+        request: SpawnRequest,
+        caller: Caller,
+    ) -> Result<SpawnSummary, SpawnIssues>;
+
+    /// Bring the world up to date for a run about to be placed in it: the
+    /// settings that live on the world rather than on the run (the provider
+    /// set, the taint policy, the limits). Runs on the world, just before the
+    /// insert. Nothing to do by default.
+    fn before_insert(&self, _world: &mut PipelineWorld, _spec: &RunSpec) {}
+}
+
+/// A run resolved, recorded and bound, ready to place.
+pub struct PreparedRun {
+    /// Its spec.
+    pub spec: std::sync::Arc<RunSpec>,
+    /// The live handles binding built for it.
+    pub bindings: crate::spec::env::Bindings,
+    /// The state it starts from.
+    pub state: crate::state::RunState,
+}
+
+impl std::fmt::Debug for PreparedRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedRun")
+            .field("run_id", &self.spec.run_id)
+            .field("bindings", &self.bindings)
+            .field("seq", &self.state.seq)
+            .finish()
+    }
+}
+
+/// A refusal that is about the host rather than the request, said the way
+/// every spawn refusal is said.
+pub(crate) fn host_refusal(message: impl Into<String>) -> SpawnIssues {
+    SpawnIssue::new(SpecPath::root(), IssueCode::Unavailable, message).into()
+}
 
 /// The daemon-installed function that pages a previously-unloaded run back into
-/// the world from its on-disk state: given a run id, it reloads the agent (its
-/// blueprint, tool state, context, stage) and returns the new entity, or `None`
-/// if there is no such resumable run on disk. Used for reload-on-demand - a
-/// control/sub-agent op targeting a run that isn't currently in memory pages it
-/// in first via the host's internal resolve-or-reload step. Installed with
-/// [`super::WorldHost::set_reloader`].
-pub(crate) type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<AgentId> + Send>;
+/// the world from its on-disk state: given a run id and what it is wanted
+/// for, it returns the job that reads the run's file and binds its spec off
+/// the serve loop, which resolves to how to place the run, or why it will not
+/// be. Used for reload-on-demand - a control/sub-agent op targeting a run that
+/// isn't currently in memory pages it in first, and waits for it (see
+/// `host::paging`). Installed with [`super::WorldHost::set_reloader`].
+pub type Reloader = Box<dyn FnMut(&str, PageIn) -> super::PageJob + Send>;
+
+/// What an op pages a run in for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageIn {
+    /// To resume it. A run that was cancelled comes back paused, so resuming
+    /// it carries on from where it stopped.
+    Resume,
+    /// For any other op. Only a run that has not stopped comes back: a
+    /// message or a pause sent to a finished run leaves it finished.
+    Address,
+}
+
+/// Why a run was not paged in.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NotPlaced {
+    /// No run by that id is on disk, or its file does not read.
+    Missing,
+    /// The run has stopped, with this status.
+    Stopped(AgentStatus),
+    /// The run cannot be brought back on this machine as it stands. The row
+    /// says why, in its wait reason.
+    Held(Box<RunListEntry>),
+}
 
 /// The daemon-installed last resort for cancelling a run the world cannot hold:
 /// given a run id, it forces that run's **on-disk** state to a terminal status
@@ -362,9 +293,10 @@ pub(crate) type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<Age
 ///
 /// This is what makes a cancel unconditional. [`Reloader`] declines whenever a
 /// run can't be rebuilt - its blueprint was moved or deleted, its metadata is
-/// unreadable, it died mid-spawn before any agent existed - and before this seam
-/// a cancel in that state replied `false` and wrote nothing, so `meta.json` kept
-/// claiming `running`/`starting` forever and the run could never be got rid of.
+/// unreadable, it died mid-spawn before any agent existed - and without this
+/// seam a cancel in that state would reply `false` and write nothing, so the
+/// run file would claim `running`/`starting` forever and the run could never be
+/// got rid of.
 /// The runtime has no notion of the on-disk layout, so the daemon supplies the
 /// writer. Installed with [`super::WorldHost::set_force_terminator`]; without one, a
 /// cancel that misses in the world simply misses (the prior behavior).
@@ -399,35 +331,48 @@ pub type Resumer = Box<dyn FnMut(&mut PipelineWorld, Entity) + Send>;
 /// [`super::WorldHost::set_housekeeper`]; a no-op when none is set.
 pub type Housekeeper = Box<dyn FnMut(&mut PipelineWorld) + Send>;
 
-/// An async hook the host awaits *before* servicing a top-level `Spawn` control
-/// op, so the daemon can do async preparation the sync spawner can't - e.g.
-/// lazily connecting the blueprint's MCP servers into the shared pool so
-/// they're warm by the time [`Spawner`] reads them. The returned future is
-/// `'static` (it must clone anything it needs from the `SpawnArgs`). Installed
-/// with [`super::WorldHost::set_spawn_preprocessor`]; when none is set, spawns proceed
-/// straight to the spawner.
-pub(crate) type SpawnPreprocessor = Box<
-    dyn Fn(&SpawnArgs) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send,
->;
-
 /// A world-access request from an agent's tool lane. The sub-agent tools
 /// (`spawn_agent`/`check_agent`/`send_to_agent`/`kill_agent`) need the world and
-/// the `Spawner`, which only the host holds - the tool lane runs async, off the
-/// world. Each carries a oneshot reply, so the (sequential) tool lane blocks on
+/// the [`RunStarter`], which only the host holds - the tool lane runs async, off
+/// the world. Each carries a oneshot reply, so the (sequential) tool lane blocks on
 /// the host applying it, mirroring the interaction hub.
 pub enum SubAgentOp {
-    /// Spawn a child agent from `args`, linked as a child of `parent_run_id`.
-    /// Rejected if the child would exceed `max_depth`. Reply is the child run id.
+    /// Start a child run of `parent_run_id` from `request`. The child is
+    /// resolved as a [`Caller::Child`] of the parent, so it is never trusted
+    /// with more than the parent is, and refused when the parent has no depth
+    /// left. Reply is the child's run id.
     Spawn {
-        /// The child's spawn parameters (blueprint path, task, etc.). Boxed
-        /// because it is much larger than the other variants' payloads.
-        args: Box<SpawnArgs>,
+        /// What the child runs. Boxed because it is much larger than the other
+        /// variants' payloads.
+        request: Box<SpawnRequest>,
         /// The run id of the agent doing the spawning.
         parent_run_id: String,
-        /// Maximum allowed sub-agent tree depth (root = 0).
-        max_depth: usize,
-        /// Reply: the child's run id, or an error message.
-        reply: oneshot::Sender<Result<String, String>>,
+        /// Reply: the child's run id, or every reason it was refused.
+        reply: oneshot::Sender<Result<crate::spec::summary::Spawned, SpawnIssues>>,
+    },
+    /// Resolve a child run of `parent_run_id` from `request` without starting
+    /// it: the same checks [`SubAgentOp::Spawn`] makes, as the same
+    /// [`Caller::Child`]. Reply is a summary of the run it would be.
+    Validate {
+        /// What the child would run. Boxed like [`SubAgentOp::Spawn`]'s.
+        request: Box<SpawnRequest>,
+        /// The run id of the agent asking.
+        parent_run_id: String,
+        /// Reply: what the child would be, or every reason it would be refused.
+        reply: oneshot::Sender<Result<SpawnSummary, SpawnIssues>>,
+    },
+    /// Read a run's history: what it was started as, where it is now (or was
+    /// at step `at`), and every edge it took. Only a run in the caller's own
+    /// tree (itself, its children, theirs) can be read.
+    History {
+        /// The run to read.
+        run_id: String,
+        /// The run asking.
+        caller_run_id: String,
+        /// The step to read the state at. `None` reads the current state.
+        at: Option<u64>,
+        /// Reply: the history, or why it cannot be read.
+        reply: oneshot::Sender<Result<RunHistory, String>>,
     },
     /// Report a run's current status and answer (`None` if the host has no such
     /// live run).
@@ -482,16 +427,50 @@ pub struct SubAgentReport {
     pub final_output: Option<leviath_core::output::FinalOutput>,
 }
 
+/// What `run_history` reads of a run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunHistory {
+    /// What the run was started as.
+    pub summary: SpawnSummary,
+    /// Its state: now when no step was asked for (live when the world holds
+    /// the run), else as of that step.
+    pub state: crate::state::RunState,
+    /// The last step its run file records.
+    pub last_seq: u64,
+    /// Every edge it took, oldest first, with the step that recorded it.
+    pub transitions: Vec<(u64, crate::state::TransitionRecord)>,
+    /// Its answer, read from the file its run file names: `None` when it
+    /// names none, and why not when that file does not read.
+    pub answer: Option<Result<String, String>>,
+}
+
 /// A control operation addressed to the host, each carrying a oneshot channel the
 /// host replies on. Agents are addressed by run id.
 pub enum ControlOp {
-    /// Spawn a new agent. Reply is the run id on success, or an error message.
+    /// Start a top-level run. Reply is its run id, or every reason it was
+    /// refused.
     Spawn {
-        /// The spawn request. Boxed because it is much larger than the other
+        /// What to run. Boxed because it is much larger than the other
         /// variants' payloads.
-        args: Box<SpawnArgs>,
+        request: Box<SpawnRequest>,
         /// Reply channel.
-        reply: oneshot::Sender<Result<String, String>>,
+        reply: oneshot::Sender<Result<crate::spec::summary::Spawned, SpawnIssues>>,
+    },
+    /// Resolve a top-level run without starting it. Reply is a summary of the
+    /// run it would be, or every reason it would be refused.
+    ValidateSpawn {
+        /// What would run.
+        request: Box<SpawnRequest>,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<SpawnSummary, SpawnIssues>>,
+    },
+    /// A run's state: read live from the world when the run is there, else
+    /// the last state its run file holds. `None` for a run that is neither.
+    Inspect {
+        /// The run to read.
+        run_id: String,
+        /// Reply channel.
+        reply: oneshot::Sender<Option<Box<crate::state::RunState>>>,
     },
     /// The status of a run, or `None` if there is no such run.
     Status {
@@ -529,12 +508,14 @@ pub enum ControlOp {
         /// Reply channel.
         reply: oneshot::Sender<bool>,
     },
-    /// Resume a paused run. Reply is `false` if there is no such (live) run.
+    /// Resume a paused run. Reply is `Ok(false)` if there is no such run or
+    /// nothing in it was paused, and `Err` with what to put back when the run
+    /// is held because this machine still cannot take it back.
     Resume {
         /// The run to resume.
         run_id: String,
         /// Reply channel.
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<Result<bool, String>>,
     },
     /// Cancel a run. Reply is `false` if there is no such (live) run.
     Cancel {
@@ -592,23 +573,30 @@ pub enum ControlOp {
     },
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// A [`RunListEntry`]'s unattended setting on the wire: an `unattended` flag,
+/// and a `yolo_profile` beside it for a named profile. Read the way
+/// [`Unattended::from_keys`](leviath_core::Unattended::from_keys) reads them.
+mod unattended_keys {
+    use leviath_core::Unattended;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    /// The field is visibly present (so a redacted log still says a secret was
-    /// supplied) and its value is not.
-    #[test]
-    fn spawn_args_debug_never_prints_the_callback_secret() {
-        let args = SpawnArgs {
-            run_id: "r1".to_string(),
-            callback_secret: Some("s3cr3t-callback-hmac-key".to_string()),
-            ..SpawnArgs::default()
-        };
-        let out = format!("{args:?}");
-        assert!(!out.contains("s3cr3t-callback-hmac-key"), "{out}");
-        assert!(out.contains("callback_secret: \"<set>\""), "{out}");
-        let none = format!("{:?}", SpawnArgs::default());
-        assert!(none.contains("callback_secret: \"<unset>\""), "{none}");
+    #[derive(Serialize, Deserialize)]
+    struct Keys {
+        #[serde(default)]
+        unattended: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        yolo_profile: Option<String>,
+    }
+
+    pub(super) fn serialize<S: Serializer>(u: &Unattended, s: S) -> Result<S::Ok, S::Error> {
+        Keys {
+            unattended: u.is_on(),
+            yolo_profile: u.profile().map(|p| p.as_str().to_string()),
+        }
+        .serialize(s)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Unattended, D::Error> {
+        Keys::deserialize(d).map(|keys| Unattended::from_keys(keys.unattended, keys.yolo_profile))
     }
 }

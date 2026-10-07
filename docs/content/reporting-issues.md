@@ -39,11 +39,17 @@ A small screen asks what the problem was about. For a run, it asks which one. Th
 | `agents/` | Every installed blueprint |
 | `tools/`, `providers/` | Your drop-in Rhai scripts |
 | `logs/` | `daemon.log`, `daemon.stdio.log`, each `serve-<name>.log` and `dashboard.log`, with their rolled copies |
-| `runs/<id>/` | The run you picked and its sub-agent runs: metadata, stages, context, journal, media, blueprint |
+| `runs/<id>/` | The run you picked and its sub-agent runs: run file, `run.json`, `request.json`, summary, stage logs and media |
 | `blueprint/` | The blueprint you were building, with a check that says whether it parses |
 | `setup/imports.json` | Which other tools' config files exist on this machine, by path only |
 
 The last three depend on what you said the problem was about. Everything else is always in.
+
+A run's `run.lvr` is its run file rewritten with the secrets taken out, and `run.json` holds the
+same values as JSON. The files it names beside it (its answer, stage logs, audits and media) are in
+the bundle at the same paths. Copied into another home's `runs` directory, the run reads like any
+other with `lev run show`, `lev timeline` and `lev result`. `request.json` is the spawn request that starts it
+again, and the zip's `README.md` gives the commands for both.
 
 ## What the zip never holds
 
@@ -82,7 +88,7 @@ stdout that is not a terminal skips it too, so `lev rage` works from a script.
 |---|---|
 | `--about <setup\|run\|agent\|other>` | What the problem was about. Answers the first question |
 | `--run <RUN_ID>` | The run it happened in: an exact id, or a prefix only one run starts with. Implies `--about run` |
-| `--agent <PATH>` | The blueprint you were building: its directory or its `agent.leviath`. Implies `--about agent` |
+| `--agent <PATH>` | The blueprint you were building: its directory or its `agent.toml`. Implies `--about agent` |
 | `--note <TEXT>` | What happened, in your words. Lands at the top of the zip's README |
 | `-o`, `--output <PATH>` | Where to write the zip. Default: `./leviath-rage-<timestamp>.zip` |
 | `--no-blobs` | Leave a run's stored media parts out |

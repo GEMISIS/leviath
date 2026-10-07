@@ -53,7 +53,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use crate::components::AgentState;
 use crate::persistence::RunMetadata;
 use crate::pipeline::{InferenceStage, Providers};
-use crate::title_bridge::{TitleJob, TitleOutcome, run_title_job};
+use crate::title_bridge::{TitleCall, TitleJob, TitleOutcome};
 
 /// The `[title]` config, as a world resource (inserted by the daemon at
 /// setup). Absent in worlds that never title (tests, `lev run` without it).
@@ -221,13 +221,13 @@ fn resolve_title_model(
 pub fn stage_pairs(
     provider: &str,
     model: &str,
-    fallbacks: &[leviath_core::blueprint::ModelEntry],
+    fallbacks: &[crate::spec::names::ModelRef],
 ) -> Vec<(String, String)> {
     std::iter::once((provider.to_string(), model.to_string()))
         .chain(
             fallbacks
                 .iter()
-                .map(|e| (e.provider.clone(), e.model.clone())),
+                .map(|e| (e.provider_or_empty().to_string(), e.model.to_string())),
         )
         .collect()
 }
@@ -315,7 +315,7 @@ fn no_thinking_extra(provider: &str) -> serde_json::Value {
         // refuses `none`. `low` is in every set this route has shown us, and
         // a title that arrives beats a cheaper one that 400s. This shipped as
         // `minimal`, and every `codex/gpt-5.5` run came out untitled with the
-        // reason visible only in `meta.json`'s `title_error`.
+        // reason visible only in the run record's `title_error`.
         "codex" => serde_json::json!({
             "reasoning": { "effort": "low" },
             "text": { "verbosity": "low" }
@@ -666,21 +666,24 @@ pub(crate) fn dispatch_title(
         providers
             .0
             .apply_retention_knobs(&provider_name, &mut request.extra);
-        stage.runtime.spawn(run_title_job(
+        // Held on the run with its permit; its trips are supervised, and a
+        // failed one is retried by the world (see `collect_title`).
+        let call = TitleCall::start(
             TitleJob {
                 entity,
                 provider,
-                provider_name: provider_name.clone(),
-                model: model.clone(),
+                provider_name,
+                model,
                 request,
                 permit,
             },
             retry,
-            sink.0.clone(),
-            stage.wake.clone(),
-        ));
+            &stage,
+            &sink.0,
+        );
         commands
             .entity(entity)
+            .insert(call)
             .remove::<PendingTitle>()
             // Padded by a second so the deadline the host holds to cannot land
             // fractionally before the job's own, which would unload the run in
@@ -740,7 +743,8 @@ pub(crate) fn expire_title_hold(
         commands
             .entity(entity)
             .remove::<PendingTitle>()
-            .remove::<AwaitingTitle>();
+            .remove::<AwaitingTitle>()
+            .remove::<TitleCall>();
     }
 }
 
@@ -774,7 +778,9 @@ type CollectTitleQuery = (
 pub(crate) fn collect_title(
     mut results: ResMut<TitleResults>,
     mut agents: Query<CollectTitleQuery, With<AwaitingTitle>>,
-    persist: Option<Res<crate::pipeline::PersistenceStage>>,
+    mut calls: Query<&mut TitleCall>,
+    stage: Option<Res<InferenceStage>>,
+    persist: Option<Res<crate::pipeline::JournalSender>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -783,6 +789,17 @@ pub(crate) fn collect_title(
             continue; // stale: agent cancelled/despawned since dispatch
         };
         crate::tick_scope::enter(outcome.entity);
+        // A failed trip the call will make again: the run keeps waiting, and
+        // `fire_due_titles` sends the next trip when its backoff is over.
+        if crate::title_bridge::settle_title(
+            calls.get_mut(outcome.entity).ok(),
+            &outcome,
+            stage.as_deref(),
+            &mut commands,
+        ) != crate::inference_call::Next::Done
+        {
+            continue;
+        }
         // Counted before the reply is examined. A title the sanitizer rejects
         // was still served and still billed, and a run that reports less
         // because its title came back empty would be reporting the one thing
@@ -798,7 +815,7 @@ pub(crate) fn collect_title(
                 persist.as_deref(),
                 Some(&meta),
                 &crate::inference_usage::CallUsage {
-                    kind: leviath_core::run_archive::InferenceKind::Title,
+                    kind: crate::runfile::record::InferenceKind::Title,
                     // No stage of its own: titling runs once at spawn, beside
                     // the run rather than inside any of its stages.
                     stage: "",
@@ -872,6 +889,7 @@ pub(crate) fn collect_title(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::title_bridge::tests::run_title_job;
     use bevy_ecs::schedule::Schedule;
     use bevy_ecs::world::World;
     use leviath_providers::{Provider, ProviderError};
@@ -939,12 +957,10 @@ mod tests {
             parent_run_id: None,
             metadata: Default::default(),
             callback_url: None,
-            callback_secret: None,
             title: None,
             title_error: None,
             blueprint_digest: None,
-            unattended: false,
-            yolo_profile: None,
+            unattended: leviath_core::Unattended::Off,
             read_paths: None,
             output_request: None,
             model_override: None,
@@ -1205,9 +1221,9 @@ mod tests {
     }
 
     /// A provider that fails its first `fail_first` calls and then answers.
-    /// The counter is what tells a retry apart from a single attempt: the old
-    /// title lane called `infer` exactly once, so a provider having one bad
-    /// moment cost the run its name for good.
+    /// The counter is what tells a retry apart from a single attempt: a lane
+    /// that called `infer` once would cost the run its name over one bad
+    /// moment.
     struct FlakyThenFine {
         fail_first: std::sync::atomic::AtomicUsize,
         /// Built per call rather than stored: `ProviderError` is not `Clone`.
@@ -1296,11 +1312,116 @@ mod tests {
         }
     }
 
-    /// The regression this whole change exists for, at the job level: a
-    /// provider that refuses once and answers next time now yields a title.
-    /// Before, `run_title_job` made a single naked `infer` call, so this run
-    /// went untitled and said so only to a debug log in a daemon writing to
-    /// `/dev/null`.
+    /// In the world: the title lane's failed trip leaves the call on the run
+    /// waiting on its due time, and `fire_due_titles` sends the next trip when
+    /// it comes. The run is still owed its name the whole time, and gets it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_world_retries_a_refused_title_trip() {
+        let (mut world, mut title_rx) = build_world(Ok("unused"), default_pools());
+        world.resource_mut::<Providers>().0.register(
+            "flaky".to_string(),
+            Arc::new(FlakyThenFine {
+                fail_first: std::sync::atomic::AtomicUsize::new(1),
+                error: || ProviderError::RateLimitExceeded {
+                    retry_after_secs: Some(0),
+                },
+            }),
+        );
+        world.insert_resource(TitleSettings(config(None, None)));
+        let e = world
+            .spawn((
+                metadata(Some("flaky/m")),
+                PendingTitle,
+                chain_of(&[("flaky", "m")]),
+            ))
+            .id();
+        run_dispatch(&mut world);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        world.insert_resource(TitleResults(rx));
+        let refused = title_rx.recv().await.expect("the first trip reports");
+        assert!(refused.result.is_err());
+        tx.send(refused).unwrap();
+        run_collect(&mut world);
+        assert!(
+            world.get::<AwaitingTitle>(e).is_some(),
+            "still owed its name"
+        );
+        assert!(
+            world.get::<crate::title_bridge::TitleCall>(e).is_some(),
+            "the call waits in the world"
+        );
+        assert!(world.get::<RunMetadata>(e).unwrap().title_error.is_none());
+
+        let mut fire = Schedule::default();
+        fire.add_systems(crate::title_bridge::fire_due_titles);
+        // The retry is made due now rather than slept out, so the one pass
+        // that fires it is the same on every machine.
+        world
+            .get_mut::<crate::title_bridge::TitleCall>(e)
+            .unwrap()
+            .make_due(false);
+        fire.run(&mut world);
+        let answered = title_rx.recv().await.expect("the retry reports");
+        tx.send(answered).unwrap();
+        run_collect(&mut world);
+        assert_eq!(
+            world.get::<RunMetadata>(e).unwrap().title.as_deref(),
+            Some("Recovered Title")
+        );
+        assert!(world.get::<crate::title_bridge::TitleCall>(e).is_none());
+    }
+
+    /// A title call whose allowance runs out while it waits reports that
+    /// without another trip, and the run says why it has no name.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_title_call_out_of_time_while_waiting_gives_up() {
+        let (mut world, mut title_rx) = build_world(Ok("unused"), default_pools());
+        let pools = default_pools();
+        let stage = world.resource::<InferenceStage>();
+        let sink = world.resource::<TitleSink>().0.clone();
+        let mut call = TitleCall::start(
+            TitleJob {
+                entity: bevy_ecs::entity::Entity::PLACEHOLDER,
+                provider: Arc::new(FlakyThenFine {
+                    fail_first: std::sync::atomic::AtomicUsize::new(5),
+                    error: || ProviderError::RateLimitExceeded {
+                        retry_after_secs: Some(3600),
+                    },
+                }),
+                provider_name: "flaky".to_string(),
+                model: "m".to_string(),
+                request: title_request("task", "flaky", "m"),
+                permit: pools.try_acquire("p", "m").expect("free"),
+            },
+            crate::inference_bridge::RetryPolicy {
+                job_timeout: std::time::Duration::from_millis(100),
+                ..crate::inference_bridge::RetryPolicy::default()
+            },
+            stage,
+            &sink,
+        );
+        let refused = title_rx.recv().await.expect("the first trip reports");
+        assert_ne!(call.settle(&refused), crate::inference_call::Next::Done);
+        let e = world.spawn(call).id();
+        let mut fire = Schedule::default();
+        fire.add_systems(crate::title_bridge::fire_due_titles);
+        // Before its backoff is over a pass sends nothing.
+        fire.run(&mut world);
+        assert!(title_rx.try_recv().is_err(), "not due yet");
+        world
+            .get_mut::<crate::title_bridge::TitleCall>(e)
+            .unwrap()
+            .make_due(true);
+        fire.run(&mut world);
+        let expired = title_rx.recv().await.expect("the call reports");
+        assert_eq!(expired.entity, e);
+        let err = expired.result.expect_err("out of time").to_string();
+        assert!(err.contains("deadline"), "{err}");
+    }
+
+    /// At the call level: a provider that refuses and answers next time
+    /// yields a title, rather than a run left untitled over one bad moment.
     #[tokio::test]
     async fn a_transient_refusal_is_retried_rather_than_losing_the_title() {
         let pools = default_pools();
@@ -1568,14 +1689,8 @@ mod tests {
     #[test]
     fn stage_pairs_puts_the_resolved_model_ahead_of_its_fallbacks() {
         let fallbacks = vec![
-            leviath_core::blueprint::ModelEntry {
-                provider: "openai".to_string(),
-                model: "gpt-5-mini".to_string(),
-            },
-            leviath_core::blueprint::ModelEntry {
-                provider: "ollama".to_string(),
-                model: "qwen3".to_string(),
-            },
+            crate::spec::names::ModelRef::parse("openai/gpt-5-mini").unwrap(),
+            crate::spec::names::ModelRef::parse("ollama/qwen3").unwrap(),
         ];
         assert_eq!(
             stage_pairs("anthropic", "claude-x", &fallbacks),
@@ -1628,7 +1743,7 @@ mod tests {
     }
 
     /// A model that makes files, not sentences, never enters the chain: a
-    /// mesh generator at the head of a run used to be asked for a title first.
+    /// mesh generator at the head of a run is passed over.
     #[test]
     fn the_chain_skips_models_that_do_not_write_text() {
         let stage = [
@@ -1755,6 +1870,39 @@ mod tests {
             Some("Release notes digest")
         );
         assert!(world.get::<AwaitingTitle>(e).is_none());
+    }
+
+    /// A title job that dies without reporting still hands the lane an
+    /// outcome, so the run is not held for a name until its hold runs out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_title_job_reports_an_error_instead_of_vanishing() {
+        let (mut world, mut title_rx) = build_world(Ok("unused"), default_pools());
+        world.resource_mut::<Providers>().0.register(
+            "exploding".to_string(),
+            Arc::new(crate::test_support::Exploding),
+        );
+        world.insert_resource(TitleSettings(config(None, None)));
+        let e = world
+            .spawn((
+                metadata(Some("exploding/m")),
+                PendingTitle,
+                chain_of(&[("exploding", "m")]),
+            ))
+            .id();
+        let _silent = crate::test_support::SilentPanics::install();
+        run_dispatch(&mut world);
+        assert!(world.get::<AwaitingTitle>(e).is_some());
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), title_rx.recv())
+            .await
+            .expect("the supervisor reports promptly")
+            .expect("an outcome");
+        assert_eq!(outcome.entity, e);
+        assert_eq!(outcome.provider_name, "exploding");
+        let err = outcome
+            .result
+            .expect_err("a dead job is an error")
+            .to_string();
+        assert!(err.contains("title"), "got: {err}");
     }
 
     #[tokio::test]

@@ -16,18 +16,34 @@ not met, it should be here.
 **Agent**: the casual word, and it means two things. "The agents I've built" means blueprints. "The
 agents I'm running" means runs. These docs say blueprint or run where the difference matters.
 
-**Blueprint**: the files you write to define what a run does: its [`agent.leviath`](/docs/agents)
-file (stages, models, tools, regions) and the tools and scripts in the directory beside it. Some older text says
-*manifest* for the `agent.leviath` file.
+**Blueprint**: the files you write to define what a run does: its [`agent.toml`](/docs/agents)
+file (stages, models, tools, regions, inputs) and the tools and scripts in the directory beside it.
+[The blueprint format](/docs/blueprint-format) lists every key. `lev blueprint migrate` converts an
+`agent.leviath` manifest into an `agent.toml`.
 
 **Run**: one execution of a blueprint, started with `lev run`, with its own id and its own memory. A
-blueprint is the recipe, a run is the cooking.
+blueprint is the recipe, a run is the cooking. Everything about a run is kept in its
+[run file](/docs/run-file).
+
+**Input**: a typed value a run is given when it starts, such as its task. A blueprint declares its
+inputs and where each one goes, usually a region. See [inputs](/docs/starting-a-run#inputs).
+
+**Spawn request**: the one request that starts every run, from any front door: the CLI, the API, a
+tool, or the embed API. It names what to run, its inputs, and how to launch it. See
+[Starting a run](/docs/starting-a-run).
+
+**Run spec**: the spawn request after the daemon resolved it against this machine: the graph, the
+checked inputs, each stage's model and tools. It is the first thing in the run file and is never
+decided again. See [the spec](/docs/run-file#the-spec).
+
+**Run file**: `run.lvr`, the one file in a run's directory that holds its spec, every step it took,
+and checkpoints of its state. Resuming reads it. See [The run file](/docs/run-file).
 
 **Run id**: the name a run is known by everywhere outside the engine, such as
 `coder-1785568852-8b48c0d1e2f3`. The CLI, the API, and the dashboard all use it. It is the handle you pass to
 `lev cancel`, `lev msg`, and the rest.
 
-**Daemon**: the background process that holds every running agent. See [the daemon](/docs/daemon).
+**Daemon**: the background process that holds every run. See [the daemon](/docs/daemon).
 
 **Unattended**: a run with nobody watching, usually started with `--yolo`. Tools that wait for a
 person are removed so the run does not stop for somebody who is not there. It waives approvals, not
@@ -41,11 +57,13 @@ unless you grant a [read path](/docs/security). Defaults to wherever you ran `le
 
 **Stage**: one step of a blueprint's [graph](/docs/stages), with its own model, tools, and context.
 
-**Transition**: an edge from one stage to another. A **hint** transition is chosen by the agent. A
-**conditional** transition fires on its own, on a runtime signal.
+**Transition**: an edge from one stage to another, written as a `[[graph.edges]]` entry. A
+**hint** transition is chosen by the model. A **conditional** transition fires on its own, on a
+runtime signal.
 
-**Transform**: what an edge does to the context on its way across. `direct` carries everything,
-`clear` drops it, `compact` summarizes it. See [carrying context](/docs/stages).
+**Transform**: what an edge does to a run's regions on its way across, set by the edge's `carry`.
+`direct` carries everything, `clear` drops it, `compact` summarizes it. See
+[carrying context](/docs/stages).
 
 **Stuck**: a *measured* condition, such as too many iterations or repeated edits to one file, that
 lets a stage escape a loop. The agent does not get to declare it. See
@@ -63,15 +81,16 @@ reaches the model inside the refused call's tool result, so its next turn is a r
 a guess. The dashboard offers it on an approval prompt, `lev respond` takes `--feedback`, and the
 API takes `feedback`. See [Human-in-the-loop](/docs/interaction).
 
-**Seed command**: a shell command that fills a context region before the run starts.
+**Seed command**: a shell command that fills a region of a run's memory before the run starts.
 
 **Spawn**: starting a run. Also used for the moment it starts, as in "resolved at spawn", meaning
 worked out once when the run began rather than repeatedly.
 
 ## Memory
 
-**Context region**: a named part of a run's memory (its context window) with its own budget and
-its own rule for what to throw away first. See [Structured context](/docs/context).
+**Region** (or context region): a named part of a run's memory (its context window) with its own
+budget and its own rule for what to throw away first. The blueprint declares the regions; each run
+fills its own. See [Structured context](/docs/context).
 
 **Eviction**: what happens when a region goes over its budget. Depending on the region's kind, its
 content is dropped, summarized, or cleared.
@@ -82,8 +101,9 @@ than discarding it. Slower than eviction, and keeps more meaning.
 **Budget**: how much of the context window a region may use. Often written as a percentage so the
 same blueprint works across models with different window sizes.
 
-**Journal**: the append-only record of what a run did, written as it happens. It is what lets the
-daemon reload an interrupted run without repeating tool calls that already took effect.
+**Journal**: the append-only record of what a run did, written into its [run file](/docs/run-file)
+as it happens. It is what lets the daemon reload an interrupted run without repeating tool calls
+that already took effect.
 
 ## More than text
 
@@ -99,8 +119,9 @@ stored part. See [More than text](/docs/mime).
 text, its file extensions, and its token cost. Compiled defaults, layered under rows from your
 config, a blueprint, or a provider. See [More than text](/docs/mime#the-registry).
 
-**Blob**: the bytes of a stored part, kept once by content hash under a run's
-`blobs/` directory and referenced from wherever the part appears. Deleted with the run.
+**Blob**: the bytes of a stored part, kept once by content hash in the run's
+[run file](/docs/run-file) and its `blobs/` directory, and referenced from wherever the part
+appears. Deleted with the run.
 
 **Stored part**: a part whose bytes live in the blob store rather than inline, because its type is
 not text: an image, an audio clip, a document, a model.

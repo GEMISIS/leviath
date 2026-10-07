@@ -41,6 +41,7 @@ pub(crate) const GLYPH_ACTIVE: &str = "●";
 pub(crate) const GLYPH_WAITING: &str = "⏸";
 pub(crate) const GLYPH_COMPLETE: &str = "✓";
 pub(crate) const GLYPH_ERROR: &str = "✗";
+pub(crate) const GLYPH_CANCELLED: &str = "⊘";
 
 // ─── Spinner frames ─────────────────────────────────────────────────────────
 

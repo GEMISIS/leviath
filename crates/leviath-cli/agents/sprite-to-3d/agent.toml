@@ -1,0 +1,650 @@
+[blueprint]
+name = "sprite-to-3d"
+version = "0.4.0"
+description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
+
+# Meshy is a Leviath provider, not an MCP server: the build and rig stages
+# below select `provider = "meshy"` the way any stage selects a model.
+# Configure it like any other provider - set MESHY_API_KEY, or `lev setup` and
+# choose Meshy - and no per-agent dependency or npx install is needed.
+
+[graph]
+entry = "prep-references"
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+
+# ─── Context layout ──────────────────────────────────────────────────────────
+[graph.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "task", kind = "pinned", budget = "5%" },
+    # Where a stage's provider failure is written when its error edge is taken,
+    # so the stage that catches it can say what went wrong. The rig is the one
+    # that fails: Meshy refuses a mesh it finds no humanoid pose in, and the run
+    # then finalizes the unrigged build with the refusal quoted here.
+    { name = "error_report", kind = "pinned", budget = "2%" },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 40 }, budget = { percent = "5%", max = 8000 } },
+    { name = "source", kind = "pinned", budget = "15%", accepts = ["image/*"] },
+    # Optional high-resolution "marketing" or official art of the character,
+    # richer than a low-res sprite sheet: it carries the true colors,
+    # proportions and signature features - a long ponytail, an arm cannon, a
+    # hat's real shape - that a tiny sprite only hints at. Supply any number
+    # with `--attach <file>:marketing`; the run works fine without it.
+    # Clearable rather than pinned so it never counts against the
+    # working-budget floor on a small window, yet stays put at a real one.
+    # Only the reference-drawing and critique stages read it - Meshy is fed the
+    # clean generated views, never this busy, dynamically-posed art.
+    { name = "marketing", kind = "clearable", budget = "15%", accepts = ["image/*"] },
+    # Every view render the prep and generate stages draw lands here, one entry
+    # each. Because a produced image is named after its own bytes
+    # (image-<sha>.png), the candidates never collide and the filter stage can
+    # point at one exactly to keep or drop. The filter stage prunes this down
+    # to the good views, and the generate stage refills it, so no rejected
+    # render lingers to distract Meshy.
+    { name = "references", kind = "pinned", budget = "20%", accepts = ["image/*"] },
+    { name = "review", kind = "pinned", budget = "8%", accepts = ["text/*"] },
+    # The running list of details that are absent or wrong in the reference
+    # renders compared with the source: a missing arm cannon, a shoulder pad, a
+    # color that drifted. The critique stage owns this region - it is the only
+    # stage that adds or clears an item, and it clears one only after
+    # confirming, on the images, that the detail is now present. Every
+    # generation pass reads it to know what to fix.
+    { name = "missing", kind = "pinned", budget = "6%", accepts = ["text/*"] },
+    # A window of one: build-model writes the generated mesh here, then
+    # rig-model reads it and writes the rigged mesh back, and keeping only the
+    # latest means the rigged mesh replaces the unrigged one rather than both
+    # piling up. The mesh is held as a reference plus a short stand-in, not
+    # inlined bytes, so a small budget is plenty.
+    { name = "model", kind = { kind = "sliding_window", max_items = 1 }, budget = "8%", accepts = ["model/*"] },
+    # A rendered preview IMAGE of the built model (Meshy returns a thumbnail
+    # render alongside the mesh). The model region holds the GLB itself, which
+    # is binary and nothing can look at; this holds a picture the verify stage
+    # can actually see and compare against the reference views. Clearable, so
+    # it stays off the fixed floor.
+    { name = "model_preview", kind = "clearable", budget = "10%", accepts = ["image/*"] },
+    # The text hint that steers the 3D texturing, written by assess-coverage
+    # once the references are settled. build-model is a meshy provider stage,
+    # and the meshy provider reads a visible text region as its texture prompt,
+    # so whatever assess-coverage writes here (the palette and materials the
+    # references agree on) becomes Meshy's texture_prompt. Kept as a
+    # first-class, reviewable field rather than improvised at build time.
+    { name = "build_spec", kind = "pinned", budget = "5%", accepts = ["text/*"] },
+    { name = "scratchpad", kind = "clearable", budget = { percent = "20%", max = 20000 } },
+]
+
+# ─── 1. Draw clean multi-view A-pose references from the sprite ──────────────
+[[graph.stages]]
+name = "prep-references"
+description = "Render four consistent three-quarter A-pose reference views from the sprite"
+model = { models = [{ provider = "openrouter", model = "google/gemini-2.5-flash-image" }], allow_user_default = false }
+tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
+max_iterations = 14
+output_routing = { "image/*" = "references" }
+output = { format = "image/*" }
+system_prompt = """
+The source region holds a sprite sheet or a single image of a character. Your
+job is to turn it into a small set of clean reference renders that a 3D model
+will be built from, all in the same style and all on-model.
+
+SOURCES - use both, for different things. The source sprite sheet is the
+authority on the character's CANONICAL layout: which parts exist, which side they
+sit on, the true proportions and silhouette across all its frames. The marketing
+region, when it holds anything, is high-resolution official art of the same
+character - trust it for APPEARANCE: exact colors, materials, the shape and
+length of features a tiny sprite blurs (a long ponytail, a hat's real form, an
+arm cannon). Borrow appearance and detail from the marketing art, but NOT its
+pose or background: marketing art is often mid-action (leaping, crouching), and
+you must still draw fresh, clean, static three-quarter views. Where the two
+disagree on a detail, the marketing art wins on how it looks and the sprite sheet
+wins on whether and where it belongs.
+
+If the task names a specific character on a busy sheet, render only that one and
+ignore the other characters, animation frames, and palette swatches.
+
+Render the character's CANONICAL design, drawn from the whole sheet (and the
+marketing art when present), not from one frame. Look across every frame for the
+signature parts - a weapon, an arm cannon, a shoulder pad, a tail, a long
+ponytail, a hat - and include them at their true size, even when a particular
+idle frame happens to omit or shrink one (an arm that is a cannon in most frames
+must be the cannon here, not a plain hand; a ponytail the marketing art shows
+hanging to the knees must be that long, not a stub). Keep asymmetric parts on the
+correct side.
+
+Draw FOUR THREE-QUARTER (DIAGONAL) VIEWS - no straight front and no straight
+back. Every view is the character turned to a corner, so each one shows a feature
+AND how far it sticks out. All four are the same character in the IDENTICAL
+A-pose (feet apart, arms straight and held down and out at roughly 45 degrees,
+palms in) on a plain neutral background, and each is a clean 3D character render -
+smooth surfaces, rounded volumes, soft studio lighting, clear depth - never pixel
+art.
+
+The same character rotating in place, viewed from each corner:
+1. FRONT THREE-QUARTER, LEFT - turned about 45 degrees toward its left, so you see
+   the face, the front, and the character's left side at once. Draw this one
+   first: it is the anchor the other three must match for style, proportions,
+   colors and pose.
+2. FRONT THREE-QUARTER, RIGHT - turned about 45 degrees toward its right.
+3. BACK THREE-QUARTER, LEFT - turned about 135 degrees, so you see the back and
+   the left side at once.
+4. BACK THREE-QUARTER, RIGHT - turned about 135 degrees the other way.
+
+CHECK THE ANCHOR BEFORE DRAWING THE REST - IN THIS SAME REPLY. You get ONE
+reply in this stage: every image you produce in it is kept, and the stage ends
+when it is sent, so do not stop after the anchor to report on it. Draw the
+anchor, look at it against the source and the marketing art on likeness, not
+just parts - the face and head shape, the expression, the body proportions, and
+the outfit: every garment and piece of gear the art shows, in its shape and
+colour, and nothing the art does not show. If the face reads as a different
+character, the expression is wrong, or a garment is missing, changed or
+invented, draw the anchor again, then draw the other three views to match the
+anchor you accept - all of it in this one reply. A wrong anchor becomes four
+wrong views; only an anchor you would accept as the character is worth
+matching.
+
+NEVER MIRROR - ROTATE. These are one character turning in place, NOT mirror
+images. An asymmetric feature - a ponytail worn to one side, an arm cannon, a
+single shoulder pad, a side bag - stays on its OWN physical side in every view;
+it must not jump to the other side when the character turns. (Mirroring a
+side-worn ponytail across the views makes the 3D builder fuse two ponytails, one
+per side - draw the one ponytail on its true side, seen from four angles.)
+
+WHY ALL DIAGONALS, AND NO STRAIGHT FRONT. A straight front or back is flat: it
+hides how far a feature sticks out, and the 3D builder both weights a straight
+front heavily AND collapses thin or trailing parts - a long ponytail, a tail,
+long hair, a cape, an arm cannon - into stubs when the view only hints at them. A
+three-quarter view shows every feature with its depth (how far it juts, which way
+it hangs), and with all four corners covered nothing thin can be flattened away
+and no single flat view dominates. Show any long ponytail, tail or hair at its
+FULL length in all four views. The two front three-quarters together cover the
+front symmetrically, so no straight front is needed.
+
+KEEP TRAILING PARTS CLEAR OF THE BODY. The 3D builder fuses any two surfaces
+that touch in a view, so long hair, a ponytail, a tail, a cape or a scarf must
+hang with a visible gap between it and the body - not pressed against the back,
+not draped over the legs or the seat, not tucked behind an arm. Where the
+design lets it, a slight sway away from the body in every view is what keeps it
+a separate part in the model.
+
+ASSEMBLE THE CHARACTER LOGICALLY. Draw every part attached where it physically
+connects: a hat resting on the head, hair emerging from the scalp, straps, belts
+and bands sitting on the body, limbs joined at their joints, a weapon held or
+mounted where it attaches - so the character reads as one connected form, not
+floating or interpenetrating pieces. Follow the character's own design wherever
+it clearly, intentionally deviates from that.
+
+A rig binds cleanly only when every view shares one pose - the arms in the same
+45-degree position in all four, not relaxed in some and out in others; a
+mixed-pose set deforms when rigged. Consistency with the anchor render matters
+more than anything: it is the same character, in the same pose, turning in space.
+
+Draw ONE single view per image. Do not pack several angles into one turnaround
+sheet: the later stages need each view on its own. Produce the images one after
+another in this same reply - one image per view - and each lands in the
+references region on its own.
+
+Keep the set small: at most two candidates for any one angle, and no more than
+EIGHT renders in all. A larger set will not fit in a single request downstream,
+and the oldest images are dropped when it does not. When the references region
+holds a good front-left, front-right, back-left and back-right three-quarter
+view, stop even if you could draw more, and the run moves on to filter them. Use
+the scratchpad for notes."""
+
+# Do not leave until four renders are actually stored. An image model returns
+# as many pictures as it likes per reply, so the gate holds the stage and asks
+# again until the set is complete.
+[[graph.edges]]
+name = "filter-references"
+from = "prep-references"
+to = "filter-references"
+hint = "Once the references region holds view renders of the character to filter."
+gate = { require_region_updated = "references", require_region_entries = { region = "references", at_least = 4 }, max_attempts = 4, message = "The references region does not hold four renders yet. Draw the views still missing - one image per view, matching the anchor's pose, style and likeness - and let them land in the references region before moving on." }
+
+# ─── 2. Filter: drop the bad renders, keep the good single views ─────────────
+[[graph.stages]]
+name = "filter-references"
+description = "Delete off-model, malformed, or multi-view renders; keep the best four single views"
+model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5" }], allow_user_default = false }
+tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
+# One delete per call, and a busy pass can leave twenty renders to prune.
+max_iterations = 24
+max_revisits = 4
+reset = ["conversation"]
+hide = ["marketing", "model_preview"]
+system_prompt = """
+The references region holds the view renders drawn so far. Compare them against
+the source and against each other, and remove the ones that would hurt the model.
+
+Delete a render (context_delete, by the index or key from context_list, one at a
+time) when it is any of these:
+- off-model: wrong silhouette, proportions, or colors;
+- not a clean 3D render: pixel art, flat, or malformed;
+- a multi-angle turnaround SHEET rather than a single view - Meshy needs one view
+  per image, and a composite sheet builds a relief of the sheet;
+- a duplicate or clearly weaker version of a view you are already keeping.
+
+Do NOT delete a render only because it is missing a detail like an arm cannon:
+that is the critique stage's call to make and record, not a reason to throw the
+view away here. Never delete the last remaining render of an angle. When in
+doubt, keep it.
+
+SUPERSEDED RENDERS MUST GO. When a later pass has drawn a corrected version of an
+angle, actually delete the older, flawed one from the references region with
+context_delete - do not leave it sitting there "stale". A discarded render that
+stays in the region is still shown to the model builder and still counts against
+the request's image budget, so at the end of this stage the region must hold only
+the views you are actually keeping: one current, best render per angle, nothing
+old or superseded.
+
+Keep the good single views: ideally a clean front, back, left and right. Write
+into the review region which views you kept, for which angles. Then hand off to
+critique-references.
+
+ONLY THE FIRST FOUR COUNT. The model builder takes at most four images, and it
+takes the first four in the references region, in the order context_list shows
+them. Anything after the fourth is never seen. So by the end of this stage the
+region must hold AT MOST FOUR renders, and the four it holds must be the ones
+you want built from, ideally one per angle. Each render is its own entry, keyed
+by its file name (image-<sha>.png), so delete exactly the one you mean with
+context_delete and its key; deleting is cheap and drawing again is not, so
+never leave a bad or redundant render in place because it sits among good ones."""
+
+[[graph.edges]]
+name = "critique-references"
+from = "filter-references"
+to = "critique-references"
+hint = "Once only good single views remain and the review region records what was kept."
+
+# ─── 3. Critique: compare each view to the source and log what is missing ────
+[[graph.stages]]
+name = "critique-references"
+description = "Critically compare the views to the source and maintain the missing-details list"
+model = { models = [{ provider = "openrouter", model = "google/gemini-2.5-pro" }], allow_user_default = false }
+tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
+max_iterations = 8
+max_revisits = 4
+reset = ["conversation"]
+system_prompt = """
+You are the critical reviewer. Compare the reference views in the references
+region against the source sprite - and against the marketing art in the marketing
+region when it holds any - carefully and skeptically. Your job is to catch
+details the renders dropped or got wrong - the mistakes a friendlier reviewer
+would let slide.
+
+Go part by part over the character's canonical design as the source shows it
+across all its frames, and as the marketing art shows it in high resolution:
+silhouette, proportions, colors, and every accessory or weapon - an arm cannon, a
+shoulder pad, a long ponytail or tail, a hat, a belt. For each view, note
+anything missing, shrunk, on the wrong side, or wrong. Judge pose consistency
+too: every view must share the same A-pose (arms ~45 degrees down), so flag any
+view whose arms or stance differ - a mixed-pose set rigs badly. Give special
+attention to a long ponytail or tail: it is the detail the downstream 3D step
+most often drops, so if any view weakens or omits it, log that.
+
+JUDGE LIKENESS FIRST, BEFORE ANY PART. A render can carry every accessory and
+still be the wrong character. Compare the face and head shape, the expression,
+the body proportions and the outfit against the marketing art when there is
+any, else against the source: is this recognisably the same character, wearing
+what the art shows, and nothing the art does not show? A face that reads as a
+different character, an expression the art never wears, a garment that is
+missing, changed or invented, a colour that drifted - each is a SERIOUS item,
+logged in the missing region as such, naming the view and what the art shows
+instead. A set whose anchor is off-model must be redrawn from the anchor, and
+your note should say so; parts checked onto a wrong likeness are wasted work.
+
+Judge MATERIAL and TEXTURE CONSISTENCY too, not just shape and color. The goal is
+not to match any one art style exactly - it is that the surfaces read the SAME
+across the set: the ponytail should be the same kind of hair in every view, the
+fur the same fur, the fabric the same fabric, so the views agree on what each
+part is made of. Flag a view whose material clearly disagrees with the others
+(for example: "back three-quarter view: ponytail rendered as stiff overlapping
+scales, but the front and back views show it as soft flowing hair - make it
+consistent"). Consistency between the views is what lets the 3D build produce one
+coherent material rather than a patchwork.
+
+The missing region is yours alone to maintain, and it is the record the next
+generation pass fixes from:
+- Read what it already lists (context_read). For each item, look at the current
+  views and decide whether it is now genuinely fixed. Only when you can confirm,
+  on the images, that the detail is present and correct do you remove that item
+  (context_delete). This sign-off is the whole point: an item leaves the list
+  only because you verified the fix, never on anyone's say-so.
+- Add an item (context_write/context_append) for every missing or wrong detail
+  you find that is not already listed, naming the detail, the view, and what it
+  should be (for example: "front and back three-quarter views: right arm is a plain hand, but
+  the source shows an arm cannon there").
+
+When the missing region reflects the true state of the views, hand off to
+assess-coverage. Do not generate or delete images here."""
+
+[[graph.edges]]
+name = "assess-coverage"
+from = "critique-references"
+to = "assess-coverage"
+hint = "Once the missing region reflects the true state of the reference views."
+
+# ─── 4. Assess: enough good, complete views to build, or generate more? ──────
+[[graph.stages]]
+name = "assess-coverage"
+description = "Decide whether the views are complete enough to build, or more are needed"
+model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5" }], allow_user_default = false }
+tools = ["context_read", "context_list", "context_write", "context_append"]
+max_iterations = 8
+max_revisits = 4
+reset = ["conversation"]
+hide = ["marketing", "model_preview"]
+transition_prompt = """
+Decide what happens next with the reference views:
+- If the references region holds FOUR usable renders covering the four
+  three-quarter angles, and the missing region lists no serious detail still
+  absent or wrong, respond with: build-model
+- If it holds fewer than four renders, an angle is missing, or the missing
+  region still lists a serious detail to fix, respond with: generate-more"""
+system_prompt = """
+Look at the good views in the references region, the missing region's list, and
+the review notes.
+
+Decide whether the views are ready to build into a model. They are ready when two
+things hold: the four three-quarter (diagonal) views are covered - front-left,
+front-right, back-left and back-right - by FOUR usable renders, one per angle,
+and the missing region lists no serious detail still absent or wrong. Fewer
+than four is not ready: the builder takes up to four views and symmetrises
+whatever it cannot see, so a two-view set loses a one-sided feature the views
+plainly show. A set that still drops a signature part the source shows, or
+whose likeness the critique flagged, is not ready either.
+
+Then choose one path:
+- If ready, WRITE THE BUILD HINTS into the build_spec region (context_write),
+  then transition to build-model. Write three labelled lines the builder will
+  pass to the 3D tool, grounded in what the references actually show:
+    texture_prompt: the character's palette and materials in a few words (for
+      example the coat colour, the metal of a weapon, fur vs. cloth vs. skin).
+    negative_prompt: the failure modes to steer away from - "eyelashes or facial
+      details painted flat onto the eyeballs, smeared or ghosted textures, visible
+      seams, duplicated or mirrored limbs, a second mirrored ponytail, extra
+      fingers".
+    art_style: the overall look in a few words (for example "stylized cartoon
+      game character, clean flat shading").
+- If an angle is missing or the missing region still lists a serious detail,
+  transition to generate-more. The missing region already says what to fix; add
+  to the review region anything else the generator should know.
+
+Do not generate or delete images here. Angles and fixes cannot be chased forever,
+so once the missing list holds only minor cosmetic notes and the angles are
+covered, prefer to build."""
+
+# The build hints are the builder's only texturing steer, so writing them is a
+# condition of leaving, not a suggestion.
+[[graph.edges]]
+name = "build-model"
+from = "assess-coverage"
+to = "build-model"
+hint = "If four usable views cover the angles and the missing region lists no serious detail."
+gate = { require_region_updated = "build_spec", require_region_entries = { region = "references", at_least = 4 }, message = "Not ready to build: the references region must hold four usable renders (route to generate-more if it holds fewer), and the build hints must be written into the build_spec region (texture_prompt, negative_prompt, art_style) - the builder textures from nothing else.", max_attempts = 2 }
+
+[[graph.edges]]
+name = "generate-more"
+from = "assess-coverage"
+to = "generate-more"
+hint = "If an angle is missing or the missing region still lists a serious detail to fix."
+
+# ─── 5. Generate more: fix the missing details and fill the missing angles ───
+[[graph.stages]]
+name = "generate-more"
+description = "Draw views that fix the missing details and fill the missing angles"
+model = { models = [{ provider = "openrouter", model = "google/gemini-2.5-flash-image" }], allow_user_default = false }
+tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
+max_iterations = 10
+max_revisits = 4
+reset = ["conversation"]
+output_routing = { "image/*" = "references" }
+output = { format = "image/*" }
+system_prompt = """
+You draw images. Your only job here is to DRAW the corrected and missing views
+now - do not just describe them.
+
+Read the missing region and the review region once: together they name the
+details to fix (for example "add the arm cannon", "remove the invented shorts",
+"make the ponytail long") and the angles that are missing or weak (for example
+"no back three-quarter view"). Then immediately start drawing.
+
+Draw one image at a time, and for each one produce an actual image, not text:
+- Redraw each view that needs a fix, applying every relevant item from the
+  missing region.
+- Draw each missing angle (commonly a front or back three-quarter view).
+
+Condition every render on the sprite sheet in the source region, the good
+references already in place, and the high-resolution marketing art in the
+marketing region when it holds any - so it is the same character in the same
+style, proportions and colors, just corrected or turned to a new angle. Trust the
+marketing art for appearance (true colors, and the length and shape of features
+like a long ponytail) but never copy its action pose. Every render must use the
+same A-pose as the existing references: arms held down and out at ~45 degrees,
+identical in all views, so the set rigs cleanly. Views are the character ROTATED,
+never mirrored: an asymmetric feature (a side-worn ponytail, an arm cannon, a
+single pad) stays on its own physical side in every view, so the build does not
+fuse two of it. Draw parts attached where they physically connect (hat on the
+head, hair from the scalp, belts on the body, limbs at their joints), except
+where the character's design clearly deviates. One single view per image, no
+turnaround sheets, on a plain neutral background. Store each in the references
+region as you go.
+
+Do not edit the missing region yourself; the critique stage re-checks your work
+and signs off what is truly fixed. Keep the set small enough to fit one request.
+Keep any long hair, ponytail, tail, cape or scarf hanging clear of the body with
+a visible gap, the way the prep stage does: the builder fuses surfaces that
+touch. Match the kept views' pose, style and likeness exactly - a corrected view
+that reads as a different character is worse than the one it replaces.
+
+Once you have drawn the fixes and the missing angles, stop; the run moves back to
+the filter."""
+
+# Un-exhaustible escape: some defects an image model simply will not fix (it
+# keeps redrawing an invented detail however clearly the critique names it).
+# When the filter/critique/assess loop has spent its revisits, move on and
+# build with the best views in hand rather than dead-ending the run.
+[[graph.edges]]
+name = "build-model"
+from = "generate-more"
+to = "build-model"
+when = "dead_end"
+hint = "The reference loop is out of revisits; build with the best views in hand."
+
+# Do not leave until the fixes have actually been drawn.
+[[graph.edges]]
+name = "filter-references"
+from = "generate-more"
+to = "filter-references"
+hint = "Once the requested views are in the references region."
+gate = { require_region_updated = "references", message = "You have not drawn any new render yet. Draw the corrected and missing views the missing region asks for, and let them land in the references region before moving on." }
+
+# ─── 6. Build the rigged, game-ready model with Meshy ────────────────────────
+# A provider stage, not a tool loop. The meshy provider submits the
+# multi-image job, polls it to completion, and hands back the mesh - one
+# inference, no MCP, no offset replies, no download babysitting. A little
+# iteration headroom only.
+[[graph.stages]]
+name = "build-model"
+description = "Meshy turns the chosen reference views into one 3D model"
+max_iterations = 3
+max_revisits = 2
+# Only the reference views may reach Meshy as input images. Hide every other
+# image region so the source sprite sheet (which would build a relief of the
+# whole sheet) and the marketing art are never fed to the builder, and hide the
+# critique text so only build_spec steers the texture prompt.
+reset = ["conversation"]
+hide = ["task", "source", "marketing", "model_preview", "review", "missing"]
+# The produced mesh goes to the model region; the preview render Meshy returns
+# beside it goes to model_preview, where verify can look at it.
+output_routing = { "model/*" = "model", "image/*" = "model_preview" }
+
+[graph.stages.model]
+models = [{ provider = "meshy", model = "multi-image-to-3d" }]
+allow_user_default = false
+# A Meshy job runs for minutes, and an ultra-mode one for longer; give the
+# provider room to poll to completion.
+request_timeout_secs = 1800
+
+# The static build hints, tuned for a hero character. Ultra mode is Meshy's
+# high-fidelity geometry pass, and the biggest lever against torn thin parts
+# (a ponytail, ear rims, fingers). Triangle topology at ~60k triangles keeps
+# those thin sheets watertight where the quad remesher at 12k left holes in
+# them; every engine triangulates anyway, and Meshy's rig is happy with
+# triangles. An explicit A-pose keeps the limbs separated for rigging. The
+# dynamic texture prompt rides in from the build_spec region's text - the
+# provider reads a visible text region as its texture prompt - so the palette
+# and materials the reference stages settled on steer the texturing. Only
+# fields Meshy documents for this endpoint are sent.
+[graph.stages.model.params.extra]
+ai_model = "meshy-7"
+ultra_mode = true
+should_remesh = true
+topology = "triangle"
+target_polycount = 60000
+pose_mode = "a-pose"
+enable_pbr = true
+texture_resolution = "2k"
+
+# The build is deterministic, so this gate rarely holds; it catches a Meshy
+# failure that landed no mesh rather than moving on to rig nothing.
+[[graph.edges]]
+name = "rig-model"
+from = "build-model"
+to = "rig-model"
+hint = "Once the built mesh is in the model region."
+gate = { require_region_updated = "model", message = "The model region is empty - the Meshy build landed no mesh.", max_attempts = 2 }
+
+# ─── 6b. Rig the built mesh into an animation-ready model ────────────────────
+[[graph.stages]]
+name = "rig-model"
+description = "Meshy rigs the built mesh into an animation-ready model"
+model = { models = [{ provider = "meshy", model = "rig" }], allow_user_default = false, request_timeout_secs = 900 }
+max_iterations = 3
+max_revisits = 2
+# The mesh in the model region is the only input. Hide the image and text
+# regions so nothing but that GLB reaches the rigger.
+reset = ["conversation"]
+hide = ["task", "source", "marketing", "references", "model_preview", "review", "missing", "build_spec"]
+# The rigged mesh replaces the unrigged one in the model region (a window of one).
+output_routing = { "model/*" = "model" }
+
+# Meshy's rigger refuses a mesh it cannot find a humanoid pose in (a 422,
+# "Pose estimation failed"): a waving arm, a prop merged into the body, a
+# non-humanoid character, a single-view build. The built mesh is still a good
+# model, so hand it back unrigged with the refusal on record, rather than
+# ending the run with nothing after the build already succeeded. Verification
+# is skipped on this path: it judges the build against the references, which
+# the rig failing says nothing about, and the error edge cannot share the
+# verify-model target with the edge below.
+[[graph.edges]]
+name = "finalize"
+from = "rig-model"
+to = "finalize"
+when = "error"
+hint = "Meshy refused to rig the mesh: finalize the unrigged model and say why."
+
+[[graph.edges]]
+name = "verify-model"
+from = "rig-model"
+to = "verify-model"
+hint = "Once the rigged mesh is in the model region."
+
+# ─── 7. Check the model against the references, and rebuild if it is off ─────
+[[graph.stages]]
+name = "verify-model"
+description = "Compare the model against the reference views and decide to rebuild or finalize"
+model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5" }], allow_user_default = false }
+tools = ["context_read", "context_list", "context_write", "context_append", "read_file", "list_dir"]
+max_iterations = 10
+max_revisits = 2
+reset = ["conversation"]
+transition_prompt = """
+Decide what happens to the model you just judged:
+- If it has a serious, fixable gap you have written into the review region,
+  respond with: generate-more
+- If it faithfully matches the reference views, respond with: finalize"""
+system_prompt = """
+The model region holds the built GLB itself, which is binary - you cannot look at
+it directly. Judge the model from the RENDERED PREVIEW image in the model_preview
+region, comparing it against the reference views, the source, the marketing art
+if present, and the missing region.
+
+Judge it honestly: are the proportions right, the colors faithful, the
+accessories all present and on the correct side (including anything the missing
+region flagged), the topology clean? Give particular attention to a long ponytail
+or tail: the image-to-3D step frequently flattens or drops one, so if the
+references show a long ponytail and the preview does not, that is a serious gap. Judge material CONSISTENCY with the references too: the built surfaces (hair, fur, fabric) should read as the same materials the reference views agree on, not a different look.
+
+A signature part the source shows on one side - a weapon, a cannon, a pad, a
+tail, a bag - that the model lacks, or shows on both sides, is a SERIOUS gap
+whenever the preview's angle would show it: the builder tends to symmetrise
+what its views under-specify, and a character without its defining part is not
+the character. Do not accept that as "the base mesh".
+
+Note the preview is usually a single front-ish angle, so it will not show
+everything on the back. Judge what it does show; do not fail the model for a
+detail the preview simply cannot depict, but DO fail it for a front-visible
+regression (missing accessory, wrong colors, a ponytail that should peek past the
+shoulder but is absent, a collapsed or deformed pose from a bad rig).
+
+Then choose one path:
+- If the model has a serious, fixable gap - a missing accessory, a dropped
+  ponytail, colors that drifted badly, a rig that deformed the pose - write
+  exactly what is wrong and how to fix it into the review region, then transition
+  back to generate-more. The builder works only from the reference views, and
+  rebuilding from the same four views with the same settings gives the same
+  model back; what changes the model is a corrected view, so the fix goes
+  through drawing, filtering and critique again before the next build. Be
+  specific about which view must change and how; the drawing stage acts only on
+  what you write. Only loop back for problems a corrected view can realistically
+  fix, and remember the loop is limited.
+- If the model faithfully matches the references, transition to finalize.
+
+Do not try to rebuild the model yourself here; your job is to judge and route."""
+
+[[graph.edges]]
+name = "finalize"
+from = "verify-model"
+to = "finalize"
+hint = "If the model faithfully matches the reference views."
+
+# Back through the reference loop, not straight to the builder: the builder
+# only sees the four reference views, so a rebuild from the same views is a
+# lottery. A corrected view is what changes the model.
+[[graph.edges]]
+name = "generate-more"
+from = "verify-model"
+to = "generate-more"
+hint = "If the model has a serious gap you have written into the review region: corrected views get drawn, filtered and critiqued, then the model is rebuilt from them."
+
+# ─── 8. Finalize: submit the model as the run's artifact ─────────────────────
+# No outgoing edges: this stage ends the run by submitting the model.
+[[graph.stages]]
+name = "finalize"
+description = "Submit the finished model as the run's artifact"
+model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5" }], allow_user_default = false }
+mode = "output"
+tools = ["context_read", "context_list", "read_file", "list_dir", "submit_output"]
+max_iterations = 6
+allow_complete = true
+require_output = true
+reset = ["conversation"]
+hide = ["marketing", "model_preview", "references", "source"]
+output = { artifacts = [{ name = "model", mime_type = "model/*", required = true }] }
+system_prompt = """
+The model region holds the finished, rigged model as a produced part - a .glb the
+Meshy provider made - and the review region holds the verifier's assessment.
+
+Call context_list on the model region to read the produced part's exact name (it
+is `rigged.glb` when the model was rigged, otherwise `model.glb`). Then call
+submit_output with the required `model` artifact whose `path` is that part name:
+submit_output resolves a produced part by its name, so there is no file on disk
+to find. In the answer text, summarize briefly what the model is and note any
+caveats the verifier or the missing region raised, so the operator knows what
+they are getting. If the error_report region holds a rig failure, the model is
+the unrigged build: submit `model.glb`, say plainly that Meshy refused to rig
+it, quote the reason, and say what usually fixes it (an upright A-pose
+character with limbs apart and no props merged into the body, built from
+several views). The run ends when you submit."""

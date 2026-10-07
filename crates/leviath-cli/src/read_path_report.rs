@@ -66,9 +66,10 @@ pub(crate) struct GrantReport {
     pub entries: Vec<EntryStatus>,
 }
 
-/// Build the report for `blueprint` under `config`.
+/// Build the report for the `read_paths` of `graph`, the graph of the
+/// blueprint named `agent`, under `config`.
 ///
-/// `None` when the blueprint declares nothing - the overwhelmingly common case,
+/// `None` when the graph declares nothing - the overwhelmingly common case,
 /// where every surface should stay silent. `Err` when the *user's own* grant
 /// list does not compile: that is worth saying out loud, because the same list
 /// is a hard spawn error.
@@ -77,22 +78,31 @@ pub(crate) struct GrantReport {
 /// outside a run pass the current directory, which is what `lev run` defaults
 /// to.
 pub(crate) fn build(
-    blueprint: &leviath_core::Blueprint,
+    graph: &leviath_runtime::spec::graph::RunGraph,
+    agent: &str,
     config: &Config,
     workdir: &Path,
 ) -> Option<Result<GrantReport, String>> {
-    let rp = blueprint
-        .read_paths
-        .as_ref()
-        .filter(|rp| !rp.allow.is_empty())?;
-    Some(report_entries(
-        &blueprint.name,
-        &rp.allow,
-        config,
-        workdir,
-        leviath_core::home_dir().as_deref(),
-        cfg!(windows),
-    ))
+    build_declared(agent, &graph.read_paths, config, workdir)
+}
+
+/// [`build`] over an agent's name and its declared entries.
+pub(crate) fn build_declared(
+    agent: &str,
+    declared: &[String],
+    config: &Config,
+    workdir: &Path,
+) -> Option<Result<GrantReport, String>> {
+    (!declared.is_empty()).then(|| {
+        report_entries(
+            agent,
+            declared,
+            config,
+            workdir,
+            leviath_core::home_dir().as_deref(),
+            cfg!(windows),
+        )
+    })
 }
 
 /// The report proper, with the platform inputs injected so every branch is
@@ -126,7 +136,7 @@ fn report_entries(
 /// The verdict for one declared entry.
 ///
 /// A declaration that does not compile is [`GrantStatus::Undetermined`] rather
-/// than an error: the manifest parser already refuses malformed entries, so
+/// than an error: the blueprint loader already refuses malformed entries, so
 /// reaching this with one means the environment (a missing home directory, say)
 /// is what could not be resolved, and that is not something to report as
 /// "ungranted".

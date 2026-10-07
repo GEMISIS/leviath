@@ -1,17 +1,17 @@
-//! Cached run history: the archived context points and the stage-visit
+//! Cached run history: the recorded context points and the stage-visit
 //! timeline derived from them.
 //!
 //! The `,`/`.` history keys would otherwise re-read and re-replay the entire
-//! `run.lvr` archive on every keypress; the stage explorer needs the same
-//! data plus real visit counts (stages.json holds one record per stage,
-//! rewritten in place, so revisits are invisible there). This module loads
-//! the archive once per run (through an injectable loader, so tests count
-//! reads), derives the visit timeline, and refreshes only when the archive
+//! run file on every keypress; the stage explorer needs the same data plus
+//! real visit counts (the stage ledger holds one record per stage, so a
+//! revisit is not a row of its own there). This module loads
+//! the run file once per run (through an injectable loader, so tests count
+//! reads), derives the visit timeline, and refreshes only when the run file
 //! has changed, checked on a tick-based TTL while something is looking at it.
 
-use leviath_core::run_archive::RunPoint;
+use leviath_runtime::runfile::history::RunPoint;
 
-/// One contiguous stay in a stage, derived from the archived points.
+/// One contiguous stay in a stage, derived from the recorded points.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StageVisit {
     pub(super) stage: String,
@@ -27,20 +27,152 @@ pub(super) struct StageVisit {
     pub(super) first_point: usize,
 }
 
-/// The cached archive of one run.
+/// The cached history of one run.
 #[derive(Debug, Clone, Default)]
 pub(super) struct RunHistoryCache {
     pub(super) run_id: String,
     pub(super) points: Vec<RunPoint>,
     pub(super) visits: Vec<StageVisit>,
-    /// Tick the archive was last found unchanged (or loaded), for the TTL.
+    /// Tick the run file was last found unchanged (or loaded), for the TTL.
     pub(super) checked_at_tick: u64,
-    /// The archive's stat when the points were read, so a reload happens only
-    /// when it has grown: a finished run's archive is read once.
+    /// The run file's stat when the points were read, so a reload happens only
+    /// when it has grown: a finished run's file is read once.
     pub(super) stamp: Option<crate::runstate::FileStamp>,
+    /// Each edge the run took, `(from, to)`, from its run file's transition
+    /// records. `None` when nothing recorded them.
+    pub(super) transitions: Option<Vec<(String, String)>>,
 }
 
-/// Look at the archive no more often than this many ticks (~1s at the 100ms
+impl RunHistoryCache {
+    /// The edges the run took, in order: as its run file recorded them, or
+    /// when none are recorded, read off its visits, where each
+    /// move from one stage to the next stands for the edge between them.
+    pub(super) fn taken(&self) -> Vec<(String, String)> {
+        match &self.transitions {
+            Some(taken) => taken.clone(),
+            None => self
+                .visits
+                .windows(2)
+                .map(|pair| (pair[0].stage.clone(), pair[1].stage.clone()))
+                .collect(),
+        }
+    }
+}
+
+impl super::state::Dashboard {
+    /// Keep `history`, read off `run_id`'s run file at `stamp`, as the
+    /// cached history. A run switch drops any browsed position along with
+    /// the old run file.
+    pub(super) fn keep_history(
+        &mut self,
+        run_id: &str,
+        stamp: Option<crate::runstate::FileStamp>,
+        history: crate::runstate::RunHistory,
+    ) {
+        if self.history.as_ref().is_some_and(|h| h.run_id != run_id) {
+            self.context_history_idx = None;
+        }
+        let crate::runstate::RunHistory {
+            points,
+            transitions,
+        } = history;
+        let visits = derive_visits(&points);
+        self.history = Some(RunHistoryCache {
+            run_id: run_id.to_string(),
+            points,
+            visits,
+            checked_at_tick: self.tick_count,
+            stamp,
+            transitions,
+        });
+    }
+
+    /// The stat the held history of `run_id` was read at; `None` when the
+    /// history held is another run's, or there is none.
+    pub(super) fn held_history(&self, run_id: Option<&str>) -> super::run_loader::Held {
+        self.history
+            .as_ref()
+            .filter(|h| Some(h.run_id.as_str()) == run_id)
+            .map(|h| h.stamp)
+    }
+
+    /// Whether the draw loop reads `run_id`'s history itself: where no
+    /// loader thread does (tests), and for a run file small enough to replay
+    /// between two frames. A long run's history is a replay of megabytes of
+    /// steps, which would hold up the first frame of the detail view; the
+    /// view draws without it and the loader thread hands it over
+    /// ([`Self::adopt_history`]).
+    pub(super) fn history_on_draw_loop(&self, run_id: &str) -> bool {
+        self.run_feed.is_none()
+            || (self.history_stamp)(run_id).is_none_or(|s| s.len <= DRAW_LOOP_HISTORY_BYTES)
+    }
+
+    /// Whether the detail view is waiting on the loader thread for the
+    /// history of its run, which it holds none of yet. The dashboard then
+    /// looks for it again soon rather than a whole tick later.
+    pub(super) fn owes_history(&self) -> bool {
+        let Some(selected) = self.selected_agent().map(|a| a.id.as_str()) else {
+            return false;
+        };
+        self.detail_view
+            && !self.history_on_draw_loop(selected)
+            && self.held_history(Some(selected)).is_none()
+    }
+
+    /// Take the newest history the loader thread read, if one landed;
+    /// whether one did.
+    pub(super) fn take_fed_history(&mut self) -> bool {
+        let Some(history) = self
+            .run_feed
+            .as_mut()
+            .and_then(super::run_loader::RunFeed::take_history)
+        else {
+            return false;
+        };
+        self.adopt_history(history);
+        true
+    }
+
+    /// Take a history the loader thread read. One the cache already holds,
+    /// read at the same stat, changes nothing.
+    pub(super) fn adopt_history(&mut self, loaded: super::run_loader::LoadedHistory) {
+        let held = self
+            .history
+            .as_ref()
+            .is_some_and(|h| h.run_id == loaded.run_id && h.stamp == loaded.stamp);
+        if !held {
+            self.keep_history(&loaded.run_id, loaded.stamp, loaded.history);
+        }
+    }
+
+    /// The window of the stage the detail view has selected, when the run
+    /// has left it: the last point of the run's history taken in that stage.
+    /// `None` for the stage the run is in (its window is the live one), and
+    /// for a run whose history is not loaded.
+    pub(super) fn selected_stage_context(
+        &self,
+        agent: &super::types::DashboardAgent,
+    ) -> Option<leviath_core::run_meta::ContextSnapshot> {
+        let stage = agent.stages.get(self.selected_stage)?;
+        if stage.name == agent.stage {
+            return None;
+        }
+        self.history
+            .as_ref()
+            .filter(|h| h.run_id == agent.id)?
+            .points
+            .iter()
+            .rev()
+            .find(|p| p.meta.current_stage == stage.name)
+            .map(|p| p.context.clone())
+    }
+}
+
+/// The largest run file whose history the draw loop replays itself: a few
+/// milliseconds of work.
+const DRAW_LOOP_HISTORY_BYTES: u64 = 1024 * 1024;
+
+/// Look at the run file no more often than this many ticks (~1s at the 100ms
 /// tick rate), and read it again only if it changed.
 pub(super) const HISTORY_TTL_TICKS: u64 = 10;
 
@@ -129,7 +261,7 @@ mod tests {
             point("plan", 2, 20),
             point("implement", 1, 30),
             point("review", 1, 40),
-            point("implement", 1, 50), // the revisit stages.json cannot show
+            point("implement", 1, 50), // the revisit the stage ledger has no row for
             point("implement", 2, 60),
         ];
         let visits = derive_visits(&points);

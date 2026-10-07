@@ -1,11 +1,10 @@
-//! Spawning an agent: the caller-resolved per-stage inputs
-//! ([`ResolvedStage`]), the per-stage setup derived from them, and the two
-//! spawn entry points.
+//! What the caller resolves for each stage of a blueprint, and the window a
+//! stage is sized against when its provider is not registered.
 
 use super::*;
 
 /// A blueprint stage resolved to a concrete provider, model, and effective tool
-/// set - the per-stage input to `spawn_agent`. The caller (CLI / daemon) owns
+/// set - the per-stage input to a spawn. The caller (CLI / daemon) owns
 /// the model-selection policy (overrides, availability, user defaults) and tool
 /// filtering; the runtime just turns the result into agent data.
 #[derive(Debug)]
@@ -18,7 +17,7 @@ pub struct ResolvedStage {
     pub tools: Vec<Tool>,
     /// Where to go if `provider_name` turns out to be unusable, best first.
     /// See `crate::pipeline::resolve_stage_candidates`.
-    pub fallbacks: Vec<leviath_core::blueprint::ModelEntry>,
+    pub fallbacks: Vec<crate::spec::names::ModelRef>,
     /// The output shape resolved for this stage: the blueprint's default, the
     /// stage's override, and the launching caller's request, combined. Resolved
     /// caller-side (like the model and tool choices beside it) because only the
@@ -35,531 +34,32 @@ pub struct ResolvedStage {
 /// [`leviath_providers::ModelCapabilities`]'s default `max_context_tokens`.
 pub(crate) const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 8192;
 
-/// Look up a model's context window (for resolving percentage region budgets)
-/// via the registered [`Providers`]. Falls back to
-/// [`DEFAULT_CONTEXT_WINDOW_TOKENS`] with a warning when the provider isn't
-/// registered - non-fatal, and `min_tokens` floors still protect regions.
-pub(crate) fn context_window_tokens(world: &World, provider_name: &str, model: &str) -> usize {
-    match world
-        .get_resource::<Providers>()
-        .and_then(|p| p.0.get(provider_name))
-    {
-        Some(provider) => provider.max_context_tokens(model),
-        None => {
-            tracing::warn!(
-                provider = provider_name,
-                model,
-                "provider not registered; using default context window for percentage budgets"
-            );
-            DEFAULT_CONTEXT_WINDOW_TOKENS
-        }
-    }
-}
-
-/// Build a stage's [`StageSetup`] from its blueprint definition: inference config
-/// (from the model parameters), tool-result routing, accepts-messages, layout,
-/// and system prompt.
-///
-/// `global_hints` is the caller's config-level toggle for each system-prompt
-/// hint; `agent_hints` the blueprint's agent-level override of the same. Each
-/// one cascades stage → agent → global here.
-pub(crate) fn stage_setup_from(
-    stage: &leviath_core::Stage,
-    global_hints: leviath_core::config::PromptHints,
-    agent_hints: leviath_core::config::PromptHintOverrides,
-    output: Option<leviath_core::output::OutputSpec>,
-) -> StageSetup {
-    let temperature = stage
-        .model
-        .parameters
-        .get("temperature")
-        .and_then(|v| v.as_f64())
-        .map(|t| t as f32);
-    // Every other model parameter (top_p, stop, seed, frequency_penalty, …) is
-    // passed through to the provider verbatim; only temperature/max_output_tokens
-    // are consumed specially above.
-    let extra_params: serde_json::Map<String, serde_json::Value> = stage
-        .model
-        .parameters
-        .iter()
-        .filter(|(k, _)| k.as_str() != "temperature" && k.as_str() != "max_output_tokens")
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    // The manifest loader already refused a cap that does not parse, so an
-    // error here can only come from a `ModelConfig` built in code; it is
-    // treated as "no cap" the way an absent one is.
-    let max_output_tokens = stage.model.output_cap().ok().flatten();
-    let base_prompt = stage
-        .config
-        .get("system_prompt")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    // A fan-out stage's single inference IS the "split": fold its `split_prompt`
-    // (which asks for the JSON array of work items) onto any base instructions so
-    // the stage's normal inference produces the work items the split system parses.
-    let system_prompt = match &stage.mode {
-        leviath_core::blueprint::StageMode::FanOut { config }
-            if !config.split_prompt.trim().is_empty() =>
-        {
-            Some(match base_prompt {
-                Some(base) => format!("{base}\n\n{}", config.split_prompt),
-                None => config.split_prompt.clone(),
-            })
-        }
-        _ => base_prompt,
-    };
-    // A stage that must hand something back says so in its own instructions, on
-    // top of the `submit_output` tool description carrying the same shape. Both,
-    // because a format the model has no prior knowledge of - a2ui, a house
-    // schema - is exactly the case where one mention is easy to miss, and there
-    // is no parser downstream to catch a near miss.
-    let system_prompt = match (&output, stage.require_output) {
-        (Some(spec), true) => {
-            let described = leviath_core::describe_spec(spec);
-            let demand = match described.is_empty() {
-                true => format!(
-                    "Before this stage ends you must call `{tool}` with your final answer. It is \
-                     the only thing the caller receives.",
-                    tool = leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
-                ),
-                false => format!(
-                    "Before this stage ends you must call `{tool}` with your final answer. It is \
-                     the only thing the caller receives.\n\n{described}",
-                    tool = leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
-                ),
-            };
-            Some(match system_prompt {
-                Some(base) => format!("{base}\n\n{demand}"),
-                None => demand,
-            })
-        }
-        _ => system_prompt,
-    };
-    // Cascade each hint toggle: stage > agent > global (both default on).
-    let batch_tool_hint = leviath_core::taint::resolve_batch_tool_hint(
-        global_hints.batch_tool,
-        agent_hints.batch_tool,
-        stage.batch_tool_hint,
-    );
-    let shell_hint = leviath_core::taint::resolve_shell_hint(
-        global_hints.shell,
-        agent_hints.shell,
-        stage.shell_hint,
-    );
-    StageSetup {
-        inference_config: InferenceConfig {
-            temperature,
-            max_output_tokens,
-            extra_params,
-            as_text: stage.input_as_text.clone(),
-            batch_tool_hint,
-            shell_hint,
-            request_timeout_secs: stage.model.request_timeout_secs,
-        },
-        routing: stage.tool_result_routing.clone(),
-        accepts_messages: stage.accepts_messages,
-        context_layout: stage.context_layout.clone(),
-        context_hide: stage.context_hide.clone(),
-        context_reset: stage.context_reset.clone(),
-        system_prompt,
-    }
-}
-
-/// Spawn a fully-formed agent into `world` from its blueprint, task, and
-/// per-stage resolution, and return its entity. Builds every stage's
-/// `StageInference`/`StageSetup` up front (so transitions are pure component
-/// swaps), seeds the context window, applies the **first** stage's setup (its
-/// layout and system prompt), pre-counts the first stage's visit, and marks the
-/// agent `ReadyToInfer`. Returns `Err` if the first stage's system prompt doesn't fit
-/// its region (the same hard failure the imperative loop raises at stage 0).
-///
-/// `stages` must be aligned with `blueprint.stages` (one [`ResolvedStage`] each).
-///
-/// `global_hints` is the caller's global config toggle for each system-prompt
-/// hint; each is resolved per stage against the blueprint's agent-level and
-/// per-stage override of the same name.
-#[cfg(test)]
-pub(crate) fn spawn_agent(
-    world: &mut World,
-    agent_id: String,
-    blueprint: leviath_core::Blueprint,
-    task: &str,
-    stages: Vec<ResolvedStage>,
-    global_hints: leviath_core::config::PromptHints,
-) -> Result<Entity, String> {
-    let seeds = std::collections::HashMap::from([("task".to_string(), task.to_string())]);
-    // No compiled custom-region scripts on this path: script-backed regions
-    // require the seeded spawn (the CLI resolves and compiles them). A custom
-    // region spawned through here renders its fallback shape. Global nudge
-    // defaults are likewise a seeded-spawn concern (the CLI reads them from
-    // config.toml); agents spawned through here cascade straight from the
-    // blueprint to the built-in defaults.
-    spawn_agent_seeded(
-        world,
-        SeededSpawn {
-            agent_id,
-            blueprint,
-            seeds,
-            parts: Vec::new(),
-            stages,
-            global_hints,
-            global_nudge: leviath_core::NudgeConfig::default(),
-            region_scripts: std::collections::HashMap::new(),
-            mime_registry: None,
-        },
-    )
-}
-
-/// Everything a seeded spawn needs besides the world it spawns into.
-///
-/// The blueprint and its resolved stages travel with the seeds and the global
-/// defaults because all six are the same decision made at different layers:
-/// what this agent starts with. The caller resolves them; this consumes them.
-pub struct SeededSpawn {
-    /// The run id this agent is registered under.
-    pub agent_id: String,
-    /// The blueprint being spawned.
-    pub blueprint: leviath_core::Blueprint,
-    /// Content for named caller-input regions, keyed by region name.
-    pub seeds: std::collections::HashMap<String, String>,
-    /// Files the caller attached, written into their regions as stored parts
-    /// once the seeds are in.
-    pub parts: Vec<leviath_core::mime::InboundPart>,
-    /// The blueprint's stages, already resolved against the provider registry.
-    pub stages: Vec<ResolvedStage>,
-    /// Config-level prompt hints, applied where the blueprint says nothing.
-    pub global_hints: leviath_core::config::PromptHints,
-    /// The config-level nudge, likewise.
-    pub global_nudge: leviath_core::NudgeConfig,
-    /// Compiled render hooks, keyed by region name.
-    pub region_scripts: std::collections::HashMap<
-        String,
-        std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
-    >,
-    /// The run's mime registry, when the host built one (with the
-    /// blueprint's checks compiled and attached). Left `None`, one is built
-    /// here from the world's registry and the blueprint's own rows, with no
-    /// checks.
-    pub mime_registry: Option<crate::blob_store::RunMimeRegistry>,
-}
-
-/// Like `spawn_agent`, but seeds the context window from a name→content map
-/// (caller-input regions filled by the CLI/ACP/API, plus blueprint-resolved
-/// seeds) rather than a single task string. `spawn_agent` is the thin wrapper
-/// that seeds only the `task` key.
-///
-/// `global_nudge` is the caller's config-level `[nudge]` defaults, captured on
-/// the agent as a `crate::pipeline::response::GlobalNudge` component; each
-/// field is resolved per stage against the blueprint's agent-level and
-/// per-stage nudge settings when an empty response is handled.
-pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entity, String> {
-    let SeededSpawn {
-        agent_id,
-        mut blueprint,
-        seeds,
-        parts,
-        stages,
-        global_hints,
-        global_nudge,
-        region_scripts,
-        mime_registry,
-    } = spawn;
-    let seeds = &seeds;
-    // The registry this run types its bytes by: the host's, or the world's
-    // rows with the blueprint's `[mime_types]` on top. A world without a
-    // registry (one assembled by hand in a test) has no run registry either.
-    let run_registry = match mime_registry {
-        Some(registry) => Some(registry),
-        None => world
-            .get_resource::<crate::blob_store::MimeRegistryHandle>()
-            .map(|r| {
-                crate::blob_store::RunMimeRegistry::new(
-                    &r.0,
-                    blueprint.mime_types.clone(),
-                    std::collections::BTreeMap::new(),
-                )
-            })
-            .transpose()
-            .map_err(|e| format!("[mime_types]: {e}"))?,
-    };
-    // Where attached bytes go, read before the world is borrowed for the
-    // spawn. A world without a store (one assembled by hand in a test)
-    // refuses a part rather than dropping it on the floor.
-    let mime_store = world
-        .get_resource::<crate::blob_store::BlobStoreHandle>()
-        .map(|s| s.0.clone())
-        .zip(run_registry.as_ref().map(|r| r.registry()));
-    let limits = world
-        .get_resource::<crate::blob_store::MimeLimits>()
-        .copied()
-        .unwrap_or_default();
-    // Everything below indexes `blueprint.stages`, `stages` and the per-stage
-    // vectors built from them by position. `parse_manifest` guarantees at
-    // least one stage, but this is `pub` and an embedder can hand-build a
-    // `Blueprint`; refusing here turns two index panics into the `Err` the
-    // signature already promises.
-    if blueprint.stages.is_empty() {
-        return Err("blueprint declares no stages".to_string());
-    }
-    if stages.len() != blueprint.stages.len() {
-        return Err(format!(
-            "{} resolved stages for a blueprint with {}",
-            stages.len(),
-            blueprint.stages.len()
-        ));
-    }
-    // Resolve any percentage region budgets against a real model context window
-    // (the only place the model - and hence the window - is known). Absolute
-    // layouts resolve to themselves, so this is a no-op for legacy blueprints.
-    //
-    // The subtlety is *which* window sizes each region. A region's percentage
-    // budget is sized against the smallest context window among the stages that
-    // actually see it - not the entry stage's window, and not a stage that never
-    // reads the region. So the GLOBAL layout is resolved per region: for each
-    // region, the smallest window over the stages that use the global layout
-    // (declare no layout of their own) and can see the region. A per-stage
-    // layout's regions are private to that stage, so its own window is the only
-    // one that uses them.
-    let stage_windows: Vec<usize> = stages
-        .iter()
-        .map(|rs| context_window_tokens(world, &rs.provider_name, &rs.model))
-        .collect();
-    let resolved_global = {
-        let smallest_window_seeing = |region: &str| -> usize {
-            blueprint
-                .stages
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| {
-                    s.context_layout.is_none() && blueprint.regions_visible_to(s).contains(region)
-                })
-                .map(|(i, _)| stage_windows[i])
-                .min()
-                // No stage uses the global layout for this region (every stage
-                // has its own, or all hide it); the entry window is a harmless
-                // default for a budget nothing at runtime consults.
-                .unwrap_or(stage_windows[0])
-        };
-        blueprint
-            .context_layout
-            .resolved_per_region(&smallest_window_seeing)
-    };
-    blueprint.context_layout = resolved_global;
-    for (i, stage) in blueprint.stages.iter_mut().enumerate() {
-        if let Some(layout) = &stage.context_layout {
-            stage.context_layout = Some(layout.resolved(stage_windows[i]));
-        }
-    }
-    // Structural validation (duplicate names, eviction order, custom scripts)
-    // once per distinct layout, now that percentages are concrete numbers.
-    blueprint
-        .context_layout
-        .validate()
-        .map_err(|e| e.to_string())?;
-    for stage in &blueprint.stages {
-        if let Some(layout) = &stage.context_layout {
-            layout.validate().map_err(|e| e.to_string())?;
-        }
-    }
-    // Then the working-room floor, per stage: each stage must keep enough
-    // evictable room after its fixed regions, judged against *its* model window
-    // over just the regions *it* sees. A region budgeted generously for a
-    // wide-window stage must not be counted against a narrow-window stage that
-    // never reads it - the check a single-window `validate()` cannot make, and
-    // the footgun that let a small entry-stage image model cap every later
-    // stage.
-    for (i, stage) in blueprint.stages.iter().enumerate() {
-        let layout = stage
-            .context_layout
-            .as_ref()
-            .unwrap_or(&blueprint.context_layout);
-        let visible = blueprint.regions_visible_to(stage);
-        layout
-            .retaining(|name| visible.contains(name))
-            .validate_working_room(stage_windows[i])
-            .map_err(|e| e.to_string())?;
-    }
-
-    // Kept before `stages` is consumed, so each stage's setup can fold the same
-    // shape into its system prompt that its tool description already carries.
-    let stage_outputs: Vec<Option<leviath_core::output::OutputSpec>> =
-        stages.iter().map(|rs| rs.output.clone()).collect();
-    // Spawn-time notes ride each stage's operational log, tagged with the
-    // stage's index, so the substitution a user's model settings made is the
-    // first line anyone reading that stage's log sees.
-    let notes: Vec<(usize, String)> = stages
-        .iter()
-        .enumerate()
-        .flat_map(|(i, rs)| rs.notes.iter().cloned().map(move |line| (i, line)))
-        .collect();
-    let stage_infs: Vec<StageInference> = stages
-        .into_iter()
-        .map(|rs| StageInference {
-            provider_name: rs.provider_name,
-            model: rs.model,
-            tools: rs.tools,
-            tool_filter: None, // tools already resolved to the effective set
-            fallbacks: rs.fallbacks,
-            output: rs.output,
-        })
-        .collect();
-    let agent_hints = leviath_core::config::PromptHintOverrides {
-        batch_tool: blueprint.batch_tool_hint,
-        shell: blueprint.shell_hint,
-    };
-    let setups: Vec<StageSetup> = blueprint
-        .stages
-        .iter()
-        .zip(stage_outputs)
-        .map(|(s, output)| stage_setup_from(s, global_hints, agent_hints, output))
-        .collect();
-
-    // Seed the window from the blueprint layout + task, then apply stage 0's
-    // context setup (layout swap + system-prompt injection) just as entering any
-    // later stage would.
-    let mut window = ContextWindow::new(blueprint.context_layout.total_budget_tokens);
-    // Attach compiled custom-region scripts BEFORE seeding, so seed writes
-    // pass through each region's on_write hook like any other entry.
-    window.region_scripts = region_scripts;
-    crate::context_setup::init_window_seeded(&mut window, &blueprint, seeds);
-    if !parts.is_empty() {
-        let Some((store, registry)) = mime_store else {
-            return Err("this world has no blob store, so it cannot take an attached part".into());
-        };
-        crate::context_setup::ingest_parts(
-            &mut window,
-            &blueprint,
-            parts,
-            &crate::context_setup::PartSink {
-                store: store.as_ref(),
-                registry: &registry,
-                run_id: &agent_id,
-                max_part_bytes: limits.max_part_bytes,
-                inline_text_bytes: limits.inline_text_bytes,
-            },
-        )?;
-    }
-    // Before stage 0's prompt is injected, so it has somewhere of its own to go
-    // rather than being charged to whichever pinned region came first.
-    let prompts: Vec<Option<String>> = setups.iter().map(|s| s.system_prompt.clone()).collect();
-    crate::context_setup::ensure_stage_instructions_region(&mut window, &prompts);
-    apply_stage_context(&setups[0], &mut window)?;
-    // Now that the window is built, not before it: this is the one place both
-    // halves of a change record are in hand (the run id the archive is named
-    // after, and the lane every other record goes down), and the seeding above
-    // has to stay off the lane. An append is the one message that cannot create
-    // a run directory, so an append arriving ahead of the first snapshot stakes
-    // the run without establishing it - and the snapshot behind it then reads as
-    // a write to a run somebody deleted. A world that persists nothing leaves
-    // the window detached, and it records nothing.
-    window.attach_journal(&agent_id, world.get_resource::<PersistenceStage>());
-
-    let stage0_name = blueprint.stages[0].name.clone();
-    let stage0_inf = stage_infs[0].clone();
-    let setup0 = &setups[0];
-    let stage0_cfg = setup0.inference_config.clone();
-    let stage0_routing = setup0.routing.clone();
-    let accepts_messages = setup0.accepts_messages;
-
-    // Pre-count stage 0's visit: the imperative loop bumps a stage's visit after
-    // it runs and before resolving its transition, so stage 0 must read as
-    // visited once by the time its first transition resolves.
-    let mut visits = VisitCounts::default();
-    *visits.0.entry(stage0_name.clone()).or_insert(0) += 1;
-
-    // Seed the per-stage ledger (names + Pending) so the dashboard shows every
-    // stage's real name from the first persist, not just the active one.
-    let mut ledger = StageLedger(
-        blueprint
-            .stages
-            .iter()
-            .enumerate()
-            .map(|(i, s)| leviath_core::run_meta::StageRecord::new(s.name.clone(), i))
-            .collect(),
-    );
-    // Stage 0 is the one stage no transition enters, so its first visit is
-    // opened here for the same reason its `VisitCounts` entry is pre-counted
-    // above: without it the two disagree from the first tick.
-    let stage0_visit = leviath_core::execution::mint_visit_id();
-    ledger.0[0].begin_visit(chrono::Utc::now().timestamp(), stage0_visit.clone());
-
-    // Repetition detection is opt-in per blueprint.
-    let repetition = blueprint
-        .repetition_detection
-        .as_ref()
-        .map(crate::repetition::RepetitionDetector::from_detection_config);
-
-    let entity = world
-        .spawn((
-            AgentBlueprint(blueprint),
-            AgentState {
-                agent_id,
-                current_stage: stage0_name,
-                current_visit: stage0_visit,
-                iteration: 0,
-                status: AgentStatus::Active,
-                spawned_children_ids: vec![],
-                pending_wait: None,
-                accepts_messages,
-            },
-            MessageInbox::default(),
-            StageCursor { index: 0 },
-            StageProgress::default(),
-            StageInferences(stage_infs),
-            StageSetups(setups),
-            visits,
-            window,
-            stage0_inf,
-            stage0_cfg,
-            ReadyToInfer,
-        ))
-        .id();
-    // Inserted after spawn: the bundle above is already at bevy's 15-tuple limit.
-    world.entity_mut(entity).insert((
-        ledger,
-        StageIoBuffer {
-            output: Vec::new(),
-            logs: notes,
-        },
-        crate::pipeline::response::GlobalNudge(global_nudge),
-    ));
-    if let Some(detector) = repetition {
-        world.entity_mut(entity).insert(detector);
-    }
-    if let Some(registry) = run_registry {
-        world.entity_mut(entity).insert(registry);
-    }
-    if let Some(routing) = stage0_routing {
-        world
-            .entity_mut(entity)
-            .insert(crate::components::ToolResultRoutingComponent { routing });
-    }
-    Ok(entity)
-}
-
 #[cfg(test)]
 mod stage_instructions_fit_tests {
     //! A stage prompt bigger than the first pinned region, spawned end to end.
 
+    use crate::spec::graph::RegionDef;
+    use crate::test_graph::pct;
+
+    /// `regions` laid out for a window of `window` tokens: each one's
+    /// percentage budget sized against it.
+    fn laid_out(regions: &[RegionDef], window: usize) -> Vec<leviath_core::Region> {
+        regions
+            .iter()
+            .map(|r| crate::context_setup::region_from_def(r, r.budget.resolve(window)))
+            .collect()
+    }
+
     /// A small `task` region beside a dedicated `stage_instructions` region
-    /// with room for a stage prompt.
-    fn layout(window: usize) -> leviath_core::layout::ContextLayout {
-        use leviath_core::layout::{BudgetSpec, ContextLayout, RegionDefinition};
-        let pct = |p: f64| BudgetSpec::Percent {
-            percent: p,
-            min: None,
-            max: None,
-        };
-        let mut task =
-            RegionDefinition::new("task".to_string(), leviath_core::RegionKind::Pinned, 0);
-        task.budget = pct(0.02);
-        let mut instr = RegionDefinition::new(
-            leviath_core::layout::STAGE_INSTRUCTIONS_REGION.to_string(),
-            leviath_core::RegionKind::Pinned,
-            0,
-        );
-        instr.budget = pct(0.03);
-        ContextLayout::new(vec![task, instr], window).resolved(window)
+    /// with room for a stage prompt, laid out for a window of `window` tokens.
+    fn layout(window: usize) -> Vec<leviath_core::Region> {
+        laid_out(
+            &[
+                pct("task", 0.02),
+                pct(crate::spec::graph::STAGE_INSTRUCTIONS_REGION, 0.03),
+            ],
+            window,
+        )
     }
 
     /// A ~2.9k-token stage prompt: too big for 2% of a 128k window, comfortable
@@ -573,15 +73,13 @@ mod stage_instructions_fit_tests {
         let window_tokens = 128_000;
         let layout = layout(window_tokens);
         let task_max = layout
-            .regions
             .iter()
             .find(|r| r.name == "task")
             .expect("task")
             .max_tokens;
         let instr_max = layout
-            .regions
             .iter()
-            .find(|r| r.name == leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+            .find(|r| r.name == crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
             .expect("stage_instructions")
             .max_tokens;
         let prompt = big_prompt();
@@ -592,21 +90,8 @@ mod stage_instructions_fit_tests {
              stage_instructions {instr_max}"
         );
 
-        let bp = leviath_core::Blueprint::new(
-            "t".to_string(),
-            "d".to_string(),
-            vec![leviath_core::Stage::new(
-                "work".to_string(),
-                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-            )],
-            layout,
-        );
         let mut window = crate::components::ContextWindow::new(window_tokens);
-        crate::context_setup::init_window_seeded(
-            &mut window,
-            &bp,
-            &std::collections::HashMap::new(),
-        );
+        crate::context_setup::lay_out(&mut window, layout);
         let setup = crate::pipeline::transition::StageSetup {
             inference_config: crate::components::InferenceConfig {
                 temperature: None,
@@ -628,7 +113,7 @@ mod stage_instructions_fit_tests {
             .expect("the prompt fits the region declared for it");
 
         let instr = window
-            .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+            .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
             .expect("region exists");
         assert!(
             instr.content.iter().any(|e| e.content.contains("word")),
@@ -645,35 +130,14 @@ mod stage_instructions_fit_tests {
     /// stage prompt, coupling an unrelated region to prompt lengths.
     #[test]
     fn a_blueprint_that_declares_no_region_still_gets_one() {
-        use leviath_core::layout::{BudgetSpec, ContextLayout, RegionDefinition};
         let window_tokens = 128_000;
         let prompt = big_prompt();
 
         // Only `task`, at 2% - a region sized for a sentence from the caller.
-        let mut task =
-            RegionDefinition::new("task".to_string(), leviath_core::RegionKind::Pinned, 0);
-        task.budget = BudgetSpec::Percent {
-            percent: 0.02,
-            min: None,
-            max: None,
-        };
-        let only_task = ContextLayout::new(vec![task], window_tokens).resolved(window_tokens);
-        let bp = leviath_core::Blueprint::new(
-            "t".to_string(),
-            "d".to_string(),
-            vec![leviath_core::Stage::new(
-                "work".to_string(),
-                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-            )],
-            only_task,
-        );
+        let only_task = laid_out(&[pct("task", 0.02)], window_tokens);
 
         let mut window = crate::components::ContextWindow::new(window_tokens);
-        crate::context_setup::init_window_seeded(
-            &mut window,
-            &bp,
-            &std::collections::HashMap::new(),
-        );
+        crate::context_setup::lay_out(&mut window, only_task);
         let prompts = vec![Some(prompt.clone())];
         crate::context_setup::ensure_stage_instructions_region(&mut window, &prompts);
 
@@ -703,7 +167,7 @@ mod stage_instructions_fit_tests {
             "the task region is left for the caller's task"
         );
         let instr = window
-            .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+            .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
             .expect("the runtime made one");
         assert!(instr.content.iter().any(|e| e.content.contains("word")));
     }
@@ -716,7 +180,7 @@ mod stage_instructions_fit_tests {
         crate::context_setup::ensure_stage_instructions_region(&mut window, &[None, None]);
         assert!(
             window
-                .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+                .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
                 .is_none()
         );
     }
@@ -726,14 +190,14 @@ mod stage_instructions_fit_tests {
     fn a_declared_region_is_not_resized() {
         let mut window = crate::components::ContextWindow::new(100_000);
         window.add_region(leviath_core::Region::new(
-            leviath_core::layout::STAGE_INSTRUCTIONS_REGION.to_string(),
+            crate::spec::graph::STAGE_INSTRUCTIONS_REGION.to_string(),
             leviath_core::RegionKind::Pinned,
             4_242,
         ));
         crate::context_setup::ensure_stage_instructions_region(&mut window, &[Some(big_prompt())]);
         assert_eq!(
             window
-                .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+                .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
                 .expect("declared")
                 .max_tokens,
             4_242
@@ -759,7 +223,7 @@ mod stage_instructions_fit_tests {
         // Capped at a quarter of the window rather than sized to the prompt.
         assert_eq!(
             window
-                .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+                .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
                 .expect("made")
                 .max_tokens,
             250
@@ -785,7 +249,7 @@ mod stage_instructions_fit_tests {
         let err = crate::pipeline::transition::apply_stage_context(&setup, &mut window)
             .expect_err("a prompt larger than the window cannot be housed");
         assert!(
-            err.contains(leviath_core::layout::STAGE_INSTRUCTIONS_REGION),
+            err.contains(crate::spec::graph::STAGE_INSTRUCTIONS_REGION),
             "{err}"
         );
     }
@@ -804,7 +268,7 @@ mod stage_instructions_fit_tests {
         );
         assert_eq!(
             window
-                .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+                .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
                 .expect("made")
                 .max_tokens,
             expected
@@ -815,37 +279,15 @@ mod stage_instructions_fit_tests {
     /// does not re-declare `stage_instructions`.
     #[test]
     fn a_scoped_stage_layout_still_routes_to_the_declared_region() {
-        use leviath_core::layout::{BudgetSpec, ContextLayout, RegionDefinition};
         let window_tokens = 128_000;
         let prompt = big_prompt();
 
         // The stage narrows what it attends to and says nothing about
         // stage_instructions - the region is the runtime's to fill.
-        let mut scoped_task =
-            RegionDefinition::new("task".to_string(), leviath_core::RegionKind::Pinned, 0);
-        scoped_task.budget = BudgetSpec::Percent {
-            percent: 0.02,
-            min: None,
-            max: None,
-        };
-        let scoped = ContextLayout::new(vec![scoped_task], window_tokens).resolved(window_tokens);
-
-        let bp = leviath_core::Blueprint::new(
-            "t".to_string(),
-            "d".to_string(),
-            vec![leviath_core::Stage::new(
-                "work".to_string(),
-                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-            )],
-            layout(window_tokens),
-        );
+        let scoped = laid_out(&[pct("task", 0.02)], window_tokens);
 
         let mut window = crate::components::ContextWindow::new(window_tokens);
-        crate::context_setup::init_window_seeded(
-            &mut window,
-            &bp,
-            &std::collections::HashMap::new(),
-        );
+        crate::context_setup::lay_out(&mut window, layout(window_tokens));
         let setup = crate::pipeline::transition::StageSetup {
             inference_config: crate::components::InferenceConfig {
                 temperature: None,
@@ -867,7 +309,7 @@ mod stage_instructions_fit_tests {
             .expect("the prompt fits the region declared for it");
 
         let instr = window
-            .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+            .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
             .expect("carried through the scoped layout");
         assert!(
             instr.content.iter().any(|e| e.content.contains("word")),

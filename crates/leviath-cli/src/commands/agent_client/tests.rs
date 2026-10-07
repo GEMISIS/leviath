@@ -178,13 +178,14 @@ impl Harness {
         }
     }
 
-    /// Write `RUN_ID`'s persisted `meta.json` with the given snake_case status,
+    /// Record `RUN_ID` in its run file with the given snake_case status,
     /// simulating what the daemon's persistence lane records (the turn reads this
     /// to decide when the run is genuinely done).
     fn write_meta_status(&self, status: &str) {
         let dir = self.runs_dir.path().join(RUN_ID);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("meta.json"), format!(r#"{{"status":"{status}"}}"#)).unwrap();
+        let mut meta = crate::test_fixtures::fixtures::run_meta(RUN_ID);
+        meta.status = serde_json::from_value(serde_json::json!(status)).unwrap();
+        crate::runstate::write_meta_to(&dir, &meta).unwrap();
     }
 
     /// Write agent output to `RUN_ID`'s stage `idx` output log under the runs dir.
@@ -318,11 +319,54 @@ fn free_text_event() -> WorldEvent {
     }
 }
 
+/// The warning a run whose graph cannot finish starts with.
+pub(super) fn looping() -> leviath_runtime::spec::issues::SpawnIssues {
+    leviath_runtime::spec::issues::SpawnIssue::new(
+        leviath_runtime::spec::issues::SpecPath::root()
+            .field("graph")
+            .field("edges"),
+        leviath_runtime::spec::issues::IssueCode::MayNeverFinish,
+        "this run can never finish",
+    )
+    .into()
+}
+
+/// A responder that spawns `RUN_ID` as a run that may never finish.
+pub(super) fn spawn_looping(req: ControlRequest) -> ControlResponse {
+    match req {
+        ControlRequest::Spawn { .. } => ControlResponse::Spawned {
+            run_id: RUN_ID.to_string(),
+            warnings: looping(),
+        },
+        _ => ControlResponse::Ok { ok: true },
+    }
+}
+
+/// A run its first prompt starts that may never finish says so in the
+/// session, before anything the run writes.
+#[tokio::test]
+async fn a_first_prompt_says_when_its_run_may_never_finish() {
+    let daemon = ScriptedDaemon::new(vec![completed("complete")], spawn_looping);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    let chunk = h
+        .recv_until(|m| update_kind(m).as_deref() == Some("agent_message_chunk"))
+        .await;
+    assert_eq!(
+        chunk.params.unwrap()["update"]["content"]["text"],
+        "!!! WARNING: THIS RUN MAY NEVER FINISH !!!\n"
+    );
+    let _ = h.recv_until(is_result).await;
+    h.close_input().await;
+}
+
 /// A responder that spawns `RUN_ID` and says yes to everything else.
 fn spawn_ok(req: ControlRequest) -> ControlResponse {
     match req {
         ControlRequest::Spawn { .. } => ControlResponse::Spawned {
             run_id: RUN_ID.to_string(),
+            warnings: Default::default(),
         },
         _ => ControlResponse::Ok { ok: true },
     }
@@ -335,15 +379,17 @@ fn blueprint_args() -> (tempfile::TempDir, AgentClientArgs) {
     let dir = root.path().join("coder");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join("agent.leviath"),
+        dir.join("agent.toml"),
         r#"
-[agent]
+[blueprint]
 name = "coder"
 version = "1.0.0"
 description = "test"
 
-[stages.implement]
-system_prompt = "Do it"
+[graph]
+stages = [{ name = "implement", system_prompt = "Do it" }]
+layout = { total_budget_tokens = 1000, regions = [{ name = "task", kind = "pinned", budget = 1000 }] }
+inputs = [{ name = "task", type = "text", required = true, binds = [{ region = "task" }] }]
 "#,
     )
     .unwrap();
@@ -594,10 +640,14 @@ async fn empty_cwd_defaults_to_the_launch_directory() {
     let captured = Arc::new(std::sync::Mutex::new(None));
     let cap = captured.clone();
     let daemon = ScriptedDaemon::new(vec![completed("complete")], move |req| match req {
-        ControlRequest::Spawn { args } => {
-            *cap.lock().unwrap() = Some(args.workdir.clone());
+        ControlRequest::Spawn { request } => {
+            *cap.lock().unwrap() = request
+                .workdir
+                .as_ref()
+                .map(|w| w.to_string_lossy().into_owned());
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
+                warnings: Default::default(),
             }
         }
         _ => ControlResponse::Ok { ok: true },
@@ -614,10 +664,13 @@ async fn empty_cwd_defaults_to_the_launch_directory() {
     h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
         .await;
     let _ = h.recv_until(is_result).await;
-    assert_eq!(
-        captured.lock().unwrap().as_deref(),
-        Some(HARNESS_DEFAULT_CWD)
-    );
+    // Compared as paths: on Windows the rooted default gains the drive.
+    let captured = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .map(std::path::PathBuf::from);
+    assert_eq!(captured, std::path::absolute(HARNESS_DEFAULT_CWD).ok());
     h.close_input().await;
 }
 
@@ -848,6 +901,22 @@ async fn a_refused_spawn_ends_the_turn_as_refusal() {
     h.close_input().await;
 }
 
+/// A blueprint gone from under a session cannot be asked for: the turn ends
+/// as a refusal without the daemon being asked.
+#[tokio::test]
+async fn a_spawn_whose_blueprint_is_gone_ends_the_turn_as_refusal() {
+    let daemon = ScriptedDaemon::new(vec![], spawn_ok);
+    let (mut h, bp) = opened_session(daemon, false).await;
+    std::fs::remove_dir_all(bp.path().join("coder")).unwrap();
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "refusal"
+    );
+    h.close_input().await;
+}
+
 #[tokio::test]
 async fn a_second_prompt_is_delivered_as_a_message() {
     let daemon = ScriptedDaemon::new(vec![completed("complete")], spawn_ok);
@@ -875,6 +944,7 @@ async fn a_second_prompt_that_cannot_be_delivered_ends_the_turn() {
     let daemon = ScriptedDaemon::new(vec![completed("complete")], |req| match req {
         ControlRequest::Spawn { .. } => ControlResponse::Spawned {
             run_id: RUN_ID.to_string(),
+            warnings: Default::default(),
         },
         ControlRequest::Message { .. } => ControlResponse::Ok { ok: false },
         _ => ControlResponse::Ok { ok: true },
@@ -1162,6 +1232,7 @@ async fn a_cancel_notification_between_turns_cancels_the_run() {
     let daemon = ScriptedDaemon::new(vec![completed("complete")], move |req| match req {
         ControlRequest::Spawn { .. } => ControlResponse::Spawned {
             run_id: RUN_ID.to_string(),
+            warnings: Default::default(),
         },
         ControlRequest::Cancel { .. } => {
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1206,6 +1277,7 @@ async fn a_cancel_notification_mid_turn_cancels_the_run() {
     let daemon = ScriptedDaemon::new(vec![status_event()], move |req| match req {
         ControlRequest::Spawn { .. } => ControlResponse::Spawned {
             run_id: RUN_ID.to_string(),
+            warnings: Default::default(),
         },
         ControlRequest::Cancel { .. } => {
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1326,6 +1398,7 @@ async fn output_is_flushed_on_the_poll_tick_between_events() {
                     ControlRequest::Spawn { .. } => {
                         let mut out = serde_json::to_string(&ControlResponse::Spawned {
                             run_id: RUN_ID.to_string(),
+                            warnings: Default::default(),
                         })
                         .unwrap();
                         out.push('\n');
@@ -1392,6 +1465,7 @@ async fn a_closed_event_stream_ends_the_turn() {
                 if let ControlRequest::Spawn { .. } = req {
                     let mut out = serde_json::to_string(&ControlResponse::Spawned {
                         run_id: RUN_ID.to_string(),
+                        warnings: Default::default(),
                     })
                     .unwrap();
                     out.push('\n');
@@ -1479,6 +1553,7 @@ fn restarting_daemon(
                     ControlRequest::Spawn { .. } => {
                         let out = say(ControlResponse::Spawned {
                             run_id: RUN_ID.to_string(),
+                            warnings: Default::default(),
                         });
                         let _ = write_half.write_all(out.as_bytes()).await;
                     }
@@ -1497,10 +1572,9 @@ fn restarting_daemon(
     }
 }
 
-/// The daemon restarts mid-turn: the event stream drops, and the turn used to
-/// end right there with a truncated reply while the run finished unwatched.
-/// Now the bridge follows the run onto the new daemon and the turn ends when
-/// the run does.
+/// The daemon restarts mid-turn: the event stream drops, and the bridge
+/// follows the run onto the new daemon rather than ending the turn with a
+/// truncated reply. The turn ends when the run does.
 #[tokio::test]
 async fn a_dropped_event_stream_is_followed_onto_the_new_daemon() {
     let daemon = restarting_daemon(None, vec![status_event()], vec![completed("complete")]);
@@ -1551,6 +1625,7 @@ async fn a_daemon_that_never_comes_back_ends_the_turn() {
                 _ => {
                     let mut out = serde_json::to_string(&ControlResponse::Spawned {
                         run_id: RUN_ID.to_string(),
+                        warnings: Default::default(),
                     })
                     .unwrap();
                     out.push('\n');
@@ -1615,19 +1690,12 @@ mod run_status_helpers {
     use leviath_core::run_meta::RunStatus;
 
     #[test]
-    fn read_run_status_reads_the_persisted_status_ignoring_extra_fields() {
+    fn read_run_status_reads_the_persisted_status() {
         let dir = tempfile::tempdir().unwrap();
-        let run = dir.path().join("r1");
-        std::fs::create_dir_all(&run).unwrap();
-        std::fs::write(
-            run.join("meta.json"),
-            r#"{"status":"complete_interactive","run_id":"r1","extra":1}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            read_run_status(dir.path(), "r1"),
-            Some(RunStatus::CompleteInteractive)
-        );
+        let mut meta = crate::test_fixtures::fixtures::run_meta("r1");
+        meta.status = RunStatus::Complete;
+        crate::runstate::create_run_in(&dir.path().join("r1"), &meta).unwrap();
+        assert_eq!(read_run_status(dir.path(), "r1"), Some(RunStatus::Complete));
     }
 
     #[test]
@@ -1685,10 +1753,10 @@ mod run_status_helpers {
         let dir = tempfile::tempdir().unwrap();
         // Missing file.
         assert_eq!(read_run_status(dir.path(), "nope"), None);
-        // Present but not valid JSON.
+        // Present but not a run file.
         let run = dir.path().join("bad");
         std::fs::create_dir_all(&run).unwrap();
-        std::fs::write(run.join("meta.json"), "not json").unwrap();
+        std::fs::write(run.join(leviath_core::files::RUN_FILE), "not a run file").unwrap();
         assert_eq!(read_run_status(dir.path(), "bad"), None);
     }
 }
@@ -1773,6 +1841,23 @@ async fn produced_files_follow_the_answer_as_links() {
     h.close_input().await;
 }
 
+/// The task a spawn request carries, and the name and bytes of each file
+/// attached to it.
+fn spawned_task_and_parts(
+    request: &leviath_runtime::spec::request::SpawnRequest,
+) -> (String, Vec<(String, Vec<u8>)>) {
+    let task = match request.inputs.get("task") {
+        Some(leviath_runtime::spec::inputs::RawInput::Text(t)) => t.clone(),
+        _ => String::new(),
+    };
+    let parts = request
+        .attachments
+        .iter()
+        .map(|a| (a.name.clone(), a.data.0.clone()))
+        .collect();
+    (task, parts)
+}
+
 /// An image in the prompt reaches the daemon as a part on the spawn, and on
 /// a later prompt as a part on the message; a prompt that is only an image
 /// still gets words naming it.
@@ -1781,15 +1866,15 @@ async fn prompt_files_reach_the_daemon_as_parts() {
     let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
     let cap = captured.clone();
     let daemon = ScriptedDaemon::new(vec![completed("complete")], move |req| match req {
-        ControlRequest::Spawn { args } => {
-            cap.lock()
-                .unwrap()
-                .push((args.task.clone(), args.parts.clone()));
+        ControlRequest::Spawn { request } => {
+            cap.lock().unwrap().push(spawned_task_and_parts(&request));
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
+                warnings: Default::default(),
             }
         }
         ControlRequest::Message { content, parts, .. } => {
+            let parts = parts.into_iter().map(|p| (p.name, p.data)).collect();
             cap.lock().unwrap().push((content, parts));
             ControlResponse::Ok { ok: true }
         }
@@ -1807,9 +1892,9 @@ async fn prompt_files_reach_the_daemon_as_parts() {
     assert_eq!(seen.len(), 2, "{seen:?}");
     assert_eq!(seen[0].0, "Attached: image-1.png");
     assert_eq!(seen[0].1.len(), 1);
-    assert_eq!(seen[0].1[0].name, "image-1.png");
+    assert_eq!(seen[0].1[0].0, "image-1.png");
     assert_eq!(seen[1].0, "and this");
-    assert_eq!(seen[1].1[0].name, "audio-1.wav");
+    assert_eq!(seen[1].1[0].0, "audio-1.wav");
     h.close_input().await;
 }
 
@@ -1821,12 +1906,11 @@ async fn linked_files_inside_the_working_directory_reach_the_daemon_as_parts() {
     let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
     let cap = captured.clone();
     let daemon = ScriptedDaemon::new(vec![completed("complete")], move |req| match req {
-        ControlRequest::Spawn { args } => {
-            cap.lock()
-                .unwrap()
-                .push((args.task.clone(), args.parts.clone()));
+        ControlRequest::Spawn { request } => {
+            cap.lock().unwrap().push(spawned_task_and_parts(&request));
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
+                warnings: Default::default(),
             }
         }
         _ => ControlResponse::Ok { ok: true },
@@ -1871,8 +1955,8 @@ async fn linked_files_inside_the_working_directory_reach_the_daemon_as_parts() {
         "{task}"
     );
     assert_eq!(parts.len(), 1, "{parts:?}");
-    assert_eq!(parts[0].name, "notes.md");
-    assert_eq!(parts[0].data, b"# notes");
+    assert_eq!(parts[0].0, "notes.md");
+    assert_eq!(parts[0].1, b"# notes");
     h.close_input().await;
 }
 
@@ -1902,3 +1986,6 @@ async fn a_run_with_no_answer_adds_no_closing_message() {
     assert_eq!(assembled, "streamed work");
     h.close_input().await;
 }
+
+#[path = "extension_tests.rs"]
+mod extension;

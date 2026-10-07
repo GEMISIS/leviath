@@ -14,7 +14,7 @@
 //! in neither set.
 //!
 //! Safe entries only ever collapse `Ask` into `Allow`. They never reach `Deny`,
-//! and an entry that came from a downloaded `agent.leviath` is inert until the
+//! and an entry that came from a downloaded blueprint is inert until the
 //! user opts in - see [`resolve_safe_keys`].
 
 use std::collections::BTreeMap;
@@ -205,7 +205,7 @@ pub struct AgentSafeCommands {
 pub(crate) fn resolve_safe_keys(
     config: &SafeCommands,
     agent: Option<&AgentSafeCommands>,
-    blueprint: Option<&leviath_core::blueprint::SafeCommandsConfig>,
+    blueprint: Option<&leviath_runtime::spec::graph::SafeCommandsDef>,
     allow_blueprint_globally: bool,
 ) -> BTreeMap<String, SafeSource> {
     let mut keys = BTreeMap::new();
@@ -220,7 +220,8 @@ pub(crate) fn resolve_safe_keys(
     }
     let opted_in = allow_blueprint_globally || agent.is_some_and(|a| a.allow_blueprint);
     if let (true, Some(bp)) = (opted_in, blueprint) {
-        add(&mut keys, &bp.tools, &bp.shell, SafeSource::Blueprint);
+        let tools: Vec<String> = bp.tools.iter().map(ToString::to_string).collect();
+        add(&mut keys, &tools, &bp.shell, SafeSource::Blueprint);
     }
     keys
 }

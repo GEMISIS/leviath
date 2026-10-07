@@ -47,6 +47,14 @@ impl WorldHost {
             // Unwrapped once: everything below reaches into this world's ECS,
             // where same-world is true by construction.
             let entity = agent.entity();
+            // A run that came back had announced some things already; the
+            // first pass over it takes them as said.
+            let announced = self
+                .world
+                .world_mut()
+                .get_entity_mut(entity)
+                .ok()
+                .and_then(|mut e| e.take::<crate::restore::Announced>());
             let Some(state) = self.world.world().get::<AgentState>(entity) else {
                 continue; // reaped between registration and now
             };
@@ -99,8 +107,21 @@ impl WorldHost {
                 .map(|w| w.max_tokens)
                 .unwrap_or(0);
             let prev = self.emitted.get(&run_id).cloned();
+            // What subscribers have heard about this run: the last pass's
+            // snapshot, or, for a run that just came back, what it had
+            // announced before it left.
+            let (title_before, spent_before, was_terminal) = prev
+                .as_ref()
+                .map(|e| (e.title.clone(), e.cost_micros, e.terminal))
+                .or_else(|| {
+                    announced.as_ref().map(|a| {
+                        let spent = super::events::usd_to_micros(a.priced_usd);
+                        (a.title.clone(), spent, a.finished)
+                    })
+                })
+                .unwrap_or_default();
 
-            if prev.is_none() {
+            if prev.is_none() && announced.is_none() {
                 let metadata = self.world.world().get::<RunMetadata>(entity);
                 let blueprint = metadata.map(|m| m.agent_name.clone()).unwrap_or_default();
                 let parent_run_id = metadata.and_then(|m| m.parent_run_id.clone());
@@ -117,7 +138,7 @@ impl WorldHost {
             // every client either polling each new run or showing the prompt's
             // first line until unrelated traffic made it re-read.
             if let Some(title) = cur.title.as_deref()
-                && prev.as_ref().and_then(|e| e.title.as_deref()) != Some(title)
+                && title_before.as_deref() != Some(title)
             {
                 let _ = self.events.send(WorldEvent::Renamed {
                     run_id: run_id.clone(),
@@ -177,9 +198,8 @@ impl WorldHost {
             // Compared against what was emitted before rather than a per-run
             // "highest seen", so a threshold is announced once and a run that
             // jumps several in one pass announces each of them.
-            let spent_before = prev.as_ref().map(|e| e.cost_micros).unwrap_or(0);
             for threshold in spend_notify.iter() {
-                let crossing = super::events::usd_to_micros(*threshold);
+                let crossing = super::events::threshold_micros(*threshold);
                 if spent_before < crossing && cur.cost_micros >= crossing {
                     let _ = self.events.send(WorldEvent::Spend {
                         run_id: run_id.clone(),
@@ -201,7 +221,6 @@ impl WorldHost {
                 });
             }
 
-            let was_terminal = prev.as_ref().map(|e| e.terminal) == Some(true);
             if cur.terminal && !was_terminal {
                 let _ = self.events.send(WorldEvent::Completed {
                     run_id: run_id.clone(),
@@ -209,7 +228,7 @@ impl WorldHost {
                     status: status.to_string(),
                     // Read off the live entity, not off disk: this fires the
                     // moment the run goes terminal, and the persist tick that
-                    // writes `meta.json` has not necessarily run yet.
+                    // writes the run file has not necessarily run yet.
                     final_output: self
                         .world
                         .world()
@@ -236,8 +255,8 @@ impl WorldHost {
             // its way to disk. Unlike `Waiting` (see the NOTE below), `Paused`
             // carries no live continuation - it is the one non-terminal state
             // whose whole meaning is "nothing is driving this" - and Resume,
-            // Message and Cancel all page an unloaded run back in through
-            // `resolve_or_reload`, exactly as a daemon restart would. Scoped
+            // Message and Cancel all page an unloaded run back in (see
+            // `host::paging`), exactly as a daemon restart would. Scoped
             // to standalone roots: a run with tree links or an open prompt
             // keeps the restart-equivalence question open and stays resident.
             if self.parkable(entity, &state.status) {

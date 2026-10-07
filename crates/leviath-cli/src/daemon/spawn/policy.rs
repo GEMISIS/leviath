@@ -36,7 +36,7 @@ pub(crate) fn model_defaults(config: &Config) -> ModelDefaults {
 /// and a region's command seed all hand the daemon's environment to a child, so
 /// they answer to the same setting. A script that has `shell` would otherwise be
 /// the way around the `env_var` gate.
-pub(super) fn shell_env_policy(config: &Config) -> leviath_tools::ShellEnvPolicy {
+pub(crate) fn shell_env_policy(config: &Config) -> leviath_tools::ShellEnvPolicy {
     leviath_tools::ShellEnvPolicy {
         mode: config.security.shell_env,
         allow_env_vars: config.security.allow_env_vars.clone(),
@@ -44,20 +44,22 @@ pub(super) fn shell_env_policy(config: &Config) -> leviath_tools::ShellEnvPolicy
     }
 }
 
-pub(super) fn parse_fallback_order(entries: &[String]) -> Vec<leviath_core::blueprint::ModelEntry> {
+pub(super) fn parse_fallback_order(
+    entries: &[String],
+) -> Vec<leviath_runtime::spec::names::ModelRef> {
     entries
         .iter()
-        .filter_map(|raw| match raw.split_once('/') {
-            Some((provider, model)) if !provider.is_empty() && !model.is_empty() => Some(
-                leviath_core::blueprint::ModelEntry::new(provider.to_string(), model.to_string()),
-            ),
-            _ => {
-                tracing::warn!(
-                    entry = %raw,
-                    "ignoring [providers] fallback_order entry: expected \"provider/model\""
-                );
-                None
-            }
-        })
+        .filter_map(
+            |raw| match leviath_runtime::spec::names::ModelRef::parse(raw) {
+                Ok(route) if route.provider.is_some() => Some(route),
+                _ => {
+                    tracing::warn!(
+                        entry = %raw,
+                        "ignoring [providers] fallback_order entry: expected \"provider/model\""
+                    );
+                    None
+                }
+            },
+        )
         .collect()
 }

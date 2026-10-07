@@ -1,10 +1,6 @@
 //! The scrubber, shape by shape.
 
 use super::scrub::*;
-use leviath_core::run_archive::{
-    MessageRecord, RunIdentity, RunRecord, read_archive, write_archive_start, write_record,
-};
-use leviath_core::run_meta::RunMeta;
 
 fn scrubber(known: &[&str]) -> Scrubber {
     Scrubber::new(known.iter().map(|s| s.to_string()))
@@ -213,94 +209,6 @@ fn every_toml_shape_is_walked() {
     assert_eq!(scrub_value("env", &mut inline, false), 1);
     let mut plain = toml_edit::Value::from_iter([("inner", toml_edit::Value::from("v"))]);
     assert_eq!(scrub_value("plain", &mut plain, false), 0);
-}
-
-fn archive_with(records: &[RunRecord]) -> Vec<u8> {
-    let mut out = Vec::new();
-    write_archive_start(&mut out, 1).unwrap();
-    for record in records {
-        write_record(&mut out, record).unwrap();
-    }
-    out
-}
-
-fn header(secret: &str) -> RunRecord {
-    let mut meta = RunMeta::new(
-        "run-1".to_string(),
-        "coder".to_string(),
-        "/tmp/coder".to_string(),
-        "do the thing".to_string(),
-        None,
-        "/tmp".to_string(),
-        1,
-    );
-    meta.callback_secret = Some(secret.to_string());
-    RunRecord::Header {
-        identity: RunIdentity {
-            run_id: "run-1".to_string(),
-            machine_id: "m".to_string(),
-            world_id: "w".to_string(),
-            created_at: 0,
-        },
-        meta: Box::new(meta),
-    }
-}
-
-#[test]
-fn a_run_archive_is_re_encoded_with_its_secrets_out() {
-    let s = scrubber(&["planted-secret-value-1"]);
-    let records = [
-        header("planted-callback-secret"),
-        RunRecord::Message {
-            message: MessageRecord {
-                role: "user".to_string(),
-                content: "planted-secret-value-1 and AKIAIOSFODNN7EXAMPLE".to_string(),
-            },
-            at: 1,
-        },
-    ];
-    let scrubbed = s.scrub_run_archive(&archive_with(&records)).unwrap();
-    assert_eq!(scrubbed.skipped, 0);
-    assert_eq!(scrubbed.redactions, 3);
-    let (version, back) = read_archive(&mut scrubbed.bytes.as_slice()).unwrap();
-    assert_eq!(version, 1);
-    assert_eq!(back.len(), 2);
-    match &back[0] {
-        RunRecord::Header { meta, .. } => {
-            assert!(meta.callback_secret.is_none());
-            assert_eq!(meta.task, "do the thing");
-        }
-        other => panic!("{other:?}"),
-    }
-    match &back[1] {
-        RunRecord::Message { message, .. } => {
-            assert_eq!(message.content, "[REDACTED] and [REDACTED:aws-key]");
-        }
-        other => panic!("{other:?}"),
-    }
-}
-
-#[test]
-fn a_frame_this_build_cannot_read_is_dropped_and_counted() {
-    let s = scrubber(&[]);
-    let mut bytes = archive_with(&[header("x")]);
-    let bogus = br#"{"NoSuchRecord":{"at":1}}"#;
-    bytes.extend_from_slice(&(bogus.len() as u64).to_be_bytes());
-    bytes.extend_from_slice(bogus);
-    let scrubbed = s.scrub_run_archive(&bytes).unwrap();
-    assert_eq!(scrubbed.skipped, 1);
-    let (_, back) = read_archive(&mut scrubbed.bytes.as_slice()).unwrap();
-    assert_eq!(back.len(), 1);
-}
-
-#[test]
-fn a_torn_or_foreign_archive_is_an_error() {
-    let s = scrubber(&[]);
-    assert!(s.scrub_run_archive(b"not an archive").is_err());
-    let mut torn = archive_with(&[]);
-    torn.extend_from_slice(&64u64.to_be_bytes());
-    torn.extend_from_slice(b"short");
-    assert!(s.scrub_run_archive(&torn).is_err());
 }
 
 #[test]

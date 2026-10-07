@@ -49,7 +49,7 @@ pub(crate) enum ServerEvent {
         /// and `cost_is_exact` on the run record is what answers it.
         complete: bool,
         /// The stage that was running when it crossed. The full per-stage
-        /// breakdown is in the run's `stages.json`.
+        /// breakdown is in the run's stage ledger.
         stage: String,
     },
 
@@ -196,6 +196,14 @@ pub(crate) enum ServerEvent {
         /// How many times the destination stage has been entered, this entry
         /// included.
         iteration: usize,
+        /// The edge taken. Absent when the move took no declared edge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge: Option<String>,
+        /// Why that edge, as `GET /api/runs/{id}/graph` spells it:
+        /// `Condition`, `Gate`, `ModelChoice`, `Fallback`, `Forced`, `Worker`
+        /// or `Router`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<leviath_runtime::state::TransitionReason>,
     },
     /// A tool call was handed to the async tool lane.
     ///
@@ -725,6 +733,8 @@ mod tests {
                     from: "plan".to_string(),
                     to: "implement".to_string(),
                     iteration: 1,
+                    edge: None,
+                    reason: None,
                 },
                 "r8",
             ),

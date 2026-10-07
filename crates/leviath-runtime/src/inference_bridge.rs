@@ -2,12 +2,14 @@
 //! bridge for inference.
 //!
 //! Systems can't `.await`, and a single inference can take up to an hour, so the
-//! inference-dispatch system never runs the network call itself. Instead it
-//! builds an [`InferenceJob`] (an agent's request plus the per-model pool permit
-//! it acquired) and `tokio::spawn`s [`run_inference_job`]. That short-lived task
-//! performs the call with the permit held, reports an [`InferenceOutcome`] on the
-//! results channel, and wakes the tick loop; the inference-collect system drains
-//! outcomes on a later tick and applies them back to the agents.
+//! inference-dispatch system never runs the network call itself. It builds an
+//! [`InferenceJob`] (an agent's request plus the per-model pool permit it
+//! acquired), keeps it on the agent as an
+//! [`InferenceCall`](crate::inference_call::InferenceCall), and spawns one
+//! [`run_attempt`] per trip to the provider. That short-lived task makes the
+//! one trip, reports an [`InferenceOutcome`] on the results channel, and wakes
+//! the tick loop. Whether a failed trip is tried again, and when, is decided
+//! back in the world (see [`crate::inference_call`]).
 //!
 //! One task exists per *in-flight request* (bounded by the per-model
 //! [`InferencePools`](crate::inference_pool::InferencePools) permits), **never**
@@ -319,13 +321,16 @@ pub(crate) struct InferenceJob {
     /// Where to journal each attempt this job makes, or `None` for a world with
     /// no persistence lane at all.
     pub journal: Option<AttemptJournal>,
+    /// The run's log of the remote jobs this call submits, which each trip
+    /// runs inside, or `None` for a lane whose calls keep none (routing).
+    pub jobs: Option<leviath_providers::jobs::JobLog>,
 }
 
-/// What the retry loop needs to record each of its attempts.
+/// What a call needs to record each of its attempts.
 ///
-/// The loop knows the attempt and the error and nothing else: not the run, not
-/// the stage, and not the name the run calls this provider by. Those travel with
-/// the job, because the dispatch system that built the request is the last place
+/// A trip knows the attempt and the error and nothing else: not the run, not the
+/// stage, and not the name the run calls this provider by. Those travel with the
+/// job, because the dispatch system that built the request is the last place
 /// they exist together.
 pub(crate) struct AttemptJournal {
     /// The run whose journal these records belong to.
@@ -338,15 +343,15 @@ pub(crate) struct AttemptJournal {
     pub provider: String,
     /// The model, likewise as configured.
     pub model: String,
-    /// The persistence lane. Every attempt is a fire-and-forget append: nothing
-    /// waits on one, and a world with no journal answers
-    /// [`Appended::NoJournal`](crate::persistence_bridge::Appended::NoJournal).
-    pub lane: UnboundedSender<crate::persistence_bridge::PersistMsg>,
+    /// The world's journal. Every attempt is a fire-and-forget record that
+    /// wakes the world, so a failed attempt reaches the run's file while the
+    /// call is still being retried.
+    pub lane: crate::pipeline::JournalSender,
     /// What went out, computed once because every attempt sends the same
     /// request. Even a file renewal leaves it untouched: it replaces the ids
     /// stored parts are named by, and the digest counts messages and tools
     /// rather than looking inside them.
-    pub digest: leviath_core::run_archive::RequestDigest,
+    pub digest: crate::runfile::record::RequestDigest,
     /// Whether the exact request is kept, and the things about it that are the
     /// same for every attempt at this call.
     pub model_input: ModelInputPlan,
@@ -354,6 +359,7 @@ pub(crate) struct AttemptJournal {
 
 /// What each attempt records about its request, decided where the request was
 /// assembled.
+#[derive(Clone)]
 ///
 /// Everything here but the body itself is settled before the first trip to the
 /// provider: the window the request came from, the parameters it carries and the
@@ -375,8 +381,8 @@ pub(crate) struct ModelInputPlan {
 
 impl ModelInputPlan {
     /// This attempt's model input, with the body when the plan keeps bodies.
-    fn record(&self, request: &InferenceRequest) -> leviath_core::run_archive::ModelInput {
-        use leviath_core::run_archive::{CaptureStatus, ModelInput};
+    pub(crate) fn record(&self, request: &InferenceRequest) -> crate::runfile::record::ModelInput {
+        use crate::runfile::record::{CaptureStatus, ModelInput};
         // A struct always serializes to an object, so the fallback is the empty
         // value rather than a panic on a path that cannot be reached.
         let body = self
@@ -406,52 +412,49 @@ impl ModelInputPlan {
 /// An answer carries how the provider said it ended, which the record keeps
 /// as a label and, for a reason this build does not know, the provider's own
 /// words. A failure carries its classification and what the loop did next.
-enum Ending<'a> {
+pub(crate) enum Ending<'a> {
     Answered(&'a leviath_providers::FinishReason),
-    Failed(leviath_core::run_archive::AttemptOutcome),
+    Failed(crate::runfile::record::AttemptOutcome),
 }
 
 impl AttemptJournal {
-    /// Append one attempt's record, under the id the loop minted for it.
-    fn record(
+    /// Append one attempt's record, under the id its trip minted for it.
+    pub(crate) fn record(
         &self,
         id: &str,
         attempt: u32,
         ending: Ending<'_>,
         took: Duration,
         waited: Duration,
-        request: &InferenceRequest,
+        model_input: crate::runfile::record::ModelInput,
     ) {
         let (outcome, finish) = match ending {
             Ending::Answered(finish) => (
-                leviath_core::run_archive::AttemptOutcome::Succeeded,
+                crate::runfile::record::AttemptOutcome::Succeeded,
                 Some(finish),
             ),
             Ending::Failed(outcome) => (outcome, None),
         };
-        let _ = self
-            .lane
-            .send(crate::persistence_bridge::PersistMsg::Append {
-                run_id: self.run_id.clone(),
-                record: Box::new(leviath_core::run_archive::RunRecord::InferenceAttempt(
-                    leviath_core::run_archive::AttemptRecord {
-                        id: id.to_string(),
-                        stage: self.stage.clone(),
-                        attempt,
-                        provider: self.provider.clone(),
-                        model: self.model.clone(),
-                        outcome,
-                        finish_reason: finish.map_or_else(String::new, |f| f.label().to_string()),
-                        stopped_for: finish.and_then(|f| f.unrecognised()).map(str::to_string),
-                        duration_ms: millis(took),
-                        backoff_ms: millis(waited),
-                        digest: self.digest.clone(),
-                        model_input: Some(self.model_input.record(request)),
-                        at: chrono::Utc::now().timestamp(),
-                    },
-                )),
-                ack: None,
-            });
+        self.lane.record(
+            &self.run_id,
+            crate::runfile::record::RunRecord::InferenceAttempt(Box::new(
+                crate::runfile::record::AttemptRecord {
+                    id: id.to_string(),
+                    stage: self.stage.clone(),
+                    attempt,
+                    provider: self.provider.clone(),
+                    model: self.model.clone(),
+                    outcome,
+                    finish_reason: finish.map_or_else(String::new, |f| f.label().to_string()),
+                    stopped_for: finish.and_then(|f| f.unrecognised()).map(str::to_string),
+                    duration_ms: millis(took),
+                    backoff_ms: millis(waited),
+                    digest: self.digest.clone(),
+                    model_input: Some(model_input),
+                    at: chrono::Utc::now().timestamp(),
+                },
+            )),
+        );
     }
 }
 
@@ -477,12 +480,12 @@ pub(crate) fn failure_label(error: &ProviderError) -> String {
 }
 
 /// How a failed attempt is journaled: what went wrong, how the policy reads it,
-/// and what the loop did next.
-fn failed(
+/// and what the world did next.
+pub(crate) fn failed(
     error: &ProviderError,
-    next: leviath_core::run_archive::Retry,
-) -> leviath_core::run_archive::AttemptOutcome {
-    leviath_core::run_archive::AttemptOutcome::Failed {
+    next: crate::runfile::record::Retry,
+) -> crate::runfile::record::AttemptOutcome {
+    crate::runfile::record::AttemptOutcome::Failed {
         kind: failure_label(error),
         transient: error.is_transient(),
         capacity: error.retry_advice().capacity,
@@ -656,9 +659,9 @@ pub(crate) struct InferenceOutcome {
     /// which: a failover means the answer came from a different provider than
     /// the attempt before it went to.
     pub attempt_id: String,
-    /// Wall-clock time the job took, retries and backoff included. Measured
-    /// here because the ECS only sees the outcome land on a later tick; this
-    /// is the only place the call's real duration exists.
+    /// Wall-clock time the call took. A trip reports its own duration; the
+    /// world replaces it with the whole call's, retries and backoff included,
+    /// once it settles the call (see [`crate::inference_call`]).
     pub latency: std::time::Duration,
     /// What the provider charges for the model this job called.
     ///
@@ -667,254 +670,216 @@ pub(crate) struct InferenceOutcome {
     /// only the provider's *name* survives, and a name cannot be asked its
     /// rates. Used only when the response carried no cost of its own.
     pub pricing: Option<leviath_providers::ModelPricing>,
+    /// What the trip that produced this outcome reported about itself, for
+    /// the world to journal and decide on. `None` when no trip was made: a
+    /// refusal, a request the window guard stopped, a call that ran out of
+    /// time, or a task that died.
+    pub attempt: Option<AttemptReport>,
 }
 
-/// Run one inference job to completion: perform the (possibly hour-long) network
-/// call with the pool permit held, release the slot, report the outcome, and
-/// wake the tick loop.
+/// One trip to the provider, as its task saw it.
+pub(crate) struct AttemptReport {
+    /// The id minted for the trip before it went out.
+    pub id: String,
+    /// How long the trip took, the call alone.
+    pub took: Duration,
+    /// Whether the request, as sent, named stored parts by the vendor's file
+    /// id. Only such a request can be answered with a file the vendor lost,
+    /// and only the sent copy knows: the world keeps the request unhydrated.
+    pub named_files: bool,
+    /// The trip's model input as its journal record keeps it, measured off
+    /// the request as sent. `None` for a call that keeps no journal.
+    pub model_input: Option<crate::runfile::record::ModelInput>,
+}
+
+/// One trip to the provider: everything the task needs and nothing it decides.
+pub(crate) struct InferenceAttempt {
+    /// The agent the call is for.
+    pub entity: Entity,
+    /// Why the call may not be sent; carried on the first trip only.
+    pub refused: Option<String>,
+    /// The provider to call.
+    pub provider: Arc<dyn Provider>,
+    /// The request as assembled, without bytes. Each trip hydrates its own
+    /// copy.
+    pub request: Arc<InferenceRequest>,
+    /// What earlier calls taught the window about its own estimate, for the
+    /// pre-flight guard.
+    pub calibration: Option<crate::pipeline::PromptCalibration>,
+    /// Whether to measure the request against the model's window first. The
+    /// first trip only: a refusal there is a fact about the request, and a
+    /// retry would only restate it.
+    pub guard: bool,
+    /// Stream the answer rather than wait for it whole.
+    pub stream: bool,
+    /// How to put stored parts in front of the model.
+    pub hydration: Option<JobHydration>,
+    /// Upload again every part the request names by file, because the vendor
+    /// answered the last trip with a file it no longer has.
+    pub renew_files: bool,
+    /// What the journal keeps of each trip's request, when it keeps one.
+    pub plan: Option<ModelInputPlan>,
+    /// When the whole call runs out of time, every trip included.
+    pub deadline: tokio::time::Instant,
+    /// The call's whole allowance, for the message a timeout gives.
+    pub job_timeout: Duration,
+    /// The run's log of the remote jobs the call submits.
+    pub jobs: Option<leviath_providers::jobs::JobLog>,
+}
+
+/// What a trip came back with before it is reported: what the provider
+/// answered and the trip's own report, or, as the error, why the request was
+/// never sent (the guard refused it).
+type Trip = Result<(Result<InferenceResponse, ProviderError>, AttemptReport), ProviderError>;
+
+/// Make one trip to the provider and report it, then wake the tick loop.
 ///
-/// Meant to be `tokio::spawn`ed by the dispatch system. If the results receiver
-/// has been dropped (the world is shutting down) the send is a harmless no-op.
-pub(crate) async fn run_inference_job(
-    job: InferenceJob,
+/// Meant to be spawned by the world, which holds the call and its pool permit
+/// for as long as it takes. A cancel drops the trip, aborting the request in
+/// flight, and reports nothing: the agent is already terminal, and the world
+/// frees the permit. If the results receiver has been dropped (the world is
+/// shutting down) the send is a harmless no-op.
+pub(crate) async fn run_attempt(
+    attempt: InferenceAttempt,
     results: UnboundedSender<InferenceOutcome>,
     wake: Arc<Notify>,
-    retry: RetryPolicy,
     cancel: crate::cancel::CancelToken,
 ) {
-    let InferenceJob {
+    let InferenceAttempt {
         entity,
         refused,
         provider,
-        mut request,
-        permit,
+        request,
         calibration,
+        guard,
         stream,
         hydration,
-        journal,
-    } = job;
+        renew_files,
+        plan,
+        deadline,
+        job_timeout,
+        jobs,
+    } = attempt;
+    let pricing = provider.pricing(&request.model);
     // Refused before anything leaves the machine, uploads included.
     if let Some(refusal) = refused {
-        drop(permit);
         let _ = results.send(InferenceOutcome {
             entity,
             attempt_id: String::new(),
             result: Err(ProviderError::RetentionRefused(refusal)),
-            latency: std::time::Duration::ZERO,
+            latency: Duration::ZERO,
             pricing: None,
+            attempt: None,
         });
         wake.notify_one();
         return;
     }
-    // Bytes go in here and nowhere earlier: the assembled request, the
-    // journal and every snapshot carry references only.
-    if let Some(hydration) = &hydration {
-        hydration.apply(&mut request).await;
-    }
-    let started = std::time::Instant::now();
-    // Retry transient failures (connection reset, timeout, 429, 5xx) with
-    // exponential backoff, holding the permit across the backoff; a permanent
-    // error fails immediately. `backoff_after` decides each wait: a capacity
-    // refusal gets the slow schedule or the provider's own `Retry-After`, an
-    // ordinary blip the fast one. The whole thing is bounded by
-    // `max_total_backoff` on the sleeping and by `job_timeout` on the job, so a
-    // never-completing (stalled-stream) call cannot hold the pool slot forever.
-    //
-    // `infer` borrows the request, so every attempt reuses the one assembled
-    // copy. Cloning it per attempt doubles the live footprint of every
-    // in-flight request for the whole (possibly minutes-long) call.
-    let attempts = async {
-        // The pre-flight guard, inside the cancel and the job timeout with the
-        // call it protects: a count that hangs is bounded by the same deadline
-        // the request is, and a cancelled run does not wait for one. Before the
-        // loop rather than in it, because a refusal here is a fact about the
-        // request and a retry would only restate it.
-        guard_context_window(provider.as_ref(), &request, calibration.as_ref()).await?;
-        let mut attempt = 1u32;
-        let mut spent = Duration::ZERO;
-        let mut renewed_files = false;
-        // What the journal records, and what neither counter above can give it.
-        // `made` counts trips to the provider, which `attempt` does not: a file
-        // renewal spends none of the retry budget, and two records for one call
-        // still have to be told apart. `waited` is the one sleep before this
-        // attempt, where `spent` is the running total.
-        let mut made = 0u32;
-        let mut waited = Duration::ZERO;
-        // Nothing waits on these appends, so a world with no lane simply writes
-        // nothing and the loop behaves exactly as it does with one.
-        // The request is a parameter rather than something the closure captures:
-        // a file renewal takes it mutably, and a record has to carry the bodies
-        // as they were when each attempt went out.
-        let record =
-            |id: &str, attempt, ending: Ending<'_>, took, waited, request: &InferenceRequest| {
-                if let Some(journal) = journal.as_ref() {
-                    journal.record(id, attempt, ending, took, waited, request);
-                }
-            };
-        loop {
-            // One id per trip, minted before the request goes out and whatever
-            // the world does with the journal: the answer's own consequences
-            // name the attempt that carried it, and a run that keeps no history
-            // still has to hand its tool batches a consistent one.
-            let id = leviath_core::execution::mint_attempt_id();
-            // Both arms produce the same finished `InferenceResponse`; the
-            // difference is entirely in how the bytes crossed the wire. A
-            // stream that dies part-way through reports a dropped connection,
-            // which is transient, so it retries here exactly as a failed send
-            // does rather than costing the run its turn.
-            let call = async {
-                match stream {
-                    true => {
-                        let chunks = provider.infer_stream(&request).await?;
-                        leviath_providers::collect_stream(chunks).await
-                    }
-                    false => provider.infer(&request).await,
-                }
-            };
-            // Timed around the call alone. The job's own latency covers the
-            // backoff as well, which is the figure the run is billed against;
-            // what a record needs is how long this one trip took, so that a
-            // provider answering slowly reads differently from a run sitting
-            // out a backoff.
-            let call_started = std::time::Instant::now();
-            let answer = call.await;
-            let took = call_started.elapsed();
-            made += 1;
-            match answer {
-                Ok(response) => {
-                    record(
-                        &id,
-                        made,
-                        Ending::Answered(&response.finish_reason),
-                        took,
-                        waited,
-                        &request,
-                    );
-                    // The id travels out with the answer: the tool calls in it
-                    // are asked for by this attempt, and nothing downstream can
-                    // work out which trip produced them.
-                    break Ok((response, id));
-                }
-                // A file the request named is gone (expired, deleted, or held
-                // by another account): upload again and retry once, at once.
-                Err(e)
-                    if !renewed_files
-                        && leviath_providers::files::names_a_missing_file(&e)
-                        && crate::provider_files::names_files(&request)
-                        && hydration.as_ref().is_some() =>
-                {
-                    record(
-                        &id,
-                        made,
-                        Ending::Failed(failed(&e, leviath_core::run_archive::Retry::RenewedFiles)),
-                        took,
-                        waited,
-                        &request,
-                    );
-                    renewed_files = true;
-                    // Taken at once, so the next attempt's record says it waited
-                    // for nothing - which is the point of recording the wait
-                    // separately from the attempt number.
-                    waited = Duration::ZERO;
-                    let renewed = hydration
-                        .as_ref()
-                        .expect("the guard checked a hydration is present")
-                        .renew_files(&mut request)
-                        .await;
-                    tracing::info!(renewed, error = %e, "a named file was gone; uploaded again and retrying");
-                }
-                Err(e) => match backoff_after(&retry, &e, attempt, spent) {
-                    Some(delay) => {
-                        record(
-                            &id,
-                            made,
-                            Ending::Failed(failed(&e, leviath_core::run_archive::Retry::SameModel)),
-                            took,
-                            waited,
-                            &request,
-                        );
-                        tokio::time::sleep(delay).await;
-                        spent = spent.saturating_add(delay);
-                        waited = delay;
-                        attempt += 1;
-                    }
-                    None => {
-                        record(
-                            &id,
-                            made,
-                            Ending::Failed(failed(&e, leviath_core::run_archive::Retry::Reported)),
-                            took,
-                            waited,
-                            &request,
-                        );
-                        break Err(e);
-                    }
-                },
+    let trip = async {
+        // Bytes go in here and nowhere earlier: the assembled request, the
+        // journal and every snapshot carry references only. `infer` borrows
+        // the request, so the trip sends this one copy.
+        let mut request = InferenceRequest::clone(&request);
+        if let Some(hydration) = &hydration {
+            hydration.apply(&mut request).await;
+            if renew_files {
+                let renewed = hydration.renew_files(&mut request).await;
+                tracing::info!(
+                    renewed,
+                    "a named file was gone; uploaded again for the retry"
+                );
             }
         }
-    };
-    // A cancel drops the whole retry-and-backoff future - aborting the in-flight
-    // HTTP request rather than waiting out the job timeout (up to 15 minutes) -
-    // and reports nothing: the agent is already terminal, so there is no outcome
-    // to apply. Releasing the permit here is the point: without it a cancelled
-    // run holds its model's pool slot for as long as the provider takes to
-    // answer, and every agent queued on that model waits for a run nobody is
-    // waiting for.
-    //
-    // Note this arm sends no outcome and so never reaches the `wake` below: the
-    // tick loop learns the slot is free from the permit's own `Drop` (see
-    // `InferencePools::with_wake`). Without that, this return frees a slot in
-    // silence and every agent queued on this model stays parked.
-    let result = tokio::select! {
-        biased;
-        _ = cancel.cancelled() => {
-            drop(permit);
-            return;
+        if guard {
+            guard_context_window(provider.as_ref(), &request, calibration.as_ref()).await?;
         }
-        outcome = tokio::time::timeout(retry.job_timeout, attempts) => match outcome {
-            Ok(result) => result,
-            // A timeout, said the same way the provider's own would have said
-            // it. `ProviderError::Other` is neither transient nor
-            // `Unreachable`, so labelling it that way sends the two ways a call
-            // can run out of time to opposite places: a provider-side timeout
-            // fails over and then parks the run for a resume, while sitting out
-            // the whole job deadline - the *worse* of the two - kills it
-            // outright and throws away every stage it finished. The wall is the
-            // same wall; only which timer noticed differs.
-            Err(_elapsed) => Err(leviath_providers::ProviderError::labelled(
-                leviath_providers::FailureKind::Timeout,
-                "waiting for the provider",
-                &format!(
-                    "the call was aborted after the {}s job timeout to free the pool slot \
-                     (a stalled or never-completing response)",
-                    retry.job_timeout.as_secs()
-                ),
-            )),
-        },
+        // Minted before the request goes out and whatever the world does with
+        // the journal: the answer's own consequences name the attempt that
+        // carried it.
+        let id = leviath_core::execution::mint_attempt_id();
+        // Timed around the call alone, so a provider answering slowly reads
+        // differently from a run sitting out a backoff.
+        let started = std::time::Instant::now();
+        // Both arms produce the same finished `InferenceResponse`; a stream
+        // that dies part-way reports a dropped connection, which is
+        // transient, so the world retries it as it does a failed send.
+        let call = async {
+            match stream {
+                true => {
+                    let chunks = provider.infer_stream(&request).await?;
+                    leviath_providers::collect_stream(chunks).await
+                }
+                false => provider.infer(&request).await,
+            }
+        };
+        // Inside the run's job log, so a provider that polls a job it
+        // submitted picks it back up rather than paying for it again.
+        let answer = match jobs {
+            Some(jobs) => jobs.scope(call).await,
+            None => call.await,
+        };
+        let report = AttemptReport {
+            id,
+            took: started.elapsed(),
+            named_files: crate::provider_files::names_files(&request),
+            model_input: plan.as_ref().map(|p| p.record(&request)),
+        };
+        Trip::Ok((answer, report))
     };
-    drop(permit); // free the pool slot before the collect system runs
-    // The attempt that answered, split back off the answer. A failure names no
-    // attempt here: nothing downstream of a failed call asks which trip refused
-    // it, and the attempt records are where that question is answered.
-    let (result, attempt_id) = match result {
-        Ok((response, id)) => (Ok(response), id),
-        Err(e) => (Err(e), String::new()),
+    // A cancel drops the trip - aborting the in-flight HTTP request rather
+    // than waiting out the deadline - and reports nothing.
+    let trip = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return,
+        trip = tokio::time::timeout_at(deadline, trip) => trip,
+    };
+    let (result, attempt_id, report) = match trip {
+        Ok(Ok((Ok(response), report))) => (Ok(response), report.id.clone(), Some(report)),
+        // A failure names no attempt here: nothing downstream of a failed
+        // call asks which trip refused it, and the attempt records are where
+        // that question is answered.
+        Ok(Ok((Err(e), report))) => (Err(e), String::new(), Some(report)),
+        Ok(Err(e)) => (Err(e), String::new(), None),
+        // A timeout, said the same way the provider's own would have said it.
+        // `ProviderError::Other` is neither transient nor `Unreachable`, so
+        // labelling it that way sends the two ways a call can run out of time
+        // to opposite places: a provider-side timeout fails over and then
+        // parks the run for a resume, while sitting out the whole job deadline
+        // - the *worse* of the two - kills it outright and throws away every
+        // stage it finished. The wall is the same wall; only which timer
+        // noticed differs.
+        Err(_elapsed) => (Err(job_timed_out(job_timeout)), String::new(), None),
     };
     let _ = results.send(InferenceOutcome {
         entity,
         result,
         attempt_id,
-        latency: started.elapsed(),
-        pricing: provider.pricing(&request.model),
+        latency: report.as_ref().map_or(Duration::ZERO, |r| r.took),
+        pricing,
+        attempt: report,
     });
     wake.notify_one();
+}
+
+/// The error a call reports when it runs out of its whole allowance, trips and
+/// backoffs included.
+pub(crate) fn job_timed_out(job_timeout: Duration) -> ProviderError {
+    leviath_providers::ProviderError::labelled(
+        leviath_providers::FailureKind::Timeout,
+        "waiting for the provider",
+        &format!(
+            "the call was aborted after the {}s job timeout to free the pool slot \
+             (a stalled or never-completing response)",
+            job_timeout.as_secs()
+        ),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference_call::tests::run_inference_job;
     use crate::inference_pool::{InferencePoolConfig, InferencePools};
-    use leviath_core::run_archive::{AttemptOutcome, Retry};
+    use crate::runfile::record::{AttemptOutcome, Retry};
     use tokio::sync::mpsc;
 
     fn test_request() -> InferenceRequest {
@@ -983,6 +948,7 @@ mod tests {
     fn job(provider: Arc<dyn Provider>) -> InferenceJob {
         let pools = InferencePools::new(InferencePoolConfig::new());
         InferenceJob {
+            jobs: None,
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             refused: None,
@@ -1014,6 +980,7 @@ mod tests {
             calls: std::sync::Mutex::new(0),
         });
         let job = InferenceJob {
+            jobs: None,
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             refused: None,
@@ -1098,6 +1065,7 @@ mod tests {
             calls: std::sync::Mutex::new(0),
         });
         let job = InferenceJob {
+            jobs: None,
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             refused: None,
@@ -1248,6 +1216,7 @@ mod tests {
     ) -> InferenceJob {
         let pools = InferencePools::new(InferencePoolConfig::new());
         InferenceJob {
+            jobs: None,
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             refused: None,
@@ -1588,6 +1557,7 @@ mod tests {
     async fn a_job_marked_to_stream_takes_the_streaming_path() {
         let pools = InferencePools::new(InferencePoolConfig::new());
         let job = InferenceJob {
+            jobs: None,
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             refused: None,
@@ -1628,6 +1598,7 @@ mod tests {
     async fn a_job_not_marked_to_stream_calls_infer() {
         let pools = InferencePools::new(InferencePoolConfig::new());
         let job = InferenceJob {
+            jobs: None,
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             refused: None,
@@ -1763,7 +1734,7 @@ mod tests {
         provider: Arc<dyn Provider>,
     ) -> (
         InferenceJob,
-        mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
+        mpsc::UnboundedReceiver<crate::pipeline::journal::Journaled>,
     ) {
         let (lane, records) = mpsc::unbounded_channel();
         let mut job = job(provider);
@@ -1772,8 +1743,8 @@ mod tests {
             stage: "draft".to_string(),
             provider: "openai".to_string(),
             model: "gpt".to_string(),
-            lane,
-            digest: leviath_core::run_archive::RequestDigest {
+            lane: crate::pipeline::JournalSender::new(lane, None),
+            digest: crate::runfile::record::RequestDigest {
                 system_hash: 11,
                 messages: 0,
                 tools: 0,
@@ -2313,14 +2284,12 @@ mod tests {
 /// and the file-renewal tests beside them read the same lane for the same thing.
 #[cfg(test)]
 pub(crate) fn journaled_attempts(
-    lane: &mut tokio::sync::mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
-) -> Vec<leviath_core::run_archive::AttemptRecord> {
+    lane: &mut tokio::sync::mpsc::UnboundedReceiver<crate::pipeline::journal::Journaled>,
+) -> Vec<crate::runfile::record::AttemptRecord> {
     let mut records = Vec::new();
-    while let Ok(msg) = lane.try_recv() {
-        if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg
-            && let leviath_core::run_archive::RunRecord::InferenceAttempt(attempt) = *record
-        {
-            records.push(attempt);
+    while let Ok(sent) = lane.try_recv() {
+        if let crate::runfile::record::RunRecord::InferenceAttempt(attempt) = *sent.record {
+            records.push(*attempt);
         }
     }
     records

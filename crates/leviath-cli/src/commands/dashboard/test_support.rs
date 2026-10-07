@@ -17,8 +17,8 @@ pub(crate) fn make_test_dashboard() -> Dashboard {
 }
 
 /// Seed a run under the current runs dir whose answer arrived through
-/// `submit_output`: the `final_output` descriptor in `meta.json` plus the
-/// sidecar beside it, submitted by `stage` under the `markdown` format, with
+/// `submit_output`: the `final_output` descriptor in the run's record plus
+/// the sidecar beside the run file, submitted by `stage` under the `markdown` format, with
 /// no `output.log` anywhere. Callers run inside
 /// `runstate::with_isolated_runs_dir`, so the home runs dir is never touched.
 pub(crate) fn seed_run_with_final_output(run_id: &str, stage: &str, content: &str) {

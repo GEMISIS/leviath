@@ -1,18 +1,17 @@
 //! Why a context window changed.
 //!
-//! A run journal already says what every region held at each point: the
-//! snapshots and diffs rebuild the window turn by turn. What they cannot say is
-//! what moved it. A region that lost the plan it was holding looks identical
+//! A run's file already says what every region held at each step: the states
+//! and deltas rebuild the window turn by turn. What they cannot say is what
+//! moved it. A region that lost the plan it was holding looks identical
 //! whether a compaction summarised it away, a stage-edge transform cleared it,
 //! or the model called `context_delete` on it - and those three are a bug in
 //! three different places.
 //!
-//! A [`ContextCause`] is that missing half, recorded beside each change as
-//! [`RunRecord::ContextChange`](crate::run_archive::RunRecord::ContextChange).
-//! It is deliberately not the runtime's `WriteOrigin`, which answers a
+//! A [`ContextCause`] is that missing half, recorded beside each committed
+//! change to the window. It is deliberately not the runtime's `WriteOrigin`, which answers a
 //! different question (whether a region hook's refusal has a tool result to be
 //! reported back through): "the model asked for this" and
-//! "this is what the model asking looks like in the journal" are not the same
+//! "this is what the model asking looks like in the run's history" are not the same
 //! fact, and one enum answering both would have to lie about one of them.
 //!
 //! # Adding a variant

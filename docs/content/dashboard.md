@@ -39,7 +39,7 @@ panel and answer. `lev respond` does the same from the shell.
 - **Detail view**: the run's path as a band under the header, or the flat stage tabs
   on a short terminal. Under it sit a context-window visualization and the content panes:
   **Output**, **Logs**, **Context** (JSON), and **Final** once the run has submitted an answer.
-  Final is the answer exactly as `GET /api/agents/{id}/result` serves it. Markdown is rendered.
+  Final is the answer exactly as `GET /api/runs/{id}/result` serves it. Markdown is rendered.
   `t` swaps the band to the whole blueprint, and `g` opens the blueprint full screen.
 - **Interactions**: answer an agent's question (free-text, edit, multiple-choice, tool-approval, or
   confirm) or send it a mid-run message.
@@ -148,28 +148,44 @@ skips marked runs that have already finished.
 
 Agent blueprints on the left, the task on the right, and above the task the selected blueprint's
 stage graph. The graph shows what an agent will do before you give it a task: how many stages, in
-what order, where it loops back. Between the graph and the task, when the blueprint takes
-[inputs from the caller](/docs/context#seeding-a-region) beyond the task (a `pictures` region with
-`seed = "input"`, a `--diff`), an **Inputs** box with one slot per region. A slot for a region
-that takes files opens a picker of the working directory, filtered to the types the region
-accepts. You choose a file from a list rather than typing its name, and never with an `@`. A
-slot for a text region takes a line of text. A file region takes as many files as its token
-budget allows, added and removed in the same picker; the number is bound by the budget, never a
-fixed count. The slot names what the region takes, its token budget (`≤117k tok`, the region's
-share of the entry model's context window), and whether it is required. It follows the selection,
-previews bundled blueprints that are not
-installed yet from the copy inside the binary, and says so when a manifest cannot be read. It is
+what order, where it loops back. It follows the selection, previews bundled blueprints that are not
+installed yet from the copy inside the binary, and says so when a blueprint cannot be read. It is
 the explorer's canvas showing the whole graph: drag to pan, wheel to zoom; on a screen too short to
-fit both, the task keeps its rows and the preview is skipped. Once
-the run starts, the dashboard opens that run's page, and `Esc` from there goes back to the list
-rather than back into the form.
+fit both, the task keeps its rows and the preview is skipped. Once the run starts, the dashboard
+opens that run's page, and `Esc` from there goes back to the list rather than back into the form.
+
+The task box fills the blueprint's `task` input. When the blueprint declares other
+[inputs](/docs/starting-a-run#inputs), an **Inputs** box between the graph and the task has one
+row per input, drawn for its type:
+
+| Input type | Its row |
+|---|---|
+| `text` | A line of text. Where its region takes files, `Ctrl+O` also opens a file picker |
+| `choice` | A picker: `←` / `→` or `Space` moves through the options |
+| `bool` | A toggle: `Space` flips it |
+| `file` | A picker of the working directory. The file is attached and the input names it |
+| Anything else | Typed as text, such as `20`, `90s` or a URL, and read by its type at start |
+
+A text row takes what the input's `--<name>` flag takes on the command line. `@file`, or a bare
+path naming a file in the working directory, attaches that file, or fills the input with its text
+when it is text. Anything else is the input's text.
+
+Each row names its type, the files it takes, its token room (`≤117k tok`, its region's share of the
+entry model's context window) and whether it is required. A declared default is filled in already,
+and a row you leave alone is not sent. A picker shows only files of the types the input or its
+region accepts. It takes as many files as the token budget allows, added and removed in the same
+picker.
+
+Every row is checked against its declaration before the run is sent. A problem shows beside its
+row: a number out of range, a list too long, a required input left empty. A problem the daemon
+finds with an input comes back to the same row.
 
 | Key | Action |
 |---|---|
 | `↑` / `↓` | Choose an agent. Any letter filters the list; `Backspace` shortens the filter |
 | `Tab` / `Enter` | Move from the agent list to the inputs, when the agent has any, else to the task |
-| `↑` / `↓` (in the inputs) | Choose a slot |
-| picker (in a file slot) | `↑` / `↓` move, any letter filters by name, `Space` selects or deselects the highlighted file, `Enter` confirms |
+| `↑` / `↓` (in the inputs) | Choose a row |
+| picker (in a file row) | `↑` / `↓` move, any letter filters by name, `Space` selects or deselects the highlighted file, `Enter` confirms |
 | `Ctrl+S` (in the task) | Start the run. `Ctrl+Enter` does the same on terminals that can tell it from `Enter` |
 | `Enter` / `Alt+Enter` | Newline |
 | `Tab` (in the task) | Move to the Start button under the editor |
@@ -179,11 +195,12 @@ rather than back into the form.
 | `Esc` (in the agent list) | Clear the filter, then close the screen |
 | `Esc` (in the task) | Back to the agent list; `Shift+Tab` back to the inputs, when there are any |
 
-In the **Inputs** box, a file slot opens its picker on `Enter` or `Ctrl+O`. A text slot takes what
-you type, and `Enter` moves to the next slot, then to the task after the last one. `Tab` goes
-straight to the task; `Shift+Tab` or `Esc` goes back to the agent list.
+In the **Inputs** box, a file row opens its picker on `Enter` or `Ctrl+O`. A text row takes what
+you type, and a choice or a toggle takes `←` / `→` and `Space`. `Enter` moves to the next row,
+then to the task after the last one. `Tab` goes straight to the task; `Shift+Tab` or `Esc` goes
+back to the agent list.
 
-Inside the picker, `Enter` never selects on its own, so a slot can be left empty, and `Esc`
+Inside the picker, `Enter` never selects on its own, so a row can be left empty, and `Esc`
 cancels. The list is the working directory only, so it never offers a file the run could not read.
 Each file shows its own token cost.
 
@@ -228,7 +245,7 @@ for a run whose blueprint could not be read, the flat tab strip stays.
 | Key | Action |
 |---|---|
 | `←` / `→` | Switch stage tab, through the graph when it is on screen |
-| `1`–`9` | Jump to that stage tab |
+| `1` to `9` | Jump to that stage tab |
 | `↑` / `↓` (or `k` / `j`) | Scroll the pane; in the Context view, move the tree cursor |
 | `PgUp` / `PgDn` | Scroll ten lines |
 | `Home` / `End` (or `b` / `e`) | Jump to the beginning / end |
@@ -270,7 +287,9 @@ the box, where `Enter` or `Space` sends, as does a click on it. `PgUp` / `PgDn` 
 document edit takes the same keys, with a Save button in place of Send. Single-line boxes (a
 rename, a filter, a server URL) still submit on `Enter`.
 
-A tool approval is a list of choices: `↑` / `↓` pick one and `Enter` answers. Its last row, "Deny
+A tool approval, a confirm and a multiple choice are lists numbered from 1, the same numbers
+`lev interactions` shows and `lev respond` takes. `↑` / `↓` or the option's number pick one, and
+`Enter` answers. A tool approval's last row, "Deny
 with feedback", opens the same response box instead of answering, for the line or two that tells
 the run what to do instead of the call. `Ctrl+S` or the Send button sends it with the deny, and
 `Esc` goes back to the choices with nothing sent. The text reaches the model inside the refused
@@ -339,7 +358,7 @@ of everything it could do:
   them, because nearly every stage has one to the same hub. With the path in focus, `e` shows the
   escapes from the current stage. A fan-out stage that is running shows its worker counts.
   A stage that takes [files](/docs/mime) beyond text wears what it takes (`◧ image/* audio/wav`,
-  from its regions' `accepts` or its `[input] accepts`). One that declares files it hands back
+  from its regions' `accepts` or its `input_accepts`). One that declares files it hands back
   wears their types (`▤ video/mp4`). A path whose file the next stage's regions cannot take
   carries `!` on its label, and selecting it says which type would cross as a stand-in.
   Selecting a stage or an edge describes it on the line under the canvas. Boxes can be dragged
@@ -393,7 +412,7 @@ An installed bundled agent that has been edited says `edited`, and `r` puts the 
 A bundled agent that is not installed yet opens in the editor from its embedded copy, and is
 installed when you save it. It keeps its name under `r`, so clone it with `n` to give it another.
 
-`r` renames the agent's directory and the `name` in its manifest, and its saved arrangement comes
+`r` renames the agent's directory and the `name` in its `agent.toml`, and its saved arrangement comes
 along. Agents that live elsewhere are edited in place, but renamed and deleted where they are.
 
 ### Agent editor
@@ -420,7 +439,7 @@ hidden, so the panel never reflows under the cursor:
   `x` drops it, `h` `l` or a drag on its `⠿` grip move it, and the last row adds a fallback. Under
   the chain are the tools it may use, picked from every tool this install has (`Space` toggles,
   `Enter` keeps). That list holds the groups, then each
-  [MCP server](/docs/mcp) from your config and the agent's own manifest as a connector that grants
+  [MCP server](/docs/mcp) from your config and the agent's own blueprint as a connector that grants
   every tool it advertises. Once the server has answered, which it is asked to do when the screen
   opens, its tools follow one by one under their `server__tool` names. Under them sits what
   each tool may be handed at this stage: `Enter` picks the types, `x` lifts the limit. You can call
@@ -463,11 +482,11 @@ while the editor runs, and the text comes back into the box when it closes.
 Every edit is checked as you make it, the way `lev validate` checks a file. The line under the
 graph says how many errors and warnings there are, and `p` opens the list. A stage an error names
 carries a `!` on its box, and saving is refused while there are errors. `Ctrl-Z` undoes the last edit, `Ctrl-Y`
-(or `Ctrl-Shift-Z`) redoes it. `v` shows the exact `agent.leviath` that will be saved, comments and all: the editor keeps
+(or `Ctrl-Shift-Z`) redoes it. `v` shows the exact `agent.toml` that will be saved, comments and all: the editor keeps
 your file's comments, key order and formatting, and only writes the keys it knows.
 
 An arrangement dragged into shape is kept per agent (in `dash/graph-layouts.json` under the data
-directory), so a graph opens the way you left it; it is never part of the manifest.
+directory), so a graph opens the way you left it; it is never part of the blueprint.
 
 | Key | Action |
 |---|---|

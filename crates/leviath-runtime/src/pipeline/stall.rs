@@ -61,11 +61,11 @@ impl StallReason {
                  `[providers] fallback_order`"
             ),
             // `PoolFull` never reaches the watchdog (see `needs_a_person`), so
-            // the missing-provider wording covers the remaining case.
+            // the missing-provider wording covers the remaining case. The
+            // pause adds the way back.
             _ => format!(
                 "provider '{provider}' is not configured, so this run has no way to \
-                 go on; add it to config.toml (or run `lev setup`), then \
-                 `lev resume` this run"
+                 go on; add it to config.toml (or run `lev setup`)"
             ),
         }
     }
@@ -353,7 +353,7 @@ pub(crate) fn fail_stalled_dispatch(
         // Every run parks, unattended included. Failing an unattended one on
         // the reasoning that a scheduler watches for a terminal status and
         // would wait for ever undersells harnesses: `paused` is visible in
-        // `meta.json` and `lev ps --json`, and one that can top up an account
+        // `lev ps --json` and the API, and one that can top up an account
         // and `lev resume` gets its work back. One that cannot is no worse
         // off - it cancels the run, a decision it can make in a second, where
         // a failed run's work is gone for good.
@@ -361,7 +361,7 @@ pub(crate) fn fail_stalled_dispatch(
             provider = %si.provider_name,
             reason = stall.reason.label(),
             stalled_secs = now.saturating_sub(stall.since),
-            unattended = md.is_some_and(|m| m.unattended),
+            unattended = md.is_some_and(|m| m.unattended.is_on()),
             "pausing a run until the machine is fixed"
         );
         // Paused, so resume is the truthful next step and is worth naming.
@@ -444,12 +444,14 @@ mod tests {
     /// The same, launched by something that is not watching.
     fn spawn_stalled_unattended(world: &mut World, reason: StallReason, age: i64) -> Entity {
         let e = spawn_stalled(world, reason, age);
-        world.entity_mut(e).insert(run_metadata(true));
+        world
+            .entity_mut(e)
+            .insert(run_metadata(leviath_core::Unattended::All));
         e
     }
 
     /// Run metadata carrying only the field the watchdog reads.
-    fn run_metadata(unattended: bool) -> crate::persistence::RunMetadata {
+    fn run_metadata(unattended: leviath_core::Unattended) -> crate::persistence::RunMetadata {
         crate::persistence::RunMetadata {
             run_id: "r".to_string(),
             agent_name: "a".to_string(),
@@ -462,12 +464,10 @@ mod tests {
             parent_run_id: None,
             metadata: std::collections::HashMap::new(),
             callback_url: None,
-            callback_secret: None,
             title: None,
             title_error: None,
             blueprint_digest: None,
             unattended,
-            yolo_profile: None,
             read_paths: None,
             output_request: None,
             model_override: None,
@@ -485,6 +485,13 @@ mod tests {
             .get::<PausedForSetup>(e)
             .expect("a parked run says what to do");
         assert!(marker.remedy.contains(remedy), "{}", marker.remedy);
+        // The way back is named once.
+        assert_eq!(
+            marker.remedy.matches("`lev resume` this run").count(),
+            1,
+            "{}",
+            marker.remedy
+        );
         // The retry stays staged, so a resume re-dispatches rather than
         // rebuilding anything.
         assert!(world.get::<ReadyToInfer>(e).is_some());
@@ -937,7 +944,7 @@ mod tests {
                 agent_state(),
                 stage_inference(),
                 stalled_for(StallReason::ProviderMissing, 61),
-                run_metadata(true),
+                run_metadata(leviath_core::Unattended::All),
                 ReadyToInfer,
             ))
             .id();
