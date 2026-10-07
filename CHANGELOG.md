@@ -67,8 +67,34 @@ same list.
   held run `paused`), and a stage a finished run never reached reads
   `skipped`.
 - A run whose machine changed since it started (its providers, an MCP
-  server's tools, the code it ran) is held, saying why, and resumes once the
-  machine is put back. Tool grants and the write budget survive a restart.
+  server's tools, the code it ran, a stage's sandbox kind) is held, saying
+  why, and resumes once the machine is put back. Tool grants and the write
+  budget survive a restart.
+- A restart picks a run up where it stopped. A resumed run sends only what
+  is new: no second `agent_spawned`, rename, spend threshold, completion or
+  webhook. A call sent again keeps its execution id and is listed once with
+  its real outcome, and `requestedBy` names the model call that asked for it.
+  A polled provider job (Meshy, Sora, xAI, Veo) is picked back up rather than
+  submitted again. A tool approval or taint-gate question that was waiting
+  comes back under the same id with no new model call, paused or not, and
+  can be answered while the run is paused.
+- `lev serve` and the ACP bridge that reconnect to the daemon are sent the
+  events they missed while they were away, so a run that finishes during a
+  reconnect still posts its webhook. Against an older daemon they fall back
+  to a plain subscription.
+- A webhook's signing secret is kept in an owner-only store
+  (`~/.leviath/secrets/`); a run's file names it (`signed_with`) and never
+  holds it, so a run file can be copied, backed up or read by an agent
+  safely. A run whose secret is gone is held with an issue saying which file
+  to put back, and deleting a run deletes its secret. Converting a 0.6.4 run
+  moves its secret into the store and out of the old files kept under the
+  run's `legacy/` folder; the backup still holds it, for going back.
+- The first start after an upgrade converts the old runs in a short-lived
+  child process, so the daemon does not keep the memory converting took; if
+  the child stops, the daemon converts the rest. An idle daemon reads its run
+  list only when a run's file changed.
+- `fan_out` holds each item to the worker's declared inputs as `spawn_agent`
+  does: an item missing a required input is refused, with the item's path.
 - `lev respond <id> <answer>` takes what the question shows: `allow`,
   `allow-stage`, `allow-run`, `deny`, `yes`, `no`, an option's label or its
   number (options are numbered from 1 everywhere they are listed), or the
@@ -164,6 +190,11 @@ same list.
   its first.
 - A "No" on a `confirm` interaction point approved the stage. It now aborts
   the run unless a list or directive names "No".
+- A stage's taint audit file held the entries of every stage before it, and a
+  restart lost the entry written just before it. Each stage's file now holds
+  its own entries, once each, across restarts.
+- A `notify_spend_usd` threshold below $0.000001 never fired. Any positive
+  threshold now fires once it is crossed.
 - A daemon started while a gateway was unreachable (OpenRouter behind a proxy
   that was down) came up with an empty model list, skipped every bare model
   name as "not served", and ran every stage on `fallback_model`, with only a

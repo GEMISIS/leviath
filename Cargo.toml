@@ -52,6 +52,11 @@ categories = ["development-tools"]
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+# The CLI's `legacy-runs` feature is deleted from its manifest before it is
+# published (prod.yml), but its code still asks for it, so the published
+# crate would warn on every such `cfg`. Naming the feature here, where the
+# published manifest still inherits it, keeps that build quiet.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("legacy-runs"))'] }
 
 # `&s[a..b]` on a `&str` panics when an index lands inside a multi-byte character.
 # That is not hypothetical here: it aborted the daemon twice (issues #109 and #115,
