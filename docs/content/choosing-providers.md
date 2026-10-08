@@ -54,7 +54,8 @@ providers are the only thing the defaults choose.
 | `rhai` | Providers you write as [Rhai scripts](/docs/rhai-providers) | your script's name |
 | `providers` | All of the above | |
 
-Grok runs on xAI's client, so `xai-subscription` brings `xai` with it. An
+Each subscription is its own feature. `xai-subscription` builds Grok sign-in without the key-based `xai`
+provider, and `openai-subscription` builds Codex without `openai`. An
 [OpenAI-compatible endpoint](/docs/providers#custom-openai-compatible-providers) needs no feature;
 every build can reach one.
 

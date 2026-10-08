@@ -30,6 +30,7 @@ pub mod learned;
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "bedrock",
     feature = "meta",

@@ -20,6 +20,7 @@ use crate::provider::ProviderError;
     feature = "anthropic",
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "meta"
 ))]
@@ -261,6 +262,7 @@ impl RemoteFile {
     feature = "anthropic",
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 pub(crate) fn file_part(upload: &FileUpload) -> Result<reqwest::multipart::Part> {
@@ -280,6 +282,7 @@ pub(crate) fn file_part(upload: &FileUpload) -> Result<reqwest::multipart::Part>
     feature = "anthropic",
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 struct ArcBytes(Arc<[u8]>);
@@ -288,6 +291,7 @@ struct ArcBytes(Arc<[u8]>);
     feature = "anthropic",
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 impl AsRef<[u8]> for ArcBytes {
@@ -310,6 +314,7 @@ pub fn now_secs() -> i64 {
     feature = "anthropic",
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 pub(crate) fn remote_from(body: &serde_json::Value, ttl_secs: u64) -> Result<RemoteFile> {
@@ -339,6 +344,7 @@ pub(crate) fn remote_from(body: &serde_json::Value, ttl_secs: u64) -> Result<Rem
     feature = "anthropic",
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "meta"
 ))]
@@ -362,7 +368,12 @@ pub fn names_a_missing_file(error: &ProviderError) -> bool {
 
 /// Upload to an OpenAI-shaped `POST /files`: a `file` part, a `purpose`, and
 /// `expires_after` from creation. OpenAI, xAI and Meta all take it.
-#[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "meta"
+))]
 pub(crate) async fn upload_openai_shape(
     endpoint: &crate::responses::client::Endpoint,
     upload: &FileUpload,
@@ -388,7 +399,12 @@ pub(crate) async fn upload_openai_shape(
 
 /// Delete from an OpenAI-shaped `DELETE /files/{id}`. A file already gone is
 /// deleted.
-#[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "meta"
+))]
 pub(crate) async fn delete_openai_shape(
     endpoint: &crate::responses::client::Endpoint,
     file: &RemoteFile,

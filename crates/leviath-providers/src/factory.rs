@@ -67,6 +67,7 @@ impl Spec {
     #[cfg(any(
         feature = "bedrock",
         feature = "xai",
+        feature = "xai-subscription",
         feature = "meta",
         feature = "openai-subscription"
     ))]
@@ -261,7 +262,7 @@ fn xai(spec: Spec, client: HttpClient) -> Result<Arc<dyn Provider>> {
 
 /// An xAI client with `auth`: a key for the `xai` provider, a sign-in for
 /// `grok`.
-#[cfg(feature = "xai")]
+#[cfg(any(feature = "xai", feature = "xai-subscription"))]
 fn xai_with(spec: Spec, client: HttpClient, auth: crate::xai::Auth) -> Result<Arc<dyn Provider>> {
     let effort = spec.option("effort");
     Ok(Arc::new(

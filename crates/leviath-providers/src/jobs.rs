@@ -199,6 +199,7 @@ fn settle<T>(log: Option<&JobLog>, step: &str, waited: Result<T>) -> Result<T> {
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "meshy"
 ))]

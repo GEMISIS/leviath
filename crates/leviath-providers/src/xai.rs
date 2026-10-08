@@ -11,17 +11,17 @@
 //! stays usable under a zero data retention arrangement. Reasoning is carried
 //! between turns by replaying the encrypted items the route hands back.
 
-#[cfg(feature = "xai")]
+#[cfg(any(feature = "xai", feature = "xai-subscription"))]
 pub(crate) mod account;
 pub mod catalog;
 pub(crate) mod media;
 
-#[cfg(feature = "xai")]
+#[cfg(any(feature = "xai", feature = "xai-subscription"))]
 use std::collections::HashMap;
 
 use crate::responses::Dialect;
 pub use crate::responses::client::Auth;
-#[cfg(feature = "xai")]
+#[cfg(any(feature = "xai", feature = "xai-subscription"))]
 use {
     crate::capabilities::{ModelCapabilities, ModelCapabilityOverride},
     crate::learned::LearnedModels,
@@ -65,11 +65,11 @@ pub const GROK_DIALECT: Dialect = Dialect {
 };
 
 /// Each model's accepted reasoning efforts, by id.
-#[cfg(feature = "xai")]
+#[cfg(any(feature = "xai", feature = "xai-subscription"))]
 type Efforts = HashMap<String, Vec<String>>;
 
 /// Grok over xAI's API.
-#[cfg(feature = "xai")]
+#[cfg(any(feature = "xai", feature = "xai-subscription"))]
 pub struct XaiProvider {
     endpoint: Endpoint,
     dialect: Dialect,
@@ -94,7 +94,7 @@ pub struct XaiProvider {
     poll_interval: std::time::Duration,
 }
 
-#[cfg(feature = "xai")]
+#[cfg(any(feature = "xai", feature = "xai-subscription"))]
 impl XaiProvider {
     /// A provider authenticating with `auth`, registered under the name its
     /// credential implies: `xai` for a key, `grok` for a sign-in.
@@ -330,14 +330,14 @@ impl XaiProvider {
 }
 
 /// Whether a 400 body is the route refusing a reasoning effort.
-#[cfg(feature = "xai")]
+#[cfg(any(feature = "xai", feature = "xai-subscription"))]
 fn refuses_effort(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
     lower.contains("reasoning") && (lower.contains("effort") || lower.contains("not supported"))
 }
 
 #[async_trait]
-#[cfg(feature = "xai")]
+#[cfg(any(feature = "xai", feature = "xai-subscription"))]
 impl Provider for XaiProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         if let Some(kind) = media::kind(&self.canonical(&request.model)) {
@@ -621,6 +621,6 @@ impl Provider for XaiProvider {
     }
 }
 
-#[cfg(feature = "xai")]
+#[cfg(any(feature = "xai", feature = "xai-subscription"))]
 #[cfg(test)]
 mod tests;

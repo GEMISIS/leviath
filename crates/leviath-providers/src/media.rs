@@ -8,22 +8,34 @@
 //! The runtime stores what comes back in the run's blob store and routes it by
 //! the stage's `output_routing`, exactly as for Meshy.
 
-#[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "meta"
+))]
 pub(crate) mod images;
 
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "meta"
 ))]
 use std::time::Duration;
-#[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "google"
+))]
 use std::time::Instant;
 
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "meta",
     feature = "meshy"
@@ -34,6 +46,7 @@ use crate::provider::{ContentBlock, InferenceRequest, MessageContent};
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "bedrock",
     feature = "meta"
@@ -52,19 +65,26 @@ use {
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "meta"
 ))]
 pub(crate) const DOWNLOAD_CAP: usize = 512 * 1024 * 1024;
 
 /// How long a media task may run when the stage names no timeout.
-#[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "google"
+))]
 pub(crate) const DEFAULT_TASK_SECS: u64 = 900;
 
 /// Every hydrated mime block whose type passes `want`, as a `data:` URI.
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta",
     feature = "meshy"
 ))]
@@ -102,18 +122,29 @@ fn parts<'a>(
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "bedrock",
     feature = "meta"
 ))]
 pub(crate) struct Part {
     /// The part's mime type.
-    #[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
+    #[cfg(any(
+        feature = "openai",
+        feature = "xai",
+        feature = "xai-subscription",
+        feature = "google"
+    ))]
     pub(crate) mime_type: MimeType,
     /// Its bytes.
     pub(crate) bytes: Vec<u8>,
     /// Its name, when it has one.
-    #[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
+    #[cfg(any(
+        feature = "openai",
+        feature = "xai",
+        feature = "xai-subscription",
+        feature = "meta"
+    ))]
     pub(crate) name: Option<String>,
 }
 
@@ -122,6 +153,7 @@ pub(crate) struct Part {
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "bedrock",
     feature = "meta"
@@ -136,10 +168,20 @@ pub(crate) fn first_part(request: &InferenceRequest, want: impl Fn(&str) -> bool
     // about.
     let _ = (&part, &name);
     Some(Part {
-        #[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
+        #[cfg(any(
+            feature = "openai",
+            feature = "xai",
+            feature = "xai-subscription",
+            feature = "google"
+        ))]
         mime_type: part.mime_type.clone(),
         bytes,
-        #[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
+        #[cfg(any(
+            feature = "openai",
+            feature = "xai",
+            feature = "xai-subscription",
+            feature = "meta"
+        ))]
         name: name.map(str::to_string),
     })
 }
@@ -234,6 +276,7 @@ fn unlabelled<'a>(text: &'a str, region: &str) -> &'a str {
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "meta",
     feature = "meshy"
@@ -252,6 +295,7 @@ pub(crate) fn extra_str(request: &InferenceRequest, key: &str) -> Option<String>
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "meta",
     feature = "meshy"
@@ -264,6 +308,7 @@ pub(crate) fn extra_i64(request: &InferenceRequest, key: &str) -> Option<i64> {
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "meshy"
 ))]
@@ -272,19 +317,29 @@ pub(crate) fn extra_f64(request: &InferenceRequest, key: &str) -> Option<f64> {
 }
 
 /// A boolean hint from `request.extra`.
-#[cfg(any(feature = "xai", feature = "meshy"))]
+#[cfg(any(feature = "xai", feature = "xai-subscription", feature = "meshy"))]
 pub(crate) fn extra_bool(request: &InferenceRequest, key: &str) -> Option<bool> {
     request.extra.get(key).and_then(Value::as_bool)
 }
 
 /// The absolute deadline for a whole media task, from its stage timeout.
-#[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "google"
+))]
 pub(crate) fn deadline(request: &InferenceRequest) -> Instant {
     Instant::now() + Duration::from_secs(request.request_timeout_secs.unwrap_or(DEFAULT_TASK_SECS))
 }
 
 /// What one poll of a long task found.
-#[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "google"
+))]
 pub(crate) enum Poll {
     /// Finished, with the finished task.
     Done(Value),
@@ -296,7 +351,12 @@ pub(crate) enum Poll {
 
 /// Poll `check` every `interval` until it is done or fails, or `deadline`
 /// passes. `what` names the task in the errors.
-#[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "google"
+))]
 pub(crate) async fn poll_until<F, Fut>(
     what: &str,
     deadline: Instant,
@@ -328,7 +388,12 @@ where
 /// Download `url` without the provider's credential (a signed or public
 /// result URL on another host), up to [`DOWNLOAD_CAP`]. Answers the bytes and
 /// the content type the host sent.
-#[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "meta"
+))]
 pub(crate) async fn download(
     client: &reqwest::Client,
     url: &str,
@@ -355,6 +420,7 @@ pub(crate) async fn download(
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "bedrock",
     feature = "meta"
 ))]
@@ -446,7 +512,12 @@ pub(crate) fn audio_seconds(audio: &Blob) -> Option<f64> {
 }
 
 /// A JSON part the provider built itself, so its type is known good.
-#[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "meta"
+))]
 pub(crate) fn json_blob(bytes: Vec<u8>, name: &str) -> Blob {
     Blob::new(
         MimeType::parse("application/json").expect("application/json is a mime type"),
@@ -460,6 +531,7 @@ pub(crate) fn json_blob(bytes: Vec<u8>, name: &str) -> Blob {
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "bedrock",
     feature = "meta"
@@ -485,6 +557,7 @@ pub(crate) fn response(
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "bedrock",
     feature = "meta"
@@ -505,6 +578,7 @@ pub(crate) fn one_chunk(response: InferenceResponse) -> crate::rate_limit::Chunk
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "bedrock",
     feature = "meta"
@@ -525,6 +599,7 @@ pub(crate) fn summary(route: &str, parts: &[Blob]) -> String {
 #[cfg(any(
     feature = "openai",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "google",
     feature = "bedrock",
     feature = "meta"
