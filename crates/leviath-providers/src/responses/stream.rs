@@ -23,6 +23,7 @@
     feature = "openai",
     feature = "openai-subscription",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 use crate::provider::{FinishReason, ProviderError, StreamChunk, TokenUsage, ToolCallDelta};
@@ -30,6 +31,7 @@ use crate::provider::{FinishReason, ProviderError, StreamChunk, TokenUsage, Tool
     feature = "openai",
     feature = "openai-subscription",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 use futures_core::Stream;
@@ -39,6 +41,7 @@ use futures_core::Stream;
     feature = "openai",
     feature = "openai-subscription",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 pub(crate) struct Turn {
@@ -55,6 +58,7 @@ pub(crate) struct Turn {
     feature = "openai",
     feature = "openai-subscription",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 impl Turn {
@@ -81,6 +85,7 @@ impl Turn {
     feature = "openai",
     feature = "openai-subscription",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 pub(crate) fn sse_stream<S>(
@@ -109,6 +114,7 @@ where
     feature = "openai",
     feature = "openai-subscription",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 pub(crate) fn parse_event(
@@ -260,6 +266,7 @@ pub(crate) fn parse_event(
     feature = "openai",
     feature = "openai-subscription",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 fn output_index(json: &serde_json::Value) -> usize {
@@ -282,6 +289,7 @@ fn output_index(json: &serde_json::Value) -> usize {
     feature = "openai",
     feature = "openai-subscription",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 fn usage_of(response: &serde_json::Value, dialect: &super::Dialect) -> TokenUsage {
@@ -318,6 +326,7 @@ fn usage_of(response: &serde_json::Value, dialect: &super::Dialect) -> TokenUsag
     feature = "openai",
     feature = "openai-subscription",
     feature = "xai",
+    feature = "xai-subscription",
     feature = "meta"
 ))]
 fn failure_message(json: &serde_json::Value) -> String {

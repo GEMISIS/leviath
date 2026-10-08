@@ -59,8 +59,9 @@ openai = ["leviath-providers/openai"]
 # ChatGPT sign-in: the `codex` provider.
 openai-subscription = ["leviath-providers/openai-subscription"]
 xai = ["leviath-providers/xai"]
-# Grok sign-in: the `grok` provider, which brings `xai` along.
-xai-subscription = ["xai", "leviath-providers/xai-subscription"]
+# Grok sign-in: the `grok` provider. It runs on xAI's client, without the
+# key-based `xai` provider.
+xai-subscription = ["leviath-providers/xai-subscription"]
 google = ["leviath-providers/google"]
 openrouter = ["leviath-providers/openrouter"]
 bedrock = ["leviath-providers/bedrock"]

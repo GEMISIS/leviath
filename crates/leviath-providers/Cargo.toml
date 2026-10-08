@@ -40,9 +40,9 @@ openai = []
 # ChatGPT sign-in: the `codex` provider.
 openai-subscription = []
 xai = []
-# Grok sign-in: the `grok` provider. It runs on xAI's client, so it brings
-# the `xai` provider along.
-xai-subscription = ["xai"]
+# Grok sign-in: the `grok` provider. It runs on xAI's client, without the
+# key-based `xai` provider.
+xai-subscription = []
 google = []
 openrouter = []
 bedrock = ["dep:crc32fast"]
