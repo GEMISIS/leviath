@@ -175,6 +175,13 @@ same list.
   type is no longer sent to it, and Meta's inline limit is read as 50 000 000
   bytes. Through OpenRouter, Muse Spark takes no audio, as OpenRouter's
   catalogue says.
+- `lev` always uses mimalloc. The `mimalloc-allocator` feature is gone, so
+  `--no-default-features` (now how a build picks its providers) no longer
+  switches the allocator as well. Benchmarking against the system allocator
+  is the new `system-allocator` feature.
+- `leviath-providers` is a workspace dependency without its default
+  features, so a crate built on `leviath-runtime` alone carries no vendor
+  providers until it asks for them.
 
 ### Fixed
 
@@ -263,6 +270,18 @@ same list.
   (`anthropic/claude-haiku-5.5`), each with a 1M-token window, 128K output
   and its list price. Haiku 5.5 costs $0.10 in and $0.50 out per million
   tokens, five times that once a prompt passes 100 000 tokens.
+- Each model provider is a cargo feature, all on by default, on
+  `leviath-cli`, `leviath` and `leviath-providers`. `cargo install
+  leviath-cli --no-default-features --features anthropic,openai` builds `lev`
+  with those two and no others; with none at all, only OpenAI-compatible
+  endpoints remain. The features are `anthropic`, `openai`,
+  `openai-subscription` (Codex), `xai`, `xai-subscription` (Grok), `google`,
+  `openrouter`, `bedrock`, `meta`, `ollama`, `meshy` and `rhai` (script
+  providers). A configured provider the build left out is skipped with a
+  warning, and `lev doctor`, `lev auth login` and a run that routes to it
+  name the feature to rebuild with. `lev --version` lists the providers when
+  some are missing, and the Docker image takes them as `LEV_FEATURES`.
+  Released binaries still carry every provider.
 
 ## 0.6.4 - 2026-09-26
 

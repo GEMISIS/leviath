@@ -18,10 +18,44 @@ readme = "README.md"
 # fails the build on anything other than doc comments and `pub use` lines.
 
 [features]
+default = ["providers"]
 # The daemon's control transport, forwarded from leviath-runtime. Off by
 # default: embedders talk to the world in-process via leviath::runtime's
 # AgentWorld; only a client for a running lev daemon needs the socket.
 control-socket = ["leviath-runtime/control-socket"]
+
+# The providers this build carries, all of them by default.
+# `default-features = false, features = ["anthropic"]` builds that one and no
+# others. Each forwards to the feature of the same name on `leviath-providers`.
+providers = [
+    "anthropic",
+    "openai",
+    "openai-subscription",
+    "xai",
+    "xai-subscription",
+    "google",
+    "openrouter",
+    "bedrock",
+    "meta",
+    "ollama",
+    "meshy",
+    "rhai",
+]
+anthropic = ["leviath-providers/anthropic"]
+openai = ["leviath-providers/openai"]
+# ChatGPT sign-in: the `codex` provider.
+openai-subscription = ["leviath-providers/openai-subscription"]
+xai = ["leviath-providers/xai"]
+# Grok sign-in: the `grok` provider, which brings `xai` along.
+xai-subscription = ["xai", "leviath-providers/xai-subscription"]
+google = ["leviath-providers/google"]
+openrouter = ["leviath-providers/openrouter"]
+bedrock = ["leviath-providers/bedrock"]
+meta = ["leviath-providers/meta"]
+ollama = ["leviath-providers/ollama"]
+meshy = ["leviath-providers/meshy"]
+# Providers written as Rhai scripts.
+rhai = ["leviath-providers/rhai"]
 
 [dependencies]
 leviath-core = { workspace = true }

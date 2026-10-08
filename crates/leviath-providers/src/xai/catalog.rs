@@ -19,16 +19,21 @@
 //! million, so every token price is divided by 10 000. `image_price` is in the
 //! same tick unit the usage block reports costs in: 10^10 per dollar.
 
+#[cfg(feature = "xai")]
 use std::collections::HashMap;
 
+#[cfg(feature = "xai")]
 use serde_json::Value;
 
 use crate::capabilities::{LimitsSource, Match, ModelCapabilities, Row};
+#[cfg(feature = "xai")]
 use crate::learned::LearnedModel;
+#[cfg(feature = "xai")]
 use crate::pricing::{ModelPricing, PriceTier, PriceUnit, UnitPrice};
 
 /// Token prices arrive in cents per 100 million tokens; this is how many of
 /// those make one dollar per million.
+#[cfg(feature = "xai")]
 const CENTS_PER_100M_PER_DOLLAR_PER_M: f64 = 10_000.0;
 
 /// The chat models named when the listing cannot be read, as
@@ -103,6 +108,7 @@ pub(crate) fn table_capabilities(model: &str) -> ModelCapabilities {
 /// Build choose their own depth, and xAI's catalogue lists no effort for them.
 /// A model named here that refuses one anyway is remembered by the provider
 /// and asked without it after that.
+#[cfg(feature = "xai")]
 pub(crate) fn takes_effort(model: &str) -> bool {
     ["grok-4.6", "grok-4.5", "grok-4.3", "grok-4.20-multi-agent"]
         .iter()
@@ -110,6 +116,7 @@ pub(crate) fn takes_effort(model: &str) -> bool {
 }
 
 /// A token price in dollars per million, from cents per 100 million.
+#[cfg(feature = "xai")]
 fn per_million(entry: &Value, key: &str) -> Option<f64> {
     entry
         .get(key)
@@ -119,6 +126,7 @@ fn per_million(entry: &Value, key: &str) -> Option<f64> {
 
 /// The rates an entry quotes, tier included, or `None` when it does not quote
 /// both input and output.
+#[cfg(feature = "xai")]
 fn token_pricing(entry: &Value) -> Option<ModelPricing> {
     let input = per_million(entry, "prompt_text_token_price")?;
     let output = per_million(entry, "completion_text_token_price")?;
@@ -154,6 +162,7 @@ fn token_pricing(entry: &Value) -> Option<ModelPricing> {
 }
 
 /// The listing's modality words as mime patterns.
+#[cfg(feature = "xai")]
 fn modalities(entry: &Value, key: &str) -> Option<Vec<String>> {
     let words = entry.get(key).and_then(Value::as_array)?;
     Some(
@@ -167,6 +176,7 @@ fn modalities(entry: &Value, key: &str) -> Option<Vec<String>> {
 }
 
 /// Every id an entry answers to beside its own.
+#[cfg(feature = "xai")]
 fn aliases(entry: &Value) -> Vec<String> {
     entry
         .get("aliases")
@@ -181,6 +191,7 @@ fn aliases(entry: &Value) -> Vec<String> {
 /// What one xAI listing read teaches: the models by canonical id, and every
 /// alias pointing at its canonical id.
 #[derive(Debug, Default, Clone, PartialEq)]
+#[cfg(feature = "xai")]
 pub(crate) struct Listing {
     /// Each model, by the id xAI calls canonical.
     pub(crate) models: HashMap<String, LearnedModel>,
@@ -188,6 +199,7 @@ pub(crate) struct Listing {
     pub(crate) aliases: HashMap<String, String>,
 }
 
+#[cfg(feature = "xai")]
 impl Listing {
     /// Record `id` with its aliases.
     fn insert(&mut self, id: String, entry: &Value, model: LearnedModel) {
@@ -201,6 +213,7 @@ impl Listing {
 /// Read `GET /v1/models` (a `data` array): every model's window, prices and
 /// release date. A model that quotes an image price is a media model and is
 /// left to [`read_media`]; one with no completion price is not a chat model.
+#[cfg(feature = "xai")]
 pub(crate) fn read_models(body: &Value, listing: &mut Listing) -> usize {
     let entries = body.get("data").and_then(Value::as_array);
     let mut read = 0;
@@ -230,6 +243,7 @@ pub(crate) fn read_models(body: &Value, listing: &mut Listing) -> usize {
 /// Fold `GET /v1/language-models` (a `models` array) into a listing: what each
 /// chat model takes and hands back. A model the first read did not carry is
 /// added, with no window, so the compiled table sizes it.
+#[cfg(feature = "xai")]
 pub(crate) fn read_modalities(body: &Value, listing: &mut Listing) {
     let entries = body.get("models").and_then(Value::as_array);
     for entry in entries.into_iter().flatten() {
@@ -258,6 +272,7 @@ pub(crate) fn read_modalities(body: &Value, listing: &mut Listing) {
 /// listing. An image model's `image_price` is in ticks (10^10 per dollar), and
 /// a per-quality table, when there is one, prices its dearest row: a stage's
 /// quality is its own choice, and the listing price should not understate it.
+#[cfg(feature = "xai")]
 pub(crate) fn read_media(body: &Value, listing: &mut Listing) {
     let entries = body.get("models").and_then(Value::as_array);
     for entry in entries.into_iter().flatten() {

@@ -19,6 +19,10 @@ leviath = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
+The crate carries every model provider by default. To compile in only the ones your application
+uses, turn its defaults off and name them; [Choosing providers](/docs/choosing-providers) lists the
+features.
+
 ## The shape of it
 
 ```rust

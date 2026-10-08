@@ -209,6 +209,12 @@ pub fn run_non_interactive(args: &SetupArgs, env: &SetupEnv) -> anyhow::Result<(
              flag, or run `lev setup` interactively)"
         );
     }
+    // Written all the same, so the file serves a build that has them; this
+    // one says what to rebuild with.
+    let unbuilt: Vec<String> = catalog::configured(&config)
+        .into_iter()
+        .filter_map(leviath_providers::compiled::missing)
+        .collect();
 
     let agents = if args.install_agents {
         crate::bundled::plan_agent_actions(&env.agents_dir)
@@ -222,7 +228,7 @@ pub fn run_non_interactive(args: &SetupArgs, env: &SetupEnv) -> anyhow::Result<(
         Vec::new()
     };
 
-    let applied = plan::apply(
+    let mut applied = plan::apply(
         // Nothing was offered here, so nothing was declined: the headless arm
         // takes its answer from flags and must not rewrite what the wizard
         // remembered about a person's choices.
@@ -235,6 +241,7 @@ pub fn run_non_interactive(args: &SetupArgs, env: &SetupEnv) -> anyhow::Result<(
         &env.agents_dir,
         None,
     )?;
+    applied.warnings.extend(unbuilt);
     report(&applied);
     Ok(())
 }

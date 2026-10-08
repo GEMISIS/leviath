@@ -16,21 +16,26 @@
 //! and completions. They are listed and priced like any other; zero data
 //! retention refuses them (see [`crate::retention`]).
 
+#[cfg(feature = "meta")]
 pub(crate) mod media;
 
-use std::collections::HashMap;
-use std::pin::Pin;
-
-use async_trait::async_trait;
-use futures_core::Stream;
-
-use crate::capabilities::{LimitsSource, Match, ModelCapabilities, ModelCapabilityOverride, Row};
-use crate::learned::{LearnedModel, LearnedModels};
-use crate::provider::{
-    InferenceRequest, InferenceResponse, ModelInfo, Provider, RateLimitConfig, Result, StreamChunk,
+use crate::capabilities::{LimitsSource, Match, ModelCapabilities, Row};
+use crate::responses::Dialect;
+#[cfg(feature = "meta")]
+use {
+    crate::capabilities::ModelCapabilityOverride,
+    crate::learned::{LearnedModel, LearnedModels},
+    crate::provider::{
+        InferenceRequest, InferenceResponse, ModelInfo, Provider, RateLimitConfig, Result,
+        StreamChunk,
+    },
+    crate::responses::client::{Auth, Endpoint},
+    crate::responses::{request as request_body, stream},
+    async_trait::async_trait,
+    futures_core::Stream,
+    std::collections::HashMap,
+    std::pin::Pin,
 };
-use crate::responses::client::{Auth, Endpoint};
-use crate::responses::{Dialect, request as request_body, stream};
 
 /// The registry name.
 pub const PROVIDER_NAME: &str = "meta";
@@ -112,6 +117,7 @@ pub(crate) fn table_capabilities(model: &str) -> ModelCapabilities {
 }
 
 /// Muse Spark on Meta's Model API.
+#[cfg(feature = "meta")]
 pub struct MetaProvider {
     endpoint: Endpoint,
     capability_overrides: HashMap<String, ModelCapabilityOverride>,
@@ -119,6 +125,7 @@ pub struct MetaProvider {
     learned: LearnedModels,
 }
 
+#[cfg(feature = "meta")]
 impl MetaProvider {
     /// A provider with `api_key`.
     pub fn new(client: reqwest::Client, api_key: String) -> Self {
@@ -175,6 +182,7 @@ impl MetaProvider {
     }
 }
 
+#[cfg(feature = "meta")]
 impl MetaProvider {
     /// Run a media model, priced by its unit row.
     async fn run_media(
@@ -188,6 +196,7 @@ impl MetaProvider {
 }
 
 #[async_trait]
+#[cfg(feature = "meta")]
 impl Provider for MetaProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         if let Some(kind) = media::kind(&request.model) {
@@ -351,5 +360,6 @@ impl Provider for MetaProvider {
     }
 }
 
+#[cfg(feature = "meta")]
 #[cfg(test)]
 mod tests;

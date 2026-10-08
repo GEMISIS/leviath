@@ -8,6 +8,7 @@
 # leave sandboxing unset and let the container itself be the boundary.
 #
 #   docker build -t leviath .
+#   docker build --build-arg LEV_FEATURES=anthropic,openai -t leviath .
 #   docker run -d -p 3000:3000 \
 #     -e LEVIATH_API_TOKEN=change-me \
 #     -v leviath-data:/data \
@@ -18,6 +19,10 @@
 # `-e ANTHROPIC_API_KEY=...`.
 
 FROM rust:1.97.1-slim-bookworm AS builder
+# The providers to build in, comma-separated (`anthropic,openai`); the other
+# default, `legacy-runs`, stays on. Empty is every provider, the same `lev` a
+# release ships.
+ARG LEV_FEATURES=""
 WORKDIR /src
 COPY . .
 # The release profile (fat LTO, one codegen unit) is what ships everywhere
@@ -31,6 +36,7 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked -p leviath-cli \
+        ${LEV_FEATURES:+--no-default-features --features "legacy-runs,$LEV_FEATURES"} \
     && cp target/release/lev /lev
 
 FROM debian:bookworm-slim

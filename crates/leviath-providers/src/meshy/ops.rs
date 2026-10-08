@@ -7,19 +7,25 @@
 //! a finished task keeps its GLB. The provider around it is the thin HTTP
 //! orchestration (submit, poll, download) over these.
 
+#[cfg(feature = "meshy")]
 use crate::media::{
     data_uris as mime_data_uris, extra_bool, extra_f64, extra_i64, extra_str, request_text,
 };
+#[cfg(feature = "meshy")]
 use serde_json::{Map, Value, json};
 
 use crate::capabilities::ModelMime;
+#[cfg(feature = "meshy")]
 use crate::provider::{InferenceRequest, ProviderError, Result};
 
 /// The most texture-prompt characters Meshy accepts.
+#[cfg(feature = "meshy")]
 const MAX_TEXTURE_PROMPT: usize = 800;
 /// The most reference images a multi-image task takes.
+#[cfg(feature = "meshy")]
 const MAX_MULTI_IMAGES: usize = 4;
 /// The default character height a rig assumes, in meters.
+#[cfg(feature = "meshy")]
 const DEFAULT_RIG_HEIGHT_METERS: f64 = 1.7;
 
 /// One Meshy generative operation, named by the model id a stage selects.
@@ -61,6 +67,7 @@ impl MeshyOp {
     }
 
     /// The canonical model id for this operation.
+    #[cfg(feature = "meshy")]
     pub(crate) fn id(self) -> &'static str {
         match self {
             Self::TextTo3d => "text-to-3d",
@@ -80,6 +87,7 @@ impl MeshyOp {
     /// is the first phase's path (both text-to-3d phases share one endpoint;
     /// animate's first phase is a rig, and its animate phase uses the
     /// animations path directly).
+    #[cfg(feature = "meshy")]
     pub(crate) fn path(self) -> &'static str {
         match self {
             Self::TextTo3d => "openapi/v2/text-to-3d",
@@ -119,6 +127,7 @@ impl MeshyOp {
     }
 
     /// The name the produced mesh part carries.
+    #[cfg(feature = "meshy")]
     pub(crate) fn output_name(self) -> &'static str {
         match self {
             Self::TextTo3d | Self::ImageTo3d | Self::MultiImageTo3d => "model.glb",
@@ -134,6 +143,7 @@ impl MeshyOp {
     /// An error here is a request the operation cannot run: an image
     /// operation with no image, a rig with no mesh. Naming the miss beats
     /// letting Meshy reject an empty body with a generic 400.
+    #[cfg(feature = "meshy")]
     pub(crate) fn build_body(self, request: &InferenceRequest) -> Result<Value> {
         match self {
             Self::ImageTo3d => {
@@ -219,6 +229,7 @@ impl MeshyOp {
     }
 
     /// The refine-phase body of text-to-3d, texturing the preview task.
+    #[cfg(feature = "meshy")]
     pub(crate) fn text_refine_body(preview_task_id: &str, request: &InferenceRequest) -> Value {
         let mut body = Map::new();
         body.insert("mode".into(), json!("refine"));
@@ -229,12 +240,14 @@ impl MeshyOp {
     }
 
     /// The animate-phase body: the rigged task plus the chosen action.
+    #[cfg(feature = "meshy")]
     pub(crate) fn animate_body(rig_task_id: &str, action_id: i64) -> Value {
         json!({ "rig_task_id": rig_task_id, "action_id": action_id })
     }
 
     /// The GLB url of a finished task, or `None` when the task carries no
     /// mesh (a shape a rig and a generation express differently).
+    #[cfg(feature = "meshy")]
     pub(crate) fn glb_url(self, task: &Value) -> Option<String> {
         let url = match self {
             Self::TextTo3d | Self::ImageTo3d | Self::MultiImageTo3d | Self::Retexture => {
@@ -250,6 +263,7 @@ impl MeshyOp {
     ///
     /// A rig has no new render; a generation's front-view thumbnail is a
     /// cheap image a verify stage can look at.
+    #[cfg(feature = "meshy")]
     pub(crate) fn preview_url(self, task: &Value) -> Option<String> {
         match self {
             Self::TextTo3d | Self::ImageTo3d | Self::MultiImageTo3d | Self::Retexture => task
@@ -266,6 +280,7 @@ impl MeshyOp {
 ///
 /// A text-to-3d with no prompt or a retexture with no style is a request Meshy
 /// cannot run; naming the miss beats a generic 400.
+#[cfg(feature = "meshy")]
 fn required_prompt(request: &InferenceRequest, op: &str) -> Result<String> {
     let prompt: String = request_text(request)
         .chars()
@@ -281,6 +296,7 @@ fn required_prompt(request: &InferenceRequest, op: &str) -> Result<String> {
 
 /// The animation action to apply: the `action` hint a stage set in
 /// `[model.parameters]`, else the request text, defaulting to a walk.
+#[cfg(feature = "meshy")]
 pub(crate) fn animate_action(request: &InferenceRequest) -> String {
     let action = extra_str(request, "action").unwrap_or_else(|| request_text(request));
     match action.trim().is_empty() {
@@ -290,11 +306,13 @@ pub(crate) fn animate_action(request: &InferenceRequest) -> String {
 }
 
 /// The first `action_id` in an animation-library listing, when it has one.
+#[cfg(feature = "meshy")]
 pub(crate) fn library_action_id(library: &Value) -> Option<i64> {
     library.as_array()?.first()?.get("action_id")?.as_i64()
 }
 
 /// The task id a create response reports, under its `result` key.
+#[cfg(feature = "meshy")]
 pub(crate) fn created_task_id(create_response: &Value) -> Result<String> {
     create_response
         .get("result")
@@ -310,6 +328,7 @@ pub(crate) fn created_task_id(create_response: &Value) -> Result<String> {
 
 /// Where a polled task is: its status word and how far along it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "meshy")]
 pub(crate) enum TaskState {
     /// Queued or running, at this percentage.
     Running(u64),
@@ -324,6 +343,7 @@ pub(crate) enum TaskState {
 /// An unknown status word is treated as still running rather than as a
 /// failure: Meshy adding a transitional state should not abort a run that
 /// would have finished, and the operation's own deadline still bounds it.
+#[cfg(feature = "meshy")]
 pub(crate) fn task_state(task: &Value) -> TaskState {
     match task.get("status").and_then(Value::as_str) {
         Some("SUCCEEDED") => TaskState::Succeeded,
@@ -348,12 +368,14 @@ pub(crate) fn task_state(task: &Value) -> TaskState {
 ///
 /// Only a mime block carrying its bytes counts: an unhydrated block (empty
 /// `data`) is one the runtime chose to send as text, which Meshy cannot use.
+#[cfg(feature = "meshy")]
 fn input_images(request: &InferenceRequest) -> Vec<String> {
     mime_data_uris(request, |mime| mime.starts_with("image/"))
 }
 
 /// The first hydrated mesh part of a request, as a `data:` URI, when it has
 /// one.
+#[cfg(feature = "meshy")]
 fn input_model(request: &InferenceRequest) -> Option<String> {
     mime_data_uris(request, |mime| mime.starts_with("model/"))
         .into_iter()
@@ -362,6 +384,7 @@ fn input_model(request: &InferenceRequest) -> Option<String> {
 
 /// Add the texture prompt to a create body, from the explicit hint or, when
 /// that is unset, the request text, capped at Meshy's limit.
+#[cfg(feature = "meshy")]
 fn apply_texture(body: &mut Map<String, Value>, request: &InferenceRequest) {
     let prompt = extra_str(request, "texture_prompt").unwrap_or_else(|| request_text(request));
     let prompt: String = prompt.trim().chars().take(MAX_TEXTURE_PROMPT).collect();
@@ -378,6 +401,7 @@ fn apply_texture(body: &mut Map<String, Value>, request: &InferenceRequest) {
 /// forwarded, so a stale or provider-neutral hint (a deprecated `symmetry_mode`,
 /// a `negative_prompt` these endpoints do not take) is dropped here rather than
 /// drawing a 400 from Meshy.
+#[cfg(feature = "meshy")]
 fn apply_model_hints(body: &mut Map<String, Value>, request: &InferenceRequest) {
     for key in ["ai_model", "topology", "pose_mode"] {
         if let Some(value) = extra_str(request, key) {
@@ -399,6 +423,7 @@ fn apply_model_hints(body: &mut Map<String, Value>, request: &InferenceRequest) 
 /// Kept apart from the geometry hints because a text-to-3d preview textures
 /// nothing and rejects them; they belong to the image ops, the refine phase and
 /// a retexture.
+#[cfg(feature = "meshy")]
 fn apply_texture_hints(body: &mut Map<String, Value>, request: &InferenceRequest) {
     if let Some(value) = extra_str(request, "texture_resolution") {
         body.insert("texture_resolution".into(), json!(value));
@@ -408,7 +433,7 @@ fn apply_texture_hints(body: &mut Map<String, Value>, request: &InferenceRequest
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "meshy"))]
 mod tests {
     use super::*;
     use crate::provider::{ContentBlock, InferenceRequest, Message, MessageContent};

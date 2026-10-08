@@ -148,13 +148,26 @@ pub async fn execute_with(args: ProvidersArgs, env: &ProvidersEnv) -> anyhow::Re
     }
 }
 
-/// The Bedrock provider the config describes, for reading and writing the
-/// account's data retention mode; `None` when no Bedrock key is configured.
+/// Built without Bedrock, there is no account to read: the retention view
+/// shows every other provider, and `retention bedrock` says what to rebuild
+/// with.
+#[cfg(not(feature = "bedrock"))]
+fn bedrock_from(
+    _config: &Config,
+    _env: &ProvidersEnv,
+    _build_client: leviath_providers::provider::HttpClientFactory<'_>,
+) -> anyhow::Result<Option<leviath_providers::bedrock::Account>> {
+    Ok(None)
+}
+
+/// The Bedrock account the config describes, for reading and writing its
+/// data retention mode; `None` when no Bedrock key is configured.
+#[cfg(feature = "bedrock")]
 fn bedrock_from(
     config: &Config,
     env: &ProvidersEnv,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
-) -> anyhow::Result<Option<leviath_providers::BedrockProvider>> {
+) -> anyhow::Result<Option<leviath_providers::bedrock::Account>> {
     let Some(key) = config
         .providers
         .bedrock_api_key
@@ -165,23 +178,23 @@ fn bedrock_from(
         return Ok(None);
     };
     let client = build_client(None)?;
-    let mut provider = leviath_providers::BedrockProvider::new(client, key.to_string())
-        .with_region(config.providers.bedrock_region.clone())
-        .with_base_url(config.providers.bedrock_base_url.clone());
-    if let Some(url) = &env.bedrock_control_url {
-        provider = provider.with_control_url(Some(url.clone()));
-    }
-    if let Some(url) = &env.bedrock_mantle_url {
-        provider = provider.with_mantle_url(Some(url.clone()));
-    }
-    Ok(Some(provider))
+    Ok(Some(leviath_providers::bedrock::Account::open(
+        client,
+        leviath_providers::bedrock::AccountSpec {
+            api_key: key.to_string(),
+            region: config.providers.bedrock_region.clone(),
+            base_url: config.providers.bedrock_base_url.clone(),
+            control_url: env.bedrock_control_url.clone(),
+            mantle_url: env.bedrock_mantle_url.clone(),
+        },
+    )))
 }
 
 /// Every provider worth a row: the built-ins that are configured, and every
 /// `[model_providers]` entry.
 fn retention_rows(config: &Config) -> Vec<String> {
     let configured = catalog::configured(config);
-    let mut names: Vec<String> = catalog::providers()
+    let mut names: Vec<String> = catalog::offered()
         .iter()
         .filter(|p| configured.contains(&p.id))
         .map(|p| p.id.to_string())
@@ -378,7 +391,11 @@ async fn set_bedrock_mode(
 ) -> anyhow::Result<()> {
     let config = Config::load_from_path_public(&env.config_path)?;
     let Some(provider) = bedrock_from(&config, env, build_client)? else {
-        anyhow::bail!("no Bedrock key is configured; `lev setup --bedrock-key ...` first");
+        let why = leviath_providers::compiled::missing(leviath_providers::bedrock::PROVIDER_NAME)
+            .unwrap_or_else(|| {
+                "no Bedrock key is configured; `lev setup --bedrock-key ...` first".to_string()
+            });
+        anyhow::bail!("{why}");
     };
     let mode = mode.trim();
     provider.set_account_retention(mode).await?;
@@ -393,13 +410,13 @@ async fn set_bedrock_mode(
 /// setter refuses one so a typo does not persist as a silent no-op. `lev
 /// doctor` reports the same class after the fact; this catches it at the edit.
 fn is_known(config: &Config, name: &str) -> bool {
-    catalog::providers().iter().any(|p| p.id == name) || config.model_providers.contains_key(name)
+    catalog::offered().iter().any(|p| p.id == name) || config.model_providers.contains_key(name)
 }
 
 /// Every provider name this config could route to, for an error that lists the
 /// alternatives rather than only rejecting the typo.
 fn known_names(config: &Config) -> Vec<String> {
-    let mut names: Vec<String> = catalog::providers()
+    let mut names: Vec<String> = catalog::offered()
         .iter()
         .map(|p| p.id.to_string())
         .collect();
@@ -462,7 +479,7 @@ fn list(json: bool, env: &ProvidersEnv) -> anyhow::Result<()> {
     let configured = catalog::configured(&config);
 
     if json {
-        let rows: Vec<serde_json::Value> = catalog::providers()
+        let rows: Vec<serde_json::Value> = catalog::offered()
             .iter()
             .map(|p| {
                 serde_json::json!({
@@ -503,7 +520,7 @@ fn list(json: bool, env: &ProvidersEnv) -> anyhow::Result<()> {
 
     println!("\nConfigured providers:");
     let mut any = false;
-    for p in catalog::providers() {
+    for p in catalog::offered() {
         if configured.contains(&p.id) {
             any = true;
             println!("  {:<12} {}", p.id, p.display);

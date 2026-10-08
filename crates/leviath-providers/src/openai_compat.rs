@@ -104,11 +104,13 @@ pub async fn send_chat_request(
 /// several (an assistant `tool_calls` message, or one `tool`-role message per
 /// result), so tool history round-trips correctly on OpenAI-compatible APIs
 /// instead of being serialized raw in Anthropic block form.
+#[cfg(feature = "openrouter")]
 pub fn message_to_openai(role: &str, content: &MessageContent) -> Vec<serde_json::Value> {
     message_to_openai_with(role, content, ToolArgsFormat::JsonString)
 }
 
 /// [`message_to_openai`], naming how tool-call arguments are rendered.
+#[cfg(feature = "openrouter")]
 pub fn message_to_openai_with(
     role: &str,
     content: &MessageContent,
@@ -564,6 +566,7 @@ pub enum ToolArgsFormat {
     /// A JSON-encoded string. OpenAI, OpenRouter, Gemini's compat endpoint.
     JsonString,
     /// A JSON object. Ollama.
+    #[cfg(any(feature = "google", feature = "ollama"))]
     Object,
 }
 
@@ -572,6 +575,7 @@ impl ToolArgsFormat {
     pub fn render(self, input: &serde_json::Value) -> serde_json::Value {
         match self {
             Self::JsonString => serde_json::Value::String(input.to_string()),
+            #[cfg(any(feature = "google", feature = "ollama"))]
             Self::Object => input.clone(),
         }
     }

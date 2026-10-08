@@ -15,12 +15,14 @@
 //! Most current models can only be called through a profile, so the profile
 //! id is what a blueprint names and what the listing here reports.
 
+#[cfg(feature = "bedrock")]
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use serde::Deserialize;
 
 use crate::capabilities::{LimitsSource, Match, ModelCapabilities, ModelMime, Row, lookup};
+#[cfg(feature = "bedrock")]
 use crate::learned::LearnedModel;
 
 /// Which vendor's model an id names, by its first segment after any
@@ -53,6 +55,7 @@ const PROFILE_PREFIXES: &[&str] = &[
 
 /// The vendor segments Bedrock's catalogue uses, so an id can be recognised
 /// as Bedrock-shaped by spelling alone.
+#[cfg(feature = "bedrock")]
 const VENDOR_SEGMENTS: &[&str] = &[
     "anthropic",
     "amazon",
@@ -112,6 +115,7 @@ pub(super) fn vendor_of(model: &str) -> Vendor {
 /// This is what lets `bedrock/…` be left off a model key that could not be
 /// anything else, and what keeps a bare `claude-sonnet-5` routed to the
 /// Anthropic provider: the same model on Bedrock bills a different account.
+#[cfg(feature = "bedrock")]
 pub(crate) fn is_bedrock_id(model: &str) -> bool {
     model.starts_with("arn:aws:bedrock:")
         || vendor_segment(model).is_some_and(|vendor| VENDOR_SEGMENTS.contains(&vendor))
@@ -382,6 +386,7 @@ pub(crate) fn mime_for(model: &str) -> ModelMime {
 
 /// One entry of `ListFoundationModels`, as much of it as matters here.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "bedrock")]
 pub(super) struct FoundationModel {
     /// The bare model id.
     pub(super) id: String,
@@ -398,6 +403,7 @@ pub(super) struct FoundationModel {
 
 /// A `modelSummaries` entry as a [`FoundationModel`], or `None` for one that
 /// does not answer in text or is no longer active.
+#[cfg(feature = "bedrock")]
 pub(super) fn parse_foundation_model(entry: &serde_json::Value) -> Option<FoundationModel> {
     let id = entry.get("modelId").and_then(|v| v.as_str())?.to_string();
     let words = |key: &str| -> Vec<String> {
@@ -461,6 +467,7 @@ pub(super) fn parse_foundation_model(entry: &serde_json::Value) -> Option<Founda
 
 /// One entry of `ListInferenceProfiles`, as much of it as matters here.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "bedrock")]
 pub(super) struct InferenceProfile {
     /// The profile id a request names.
     pub(super) id: String,
@@ -472,6 +479,7 @@ pub(super) struct InferenceProfile {
 
 /// An `inferenceProfileSummaries` entry as an [`InferenceProfile`], or
 /// `None` for one that is not active.
+#[cfg(feature = "bedrock")]
 pub(super) fn parse_inference_profile(entry: &serde_json::Value) -> Option<InferenceProfile> {
     let id = entry
         .get("inferenceProfileId")
@@ -504,6 +512,7 @@ pub(super) fn parse_inference_profile(entry: &serde_json::Value) -> Option<Infer
 ///
 /// Limits stay `None`: the listing carries none, and a record that named a
 /// limit would relabel the card's figure as read from the API.
+#[cfg(feature = "bedrock")]
 pub(super) fn merge_listing(
     models: &[FoundationModel],
     profiles: &[InferenceProfile],

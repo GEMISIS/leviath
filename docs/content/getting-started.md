@@ -111,6 +111,9 @@ cargo install --git https://github.com/GEMISIS/leviath.git --bin lev   # latest 
 To embed the runtime in your own application instead of running the CLI, add the
 [`leviath`](https://crates.io/crates/leviath) crate as a dependency.
 
+Both carry every model provider by default. [Choosing providers](/docs/choosing-providers) shows how
+to build with only the ones you use.
+
 </details>
 
 ## Configure a provider

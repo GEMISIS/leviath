@@ -38,7 +38,7 @@ use leviath_runtime::control_socket::RESTART_GRACE;
 /// footprint under 293 MB of retained RSS after a five-agent burst). mimalloc
 /// returns freed pages to the OS aggressively, so RSS tracks what the process
 /// actually holds.
-#[cfg(feature = "mimalloc-allocator")]
+#[cfg(not(feature = "system-allocator"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -46,7 +46,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[derive(Parser)]
 #[command(name = "lev")]
 #[command(about = "Leviath agent framework CLI", long_about = None)]
-#[command(version)]
+#[command(version, long_version = leviath_cli::dispatch::long_version())]
 // clap cannot group subcommands under headings, so `lev --help` renders the
 // categorized `COMMANDS_HELP` (via `after_help` in `HELP_TEMPLATE`) instead of
 // clap's flat list. The library owns both, held to the `Commands` enum by a test.
@@ -67,7 +67,7 @@ fn main() -> anyhow::Result<()> {
     // the OS keeps charging to it. Applied in-binary so every lev process
     // behaves the same however it was started; a user-exported
     // MIMALLOC_PURGE_DELAY always wins.
-    #[cfg(feature = "mimalloc-allocator")]
+    #[cfg(not(feature = "system-allocator"))]
     leviath_alloc::use_purge_at_free_unless_overridden();
 
     // An explicit runtime instead of `#[tokio::main]` for one number: script

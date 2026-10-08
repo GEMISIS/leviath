@@ -18,8 +18,10 @@ use crate::responses::client::Endpoint;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EditShape {
     /// xAI: `image: {url}` for one, `images: [{url}]` for several.
+    #[cfg(feature = "xai")]
     Xai,
     /// Meta: `images: [{image_url}]`.
+    #[cfg(any(feature = "openai", feature = "meta"))]
     Meta,
 }
 
@@ -77,13 +79,16 @@ pub(crate) async fn run(
         true => "/images/generations",
         false => {
             match (route.shape, references.as_slice()) {
+                #[cfg(feature = "xai")]
                 (EditShape::Xai, [one]) => {
                     body.insert("image".into(), json!({ "url": one }));
                 }
+                #[cfg(feature = "xai")]
                 (EditShape::Xai, many) => {
                     let images: Vec<Value> = many.iter().map(|u| json!({ "url": u })).collect();
                     body.insert("images".into(), json!(images));
                 }
+                #[cfg(any(feature = "openai", feature = "meta"))]
                 (EditShape::Meta, many) => {
                     let images: Vec<Value> =
                         many.iter().map(|u| json!({ "image_url": u })).collect();

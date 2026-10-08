@@ -186,10 +186,15 @@ jobs:
   # `-p <crate>` rather than `--workspace` is the whole point. A workspace
   # build unifies features, and `leviath-cli` turns `control-socket` on, which
   # is exactly how the off path stayed invisible.
+  #
+  # Each provider is a feature too, and every other job builds all of them, so
+  # this is also where a build with fewer is compiled. A provider's code is
+  # gated where it lives, and a helper only some providers call goes dead in a
+  # build without them; clippy's `-D warnings` is what finds that.
   default-features:
     name: Build with default features
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/rust-setup
@@ -200,7 +205,27 @@ jobs:
       # The release publishes `lev` without `legacy-runs` (its crate is never
       # published, so prod.yml deletes the feature), which no other job builds.
       - name: Check the lev that crates.io gets
-        run: cargo check -p leviath-cli --no-default-features --features mimalloc-allocator
+        run: cargo check -p leviath-cli --no-default-features --features providers
+      - name: Build each provider on its own
+        run: |
+          for provider in anthropic openai openai-subscription xai xai-subscription google \
+                          openrouter bedrock meta ollama meshy rhai; do
+            echo "::group::$provider"
+            cargo clippy -p leviath-providers --no-default-features --features "$provider" --lib -- -D warnings
+            echo "::endgroup::"
+          done
+      - name: Build with no providers at all
+        run: |
+          cargo clippy -p leviath-providers --no-default-features --lib -- -D warnings
+          cargo clippy -p leviath --no-default-features --lib -- -D warnings
+          cargo clippy -p leviath-cli --no-default-features --lib --bins -- -D warnings
+      - name: Build lev with a chosen few
+        run: cargo clippy -p leviath-cli --no-default-features --features anthropic,openai --lib --bins -- -D warnings
+      # A doc link to a provider's code breaks in a build without it.
+      - name: Document the providers with none of them built in
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p leviath-providers --no-deps --no-default-features
       # The rot this job exists to catch was in the docs, not the build, so
       # checking only compilation would not have caught it.
       - name: Document the runtime without its optional features

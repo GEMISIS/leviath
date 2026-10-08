@@ -256,6 +256,7 @@ pub fn builtin_mime(provider: &str, model: &str) -> ModelMime {
 }
 
 /// OpenRouter's `architecture.input_modalities` words as patterns.
+#[cfg(any(feature = "xai", feature = "openrouter", feature = "bedrock"))]
 pub(crate) fn modality_pattern(word: &str) -> Option<&'static str> {
     match word.trim().to_ascii_lowercase().as_str() {
         "text" => Some("text/*"),

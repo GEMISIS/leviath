@@ -441,7 +441,7 @@ fn providers_of(
             options: None,
         }
     }
-    vec![
+    let rows = vec![
         keyed("anthropic", "Anthropic", redacted.has_anthropic_key, None),
         keyed("openai", "OpenAI", redacted.has_openai_key, None),
         keyed("google", "Google", redacted.has_google_key, None),
@@ -499,7 +499,12 @@ fn providers_of(
             region: None,
             options: None,
         },
-    ]
+    ];
+    // Only what this build carries: a row for a provider it left out is a
+    // setting nothing would read.
+    rows.into_iter()
+        .filter(|row| leviath_providers::compiled::missing(&row.id).is_none())
+        .collect()
 }
 
 /// One diagnostics run as this schema describes it.

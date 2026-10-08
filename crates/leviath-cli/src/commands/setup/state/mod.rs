@@ -193,7 +193,7 @@ impl Wizard {
             .map(|r| r.trim().to_string())
             .filter(|r| !r.is_empty());
 
-        let providers = catalog::providers()
+        let providers = catalog::offered()
             .into_iter()
             .map(|provider| {
                 let stored = catalog::stored_credential(&base, provider.id);

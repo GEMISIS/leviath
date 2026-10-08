@@ -11,17 +11,24 @@
 //! - `grok-stt`: `POST /stt` as a multipart upload of the audio, answered with
 //!   the transcript and word timings. Also a Leviath name.
 
+#[cfg(feature = "xai")]
 use std::time::Duration;
 
+#[cfg(feature = "xai")]
 use serde_json::{Value, json};
 
+#[cfg(feature = "xai")]
 use crate::media::{self, Poll, images};
+#[cfg(feature = "xai")]
 use crate::pricing::UnitPrice;
+#[cfg(feature = "xai")]
 use crate::provider::{InferenceRequest, InferenceResponse, ProviderError, Result};
+#[cfg(feature = "xai")]
 use crate::responses::client::Endpoint;
 
 /// What a media model does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "xai")]
 pub(crate) enum Kind {
     /// Make or edit images.
     Image,
@@ -34,6 +41,7 @@ pub(crate) enum Kind {
 }
 
 /// The media kind `model` is, or `None` for a chat model.
+#[cfg(feature = "xai")]
 pub(crate) fn kind(model: &str) -> Option<Kind> {
     match model {
         m if m.starts_with("grok-imagine-image") => Some(Kind::Image),
@@ -58,6 +66,7 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
 
 /// How one call is billed: whether the reply's own cost is the call's, and
 /// the per-unit price to fall back on.
+#[cfg(feature = "xai")]
 pub(crate) struct Billing {
     /// Whether a quoted `cost_in_usd_ticks` is this call's cost (an API key)
     /// or not (a subscription).
@@ -66,6 +75,7 @@ pub(crate) struct Billing {
     pub(crate) unit: Option<UnitPrice>,
 }
 
+#[cfg(feature = "xai")]
 impl Billing {
     /// The cost from the reply's ticks, else `quantity` units, else unknown.
     /// Nothing at all on a subscription.
@@ -82,6 +92,7 @@ impl Billing {
 }
 
 /// Run the media model `request` names.
+#[cfg(feature = "xai")]
 pub(crate) async fn run(
     endpoint: &Endpoint,
     provider: &str,
@@ -115,6 +126,7 @@ pub(crate) async fn run(
 }
 
 /// Make, edit or extend a video, and wait for it.
+#[cfg(feature = "xai")]
 async fn video(
     endpoint: &Endpoint,
     provider: &str,
@@ -214,6 +226,7 @@ async fn video(
 }
 
 /// Speak the request's text.
+#[cfg(feature = "xai")]
 async fn speech(
     endpoint: &Endpoint,
     provider: &str,
@@ -277,6 +290,7 @@ async fn speech(
 }
 
 /// Transcribe the request's audio.
+#[cfg(feature = "xai")]
 async fn transcribe(
     endpoint: &Endpoint,
     request: &InferenceRequest,

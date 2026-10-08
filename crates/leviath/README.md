@@ -12,6 +12,19 @@ one namespace so an application only needs a single dependency:
 leviath = "0.1"
 ```
 
+Every model provider is built in by default. To compile only the ones your
+application uses, turn the defaults off and name them:
+
+```toml
+[dependencies]
+leviath = { version = "0.6", default-features = false, features = ["anthropic"] }
+```
+
+The provider features are `anthropic`, `openai`, `openai-subscription`, `xai`,
+`xai-subscription`, `google`, `openrouter`, `bedrock`, `meta`, `ollama`,
+`meshy` and `rhai`; [Choosing providers](https://leviath.dev/docs/choosing-providers)
+says what each one is.
+
 Running an agent in-process takes a provider, a blueprint, and an event
 loop. No daemon, no config file:
 

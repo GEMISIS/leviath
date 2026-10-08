@@ -11,6 +11,19 @@ execution engine.
 cargo install leviath-cli
 ```
 
+That builds every model provider in. To build only the ones you use, turn the
+defaults off and name them:
+
+```bash
+cargo install leviath-cli --no-default-features --features anthropic,openai
+```
+
+The features are `anthropic`, `openai`, `openai-subscription` (Codex),
+`xai`, `xai-subscription` (Grok), `google`, `openrouter`, `bedrock`, `meta`,
+`ollama`, `meshy` and `rhai` (script providers). With none, `lev` reaches only
+the OpenAI-compatible endpoints in your config.
+[Choosing providers](https://leviath.dev/docs/choosing-providers) has the rest.
+
 Prebuilt binaries skip the compile. On macOS:
 
 ```bash
