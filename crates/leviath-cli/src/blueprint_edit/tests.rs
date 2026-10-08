@@ -194,7 +194,7 @@ fn the_views_read_the_coder_the_way_the_lair_does() {
     // A model the blueprint names without pinning a route reads back as the
     // bare name. It has to survive the view: this stage lists several such
     // models, and reading only the route-pinned ones showed just the local one.
-    assert_eq!(discover.models[0], "claude-sonnet-5");
+    assert_eq!(discover.models[0], "claude-sonnet-5-5");
     assert!(discover.models.len() > 1, "{:?}", discover.models);
     assert!(
         discover.models.iter().any(|m| m.starts_with("ollama/")),
@@ -317,7 +317,7 @@ fn the_views_read_the_coder_the_way_the_lair_does() {
     assert!(tools.contains(&"read_file".to_string()));
     assert!(tools.windows(2).all(|w| w[0] < w[1]), "sorted, deduped");
     let models = doc.known_models();
-    assert!(models.contains(&"claude-opus-5".to_string()));
+    assert!(models.contains(&"claude-opus-5-5".to_string()));
     assert!(models.windows(2).all(|w| w[0] < w[1]));
 }
 

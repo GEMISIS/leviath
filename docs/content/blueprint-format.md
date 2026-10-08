@@ -83,7 +83,7 @@ system_prompt = """
 Read `brief` and `commits`. Group the changes that matter to the audience,
 read the code with read_file where a commit message is unclear, and append
 one line per change to `notes` with context_append."""
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.4-mini" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }, { provider = "openai", model = "gpt-5.4-mini" }] }
 tools = ["read_file", "shell", "context_append"]
 max_iterations = 12
 
@@ -317,8 +317,8 @@ them under `StageDef`.
 provider in your `provider_order` that serves it:
 
 ```toml
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { model = "gpt-5.5" }] }
-model = { models = [{ model = "claude-opus-5" }], params = { temperature = 0.2, max_output_tokens = "40%" } }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }, { model = "gpt-5.5" }] }
+model = { models = [{ model = "claude-opus-5-5" }], params = { temperature = 0.2, max_output_tokens = "40%" } }
 model = { models = [{ model = "gpt-5.5" }], params = { extra = { reasoning_effort = "high" } }, request_timeout_secs = 600 }
 ```
 
@@ -464,7 +464,7 @@ conversation = { kind = "sliding_window", max_items = 20, budget = "40%" }
 read_file = "allow"
 
 [stages.read]
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }] }
 available_tools = ["read_file", "context_write"]
 max_iterations = 6
 system_prompt = "Read the file named in task and note what matters."
@@ -492,7 +492,7 @@ tool_permissions = { read_file = "allow" }
 [[graph.stages]]
 name = "read"
 system_prompt = "Read the file named in task and note what matters."
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }] }
 tools = [
     "read_file",
     "context_write",

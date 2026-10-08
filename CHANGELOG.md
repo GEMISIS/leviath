@@ -162,6 +162,19 @@ same list.
 - Library: `InteractionHub::try_answer` and `AgentWorld::try_answer` say why
   an answer did not land (`AnswerError`), and `InteractionHub::cancel` is
   public.
+- The defaults and bundled blueprints use the Claude 5.5 models. The eight
+  bundled blueprints that named Claude now name `claude-sonnet-5-5` and
+  `claude-opus-5-5` (`anthropic/claude-opus-5.5` through OpenRouter), each
+  at the tier it had, and their versions moved up. A `compacting` region's
+  default summarizer, the model a stage that names none is reported against,
+  and the `lev create` template are `claude-sonnet-5-5` (they were
+  `claude-sonnet-4-6`). These models take no temperature, so a compaction
+  `temperature` is left out of the request, as it already was for Claude 5.
+- Muse Spark on Meta's API takes the audio and video types Meta names: MP3
+  and WAV audio and MP4 video, by file id or inline. Any other audio or video
+  type is no longer sent to it, and Meta's inline limit is read as 50 000 000
+  bytes. Through OpenRouter, Muse Spark takes no audio, as OpenRouter's
+  catalogue says.
 
 ### Fixed
 

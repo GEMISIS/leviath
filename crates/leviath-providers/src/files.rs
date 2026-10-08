@@ -139,13 +139,20 @@ const XAI: MediaLimits = MediaLimits {
     file_ttl_max_secs: 30 * DAY,
 };
 
-/// Meta's Model API: images, video, audio and PDFs by file id; 1 GiB a file,
-/// kept up to 30 days; 50 MB a request inline.
+/// Meta's Model API: images, MP4 video, MP3 and WAV audio and PDFs by file
+/// id; 1 GiB a file, kept up to 30 days; 50 MB (decimal, 50 000 000 bytes)
+/// inline, as Meta's file-handling page states them.
 const META: MediaLimits = MediaLimits {
-    inline_request_bytes: Some(50 * MIB),
+    inline_request_bytes: Some(50_000_000),
     inline_part_bytes: &[],
     file_bytes: Some(1024 * MIB),
-    file_types: &["image/*", "video/*", "audio/*", "application/pdf"],
+    file_types: &[
+        "image/*",
+        "video/mp4",
+        "audio/mpeg",
+        "audio/wav",
+        "application/pdf",
+    ],
     file_ttl_max_secs: 30 * DAY,
 };
 

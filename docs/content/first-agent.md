@@ -151,7 +151,7 @@ A **stage** is one phase of the work, with its own prompt, model, and tools:
 [[graph.stages]]
 name = "survey"
 description = "Sort the commits into what a user would notice and what they would not"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }] }
 tools = ["context_write"]
 max_iterations = 10
 system_prompt = """
@@ -201,7 +201,7 @@ Now the stage it points at:
 [[graph.stages]]
 name = "draft"
 description = "Turn the sorted changes into release notes"
-model = { models = [{ model = "gpt-5.5" }, { model = "claude-opus-5" }] }
+model = { models = [{ model = "gpt-5.5" }, { model = "claude-opus-5-5" }] }
 tools = ["bash", "read_file"]
 max_iterations = 15
 system_prompt = """
@@ -232,7 +232,7 @@ A run's result should be something a script can use, not a transcript to read. T
 name = "publish"
 mode = "output"
 description = "Hand back the finished notes"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }] }
 max_iterations = 3
 output = { format = "markdown", instructions = "The release notes only. Start at the first heading, with no preamble." }
 ```
@@ -273,7 +273,7 @@ when = "error"
 [[graph.stages]]
 name = "recover"
 description = "Say what went wrong when a stage fails"
-model = { models = [{ model = "gpt-5.4-mini" }, { model = "claude-sonnet-5" }] }
+model = { models = [{ model = "gpt-5.4-mini" }, { model = "claude-sonnet-5-5" }] }
 tools = []
 max_iterations = 3
 system_prompt = """
@@ -389,7 +389,7 @@ budget = "25%"
 [[graph.stages]]
 name = "survey"
 description = "Sort the commits into what a user would notice and what they would not"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }] }
 tools = ["context_write"]
 max_iterations = 10
 system_prompt = """
@@ -405,7 +405,7 @@ line, each keeping its short commit hash. Then say you are done.
 [[graph.stages]]
 name = "draft"
 description = "Turn the sorted changes into release notes"
-model = { models = [{ model = "gpt-5.5" }, { model = "claude-opus-5" }] }
+model = { models = [{ model = "gpt-5.5" }, { model = "claude-opus-5-5" }] }
 tools = ["bash", "read_file"]
 max_iterations = 15
 system_prompt = """
@@ -423,14 +423,14 @@ Then hand the notes to the publish stage.
 name = "publish"
 mode = "output"
 description = "Hand back the finished notes"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }] }
 max_iterations = 3
 output = { format = "markdown", instructions = "The release notes only. Start at the first heading, with no preamble." }
 
 [[graph.stages]]
 name = "recover"
 description = "Say what went wrong when a stage fails"
-model = { models = [{ model = "gpt-5.4-mini" }, { model = "claude-sonnet-5" }] }
+model = { models = [{ model = "gpt-5.4-mini" }, { model = "claude-sonnet-5-5" }] }
 tools = []
 max_iterations = 3
 system_prompt = """

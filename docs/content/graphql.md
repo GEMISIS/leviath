@@ -1032,7 +1032,7 @@ mutation Spawn($since: String!) {
       { name: "max_items", value: { int: 15 } }
     ]
     workdir: "/work/app"
-    model: "claude-sonnet-5"
+    model: "claude-sonnet-5-5"
     launch: { maxDepth: 2, unattended: { profile: "careful" }, captureModelInput: true }
     attachments: [{ content: { path: "CHANGELOG.md" }, region: { name: "notes" }, caption: "the changelog so far" }]
     delivery: {

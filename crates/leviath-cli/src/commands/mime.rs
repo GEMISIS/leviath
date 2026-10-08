@@ -588,7 +588,7 @@ mod tests {
         assert!(some.contains("PROVIDER"), "{some}");
         assert!(
             some.lines()
-                .any(|l| l.starts_with("meta") && l.contains("50.0 MiB") && l.contains("1.0 GiB")),
+                .any(|l| l.starts_with("meta") && l.contains("47.7 MiB") && l.contains("1.0 GiB")),
             "{some}"
         );
         assert!(

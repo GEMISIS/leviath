@@ -1,6 +1,6 @@
 [blueprint]
 name = "deep-researcher"
-version = "0.5.0"
+version = "0.6.0"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 
 # gather -> investigate (fan out) -> analyze -> challenge -> synthesize -> polish -> summary
@@ -16,7 +16,7 @@ max_child_depth = 2
 # Read/search agent: writes only its final report.
 tool_permissions = { read_file = "allow", list_dir = "allow", web_search = "allow", web_fetch = "allow", current_time = "allow", write_file = "ask", bash = "ask" }
 
-compaction = { model = { provider = "anthropic", model = "claude-sonnet-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+compaction = { model = { provider = "anthropic", model = "claude-sonnet-5-5" }, max_summary_tokens = 2000, temperature = 0.2 }
 
 [[graph.inputs]]
 name = "task"
@@ -96,7 +96,7 @@ regions = [
 [[graph.stages]]
 name = "gather"
 description = "Gather primary sources and key references on the topic"
-model = { models = [{ model = "grok-4.6" }, { model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "grok-4.6" }, { model = "claude-sonnet-5-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 # web_search / web_fetch are provided by this agent's tools/.
 tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read", "ask_user_text", "ask_user_choice"]
 max_iterations = 25
@@ -264,7 +264,7 @@ hint = "Primary sources gathered - break the topic into sub-questions and resear
 [[graph.stages]]
 name = "investigate"
 description = "Research each sub-question of the topic in parallel"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "grok-4.6" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "grok-4.6" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["fan_out"]
 max_iterations = 4
 # investigate to error_recovery and back is a cycle, so it needs a ceiling.
@@ -356,7 +356,7 @@ when = "error"
 [[graph.stages]]
 name = "analyze"
 description = "Analyze findings, cross-reference claims, and decide the next move"
-model = { models = [{ model = "deepseek-v4-pro" }, { model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "deepseek-v4-pro" }, { model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "web_fetch", "context_write", "context_append", "current_time"]
 max_iterations = 20
 max_revisits = 4  # backstop only; the convergence note is what should end this loop
@@ -444,7 +444,7 @@ carry = { compact = {} }
 [[graph.stages]]
 name = "follow_citations"
 description = "Pull and read specific cited sources flagged during analysis"
-model = { models = [{ model = "deepseek-v4-pro" }, { model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "deepseek-v4-pro" }, { model = "claude-sonnet-5-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["web_fetch", "web_search", "read_file", "context_append", "current_time", "context_read"]
 max_iterations = 12
 max_revisits = 3
@@ -486,7 +486,7 @@ when = "error"
 [[graph.stages]]
 name = "synthesize"
 description = "Produce a structured, cited research report"
-model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "claude-sonnet-5" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "claude-sonnet-5-5" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["write_file", "read_file", "context_write"]
 max_iterations = 15
 # `sources` is the raw material - fetched pages, ~125k tokens on a real run -
@@ -555,7 +555,7 @@ carry = { custom = { clear = ["conversation"] } }
 [[graph.stages]]
 name = "error_recovery"
 description = "Recover from a failed source fetch or parse during research"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
@@ -588,7 +588,7 @@ carry = { compact = {} }
 [[graph.stages]]
 name = "summary"
 description = "Say what the investigation found"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 mode = "output"
 tools = ["submit_output"]
 max_iterations = 8
@@ -621,7 +621,7 @@ is worse than no summary."""
 [[graph.stages]]
 name = "challenge"
 description = "Attack the analysis: what is thin, unsupported, or too confident"
-model = { models = [{ model = "grok-4.6" }, { model = "deepseek-v4-pro" }, { model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "grok-4.6" }, { model = "deepseek-v4-pro" }, { model = "claude-sonnet-5-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["context_read", "context_append", "web_search", "web_fetch", "current_time"]
 max_iterations = 10
 max_revisits = 1
@@ -700,7 +700,7 @@ description = "Rewrite the report in plain language without changing what it say
 # The reply IS the whole report, so the cap is whatever the model can give: a
 # fixed number smaller than the report cuts every reply off at the cap, and the
 # stage re-sends the same reply until it runs out of tries.
-model = { models = [{ model = "gemini-3.1-pro-preview" }, { model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }], params = { max_output_tokens = "100%" } }
+model = { models = [{ model = "gemini-3.1-pro-preview" }, { model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "claude-sonnet-5-5" }, { provider = "ollama", model = "qwen3.5:9b" }], params = { max_output_tokens = "100%" } }
 tools = ["context_read", "context_write", "read_file", "write_file", "list_dir"]
 max_iterations = 10
 # `sources` is the raw material - fetched pages, ~125k tokens on a real run -

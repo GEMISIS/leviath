@@ -139,7 +139,7 @@ regions = [
 [[graph.stages]]
 name = "analyze"
 description = "Understand the task and plan the implementation"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }] }
 tools = ["read_file", "list_dir"]
 max_iterations = 15
 # Large file reads land in the `codebase` region (a short pointer stays in the
@@ -154,7 +154,7 @@ plan: which files to create/modify, what each does, and the key decisions.
 [[graph.stages]]
 name = "implement"
 description = "Write code according to the plan"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }] }
 tools = ["write_file", "read_file", "edit_file", "list_dir", "bash"]
 max_iterations = 50
 tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase" } }
@@ -204,7 +204,7 @@ regions = [
 [[graph.stages]]
 name = "gather"
 description = "Gather relevant information"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }] }
 # For real web research, drop web_search.rhai / web_fetch.rhai into a `tools/`
 # directory beside this file and add them here (see the bundled researcher).
 tools = ["read_file", "list_dir", "bash"]
@@ -219,7 +219,7 @@ Note where each item came from and the claims it supports.
 [[graph.stages]]
 name = "synthesize"
 description = "Synthesize findings and discuss with user"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }] }
 mode = "interactive"
 tools = ["read_file", "list_dir"]
 max_iterations = 15
@@ -266,7 +266,7 @@ regions = [
 [[graph.stages]]
 name = "main"
 description = "Main execution stage"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }] }
 tools = ["read_file", "list_dir", "write_file", "bash"]
 max_iterations = 30
 system_prompt = """

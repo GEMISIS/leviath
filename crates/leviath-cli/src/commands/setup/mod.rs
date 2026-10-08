@@ -122,7 +122,7 @@ pub struct SetupArgs {
     pub ollama_url: Option<String>,
 
     /// One model every stage starts on, ahead of what its blueprint names
-    /// (e.g. claude-sonnet-4-6). Unset lets each blueprint decide.
+    /// (e.g. claude-sonnet-5-5). Unset lets each blueprint decide.
     #[arg(long)]
     pub override_model: Option<String>,
 

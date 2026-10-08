@@ -1,6 +1,6 @@
 [blueprint]
 name = "reviewer"
-version = "0.3.1"
+version = "0.4.0"
 description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 
 # discover -> scan -> split_review (review_worker x N) -> deep_review -> report -> summary
@@ -14,7 +14,7 @@ entry = "discover"
 # Read-only agent: it inspects a diff/codebase and reports. No write access.
 tool_permissions = { read_file = "allow", list_dir = "allow", bash = "ask" }
 
-compaction = { model = { provider = "anthropic", model = "claude-sonnet-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+compaction = { model = { provider = "anthropic", model = "claude-sonnet-5-5" }, max_summary_tokens = 2000, temperature = 0.2 }
 
 # What the caller asked for, if anything (`--task`), and - when this blueprint
 # is running as one of its own fan-out workers - the area `split_review` gave
@@ -137,7 +137,7 @@ regions = [
 [[graph.stages]]
 name = "discover"
 description = "Map the project and work out how to verify a hypothesis in it"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "list_dir", "bash", "context_write"]
 max_iterations = 6
 max_revisits = 2
@@ -181,7 +181,7 @@ hint = "Project mapped - begin the review"
 [[graph.stages]]
 name = "scan"
 description = "Fast first pass for obvious issues"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "list_dir", "context_append", "context_read"]
 max_iterations = 12
 # Passive reads go to `findings`; everything else stays in conversation.
@@ -233,7 +233,7 @@ hint = "First pass complete - hand the flagged areas out for review"
 [[graph.stages]]
 name = "split_review"
 description = "Split the change into areas, one reviewer each"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["fan_out"]
 max_iterations = 4
 # split_review <-> error_handler is a cycle, so it needs a ceiling. One retry is
@@ -294,7 +294,7 @@ when = "error"
 [[graph.stages]]
 name = "review_worker"
 description = "Review one area of the change in depth"
-model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "list_dir", "submit_output"]
 max_iterations = 20
 allow_as_worker = true
@@ -329,7 +329,7 @@ instructions = "One finding per line, most severe first, as `severity | file:lin
 [[graph.stages]]
 name = "deep_review"
 description = "In-depth analysis of correctness, security, and architecture"
-model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "list_dir", "bash", "context_write", "context_append", "context_read"]
 max_iterations = 25
 max_revisits = 2
@@ -385,7 +385,7 @@ carry = { compact = {} }
 [[graph.stages]]
 name = "report"
 description = "Produce an actionable, ranked review report"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file"]
 max_iterations = 10
 system_prompt = """
@@ -414,7 +414,7 @@ hint = "The review is written"
 [[graph.stages]]
 name = "error_handler"
 description = "Handle errors encountered during scanning or review"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "bash"]
 max_iterations = 10
 max_revisits = 1
@@ -447,7 +447,7 @@ carry = { compact = {} }
 [[graph.stages]]
 name = "summary"
 description = "Say what the review found"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 mode = "output"
 tools = ["submit_output"]
 max_iterations = 8

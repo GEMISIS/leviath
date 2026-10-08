@@ -56,7 +56,25 @@ fn inline_only_keeps_the_inline_limits_and_drops_the_files() {
     let meta = provider_limits("meta").inline_only();
     assert_eq!(meta.file_bytes, None);
     assert!(!meta.by_file(&mime("image/png"), 1));
-    assert_eq!(meta.inline_request_bytes, Some(50 * MIB));
+    assert_eq!(meta.inline_request_bytes, Some(50_000_000));
+}
+
+#[test]
+fn meta_takes_by_file_only_the_audio_and_video_types_it_names() {
+    let meta = provider_limits("meta");
+    for ok in [
+        "audio/wav",
+        "audio/mpeg",
+        "video/mp4",
+        "image/png",
+        "application/pdf",
+    ] {
+        assert!(meta.by_file(&mime(ok), 1), "{ok}");
+    }
+    for refused in ["audio/ogg", "audio/flac", "video/webm"] {
+        assert!(!meta.by_file(&mime(refused), 1), "{refused}");
+    }
+    assert!(!meta.by_file(&mime("audio/wav"), 1024 * MIB + 1));
 }
 
 #[test]

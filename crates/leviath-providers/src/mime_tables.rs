@@ -132,8 +132,24 @@ pub(crate) fn xai(model: &str) -> ModelMime {
     published_modality("xai", model).unwrap_or_else(|| ModelMime::new(VISION_DOC, TEXT))
 }
 
-/// Meta: Muse Spark reads text, images, audio, video and PDFs; Muse Image makes
-/// and edits images; Muse Voice Transcribe reads WAV audio and nothing else.
+/// What Muse Spark reads on Meta's own API, from Meta's model table and its
+/// file-handling page: text, images, MP4 video, MP3 and WAV audio, and PDFs.
+/// Meta names those two audio types and that one video type and no others.
+const MUSE_SPARK_INPUT: &[&str] = &[
+    "text/*",
+    "image/*",
+    "video/mp4",
+    "audio/mpeg",
+    "audio/wav",
+    "application/pdf",
+];
+
+/// Meta: Muse Spark reads what [`MUSE_SPARK_INPUT`] lists; Muse Image makes and
+/// edits images; Muse Voice Transcribe reads WAV audio and nothing else.
+///
+/// Meta publishes these lists itself, so the catalogue rows under `meta` in
+/// `modalities.toml` are not read here: they say what OpenRouter carries for
+/// the same models, which is less (no audio), and answer for that route.
 pub(crate) fn meta(model: &str) -> ModelMime {
     let m = lower(model);
     if m.starts_with("muse-image") {
@@ -142,7 +158,13 @@ pub(crate) fn meta(model: &str) -> ModelMime {
     if m.starts_with("muse-voice-transcribe") {
         return ModelMime::new(&["audio/wav"], TEXT);
     }
-    published_modality("meta", model).unwrap_or_else(|| ModelMime::new(GEMINI_INPUT, TEXT))
+    ModelMime::new(MUSE_SPARK_INPUT, TEXT)
+}
+
+/// A Meta model reached through OpenRouter: what the gateway's catalogue says
+/// it carries, else what Meta's own API takes.
+fn meta_via_gateway(model: &str) -> ModelMime {
+    published_modality("meta", model).unwrap_or_else(|| meta(model))
 }
 
 /// Whether `model` on `provider` is a media model: one served by an endpoint
@@ -190,7 +212,7 @@ pub(crate) fn by_prefix(model: &str) -> ModelMime {
         Some(("openai", rest)) => openai(rest),
         Some(("google", rest)) => gemini(rest),
         Some(("x-ai", rest)) => xai(rest),
-        Some(("meta", rest)) => meta(rest),
+        Some(("meta", rest)) => meta_via_gateway(rest),
         _ => ModelMime::text_only(),
     }
 }
@@ -329,6 +351,24 @@ mod tests {
         assert!(!m.accepts(&mt("audio/wav")));
         assert!(m.produces(&mt("text/plain")));
         assert!(!m.produces(&mt("image/png")));
+    }
+
+    #[test]
+    fn muse_spark_takes_audio_from_meta_and_none_through_openrouter() {
+        let direct = builtin_mime("meta", "muse-spark-1.2");
+        assert!(direct.accepts(&mt("audio/wav")));
+        assert!(direct.accepts(&mt("audio/mpeg")));
+        assert!(direct.accepts(&mt("video/mp4")));
+        // Meta names MP3 and WAV, MP4 and nothing else.
+        assert!(!direct.accepts(&mt("audio/ogg")));
+        assert!(!direct.accepts(&mt("video/webm")));
+
+        let gateway = builtin_mime("openrouter", "meta/muse-spark-1.2");
+        assert!(!gateway.accepts(&mt("audio/wav")), "{gateway:?}");
+        assert!(gateway.accepts(&mt("image/png")));
+        // A Muse Spark the catalogue has no row for answers with Meta's list.
+        let unlisted = by_prefix("meta/muse-spark-9");
+        assert!(unlisted.accepts(&mt("audio/wav")));
     }
 
     #[test]

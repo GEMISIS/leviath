@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// [title]
 /// enabled = true
 /// provider = "anthropic"
-/// model = "claude-haiku-4-5-20251001"
+/// model = "claude-haiku-5-5"
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TitleConfig {

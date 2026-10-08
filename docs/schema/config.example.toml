@@ -6,8 +6,8 @@
 # with one provider key needs almost none of it.
 
 default_provider = "anthropic"
-override_model = "claude-sonnet-5"
-fallback_model = "claude-haiku-4-5"
+override_model = "claude-sonnet-5-5"
+fallback_model = "claude-haiku-5-5"
 agent_paths = ["~/work/agents"]
 openrouter_api_key = "sk-or-example"
 ollama_base_url = "http://localhost:11434"
@@ -52,7 +52,7 @@ codex_originator = "leviath"
 codex_reasoning_effort = "medium"
 codex_verbosity = "medium"
 codex_replay_reasoning = true
-fallback_order = ["anthropic/claude-sonnet-5", "openai/gpt-5.4-mini"]
+fallback_order = ["anthropic/claude-sonnet-5-5", "openai/gpt-5.4-mini"]
 
 [limits]
 max_concurrent_inferences = 8
@@ -132,7 +132,7 @@ text = "You are in {stage} and have not written to {regions}."
 [title]
 enabled = true
 provider = "anthropic"
-model = "claude-sonnet-5"
+model = "claude-sonnet-5-5"
 
 [sandbox]
 kind = "none"

@@ -189,7 +189,7 @@ is refused with every problem in it, the same list `--check` prints.
 ```toml
 # nightly.toml
 source = { blueprint = { name = "release-notes" } }
-model = { provider = "anthropic", model = "claude-sonnet-5" }
+model = { provider = "anthropic", model = "claude-sonnet-5-5" }
 workdir = "/srv/repo"
 
 [inputs]
@@ -226,7 +226,7 @@ release-notes would run (blueprint release-notes@a4adce5110b52cc26e95bb6ef879985
     max_items = 10
     since = "v0.6.0"
   stages:
-    gather  anthropic/claude-sonnet-5  tools: read_file, shell, context_append
+    gather  anthropic/claude-sonnet-5-5  tools: read_file, shell, context_append
     write  openai/gpt-5.5  no tools
 ```
 
@@ -1224,7 +1224,7 @@ $ lev doctor
 
   config     OK  default_provider=openrouter; registered: ollama, openrouter (script providers resolve by name)
   journal    OK  1284 record(s) written, none lost
-  resolve    OK  openrouter / anthropic/claude-sonnet-4.5
+  resolve    OK  openrouter / anthropic/claude-sonnet-5.5
   inference  OK  12 in / 4 out / 16 total, replied PONG  (1.2s)
   daemon     OK  run doctor-1785649252-bf7b3d07a265 Complete after 1 iteration(s)  (0.3s)
 

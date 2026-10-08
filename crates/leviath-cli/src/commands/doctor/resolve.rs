@@ -27,7 +27,7 @@ pub(super) struct Resolved {
 ///
 /// The chain's last resort is unchecked: with nothing to pick from it hands
 /// back the placeholder every model-less stage carries (`anthropic` /
-/// `claude-sonnet-4-6`) whether or not anything answers to that name. That
+/// `claude-sonnet-5-5`) whether or not anything answers to that name. That
 /// placeholder is not a finding about the user's config, so it is never
 /// reported as one. Reaching it means the config names no model of its own,
 /// and the verdict is then about the provider preference instead

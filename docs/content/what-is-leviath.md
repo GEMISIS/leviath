@@ -119,7 +119,7 @@ tools = ["read_file", "list_dir", "summarize"]
 
 [[graph.stages]]
 name = "build"
-model = { models = [{ model = "claude-opus-5" }] }
+model = { models = [{ model = "claude-opus-5-5" }] }
 tools = ["read_file", "write_file", "shell"]
 input_accepts = ["text/*", "image/png"]   # the task, and a picture of the design
 
