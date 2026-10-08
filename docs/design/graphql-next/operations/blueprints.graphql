@@ -1,0 +1,93 @@
+# Blueprints: the installed catalogue, what each one grants its stages, its
+# revisions and edits, validation, and writes pinned to the revision read.
+
+# B0 Operator discovers the installed blueprints, what each stage is granted, how many revisions each has, and the manifests that do not load.
+query BlueprintDiscovery($first: Int! = 25, $after: Cursor) {
+  blueprints(first: $first, after: $after, orderBy: [{ field: NAME, direction: ASC }]) {
+    results {
+      id
+      name
+      revision {
+        id
+        number
+        digest
+        version
+        description
+        createdAt
+        entryStage { name }
+        stages {
+          __typename
+          name
+          tools {
+            grants {
+              __typename
+              ... on ToolByName { name }
+              ... on ToolsOfMcpServer { serverName }
+              ... on ToolsMatching { pattern }
+            }
+            requiredTools { name }
+          }
+        }
+      }
+      revisions(first: 1) { total }
+    }
+    cursor
+    total
+  }
+  brokenBlueprints { id name path digest problems { severity message rule remedy stageName } }
+}
+
+# B1 Editor validates a proposed manifest without installing it, and reads every finding with its rule, stage and remedy.
+query ValidateBlueprint($manifest: String!, $as: BlueprintRef) {
+  validateBlueprint(manifest: $manifest, as: $as) {
+    valid
+    problems {
+      __typename
+      severity
+      message
+      ... on BlueprintProblem { rule remedy stageName }
+      ... on TextProblem { line column }
+    }
+  }
+}
+
+# B2 Editor reads the installed revision and the owner's earlier revisions and edits, then one exact earlier revision by id.
+query BlueprintRevisionHistory($name: String!, $revisionId: ID!, $first: Int! = 20) {
+  blueprint(name: $name) {
+    id
+    name
+    path
+    revision { id number digest createdAt createdBy manifest }
+    revisions(first: $first) { results { id number digest version createdAt createdBy } cursor total }
+    history(first: $first) {
+      results { number at by why revision { id digest } changes { field before after } }
+      cursor
+      total
+    }
+  }
+  earlier: node(id: $revisionId) {
+    id
+    ... on BlueprintRevision { number digest createdAt manifest blueprint { name revision { digest } } }
+  }
+}
+
+# B3 Editor replaces an installed manifest, pinned to the digest it read, and keeps the returned revision as its next pin; a stale pin is refused whole.
+mutation UpdateBlueprintRevision($request: UpdateBlueprintRequest!) {
+  updateBlueprint(request: $request) {
+    alreadyInState
+    blueprint {
+      id
+      name
+      revision { id number digest createdAt createdBy validation { valid problems { severity message } } }
+      history(first: 1) { results { number at by why changes { field } } }
+    }
+  }
+}
+
+# B4 New: an author installs a new blueprint; the name comes from the manifest, and a manifest that does not load is refused rather than installed.
+mutation CreateBlueprint($request: CreateBlueprintRequest!) {
+  createBlueprint(request: $request) {
+    alreadyInState
+    blueprint { id name path revision { id number digest } }
+  }
+}

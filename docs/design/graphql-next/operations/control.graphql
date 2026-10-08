@@ -1,0 +1,61 @@
+# Run control: one run at a time (a refusal is a GraphQL error; a retry of
+# something already done succeeds with alreadyInState), and sweeps by filter
+# (per-run outcomes as data, bounded by maxAffected, with a dry run first).
+
+# C0 Operator pauses a live run when a spend or safety threshold is reached; pausing a paused run succeeds with alreadyInState.
+mutation PauseRun($request: PauseRunRequest!) {
+  pauseRun(request: $request) {
+    alreadyInState
+    confirmed
+    warnings
+    run { id state { __typename ... on Paused { stage { name } } } }
+  }
+}
+
+# C1 Operator resumes a paused run after resolving its blocker.
+mutation ResumeRun($request: ResumeRunRequest!) {
+  resumeRun(request: $request) {
+    alreadyInState
+    run { id state { __typename } }
+  }
+}
+
+# C2 Operator cancels one run and its children when the work is obsolete.
+mutation CancelRun($request: CancelRunRequest!) {
+  cancelRun(request: $request) {
+    alreadyInState
+    confirmed
+    warnings
+    run { id state { __typename ... on Cancelled { finishedAt } } }
+  }
+}
+
+# C3 Operator sends a steering message to a run whose current stage accepts messages; the idempotency key makes a retry safe.
+mutation SendRunMessage($request: SendMessageRequest!) {
+  sendMessage(request: $request) {
+    replayed
+    run { id acceptsMessages state { __typename } }
+  }
+}
+
+# C4 Operator pauses a filtered set during a maintenance window; each run answers with its own outcome, and runs that could not be paused say why.
+mutation PauseRunBatch($request: PauseRunsRequest!) {
+  pauseRuns(request: $request) {
+    dryRun
+    summary { matched wouldAct acted unconfirmed outcomeUnknown alreadyInState refused notAttempted complete }
+    outcomes {
+      __typename
+      runId
+      ... on SweepRefused { code reason message }
+    }
+  }
+}
+
+# C5 New: operator previews a cancel sweep with dryRun before running it, so a filter that matches too much is seen before it acts.
+mutation CancelRunsPreview($request: CancelRunsRequest!) {
+  cancelRuns(request: $request) {
+    dryRun
+    summary { matched wouldAct refused complete }
+    outcomes { __typename runId run { id task state { __typename } } }
+  }
+}
