@@ -48,15 +48,12 @@ fn count_tokens_tiktoken(text: &str, model: &str) -> usize {
 /// The one name this answers differently: `gpt-2`, which tiktoken maps to
 /// its GPT-2 encoding and this maps to `cl100k_base` like any other name it
 /// does not know. Nobody runs an agent on GPT-2, and the count is a fallback
-/// estimate either way. An unknown name falls back to `cl100k_base` exactly
-/// as before.
+/// estimate either way. An unknown name falls back to `cl100k_base`.
 fn bpe_for(model: &str) -> &'static CoreBPE {
     if model.starts_with("gpt-oss-") {
         return tiktoken_rs::o200k_harmony_singleton();
     }
-    let o200k = model == "gpt-5"
-        || model.starts_with("gpt-5-")
-        || model.starts_with("gpt-5.")
+    let o200k = model.starts_with("gpt-5")
         || model == "gpt-4.1"
         || model.starts_with("gpt-4.1-")
         || model.starts_with("gpt-4.5-")
