@@ -218,7 +218,7 @@ base64 = "0.23"
 # self-describing, so a frame decodes only into the exact Rust type that wrote
 # it; zstd keeps context-heavy state small and crc32 catches a torn tail.
 postcard = { version = "1.1", default-features = false, features = ["use-std"] }
-zstd = "0.13"
+zstd = "0.14"
 crc32fast = "1.5"
 # The exported JSON Schema of a spawn request, for outside tools and agents.
 schemars = "1"
