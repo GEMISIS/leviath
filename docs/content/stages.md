@@ -211,7 +211,7 @@ tool's reach at this stage.
 ### Every stage should name its own model
 
 `model` is per stage, written as a list of models best first:
-`model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }`. There is no
+`model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }] }`. There is no
 blueprint-wide model. A `model` key under `[graph]` is refused as an unknown key.
 
 A stage that omits `model` does not fail. It runs on whichever provider your `[providers]`

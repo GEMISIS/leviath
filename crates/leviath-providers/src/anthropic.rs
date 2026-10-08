@@ -2750,6 +2750,17 @@ mod tests {
         let body = provider.build_request_body(&request);
         // Opus 4.8 doesn't support temperature, so it should NOT be in the body
         assert!(body.get("temperature").is_none());
+
+        // Nor do the 5.5 defaults: a compaction's 0.2 is left out for them.
+        for model in ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"] {
+            let request = InferenceRequest {
+                model: model.to_string(),
+                temperature: 0.2,
+                ..request.clone()
+            };
+            let body = provider.build_request_body(&request);
+            assert!(body.get("temperature").is_none(), "{model}");
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [blueprint]
 name = "sprite-to-3d"
-version = "0.4.0"
+version = "0.5.0"
 description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
 
 # Meshy is a Leviath provider, not an MCP server: the build and rig stages
@@ -206,7 +206,7 @@ gate = { require_region_updated = "references", require_region_entries = { regio
 [[graph.stages]]
 name = "filter-references"
 description = "Delete off-model, malformed, or multi-view renders; keep the best four single views"
-model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5" }], allow_user_default = false }
+model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5.5" }], allow_user_default = false }
 tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
 # One delete per call, and a busy pass can leave twenty renders to prune.
 max_iterations = 24
@@ -329,7 +329,7 @@ hint = "Once the missing region reflects the true state of the reference views."
 [[graph.stages]]
 name = "assess-coverage"
 description = "Decide whether the views are complete enough to build, or more are needed"
-model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5" }], allow_user_default = false }
+model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5.5" }], allow_user_default = false }
 tools = ["context_read", "context_list", "context_write", "context_append"]
 max_iterations = 8
 max_revisits = 4
@@ -555,7 +555,7 @@ hint = "Once the rigged mesh is in the model region."
 [[graph.stages]]
 name = "verify-model"
 description = "Compare the model against the reference views and decide to rebuild or finalize"
-model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5" }], allow_user_default = false }
+model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5.5" }], allow_user_default = false }
 tools = ["context_read", "context_list", "context_write", "context_append", "read_file", "list_dir"]
 max_iterations = 10
 max_revisits = 2
@@ -624,7 +624,7 @@ hint = "If the model has a serious gap you have written into the review region: 
 [[graph.stages]]
 name = "finalize"
 description = "Submit the finished model as the run's artifact"
-model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5" }], allow_user_default = false }
+model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5.5" }], allow_user_default = false }
 mode = "output"
 tools = ["context_read", "context_list", "read_file", "list_dir", "submit_output"]
 max_iterations = 6

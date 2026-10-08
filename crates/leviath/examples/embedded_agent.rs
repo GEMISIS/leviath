@@ -31,7 +31,7 @@ Look at the files in the working directory and produce a short summary of
 what this project is. Use list_dir and read_file. If something important is
 ambiguous, ask the user one question with ask_user_text. Finish with a
 plain-text summary."""
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }] }
 tools = ["read_file", "list_dir", "ask_user_text"]
 
 [graph.layout]

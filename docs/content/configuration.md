@@ -32,8 +32,8 @@ where you look up the exact name, type, and default. The same contract ships mac
 
 ```toml
 default_provider     = "anthropic"   # provider used when a blueprint names none
-override_model       = "claude-sonnet-4-5"   # every stage starts on this; unset lets each blueprint decide
-fallback_model       = "claude-haiku-4-5"    # only for a stage none of whose own models is configured
+override_model       = "claude-sonnet-5-5"   # every stage starts on this; unset lets each blueprint decide
+fallback_model       = "claude-haiku-5-5"    # only for a stage none of whose own models is configured
 agent_paths          = ["~/projects/my-agents"]   # extra directories scanned for blueprints
 openrouter_api_key   = "sk-or-..."   # env fallback: OPENROUTER_API_KEY
 ollama_base_url      = "http://localhost:11434"   # env fallback: OLLAMA_HOST
@@ -139,7 +139,7 @@ codex_verbosity        = "medium"   # low | medium | high
 codex_replay_reasoning = true       # replay each turn's reasoning on the next request
 grok_enabled           = false      # bill Grok to a SuperGrok or X Premium+ subscription
 anthropic_cache_ttl = "5m"           # 5m (default) | 1h
-fallback_order      = ["anthropic/claude-sonnet-5", "openai/gpt-5.6-mini"]
+fallback_order      = ["anthropic/claude-sonnet-5-5", "openai/gpt-5.6-mini"]
 provider_order      = ["codex", "openrouter", "openai"]   # a bare name's route preference
 zero_retention      = false          # ask every provider for zero data retention (see below)
 zero_retention_agreements = []       # providers you hold a zero data retention contract with
@@ -1229,7 +1229,7 @@ Auto-generated short run titles.
 [title]
 enabled  = true
 provider = "anthropic"
-model    = "claude-haiku-4-5-20251001"
+model    = "claude-haiku-5-5"
 ```
 
 `enabled` defaults to `true`. `provider` and `model` fall back to the run's own first-stage

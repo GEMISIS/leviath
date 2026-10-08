@@ -63,7 +63,7 @@ budget = "40%"
 
 [[graph.stages]]
 name = "analyze"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }] }
 tools = ["read_file", "list_dir"]
 required_tools = []               # human-in-the-loop tools kept in an unattended run
 max_iterations = 15
@@ -71,7 +71,7 @@ system_prompt = "Understand the task and produce a short implementation plan."
 
 [[graph.stages]]
 name = "implement"
-model = { models = [{ model = "gpt-5.5" }, { model = "claude-opus-5" }] }
+model = { models = [{ model = "gpt-5.5" }, { model = "claude-opus-5-5" }] }
 tools = ["read_file", "write_file", "bash"]
 max_iterations = 40
 system_prompt = "Carry out the plan. Run the tests after each change."
@@ -177,7 +177,7 @@ system_prompt = "Understand the task."
 allow_user_default = true          # let the host's override_model and fallback_model apply;
                                    # false keeps this list exactly as written
 models = [
-    { model = "claude-sonnet-5" }, # name models, not routes: whichever provider
+    { model = "claude-sonnet-5-5" }, # name models, not routes: whichever provider
     { model = "gpt-5.4-mini" },    # the user configured is asked which it serves.
                                    # Pin one only for a model a single route can
                                    # reach: { provider = "ollama", model = "..." }
@@ -556,7 +556,7 @@ max_readonly_streak = 10     # default; read-only calls with no modification in 
 ## Who does the summarizing
 
 A [`compacting` region](/docs/context) summarizes rather than evicting, and something has to write
-that summary. By default it is `claude-sonnet-4-6` on Anthropic, whatever the stage itself runs on,
+that summary. By default it is `claude-sonnet-5-5` on Anthropic, whatever the stage itself runs on,
 because a summary is cheap work that does not need the stage's model. `[graph.compaction]`
 replaces that default, and then names all three of `model`, `max_summary_tokens` and
 `temperature`:

@@ -113,7 +113,8 @@ what they claim. Without one, a declared type is taken at its word, as every pro
 ## What a model sees
 
 A model declares what it takes, as mime types. Anthropic and OpenAI models list `image/*` and
-`application/pdf`; Gemini and Meta's Muse Spark add `audio/*` and `video/*`; a local model you describe in
+`application/pdf`; Gemini adds `audio/*` and `video/*`, and Meta's Muse Spark adds MP3 and WAV audio and MP4
+video (on Meta's API only: OpenRouter carries no audio for it); a local model you describe in
 `[model_capabilities]` lists whatever it can do. Where a provider publishes this per model,
 Leviath reads it: OpenRouter's catalogue carries each model's input and output modalities and
 Ollama's `/api/show` reports vision, and both win over the built-in tables. The vendors whose
@@ -304,7 +305,7 @@ retry, or the next turn reuses the upload.
 | OpenAI | images, PDFs | 512 MB | 50 MB a file, 20 MB an image |
 | Google | images, audio, video, PDFs | 2 GB | 100 MB a request, 50 MB a PDF |
 | xAI and Grok | PDFs, plain text | 512 MB | 20 MB an image |
-| Meta | images, audio, video, PDFs | 1 GiB | 50 MB a request |
+| Meta | images, MP3 and WAV audio, MP4 video, PDFs | 1 GiB | 50 MB a request |
 | Bedrock | nothing (no Files API) | | 3.75 MB an image, 4.5 MB a document, 25 MB a video |
 | everything else | nothing | | `[mime] max_media_bytes_per_request` |
 

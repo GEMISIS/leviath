@@ -126,7 +126,7 @@ impl Candidate {
 fn first_listed(choice: &ModelChoice) -> Candidate {
     match choice.models.first() {
         Some(m) => Candidate::new(m.provider_or_empty().to_string(), m.model.to_string()),
-        None => Candidate::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
+        None => Candidate::new("anthropic".to_string(), "claude-sonnet-5-5".to_string()),
     }
 }
 

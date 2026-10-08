@@ -33,7 +33,7 @@ Add a stage with `mode = "output"`:
 [[graph.stages]]
 name = "summary"
 mode = "output"
-model = { models = [{ model = "claude-sonnet-5" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }] }
 description = "Say what changed"
 max_iterations = 8
 system_prompt = """

@@ -1,6 +1,6 @@
 [blueprint]
 name = "data-analyst"
-version = "0.2.0"
+version = "0.3.0"
 description = "Data analyst - searches the web for data on a subject, builds a clean CSV of it, and hands back a ready-to-use summary of what the numbers say"
 
 [graph]
@@ -11,7 +11,7 @@ entry = "scope"
 # creation is worth a person seeing once.
 tool_permissions = { read_file = "allow", read_files = "allow", list_dir = "allow", web_search = "allow", web_fetch = "allow", write_file = "ask", bash = "ask" }
 
-compaction = { model = { provider = "anthropic", model = "claude-sonnet-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+compaction = { model = { provider = "anthropic", model = "claude-sonnet-5-5" }, max_summary_tokens = 2000, temperature = 0.2 }
 
 # The subject, what to gather data on.
 [[graph.inputs]]
@@ -96,7 +96,7 @@ regions = [
 [[graph.stages]]
 name = "scope"
 description = "Decide the table's columns before gathering anything"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["web_search", "context_write", "current_time"]
 max_iterations = 8
 system_prompt = """
@@ -162,7 +162,7 @@ hint = "The schema is decided"
 [[graph.stages]]
 name = "split"
 description = "Split the subject into slices, one worker each"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["fan_out"]
 max_iterations = 4
 # split ↔ error_recovery is a cycle, so it needs a ceiling. One retry is enough
@@ -223,7 +223,7 @@ when = "error"
 [[graph.stages]]
 name = "gather_worker"
 description = "Gather the rows for one slice of the subject"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["web_search", "web_fetch", "submit_output", "current_time"]
 max_iterations = 25
 allow_as_worker = true
@@ -259,7 +259,7 @@ instructions = "A header line matching the schema's columns in order, then one r
 [[graph.stages]]
 name = "build"
 description = "Assemble the workers' rows into one dataset"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["write_file", "read_file", "context_read", "context_write"]
 max_iterations = 15
 system_prompt = """
@@ -307,7 +307,7 @@ gate = { require_modifications = true, message = "No file was written. The datas
 [[graph.stages]]
 name = "present"
 description = "Say what the data shows"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 mode = "output"
 tools = ["submit_output"]
 max_iterations = 8
@@ -341,7 +341,7 @@ instructions = "Use a short `## Findings` list. Put figures inline, not in a tab
 [[graph.stages]]
 name = "error_recovery"
 description = "Recover from a failed fetch, parse, or write"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "context_read", "context_write"]
 max_iterations = 8
 max_revisits = 1

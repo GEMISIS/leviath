@@ -466,7 +466,7 @@ curl -X POST http://localhost:3000/api/runs \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"source": {"blueprint": {"name": "coder"}},
        "inputs": {"task": "Add input validation"},
-       "model": {"provider": "anthropic", "model": "claude-sonnet-5"},
+       "model": {"provider": "anthropic", "model": "claude-sonnet-5-5"},
        "launch": {"unattended": "all"},
        "delivery": {"metadata": {"ticket": "REL-12"}}}'
 ```
@@ -573,7 +573,7 @@ a summary of the run it would be:
   "origin": "Raw",
   "entry_stage": "gather",
   "stages": [
-    {"stage": "gather", "provider": "anthropic", "model": "claude-sonnet-5",
+    {"stage": "gather", "provider": "anthropic", "model": "claude-sonnet-5-5",
      "tools": ["read_file", "shell", "context_append"]},
     {"stage": "write", "provider": "openai", "model": "gpt-5.5", "tools": []}
   ],
@@ -930,8 +930,8 @@ order:
           "active": { "banked_secs": 181, "since": null } }
       ],
       "models": [
-        { "provider": "anthropic",  "model": "claude-opus-5" },
-        { "provider": "openrouter", "model": "anthropic/claude-opus-5" }
+        { "provider": "anthropic",  "model": "claude-opus-5-5" },
+        { "provider": "openrouter", "model": "anthropic/claude-opus-5.5" }
       ],
       "region_tokens": { "task": 24, "data_preview": 4004 },
       "runaway_warned": false },

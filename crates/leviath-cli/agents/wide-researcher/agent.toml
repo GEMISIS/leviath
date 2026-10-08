@@ -1,6 +1,6 @@
 [blueprint]
 name = "wide-researcher"
-version = "0.5.0"
+version = "0.6.0"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 
 # survey -> investigate (fan out) -> compare -> deep_dive -> challenge -> summarize -> polish -> summary
@@ -15,7 +15,7 @@ max_child_depth = 2
 
 tool_permissions = { read_file = "allow", list_dir = "allow", web_search = "allow", web_fetch = "allow", current_time = "allow", write_file = "ask", bash = "ask" }
 
-compaction = { model = { provider = "anthropic", model = "claude-sonnet-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+compaction = { model = { provider = "anthropic", model = "claude-sonnet-5-5" }, max_summary_tokens = 2000, temperature = 0.2 }
 
 [[graph.inputs]]
 name = "task"
@@ -85,7 +85,7 @@ regions = [
 [[graph.stages]]
 name = "survey"
 description = "Survey the landscape across multiple sub-topics"
-model = { models = [{ model = "grok-4.6" }, { model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "grok-4.6" }, { model = "claude-sonnet-5-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read", "ask_user_text", "ask_user_choice"]
 max_iterations = 25
 max_revisits = 2
@@ -240,7 +240,7 @@ hint = "Landscape mapped - the threads worth covering are identified"
 [[graph.stages]]
 name = "investigate"
 description = "Research each thread of the landscape in parallel"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "grok-4.6" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "grok-4.6" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["fan_out"]
 max_iterations = 4
 # investigate to error_recovery and back is a cycle, so it needs a ceiling.
@@ -332,7 +332,7 @@ when = "error"
 [[graph.stages]]
 name = "compare"
 description = "Compare and contrast approaches across the landscape"
-model = { models = [{ model = "deepseek-v4-pro" }, { model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "deepseek-v4-pro" }, { model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "web_fetch", "context_write", "context_append", "current_time"]
 max_iterations = 15
 max_revisits = 4  # backstop only; the convergence note is what should end this loop
@@ -415,7 +415,7 @@ when = "error"
 [[graph.stages]]
 name = "deep_dive"
 description = "Focused deep read on one interesting thread flagged during comparison"
-model = { models = [{ model = "deepseek-v4-pro" }, { model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "deepseek-v4-pro" }, { model = "claude-sonnet-5-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["web_search", "web_fetch", "read_file", "context_append", "current_time", "context_read"]
 max_iterations = 12
 max_revisits = 2
@@ -474,7 +474,7 @@ carry = { compact = {} }
 [[graph.stages]]
 name = "summarize"
 description = "Produce a landscape overview with recommendations"
-model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "claude-sonnet-5" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "claude-sonnet-5-5" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["write_file", "read_file", "context_write"]
 max_iterations = 10
 system_prompt = """
@@ -557,7 +557,7 @@ carry = { custom = { clear = ["conversation"] } }
 [[graph.stages]]
 name = "error_recovery"
 description = "Recover from a failed source fetch during the survey"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
@@ -590,7 +590,7 @@ carry = { compact = {} }
 [[graph.stages]]
 name = "summary"
 description = "Say what the survey found"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 mode = "output"
 tools = ["submit_output"]
 max_iterations = 8
@@ -613,7 +613,7 @@ file you wrote."""
 [[graph.stages]]
 name = "challenge"
 description = "Attack the analysis: what is thin, unsupported, or too confident"
-model = { models = [{ model = "grok-4.6" }, { model = "deepseek-v4-pro" }, { model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "grok-4.6" }, { model = "deepseek-v4-pro" }, { model = "claude-sonnet-5-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["context_read", "context_append", "web_search", "web_fetch", "current_time"]
 max_iterations = 10
 max_revisits = 1
@@ -711,7 +711,7 @@ carry = { compact = {} }
 [[graph.stages]]
 name = "polish"
 description = "Rewrite the report in plain language without changing what it says"
-model = { models = [{ model = "gemini-3.1-pro-preview" }, { model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }], params = { max_output_tokens = 24000 } }
+model = { models = [{ model = "gemini-3.1-pro-preview" }, { model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "claude-sonnet-5-5" }, { provider = "ollama", model = "qwen3.5:9b" }], params = { max_output_tokens = 24000 } }
 tools = ["context_read", "context_write", "read_file", "write_file", "list_dir"]
 max_iterations = 10
 system_prompt = """

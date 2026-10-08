@@ -157,9 +157,22 @@ async fn a_listing_that_fails_fails_the_check() {
 fn media_models_take_what_their_endpoints_take_and_chat_carries_audio_and_video() {
     let provider = provider("http://127.0.0.1:1");
     assert_eq!(provider.name(), "meta");
-    let spark = provider.mime("muse-spark-1.3");
-    assert!(spark.input.iter().any(|p| p == "video/*"), "{spark:?}");
-    assert!(spark.input.iter().any(|p| p == "audio/*"), "{spark:?}");
+    // Meta's own lists: MP4 video, MP3 and WAV audio, whatever OpenRouter's
+    // catalogue says the gateway carries.
+    for model in [
+        "muse-spark-1.1",
+        "muse-spark-1.2-contributor",
+        "muse-spark-1.3",
+    ] {
+        let spark = provider.mime(model);
+        for wanted in ["video/mp4", "audio/mpeg", "audio/wav", "application/pdf"] {
+            assert!(
+                spark.input.iter().any(|p| p == wanted),
+                "{model}: {spark:?}"
+            );
+        }
+        assert!(!spark.input.iter().any(|p| p == "audio/*"), "{spark:?}");
+    }
     assert_eq!(provider.mime("muse-image-1.0").output, ["image/*"]);
     assert_eq!(
         provider.mime("muse-voice-transcribe-1.0").input,

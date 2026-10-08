@@ -96,7 +96,7 @@ To keep working through it, give the host somewhere else to go:
 
 ```toml
 [providers]
-fallback_order = ["anthropic/claude-sonnet-5"]
+fallback_order = ["anthropic/claude-sonnet-5-5"]
 ```
 
 Runs then move to that model instead of failing. This is read per run, so it takes effect on the

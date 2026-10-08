@@ -1,6 +1,6 @@
 [blueprint]
 name = "researcher"
-version = "0.5.0"
+version = "0.6.0"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 
 # gather -> analyze -> summarize -> summary
@@ -22,7 +22,7 @@ max_child_depth = 2
 # every other.
 tool_permissions = { read_file = "allow", list_dir = "allow", web_search = "allow", web_fetch = "allow", current_time = "allow", write_file = "ask", bash = "ask" }
 
-compaction = { model = { provider = "anthropic", model = "claude-sonnet-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+compaction = { model = { provider = "anthropic", model = "claude-sonnet-5-5" }, max_summary_tokens = 2000, temperature = 0.2 }
 
 # The research question. Supplied via --task (or the API/ACP task field).
 [[graph.inputs]]
@@ -113,7 +113,7 @@ regions = [
 [[graph.stages]]
 name = "gather"
 description = "Gather relevant information on the topic"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 # web_search / web_fetch are provided by the agent's script tools.
 tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "context_read", "current_time", "fan_out"]
 max_iterations = 8
@@ -280,7 +280,7 @@ carry = { compact = {} }
 [[graph.stages]]
 name = "analyze"
 description = "Analyze and synthesize findings"
-model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "web_fetch", "context_write", "context_append", "context_read", "current_time"]
 max_iterations = 20
 max_revisits = 3
@@ -330,7 +330,7 @@ carry = { compact = {} }
 [[graph.stages]]
 name = "summarize"
 description = "Write up everything found, organized by theme"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["write_file", "read_file"]
 max_iterations = 10
 # `raw_findings` is the raw material - every fetched page - and this stage's
@@ -402,7 +402,7 @@ hint = "The report is written"
 [[graph.stages]]
 name = "error_recovery"
 description = "Diagnose and recover from errors during gathering or analysis"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
@@ -436,7 +436,7 @@ carry = { compact = {} }
 [[graph.stages]]
 name = "summary"
 description = "Say what the research found"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 mode = "output"
 tools = ["submit_output"]
 max_iterations = 8
@@ -470,7 +470,7 @@ description = "Split a thread that turned out to be several, one level deeper"
 # The split decision is an inference like any other, so this stage names its own
 # model. sonnet-5 measured best at it: given the same material it produced eight
 # subject-shaped items where deepseek produced three vague buckets.
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["fan_out"]
 max_iterations = 4
 max_revisits = 1

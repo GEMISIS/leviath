@@ -12,7 +12,7 @@ pub struct CompactionConfig {
     /// Provider to use for compaction (e.g., "anthropic", "openai")
     pub provider: String,
 
-    /// Model to use (e.g., "claude-sonnet-4-6", "gpt-5.4-mini")
+    /// Model to use (e.g., "claude-sonnet-5-5", "gpt-5.4-mini")
     pub model: String,
 
     /// Custom system prompt for compaction (None = use default)
@@ -33,7 +33,7 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             provider: "anthropic".to_string(),
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             system_prompt: None,
             user_prompt_template: None,
             max_summary_tokens: 2000,

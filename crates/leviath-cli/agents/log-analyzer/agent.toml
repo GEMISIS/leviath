@@ -1,6 +1,6 @@
 [blueprint]
 name = "log-analyzer"
-version = "0.3.0"
+version = "0.4.0"
 description = "Analyzes log files - sweeps many files or time windows in parallel, then identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
 
 [graph]
@@ -8,7 +8,7 @@ entry = "ingest"
 
 tool_permissions = { read_file = "allow", list_dir = "allow", bash = "ask", write_file = "ask" }
 
-compaction = { model = { provider = "anthropic", model = "claude-sonnet-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+compaction = { model = { provider = "anthropic", model = "claude-sonnet-5-5" }, max_summary_tokens = 2000, temperature = 0.2 }
 
 [[graph.inputs]]
 name = "task"
@@ -78,7 +78,7 @@ regions = [
 [[graph.stages]]
 name = "ingest"
 description = "Read log files, identify format and structure"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "list_dir", "bash", "context_write", "context_read"]
 max_iterations = 15
 tool_routing = { default_region = "conversation", tool_regions = { read_file = "logs", bash = "logs" }, keep_results = true }
@@ -132,7 +132,7 @@ hint = "Log format identified, ready to sweep the files"
 [[graph.stages]]
 name = "split_logs"
 description = "Split the logs into files or time windows, one sweeper each"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["fan_out"]
 max_iterations = 4
 # split_logs ↔ error_recovery is a cycle, so it needs a ceiling. One retry is
@@ -190,7 +190,7 @@ when = "error"
 [[graph.stages]]
 name = "scan_worker"
 description = "Sweep one log file or time window for errors, anomalies, and trends"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "bash", "submit_output"]
 max_iterations = 20
 allow_as_worker = true
@@ -222,7 +222,7 @@ instructions = "One finding per line, as `<severity> | <finding> | <evidence: co
 [[graph.stages]]
 name = "analyze"
 description = "Identify anomalies, trends, and error patterns"
-model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "bash", "context_write", "context_append", "context_read"]
 max_iterations = 25
 max_revisits = 3
@@ -278,7 +278,7 @@ carry = { compact = {} }
 [[graph.stages]]
 name = "script"
 description = "Write and execute scripts to parse, filter, and aggregate log data"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "bash", "context_read"]
 max_iterations = 20
 max_revisits = 5
@@ -333,7 +333,7 @@ hint = "Refine or write another script"
 [[graph.stages]]
 name = "report"
 description = "Produce a structured analysis report with findings"
-model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["write_file", "read_file"]
 max_iterations = 10
 # Generating the final report - don't inject mid-run user messages into it.
@@ -362,7 +362,7 @@ hint = "The report is written"
 [[graph.stages]]
 name = "error_recovery"
 description = "Recover from a failed read or script execution"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 tools = ["read_file", "bash"]
 max_iterations = 10
 max_revisits = 1
@@ -393,7 +393,7 @@ carry = { compact = {} }
 [[graph.stages]]
 name = "summary"
 description = "Say what the logs showed"
-model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 mode = "output"
 tools = ["submit_output"]
 max_iterations = 8

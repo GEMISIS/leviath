@@ -49,7 +49,7 @@ provider verbatim. Spell it the way the provider spells it:
 
 | Provider | Shape | Example |
 |---|---|---|
-| Anthropic | the bare model name | `claude-sonnet-5` |
+| Anthropic | the bare model name | `claude-sonnet-5-5` |
 | OpenAI | the bare model name | `gpt-5.4-mini` |
 | OpenAI Codex | `codex/model` (prefix required) | `codex/gpt-5.5` |
 | Google | the bare model name | `gemini-2.5-pro` |
@@ -58,7 +58,7 @@ provider verbatim. Spell it the way the provider spells it:
 | Meta | the bare model name | `muse-spark-1.3` |
 | OpenRouter | `vendor/model` | `deepseek/deepseek-v4-flash` |
 | Ollama | `model:tag` | `qwen3.5:9b` |
-| AWS Bedrock | the inference-profile id, or the bare model id | `us.anthropic.claude-sonnet-5` |
+| AWS Bedrock | the inference-profile id, or the bare model id | `us.anthropic.claude-sonnet-5-5` |
 
 OpenRouter is the one that trips people up: its identifiers carry a vendor prefix, and the prefix is
 part of the name. `deepseek-v4-flash` is not a valid OpenRouter model; `deepseek/deepseek-v4-flash`
@@ -127,7 +127,7 @@ name = "analyze"
 [graph.stages.model]
 models = [
     { provider = "openrouter", model = "deepseek/deepseek-v4-flash" },
-    { provider = "anthropic", model = "claude-sonnet-5" },
+    { provider = "anthropic", model = "claude-sonnet-5-5" },
 ]
 ```
 
@@ -142,7 +142,7 @@ fall back to:
 
 ```toml
 [providers]
-fallback_order = ["anthropic/claude-sonnet-5", "openai/gpt-5.6-mini"]
+fallback_order = ["anthropic/claude-sonnet-5-5", "openai/gpt-5.6-mini"]
 ```
 
 Entries are `provider/model` pairs, best first, and are tried after the stage's own list and your
@@ -257,12 +257,12 @@ models a provider outage would move the stage on to, in the order it tries them:
 
 ```
 Models this install would use:
-  gather           openrouter/anthropic/claude-sonnet-5
+  gather           openrouter/anthropic/claude-sonnet-5.5
                      falls back to: openai/gpt-5.4-mini
-                     blueprint order: anthropic/claude-sonnet-5, openai/gpt-5.4-mini, ...
-  analyze          openrouter/anthropic/claude-opus-5
+                     blueprint order: anthropic/claude-sonnet-5-5, openai/gpt-5.4-mini, ...
+  analyze          openrouter/anthropic/claude-opus-5.5
                      falls back to: openai/gpt-5.5
-                     blueprint order: anthropic/claude-opus-5, openai/gpt-5.5, ...
+                     blueprint order: anthropic/claude-opus-5-5, openai/gpt-5.5, ...
   default_provider = openrouter, override_model = (unset), fallback_model = (unset)
 ```
 
@@ -301,7 +301,7 @@ Runs start on the models their stages name, as though the gateway had answered. 
 the live list in the background, first after five seconds and then backing off to once a minute.
 When the live list arrives it replaces the copy and is written back.
 
-With no copy yet (the first start on a machine, say), "does it serve `claude-opus-5`?" has no
+With no copy yet (the first start on a machine, say), "does it serve `claude-opus-5-5`?" has no
 answer. Nothing runs on a guess:
 
 - A run the daemon was resuming after a restart is held. `lev ps` lists it as paused, waiting on
@@ -312,7 +312,7 @@ answer. Nothing runs on a guess:
   the first run after the gateway comes back goes through.
 
 ```
-stage 'story' names claude-opus-5, and whether any provider serves it cannot be told yet: the
+stage 'story' names claude-opus-5-5, and whether any provider serves it cannot be told yet: the
 model list of openrouter has not been read (see daemon.log for why).
 ```
 
@@ -351,13 +351,13 @@ Or copy the blueprint and name the models you want, best first. Set them on the 
 about:
 
 ```toml
-model = { models = ["deepseek-v4-flash", "claude-sonnet-5"] }
+model = { models = ["deepseek-v4-flash", "claude-sonnet-5-5"] }
 ```
 
 Pin a provider only for a model that one route alone can reach, such as anything local:
 
 ```toml
-model = { models = ["claude-sonnet-5", { provider = "ollama", model = "qwen3.5:9b" }] }
+model = { models = ["claude-sonnet-5-5", { provider = "ollama", model = "qwen3.5:9b" }] }
 ```
 
 A model no configured provider serves is skipped. The warning names it, and the stage falls through
@@ -515,7 +515,7 @@ lev providers retention --json
 lev providers retention set zero     # ask everywhere; refuse a model that cannot give it
 lev providers retention set off
 lev providers retention bedrock none # Bedrock's account mode, directly
-lev models show claude-sonnet-5      # a model's own answer, on the Retention line
+lev models show claude-sonnet-5-5      # a model's own answer, on the Retention line
 ```
 
 How to think about retention, and what the switch can and cannot promise, is its own page:
@@ -702,14 +702,14 @@ Defaults screen once Bedrock is chosen. A model has to be enabled for your accou
 or the call comes back as an access error.
 
 Model ids are Bedrock's own. Most current models are reached through an inference profile whose
-prefix says where the request may be routed, so name that: `us.anthropic.claude-sonnet-5`,
-`eu.amazon.nova-pro-v1:0`, `global.anthropic.claude-opus-5`. A model that takes on-demand calls by
+prefix says where the request may be routed, so name that: `us.anthropic.claude-sonnet-5-5`,
+`eu.amazon.nova-pro-v1:0`, `global.anthropic.claude-opus-5-5`. A model that takes on-demand calls by
 its bare id (`openai.gpt-oss-120b-1:0`) is named that way. Put the provider in front in a
-blueprint, and leave the bare vendor names to the vendors. `claude-sonnet-5` on its own still routes
+blueprint, and leave the bare vendor names to the vendors. `claude-sonnet-5-5` on its own still routes
 to your Anthropic key, because the same model on Bedrock bills a different account.
 
 ```toml
-model = { models = ["bedrock/us.anthropic.claude-sonnet-5"] }
+model = { models = ["bedrock/us.anthropic.claude-sonnet-5-5"] }
 ```
 
 `lev models list --provider bedrock` lists what your key can reach, with prices beside the models
@@ -730,7 +730,7 @@ sets `thinking = { type = "disabled" }`.
 name = "plan"
 
 [graph.stages.model]
-models = ["bedrock/us.anthropic.claude-sonnet-5"]
+models = ["bedrock/us.anthropic.claude-sonnet-5-5"]
 params = { extra = { thinking = { type = "adaptive" } } }
 
 [[graph.stages]]
@@ -958,7 +958,7 @@ meta_api_key = "..."
 
 | Model | Takes | Makes |
 |---|---|---|
-| `muse-spark-1.3`, `-1.2`, `-1.1` | text, images, video, audio and PDFs (1 048 576 tokens) | text and tool calls |
+| `muse-spark-1.3`, `-1.2`, `-1.1` | text, images, MP4 video, MP3 and WAV audio, and PDFs (1 048 576 tokens) | text and tool calls |
 | `muse-spark-1.3-contributor`, `-1.2-contributor` | the same, at a much lower price | the same |
 | `muse-image-1.0` | text, and images to edit | images |
 | `muse-voice-transcribe-1.0` | WAV audio | the transcript, with a `transcript.json` part of turns |
@@ -970,6 +970,10 @@ one is refused.
 **Muse Spark always reasons.** An effort of `none` is refused by Meta and never sent; `minimal`,
 `low`, `medium`, `high` and `xhigh` are taken. `stop`, `logit_bias`, `n` and log probabilities are
 refused too, so Leviath removes them from a stage's parameters.
+
+**Audio on Muse Spark is MP3 or WAV.** Meta's docs say audio on 1.3 is not fully supported yet and
+suggest 1.2 for it. OpenRouter lists no audio input for any Muse Spark, so audio reaches it only
+through the `meta` provider.
 
 **Transcription takes WAV only:** mono, 16-bit, 16 or 24 kHz, at most 32 MB and ten minutes.
 Leviath does not convert audio, and refuses anything else with a message naming the format.

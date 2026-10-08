@@ -365,7 +365,7 @@ release-notes would run (blueprint release-notes@a4adce5110b52cc26e95bb6ef879985
     max_items = 20
     since = "v0.6.0"
   stages:
-    gather  anthropic/claude-sonnet-5  tools: read_file, shell, context_append
+    gather  anthropic/claude-sonnet-5-5  tools: read_file, shell, context_append
     write  openai/gpt-5.5  no tools
 ```
 
