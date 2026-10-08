@@ -215,6 +215,9 @@ pub struct HydrationReport {
     /// Blocks sent as their stand-in because they were over the provider's
     /// inline limit for their type.
     pub too_large: usize,
+    /// Blocks sent as their stand-in because the provider takes their type
+    /// only by file id and they were not uploaded.
+    pub not_uploaded: usize,
 }
 
 /// What one block should become.
@@ -222,6 +225,7 @@ enum Fate {
     Bytes,
     Remote,
     TooLarge(u64),
+    NotUploaded,
     Text,
     StandIn,
 }
@@ -252,6 +256,11 @@ fn fate(block: &ContentBlock, h: &Hydration<'_>) -> Fate {
     if sends_natively(block, h.mime) {
         return match (remote, h.limits.inline_part_limit(&part.mime_type)) {
             (Some(_), _) => Fate::Remote,
+            // A type the provider takes only by file id never goes inline: it
+            // is refused with its reason instead. Muse Spark's audio is one,
+            // because Meta answers inline audio with a 200 and drops it unread
+            // (https://github.com/meta-models/meta-model-cookbook/issues/59).
+            (None, _) if part.mime_type.matches_any(h.limits.file_only) => Fate::NotUploaded,
             (None, Some(max)) if part.size > max => Fate::TooLarge(max),
             (None, _) => Fate::Bytes,
         };
@@ -326,6 +335,21 @@ pub fn hydrate_request(request: &mut InferenceRequest, h: &Hydration<'_>) -> Hyd
                             part.stand_in,
                             human_bytes(part.size),
                             human_bytes(max)
+                        ),
+                    };
+                }
+                Fate::NotUploaded => {
+                    report.not_uploaded += 1;
+                    let why = match h.why_inline {
+                        "" => "it could not be uploaded",
+                        why => why,
+                    };
+                    *block = ContentBlock::Text {
+                        text: format!(
+                            "{} [not sent: this provider takes {} only as an uploaded file, \
+                             because inline it is dropped unread \
+                             (meta-model-cookbook#59), and {why}]",
+                            part.stand_in, part.mime_type
                         ),
                     };
                 }

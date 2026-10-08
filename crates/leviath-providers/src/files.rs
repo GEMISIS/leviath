@@ -37,6 +37,9 @@ pub struct MediaLimits {
     pub file_types: &'static [&'static str],
     /// The longest lifetime an upload may ask for, in seconds.
     pub file_ttl_max_secs: u64,
+    /// The types this model is sent only by file id: a part of one that is
+    /// not uploaded becomes its stand-in with the reason, never inline bytes.
+    pub file_only: &'static [&'static str],
 }
 
 impl MediaLimits {
@@ -48,6 +51,7 @@ impl MediaLimits {
         file_bytes: None,
         file_types: &[],
         file_ttl_max_secs: MIN_TTL_SECS,
+        file_only: &[],
     };
 
     /// These limits with the file side taken away: what a model whose
@@ -56,6 +60,7 @@ impl MediaLimits {
         MediaLimits {
             file_bytes: None,
             file_types: &[],
+            file_only: &[],
             ..self
         }
     }
@@ -107,6 +112,7 @@ const ANTHROPIC: MediaLimits = MediaLimits {
         "text/plain",
     ],
     file_ttl_max_secs: 90 * DAY,
+    file_only: &[],
 };
 
 /// OpenAI's Responses API: images and PDFs by file id; 512 MB a file, kept up
@@ -117,6 +123,7 @@ const OPENAI: MediaLimits = MediaLimits {
     file_bytes: Some(512 * MIB),
     file_types: &["image/*", "application/pdf"],
     file_ttl_max_secs: 30 * DAY,
+    file_only: &[],
 };
 
 /// Google's Gemini API: images, audio, video and PDFs by file uri; 2 GB a
@@ -127,6 +134,7 @@ const GOOGLE: MediaLimits = MediaLimits {
     file_bytes: Some(2 * 1024 * MIB),
     file_types: &["image/*", "audio/*", "video/*", "application/pdf"],
     file_ttl_max_secs: 2 * DAY,
+    file_only: &[],
 };
 
 /// xAI (and Grok, the same API): documents by file id; 512 MB a file, kept up
@@ -137,11 +145,20 @@ const XAI: MediaLimits = MediaLimits {
     file_bytes: Some(512 * MIB),
     file_types: &["application/pdf", "text/plain"],
     file_ttl_max_secs: 30 * DAY,
+    file_only: &[],
 };
 
 /// Meta's Model API: images, MP4 video, MP3 and WAV audio and PDFs by file
 /// id; 1 GiB a file, kept up to 30 days; 50 MB (decimal, 50 000 000 bytes)
 /// inline, as Meta's file-handling page states them.
+///
+/// Muse Spark's audio goes only by uploaded file: Meta answers an inline
+/// `input_audio` part with a 200 and drops the audio unread
+/// (<https://github.com/meta-models/meta-model-cookbook/issues/59>). An
+/// audio part that cannot be uploaded is refused with its reason instead.
+/// Meta's media models take no file ids and clear this through
+/// [`MediaLimits::inline_only`], so Muse Voice Transcribe still reads its
+/// audio inline on its own route.
 const META: MediaLimits = MediaLimits {
     inline_request_bytes: Some(50_000_000),
     inline_part_bytes: &[],
@@ -154,6 +171,7 @@ const META: MediaLimits = MediaLimits {
         "application/pdf",
     ],
     file_ttl_max_secs: 30 * DAY,
+    file_only: &["audio/*"],
 };
 
 /// Amazon Bedrock's Converse API: no file storage; 3.75 MB an image, 4.5 MB a
@@ -168,6 +186,7 @@ const BEDROCK: MediaLimits = MediaLimits {
     file_bytes: None,
     file_types: &[],
     file_ttl_max_secs: MIN_TTL_SECS,
+    file_only: &[],
 };
 
 /// What `provider` documents for its chat models, by registry name. A name

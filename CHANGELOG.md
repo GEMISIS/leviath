@@ -242,6 +242,12 @@ same list.
   image's format from its file name, and a part named after an artifact
   (`image`) or not named at all was uploaded with no extension. Uploads now
   end in an extension the mime registry gives the part's type.
+- Audio sent to Muse Spark inline could be dropped by Meta unread, with a
+  200 and no error
+  ([meta-model-cookbook#59](https://github.com/meta-models/meta-model-cookbook/issues/59)).
+  Muse Spark audio now always goes as an uploaded file named by id. An
+  audio part that cannot be uploaded (uploads off, zero data retention, a
+  failed upload) is not sent: the model gets its stand-in with the reason.
 - A Bedrock inference profile for India (`in.anthropic.claude-opus-5`) was
   read as a model id of its own and missed its card's limits. `in` is now a
   profile prefix beside `us`, `eu`, `apac` and the rest.
