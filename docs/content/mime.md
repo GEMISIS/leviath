@@ -326,6 +326,12 @@ uploaded:
 [application/pdf, 60.0 MiB] report.pdf [not sent: 60.0 MiB is over the 50.0 MiB this provider takes inline; zero data retention is on, so nothing is uploaded]
 ```
 
+Muse Spark's audio never goes inline. Meta drops an inline audio part unread
+([meta-model-cookbook#59](https://github.com/meta-models/meta-model-cookbook/issues/59)), so on
+the `meta` provider an audio part is always uploaded, whatever its size. When it cannot be
+uploaded for any of the reasons above, or the upload fails, it reaches the model as its stand-in
+with the reason rather than as bytes Meta would drop.
+
 Each run records its uploads in `provider-files.json` in its directory. The files are deleted
 from the provider when the run finishes, and when the run is deleted (from `lev serve`, the
 dashboard, or `lev doctor`). They are also deleted when the daemon starts for a run that finished

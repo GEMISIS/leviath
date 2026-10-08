@@ -215,6 +215,22 @@ async fn muse_spark_takes_media_by_file_and_the_media_models_take_none() {
     let mp4 = leviath_core::mime::MimeType::parse("video/mp4").unwrap();
     assert!(meta.media_limits("muse-spark-1.3").by_file(&mp4, 1));
     assert!(!meta.media_limits("muse-image-1.0").by_file(&mp4, 1));
+    // Every Muse Spark takes audio only by file; the media models, which take
+    // no file ids, read theirs inline on their own routes.
+    for model in [
+        "muse-spark-1.1",
+        "muse-spark-1.2",
+        "muse-spark-1.2-contributor",
+        "muse-spark-1.3",
+        "muse-spark-1.3-contributor",
+    ] {
+        assert_eq!(meta.media_limits(model).file_only, ["audio/*"], "{model}");
+    }
+    assert!(
+        meta.media_limits("muse-voice-transcribe-1.0")
+            .file_only
+            .is_empty()
+    );
     let upload = crate::files::FileUpload {
         bytes: std::sync::Arc::from(&b"....ftyp"[..]),
         mime_type: "video/mp4".into(),

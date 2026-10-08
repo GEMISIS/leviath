@@ -971,9 +971,15 @@ one is refused.
 `low`, `medium`, `high` and `xhigh` are taken. `stop`, `logit_bias`, `n` and log probabilities are
 refused too, so Leviath removes them from a stage's parameters.
 
-**Audio on Muse Spark is MP3 or WAV.** Meta's docs say audio on 1.3 is not fully supported yet and
-suggest 1.2 for it. OpenRouter lists no audio input for any Muse Spark, so audio reaches it only
-through the `meta` provider.
+**Audio on Muse Spark is MP3 or WAV, and always uploaded.** Meta answers an inline audio part with
+a 200 and drops the audio unread
+([meta-model-cookbook#59](https://github.com/meta-models/meta-model-cookbook/issues/59)), so
+Leviath sends Muse Spark audio only as a file in Meta's storage, named by its id, however small.
+When it cannot be uploaded (`[providers] file_uploads = false`, zero data retention, or a failed
+upload), the part is not sent: the model gets its stand-in with the reason, and the run's log
+says so. Other parts are sent as usual. Meta's docs also say audio on 1.3 is not fully supported
+yet and suggest 1.2 for it. OpenRouter lists no audio input for any Muse Spark, so audio reaches
+it only through the `meta` provider.
 
 **Transcription takes WAV only:** mono, 16-bit, 16 or 24 kHz, at most 32 MB and ten minutes.
 Leviath does not convert audio, and refuses anything else with a message naming the format.

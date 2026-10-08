@@ -210,3 +210,56 @@ fn a_part_sent_natively_is_one_the_model_takes_and_no_override_turns_aside() {
         &mime
     ));
 }
+
+#[test]
+fn a_file_only_type_goes_by_id_or_is_refused_and_never_inline() {
+    let limits = crate::files::provider_limits("meta");
+    let mime = crate::mime_tables::builtin_mime("meta", "muse-spark-1.2");
+    let fetch = |_: &BlobRef| Some(Arc::from(&b"RIFF"[..]));
+    let hydrate = |req: &mut InferenceRequest, why: &str| {
+        hydrate_request(
+            req,
+            &Hydration {
+                mime: &mime,
+                registry: &MimeRegistry::builtin(),
+                max_media_bytes: MIB,
+                fetch: &fetch,
+                limits,
+                why_inline: why,
+            },
+        )
+    };
+    let wav = || ContentBlock::mime(&part("audio/wav", b"RIFF", "a.wav")).unwrap();
+    let png = || ContentBlock::mime(&part("image/png", b"\x89PNG", "p.png")).unwrap();
+
+    // Uploaded: named by id.
+    let mut held = request(vec![remote(wav(), "file_7")]);
+    let report = hydrate(&mut held, "");
+    assert_eq!((report.by_file, report.not_uploaded), (1, 0));
+    assert_eq!(
+        responses_part(&blocks(&held)[0]).unwrap(),
+        serde_json::json!({ "type": "input_audio", "file_id": "file_7" })
+    );
+
+    // Not uploaded: refused with the reason, and the image beside it goes
+    // inline as it always did.
+    for (why, said) in [
+        ("[providers] file_uploads is off", "file_uploads is off"),
+        ("", "it could not be uploaded"),
+    ] {
+        let mut req = request(vec![wav(), png()]);
+        let report = hydrate(&mut req, why);
+        assert_eq!((report.not_uploaded, report.sent), (1, 1));
+        let out = blocks(&req);
+        let refusal = serde_json::to_string(&out[0]).unwrap();
+        assert!(refusal.contains("a.wav"), "{refusal}");
+        assert!(
+            refusal.contains("takes audio/wav only as an uploaded file"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("meta-model-cookbook#59"), "{refusal}");
+        assert!(refusal.contains(said), "{refusal}");
+        assert!(!out[0].is_hydrated_mime());
+        assert!(out[1].is_hydrated_mime());
+    }
+}

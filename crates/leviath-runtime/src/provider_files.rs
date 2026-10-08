@@ -237,7 +237,7 @@ pub(crate) async fn attach(
                         provider = %route.provider_name,
                         part = %part.sha256,
                         error = %e,
-                        "a part could not be uploaded and goes inline"
+                        "a part could not be uploaded; it goes inline only where the provider takes its type inline"
                     );
                     *remote = None;
                 }

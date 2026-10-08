@@ -243,6 +243,7 @@ impl JobHydration {
         if report.stand_ins > 0
             || report.capped > 0
             || report.too_large > 0
+            || report.not_uploaded > 0
             || !report.missing.is_empty()
         {
             tracing::info!(
@@ -253,8 +254,22 @@ impl JobHydration {
                 stand_ins = report.stand_ins,
                 capped = report.capped,
                 too_large = report.too_large,
+                not_uploaded = report.not_uploaded,
                 missing = report.missing.len(),
                 "[mime] stored parts the model did not receive as bytes"
+            );
+        }
+        if report.not_uploaded > 0 {
+            tracing::warn!(
+                model = %request.model,
+                parts = report.not_uploaded,
+                why = %match self.why_inline {
+                    "" => "the upload did not succeed",
+                    why => why,
+                },
+                "[mime] parts this provider takes only by uploaded file were not sent: inline, \
+                 Meta drops audio unread \
+                 (https://github.com/meta-models/meta-model-cookbook/issues/59)"
             );
         }
     }
@@ -2298,3 +2313,6 @@ pub(crate) fn journaled_attempts(
 #[cfg(test)]
 #[path = "inference_bridge/file_tests.rs"]
 mod file_tests;
+#[cfg(test)]
+#[path = "inference_bridge/meta_audio_tests.rs"]
+mod meta_audio_tests;
