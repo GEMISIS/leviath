@@ -229,6 +229,21 @@ same list.
   image's format from its file name, and a part named after an artifact
   (`image`) or not named at all was uploaded with no extension. Uploads now
   end in an extension the mime registry gives the part's type.
+- A Bedrock inference profile for India (`in.anthropic.claude-opus-5`) was
+  read as a model id of its own and missed its card's limits. `in` is now a
+  profile prefix beside `us`, `eu`, `apac` and the rest.
+- Through OpenRouter, a Claude model named with a dotted version
+  (`anthropic/claude-opus-4.8`) or from the Claude 5 line was sent a
+  temperature it refuses when the gateway's listing could not be read.
+
+### Added
+
+- Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 on Anthropic
+  (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`), Bedrock
+  (`us.anthropic.claude-haiku-5-5` and the other profiles) and OpenRouter
+  (`anthropic/claude-haiku-5.5`), each with a 1M-token window, 128K output
+  and its list price. Haiku 5.5 costs $0.10 in and $0.50 out per million
+  tokens, five times that once a prompt passes 100 000 tokens.
 
 ## 0.6.4 - 2026-09-26
 

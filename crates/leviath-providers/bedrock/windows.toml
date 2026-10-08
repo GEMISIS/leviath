@@ -15,7 +15,7 @@
 # `reasoning` says the card has a Reasoning line, and `count_tokens` whether
 # the card lists CountTokens as supported on `bedrock-runtime`.
 
-read_on = "2026-09-28"
+read_on = "2026-10-08"
 
 [[model]]
 id = "ai21.jamba-1-5-large-v1:0"
@@ -144,7 +144,17 @@ context = 200000
 output = 64000
 reasoning = true
 count_tokens = true
-profiles = ["us.anthropic.claude-haiku-4-5-20251001-v1:0", "eu.anthropic.claude-haiku-4-5-20251001-v1:0", "au.anthropic.claude-haiku-4-5-20251001-v1:0", "jp.anthropic.claude-haiku-4-5-20251001-v1:0", "global.anthropic.claude-haiku-4-5-20251001-v1:0"]
+profiles = ["us.anthropic.claude-haiku-4-5-20251001-v1:0", "eu.anthropic.claude-haiku-4-5-20251001-v1:0", "au.anthropic.claude-haiku-4-5-20251001-v1:0", "jp.anthropic.claude-haiku-4-5-20251001-v1:0", "in.anthropic.claude-haiku-4-5-20251001-v1:0", "global.anthropic.claude-haiku-4-5-20251001-v1:0"]
+source = "aws-model-card"
+
+[[model]]
+id = "anthropic.claude-haiku-5-5"
+name = "Claude Haiku 5.5"
+context = 1000000
+output = 128000
+reasoning = true
+count_tokens = false
+profiles = ["us.anthropic.claude-haiku-5-5", "eu.anthropic.claude-haiku-5-5", "au.anthropic.claude-haiku-5-5", "jp.anthropic.claude-haiku-5-5", "global.anthropic.claude-haiku-5-5"]
 source = "aws-model-card"
 
 [[model]]
@@ -234,7 +244,7 @@ context = 1000000
 output = 128000
 reasoning = true
 count_tokens = false
-profiles = ["us.anthropic.claude-opus-5", "eu.anthropic.claude-opus-5", "au.anthropic.claude-opus-5", "global.anthropic.claude-opus-5"]
+profiles = ["us.anthropic.claude-opus-5", "eu.anthropic.claude-opus-5", "au.anthropic.claude-opus-5", "in.anthropic.claude-opus-5", "global.anthropic.claude-opus-5"]
 source = "aws-model-card"
 
 [[model]]
@@ -284,7 +294,7 @@ context = 1000000
 output = 128000
 reasoning = true
 count_tokens = false
-profiles = ["us.anthropic.claude-sonnet-5", "eu.anthropic.claude-sonnet-5", "au.anthropic.claude-sonnet-5", "global.anthropic.claude-sonnet-5"]
+profiles = ["us.anthropic.claude-sonnet-5", "eu.anthropic.claude-sonnet-5", "au.anthropic.claude-sonnet-5", "in.anthropic.claude-sonnet-5", "global.anthropic.claude-sonnet-5"]
 source = "aws-model-card"
 
 [[model]]
@@ -294,7 +304,7 @@ context = 1000000
 output = 128000
 reasoning = true
 count_tokens = false
-profiles = ["global.anthropic.claude-sonnet-5-5"]
+profiles = ["us.anthropic.claude-sonnet-5-5", "eu.anthropic.claude-sonnet-5-5", "global.anthropic.claude-sonnet-5-5"]
 source = "aws-model-card"
 
 [[model]]
@@ -698,6 +708,56 @@ profiles = ["us-gov.nvidia.nemotron-super-3-120b"]
 source = "aws-model-card"
 
 [[model]]
+id = "openai.gpt-5.4"
+name = "GPT-5.4"
+context = 1050000
+output = 128000
+reasoning = false
+count_tokens = false
+profiles = []
+source = "aws-model-card"
+
+[[model]]
+id = "openai.gpt-5.5"
+name = "GPT-5.5"
+context = 1050000
+output = 128000
+reasoning = false
+count_tokens = false
+profiles = []
+source = "aws-model-card"
+
+[[model]]
+id = "openai.gpt-5.6-luna"
+name = "GPT-5.6 Luna"
+context = 1050000
+output = 128000
+reasoning = false
+count_tokens = false
+profiles = ["us.openai.gpt-5.6-luna", "in.openai.gpt-5.6-luna", "global.openai.gpt-5.6-luna"]
+source = "aws-model-card"
+
+[[model]]
+id = "openai.gpt-5.6-sol"
+name = "GPT-5.6 Sol"
+context = 1050000
+output = 128000
+reasoning = false
+count_tokens = false
+profiles = ["us.openai.gpt-5.6-sol", "global.openai.gpt-5.6-sol"]
+source = "aws-model-card"
+
+[[model]]
+id = "openai.gpt-5.6-terra"
+name = "GPT-5.6 Terra"
+context = 1050000
+output = 128000
+reasoning = false
+count_tokens = false
+profiles = ["us.openai.gpt-5.6-terra", "in.openai.gpt-5.6-terra", "global.openai.gpt-5.6-terra"]
+source = "aws-model-card"
+
+[[model]]
 id = "openai.gpt-6-astra"
 name = "GPT-6 Astra"
 context = 1050000
@@ -705,6 +765,36 @@ output = 128000
 reasoning = false
 count_tokens = false
 profiles = ["us.openai.gpt-6-astra", "global.openai.gpt-6-astra"]
+source = "aws-model-card"
+
+[[model]]
+id = "openai.gpt-6-luna"
+name = "GPT-6 Luna"
+context = 1050000
+output = 128000
+reasoning = false
+count_tokens = false
+profiles = ["us.openai.gpt-6-luna", "global.openai.gpt-6-luna"]
+source = "aws-model-card"
+
+[[model]]
+id = "openai.gpt-6-sol"
+name = "GPT-6 Sol"
+context = 1050000
+output = 128000
+reasoning = false
+count_tokens = false
+profiles = ["us.openai.gpt-6-sol", "global.openai.gpt-6-sol"]
+source = "aws-model-card"
+
+[[model]]
+id = "openai.gpt-6.1-sol"
+name = "GPT-6.1 Sol"
+context = 1000000
+output = 131072
+reasoning = false
+count_tokens = false
+profiles = ["us.openai.gpt-6.1-sol", "global.openai.gpt-6.1-sol"]
 source = "aws-model-card"
 
 [[model]]
@@ -875,4 +965,14 @@ output = 128000
 reasoning = false
 count_tokens = false
 profiles = []
+source = "aws-model-card"
+
+[[model]]
+id = "zai.glm-5.3"
+name = "GLM 5.3"
+context = 1000000
+output = 128000
+reasoning = false
+count_tokens = false
+profiles = ["us.zai.glm-5.3", "global.zai.glm-5.3"]
 source = "aws-model-card"

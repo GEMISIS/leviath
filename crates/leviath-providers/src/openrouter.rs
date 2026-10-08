@@ -300,6 +300,18 @@ pub(crate) fn table_capabilities(model: &str) -> ModelCapabilities {
 pub(crate) const CATALOG: &[(&str, &str)] = &[
     ("x-ai/grok-4.6", "Grok 4.6"),
     ("meta/muse-spark-1.2", "Muse Spark 1.2"),
+    (
+        "anthropic/claude-opus-5.5",
+        "Claude Opus 5.5 (via OpenRouter)",
+    ),
+    (
+        "anthropic/claude-sonnet-5.5",
+        "Claude Sonnet 5.5 (via OpenRouter)",
+    ),
+    (
+        "anthropic/claude-haiku-5.5",
+        "Claude Haiku 5.5 (via OpenRouter)",
+    ),
     ("anthropic/claude-opus-5", "Claude Opus 5 (via OpenRouter)"),
     (
         "anthropic/claude-sonnet-5",
@@ -427,11 +439,18 @@ pub(crate) const MODELS: &[Row] = &[
         output: 32_768,
     },
     // Anthropic models via OpenRouter inherit the direct provider's flags:
-    // these four refuse a temperature, the rest of the family takes one.
+    // the Claude 5 line and the newest Opus 4.x refuse a temperature, the
+    // rest of the family takes one. OpenRouter spells a version with a dot
+    // (`claude-opus-4.8`, `claude-sonnet-5.5`), so both spellings are named.
     Row {
         matches: &[
             Match::PrefixAnd("anthropic/", "claude-opus-4-8"),
+            Match::PrefixAnd("anthropic/", "claude-opus-4.8"),
             Match::PrefixAnd("anthropic/", "claude-opus-4-7"),
+            Match::PrefixAnd("anthropic/", "claude-opus-4.7"),
+            Match::PrefixAnd("anthropic/", "claude-opus-5"),
+            Match::PrefixAnd("anthropic/", "claude-sonnet-5"),
+            Match::PrefixAnd("anthropic/", "claude-haiku-5"),
             Match::PrefixAnd("anthropic/", "claude-fable-5"),
             Match::PrefixAnd("anthropic/", "claude-mythos-5"),
         ],
@@ -1431,6 +1450,28 @@ mod tests {
             "key".to_string(),
         );
         let caps = provider.capabilities("anthropic/claude-opus-4-8");
+        assert!(!caps.supports_temperature);
+    }
+
+    #[test]
+    fn the_claude_5_5_line_is_listed_under_its_openrouter_ids() {
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
+        for id in [
+            "anthropic/claude-opus-5.5",
+            "anthropic/claude-sonnet-5.5",
+            "anthropic/claude-haiku-5.5",
+        ] {
+            assert!(CATALOG.iter().any(|(c, _)| *c == id), "{id} is listed");
+            let caps = provider.capabilities(id);
+            assert!(!caps.supports_temperature, "{id} takes no temperature");
+            assert_eq!(caps.max_context_tokens, 1_000_000, "{id}");
+            assert_eq!(caps.max_output_tokens, 128_000, "{id}");
+        }
+        // The dotted spelling of an older no-temperature model is caught too.
+        let caps = provider.capabilities("anthropic/claude-opus-4.8");
         assert!(!caps.supports_temperature);
     }
 

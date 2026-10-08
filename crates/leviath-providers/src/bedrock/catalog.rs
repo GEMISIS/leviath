@@ -47,7 +47,9 @@ pub(super) enum Vendor {
 }
 
 /// The inference-profile prefixes AWS defines: one geography or `global`.
-const PROFILE_PREFIXES: &[&str] = &["us", "eu", "apac", "global", "jp", "au", "ca", "us-gov"];
+const PROFILE_PREFIXES: &[&str] = &[
+    "us", "eu", "apac", "global", "jp", "au", "ca", "in", "us-gov",
+];
 
 /// The vendor segments Bedrock's catalogue uses, so an id can be recognised
 /// as Bedrock-shaped by spelling alone.
@@ -229,6 +231,7 @@ pub(crate) const MODELS: &[Row] = &[
         matches: &[
             Match::Contains("anthropic.claude-opus-5"),
             Match::Contains("anthropic.claude-sonnet-5"),
+            Match::Contains("anthropic.claude-haiku-5"),
             Match::Contains("anthropic.claude-fable-5"),
             Match::Contains("anthropic.claude-mythos-5"),
             Match::Contains("anthropic.claude-opus-4-8"),
@@ -559,6 +562,10 @@ mod tests {
         );
         assert_eq!(bare_id("us-gov.anthropic.claude-x"), "anthropic.claude-x");
         assert_eq!(
+            bare_id("in.anthropic.claude-opus-5"),
+            "anthropic.claude-opus-5"
+        );
+        assert_eq!(
             bare_id("anthropic.claude-sonnet-5"),
             "anthropic.claude-sonnet-5"
         );
@@ -641,6 +648,25 @@ mod tests {
         assert_eq!(caps.max_output_tokens, 128_000);
         assert!(!caps.supports_temperature);
         assert!(caps.supports_tools);
+    }
+
+    #[test]
+    fn the_claude_5_5_line_is_listed_with_its_card_limits() {
+        for (profile, name) in [
+            ("us.anthropic.claude-opus-5-5", "Claude Opus 5.5"),
+            ("us.anthropic.claude-sonnet-5-5", "Claude Sonnet 5.5"),
+            ("us.anthropic.claude-haiku-5-5", "Claude Haiku 5.5"),
+        ] {
+            assert!(CATALOG.contains(&(profile, name)), "{profile} is listed");
+            let row = window_for(profile).expect(profile);
+            assert_eq!(row.id, bare_id(profile));
+            assert!(row.profiles.contains(&format!("global.{}", row.id)));
+            let caps = table_capabilities(profile);
+            assert_eq!(caps.max_context_tokens, 1_000_000, "{profile}");
+            assert_eq!(caps.max_output_tokens, 128_000, "{profile}");
+            assert!(!caps.supports_temperature, "{profile}");
+            assert!(caps.supports_tools, "{profile}");
+        }
     }
 
     #[test]

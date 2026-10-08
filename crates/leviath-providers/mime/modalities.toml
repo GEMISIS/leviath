@@ -8,7 +8,7 @@
 # overwrites. A model no row matches falls to the name heuristic in
 # `mime_tables`, which is the floor these rows lift.
 
-read_on = "2026-09-17"
+read_on = "2026-10-08"
 
 [[modality]]
 provider = "anthropic"
@@ -34,6 +34,13 @@ source = "openrouter"
 [[modality]]
 provider = "anthropic"
 prefix = "claude-haiku-4-5"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-haiku-5-5"
 input = ["text/*", "image/*", "application/pdf"]
 output = ["text/*"]
 source = "openrouter"
@@ -89,6 +96,13 @@ source = "openrouter"
 
 [[modality]]
 provider = "anthropic"
+prefix = "claude-opus-5-5"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
 prefix = "claude-sonnet-4"
 input = ["text/*", "image/*", "application/pdf"]
 output = ["text/*"]
@@ -111,6 +125,13 @@ source = "openrouter"
 [[modality]]
 provider = "anthropic"
 prefix = "claude-sonnet-5"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "anthropic"
+prefix = "claude-sonnet-5-5"
 input = ["text/*", "image/*", "application/pdf"]
 output = ["text/*"]
 source = "openrouter"
@@ -260,6 +281,13 @@ provider = "google"
 prefix = "gemini-3.8-flash"
 input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
 output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "google"
+prefix = "gemini-nano-banana-2.1"
+input = ["text/*", "image/*"]
+output = ["text/*", "image/*"]
 source = "openrouter"
 
 [[modality]]
@@ -677,6 +705,48 @@ source = "openrouter"
 
 [[modality]]
 provider = "openai"
+prefix = "gpt-6-luna"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-6-luna-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-6-sol"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-6-sol-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-6.1-sol"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-6.1-sol-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
 prefix = "gpt-audio"
 input = ["text/*", "audio/*"]
 output = ["text/*", "audio/*"]
@@ -804,6 +874,13 @@ source = "openrouter"
 [[modality]]
 provider = "xai"
 prefix = "grok-4.6"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "xai"
+prefix = "grok-4.7"
 input = ["text/*", "image/*", "application/pdf"]
 output = ["text/*"]
 source = "openrouter"

@@ -51,7 +51,9 @@ const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The inference-profile prefixes AWS defines, so a bare id can be read off
 /// a profile id when the card names no bare id.
-const PROFILE_PREFIXES: [&str; 8] = ["us", "eu", "apac", "global", "jp", "au", "ca", "us-gov"];
+const PROFILE_PREFIXES: [&str; 9] = [
+    "us", "eu", "apac", "global", "jp", "au", "ca", "in", "us-gov",
+];
 
 /// How far a limit may move between refreshes before the write is refused.
 const PLAUSIBLE_MOVE: f64 = 3.0;

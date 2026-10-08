@@ -315,6 +315,9 @@ pub(crate) fn table_capabilities(model: &str) -> ModelCapabilities {
 /// The models this build names when the listing cannot be read: the current
 /// line-up, as `(id, display name)`.
 pub(crate) const CATALOG: &[(&str, &str)] = &[
+    ("claude-opus-5-5", "Claude Opus 5.5"),
+    ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+    ("claude-haiku-5-5", "Claude Haiku 5.5"),
     ("claude-opus-5", "Claude Opus 5"),
     ("claude-sonnet-5", "Claude Sonnet 5"),
     ("claude-fable-5", "Claude Fable 5"),
@@ -331,7 +334,7 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
 /// must stay below `claude-opus-4-8` and friends, which it would otherwise
 /// swallow with the wrong output limit.
 pub(crate) const MODELS: &[Row] = &[
-    // Opus 5: top-tier, 1M context, 128K output, no temperature.
+    // Opus 5 and 5.5: top-tier, 1M context, 128K output, no temperature.
     Row {
         matches: &[Match::Contains("claude-opus-5")],
         temperature: false,
@@ -339,9 +342,18 @@ pub(crate) const MODELS: &[Row] = &[
         context: 1_000_000,
         output: 128_000,
     },
-    // Sonnet 5: 1M context, 128K output, no temperature.
+    // Sonnet 5 and 5.5: 1M context, 128K output, no temperature.
     Row {
         matches: &[Match::Contains("claude-sonnet-5")],
+        temperature: false,
+        tools: true,
+        context: 1_000_000,
+        output: 128_000,
+    },
+    // Haiku 5.5: 1M context, 128K output, no temperature (OpenRouter lists no
+    // `temperature` parameter for it and LiteLLM marks sampling unsupported).
+    Row {
+        matches: &[Match::Contains("claude-haiku-5")],
         temperature: false,
         tools: true,
         context: 1_000_000,
@@ -1685,6 +1697,26 @@ mod tests {
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 1_000_000);
         assert_eq!(caps.max_output_tokens, 128_000);
+    }
+
+    #[test]
+    fn the_claude_5_5_line_is_named_and_sized_as_published() {
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
+        for (id, name) in [
+            ("claude-opus-5-5", "Claude Opus 5.5"),
+            ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+            ("claude-haiku-5-5", "Claude Haiku 5.5"),
+        ] {
+            assert!(CATALOG.contains(&(id, name)), "{id} is in the catalogue");
+            let caps = provider.builtin_capabilities(id);
+            assert!(!caps.supports_temperature, "{id} takes no temperature");
+            assert!(caps.supports_tools, "{id}");
+            assert_eq!(caps.max_context_tokens, 1_000_000, "{id}");
+            assert_eq!(caps.max_output_tokens, 128_000, "{id}");
+        }
     }
 
     #[test]
