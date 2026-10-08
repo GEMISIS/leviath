@@ -9,8 +9,8 @@ use super::{AccountRetention, ModelRetention};
 use crate::provider::HttpClient;
 use crate::provider::Result;
 
-/// Where an [`Account`] sends its requests.
-pub struct AccountSpec {
+/// Where a [`DataRetention`] sends its requests.
+pub struct DataRetentionSpec {
     /// The Bedrock API key.
     pub api_key: String,
     /// The AWS region; `None` is the provider's default.
@@ -24,7 +24,7 @@ pub struct AccountSpec {
 }
 
 /// A Bedrock account, opened to read and set its data retention.
-pub struct Account {
+pub struct DataRetention {
     #[cfg(feature = "bedrock")]
     provider: super::BedrockProvider,
     /// A build without Bedrock never makes one.
@@ -32,11 +32,11 @@ pub struct Account {
     never: std::convert::Infallible,
 }
 
-impl Account {
+impl DataRetention {
     /// The account `spec` names, reached with `client`. Only a build with
     /// Bedrock can open one.
     #[cfg(feature = "bedrock")]
-    pub fn open(client: HttpClient, spec: AccountSpec) -> Self {
+    pub fn open(client: HttpClient, spec: DataRetentionSpec) -> Self {
         Self {
             provider: super::BedrockProvider::new(client, spec.api_key)
                 .with_region(spec.region)
@@ -97,9 +97,9 @@ mod tests {
     /// reached, so every call answers without a request.
     #[tokio::test]
     async fn an_account_behind_a_gateway_answers_without_a_request() {
-        let account = Account::open(
+        let retention = DataRetention::open(
             crate::provider::build_http_client(None).expect("a test client builds"),
-            AccountSpec {
+            DataRetentionSpec {
                 api_key: "ABSK-test".to_string(),
                 region: Some("eu-west-1".to_string()),
                 base_url: Some("https://gw.example/bedrock".to_string()),
@@ -107,10 +107,10 @@ mod tests {
                 mantle_url: None,
             },
         );
-        assert_eq!(account.region(), "eu-west-1");
-        assert!(account.account_retention().await.unwrap().is_none());
-        assert!(account.set_account_retention("none").await.is_err());
-        assert_eq!(account.read_model_retention().await.unwrap(), 0);
-        assert!(account.model_retentions().is_empty());
+        assert_eq!(retention.region(), "eu-west-1");
+        assert!(retention.account_retention().await.unwrap().is_none());
+        assert!(retention.set_account_retention("none").await.is_err());
+        assert_eq!(retention.read_model_retention().await.unwrap(), 0);
+        assert!(retention.model_retentions().is_empty());
     }
 }

@@ -156,7 +156,7 @@ fn bedrock_from(
     _config: &Config,
     _env: &ProvidersEnv,
     _build_client: leviath_providers::provider::HttpClientFactory<'_>,
-) -> anyhow::Result<Option<leviath_providers::bedrock::Account>> {
+) -> anyhow::Result<Option<leviath_providers::bedrock::DataRetention>> {
     Ok(None)
 }
 
@@ -167,7 +167,7 @@ fn bedrock_from(
     config: &Config,
     env: &ProvidersEnv,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
-) -> anyhow::Result<Option<leviath_providers::bedrock::Account>> {
+) -> anyhow::Result<Option<leviath_providers::bedrock::DataRetention>> {
     let Some(key) = config
         .providers
         .bedrock_api_key
@@ -178,9 +178,9 @@ fn bedrock_from(
         return Ok(None);
     };
     let client = build_client(None)?;
-    Ok(Some(leviath_providers::bedrock::Account::open(
+    Ok(Some(leviath_providers::bedrock::DataRetention::open(
         client,
-        leviath_providers::bedrock::AccountSpec {
+        leviath_providers::bedrock::DataRetentionSpec {
             api_key: key.to_string(),
             region: config.providers.bedrock_region.clone(),
             base_url: config.providers.bedrock_base_url.clone(),
