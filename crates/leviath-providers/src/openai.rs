@@ -16,17 +16,22 @@
 pub(crate) mod media;
 
 use crate::capabilities::{Match, Row};
-use crate::learned::{LearnedModel, LearnedModels};
-use crate::provider::{
-    InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
-    Provider, ProviderError, Result, StreamChunk,
+use crate::provider::ModelCapabilities;
+use crate::responses::Dialect;
+#[cfg(feature = "openai")]
+use {
+    crate::learned::{LearnedModel, LearnedModels},
+    crate::provider::{
+        InferenceRequest, InferenceResponse, ModelCapabilityOverride, ModelInfo, Provider,
+        ProviderError, Result, StreamChunk,
+    },
+    crate::responses::client::{Auth, Endpoint},
+    crate::responses::{request as request_body, stream},
+    async_trait::async_trait,
+    futures_core::Stream,
+    std::collections::HashMap,
+    std::pin::Pin,
 };
-use crate::responses::client::{Auth, Endpoint};
-use crate::responses::{Dialect, request as request_body, stream};
-use async_trait::async_trait;
-use futures_core::Stream;
-use std::collections::HashMap;
-use std::pin::Pin;
 
 /// The registry name.
 pub const PROVIDER_NAME: &str = "openai";
@@ -48,6 +53,7 @@ pub const DIALECT: Dialect = Dialect {
 };
 
 /// OpenAI provider.
+#[cfg(feature = "openai")]
 pub struct OpenAIProvider {
     /// The name it is registered under: `openai`, or the name a
     /// `[model_providers.<name>]` entry gave a second host.
@@ -91,6 +97,7 @@ pub struct OpenAIProvider {
 /// their own endpoints, and image and speech models produce no text. The
 /// listing itself says nothing about which endpoint a model speaks, so the
 /// name is the only signal.
+#[cfg(feature = "openai")]
 fn is_chat_model_id(model_key: &str) -> bool {
     const NOT_CHAT: &[&str] = &[
         "realtime",
@@ -106,11 +113,13 @@ fn is_chat_model_id(model_key: &str) -> bool {
 
 /// Whether this provider runs `model_key`: a chat or reasoning model, or an
 /// image, video, speech or transcription model on its own route.
+#[cfg(feature = "openai")]
 fn serves_id(model_key: &str) -> bool {
     is_chat_model_id(model_key) || media::kind(model_key).is_some()
 }
 
 /// `o` followed by a digit: the reasoning line.
+#[cfg(feature = "openai")]
 fn is_o_series(model_key: &str) -> bool {
     model_key.starts_with('o')
         && model_key
@@ -121,6 +130,7 @@ fn is_o_series(model_key: &str) -> bool {
 /// Whether `model` reasons, and so hands back an encrypted chain of thought
 /// worth replaying: the o-series and the GPT-5 family, but not its `chat`
 /// variants, which do not reason.
+#[cfg(feature = "openai")]
 fn reasons(model: &str) -> bool {
     (is_o_series(model) || model.starts_with("gpt-5")) && !model.contains("chat")
 }
@@ -228,6 +238,7 @@ pub(crate) const MODELS: &[Row] = &[
     },
 ];
 
+#[cfg(feature = "openai")]
 impl OpenAIProvider {
     /// Create a new OpenAI provider.
     pub fn new(client: reqwest::Client, api_key: String) -> Self {
@@ -394,6 +405,7 @@ impl OpenAIProvider {
 /// A Chat Completions `response_format` as a Responses `text.format`: the
 /// `json_schema` object's fields move up a level; every other shape is the
 /// same.
+#[cfg(feature = "openai")]
 fn text_format(format: serde_json::Value) -> serde_json::Value {
     match (
         format.get("type").and_then(|t| t.as_str()),
@@ -409,6 +421,7 @@ fn text_format(format: serde_json::Value) -> serde_json::Value {
 }
 
 #[async_trait]
+#[cfg(feature = "openai")]
 impl Provider for OpenAIProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         if let Some(kind) = media::kind(&request.model) {
@@ -634,8 +647,10 @@ impl Provider for OpenAIProvider {
 /// Below this the encode finishes in well under a millisecond and a thread
 /// hop would cost more than it saves; above it the count is a real stretch of
 /// CPU and goes to a blocking thread.
+#[cfg(feature = "openai")]
 const TIKTOKEN_INLINE_BYTES: usize = 256 * 1024;
 
+#[cfg(feature = "openai")]
 impl OpenAIProvider {
     /// GET `/models`, as the endpoint answers it.
     async fn fetch_models_json(&self) -> Result<serde_json::Value> {
@@ -668,8 +683,10 @@ impl OpenAIProvider {
     }
 }
 
+#[cfg(feature = "openai")]
 #[cfg(test)]
 mod mime_tests;
 
+#[cfg(feature = "openai")]
 #[cfg(test)]
 mod tests;

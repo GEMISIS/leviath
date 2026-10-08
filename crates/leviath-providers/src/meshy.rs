@@ -5,7 +5,7 @@
 //! minutes, and hands back a `.glb`. It still fits the one provider seam the
 //! rest of the system speaks: the stage's visible parts arrive as the
 //! request's hydrated mime blocks, the produced mesh leaves as an
-//! [`InferenceResponse`] part, and the runtime stores and routes it the same
+//! [`crate::InferenceResponse`] part, and the runtime stores and routes it the same
 //! way it stores an image a drawing model returns.
 //!
 //! Making it a provider is what replaces a fragile "an LLM drives an MCP
@@ -14,45 +14,56 @@
 //! no offset replies, no stand-in accounting, because there is no model in the
 //! loop at all.
 
-use std::collections::HashMap;
-
-use async_trait::async_trait;
-use serde_json::Value;
-use tokio::time::{Duration, Instant, sleep};
-
-use leviath_core::mime::{Blob, MimeType};
-use leviath_net::read_caps::{JSON_BODY_CAP, read_body_capped};
-
-use crate::capabilities::{Match, ModelCapabilities, ModelCapabilityOverride, ModelMime, Row};
-use crate::pricing::TokenUsage;
-use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, ModelInfo, Provider, ProviderError,
-    RateLimitConfig, Result, StreamChunk, apply_request_timeout,
+use crate::capabilities::{Match, ModelCapabilities, ModelMime, Row};
+#[cfg(feature = "meshy")]
+use {
+    crate::capabilities::ModelCapabilityOverride,
+    crate::pricing::TokenUsage,
+    crate::provider::{
+        FinishReason, InferenceRequest, InferenceResponse, ModelInfo, Provider, ProviderError,
+        RateLimitConfig, Result, StreamChunk, apply_request_timeout,
+    },
+    crate::rate_limit::RateLimiter,
+    async_trait::async_trait,
+    leviath_core::mime::{Blob, MimeType},
+    leviath_net::read_caps::{JSON_BODY_CAP, read_body_capped},
+    serde_json::Value,
+    std::collections::HashMap,
+    tokio::time::{Duration, Instant, sleep},
 };
-use crate::rate_limit::RateLimiter;
 
 mod ops;
+#[cfg(feature = "meshy")]
 #[cfg(test)]
 mod resume_tests;
-use ops::{MeshyOp, TaskState, animate_action, created_task_id, library_action_id, task_state};
+use ops::MeshyOp;
+#[cfg(feature = "meshy")]
+use ops::{TaskState, animate_action, created_task_id, library_action_id, task_state};
 
 /// The default Meshy API origin.
+#[cfg(feature = "meshy")]
 const DEFAULT_BASE_URL: &str = "https://api.meshy.ai";
 /// The mime type every Meshy operation produces.
+#[cfg(feature = "meshy")]
 const GLTF_BINARY: &str = "model/gltf-binary";
 /// What an operation made: its parts, and a note for each of its tasks that
 /// had to be submitted again (see [`crate::jobs::Ran::note`]).
+#[cfg(feature = "meshy")]
 type Made = (Vec<Blob>, Vec<Option<String>>);
 
 /// How long to wait between status polls.
+#[cfg(feature = "meshy")]
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// The whole-operation deadline when a stage sets no `request_timeout_secs`.
 /// A Meshy job runs for minutes, so this is generous; a per-stage timeout
 /// overrides it in either direction.
+#[cfg(feature = "meshy")]
 const DEFAULT_OP_TIMEOUT_SECS: u64 = 900;
 /// The per-request bound on a single create or poll call, which are quick.
+#[cfg(feature = "meshy")]
 const SHORT_REQUEST_SECS: u64 = 60;
 /// The per-request bound on a mesh download, which moves megabytes.
+#[cfg(feature = "meshy")]
 const DOWNLOAD_REQUEST_SECS: u64 = 300;
 
 /// The models this build names for a listing, one per operation.
@@ -66,6 +77,7 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
 ];
 
 /// The path that creates and lists an animation task (animate's second phase).
+#[cfg(feature = "meshy")]
 const ANIMATIONS_PATH: &str = "openapi/v1/animations";
 
 /// The nominal limits for a Meshy model.
@@ -104,6 +116,7 @@ pub(crate) fn mime_for(model: &str) -> ModelMime {
 }
 
 /// A generative 3D provider backed by Meshy's REST API.
+#[cfg(feature = "meshy")]
 pub struct MeshyProvider {
     client: reqwest::Client,
     api_key: String,
@@ -117,6 +130,7 @@ pub struct MeshyProvider {
     extra_headers: Vec<(String, String)>,
 }
 
+#[cfg(feature = "meshy")]
 impl MeshyProvider {
     /// A provider with the default Meshy origin and no overrides.
     pub fn new(client: reqwest::Client, api_key: String) -> Self {
@@ -430,6 +444,7 @@ impl MeshyProvider {
 /// The workspace's reqwest is built without the query-string feature, so the
 /// term is encoded here rather than by `RequestBuilder::query`. Unreserved
 /// characters pass through; everything else becomes `%XX`.
+#[cfg(feature = "meshy")]
 fn query_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -444,6 +459,7 @@ fn query_encode(value: &str) -> String {
 }
 
 #[async_trait]
+#[cfg(feature = "meshy")]
 impl Provider for MeshyProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         let op = MeshyOp::parse(&request.model).ok_or_else(|| {
@@ -556,6 +572,7 @@ impl Provider for MeshyProvider {
 /// says "Pose estimation failed, please provide a valid model URL" - a remark
 /// about the mesh, worded as if the request were malformed. Say what it
 /// means and what fixes it, and keep Meshy's own words at the end.
+#[cfg(feature = "meshy")]
 fn explain_rig_refusal(err: ProviderError) -> ProviderError {
     match err {
         ProviderError::ApiError(msg) if msg.contains("Pose estimation failed") => {
@@ -572,6 +589,7 @@ fn explain_rig_refusal(err: ProviderError) -> ProviderError {
     }
 }
 
+#[cfg(feature = "meshy")]
 #[cfg(test)]
 mod tests {
     use super::*;

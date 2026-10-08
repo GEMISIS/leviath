@@ -1,6 +1,6 @@
 //! The OpenAI Codex provider: inference billed to a ChatGPT subscription.
 //!
-//! A second, entirely separate door into OpenAI. The [`crate::OpenAIProvider`]
+//! A second, entirely separate door into OpenAI. The `OpenAIProvider`
 //! next to this one holds a static `sk-...` key and speaks Chat Completions at
 //! `api.openai.com`, billing every token per use. This one holds a rotating
 //! OAuth bearer obtained by signing in with a ChatGPT account, speaks the
@@ -36,11 +36,14 @@
 //! - `response.completed` carries usage and status only. Its `output` array is
 //!   always empty, so every output item has to be accumulated from the stream.
 
+#[cfg(feature = "openai-subscription")]
 pub mod catalog;
 pub mod headers;
+#[cfg(feature = "openai-subscription")]
 pub mod provider;
 pub mod usage;
 
+#[cfg(feature = "openai-subscription")]
 pub use provider::CodexProvider;
 pub use usage::{Quota, QuotaWindow};
 

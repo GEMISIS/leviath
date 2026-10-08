@@ -223,6 +223,7 @@ impl ChatTarget<'_> {
     /// more. The refusal is the initial HTTP response in both the buffered and
     /// the streaming path, so both catch it here; a model already in `memo`
     /// never arrives with a temperature to refuse.
+    #[cfg(feature = "openrouter")]
     pub(crate) async fn send_dropping_refused_temperature(
         &self,
         body: &mut serde_json::Value,

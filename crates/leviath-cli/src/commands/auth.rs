@@ -152,20 +152,25 @@ pub async fn execute(args: AuthArgs, env: AuthEnv) -> anyhow::Result<()> {
 /// The providers `lev auth login` knows how to sign in to: every row the
 /// setup catalog offers as a browser sign-in.
 fn oauth_providers() -> Vec<&'static str> {
-    crate::commands::setup::catalog::providers()
+    crate::commands::setup::catalog::offered()
         .into_iter()
         .filter(|p| p.credential == crate::commands::setup::catalog::Credential::Signin)
         .map(|p| p.id)
         .collect()
 }
 
-/// The error for a provider name that does not sign in with a browser.
+/// The error for a provider name that does not sign in with a browser, or
+/// that this lev was built without.
 fn not_an_oauth_provider(provider: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "'{provider}' does not sign in with a browser. Providers that do: {}. \
-         An API key goes in `lev setup` instead.",
-        oauth_providers().join(", ")
-    )
+    leviath_providers::compiled::missing(provider)
+        .map(anyhow::Error::msg)
+        .unwrap_or_else(|| {
+            anyhow::anyhow!(
+                "'{provider}' does not sign in with a browser. Providers that do: {}. \
+                 An API key goes in `lev setup` instead.",
+                oauth_providers().join(", ")
+            )
+        })
 }
 
 /// How `provider` signs in, or the refusal for one that does not.

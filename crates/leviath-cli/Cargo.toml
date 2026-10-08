@@ -24,25 +24,58 @@ name = "lev"
 path = "src/main.rs"
 
 [features]
-default = ["mimalloc-allocator", "legacy-runs"]
+default = ["providers", "legacy-runs"]
 # Converts a run directory in the older many-file layout into a run file the
 # first time the daemon loads it. Its crate is never published (it goes before
 # 1.0), so a published build leaves this off and reports such a directory
 # instead.
 legacy-runs = ["dep:leviath-legacy-runs"]
 debug-http = ["leviath-providers/debug-http"]
-# The lev binary's global allocator (see main.rs). A feature so the two
-# allocators can be benchmarked against each other on identical code
-# (`--no-default-features` builds on the system allocator), and so an
-# embedder-style build can opt out entirely.
-mimalloc-allocator = ["dep:mimalloc", "dep:leviath-alloc", "leviath-alloc/mimalloc"]
+# The system allocator in place of mimalloc (see main.rs), so the two can be
+# benchmarked against each other on identical code. Off by default and kept
+# out of `default`, so `--no-default-features` (how a build picks its
+# providers) never changes the allocator as a side effect.
+system-allocator = []
+
+# The providers this lev carries, all of them by default. `--no-default-features
+# --features anthropic,openai` builds those two and no others. Each one forwards
+# to the feature of the same name on `leviath-providers`.
+providers = [
+    "anthropic",
+    "openai",
+    "openai-subscription",
+    "xai",
+    "xai-subscription",
+    "google",
+    "openrouter",
+    "bedrock",
+    "meta",
+    "ollama",
+    "meshy",
+    "rhai",
+]
+anthropic = ["leviath-providers/anthropic"]
+openai = ["leviath-providers/openai"]
+# ChatGPT sign-in: the `codex` provider.
+openai-subscription = ["leviath-providers/openai-subscription"]
+xai = ["leviath-providers/xai"]
+# Grok sign-in: the `grok` provider, which brings `xai` along.
+xai-subscription = ["xai", "leviath-providers/xai-subscription"]
+google = ["leviath-providers/google"]
+openrouter = ["leviath-providers/openrouter"]
+bedrock = ["leviath-providers/bedrock"]
+meta = ["leviath-providers/meta"]
+ollama = ["leviath-providers/ollama"]
+meshy = ["leviath-providers/meshy"]
+# Providers written as Rhai scripts.
+rhai = ["leviath-providers/rhai"]
 
 [dependencies]
 # The binary's global allocator (see main.rs). Kept out of the workspace dep
 # table on purpose: only the composition-root binary should pick an allocator,
 # never a library crate.
-mimalloc = { version = "0.1", optional = true }
-leviath-alloc = { path = "../leviath-alloc", version = "0.6.4", optional = true }
+mimalloc = "0.1"
+leviath-alloc = { path = "../leviath-alloc", version = "0.6.4", features = ["mimalloc"] }
 leviath-core = { workspace = true }
 # The outbound-request policy (SSRF checks + the shared client).
 leviath-net = { workspace = true }

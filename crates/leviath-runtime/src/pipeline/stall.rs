@@ -63,9 +63,12 @@ impl StallReason {
             // `PoolFull` never reaches the watchdog (see `needs_a_person`), so
             // the missing-provider wording covers the remaining case. The
             // pause adds the way back.
+            // A provider this build left out reads the same way, with the
+            // rebuild in place of the config edit.
             _ => format!(
                 "provider '{provider}' is not configured, so this run has no way to \
-                 go on; add it to config.toml (or run `lev setup`)"
+                 go on; {}",
+                leviath_providers::compiled::remedy(provider)
             ),
         }
     }

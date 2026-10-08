@@ -54,6 +54,8 @@ schemars = { workspace = true }
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }
+# The tests build real providers from config, so they want every one built in.
+leviath-providers = { workspace = true, features = ["providers"] }
 # `start_paused` / `advance`, so the interaction deadline is tested by moving a
 # virtual clock rather than by sleeping through a real hour.
 tokio = { workspace = true, features = ["test-util"] }

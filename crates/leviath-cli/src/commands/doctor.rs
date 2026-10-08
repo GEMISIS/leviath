@@ -545,6 +545,13 @@ fn config_check(config: &Config, registry: &ProviderRegistry) -> Check {
     // A `[mime_types]` row that will not load is skipped by the daemon, which
     // then types that file by the built-in table instead of the operator's.
     notes.extend(malformed_mime_types(config));
+    // A provider configured for a build that has it, read by one that does
+    // not: the daemon skips it, and this says what to rebuild with.
+    notes.extend(
+        crate::commands::setup::catalog::configured(config)
+            .into_iter()
+            .filter_map(leviath_providers::compiled::missing),
+    );
     if !unread.is_empty() {
         let subject = match unread.len() {
             1 => "1 key in config.toml is".to_string(),

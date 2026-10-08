@@ -12,7 +12,45 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+# One feature per provider, all on by default. `--no-default-features
+# --features anthropic,openai` builds those two and no others; with none at
+# all, the only providers left are OpenAI-compatible endpoints named in the
+# config. `leviath-cli` and `leviath` forward the same names.
+#
+# A feature gates a provider's client. Its model tables stay compiled either
+# way, because a gateway describes another vendor's models with them.
 [features]
+default = ["providers"]
+providers = [
+    "anthropic",
+    "openai",
+    "openai-subscription",
+    "xai",
+    "xai-subscription",
+    "google",
+    "openrouter",
+    "bedrock",
+    "meta",
+    "ollama",
+    "meshy",
+    "rhai",
+]
+anthropic = []
+openai = []
+# ChatGPT sign-in: the `codex` provider.
+openai-subscription = []
+xai = []
+# Grok sign-in: the `grok` provider. It runs on xAI's client, so it brings
+# the `xai` provider along.
+xai-subscription = ["xai"]
+google = []
+openrouter = []
+bedrock = ["dep:crc32fast"]
+meta = []
+ollama = []
+meshy = []
+# Providers written as Rhai scripts.
+rhai = ["dep:rhai", "dep:leviath-scripting"]
 debug-http = []
 
 [dependencies]
@@ -23,7 +61,7 @@ leviath-sys = { workspace = true }
 # For the shared Rhai sandbox limits (`leviath_scripting::harden`), so provider
 # scripts and tool scripts are hardened by one definition rather than two copies.
 # No cycle: `leviath-scripting` depends only on `leviath-core`.
-leviath-scripting = { workspace = true }
+leviath-scripting = { workspace = true, optional = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
@@ -45,7 +83,7 @@ bytes = "1"
 chrono = { workspace = true }
 # Bedrock streams a reply as binary event-stream frames, each checked with
 # the CRC32 gzip uses. Already in the graph through flate2.
-crc32fast = "1"
+crc32fast = { version = "1", optional = true }
 # Decoding the `exp` and plan-tier claims out of the ChatGPT id and access
 # tokens. Payload only: the signature is the issuer's to verify, not ours.
 base64 = { workspace = true }
@@ -53,7 +91,7 @@ base64 = { workspace = true }
 # unique for the life of a conversation - which outlives the process, since
 # a pause and resume restores a window full of ids from the last one.
 rand = { workspace = true }
-rhai = { workspace = true }
+rhai = { workspace = true, optional = true }
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }

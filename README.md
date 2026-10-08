@@ -93,6 +93,8 @@ cargo install --git https://github.com/GEMISIS/leviath.git --bin lev   # latest 
 
 Leviath is also a library: add the [`leviath`](https://crates.io/crates/leviath) crate to embed the runtime in your own application. The [embedding guide](https://leviath.dev/docs/embedding) covers building a world, spawning agents, and streaming their events in-process.
 
+Both carry every model provider by default. To build with only the ones you use, turn the defaults off and name them, as in `cargo install leviath-cli --no-default-features --features anthropic,openai`. [Choosing providers](https://leviath.dev/docs/choosing-providers) lists the features.
+
 ### 2. Configure a provider
 
 One provider is all you need: an API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), [OpenRouter](https://openrouter.ai/), or [AWS Bedrock](https://console.aws.amazon.com/bedrock/). No key at all? Run a local [Ollama](https://ollama.com).

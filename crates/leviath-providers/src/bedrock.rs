@@ -14,26 +14,33 @@
 //! credentials, no request signing. Every host is regional, so the region is
 //! part of the address and the one setting a user has to get right.
 
+pub mod account;
 pub(crate) mod catalog;
+#[cfg(feature = "bedrock")]
 mod convert;
+#[cfg(feature = "bedrock")]
 mod count;
+#[cfg(feature = "bedrock")]
 mod eventstream;
 pub(crate) mod media;
+#[cfg(feature = "bedrock")]
 mod pricing;
+#[cfg(feature = "bedrock")]
 mod stream;
 
-use std::collections::HashMap;
-use std::pin::Pin;
-
-use async_trait::async_trait;
-use futures_core::Stream;
-
-use crate::learned::LearnedModels;
-use crate::provider::{
-    InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
-    Provider, ProviderError, Result, StreamChunk, UnavailableReason,
+#[cfg(feature = "bedrock")]
+use {
+    crate::learned::LearnedModels,
+    crate::provider::{
+        InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
+        Provider, ProviderError, Result, StreamChunk, UnavailableReason,
+    },
+    crate::rate_limit::RateLimiter,
+    async_trait::async_trait,
+    futures_core::Stream,
+    std::collections::HashMap,
+    std::pin::Pin,
 };
-use crate::rate_limit::RateLimiter;
 
 /// The name this provider is registered and configured under.
 pub const PROVIDER_NAME: &str = "bedrock";
@@ -46,9 +53,11 @@ pub const KEY_ENV: &str = "AWS_BEARER_TOKEN_BEDROCK";
 
 /// Re-exported so a listing compiled from the tables can name what AWS's
 /// cards say about a model.
+pub use account::{Account, AccountSpec};
 pub use catalog::{WindowRow, window_for, windows_read_on};
 
 /// The Bedrock provider.
+#[cfg(feature = "bedrock")]
 pub struct BedrockProvider {
     /// HTTP client for inference.
     client: reqwest::Client,
@@ -152,6 +161,7 @@ pub const RETENTION_MODES: &[&str] = &[
     "inherit",
 ];
 
+#[cfg(feature = "bedrock")]
 impl BedrockProvider {
     /// A provider for `region` with the key, and nothing else configured.
     pub fn new(client: reqwest::Client, api_key: String) -> Self {
@@ -616,6 +626,7 @@ impl BedrockProvider {
 /// `model` as a path segment: every byte outside RFC 3986's unreserved set
 /// percent-encoded, which turns the `:` in `-v1:0` into `%3A` and the `/` in
 /// an ARN into `%2F`.
+#[cfg(feature = "bedrock")]
 pub(crate) fn encode_model_id(model: &str) -> String {
     let mut out = String::with_capacity(model.len());
     for byte in model.bytes() {
@@ -630,6 +641,7 @@ pub(crate) fn encode_model_id(model: &str) -> String {
 }
 
 /// The `x-amzn-ErrorType` header, without the URI AWS sometimes appends.
+#[cfg(feature = "bedrock")]
 fn aws_error_type(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers
         .get("x-amzn-errortype")
@@ -640,6 +652,7 @@ fn aws_error_type(headers: &reqwest::header::HeaderMap) -> Option<String> {
 
 /// The message in an AWS error body (`{"message"}`) or an Anthropic one
 /// (`{"error": {"message"}}`).
+#[cfg(feature = "bedrock")]
 fn error_message(body: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     value
@@ -657,6 +670,7 @@ fn error_message(body: &str) -> Option<String> {
 /// or deactivated Bedrock API key is refused differently, measured live: an
 /// `AccessDeniedException` whose message is "Authentication failed: Please
 /// make sure your API Key is valid", so the message is read too.
+#[cfg(feature = "bedrock")]
 fn is_bad_key(error_type: Option<&str>, message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     matches!(
@@ -674,6 +688,7 @@ fn is_bad_key(error_type: Option<&str>, message: &str) -> bool {
 /// works but may not do this" and tells the operator to check the model's
 /// permissions. The `x-amzn-ErrorType` header tells the two apart, and it is
 /// gone once the body has been read, so this reads it first.
+#[cfg(feature = "bedrock")]
 pub(crate) async fn classify_response(
     response: reqwest::Response,
     limiter: Option<&RateLimiter>,
@@ -711,6 +726,7 @@ pub(crate) async fn classify_response(
 }
 
 #[async_trait]
+#[cfg(feature = "bedrock")]
 impl Provider for BedrockProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         tracing::debug!(model = %request.model, "Calling Bedrock Converse");
@@ -1042,5 +1058,6 @@ impl Provider for BedrockProvider {
     }
 }
 
+#[cfg(feature = "bedrock")]
 #[cfg(test)]
 mod tests;

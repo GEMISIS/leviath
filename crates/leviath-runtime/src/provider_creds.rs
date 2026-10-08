@@ -494,28 +494,6 @@ pub fn build_provider_registry_probing(
     for c in creds {
         let caps = c.model_capabilities.clone();
         let timeout = c.request_timeout_secs;
-        // Decided by kind before the name is looked at: an endpoint is
-        // registered under whatever name the config gave it, and that name is
-        // the user's to choose.
-        if let Some(host) = OpenaiHostSpec::from_creds(c)? {
-            registry.register(
-                c.name.clone(),
-                Arc::new(
-                    leviath_providers::OpenAIProvider::with_overrides(
-                        clients.get_or_build(timeout, build_client)?,
-                        host.api_key,
-                        caps,
-                        c.rate_limit.as_ref(),
-                    )
-                    .named(c.name.clone())
-                    .with_base_url(Some(host.base_url))
-                    .with_headers(host.headers)
-                    .with_auth_header(host.auth_header)
-                    .with_serves(host.serves),
-                ),
-            );
-            continue;
-        }
         if let Some(endpoint) = EndpointSpec::from_creds(c)? {
             registry.register(
                 c.name.clone(),
@@ -537,278 +515,46 @@ pub fn build_provider_registry_probing(
             );
             continue;
         }
-        match c.name.as_str() {
-            "anthropic" => {
-                if let Some(ref key) = c.api_key {
-                    registry.register(
-                        "anthropic".to_string(),
-                        Arc::new(
-                            leviath_providers::AnthropicProvider::with_overrides(
-                                clients.get_or_build(timeout, build_client)?,
-                                key.clone(),
-                                caps,
-                                c.rate_limit.as_ref(),
-                            )
-                            .with_base_url(c.base_url.clone())
-                            .with_headers(c.headers()?)
-                            // An unrecognised value keeps the default rather
-                            // than failing the daemon's boot over a cache
-                            // setting; the config layer is what validates it.
-                            .with_cache_ttl(
-                                match c.options.get("cache_ttl").map(String::as_str) {
-                                    Some("1h") => {
-                                        leviath_providers::anthropic::CacheTtl::Ephemeral1h
-                                    }
-                                    _ => leviath_providers::anthropic::CacheTtl::Ephemeral5m,
-                                },
-                            ),
-                        ),
-                    );
-                }
-            }
-            "openai" => {
-                if let Some(ref key) = c.api_key {
-                    registry.register(
-                        "openai".to_string(),
-                        Arc::new(
-                            leviath_providers::OpenAIProvider::with_overrides(
-                                clients.get_or_build(timeout, build_client)?,
-                                key.clone(),
-                                caps,
-                                c.rate_limit.as_ref(),
-                            )
-                            .with_base_url(c.base_url.clone())
-                            .with_headers(c.headers()?),
-                        ),
-                    );
-                }
-            }
-            "google" => {
-                if let Some(ref key) = c.api_key {
-                    registry.register(
-                        "google".to_string(),
-                        Arc::new(
-                            leviath_providers::GeminiProvider::with_overrides(
-                                clients.get_or_build(timeout, build_client)?,
-                                key.clone(),
-                                caps,
-                                c.rate_limit.as_ref(),
-                            )
-                            .with_base_url(c.base_url.clone())
-                            .with_headers(c.headers()?),
-                        ),
-                    );
-                }
-            }
-            "openrouter" => {
-                if let Some(ref key) = c.api_key {
-                    registry.register(
-                        "openrouter".to_string(),
-                        Arc::new(
-                            leviath_providers::OpenRouterProvider::with_overrides(
-                                clients.get_or_build(timeout, build_client)?,
-                                key.clone(),
-                                caps,
-                                c.rate_limit.as_ref(),
-                            )
-                            .with_base_url(c.base_url.clone())
-                            .with_headers(c.headers()?),
-                        ),
-                    );
-                }
-            }
-            "meshy" => {
-                if let Some(ref key) = c.api_key {
-                    registry.register(
-                        "meshy".to_string(),
-                        Arc::new(
-                            leviath_providers::MeshyProvider::with_overrides(
-                                clients.get_or_build(timeout, build_client)?,
-                                key.clone(),
-                                caps,
-                                c.rate_limit.as_ref(),
-                            )
-                            .with_base_url(c.base_url.clone())
-                            .with_headers(c.headers()?),
-                        ),
-                    );
-                }
-            }
-            "bedrock" => {
-                if let Some(ref key) = c.api_key {
-                    registry.register(
-                        "bedrock".to_string(),
-                        Arc::new(
-                            leviath_providers::BedrockProvider::with_overrides(
-                                clients.get_or_build(timeout, build_client)?,
-                                key.clone(),
-                                caps,
-                                c.rate_limit.as_ref(),
-                            )
-                            .with_base_url(c.base_url.clone())
-                            .with_headers(c.headers()?)
-                            // Absent means the provider's default region; the
-                            // config layer writes it only when one was set.
-                            .with_region(c.options.get("region").cloned()),
-                        ),
-                    );
-                }
-            }
-            "xai" | "meta" => {
-                if let Some(ref key) = c.api_key {
-                    let client = clients.get_or_build(timeout, build_client)?;
-                    let effort = c.options.get("effort").cloned();
-                    let provider: Arc<dyn leviath_providers::Provider> = match c.name.as_str() {
-                        "xai" => Arc::new(
-                            leviath_providers::xai::XaiProvider::new(
-                                client,
-                                leviath_providers::xai::Auth::Key(key.clone()),
-                            )
-                            .with_overrides(caps)
-                            .with_rate_limit(c.rate_limit.as_ref())
-                            .with_request_timeout(timeout)
-                            .with_base_url(c.base_url.clone())
-                            .with_headers(c.headers()?)
-                            .with_reasoning_effort(effort),
-                        ),
-                        _ => Arc::new(
-                            leviath_providers::meta::MetaProvider::new(client, key.clone())
-                                .with_overrides(caps)
-                                .with_rate_limit(c.rate_limit.as_ref())
-                                .with_request_timeout(timeout)
-                                .with_base_url(c.base_url.clone())
-                                .with_headers(c.headers()?)
-                                .with_reasoning_effort(effort),
-                        ),
-                    };
-                    registry.register(c.name.clone(), provider);
-                }
-            }
-            "grok" => {
-                // Registered without reading the grant, for the reason the
-                // Codex arm below gives: a keychain read at daemon start can
-                // raise a GUI prompt, and a `grok/...` model failing at its
-                // first inference with "run `lev auth login grok`" is the
-                // better failure.
-                let Some(store_path) = c.options.get("auth_store_path") else {
-                    tracing::warn!(
-                        "the grok provider was configured without a grant location, \
-                         so it is skipped; this is a bug in leviath rather than in the config"
-                    );
-                    continue;
-                };
-                let client = clients.get_or_build(timeout, build_client)?;
-                let tokens = leviath_providers::oauth::OAuthTokenSource::new(
-                    leviath_providers::grok::PROVIDER_NAME,
-                    std::path::PathBuf::from(store_path),
-                    Arc::new(leviath_providers::oauth::HttpRefresh::new(
-                        client.clone(),
-                        &leviath_providers::grok::PROFILE,
-                    )),
-                )
-                .with_credential_store(credential_store(c));
-                registry.register(
-                    leviath_providers::grok::PROVIDER_NAME.to_string(),
-                    Arc::new(
-                        leviath_providers::xai::XaiProvider::new(
-                            client,
-                            leviath_providers::xai::Auth::Signin(Arc::new(tokens)),
-                        )
-                        .with_overrides(caps)
-                        .with_rate_limit(c.rate_limit.as_ref())
-                        .with_request_timeout(timeout)
-                        .with_base_url(c.base_url.clone())
-                        .with_headers(c.headers()?)
-                        .with_reasoning_effort(c.options.get("effort").cloned()),
-                    ),
-                );
-            }
-            "ollama" => {
-                let url = c
-                    .base_url
-                    .clone()
-                    .unwrap_or_else(|| "http://localhost:11434".to_string());
-                // The only provider that registers on something other than a
-                // key, because it has no key to register on. See
-                // [`tcp_reachable`]: an address nothing answers on is not a
-                // usable provider, and pretending otherwise put it ahead of
-                // providers that were actually configured.
-                if reachable(&url) {
-                    registry.register(
-                        "ollama".to_string(),
-                        Arc::new(leviath_providers::OllamaProvider::with_overrides(
-                            clients.get_or_build(timeout, build_client)?,
-                            url,
-                            caps,
-                        )),
-                    );
-                } else {
-                    tracing::info!(
-                        base_url = %url,
-                        "nothing is listening for ollama; not registering it. Start \
-                         ollama and reload the config to use it."
-                    );
-                }
-            }
-            "codex" => {
-                // Registered without probing for a grant. The alternative is a
-                // synchronous credential-store read during daemon start, which
-                // on the keychain backend can raise a GUI prompt. The cost is
-                // that a `codex/...` model fails at its first inference with
-                // "run `lev auth login codex`" rather than being skipped, and
-                // that is the better failure: a silently skipped provider is
-                // how a run quietly uses a model nobody chose.
-                // The path comes from the caller rather than being resolved
-                // here: the CLI owns where Leviath's files live, and a runtime
-                // that guessed could look somewhere the CLI never wrote.
-                let Some(store_path) = c.options.get("auth_store_path") else {
-                    tracing::warn!(
-                        "the codex provider was configured without a grant location, \
-                         so it is skipped; this is a bug in leviath rather than in the config"
-                    );
-                    continue;
-                };
-                let store_path = std::path::PathBuf::from(store_path);
-                let credential_store = credential_store(c);
-                let client = clients.get_or_build(timeout, build_client)?;
-                let tokens = leviath_providers::oauth::OAuthTokenSource::new(
-                    leviath_providers::codex::PROVIDER_NAME,
-                    store_path,
-                    Arc::new(leviath_providers::oauth::HttpRefresh::new(
-                        client.clone(),
-                        &leviath_providers::codex::PROFILE,
-                    )),
-                )
-                .with_credential_store(credential_store);
-                registry.register(
-                    "codex".to_string(),
-                    Arc::new(
-                        leviath_providers::CodexProvider::new(client, Arc::new(tokens))
-                            .with_overrides(Some(caps))
-                            .with_rate_limit(c.rate_limit.as_ref())
-                            .with_request_timeout(timeout)
-                            .with_base_url(c.base_url.clone())
-                            .with_originator(c.options.get("originator").cloned())
-                            // A separate host from `base_url` in production,
-                            // so it takes its own option rather than a path
-                            // under that one.
-                            .with_usage_url(c.options.get("usage_url").cloned())
-                            .with_reasoning(
-                                c.options.get("effort").cloned(),
-                                c.options.get("verbosity").cloned(),
-                            )
-                            .with_reasoning_replay(
-                                c.options.get("replay_reasoning").map(String::as_str)
-                                    != Some("false"),
-                            ),
-                    ),
-                );
-            }
-            _ => {}
+        // Decided by kind before the name is looked at: a second OpenAI host
+        // is registered under whatever name the config gave it, and that name
+        // is the user's to choose.
+        let mut spec = spec_for(c)?;
+        if let Some(host) = OpenaiHostSpec::from_creds(c)? {
+            spec.kind = leviath_providers::openai::PROVIDER_NAME.to_string();
+            spec.api_key = Some(host.api_key);
+            spec.base_url = Some(host.base_url);
+            spec.headers = host.headers;
+            spec.auth_header = host.auth_header;
+            spec.serves = host.serves;
+        }
+        let mut client = || clients.get_or_build(timeout, build_client);
+        if let Some(provider) = leviath_providers::factory::build(spec, &mut client, reachable)? {
+            registry.register(c.name.clone(), provider);
         }
     }
 
     Ok(registry)
+}
+
+/// What [`leviath_providers::factory::build`] needs to build the built-in
+/// provider `c` names.
+fn spec_for(
+    c: &ProviderCreds,
+) -> Result<leviath_providers::factory::Spec, leviath_providers::ProviderError> {
+    Ok(leviath_providers::factory::Spec {
+        name: c.name.clone(),
+        kind: c.name.clone(),
+        api_key: c.api_key.clone(),
+        base_url: c.base_url.clone(),
+        headers: c.headers()?,
+        auth_header: None,
+        serves: Vec::new(),
+        caps: c.model_capabilities.clone(),
+        rate_limit: c.rate_limit.clone(),
+        request_timeout_secs: c.request_timeout_secs,
+        options: c.options.clone(),
+        credential_store: credential_store(c),
+    })
 }
 
 /// The OS credential store a sign-in provider's grant lives in, when its

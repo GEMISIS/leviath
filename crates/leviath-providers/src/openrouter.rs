@@ -3,23 +3,29 @@
 //! OpenRouter provides access to multiple models through a unified API.
 //! Uses OpenAI-compatible format with additional headers.
 
+#[cfg(feature = "openrouter")]
 mod catalog;
 
 use crate::capabilities::{Match, Row};
-use crate::learned::LearnedModels;
-use crate::openai_compat::{openai_sse_stream, parse_openai_response};
-use crate::provider::{
-    InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
-    ModelInfo, Provider, ProviderError, Result, StreamChunk,
+use crate::provider::{LimitsSource, ModelCapabilities};
+#[cfg(feature = "openrouter")]
+use {
+    crate::learned::LearnedModels,
+    crate::openai_compat::{openai_sse_stream, parse_openai_response},
+    crate::provider::{
+        InferenceRequest, InferenceResponse, ModelCapabilityOverride, ModelInfo, Provider,
+        ProviderError, Result, StreamChunk,
+    },
+    crate::rate_limit::RateLimiter,
+    async_trait::async_trait,
+    catalog::parse_entry,
+    futures_core::Stream,
+    std::collections::HashMap,
+    std::pin::Pin,
 };
-use crate::rate_limit::RateLimiter;
-use async_trait::async_trait;
-use catalog::parse_entry;
-use futures_core::Stream;
-use std::collections::HashMap;
-use std::pin::Pin;
 
 /// OpenRouter provider.
+#[cfg(feature = "openrouter")]
 pub struct OpenRouterProvider {
     /// HTTP client
     client: reqwest::Client,
@@ -75,6 +81,7 @@ pub struct OpenRouterProvider {
     extra_headers: Vec<(String, String)>,
 }
 
+#[cfg(feature = "openrouter")]
 impl OpenRouterProvider {
     /// Whether to send this model explicit `cache_control` markers.
     ///
@@ -501,6 +508,7 @@ pub(crate) const FALLBACK_CAPABILITIES: ModelCapabilities = ModelCapabilities {
     limits_source: LimitsSource::Builtin,
 };
 
+#[cfg(feature = "openrouter")]
 impl OpenRouterProvider {
     /// The headers every chat request carries.
     ///
@@ -654,6 +662,7 @@ impl OpenRouterProvider {
 }
 
 #[async_trait]
+#[cfg(feature = "openrouter")]
 impl Provider for OpenRouterProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         tracing::debug!(model = %request.model, "Calling OpenRouter API");
@@ -904,9 +913,11 @@ impl Provider for OpenRouterProvider {
     }
 }
 
+#[cfg(feature = "openrouter")]
 #[cfg(test)]
 mod mime_tests;
 
+#[cfg(feature = "openrouter")]
 #[cfg(test)]
 mod tests {
 
@@ -2520,6 +2531,7 @@ mod tests {
     }
 }
 
+#[cfg(feature = "openrouter")]
 #[cfg(test)]
 mod learned_tests {
     use super::*;

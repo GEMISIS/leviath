@@ -19,10 +19,28 @@
 //! Reasoning items are gathered across the response and sealed together under
 //! the provider's name when it ends (see [`super::reasoning`]).
 
+#[cfg(any(
+    feature = "openai",
+    feature = "openai-subscription",
+    feature = "xai",
+    feature = "meta"
+))]
 use crate::provider::{FinishReason, ProviderError, StreamChunk, TokenUsage, ToolCallDelta};
+#[cfg(any(
+    feature = "openai",
+    feature = "openai-subscription",
+    feature = "xai",
+    feature = "meta"
+))]
 use futures_core::Stream;
 
 /// State carried across events within one response.
+#[cfg(any(
+    feature = "openai",
+    feature = "openai-subscription",
+    feature = "xai",
+    feature = "meta"
+))]
 pub(crate) struct Turn {
     /// Whether any function call was seen, which decides the finish reason:
     /// the terminal event reports `completed` either way.
@@ -33,6 +51,12 @@ pub(crate) struct Turn {
     reasoning: Vec<String>,
 }
 
+#[cfg(any(
+    feature = "openai",
+    feature = "openai-subscription",
+    feature = "xai",
+    feature = "meta"
+))]
 impl Turn {
     /// A fresh response on `dialect`'s route.
     pub(crate) fn new(dialect: super::Dialect) -> Self {
@@ -53,6 +77,12 @@ impl Turn {
 ///
 /// A closure over [`Turn`] rather than a bare `fn` because the finish reason
 /// depends on what arrived earlier in the same response.
+#[cfg(any(
+    feature = "openai",
+    feature = "openai-subscription",
+    feature = "xai",
+    feature = "meta"
+))]
 pub(crate) fn sse_stream<S>(
     inner: S,
     dialect: super::Dialect,
@@ -75,6 +105,12 @@ where
 /// `None` means "no complete event yet, or nothing worth emitting"; the caller
 /// polls again. `Some(None)` ends the stream. `Some(Some(..))` is a chunk or an
 /// error the server delivered inside a 200.
+#[cfg(any(
+    feature = "openai",
+    feature = "openai-subscription",
+    feature = "xai",
+    feature = "meta"
+))]
 pub(crate) fn parse_event(
     buffer: &mut String,
     turn: &mut Turn,
@@ -220,6 +256,12 @@ pub(crate) fn parse_event(
 }
 
 /// Which output item an event belongs to.
+#[cfg(any(
+    feature = "openai",
+    feature = "openai-subscription",
+    feature = "xai",
+    feature = "meta"
+))]
 fn output_index(json: &serde_json::Value) -> usize {
     json.get("output_index")
         .and_then(|v| v.as_u64())
@@ -236,6 +278,12 @@ fn output_index(json: &serde_json::Value) -> usize {
 /// A route that prices its own calls (xAI's `cost_in_usd_ticks`) has that
 /// figure recorded as the cost when its dialect says so, which carries every
 /// tier and tool charge the token counts alone cannot.
+#[cfg(any(
+    feature = "openai",
+    feature = "openai-subscription",
+    feature = "xai",
+    feature = "meta"
+))]
 fn usage_of(response: &serde_json::Value, dialect: &super::Dialect) -> TokenUsage {
     let usage = response.get("usage");
     let number = |node: Option<&serde_json::Value>, key: &str| -> usize {
@@ -266,6 +314,12 @@ fn usage_of(response: &serde_json::Value, dialect: &super::Dialect) -> TokenUsag
 }
 
 /// The most useful sentence in a failure event.
+#[cfg(any(
+    feature = "openai",
+    feature = "openai-subscription",
+    feature = "xai",
+    feature = "meta"
+))]
 fn failure_message(json: &serde_json::Value) -> String {
     let nested = json.get("response").and_then(|r| r.get("error"));
     for node in [json.get("error"), nested] {

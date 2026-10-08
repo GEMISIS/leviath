@@ -186,7 +186,7 @@ pub(super) struct ListQuery {
 /// A list rather than one key per provider, so each is a table entry rather
 /// than a new route and a console change.
 fn signin_providers() -> Vec<(&'static str, &'static str)> {
-    crate::commands::setup::catalog::providers()
+    crate::commands::setup::catalog::offered()
         .into_iter()
         .filter(|p| p.credential == crate::commands::setup::catalog::Credential::Signin)
         .map(|p| (p.id, p.display))

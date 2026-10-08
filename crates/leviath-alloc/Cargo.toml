@@ -13,9 +13,8 @@
 [package]
 name = "leviath-alloc"
 description = "Allocator tuning for the leviath binary: one audited mimalloc option call"
-# Published, and it has to be: `leviath-cli` pins it by version under its
-# default `mimalloc-allocator` feature, so `cargo install leviath-cli` fetches
-# it from crates.io. Marking it `publish = false` once looked like hygiene
+# Published, and it has to be: `leviath-cli` pins it by version, so
+# `cargo install leviath-cli` fetches it from crates.io. Marking it `publish = false` once looked like hygiene
 # (the one `unsafe` call, kept off the registry) and stalled the 0.5.8
 # release at this crate; `cargo xtask version --check` now refuses that.
 version.workspace = true
@@ -25,9 +24,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-# Off by default so builds without the mimalloc global allocator (the
-# `--no-default-features` A/B benchmarking configuration of leviath-cli)
-# compile no FFI at all and the entry point is a no-op.
+# Off by default, so a build that does not ask for mimalloc compiles no FFI
+# at all and the entry point is a no-op. `leviath-cli` always asks; its
+# `system-allocator` feature (the A/B benchmarking configuration) changes only
+# which global allocator the binary installs.
 mimalloc = ["dep:libmimalloc-sys"]
 
 [dependencies]

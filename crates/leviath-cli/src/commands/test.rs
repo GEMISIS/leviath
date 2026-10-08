@@ -74,58 +74,34 @@ fn build_registry_from_config_with(
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
     let mut reg = ProviderRegistry::new();
-    // `lev test` uses one client for every provider it registers: the command
-    // has no per-provider timeout to honour, so there is nothing to key on.
-    let client = build_client(None)
-        .map_err(|e| leviath_providers::ProviderError::ClientBuild(e.to_string()))?;
+    // A client per provider that registers, built when it does: the command
+    // has no per-provider timeout to honour, and lives for one test.
+    let mut client = || {
+        build_client(None).map_err(|e| leviath_providers::ProviderError::ClientBuild(e.to_string()))
+    };
 
-    if let Some(ref key) = config.providers.anthropic_api_key {
-        reg.register(
-            "anthropic".to_string(),
-            Arc::new(leviath_providers::AnthropicProvider::new(
-                client.clone(),
-                key.clone(),
-            )),
-        );
+    use leviath_providers::factory::Spec;
+    let keyed = |kind: &str, key: &Option<String>| {
+        let mut spec = Spec::new(kind);
+        spec.api_key = key.clone();
+        spec
+    };
+    // Ollama is registered whether or not anything answers: `lev test` reports
+    // a dead address as the stage's failure rather than as a missing provider.
+    let mut ollama = Spec::new("ollama");
+    ollama.base_url = config.ollama_base_url.clone();
+    for spec in [
+        keyed("anthropic", &config.providers.anthropic_api_key),
+        keyed("openai", &config.providers.openai_api_key),
+        keyed("google", &config.providers.google_api_key),
+        keyed("openrouter", &config.openrouter_api_key),
+        ollama,
+    ] {
+        let name = spec.name.clone();
+        if let Some(provider) = leviath_providers::factory::build(spec, &mut client, &|_| true)? {
+            reg.register(name, provider);
+        }
     }
-    if let Some(ref key) = config.providers.openai_api_key {
-        reg.register(
-            "openai".to_string(),
-            Arc::new(leviath_providers::OpenAIProvider::new(
-                client.clone(),
-                key.clone(),
-            )),
-        );
-    }
-    if let Some(ref key) = config.providers.google_api_key {
-        reg.register(
-            "google".to_string(),
-            Arc::new(leviath_providers::GeminiProvider::new(
-                client.clone(),
-                key.clone(),
-            )),
-        );
-    }
-    if let Some(ref key) = config.openrouter_api_key {
-        reg.register(
-            "openrouter".to_string(),
-            Arc::new(leviath_providers::OpenRouterProvider::new(
-                client.clone(),
-                key.clone(),
-            )),
-        );
-    }
-    let ollama_url = config
-        .ollama_base_url
-        .as_deref()
-        .unwrap_or("http://localhost:11434");
-    reg.register(
-        "ollama".to_string(),
-        Arc::new(leviath_providers::OllamaProvider::with_base_url(
-            client.clone(),
-            ollama_url.to_string(),
-        )),
-    );
 
     Ok(reg)
 }

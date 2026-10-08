@@ -17,12 +17,17 @@
 //! - `whisper-*`, `*-transcribe*`: `POST /audio/transcriptions`, multipart. The
 //!   reply's `usage` is either seconds of audio (`whisper-1`) or tokens.
 
+#[cfg(feature = "openai")]
 use std::time::Duration;
 
+#[cfg(feature = "openai")]
 use serde_json::{Value, json};
 
+#[cfg(feature = "openai")]
 use crate::media::{self, Poll, images};
+#[cfg(feature = "openai")]
 use crate::provider::{InferenceRequest, InferenceResponse, ProviderError, Result};
+#[cfg(feature = "openai")]
 use crate::responses::client::Endpoint;
 
 /// What a media model does.
@@ -75,6 +80,7 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
 ];
 
 /// How a call is priced: the model's rates, when the shipped table has them.
+#[cfg(feature = "openai")]
 pub(crate) struct Billing {
     /// The per-unit price (a second of video, a million characters, an hour
     /// of audio).
@@ -84,6 +90,7 @@ pub(crate) struct Billing {
 }
 
 /// Run the media model `request` names.
+#[cfg(feature = "openai")]
 pub(crate) async fn run(
     endpoint: &Endpoint,
     kind: Kind,
@@ -122,11 +129,13 @@ pub(crate) async fn run(
 }
 
 /// The OpenAI route and model, for the summary line.
+#[cfg(feature = "openai")]
 fn route(request: &InferenceRequest) -> String {
     format!("{}/{}", super::PROVIDER_NAME, request.model)
 }
 
 /// Make a video, wait for it, keep it, and delete the job.
+#[cfg(feature = "openai")]
 async fn video(
     endpoint: &Endpoint,
     request: &InferenceRequest,
@@ -229,6 +238,7 @@ async fn video(
 }
 
 /// Speak the request's text.
+#[cfg(feature = "openai")]
 async fn speech(
     endpoint: &Endpoint,
     request: &InferenceRequest,
@@ -282,6 +292,7 @@ async fn speech(
 }
 
 /// Transcribe the request's audio.
+#[cfg(feature = "openai")]
 async fn transcribe(
     endpoint: &Endpoint,
     request: &InferenceRequest,

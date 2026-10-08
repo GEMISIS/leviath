@@ -349,6 +349,19 @@ pub(crate) fn providers() -> Vec<Provider> {
     ]
 }
 
+/// The providers this lev can use: [`providers`] less any this build left
+/// out. What the wizard, `lev auth login` and the provider listings offer.
+///
+/// [`providers`] itself stays whole, so a config written by a fuller build
+/// still reads back, and its keys are reported as unusable here rather than
+/// as unknown.
+pub(crate) fn offered() -> Vec<Provider> {
+    providers()
+        .into_iter()
+        .filter(|p| leviath_providers::compiled::missing(p.id).is_none())
+        .collect()
+}
+
 /// Where llama.cpp's server listens by default.
 pub const LLAMA_CPP_URL: &str = "http://localhost:8080/v1";
 

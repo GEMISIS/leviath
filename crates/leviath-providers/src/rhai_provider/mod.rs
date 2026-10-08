@@ -2,16 +2,16 @@
 //!
 //! A `.rhai` script in `~/.leviath/providers/` implements the API-specific
 //! *format mapping* (request → HTTP body, response JSON → Leviath types); this
-//! Rust [`RhaiProvider`] wraps it with the full [`Provider`]
+//! Rust `RhaiProvider` wraps it with the full [`crate::Provider`]
 //! trait and owns the hard runtime concerns - HTTP transport, rate limiting,
 //! per-stage timeouts, retry/error-classification, and token counting.
 //!
 //! ## Async ↔ sync bridge
 //!
 //! Rhai is synchronous but `Provider` is async. The script runs on a
-//! `spawn_blocking` thread; its HTTP host functions send a [`BrokerJob`] over a
+//! `spawn_blocking` thread; its HTTP host functions send a [`host::BrokerJob`] over a
 //! channel and block that thread on a reply, while an async **broker** on the
-//! runtime services the job with the shared [`HttpExecutor`]. This is
+//! runtime services the job with the shared [`host::HttpExecutor`]. This is
 //! runtime-flavor-agnostic (unlike `Handle::block_on` inside `spawn_blocking`,
 //! which can deadlock on a current-thread runtime).
 //!
@@ -23,30 +23,45 @@
 //! model) -> int`, `list_models(state) -> Array`,
 //! `warm_models(state, models) -> ()`.
 
+#[cfg(feature = "rhai")]
 mod convert;
+#[cfg(feature = "rhai")]
 mod engine;
 pub mod host;
 mod meta;
 
 use std::collections::HashMap;
+#[cfg(feature = "rhai")]
 use std::path::Path;
+#[cfg(feature = "rhai")]
 use std::pin::Pin;
 use std::sync::Arc;
 
+#[cfg(feature = "rhai")]
 use async_trait::async_trait;
+#[cfg(feature = "rhai")]
 use futures_core::Stream;
+#[cfg(feature = "rhai")]
 use rhai::{AST, Dynamic, Engine, FnPtr, Scope};
+#[cfg(feature = "rhai")]
 use tokio::sync::mpsc;
+#[cfg(feature = "rhai")]
 use tokio::task::JoinHandle;
 
+#[cfg(feature = "rhai")]
 use crate::provider::{
-    InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
-    ModelInfo, Provider, ProviderError, RateLimitConfig, Result, StreamChunk, ToolCallDelta,
+    InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelInfo, Provider,
+    StreamChunk, ToolCallDelta,
 };
+use crate::provider::{ModelCapabilityOverride, ProviderError, RateLimitConfig, Result};
+#[cfg(feature = "rhai")]
 use crate::rate_limit::RateLimiter;
 
+#[cfg(feature = "rhai")]
 use convert::{map_rhai_err, parse_inference_dynamic};
+#[cfg(feature = "rhai")]
 use engine::{ExecConfig, build_exec_engine, build_init_engine};
+#[cfg(feature = "rhai")]
 use host::{BrokerJob, HostHttpError, HttpExecutor};
 
 pub use meta::{ProviderMeta, ProviderMimeRow, parse_provider_annotations};
@@ -54,6 +69,7 @@ pub use meta::{ProviderMeta, ProviderMimeRow, parse_provider_annotations};
 /// The entry points every provider script must define, as the error messages
 /// spell them: the name, how many parameters it takes, and the parameter list
 /// to show whoever has to fix it.
+#[cfg(feature = "rhai")]
 const REQUIRED_FNS: [(&str, usize, &str); 2] = [
     ("initialize", 1, "config"),
     ("inference", 2, "state, request"),
@@ -67,7 +83,7 @@ const REQUIRED_FNS: [(&str, usize, &str); 2] = [
 /// `initialize` is script code and the caller compiling arbitrary submitted
 /// text is an ungated HTTP route.
 ///
-/// The engine is the one [`RhaiProvider::from_source`] compiles with rather
+/// The engine is the one `RhaiProvider::from_source` compiles with rather
 /// than a bare `Engine::new`, so the verdict is the one a load would reach.
 /// That is not cosmetic: the shared hardening raises Rhai's expression-depth
 /// limits, which are low enough in a debug build to reject legitimate scripts.
@@ -94,6 +110,21 @@ pub struct SourceReport {
 /// [`check_source`], keeping the whole report rather than the annotations
 /// alone. `lev validate` uses it to say what a script provider can and cannot
 /// do before a run finds out.
+///
+/// A build without the `rhai` feature compiles no script, so it refuses every
+/// one with what to rebuild with.
+#[cfg(not(feature = "rhai"))]
+pub fn inspect_source(label: &str, src: &str) -> Result<SourceReport> {
+    let _ = (label, src);
+    Err(ProviderError::Other(
+        crate::compiled::scripts_missing().unwrap_or_default(),
+    ))
+}
+
+/// [`check_source`], keeping the whole report rather than the annotations
+/// alone. `lev validate` uses it to say what a script provider can and cannot
+/// do before a run finds out.
+#[cfg(feature = "rhai")]
 pub fn inspect_source(label: &str, src: &str) -> Result<SourceReport> {
     let meta = parse_provider_annotations(src);
     let ast = build_init_engine(Arc::new(Vec::new()))
@@ -113,6 +144,7 @@ pub fn inspect_source(label: &str, src: &str) -> Result<SourceReport> {
 /// caches, then fails at the first real inference - by which point a run has
 /// started and the failure looks like a provider outage rather than a typo.
 /// Reading it off the AST moves that to the moment the script is read.
+#[cfg(feature = "rhai")]
 fn require_entry_points(label: &str, ast: &AST) -> Result<()> {
     for (name, params, signature) in REQUIRED_FNS {
         if has_fn(ast, name, params) {
@@ -135,9 +167,11 @@ fn require_entry_points(label: &str, ast: &AST) -> Result<()> {
 /// A boxed script-function call: builds the `Scope` and invokes one Rhai
 /// function on the given engine, returning its `Dynamic` result. Boxed (not a
 /// generic) so [`RhaiProvider::dispatch`] has a single instantiation.
+#[cfg(feature = "rhai")]
 type ScriptCall = Box<dyn FnOnce(&Engine) -> Result<Dynamic> + Send>;
 
 /// A provider whose request/response mapping is implemented by a Rhai script.
+#[cfg(feature = "rhai")]
 pub struct RhaiProvider {
     name: String,
     ast: Arc<AST>,
@@ -197,6 +231,36 @@ pub struct ScriptProviderSettings {
     pub env_allowlist: Arc<Vec<String>>,
 }
 
+/// Load the script at `script_path` as a provider: [`RhaiProvider::from_script`]
+/// for a caller that holds providers as `dyn Provider`.
+#[cfg(feature = "rhai")]
+pub fn load(
+    script_path: &Path,
+    executor: Arc<dyn host::HttpExecutor>,
+    settings: ScriptProviderSettings,
+) -> Result<Arc<dyn Provider>> {
+    Ok(Arc::new(RhaiProvider::from_script(
+        script_path,
+        executor,
+        settings,
+    )?))
+}
+
+/// A build without the `rhai` feature runs no script, so every load fails
+/// with what to rebuild with.
+#[cfg(not(feature = "rhai"))]
+pub fn load(
+    script_path: &std::path::Path,
+    executor: Arc<dyn host::HttpExecutor>,
+    settings: ScriptProviderSettings,
+) -> Result<Arc<dyn crate::Provider>> {
+    let _ = (script_path, executor, settings);
+    Err(ProviderError::Other(
+        crate::compiled::scripts_missing().unwrap_or_default(),
+    ))
+}
+
+#[cfg(feature = "rhai")]
 impl RhaiProvider {
     /// Load a provider from a script file. Reads + compiles the script and runs
     /// `initialize(config)` **offline**; any failure (missing file, compile
@@ -347,6 +411,7 @@ impl RhaiProvider {
 }
 
 /// Whether the compiled AST defines a script function of the given name/arity.
+#[cfg(feature = "rhai")]
 fn has_fn(ast: &AST, name: &str, params: usize) -> bool {
     ast.iter_functions()
         .any(|f| f.name == name && f.params.len() == params)
@@ -354,12 +419,14 @@ fn has_fn(ast: &AST, name: &str, params: usize) -> bool {
 
 /// Map a blocking-task join failure (a panic in the script thread) to a
 /// [`ProviderError`]. A free function so its single region is covered directly.
+#[cfg(feature = "rhai")]
 fn task_failed(e: tokio::task::JoinError) -> ProviderError {
     ProviderError::Other(format!("provider script task failed: {e}"))
 }
 
 /// Finalize a streaming script task: on a script or task error, push it as the
 /// stream's terminal item. A free function so all three arms are unit-testable.
+#[cfg(feature = "rhai")]
 fn finalize_stream(
     outcome: std::result::Result<Result<()>, tokio::task::JoinError>,
     err_tx: &mpsc::UnboundedSender<Result<StreamChunk>>,
@@ -377,6 +444,7 @@ fn finalize_stream(
 
 /// Service one broker job: perform the HTTP request and (for unary jobs) reply.
 /// Rate-limit accounting lives here so the provider owns it, not the executor.
+#[cfg(feature = "rhai")]
 async fn serve_job(
     executor: &Arc<dyn HttpExecutor>,
     rate_limiter: &Option<RateLimiter>,
@@ -409,6 +477,7 @@ async fn serve_job(
 /// Serialize an [`InferenceRequest`] into the Rhai `request` map handed to the
 /// script. Both steps are infallible for a well-formed request (derive-Serialize
 /// with string keys → JSON → Dynamic), so a failure is a programmer error.
+#[cfg(feature = "rhai")]
 fn request_to_dynamic(request: &InferenceRequest) -> Dynamic {
     let json = serde_json::to_value(request).expect("InferenceRequest serializes to JSON");
     rhai::serde::to_dynamic(json).expect("a JSON value converts to Dynamic")
@@ -416,6 +485,7 @@ fn request_to_dynamic(request: &InferenceRequest) -> Dynamic {
 
 /// Build the single collapsed chunk the default (non-native) streaming path
 /// emits from a full [`InferenceResponse`].
+#[cfg(feature = "rhai")]
 fn collapse_chunk(response: InferenceResponse) -> StreamChunk {
     StreamChunk {
         parts: Vec::new(),
@@ -439,6 +509,7 @@ fn collapse_chunk(response: InferenceResponse) -> StreamChunk {
 }
 
 #[async_trait]
+#[cfg(feature = "rhai")]
 impl Provider for RhaiProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         if let Some(rl) = &self.rate_limiter {
@@ -735,6 +806,7 @@ impl Provider for RhaiProvider {
 }
 
 /// Convert the array returned by a script's `list_models` into [`ModelInfo`]s.
+#[cfg(feature = "rhai")]
 fn parse_models(value: Dynamic, provider: &str) -> Vec<ModelInfo> {
     let json: serde_json::Value = match rhai::serde::from_dynamic(&value) {
         Ok(v) => v,
@@ -774,5 +846,6 @@ fn parse_models(value: Dynamic, provider: &str) -> Vec<ModelInfo> {
         .unwrap_or_default()
 }
 
+#[cfg(feature = "rhai")]
 #[cfg(test)]
 mod tests;

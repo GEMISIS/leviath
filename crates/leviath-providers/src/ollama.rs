@@ -2,18 +2,25 @@
 //!
 //! Ollama provides local LLM execution via NDJSON streaming.
 
+#[cfg(feature = "ollama")]
 use crate::capabilities::{Match, Row};
-use crate::learned::{LearnedModel, LearnedModels};
-use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities,
-    ModelCapabilityOverride, ModelInfo, Provider, ProviderError, Result, StreamChunk, TokenUsage,
+#[cfg(feature = "ollama")]
+use crate::provider::{LimitsSource, ModelCapabilities};
+#[cfg(feature = "ollama")]
+use {
+    crate::learned::{LearnedModel, LearnedModels},
+    crate::provider::{
+        FinishReason, InferenceRequest, InferenceResponse, ModelCapabilityOverride, ModelInfo,
+        Provider, ProviderError, Result, StreamChunk, TokenUsage,
+    },
+    async_trait::async_trait,
+    futures_core::Stream,
+    std::collections::HashMap,
+    std::pin::Pin,
 };
-use async_trait::async_trait;
-use futures_core::Stream;
-use std::collections::HashMap;
-use std::pin::Pin;
 
 /// Ollama provider for local LLM execution.
+#[cfg(feature = "ollama")]
 pub struct OllamaProvider {
     /// HTTP client
     client: reqwest::Client,
@@ -38,6 +45,7 @@ pub struct OllamaProvider {
 ///
 /// Ollama sends no ids of its own. What the minted one has to guarantee, and
 /// why, is in [`crate::call_ids`].
+#[cfg(feature = "ollama")]
 fn next_tool_call_id() -> String {
     crate::call_ids::mint("ollama")
 }
@@ -67,6 +75,7 @@ fn next_tool_call_id() -> String {
 /// Matched on the fragment rather than the whole sentence: the surrounding text
 /// is an HTTP status and a JSON envelope that the shared send path formats, and
 /// the phrase itself is what Ollama writes.
+#[cfg(feature = "ollama")]
 fn mentions_dropped_user_turn(message: &str) -> bool {
     message.to_ascii_lowercase().contains("no user query found")
 }
@@ -78,6 +87,7 @@ fn mentions_dropped_user_turn(message: &str) -> bool {
 /// configured, and against what the run's own accounting reported. An exact
 /// count would need the server's tokenizer, and the server has just refused to
 /// talk to us.
+#[cfg(feature = "ollama")]
 fn estimated_request_tokens(request: &InferenceRequest) -> usize {
     let blocks = request
         .system
@@ -99,6 +109,7 @@ fn estimated_request_tokens(request: &InferenceRequest) -> usize {
 }
 
 /// One content block's share of [`estimated_request_tokens`].
+#[cfg(feature = "ollama")]
 fn estimated_block_tokens(block: &crate::ContentBlock) -> usize {
     crate::mime::block_tokens(block)
 }
@@ -110,8 +121,10 @@ fn estimated_block_tokens(block: &crate::ContentBlock) -> usize {
 /// the rest of the day on a machine that ran one agent this morning. Ollama's
 /// own default is five minutes; this says so explicitly rather than depending on
 /// a default that is a server setting somebody may have changed.
+#[cfg(feature = "ollama")]
 const WARM_KEEP_ALIVE: &str = "5m";
 
+#[cfg(feature = "ollama")]
 fn effective_window(show: &serde_json::Value) -> Option<usize> {
     let parameters = show.get("parameters")?.as_str()?;
     parameters.lines().find_map(|line| {
@@ -126,6 +139,7 @@ fn effective_window(show: &serde_json::Value) -> Option<usize> {
 ///
 /// `deepseek-r1` sits above the general DeepSeek row because it is the one
 /// that cannot call tools.
+#[cfg(feature = "ollama")]
 pub(crate) const MODELS: &[Row] = &[
     // Llama 3.x and Qwen 2.x/3: tool-capable, 128K context.
     Row {
@@ -195,6 +209,7 @@ pub(crate) const MODELS: &[Row] = &[
 ///
 /// Conservative on purpose: a small window and no tools, since most models
 /// people pull into Ollama are small and tool calling is the exception.
+#[cfg(feature = "ollama")]
 pub(crate) const FALLBACK_CAPABILITIES: ModelCapabilities = ModelCapabilities {
     supports_temperature: true,
     supports_streaming: true,
@@ -205,6 +220,7 @@ pub(crate) const FALLBACK_CAPABILITIES: ModelCapabilities = ModelCapabilities {
     limits_source: LimitsSource::Builtin,
 };
 
+#[cfg(feature = "ollama")]
 impl OllamaProvider {
     /// Create a new Ollama provider.
     pub fn new(client: reqwest::Client) -> Self {
@@ -487,6 +503,7 @@ impl OllamaProvider {
 /// Recent servers report a `capabilities` array (`completion`, `tools`,
 /// `vision`, `thinking`, ...); `None` when the answer has no such array, which
 /// an older server's does not, so the compiled table keeps its guess.
+#[cfg(feature = "ollama")]
 fn calls_tools(show: &serde_json::Value) -> Option<bool> {
     let capabilities = show.get("capabilities")?.as_array()?;
     Some(capabilities.iter().any(|c| c.as_str() == Some("tools")))
@@ -495,6 +512,7 @@ fn calls_tools(show: &serde_json::Value) -> Option<bool> {
 /// What `/api/show` says the model takes: text and images when it lists
 /// `vision`, text alone when it lists capabilities without it, and `None`
 /// when the answer has no such array, so the name table keeps its guess.
+#[cfg(feature = "ollama")]
 fn sees_images(show: &serde_json::Value) -> Option<Vec<String>> {
     let capabilities = show.get("capabilities")?.as_array()?;
     let vision = capabilities.iter().any(|c| c.as_str() == Some("vision"));
@@ -504,6 +522,7 @@ fn sees_images(show: &serde_json::Value) -> Option<Vec<String>> {
     })
 }
 
+#[cfg(feature = "ollama")]
 impl OllamaProvider {
     /// Build request body for the Ollama API.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
@@ -634,6 +653,7 @@ impl OllamaProvider {
 }
 
 #[async_trait]
+#[cfg(feature = "ollama")]
 impl Provider for OllamaProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         tracing::debug!(model = %request.model, "Calling Ollama API");
@@ -843,6 +863,7 @@ impl Provider for OllamaProvider {
 }
 
 /// Wrap a byte stream in the NDJSON framer Ollama's `/api/chat` speaks.
+#[cfg(feature = "ollama")]
 fn ollama_ndjson_stream<S>(inner: S) -> crate::provider::stream::FramedStream
 where
     S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
@@ -859,6 +880,7 @@ where
 /// Blank lines are skipped; `None` when no newline has arrived yet. A line
 /// that is not JSON is an error the stream delivers rather than a skipped
 /// frame, because with NDJSON there is no other framing to fall back on.
+#[cfg(feature = "ollama")]
 fn ollama_frame(buffer: &mut String) -> Option<Option<Result<StreamChunk>>> {
     loop {
         // Both halves are copied out before the buffer is replaced.
@@ -882,6 +904,7 @@ fn ollama_frame(buffer: &mut String) -> Option<Option<Result<StreamChunk>>> {
 
 /// A parsed NDJSON object as a chunk: text on every line, tool calls and
 /// usage on the one flagged `done`.
+#[cfg(feature = "ollama")]
 fn ollama_chunk(json: &serde_json::Value) -> StreamChunk {
     let done = json.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
     let message = json.get("message");
@@ -964,6 +987,7 @@ fn ollama_chunk(json: &serde_json::Value) -> StreamChunk {
 /// final `done` record can be sitting in the buffer with nothing to frame
 /// it. It is read as text and the stream is marked complete; the usage on it
 /// is not recovered.
+#[cfg(feature = "ollama")]
 fn ollama_flush(buffer: &mut String) -> Option<StreamChunk> {
     let remaining = buffer.trim().to_string();
     if remaining.is_empty() {
@@ -987,9 +1011,11 @@ fn ollama_flush(buffer: &mut String) -> Option<StreamChunk> {
     })
 }
 
+#[cfg(feature = "ollama")]
 #[cfg(test)]
 mod mime_tests;
 
+#[cfg(feature = "ollama")]
 #[cfg(test)]
 mod tests {
 

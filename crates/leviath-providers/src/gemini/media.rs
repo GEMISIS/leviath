@@ -16,12 +16,17 @@
 //!   stage hands an image model to edit. Speech arrives as raw 24 kHz PCM in
 //!   many deltas, which the stream joins into one WAV.
 
+#[cfg(feature = "google")]
 use std::time::Duration;
 
+#[cfg(feature = "google")]
 use base64::Engine as _;
+#[cfg(feature = "google")]
 use serde_json::{Map, Value, json};
 
+#[cfg(feature = "google")]
 use crate::media::{self, Poll};
+#[cfg(feature = "google")]
 use crate::provider::{
     ContentBlock, InferenceRequest, InferenceResponse, MessageContent, Provider, ProviderError,
     Result,
@@ -90,6 +95,7 @@ pub(crate) fn adjusted(
 /// Parameters: `voice` and `language` for a speech model (sent as
 /// `speech_config`), `aspect_ratio` and `image_size` for an image model
 /// (`image_config`), and `temperature` and `seed`.
+#[cfg(feature = "google")]
 pub(crate) fn prompted_body(request: &InferenceRequest) -> Value {
     let mut content = vec![json!({ "type": "text", "text": media::request_text(request) })];
     for message in &request.messages {
@@ -147,6 +153,7 @@ pub(crate) fn prompted_body(request: &InferenceRequest) -> Value {
 /// `stream` with its closing chunk priced at `unit` for every file the stream
 /// handed on: a model billed by the clip (Lyria) reports no token cost, and
 /// its usage alone would record the call as free.
+#[cfg(feature = "google")]
 pub(crate) fn priced_by_unit(
     stream: crate::rate_limit::ChunkStream,
     unit: crate::pricing::UnitPrice,
@@ -168,6 +175,7 @@ pub(crate) fn priced_by_unit(
     }))
 }
 
+#[cfg(feature = "google")]
 impl super::GeminiProvider {
     /// Make a Veo video, wait for it, and keep it.
     pub(super) async fn video(

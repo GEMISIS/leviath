@@ -16,10 +16,14 @@
 //! Nova Reel (video) is not served: it writes its result to an S3 bucket the
 //! caller names, and a Bedrock API key cannot read S3.
 
+#[cfg(feature = "bedrock")]
 use base64::Engine as _;
+#[cfg(feature = "bedrock")]
 use serde_json::{Map, Value, json};
 
+#[cfg(feature = "bedrock")]
 use crate::media;
+#[cfg(feature = "bedrock")]
 use crate::provider::{InferenceRequest, InferenceResponse, ProviderError, Result};
 
 /// Whether `model` is an image model this provider runs.
@@ -33,6 +37,7 @@ pub(crate) fn is_image_model(model: &str) -> bool {
 /// The Stability tools that take an image and no prompt, and refuse one
 /// (400 "Invalid field 'prompt' in request. Available fields for remove-bg are:
 /// image, output_format").
+#[cfg(feature = "bedrock")]
 const UNPROMPTED_TOOLS: &[&str] = &[
     "stability.stable-image-remove-background",
     "stability.stable-fast-upscale",
@@ -47,6 +52,7 @@ const UNPROMPTED_TOOLS: &[&str] = &[
 /// `IMAGE_VARIATION` when handed an image, with the parameters as the
 /// generation config (`numberOfImages`, `width`, `height`, `cfgScale`,
 /// `seed`, `quality`).
+#[cfg(feature = "bedrock")]
 pub(crate) fn body(model: &str, request: &InferenceRequest) -> Value {
     let prompt = media::request_text(request);
     let image = media::first_part(request, |m| m.starts_with("image/"))
@@ -89,6 +95,7 @@ pub(crate) fn body(model: &str, request: &InferenceRequest) -> Value {
 }
 
 /// The images a reply carries, or the refusal it reports.
+#[cfg(feature = "bedrock")]
 pub(crate) fn images(model: &str, reply: &Value) -> Result<Vec<leviath_core::mime::Blob>> {
     if let Some(error) = reply.get("error").and_then(Value::as_str) {
         return Err(ProviderError::ApiError(format!(
@@ -135,6 +142,7 @@ pub(crate) fn images(model: &str, reply: &Value) -> Result<Vec<leviath_core::mim
     Ok(parts)
 }
 
+#[cfg(feature = "bedrock")]
 impl super::BedrockProvider {
     /// Make or edit images with the model `request` names.
     pub(super) async fn run_image(&self, request: &InferenceRequest) -> Result<InferenceResponse> {

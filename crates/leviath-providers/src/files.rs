@@ -15,7 +15,15 @@ use serde::{Deserialize, Serialize};
 
 use leviath_core::mime::MimeType;
 
-use crate::provider::{ProviderError, Result};
+use crate::provider::ProviderError;
+#[cfg(any(
+    feature = "anthropic",
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "meta"
+))]
+use crate::provider::Result;
 
 /// One mebibyte.
 pub const MIB: u64 = 1024 * 1024;
@@ -249,6 +257,12 @@ impl RemoteFile {
 }
 
 /// The bytes as a multipart file part, typed and named, without a copy.
+#[cfg(any(
+    feature = "anthropic",
+    feature = "openai",
+    feature = "xai",
+    feature = "meta"
+))]
 pub(crate) fn file_part(upload: &FileUpload) -> Result<reqwest::multipart::Part> {
     let len = upload.bytes.len() as u64;
     let body = reqwest::Body::from(bytes::Bytes::from_owner(ArcBytes(upload.bytes.clone())));
@@ -262,8 +276,20 @@ pub(crate) fn file_part(upload: &FileUpload) -> Result<reqwest::multipart::Part>
 }
 
 /// An `Arc<[u8]>` the `bytes` crate can own.
+#[cfg(any(
+    feature = "anthropic",
+    feature = "openai",
+    feature = "xai",
+    feature = "meta"
+))]
 struct ArcBytes(Arc<[u8]>);
 
+#[cfg(any(
+    feature = "anthropic",
+    feature = "openai",
+    feature = "xai",
+    feature = "meta"
+))]
 impl AsRef<[u8]> for ArcBytes {
     fn as_ref(&self) -> &[u8] {
         &self.0
@@ -280,6 +306,12 @@ pub fn now_secs() -> i64 {
 
 /// The file a vendor's upload answer describes: its `id`, and its expiry as
 /// Unix seconds or an RFC 3339 time, else `ttl_secs` from now.
+#[cfg(any(
+    feature = "anthropic",
+    feature = "openai",
+    feature = "xai",
+    feature = "meta"
+))]
 pub(crate) fn remote_from(body: &serde_json::Value, ttl_secs: u64) -> Result<RemoteFile> {
     let id = body
         .get("id")
@@ -303,6 +335,13 @@ pub(crate) fn remote_from(body: &serde_json::Value, ttl_secs: u64) -> Result<Rem
 
 /// A vendor's answer to an upload or a delete, as its JSON body or the error
 /// its status names.
+#[cfg(any(
+    feature = "anthropic",
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "meta"
+))]
 pub(crate) async fn read_answer(response: reqwest::Response) -> Result<serde_json::Value> {
     let status = response.status();
     if !status.is_success() {
@@ -323,6 +362,7 @@ pub fn names_a_missing_file(error: &ProviderError) -> bool {
 
 /// Upload to an OpenAI-shaped `POST /files`: a `file` part, a `purpose`, and
 /// `expires_after` from creation. OpenAI, xAI and Meta all take it.
+#[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
 pub(crate) async fn upload_openai_shape(
     endpoint: &crate::responses::client::Endpoint,
     upload: &FileUpload,
@@ -348,6 +388,7 @@ pub(crate) async fn upload_openai_shape(
 
 /// Delete from an OpenAI-shaped `DELETE /files/{id}`. A file already gone is
 /// deleted.
+#[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
 pub(crate) async fn delete_openai_shape(
     endpoint: &crate::responses::client::Endpoint,
     file: &RemoteFile,

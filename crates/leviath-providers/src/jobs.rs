@@ -196,6 +196,12 @@ fn settle<T>(log: Option<&JobLog>, step: &str, waited: Result<T>) -> Result<T> {
 }
 
 /// `summary`, followed by each note.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "meshy"
+))]
 pub(crate) fn noted(summary: String, notes: impl IntoIterator<Item = Option<String>>) -> String {
     notes
         .into_iter()

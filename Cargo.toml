@@ -112,7 +112,10 @@ leviath-net = { path = "crates/leviath-net", version = "0.6.4" }
 leviath-agent-client = { path = "crates/leviath-agent-client", version = "0.6.4" }
 leviath-runtime = { path = "crates/leviath-runtime", version = "0.6.4" }
 leviath-blueprint = { path = "crates/leviath-blueprint", version = "0.6.4" }
-leviath-providers = { path = "crates/leviath-providers", version = "0.6.4" }
+# Without its default features, so a library crate depending on it does not
+# switch every provider back on: the providers a build has are chosen where it
+# is assembled (`leviath-cli`, `leviath`), and those forward the features.
+leviath-providers = { path = "crates/leviath-providers", version = "0.6.4", default-features = false }
 leviath-mcp = { path = "crates/leviath-mcp", version = "0.6.4" }
 leviath-scripting = { path = "crates/leviath-scripting", version = "0.6.4" }
 leviath-package = { path = "crates/leviath-package", version = "0.6.4" }

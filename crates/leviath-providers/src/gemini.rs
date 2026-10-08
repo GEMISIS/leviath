@@ -14,23 +14,32 @@
 //! Veo, and the image, speech and music models, are served too (see
 //! `media`).
 
+#[cfg(feature = "google")]
 mod files;
 pub(crate) mod media;
+#[cfg(feature = "google")]
 mod request;
+#[cfg(feature = "google")]
 mod stream;
 
-use crate::learned::{LearnedModel, LearnedModels};
-use crate::openai_compat::send_chat_request;
-use crate::provider::{
-    InferenceRequest, InferenceResponse, LimitsSource, ModelCapabilities, ModelCapabilityOverride,
-    ModelInfo, Provider, ProviderError, Result, StreamChunk,
+#[cfg(feature = "google")]
+use crate::learned::LearnedModel;
+use crate::provider::{LimitsSource, ModelCapabilities};
+#[cfg(feature = "google")]
+use {
+    crate::learned::LearnedModels,
+    crate::openai_compat::send_chat_request,
+    crate::provider::{
+        InferenceRequest, InferenceResponse, ModelCapabilityOverride, ModelInfo, Provider,
+        ProviderError, Result, StreamChunk,
+    },
+    crate::rate_limit::RateLimiter,
+    async_trait::async_trait,
+    futures_core::Stream,
+    std::collections::HashMap,
+    std::pin::Pin,
+    std::time::Duration,
 };
-use crate::rate_limit::RateLimiter;
-use async_trait::async_trait;
-use futures_core::Stream;
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::time::Duration;
 
 /// The native API root.
 pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -92,6 +101,7 @@ impl GeminiFamily {
 ///
 /// The endpoint served 53 models in a single page at this size when measured;
 /// the page token is followed regardless.
+#[cfg(feature = "google")]
 const NATIVE_PAGE_SIZE: usize = 200;
 
 /// What the family table says about `model`, for a caller with no provider
@@ -128,6 +138,7 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
 ];
 
 /// Google Gemini provider.
+#[cfg(feature = "google")]
 pub struct GeminiProvider {
     /// HTTP client
     client: reqwest::Client,
@@ -160,6 +171,7 @@ pub struct GeminiProvider {
     video_poll: Duration,
 }
 
+#[cfg(feature = "google")]
 impl GeminiProvider {
     /// Create a new Gemini provider.
     pub fn new(client: reqwest::Client, api_key: String) -> Self {
@@ -261,6 +273,7 @@ impl GeminiProvider {
 }
 
 #[async_trait]
+#[cfg(feature = "google")]
 impl Provider for GeminiProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         if media::kind(&request.model) == Some(media::Kind::Video) {
@@ -471,6 +484,7 @@ impl Provider for GeminiProvider {
 /// not a chat model (embeddings, video, `aqa`) and is dropped rather than
 /// listed with limits a stage could never use. An entry with no such array
 /// is kept: absent is "did not say", and the live listing always says.
+#[cfg(feature = "google")]
 fn parse_native_entry(item: &serde_json::Value) -> Option<(String, LearnedModel)> {
     let name = item.get("name")?.as_str()?;
     let id = name.strip_prefix("models/").unwrap_or(name).to_string();
@@ -521,6 +535,7 @@ fn parse_native_entry(item: &serde_json::Value) -> Option<(String, LearnedModel)
     ))
 }
 
+#[cfg(feature = "google")]
 impl GeminiProvider {
     /// GET one page of the models listing and return its body.
     async fn fetch_model_listing(&self, url: String) -> Result<serde_json::Value> {
@@ -577,8 +592,10 @@ impl GeminiProvider {
     }
 }
 
+#[cfg(feature = "google")]
 #[cfg(test)]
 mod mime_tests;
 
+#[cfg(feature = "google")]
 #[cfg(test)]
 mod tests;

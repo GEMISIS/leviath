@@ -8,28 +8,66 @@
 //! The runtime stores what comes back in the run's blob store and routes it by
 //! the stage's `output_routing`, exactly as for Meshy.
 
+#[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
 pub(crate) mod images;
 
-use std::time::{Duration, Instant};
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "meta"
+))]
+use std::time::Duration;
+#[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
+use std::time::Instant;
 
-use base64::Engine as _;
-use leviath_core::mime::{Blob, MimeType};
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "meta",
+    feature = "meshy"
+))]
 use serde_json::Value;
 
-use crate::provider::{
-    ContentBlock, FinishReason, InferenceRequest, InferenceResponse, MessageContent, ProviderError,
-    Result, StreamChunk, TokenUsage,
+use crate::provider::{ContentBlock, InferenceRequest, MessageContent};
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "bedrock",
+    feature = "meta"
+))]
+use {
+    crate::provider::{
+        FinishReason, InferenceResponse, ProviderError, Result, StreamChunk, TokenUsage,
+    },
+    base64::Engine as _,
+    leviath_core::mime::{Blob, MimeType},
 };
 
 /// The largest body a media download reads: a 15-second 1080p video or a long
 /// speech track can pass the 64 MiB a JSON reply is capped at. What is kept is
 /// still bounded by `[mime] max_part_bytes` when the runtime stores it.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "meta"
+))]
 pub(crate) const DOWNLOAD_CAP: usize = 512 * 1024 * 1024;
 
 /// How long a media task may run when the stage names no timeout.
+#[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
 pub(crate) const DEFAULT_TASK_SECS: u64 = 900;
 
 /// Every hydrated mime block whose type passes `want`, as a `data:` URI.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "meta",
+    feature = "meshy"
+))]
 pub(crate) fn data_uris(request: &InferenceRequest, want: impl Fn(&str) -> bool) -> Vec<String> {
     parts(request, want)
         .map(|(part, data, _)| crate::mime::data_uri(&part.mime_type, data))
@@ -61,25 +99,47 @@ fn parts<'a>(
 }
 
 /// A decoded media part: its type, bytes and name.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "bedrock",
+    feature = "meta"
+))]
 pub(crate) struct Part {
     /// The part's mime type.
+    #[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
     pub(crate) mime_type: MimeType,
     /// Its bytes.
     pub(crate) bytes: Vec<u8>,
     /// Its name, when it has one.
+    #[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
     pub(crate) name: Option<String>,
 }
 
 /// The first hydrated part whose type passes `want`, decoded. An upload
 /// endpoint takes bytes, not a data URI.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "bedrock",
+    feature = "meta"
+))]
 pub(crate) fn first_part(request: &InferenceRequest, want: impl Fn(&str) -> bool) -> Option<Part> {
     let (part, data, name) = parts(request, want).next()?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data)
         .ok()?;
+    // Which fields a part carries depends on the providers built in; the
+    // unused halves are bound here so a build without them has nothing to warn
+    // about.
+    let _ = (&part, &name);
     Some(Part {
+        #[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
         mime_type: part.mime_type.clone(),
         bytes,
+        #[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
         name: name.map(str::to_string),
     })
 }
@@ -171,6 +231,13 @@ fn unlabelled<'a>(text: &'a str, region: &str) -> &'a str {
 }
 
 /// A non-empty string hint from `request.extra`.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "meta",
+    feature = "meshy"
+))]
 pub(crate) fn extra_str(request: &InferenceRequest, key: &str) -> Option<String> {
     request
         .extra
@@ -182,26 +249,42 @@ pub(crate) fn extra_str(request: &InferenceRequest, key: &str) -> Option<String>
 }
 
 /// An integer hint from `request.extra`.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "meta",
+    feature = "meshy"
+))]
 pub(crate) fn extra_i64(request: &InferenceRequest, key: &str) -> Option<i64> {
     request.extra.get(key).and_then(Value::as_i64)
 }
 
 /// A floating-point hint from `request.extra`.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "meshy"
+))]
 pub(crate) fn extra_f64(request: &InferenceRequest, key: &str) -> Option<f64> {
     request.extra.get(key).and_then(Value::as_f64)
 }
 
 /// A boolean hint from `request.extra`.
+#[cfg(any(feature = "xai", feature = "meshy"))]
 pub(crate) fn extra_bool(request: &InferenceRequest, key: &str) -> Option<bool> {
     request.extra.get(key).and_then(Value::as_bool)
 }
 
 /// The absolute deadline for a whole media task, from its stage timeout.
+#[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
 pub(crate) fn deadline(request: &InferenceRequest) -> Instant {
     Instant::now() + Duration::from_secs(request.request_timeout_secs.unwrap_or(DEFAULT_TASK_SECS))
 }
 
 /// What one poll of a long task found.
+#[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
 pub(crate) enum Poll {
     /// Finished, with the finished task.
     Done(Value),
@@ -213,6 +296,7 @@ pub(crate) enum Poll {
 
 /// Poll `check` every `interval` until it is done or fails, or `deadline`
 /// passes. `what` names the task in the errors.
+#[cfg(any(feature = "openai", feature = "xai", feature = "google"))]
 pub(crate) async fn poll_until<F, Fut>(
     what: &str,
     deadline: Instant,
@@ -244,6 +328,7 @@ where
 /// Download `url` without the provider's credential (a signed or public
 /// result URL on another host), up to [`DOWNLOAD_CAP`]. Answers the bytes and
 /// the content type the host sent.
+#[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
 pub(crate) async fn download(
     client: &reqwest::Client,
     url: &str,
@@ -267,6 +352,12 @@ pub(crate) async fn download(
 }
 
 /// A blob of `mime` named `name`, or the error for a type that does not parse.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "bedrock",
+    feature = "meta"
+))]
 pub(crate) fn blob(mime: &str, bytes: Vec<u8>, name: &str) -> Result<Blob> {
     let mime_type = MimeType::parse(mime).map_err(|e| {
         ProviderError::InvalidResponse(format!(
@@ -278,6 +369,7 @@ pub(crate) fn blob(mime: &str, bytes: Vec<u8>, name: &str) -> Result<Blob> {
 
 /// A file of a type this code names itself (`video/mp4`), so it is known to
 /// parse.
+#[cfg(any(feature = "openai", feature = "google"))]
 pub(crate) fn typed_blob(mime: &'static str, bytes: Vec<u8>, name: &str) -> Blob {
     Blob::new(
         MimeType::parse(mime).expect("a type named in code is a mime type"),
@@ -287,6 +379,7 @@ pub(crate) fn typed_blob(mime: &'static str, bytes: Vec<u8>, name: &str) -> Blob
 }
 
 /// A response's body, up to [`DOWNLOAD_CAP`].
+#[cfg(any(feature = "openai", feature = "google"))]
 pub(crate) async fn body_bytes(response: reqwest::Response) -> Result<Vec<u8>> {
     Ok(
         leviath_net::read_caps::read_body_capped(response, DOWNLOAD_CAP)
@@ -298,6 +391,7 @@ pub(crate) async fn body_bytes(response: reqwest::Response) -> Result<Vec<u8>> {
 
 /// The audio type a response's `Content-Type` names, or `audio/mpeg` when it
 /// names none or something that is not audio.
+#[cfg(feature = "openai")]
 pub(crate) fn audio_type(response: &reqwest::Response) -> MimeType {
     response
         .headers()
@@ -312,6 +406,7 @@ pub(crate) fn audio_type(response: &reqwest::Response) -> MimeType {
 /// its header's byte rate, and an MP3 by its first frame's bitrate, which
 /// holds for the constant-bitrate files the speech routes return (OpenAI's
 /// 76 032-byte, 128 kbps clip measured 4.752 s). `None` for anything else.
+#[cfg(feature = "openai")]
 pub(crate) fn audio_seconds(audio: &Blob) -> Option<f64> {
     let bytes = &audio.bytes;
     match audio.mime_type.as_str() {
@@ -351,6 +446,7 @@ pub(crate) fn audio_seconds(audio: &Blob) -> Option<f64> {
 }
 
 /// A JSON part the provider built itself, so its type is known good.
+#[cfg(any(feature = "openai", feature = "xai", feature = "meta"))]
 pub(crate) fn json_blob(bytes: Vec<u8>, name: &str) -> Blob {
     Blob::new(
         MimeType::parse("application/json").expect("application/json is a mime type"),
@@ -361,6 +457,13 @@ pub(crate) fn json_blob(bytes: Vec<u8>, name: &str) -> Blob {
 
 /// The response for a media call: a one-line summary as the text, the files
 /// as parts, and the call's cost when it is known.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "bedrock",
+    feature = "meta"
+))]
 pub(crate) fn response(
     summary: String,
     parts: Vec<Blob>,
@@ -379,6 +482,13 @@ pub(crate) fn response(
 /// `response` as the one chunk a stream carries. The default streaming path
 /// drops parts, which for a provider whose whole output is a part would lose
 /// the file.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "bedrock",
+    feature = "meta"
+))]
 pub(crate) fn one_chunk(response: InferenceResponse) -> crate::rate_limit::ChunkStream {
     let chunk = StreamChunk {
         delta: response.content,
@@ -392,6 +502,13 @@ pub(crate) fn one_chunk(response: InferenceResponse) -> crate::rate_limit::Chunk
 }
 
 /// The summary line for `parts` from `route`.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "bedrock",
+    feature = "meta"
+))]
 pub(crate) fn summary(route: &str, parts: &[Blob]) -> String {
     format!(
         "Produced {} part(s) with {route}: {}",
@@ -405,6 +522,13 @@ pub(crate) fn summary(route: &str, parts: &[Blob]) -> String {
 }
 
 /// The file extension a person expects for `mime`.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "google",
+    feature = "bedrock",
+    feature = "meta"
+))]
 pub(crate) fn extension(mime: &str) -> &'static str {
     match mime {
         "image/jpeg" => "jpg",

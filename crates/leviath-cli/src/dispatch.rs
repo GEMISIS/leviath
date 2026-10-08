@@ -178,6 +178,19 @@ pub const HELP_TEMPLATE: &str = "\
 Options:
 {options}";
 
+/// What `lev --version` prints: the version, and below it the providers this
+/// build carries when it carries fewer than all of them.
+pub fn long_version() -> &'static str {
+    static LONG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "{}{}",
+            env!("CARGO_PKG_VERSION"),
+            leviath_providers::compiled::version_note()
+        )
+    });
+    LONG.as_str()
+}
+
 /// The categorized top-level command list, shown in place of clap's flat one.
 ///
 /// Hand-maintained because clap cannot group subcommands, and held to the enum
@@ -503,6 +516,13 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A build with every provider prints the plain version; the providers
+    /// line is for a build that left some out.
+    #[test]
+    fn the_long_version_is_the_version_for_a_full_build() {
+        assert_eq!(long_version(), env!("CARGO_PKG_VERSION"));
+    }
 
     /// Every command clap knows about is categorized in [`COMMANDS_HELP`], so a
     /// new subcommand cannot be added without giving it a section - the whole

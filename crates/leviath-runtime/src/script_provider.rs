@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use leviath_providers::rhai_provider::host::HttpExecutor;
-use leviath_providers::{ModelCapabilityOverride, Provider, RateLimitConfig, RhaiProvider};
+use leviath_providers::{ModelCapabilityOverride, Provider, RateLimitConfig};
 
 /// Per-provider configuration from `[model_providers.<name>]`. All fields are
 /// optional overrides - a script activates by an agent referencing its name and
@@ -326,7 +326,7 @@ impl ScriptProviderLayer {
             }
         };
         // No lock held here - see the note above.
-        match RhaiProvider::from_script(
+        match leviath_providers::rhai_provider::load(
             &path,
             executor,
             leviath_providers::rhai_provider::ScriptProviderSettings {
@@ -339,8 +339,7 @@ impl ScriptProviderLayer {
                 env_allowlist: config.env_allowlist.clone(),
             },
         ) {
-            Ok(p) => {
-                let provider: Arc<dyn Provider> = Arc::new(p);
+            Ok(provider) => {
                 leviath_core::sync::lock(&self.cache).insert(
                     name.to_string(),
                     Cached {

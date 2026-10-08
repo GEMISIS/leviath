@@ -11,25 +11,31 @@
 //! stays usable under a zero data retention arrangement. Reasoning is carried
 //! between turns by replaying the encrypted items the route hands back.
 
+#[cfg(feature = "xai")]
 pub(crate) mod account;
 pub mod catalog;
 pub(crate) mod media;
 
+#[cfg(feature = "xai")]
 use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::{Arc, RwLock};
 
-use async_trait::async_trait;
-use futures_core::Stream;
-
-use crate::capabilities::{ModelCapabilities, ModelCapabilityOverride};
-use crate::learned::LearnedModels;
-use crate::provider::{
-    InferenceRequest, InferenceResponse, ModelInfo, Provider, RateLimitConfig, Result, StreamChunk,
-};
+use crate::responses::Dialect;
 pub use crate::responses::client::Auth;
-use crate::responses::client::{Endpoint, api_error};
-use crate::responses::{Dialect, request as request_body, stream};
+#[cfg(feature = "xai")]
+use {
+    crate::capabilities::{ModelCapabilities, ModelCapabilityOverride},
+    crate::learned::LearnedModels,
+    crate::provider::{
+        InferenceRequest, InferenceResponse, ModelInfo, Provider, RateLimitConfig, Result,
+        StreamChunk,
+    },
+    crate::responses::client::{Endpoint, api_error},
+    crate::responses::{request as request_body, stream},
+    async_trait::async_trait,
+    futures_core::Stream,
+    std::pin::Pin,
+    std::sync::{Arc, RwLock},
+};
 
 /// The registry name for an API key.
 pub const PROVIDER_NAME: &str = "xai";
@@ -59,9 +65,11 @@ pub const GROK_DIALECT: Dialect = Dialect {
 };
 
 /// Each model's accepted reasoning efforts, by id.
+#[cfg(feature = "xai")]
 type Efforts = HashMap<String, Vec<String>>;
 
 /// Grok over xAI's API.
+#[cfg(feature = "xai")]
 pub struct XaiProvider {
     endpoint: Endpoint,
     dialect: Dialect,
@@ -86,6 +94,7 @@ pub struct XaiProvider {
     poll_interval: std::time::Duration,
 }
 
+#[cfg(feature = "xai")]
 impl XaiProvider {
     /// A provider authenticating with `auth`, registered under the name its
     /// credential implies: `xai` for a key, `grok` for a sign-in.
@@ -321,12 +330,14 @@ impl XaiProvider {
 }
 
 /// Whether a 400 body is the route refusing a reasoning effort.
+#[cfg(feature = "xai")]
 fn refuses_effort(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
     lower.contains("reasoning") && (lower.contains("effort") || lower.contains("not supported"))
 }
 
 #[async_trait]
+#[cfg(feature = "xai")]
 impl Provider for XaiProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         if let Some(kind) = media::kind(&self.canonical(&request.model)) {
@@ -610,5 +621,6 @@ impl Provider for XaiProvider {
     }
 }
 
+#[cfg(feature = "xai")]
 #[cfg(test)]
 mod tests;

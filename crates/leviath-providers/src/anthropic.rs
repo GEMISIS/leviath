@@ -1,24 +1,32 @@
 //! Anthropic Claude provider implementation.
 
+#[cfg(feature = "anthropic")]
 mod catalog;
+#[cfg(feature = "anthropic")]
 mod files;
+#[cfg(feature = "anthropic")]
 mod stream;
 
 use crate::capabilities::{Match, Row};
-use crate::learned::LearnedModels;
-use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride,
-    ModelInfo, Provider, ProviderError, Result, StreamChunk, TokenUsage, ToolCall,
+use crate::provider::ModelCapabilities;
+#[cfg(feature = "anthropic")]
+use {
+    crate::learned::LearnedModels,
+    crate::provider::{
+        FinishReason, InferenceRequest, InferenceResponse, ModelCapabilityOverride, ModelInfo,
+        Provider, ProviderError, Result, StreamChunk, TokenUsage, ToolCall,
+    },
+    crate::rate_limit::RateLimiter,
+    async_trait::async_trait,
+    futures_core::Stream,
+    std::collections::HashMap,
+    std::pin::Pin,
+    stream::anthropic_sse_stream,
 };
-use crate::rate_limit::RateLimiter;
-use async_trait::async_trait;
-use futures_core::Stream;
-use std::collections::HashMap;
-use std::pin::Pin;
-use stream::anthropic_sse_stream;
 
 /// Read the dump directory from the environment and delegate to
 /// [`dump_request`]. See that function for the rationale.
+#[cfg(feature = "anthropic")]
 fn maybe_dump_request(body: &serde_json::Value) {
     dump_request(
         body,
@@ -40,6 +48,7 @@ fn maybe_dump_request(body: &serde_json::Value) {
 /// the alternative and is the shape of thing that goes stale silently - the
 /// Ollama context window guessed from model names is wrong by 4x, which is
 /// the failure this deliberately avoids.
+#[cfg(any(feature = "anthropic", feature = "bedrock", feature = "openrouter"))]
 const MIN_CACHEABLE_TOKENS: usize = 1024;
 
 /// How far back Anthropic looks for a usable cache entry, in content blocks.
@@ -58,6 +67,7 @@ const MIN_CACHEABLE_TOKENS: usize = 1024;
 ///
 /// Kept a little under the documented figure. Being wrong low costs one extra
 /// marker; being wrong high costs the entire conversation cache.
+#[cfg(feature = "anthropic")]
 const CACHE_LOOKBACK_BLOCKS: usize = 16;
 
 /// How many of the four markers the system blocks may claim.
@@ -66,6 +76,7 @@ const CACHE_LOOKBACK_BLOCKS: usize = 16;
 /// marker in the messages covers everything - every system block *and* the
 /// conversation ahead of it - so it is the single most valuable position in the
 /// request. A fourth system marker can only ever cover less than that.
+#[cfg(any(feature = "anthropic", feature = "bedrock", feature = "openrouter"))]
 pub(crate) const MAX_SYSTEM_BREAKPOINTS: usize = 2;
 
 /// Choose which messages carry a `cache_control` breakpoint.
@@ -87,6 +98,7 @@ pub(crate) const MAX_SYSTEM_BREAKPOINTS: usize = 2;
 /// when there are more than fit, because they cover the most conversation - and
 /// the stride guarantees consecutive kept positions are within the lookback of
 /// one another.
+#[cfg(feature = "anthropic")]
 fn message_cache_breakpoints(block_counts: &[usize], budget: usize) -> Vec<usize> {
     if budget == 0 {
         return Vec::new();
@@ -148,6 +160,7 @@ fn message_cache_breakpoints(block_counts: &[usize], budget: usize) -> Vec<usize
 /// a candidate needs both to agree: the blueprint knows whether an author
 /// rewrites a region, and the runtime knows that it clears a `Temporary` one
 /// whatever the blueprint says.
+#[cfg(any(feature = "anthropic", feature = "bedrock", feature = "openrouter"))]
 pub(crate) fn system_cache_breakpoints(
     blocks: &[crate::provider::SystemBlock],
     budget: usize,
@@ -218,6 +231,7 @@ pub(crate) fn system_cache_breakpoints(
 /// injected into the system prompt) differs from the small requests that
 /// succeed - size, structure, and content - without a special build. Enable by
 /// setting `LEVIATH_DUMP_REQUEST_DIR`.
+#[cfg(feature = "anthropic")]
 fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
     let bytes = serde_json::to_vec(body).map(|v| v.len()).unwrap_or(0);
     tracing::debug!(request_bytes = bytes, "anthropic request body");
@@ -277,6 +291,7 @@ pub enum CacheTtl {
 }
 
 /// Anthropic Claude provider.
+#[cfg(feature = "anthropic")]
 pub struct AnthropicProvider {
     /// HTTP client
     client: reqwest::Client,
@@ -418,6 +433,7 @@ pub(crate) const MODELS: &[Row] = &[
     },
 ];
 
+#[cfg(feature = "anthropic")]
 impl AnthropicProvider {
     /// Create a new Anthropic provider.
     pub fn new(client: reqwest::Client, api_key: String) -> Self {
@@ -852,6 +868,7 @@ impl AnthropicProvider {
 }
 
 #[async_trait]
+#[cfg(feature = "anthropic")]
 impl Provider for AnthropicProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         tracing::debug!(model = %request.model, "Calling Anthropic API");
@@ -1061,6 +1078,7 @@ impl Provider for AnthropicProvider {
     }
 }
 
+#[cfg(feature = "anthropic")]
 impl AnthropicProvider {
     /// Every page of `GET /v1/models`, parsed.
     async fn fetch_catalog(&self) -> Result<HashMap<String, crate::learned::LearnedModel>> {
@@ -1127,9 +1145,11 @@ impl AnthropicProvider {
     }
 }
 
+#[cfg(feature = "anthropic")]
 #[cfg(test)]
 mod mime_tests;
 
+#[cfg(feature = "anthropic")]
 #[cfg(test)]
 mod tests {
     // The SSE parser lives in `stream`, and its tests stayed here beside the
@@ -4178,6 +4198,7 @@ mod tests {
     }
 }
 
+#[cfg(feature = "anthropic")]
 #[cfg(test)]
 mod learned_tests {
     use super::*;
