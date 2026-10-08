@@ -14,12 +14,12 @@
 //! credentials, no request signing. Every host is regional, so the region is
 //! part of the address and the one setting a user has to get right.
 
-pub mod account;
 pub(crate) mod catalog;
 #[cfg(feature = "bedrock")]
 mod convert;
 #[cfg(feature = "bedrock")]
 mod count;
+pub mod data_retention;
 #[cfg(feature = "bedrock")]
 mod eventstream;
 pub(crate) mod media;
@@ -51,10 +51,10 @@ pub const DEFAULT_REGION: &str = "us-east-1";
 /// The environment variable AWS's own tooling reads the API key from.
 pub const KEY_ENV: &str = "AWS_BEARER_TOKEN_BEDROCK";
 
+pub use catalog::{WindowRow, window_for, windows_read_on};
 /// Re-exported so a listing compiled from the tables can name what AWS's
 /// cards say about a model.
-pub use account::{Account, AccountSpec};
-pub use catalog::{WindowRow, window_for, windows_read_on};
+pub use data_retention::{DataRetention, DataRetentionSpec};
 
 /// The Bedrock provider.
 #[cfg(feature = "bedrock")]
