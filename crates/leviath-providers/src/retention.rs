@@ -605,6 +605,11 @@ mod tests {
         );
         assert!(is_covered_claude("Anthropic.Claude-Fable-5-1"));
         assert!(!is_covered_claude("claude-opus-5"));
+        // The 5.5 line keeps the agreement-controlled retention Opus 5 has.
+        for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+            assert!(!is_covered_claude(model), "{model}");
+            assert_eq!(builtin("anthropic", model).control, Control::Agreement);
+        }
         let p = builtin("openai", "gpt-5.5");
         assert_eq!(p.summary(), "30 days (by agreement, documented)");
         for c in [

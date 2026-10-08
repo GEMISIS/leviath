@@ -238,6 +238,11 @@ fn without_prefix_strips_only_a_profile_prefix() {
         "amazon.nova-pro-v1:0"
     );
     assert_eq!(without_prefix("bare"), "bare");
+    // India's geo profile, which the cards name beside the others.
+    assert_eq!(
+        without_prefix("in.anthropic.claude-opus-5"),
+        "anthropic.claude-opus-5"
+    );
 }
 
 #[test]

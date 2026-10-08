@@ -82,15 +82,18 @@ yours about the budget, and it applies to any blueprint you run.
 
 The per-token rates differ by more than 10x across the models a blueprint might name, so which
 model runs which stage is the largest single lever after headcount. Rates below are dollars per
-million tokens, as published on 2026-08-23:
+million tokens, as published on 2026-10-08:
 
 | model | input | cached input | output |
 | --- | --- | --- | --- |
 | `claude-opus-5` | $5.00 | $0.50 | $25.00 |
 | `gpt-5.5` | $5.00 | $0.50 | $30.00 |
+| `claude-opus-5-5` | $4.00 | $0.20 | $20.00 |
 | `claude-sonnet-5` | $2.00 | $0.20 | $10.00 |
+| `claude-sonnet-5-5` | $2.00 | $0.10 | $10.00 |
 | `gemini-3.1-pro` | $2.00 | $0.20 | $12.00 |
 | `gemini-3.5-flash` | $1.50 | $0.15 | $9.00 |
+| `claude-haiku-5-5` | $0.10 | $0.01 | $0.50 |
 
 A research stage that reads a great deal and writes little is dominated by its input rate; a
 stage that rewrites a whole report is dominated by output. So the expensive model belongs where
@@ -192,8 +195,8 @@ output_per_mtok = 15.0
 ## A long prompt can cost more per token
 
 Some vendors bill a whole request at a higher rate once its prompt reaches a size. That size is
-200 000 tokens on Gemini 2.5 Pro, Claude Sonnet 4 and the current Grok models, and 272 000 on
-several GPT-5 models.
+100 000 tokens on Claude Haiku 5.5, 200 000 on Gemini 2.5 Pro, Claude Sonnet 4 and the current
+Grok models, and 272 000 on several GPT-5 models.
 Leviath bills such a request at the higher rate. It does not let the higher rate decide which
 model a stage uses, but it tells you:
 

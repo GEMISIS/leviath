@@ -684,6 +684,29 @@ mod cost_tests {
         assert_eq!(p.cached_input_per_mtok, 0.5);
     }
 
+    /// The Claude 5.5 line has rows of its own, so none is priced through the
+    /// shorter `claude-opus-5` or `claude-sonnet-5` row it starts with.
+    #[test]
+    fn the_claude_5_5_line_is_priced_by_its_own_rows() {
+        for (model, input, cached, write, output) in [
+            ("claude-opus-5-5", 4.0, 0.2, 5.0, 20.0),
+            ("claude-sonnet-5-5", 2.0, 0.1, 2.5, 10.0),
+            ("claude-haiku-5-5", 0.1, 0.01, 0.125, 0.5),
+        ] {
+            let p = published_rates("anthropic", model).expect(model);
+            assert_eq!(
+                (
+                    p.input_per_mtok,
+                    p.cached_input_per_mtok,
+                    p.cache_write_per_mtok,
+                    p.output_per_mtok
+                ),
+                (input, cached, write, output),
+                "{model}"
+            );
+        }
+    }
+
     /// OpenAI and Google quote a cached-input rate and charge nothing extra to
     /// write, so their write rate is the input rate rather than a premium.
     #[test]

@@ -332,6 +332,17 @@ mod tests {
     }
 
     #[test]
+    fn the_claude_5_5_line_reads_text_images_and_pdfs_by_its_own_rows() {
+        for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+            assert!(published_modality("anthropic", model).is_some(), "{model}");
+            let m = anthropic(model);
+            assert!(m.accepts(&mt("image/png")), "{model}");
+            assert!(m.accepts(&mt("application/pdf")), "{model}");
+            assert!(m.produces(&mt("text/plain")), "{model}");
+        }
+    }
+
+    #[test]
     fn the_catalogue_table_refines_the_name_heuristic() {
         // The catalogue names claude-3-haiku with a narrower list than the
         // family default: images, but no PDF. The precise row wins.
