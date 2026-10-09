@@ -1,8 +1,16 @@
-//! Leviath CLI library - re-exports for integration tests.
+//! Leviath CLI library - the whole of `lev`, behind [`run`].
 //!
-//! `missing_docs` applies here like everywhere else in the workspace. This crate
-//! ships the `lev` binary rather than a library anyone calls, so the case for
-//! exempting it was real - and the case against turned out to be stronger: the
+//! The `lev` binary is an allocator and a call to [`run`]. A fork that wants
+//! its own binary around lev (another name, setup of its own, argv rewritten
+//! first) calls [`run`] or [`run_from`] from its `main` the same way:
+//!
+//! ```no_run
+//! fn main() -> anyhow::Result<()> {
+//!     leviath_cli::run()
+//! }
+//! ```
+//!
+//! `missing_docs` applies here like everywhere else in the workspace. The
 //! `pub` surface is what the integration tests drive, and a wire type like
 //! `commands::serve::ServerEvent` is read by clients that never see this
 //! source. An undocumented field there is a gap for somebody.
@@ -22,6 +30,8 @@ pub mod credentials;
 pub mod daemon;
 pub mod dependencies;
 pub mod dispatch;
+mod entry;
+pub use entry::{run, run_from};
 pub(crate) mod held_checkpoints;
 pub mod home_backup;
 pub(crate) mod lint;

@@ -482,11 +482,12 @@ jobs:
           rm -f "$probe"
           echo "Suppression lint confirmed: the planted probe was caught."
 
-  # `crates/leviath-cli/src/main.rs` is the ONE file excluded from coverage
+  # `crates/leviath-cli/src/main.rs` and the `leviath_cli::run` it calls
+  # (`crates/leviath-cli/src/entry/`) are the code excluded from coverage
   # measurement - the thin, un-unit-tested composition root where real terminal
   # / stdin / port / subprocess / `/dev/tty` I/O is wired into the tested lib
   # cores. Changing it needs deliberate maintainer sign-off: this job fails any
-  # PR that touches main.rs unless the maintainer applies the
+  # PR that touches either unless the maintainer applies the
   # `allow-main-rs-change` label.
   guard-main-rs:
     name: Guard bin entrypoint (main.rs)
@@ -515,13 +516,14 @@ jobs:
           # and the fix looked like applying the override label to a PR that
           # never touched the file.
           # Any main.rs, not just the one that exists today. The coverage
-          # exclusion is the regex `[\\/]main\.rs$` (xtask/src/coverage.rs), so
-          # a second bin crate's entrypoint would be unmeasured the day it is
-          # added - and naming one path here would have let it through both the
-          # measurement and this review gate at once.
-          CHANGED=$(git diff --name-only "$BASE...$HEAD" | grep -E '(^|/)main\.rs$' || true)
+          # exclusion is `UNMEASURED` in xtask/src/coverage.rs, which matches
+          # every `main.rs`, so a second bin crate's entrypoint would be
+          # unmeasured the day it is added - and naming one path here would
+          # have let it through both the measurement and this review gate at
+          # once. The same regex leaves out leviath-cli's `src/entry/`.
+          CHANGED=$(git diff --name-only "$BASE...$HEAD" | grep -E '(^|/)main\.rs$|^crates/leviath-cli/src/entry/' || true)
           if [ -z "$CHANGED" ]; then
-            echo "main.rs unchanged."
+            echo "main.rs and leviath-cli/src/entry/ unchanged."
             exit 0
           fi
 
@@ -544,7 +546,7 @@ jobs:
             *,allow-main-rs-change,*)
               echo "main.rs change approved via 'allow-main-rs-change' label: $CHANGED" ;;
             *)
-              echo "::error::main.rs is the coverage-excluded bin entrypoint; changing it needs maintainer approval. Apply the 'allow-main-rs-change' label to override. Changed: $CHANGED"
+              echo "::error::main.rs and leviath-cli/src/entry/ are the coverage-excluded bin entrypoint; changing them needs maintainer approval. Apply the 'allow-main-rs-change' label to override. Changed: $CHANGED"
               exit 1 ;;
           esac
 

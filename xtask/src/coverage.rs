@@ -18,13 +18,24 @@
 //! --fail-under-{lines,functions,regions} 100` invocation, which also writes a
 //! browsable HTML report to `coverage/html/<pkg>`. `--fail-under-* 100` on the
 //! package total is equivalent to a per-file 100% gate (a total can only be
-//! 100% if every file is). `src/main.rs` - the un-unit-tested bin composition
-//! root - is excluded via `--ignore-filename-regex`.
+//! 100% if every file is). The un-unit-tested bin composition root - every
+//! `src/main.rs`, and `leviath-cli`'s `src/entry/` that the `lev` binary's
+//! `main.rs` calls into - is excluded via `--ignore-filename-regex`
+//! ([`UNMEASURED`]).
 //!
 //! Branch coverage is intentionally not collected: `cargo llvm-cov --branch`
 //! reliably SIGSEGVs on the same open upstream LLVM bug linked above.
 
 use anyhow::{Context, Result};
+
+/// The files left out of measurement: every bin's `main.rs`, and the
+/// `leviath_cli::run` composition root under `leviath-cli/src/entry/`, which
+/// is public so a fork can wrap lev in a binary of its own. Both are the thin
+/// layer where real terminal, socket and subprocess I/O meets the tested
+/// cores, and CI's `guard-main-rs` job asks for sign-off on a change to
+/// either. Separators match `/` and `\`, since llvm-cov reports Windows paths
+/// with backslashes.
+const UNMEASURED: &str = r"[\\/]main\.rs$|leviath-cli[\\/]src[\\/]entry[\\/]";
 
 // ── Runner trait (injectable for testing) ────────────────────────────────────
 
@@ -132,10 +143,8 @@ fn gate_package(runner: &dyn Runner, pkg: &str) -> Result<()> {
         "--package",
         pkg,
         "--all-features",
-        // The bin (src/main.rs) is the un-unit-tested composition root; exclude
-        // it on every OS (llvm-cov reports `...\src\main.rs` on Windows).
         "--ignore-filename-regex",
-        r"[\\/]main\.rs$",
+        UNMEASURED,
         "--fail-under-lines",
         "100",
         "--fail-under-functions",
@@ -186,7 +195,7 @@ fn uncovered_regions(runner: &dyn Runner, pkg: &str) -> Option<Vec<String>> {
             // No `--all-features` here: `report` re-reads the profile data the
             // gate just produced and rejects the flag outright.
             "--ignore-filename-regex",
-            r"[\\/]main\.rs$",
+            UNMEASURED,
             "--json",
             "--output-path",
             REPORT_JSON,
@@ -428,7 +437,7 @@ mod tests {
         assert!(has_pair(a, "--fail-under-lines", "100"));
         assert!(has_pair(a, "--fail-under-functions", "100"));
         assert!(has_pair(a, "--fail-under-regions", "100"));
-        assert!(a.iter().any(|s| s == r"[\\/]main\.rs$"));
+        assert!(has_pair(a, "--ignore-filename-regex", UNMEASURED));
         assert!(has_pair(a, "--output-dir", "coverage/html/leviath-core"));
     }
 

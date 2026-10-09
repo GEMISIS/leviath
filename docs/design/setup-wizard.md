@@ -209,9 +209,10 @@ round trip both proves the credential and returns the model list the picker
 needs.
 
 `ProviderVerifier` is the seam that keeps tests off the network: `SkipVerifier`
-backs `--no-verify`, `LiveVerifier` is instantiated only by `main.rs`, and the
-wizard never calls a provider directly. Checks run on a background task and land
-through a channel, so the UI never blocks on the network.
+backs `--no-verify`, `LiveVerifier` is instantiated only by `lev`'s composition
+root (`leviath-cli`'s `src/entry/`), and the wizard never calls a provider
+directly. Checks run on a background task and land through a channel, so the UI
+never blocks on the network.
 
 A failure is always a warning and never a blocker - an offline laptop or a
 provider outage must not stop someone finishing setup. Errors are mapped to what
@@ -225,9 +226,9 @@ provider name means the registry never built one (reporting that as
 The terminal wizard is a desktop front-end, not something prescribed to Leviath
 as a whole:
 
-- **Taking over a TTY** happens only in `main.rs`'s `CrosstermSetup`. Without a
-  terminal, `lev setup` refuses and names the flags to use instead rather than
-  starting ratatui on a pipe.
+- **Taking over a TTY** happens only in the composition root's `CrosstermSetup`.
+  Without a terminal, `lev setup` refuses and names the flags to use instead
+  rather than starting ratatui on a pipe.
 - **Scanning a home directory** for other tools' config is desktop-shaped. A
   host with no such layout simply finds no sources and the step is skipped.
 - **The real environment** - `std::env`, `dirs::config_dir()`, a real browser,
