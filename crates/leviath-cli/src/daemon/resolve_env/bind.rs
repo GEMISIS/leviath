@@ -486,15 +486,15 @@ impl DaemonEnv {
             .and_then(|s| spec.stage(s.name.as_str()));
         let candidates = entry.map_or_else(Vec::new, |plan| {
             leviath_runtime::title::stage_pairs(
-                plan.provider.as_str(),
-                plan.model.as_str(),
-                &plan.fallbacks,
+                plan.model.provider.as_str(),
+                plan.model.id.as_str(),
+                &plan.model.fallbacks,
             )
         });
         let label = spec
             .stages
             .first()
-            .map(|p| format!("{}/{}", p.provider, p.model));
+            .map(|p| format!("{}/{}", p.model.provider, p.model.id));
         let chain = leviath_runtime::title::title_chain(settings, label.as_deref(), &candidates);
         match settings.enabled && !chain.is_empty() {
             true => Bindings::new().with(leviath_runtime::title::TitleCandidates(chain)),

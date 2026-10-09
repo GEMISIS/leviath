@@ -31,7 +31,7 @@ fn the_published_schemas_match_this_build() {
 /// The hash of the binary samples below as this build encodes them. When it
 /// changes, the binary layout changed: bump `LAYOUT_VERSION`, then record
 /// the new hash here.
-const LAYOUT_HASH: &str = "13e7983108dbb98adb73fe12be27da0c734f4e9af8005378e8389c8fa81c452e";
+const LAYOUT_HASH: &str = "58a74c4bbee5107e8524e1ed1d15e1a89bd514454d35e074d83a9627e1c20539";
 
 /// A fully populated sample of every frame type, so a change to any type's
 /// binary encoding changes the bytes.

@@ -21,10 +21,10 @@ async fn a_raw_request_resolves_to_a_whole_spec() {
     assert_eq!(spec.origin, SpecOrigin::Raw);
     assert_eq!(spec.stages.len(), 2);
     assert_eq!(spec.stages[0].stage.as_str(), "plan");
-    assert_eq!(spec.stages[0].provider.as_str(), "mock");
-    assert_eq!(spec.stages[0].model.as_str(), "gpt-mock");
-    assert_eq!(spec.stages[0].context_window, 100_000);
-    assert_eq!(spec.stages[0].max_output_tokens, None);
+    assert_eq!(spec.stages[0].model.provider.as_str(), "mock");
+    assert_eq!(spec.stages[0].model.id.as_str(), "gpt-mock");
+    assert_eq!(spec.stages[0].model.context_window, 100_000);
+    assert_eq!(spec.stages[0].reply_cap, None);
     assert_eq!(spec.stages[0].output, None);
     assert_eq!(spec.seeded["task"].text, "do the thing");
     assert_eq!(spec.placement.workdir, PathBuf::from("/work"));
@@ -66,8 +66,10 @@ fn installed(graph: RunGraph) -> LoadedBlueprint {
 }
 
 /// A fan-out's installed worker blueprint is pinned to the revision installed
-/// when the run is resolved; one not installed, or already pinned, is left as
-/// written, and so is any other stage.
+/// when the run is resolved, and one already pinned keeps its revision. One
+/// that is not installed refuses the spawn, named at the stage's worker, with
+/// everything else wrong with the request rather than when the first worker
+/// starts.
 #[tokio::test]
 async fn a_fan_out_worker_blueprint_is_pinned_to_the_installed_revision() {
     use crate::spec::graph::{FanOutDef, StageMode, WorkerFailure, WorkerSource};
@@ -107,10 +109,9 @@ async fn a_fan_out_worker_blueprint_is_pinned_to_the_installed_revision() {
             BlueprintRef::parse(&format!("coder@{}", Digest::of(b"v1"))).unwrap()
         )
     );
-    assert_eq!(
-        worker(ghost).await,
-        WorkerSource::Blueprint(BlueprintRef::parse("ghost").unwrap())
-    );
+    let issues = spawn(&raw(ghost), &env).await.expect_err("refused");
+    let paths: Vec<String> = issues.iter().map(|i| i.path.to_string()).collect();
+    assert_eq!(paths, ["source.raw.stages.plan.mode.fan_out.worker.name"]);
     assert_eq!(
         worker(kept).await,
         WorkerSource::Blueprint(BlueprintRef::parse(&pinned).unwrap())

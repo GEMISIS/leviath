@@ -61,8 +61,8 @@ fn a_finished_run_whose_blueprint_is_gone_converts_from_what_it_recorded() {
         .map(|s| s.name.as_str())
         .collect();
     assert_eq!(stages, ["main"]);
-    assert_eq!(file.spec.stages[0].provider.as_str(), "openai");
-    assert_eq!(file.spec.stages[0].model.as_str(), "gpt-mock");
+    assert_eq!(file.spec.stages[0].model.provider.as_str(), "openai");
+    assert_eq!(file.spec.stages[0].model.id.as_str(), "gpt-mock");
     assert!(file.spec.stages[0].tools.is_empty());
     // Its regions, so its context reads back.
     let regions: Vec<&str> = file
@@ -145,7 +145,7 @@ fn a_recorded_graph_has_every_stage_the_run_entered_and_the_edges_it_took() {
         .map(|e| (e.from.as_str(), e.to.as_str()))
         .collect();
     assert_eq!(edges, [("main", "review")]);
-    assert_eq!(file.spec.stages[1].provider.as_str(), "anthropic");
+    assert_eq!(file.spec.stages[1].model.provider.as_str(), "anthropic");
     assert_eq!(file.last.cursor.stage.as_str(), "review");
 }
 
@@ -571,8 +571,8 @@ fn a_run_lists_the_task_and_model_it_recorded() {
         }
     });
     let (_, file) = run.converted();
-    assert_eq!(file.spec.stages[0].provider.as_str(), "anthropic");
-    assert_eq!(file.spec.stages[0].model.as_str(), "claude-x");
+    assert_eq!(file.spec.stages[0].model.provider.as_str(), "anthropic");
+    assert_eq!(file.spec.stages[0].model.id.as_str(), "claude-x");
     let meta = listed(&run);
     assert_eq!(meta.task, "What time is it?");
     assert_eq!(meta.model.as_deref(), Some("anthropic/claude-x"));

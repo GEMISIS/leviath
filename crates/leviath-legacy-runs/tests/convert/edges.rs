@@ -174,17 +174,17 @@ fn a_rich_run_carries_its_scripts_inputs_and_stages() {
     );
     assert!(report.defaulted("origin.blueprint.digest").is_some());
     let main = spec.stage("main").unwrap();
-    assert_eq!(main.max_output_tokens, Some(4096));
-    assert_eq!(main.fallbacks.len(), 1);
-    assert_eq!(main.fallbacks[0].model.as_str(), "m2");
+    assert_eq!(main.reply_cap, Some(4096));
+    assert_eq!(main.model.fallbacks.len(), 1);
+    assert_eq!(main.model.fallbacks[0].model.as_str(), "m2");
     // A stage that takes the caller's model runs on the one the run was
     // launched with.
     let second = spec.stage("second").unwrap();
-    assert_eq!(second.provider.as_str(), "openai");
-    assert_eq!(second.model.as_str(), "gpt-mock");
+    assert_eq!(second.model.provider.as_str(), "openai");
+    assert_eq!(second.model.id.as_str(), "gpt-mock");
     assert!(report.defaulted("stages.second.model").is_none());
-    assert_eq!(spec.stage("third").unwrap().max_output_tokens, None);
-    assert!(report.defaulted("stages.third.max_output_tokens").is_some());
+    assert_eq!(spec.stage("third").unwrap().reply_cap, None);
+    assert!(report.defaulted("stages.third.reply_cap").is_some());
     assert!(matches!(&spec.launch.unattended, Unattended::Profile(p) if p.as_str() == "careful"));
     assert_eq!(spec.launch.max_depth, 3);
     assert_eq!(
@@ -219,7 +219,7 @@ fn a_stage_with_a_bare_model_and_no_launch_model_is_named_unknown() {
     rich(&run);
     let (report, file) = run.converted();
     let second = file.spec.stage("second").unwrap();
-    assert_eq!(second.provider.as_str(), "unknown");
+    assert_eq!(second.model.provider.as_str(), "unknown");
     assert!(report.defaulted("stages.second.model").is_some());
 }
 

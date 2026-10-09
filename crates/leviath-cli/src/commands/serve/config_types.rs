@@ -312,6 +312,10 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // announced rather than left to be discovered: a console can read this and
     // know which spelling it is being sent instead of sniffing the strings.
     "events.run_status",
+    // An `events_dropped` frame on `/ws` when a subscriber falls behind the
+    // bus, instead of a stream with a silent hole in it. Announced so a
+    // console knows a silence from this server is a real one.
+    "events.dropped",
     // Region kinds in a context snapshot are spelled the way the blueprint
     // spells them - `sliding_window`, `compact_history` - rather than the
     // shorter `sliding`/`history` that only ever existed in a snapshot.

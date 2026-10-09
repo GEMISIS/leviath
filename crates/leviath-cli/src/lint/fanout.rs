@@ -52,6 +52,35 @@ pub(super) fn lint_fanout_escape(graph: &RunGraph, stage: &StageDef) -> Vec<Lint
     ]
 }
 
+/// A fan-out to a worker blueprint this install cannot load.
+///
+/// An error, as it is at spawn: the run would pay for every stage before the
+/// fan-out and then fail each worker as it starts.
+pub(super) fn lint_fanout_worker_loads(stage: &StageDef, env: &LintEnv) -> Vec<LintFinding> {
+    let StageMode::FanOut(config) = &stage.mode else {
+        return Vec::new();
+    };
+    let WorkerSource::Blueprint(reference) = &config.worker else {
+        return Vec::new();
+    };
+    let Some(why) = env
+        .unloadable_workers
+        .as_ref()
+        .and_then(|unloadable| unloadable.get(&reference.to_string()))
+    else {
+        return Vec::new();
+    };
+    vec![
+        LintFinding::new(
+            LintSeverity::Error,
+            "fanout-worker-missing",
+            format!("fans out to blueprint '{reference}', which cannot be loaded: {why}"),
+        )
+        .in_stage(stage.name.as_str())
+        .with_fix("install it with `lev add`, or correct the name".to_string()),
+    ]
+}
+
 /// A fan-out whose workers run this graph, which declares no input for a work
 /// item to fill.
 ///

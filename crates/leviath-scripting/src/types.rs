@@ -93,7 +93,7 @@ mod tests {
     use rhai::Engine;
 
     fn engine() -> Engine {
-        let mut e = Engine::new();
+        let mut e = crate::sandboxed(1_000_000);
         register_types(&mut e);
         e
     }

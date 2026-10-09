@@ -9,7 +9,7 @@ use leviath_runtime::spec::names::RunId;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Defaulted {
     /// The field, as a path into the run file (`launch.allow`,
-    /// `stages.plan.context_window`).
+    /// `stages.plan.model.context_window`).
     pub field: String,
     /// The value it was given.
     pub value: String,

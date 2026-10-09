@@ -49,6 +49,7 @@ mod update;
 mod update_cache;
 mod update_job;
 mod upload;
+mod webhook_outbox;
 mod websocket;
 mod yolo;
 

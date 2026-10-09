@@ -312,7 +312,10 @@ async fn paths_models_code_and_bytes_answer_through_the_shared_host() {
 
     let graph = load_installed_graph();
     let plan = env.model(&graph.stages[0], None).await.unwrap();
-    assert_eq!((plan.provider.as_str(), plan.model.as_str()), ("mock", "m"));
+    assert_eq!(
+        (plan.model.provider.as_str(), plan.model.id.as_str()),
+        ("mock", "m")
+    );
     let mut nowhere = graph.stages[0].clone();
     nowhere.model.models = vec![ModelRef::parse("gone/x").unwrap()];
     nowhere.model.allow_user_default = false;

@@ -271,7 +271,10 @@ fn lint_env(
     config: Option<&crate::config::Config>,
     registry: Option<&leviath_runtime::ProviderRegistry>,
 ) -> LintEnv {
-    let env = LintEnv::offline(&checked.agent_dir);
+    // The installed blueprints a fan-out names are this machine's, not the
+    // config's, so they are checked with or without one.
+    let env = LintEnv::offline(&checked.agent_dir)
+        .with_workers(&checked.graph, leviath_core::paths::agents_dir().as_deref());
     let Some(config) = config else {
         return env;
     };
@@ -396,9 +399,9 @@ fn model_resolution_lines(
                 Ok(plan) => {
                     lines.push(format!(
                         "  {:<16} {}/{}",
-                        stage.name, plan.provider, plan.model
+                        stage.name, plan.model.provider, plan.model.id
                     ));
-                    plan.model.to_string()
+                    plan.model.id.to_string()
                 }
                 Err(issue) => {
                     lines.push(format!(

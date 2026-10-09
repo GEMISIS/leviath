@@ -450,6 +450,7 @@ does not, and a **note** never does. Each finding prints with its code in bracke
 | error | `required-tool-not-granted` | A `required_tools` entry no name or group in `tools` reaches. See below |
 | error | `unserved-model` | A stage names a model the provider that would run it does not carry. See below |
 | error | `fanout-worker-task-unheld` | A `fan_out` stage runs workers on this graph, which binds no input to a region. See below |
+| error | `fanout-worker-missing` | A `fan_out` stage names a worker blueprint this install cannot load. A spawn refuses it too |
 | error | `retention-not-zero` | `[providers] zero_retention` is on and the model this stage would start on keeps something. See below |
 | warning | `retention-fallback-dropped` | `[providers] zero_retention` is on and a listed fallback keeps something, so failover skips it |
 | warning | `stage-missing-model` | No `model`, so the stage runs on whatever your `default_provider` is |

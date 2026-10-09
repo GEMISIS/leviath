@@ -72,10 +72,18 @@ pub(super) async fn load(
 
 /// Pin each fan-out stage's installed worker blueprint to the revision
 /// installed now, so every worker of the run (and of the run resumed) runs
-/// the blueprint the run was resolved against. A worker that names no
-/// installed blueprint is left as written: it fails when it is started, as
-/// it always has.
-pub(super) async fn pin_workers(graph: &mut RunGraph, env: &dyn ResolveEnv) {
+/// the blueprint the run was resolved against.
+///
+/// A worker blueprint that cannot be loaded is reported at `at`'s
+/// `stages.<stage>.mode.fan_out.worker`, with everything else wrong with the
+/// request: found here, it costs nothing, where found when the first worker
+/// starts it costs every stage the run paid for on the way there.
+pub(super) async fn pin_workers(
+    graph: &mut RunGraph,
+    at: &SpecPath,
+    env: &dyn ResolveEnv,
+    issues: &mut SpawnIssues,
+) {
     for stage in &mut graph.stages {
         let StageMode::FanOut(fan) = &mut stage.mode else {
             continue;
@@ -83,10 +91,19 @@ pub(super) async fn pin_workers(graph: &mut RunGraph, env: &dyn ResolveEnv) {
         let WorkerSource::Blueprint(reference) = &mut fan.worker else {
             continue;
         };
-        if reference.digest.is_none()
-            && let Ok(loaded) = env.blueprint(reference).await
-        {
-            reference.digest = loaded.reference.digest;
+        match env.blueprint(reference).await {
+            Ok(loaded) => {
+                reference.digest = reference.digest.take().or(loaded.reference.digest);
+            }
+            Err(issue) => {
+                let worker = at
+                    .field("stages")
+                    .key(stage.name.as_str())
+                    .field("mode")
+                    .field("fan_out")
+                    .field("worker");
+                issues.push(rebase(&worker, issue));
+            }
         }
     }
 }

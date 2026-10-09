@@ -3,6 +3,7 @@
 //! completion webhook when a run finishes. The daemon pushes changes, so there
 //! is no filesystem poll and no polling interval.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use hmac::{Hmac, KeyInit, Mac};
@@ -11,6 +12,7 @@ use sha2::Sha256;
 
 use super::events::ServerEvent;
 use super::types::*;
+use super::webhook_outbox::Outbox;
 use crate::config::WebhookConfig;
 use crate::runstate;
 
@@ -35,13 +37,19 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
         leviath_net::ClientTimeouts::default(),
         state.limits.allow_local_network,
     );
+    let runs = runstate::runs_dir();
+    let outbox = Arc::new(Outbox::open(
+        runs.with_file_name("webhooks"),
+        leviath_core::duration::now_secs(),
+    ));
+    send_owed(&state, &client, &outbox, &runs);
     let mut link = LinkWatch::new(&state);
     // Where the stream had got to when it last dropped, so the next one
     // starts with what was missed: above all a run that a restarted daemon
     // finished before this loop was back, whose webhook is fired from here.
     let mut cursor = None;
     loop {
-        consume_once(&state, &client, &mut link, &mut cursor).await;
+        consume_once(&state, &client, &outbox, &mut link, &mut cursor).await;
         // The stream ended (daemon closed / restarted) or was unreachable; back
         // off briefly, then re-subscribe.
         tokio::time::sleep(backoff).await;
@@ -118,12 +126,37 @@ impl LinkWatch {
     }
 }
 
+/// Send the webhook of every finished run that still owes one: those a
+/// previous server was still retrying when it stopped, and those that
+/// finished while no server was running to see them.
+fn send_owed(
+    state: &AppState,
+    client: &reqwest::Client,
+    outbox: &Arc<Outbox>,
+    runs: &std::path::Path,
+) {
+    let cfg = state.current_config().webhook.clone();
+    let metas = crate::run_index::list(runs);
+    for meta in outbox.owed(&metas, |run_id| delivery_id("agent_completed", run_id)) {
+        let final_output = runstate::read_final_output(&meta.run_id);
+        fire_completion_webhook(
+            client,
+            &cfg,
+            outbox,
+            &meta.run_id,
+            meta.status.wire(),
+            final_output.as_ref(),
+        );
+    }
+}
+
 /// One subscribe-and-consume pass: forward events until the stream ends,
 /// starting after `cursor` and leaving it where the stream got to. Returns
 /// immediately if the daemon can't be reached.
 async fn consume_once(
     state: &AppState,
     client: &reqwest::Client,
+    outbox: &Arc<Outbox>,
     link: &mut LinkWatch,
     cursor: &mut Option<leviath_runtime::control_socket::EventCursor>,
 ) {
@@ -133,7 +166,7 @@ async fn consume_once(
     };
     link.up(state);
     while let Some(event) = stream.next().await {
-        handle_event(state, client, event);
+        handle_event(state, client, outbox, event);
     }
     // A stream that dropped before the daemon said where it starts leaves
     // the cursor where it was.
@@ -143,7 +176,12 @@ async fn consume_once(
 
 /// Broadcast one world event to WebSocket subscribers, firing a completion
 /// webhook when a run reaches a terminal status.
-fn handle_event(state: &AppState, client: &reqwest::Client, event: WorldEvent) {
+fn handle_event(
+    state: &AppState,
+    client: &reqwest::Client,
+    outbox: &Arc<Outbox>,
+    event: WorldEvent,
+) {
     if let WorldEvent::Completed {
         run_id,
         status,
@@ -154,6 +192,7 @@ fn handle_event(state: &AppState, client: &reqwest::Client, event: WorldEvent) {
         fire_completion_webhook(
             client,
             &state.current_config().webhook,
+            outbox,
             run_id,
             &wire_status(status),
             final_output.as_ref(),
@@ -377,23 +416,31 @@ fn delivery_id(event: &str, run_id: &str) -> String {
 /// store beside the runs, and a webhook whose secret is no longer there is
 /// not posted unsigned.
 /// Every delivery carries a deterministic [`delivery_id`] for receiver-side
-/// dedupe (in the signed body and the `X-Leviath-Delivery` header).
+/// dedupe (in the signed body and the `X-Leviath-Delivery` header), and is
+/// settled in `outbox` once it is over, so a restart neither loses it nor
+/// sends it again.
+///
+/// Returns whether a delivery was started.
 fn fire_completion_webhook(
     client: &reqwest::Client,
     cfg: &WebhookConfig,
+    outbox: &Arc<Outbox>,
     run_id: &str,
     status: &str,
     final_output: Option<&leviath_core::output::FinalOutput>,
-) {
+) -> bool {
     let dir = runstate::run_dir(run_id);
     let Ok(tail) = runstate::run_file::tail_in(&dir) else {
-        return; // metadata not yet persisted
+        return false; // metadata not yet persisted
     };
     let meta = leviath_runtime::runfile::summary_of(&tail.spec, &tail.state, tail.updated_at);
     let Some(url) = meta.callback_url.clone() else {
-        return; // no webhook configured
+        return false; // no webhook configured
     };
     let delivery = delivery_id("agent_completed", &meta.run_id);
+    if !outbox.claim(&delivery) {
+        return false; // sent already, or being sent
+    }
     let payload = completion_payload(&meta, status, final_output, &delivery);
     // Serialize once so the signature covers the exact bytes we send. `Value`'s
     // `Display` is infallible and byte-identical to `to_vec`.
@@ -405,17 +452,16 @@ fn fire_completion_webhook(
         Some(Err(reference)) => {
             let reference = reference.to_string();
             tracing::warn!(run_id = %run_id, secret = %reference, "the run's webhook was not posted: its signing secret is not in the secret store");
-            return;
+            outbox.settle(&delivery);
+            return false;
         }
     };
-    tokio::spawn(fire_webhook(
-        client.clone(),
-        url,
-        body,
-        signature,
-        delivery,
-        cfg.clone(),
-    ));
+    let (client, cfg, outbox) = (client.clone(), cfg.clone(), Arc::clone(outbox));
+    tokio::spawn(async move {
+        fire_webhook(client, url, body, signature, &delivery, cfg).await;
+        outbox.settle(&delivery);
+    });
+    true
 }
 
 /// The completion webhook's body.
@@ -495,7 +541,7 @@ async fn fire_webhook(
     url: String,
     body: Vec<u8>,
     signature: Option<String>,
-    delivery: String,
+    delivery: &str,
     cfg: WebhookConfig,
 ) {
     let max_attempts = cfg.max_retries.saturating_add(1);
@@ -505,7 +551,7 @@ async fn fire_webhook(
         let mut req = client
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header("X-Leviath-Delivery", &delivery)
+            .header("X-Leviath-Delivery", delivery)
             .timeout(Duration::from_secs(cfg.timeout_secs))
             .body(body.clone());
         if let Some(sig) = &signature {
@@ -552,6 +598,11 @@ mod tests {
     use leviath_runtime::control_socket::{ControlClient, bind_control_listener, control_id};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::sync::broadcast;
+
+    /// An outbox of its own, in a directory nothing else uses.
+    fn outbox() -> Arc<Outbox> {
+        Arc::new(Outbox::open(tempfile::tempdir().unwrap().keep(), 0))
+    }
 
     fn state_with(control: ControlClient) -> (AppState, broadcast::Receiver<Stamped>) {
         let (tx, rx) = broadcast::channel(64);
@@ -941,6 +992,7 @@ mod tests {
         handle_event(
             &state,
             &client,
+            &outbox(),
             WorldEvent::Status {
                 run_id: "r".into(),
                 agent_id: "a".into(),
@@ -967,6 +1019,7 @@ mod tests {
         handle_event(
             &state,
             &client,
+            &outbox(),
             WorldEvent::Status {
                 run_id: "r".into(),
                 agent_id: "a".into(),
@@ -1015,6 +1068,7 @@ mod tests {
                 handle_event(
                     &state,
                     &client,
+                    &outbox(),
                     WorldEvent::Completed {
                         run_id: "run-done".into(),
                         agent_id: "a".into(),
@@ -1042,7 +1096,7 @@ mod tests {
                 let client = reqwest::Client::new();
                 let cfg = fast_cfg();
                 // No meta on disk → no-op.
-                fire_completion_webhook(&client, &cfg, "ghost", "complete", None);
+                fire_completion_webhook(&client, &cfg, &outbox(), "ghost", "complete", None);
                 // Meta without a callback_url → no-op.
                 let meta = RunMeta::new(
                     "no-cb".into(),
@@ -1054,7 +1108,7 @@ mod tests {
                     1,
                 );
                 create_run(&meta).unwrap();
-                fire_completion_webhook(&client, &cfg, "no-cb", "complete", None);
+                fire_completion_webhook(&client, &cfg, &outbox(), "no-cb", "complete", None);
             },
         )
         .await;
@@ -1108,7 +1162,7 @@ mod tests {
             url,
             b"{}".to_vec(),
             None,
-            "agent_completed:run-x".to_string(),
+            "agent_completed:run-x",
             fast_cfg(),
         )
         .await;
@@ -1124,7 +1178,7 @@ mod tests {
             url,
             b"{}".to_vec(),
             None,
-            "agent_completed:run-x".to_string(),
+            "agent_completed:run-x",
             fast_cfg(),
         )
         .await;
@@ -1140,7 +1194,7 @@ mod tests {
             url,
             b"{}".to_vec(),
             None,
-            "agent_completed:run-x".to_string(),
+            "agent_completed:run-x",
             fast_cfg(),
         )
         .await;
@@ -1156,7 +1210,7 @@ mod tests {
             url,
             b"{}".to_vec(),
             None,
-            "agent_completed:run-x".to_string(),
+            "agent_completed:run-x",
             fast_cfg(),
         )
         .await;
@@ -1173,7 +1227,7 @@ mod tests {
             url,
             body,
             Some(expected.clone()),
-            "agent_completed:run-x".to_string(),
+            "agent_completed:run-x",
             fast_cfg(),
         )
         .await;
@@ -1190,7 +1244,7 @@ mod tests {
             url,
             b"{}".to_vec(),
             None,
-            "agent_completed:run-x".to_string(),
+            "agent_completed:run-x",
             fast_cfg(),
         )
         .await;
@@ -1208,9 +1262,89 @@ mod tests {
             "http://127.0.0.1:1/never".to_string(),
             b"{}".to_vec(),
             None,
-            "agent_completed:run-x".to_string(),
+            "agent_completed:run-x",
             fast_cfg(),
         )
+        .await;
+    }
+
+    /// A run that finished while no server was running to see it still gets
+    /// its webhook: the next server sends what is owed when it starts, once,
+    /// and a server after that owes nothing.
+    #[tokio::test]
+    async fn a_server_sends_the_webhooks_owed_when_it_starts() {
+        crate::runstate::with_isolated_runs_dir_async("send_owed", |_d| async move {
+            let (url, server) = fake_receiver(vec![200]).await;
+            let mut meta = RunMeta::new(
+                "missed".into(),
+                "coder".into(),
+                "/p".into(),
+                "t".into(),
+                None,
+                "/w".into(),
+                1,
+            );
+            meta.callback_url = Some(url);
+            meta.status = leviath_core::run_meta::RunStatus::Complete;
+            create_run(&meta).unwrap();
+            let (state, _rx) = state_with(no_daemon_client());
+            let client = reqwest::Client::new();
+            let runs = runstate::runs_dir();
+            let outbox = outbox();
+
+            send_owed(&state, &client, &outbox, &runs);
+            let requests = server.await.unwrap();
+            assert!(requests[0].contains("agent_completed:missed"));
+            let settled = || {
+                let metas = crate::run_index::list(&runs);
+                outbox
+                    .owed(&metas, |id| delivery_id("agent_completed", id))
+                    .is_empty()
+            };
+            leviath_testkit::wait_until("the delivery is settled once it is over", settled).await;
+            // Nothing is listening any more, so a second send would fail
+            // loudly; the sweep finds nothing to send.
+            send_owed(&state, &client, &outbox, &runs);
+        })
+        .await;
+    }
+
+    /// A delivery that is settled is not sent again, however its completion
+    /// arrives; one that is not settled is.
+    #[tokio::test]
+    async fn a_settled_webhook_is_not_sent_again() {
+        crate::runstate::with_isolated_runs_dir_async("settled_webhook", |_d| async move {
+            let mut meta = RunMeta::new(
+                "done-before".into(),
+                "coder".into(),
+                "/p".into(),
+                "t".into(),
+                None,
+                "/w".into(),
+                1,
+            );
+            // Nothing listens there; the answer under test is whether a
+            // delivery is started at all.
+            meta.callback_url = Some("http://127.0.0.1:9/hook".to_string());
+            meta.status = leviath_core::run_meta::RunStatus::Complete;
+            create_run(&meta).unwrap();
+            let client = reqwest::Client::new();
+            let fire = |outbox: &Arc<Outbox>| {
+                fire_completion_webhook(
+                    &client,
+                    &fast_cfg(),
+                    outbox,
+                    "done-before",
+                    "complete",
+                    None,
+                )
+            };
+
+            let settled = outbox();
+            settled.settle(&delivery_id("agent_completed", "done-before"));
+            assert!(!fire(&settled), "settled: nothing is sent");
+            assert!(fire(&outbox()), "owed: a delivery starts");
+        })
         .await;
     }
 
@@ -1239,6 +1373,7 @@ mod tests {
                 fire_completion_webhook(
                     &reqwest::Client::new(),
                     &fast_cfg(),
+                    &outbox(),
                     "signed",
                     "complete",
                     None,
@@ -1306,8 +1441,8 @@ mod tests {
             leviath_runtime::secret_store::SecretStore::of_runs(&runstate::runs_dir())
                 .forget_run("lost");
             let client = reqwest::Client::new();
-            fire_completion_webhook(&client, &fast_cfg(), "lost", "complete", None);
-            fire_completion_webhook(&client, &fast_cfg(), "kept", "complete", None);
+            fire_completion_webhook(&client, &fast_cfg(), &outbox(), "lost", "complete", None);
+            fire_completion_webhook(&client, &fast_cfg(), &outbox(), "kept", "complete", None);
             // The one request the receiver took is the run whose secret is
             // still there.
             let requests = server.await.unwrap();
@@ -1338,7 +1473,7 @@ mod tests {
             url,
             b"{}".to_vec(),
             None,
-            "agent_completed:run-r".to_string(),
+            "agent_completed:run-r",
             fast_cfg(),
         )
         .await;
@@ -1398,7 +1533,14 @@ mod tests {
         );
         let (state, mut rx) = state_with(control);
         let client = reqwest::Client::new();
-        consume_once(&state, &client, &mut LinkWatch::new(&state), &mut None).await; // returns when the stream closes
+        consume_once(
+            &state,
+            &client,
+            &outbox(),
+            &mut LinkWatch::new(&state),
+            &mut None,
+        )
+        .await; // returns when the stream closes
         server.await.unwrap();
         assert_eq!(tag(&rx.try_recv().unwrap()), "agent_status");
     }
@@ -1407,7 +1549,14 @@ mod tests {
     async fn consume_once_returns_when_daemon_absent() {
         let (state, _rx) = state_with(no_daemon_client());
         let client = reqwest::Client::new();
-        consume_once(&state, &client, &mut LinkWatch::new(&state), &mut None).await; // subscribe fails → returns immediately
+        consume_once(
+            &state,
+            &client,
+            &outbox(),
+            &mut LinkWatch::new(&state),
+            &mut None,
+        )
+        .await; // subscribe fails → returns immediately
     }
 
     /// A daemon on `id` serving one connection from `log`, as the real
@@ -1469,7 +1618,14 @@ mod tests {
             after: 3,
         };
         let mut cursor = Some(before.clone());
-        consume_once(&state, &client, &mut LinkWatch::new(&state), &mut cursor).await;
+        consume_once(
+            &state,
+            &client,
+            &outbox(),
+            &mut LinkWatch::new(&state),
+            &mut cursor,
+        )
+        .await;
         server.await.unwrap();
         assert_eq!(tag(&rx.try_recv().unwrap()), "log");
         assert_eq!(cursor, Some(before), "nothing newer to pick up from");
@@ -1495,7 +1651,7 @@ mod tests {
         let first = EventLog::recording(&world);
         let served = log_daemon(&id, &first);
         drop(world);
-        consume_once(&state, &client, &mut link, &mut cursor).await;
+        consume_once(&state, &client, &outbox(), &mut link, &mut cursor).await;
         served.await.unwrap();
         let down = serde_json::to_value(rx.try_recv().unwrap().event).unwrap();
         assert_eq!(down["connected"], false);
@@ -1513,7 +1669,7 @@ mod tests {
             .unwrap();
         drop(world);
         let served = log_daemon(&id, &second);
-        consume_once(&state, &client, &mut link, &mut cursor).await;
+        consume_once(&state, &client, &outbox(), &mut link, &mut cursor).await;
         served.await.unwrap();
         let frames: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
             .map(|frame| tag(&frame))
@@ -1601,8 +1757,8 @@ mod tests {
         let (state, mut rx) = state_with(no_daemon_client());
         let client = reqwest::Client::new();
         let mut link = LinkWatch::new(&state);
-        consume_once(&state, &client, &mut link, &mut None).await;
-        consume_once(&state, &client, &mut link, &mut None).await;
+        consume_once(&state, &client, &outbox(), &mut link, &mut None).await;
+        consume_once(&state, &client, &outbox(), &mut link, &mut None).await;
         let down = serde_json::to_value(rx.try_recv().unwrap().event).unwrap();
         assert_eq!(down["type"], "daemon_link");
         assert_eq!(down["connected"], false);
@@ -1633,7 +1789,7 @@ mod tests {
         };
 
         // Pass 1: nothing listening.
-        consume_once(&state, &client, &mut link, &mut None).await;
+        consume_once(&state, &client, &outbox(), &mut link, &mut None).await;
         let down = next(&mut rx);
         assert_eq!(down["connected"], false);
 
@@ -1662,7 +1818,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             drop(events);
         });
-        consume_once(&state, &client, &mut link, &mut None).await;
+        consume_once(&state, &client, &outbox(), &mut link, &mut None).await;
         ender.await.unwrap();
         server_a.await.unwrap();
         let up = next(&mut rx);
@@ -1685,7 +1841,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             drop(events);
         });
-        consume_once(&state, &client, &mut link, &mut None).await;
+        consume_once(&state, &client, &outbox(), &mut link, &mut None).await;
         ender.await.unwrap();
         server_b.await.unwrap();
         let up = next(&mut rx);

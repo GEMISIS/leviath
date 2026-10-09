@@ -144,7 +144,7 @@ pub async fn resolve(
     }
 
     let mut graph = src.graph.clone();
-    source::pin_workers(&mut graph, env).await;
+    source::pin_workers(&mut graph, &src.at, env, &mut issues).await;
     inputs::apply_slots(&mut graph, &checked.values);
     defaults::grant_mode_tools(&mut graph);
     defaults::fold(&mut graph, &limits);

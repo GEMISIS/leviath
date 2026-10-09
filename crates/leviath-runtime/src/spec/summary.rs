@@ -78,8 +78,8 @@ impl SpawnSummary {
                 .iter()
                 .map(|plan| StageSummary {
                     stage: plan.stage.clone(),
-                    provider: plan.provider.clone(),
-                    model: plan.model.clone(),
+                    provider: plan.model.provider.clone(),
+                    model: plan.model.id.clone(),
                     tools: plan.tools.iter().map(|t| t.name.clone()).collect(),
                 })
                 .collect(),
@@ -102,7 +102,7 @@ mod tests {
         assert_eq!(summary.stages.len(), spec.stages.len());
         let first = &summary.stages[0];
         assert_eq!(first.stage, spec.stages[0].stage);
-        assert_eq!(first.model, spec.stages[0].model);
+        assert_eq!(first.model, spec.stages[0].model.id);
         assert_eq!(
             first.tools,
             spec.stages[0]

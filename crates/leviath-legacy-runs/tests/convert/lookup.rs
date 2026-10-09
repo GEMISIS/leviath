@@ -10,7 +10,7 @@ use leviath_legacy_runs::{ConvertEnv, StageLookup, convert, graph};
 use leviath_runtime::spec::env::{CodeFiles, ModelPlan, StageTools};
 use leviath_runtime::spec::graph::{CodeRef, RunGraph, StageDef};
 use leviath_runtime::spec::names::{Digest, ModelId, ModelRef, ProviderName, ToolName};
-use leviath_runtime::spec::run_spec::{ToolDef, ToolSource};
+use leviath_runtime::spec::run_spec::{ChosenModel, ToolDef, ToolSource};
 use serde_json::json;
 
 use crate::common::{Run, RunFile, fixtures_dir};
@@ -109,11 +109,13 @@ impl StageLookup for Machine {
             model: ModelId::new("gpt-default").unwrap(),
         });
         Ok(ModelPlan {
-            provider: chosen.provider.unwrap(),
-            model: chosen.model,
-            context_window: 200_000,
+            model: ChosenModel {
+                provider: chosen.provider.unwrap(),
+                id: chosen.model,
+                context_window: 200_000,
+                fallbacks: Vec::new(),
+            },
             max_output_tokens: 8_000,
-            fallbacks: Vec::new(),
             notes: vec!["chosen on this machine".into()],
         })
     }
@@ -169,8 +171,8 @@ fn a_stage_the_run_never_reached_runs_on_the_model_it_was_launched_with() {
     let (report, file) = run.converted();
     for name in ["main", "review"] {
         let stage = file.spec.stage(name).unwrap();
-        assert_eq!(stage.provider.as_str(), "anthropic", "{name}");
-        assert_eq!(stage.model.as_str(), "claude-x", "{name}");
+        assert_eq!(stage.model.provider.as_str(), "anthropic", "{name}");
+        assert_eq!(stage.model.id.as_str(), "claude-x", "{name}");
         assert!(report.defaulted(&format!("stages.{name}.model")).is_none());
     }
 }
@@ -186,17 +188,13 @@ fn without_a_launch_model_a_stage_runs_on_the_model_the_run_recorded() {
         ("review", "anthropic", "claude-sonnet-4-6"),
     ] {
         let stage = file.spec.stage(name).unwrap();
-        assert_eq!(stage.provider.as_str(), provider, "{name}");
-        assert_eq!(stage.model.as_str(), model, "{name}");
+        assert_eq!(stage.model.provider.as_str(), provider, "{name}");
+        assert_eq!(stage.model.id.as_str(), model, "{name}");
         assert!(report.defaulted(&format!("stages.{name}.model")).is_none());
         assert!(stage.tools.is_empty());
     }
     assert!(report.defaulted("stages.*.tools").is_some());
-    assert!(
-        report
-            .defaulted("stages.review.max_output_tokens")
-            .is_some()
-    );
+    assert!(report.defaulted("stages.review.reply_cap").is_some());
 }
 
 /// The machine gives each stage its model's window and the tools the old run
@@ -217,14 +215,14 @@ fn a_lookup_gives_each_stage_its_window_and_its_tools() {
         ]
     );
     let main = file.spec.stage("main").unwrap();
-    assert_eq!(main.context_window, 200_000);
+    assert_eq!(main.model.context_window, 200_000);
     // A run that recorded no child-run limit ran under the operator's.
     assert_eq!(file.spec.launch.max_depth, 3);
     assert!(main.notes.iter().any(|n| n == "chosen on this machine"));
     // A run nobody answers is not offered the tools that only ask a person.
     let names: Vec<&str> = main.tools.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names, ["shell", "submit_output", "probe_tool"]);
-    assert_eq!(main.max_output_tokens, Some(200), "10% of the task region");
+    assert_eq!(main.reply_cap, Some(200), "10% of the task region");
     let review = file.spec.stage("review").unwrap();
     // A stage that requires a tool that asks keeps it.
     let names: Vec<&str> = review.tools.iter().map(|t| t.name.as_str()).collect();
@@ -234,11 +232,7 @@ fn a_lookup_gives_each_stage_its_window_and_its_tools() {
     );
     assert_eq!(file.spec.code.len(), 1);
     assert_eq!(file.code.len(), 1);
-    assert_eq!(
-        review.max_output_tokens,
-        Some(8_000),
-        "25% capped at the model's"
-    );
+    assert_eq!(review.reply_cap, Some(8_000), "25% capped at the model's");
     let submit = review
         .tools
         .iter()
@@ -252,9 +246,9 @@ fn a_lookup_gives_each_stage_its_window_and_its_tools() {
     assert!(file.code.iter().any(|(d, _)| d == digest));
     for field in [
         "stages.*.tools",
-        "stages.main.context_window",
+        "stages.main.model.context_window",
         "stages.main.tools",
-        "stages.review.max_output_tokens",
+        "stages.review.reply_cap",
     ] {
         assert!(report.defaulted(field).is_none(), "{field}");
     }
@@ -285,7 +279,7 @@ fn a_lookup_that_cannot_answer_leaves_the_recorded_model_and_says_why() {
     };
     let (report, file) = convert_on(&run, &machine);
     let main = file.spec.stage("main").unwrap();
-    assert_eq!(main.model.as_str(), "gpt-mock");
+    assert_eq!(main.model.id.as_str(), "gpt-mock");
     assert!(main.tools.is_empty());
     assert!(
         report
@@ -294,7 +288,11 @@ fn a_lookup_that_cannot_answer_leaves_the_recorded_model_and_says_why() {
             .any(|n| n.contains("stages.main.model could not be looked up"))
     );
     assert!(report.defaulted("stages.main.tools").is_some());
-    assert!(report.defaulted("stages.main.context_window").is_some());
+    assert!(
+        report
+            .defaulted("stages.main.model.context_window")
+            .is_some()
+    );
     assert!(report.defaulted("stages.*.tools").is_none());
 }
 

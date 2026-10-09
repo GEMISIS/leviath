@@ -436,8 +436,8 @@ fn run_install_script(code: &CodeRef, dir: &Path, env: &DepsEnv) -> anyhow::Resu
     let bytes = leviath_runtime::bind::host::read_code(code, Some(dir))
         .map_err(|e| anyhow::anyhow!("read install script {shown}: {e}"))?;
     let source = String::from_utf8_lossy(&bytes);
-    let mut engine = rhai::Engine::new();
-    leviath_scripting::harden(&mut engine, 1_000_000);
+    let mut engine =
+        leviath_scripting::sandboxed(leviath_scripting::dependency_check::CHECK_MAX_OPERATIONS);
     let runner = env.runner.clone();
     engine.register_fn(
         "sh",

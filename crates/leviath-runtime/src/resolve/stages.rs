@@ -60,7 +60,7 @@ pub(super) async fn plan_all(
         .into_iter()
         .map(|(model, tools)| model.map(|m| (m, tools)))
         .collect::<Option<_>>()?;
-    let windows: Vec<u32> = chosen.iter().map(|(m, _)| m.context_window).collect();
+    let windows: Vec<u32> = chosen.iter().map(|(m, _)| m.model.context_window).collect();
     let mut plans = Vec::new();
     for (i, (stage, (model, tools))) in graph.stages.iter().zip(chosen).enumerate() {
         let sat = at.field("stages").key(stage.name.as_str());
@@ -125,18 +125,15 @@ fn plan(
         request.output.as_ref(),
     );
     output::describe_submit(&mut tools, shape.as_ref());
-    let max_output_tokens = output_cap(
+    let reply_cap = output_cap(
         stage.model.params.max_output_tokens.as_ref(),
         &model,
         &region_budgets,
     );
     StagePlan {
         stage: stage.name.clone(),
-        provider: model.provider,
         model: model.model,
-        context_window: model.context_window,
-        max_output_tokens,
-        fallbacks: model.fallbacks,
+        reply_cap,
         tools,
         output: shape,
         region_budgets,
@@ -225,17 +222,10 @@ pub(crate) fn budgets(
     }
 }
 
-/// A budget in tokens against `window`: a percentage is rounded, capped at
-/// `max`, then floored at `min`. The floor wins when the two cross, since a
-/// region starved below a usable size is worse than one slightly over its cap.
-pub(super) fn budget(budget: &Budget, window: u32) -> u32 {
-    match budget {
-        Budget::Tokens(n) => *n,
-        Budget::Percent { percent, min, max } => {
-            let share = (f64::from(window) * percent).round() as u32;
-            share.min(max.unwrap_or(u32::MAX)).max(min.unwrap_or(0))
-        }
-    }
+/// [`Budget::resolve`] in the `u32` a plan records. Lossless: a share is at
+/// most the window, and a fixed budget, floor or cap is a `u32` already.
+fn budget(budget: &Budget, window: u32) -> u32 {
+    budget.resolve(window as usize) as u32
 }
 
 /// Refuse a stage whose fixed regions leave the model too little room to
@@ -300,7 +290,7 @@ fn output_cap(
         |whole: u32, fraction: f64| ((f64::from(whole) * fraction).round() as u32).clamp(1, most);
     match cap? {
         OutputCap::Tokens(n) => Some(*n),
-        OutputCap::WindowPercent(fraction) => Some(share(model.context_window, *fraction)),
+        OutputCap::WindowPercent(fraction) => Some(share(model.model.context_window, *fraction)),
         OutputCap::RegionPercent { percent, region } => {
             Some(budgets.get(region).map_or(most, |b| share(*b, *percent)))
         }
@@ -318,8 +308,13 @@ pub(super) fn fingerprint(
     let mut providers = BTreeSet::new();
     let mut servers = BTreeSet::new();
     for plan in plans {
-        providers.insert(plan.provider.clone());
-        providers.extend(plan.fallbacks.iter().filter_map(|f| f.provider.clone()));
+        providers.insert(plan.model.provider.clone());
+        providers.extend(
+            plan.model
+                .fallbacks
+                .iter()
+                .filter_map(|f| f.provider.clone()),
+        );
         for tool in &plan.tools {
             if let ToolSource::Mcp { server, .. } = &tool.source {
                 servers.insert(server.clone());

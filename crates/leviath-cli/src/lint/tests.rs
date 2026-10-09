@@ -245,6 +245,52 @@ allow_as_worker = true
     assert_eq!(codes(&findings), ["fanout-no-escape"]);
 }
 
+/// A fan-out to a blueprint that will not load is an error, as it is at
+/// spawn. One that loads, a fan-out to a stage, and an install nobody asked
+/// about say nothing.
+#[test]
+fn a_fan_out_to_a_blueprint_that_will_not_load_is_an_error() {
+    use crate::daemon::resolve_env::tests::{MANIFEST, install};
+    let fan_to = |worker: &str| {
+        manifest_taking_task(&format!(
+            r#"
+
+[[graph.stages]]
+name = "split"
+mode = {{ fan_out = {{ worker = {worker} }} }}
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
+
+[[graph.stages]]
+name = "after"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
+"#
+        ))
+    };
+    let agents = tempfile::tempdir().unwrap();
+    install(&agents, "helper", MANIFEST);
+    let env_for =
+        |toml: &str| LintEnv::default().with_workers(&graph_of(toml), Some(agents.path()));
+
+    let ghost = fan_to(r#"{ blueprint = { name = "ghost" } }"#);
+    let found = lint(&ghost, &env_for(&ghost));
+    let missing = with_code(&found, "fanout-worker-missing");
+    assert_eq!(missing.len(), 1, "{:?}", codes(&found));
+    assert_eq!(missing[0].severity, LintSeverity::Error);
+    assert!(
+        missing[0].message.contains("'ghost'"),
+        "{}",
+        missing[0].message
+    );
+
+    let helper = fan_to(r#"{ blueprint = { name = "helper" } }"#);
+    assert!(with_code(&lint(&helper, &env_for(&helper)), "fanout-worker-missing").is_empty());
+    // A worker picked at run time has no name to load until then.
+    let query = fan_to(r#"{ query = "a researcher" }"#);
+    assert!(with_code(&lint(&query, &env_for(&query)), "fanout-worker-missing").is_empty());
+    let unasked = lint(&ghost, &LintEnv::default());
+    assert!(with_code(&unasked, "fanout-worker-missing").is_empty());
+}
+
 /// A work item's inputs land in the regions the graph binds them to, so a
 /// graph that runs its own workers and binds no input leaves every worker
 /// without its work - and the run still completes, which is why the lint is
@@ -4134,23 +4180,6 @@ fn every_group_has_its_token_and_all_covers_the_rest() {
     assert!(covers(ToolGroup::All, ToolGroup::Mcp));
     assert!(covers(ToolGroup::Mcp, ToolGroup::Mcp));
     assert!(!covers(ToolGroup::Mcp, ToolGroup::Builtin));
-}
-
-/// A share is rounded, capped by `max`, then floored by `min`, so a floor
-/// above the cap wins; a fixed budget ignores the window.
-#[test]
-fn a_budget_resolves_against_a_window() {
-    use leviath_runtime::spec::graph::Budget;
-    assert_eq!(resolve_budget(&Budget::Tokens(500), 1_000_000), 500);
-    let share = |min, max| Budget::Percent {
-        percent: 0.5,
-        min,
-        max,
-    };
-    assert_eq!(resolve_budget(&share(None, None), 1000), 500);
-    assert_eq!(resolve_budget(&share(None, Some(100)), 1000), 100);
-    assert_eq!(resolve_budget(&share(Some(800), None), 1000), 800);
-    assert_eq!(resolve_budget(&share(Some(800), Some(100)), 1000), 800);
 }
 
 /// A stage's own `input_accepts` wins; without one it takes what the regions

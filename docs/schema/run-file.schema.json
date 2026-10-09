@@ -4372,6 +4372,39 @@
         ],
         "type": "object"
       },
+      "ChosenModel": {
+        "description": "A model as chosen for a stage: who serves it, how much it holds, and where\nto go when that provider fails. The resolver's [`ModelPlan`] carries one,\nand a [`StagePlan`] keeps it whole.\n\n[`ModelPlan`]: super::env::ModelPlan",
+        "properties": {
+          "context_window": {
+            "description": "Its context window, in tokens.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fallbacks": {
+            "description": "Where to go if the provider fails, best first.",
+            "items": {
+              "$ref": "#/$defs/ModelRef"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "The model.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "The provider that serves it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "id",
+          "context_window",
+          "fallbacks"
+        ],
+        "type": "object"
+      },
       "ClampedPercent": {
         "additionalProperties": false,
         "description": "A share of the window, clamped.",
@@ -7869,31 +7902,9 @@
       "StagePlan": {
         "description": "One stage, decided.",
         "properties": {
-          "context_window": {
-            "description": "That model's context window, in tokens.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "fallbacks": {
-            "description": "Where to go if the provider fails, best first.",
-            "items": {
-              "$ref": "#/$defs/ModelRef"
-            },
-            "type": "array"
-          },
-          "max_output_tokens": {
-            "description": "The cap on one reply, in tokens, when there is one.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
           "model": {
-            "description": "The model it runs.",
-            "type": "string"
+            "$ref": "#/$defs/ChosenModel",
+            "description": "The model it runs on."
           },
           "notes": {
             "description": "Lines worth logging about how the stage was decided.",
@@ -7913,10 +7924,6 @@
             ],
             "description": "The final-output shape it asks for, with the caller's request applied."
           },
-          "provider": {
-            "description": "The provider that serves it.",
-            "type": "string"
-          },
           "region_budgets": {
             "additionalProperties": {
               "format": "uint32",
@@ -7925,6 +7932,15 @@
             },
             "description": "Each region's budget in this stage, in tokens.",
             "type": "object"
+          },
+          "reply_cap": {
+            "description": "The cap on one reply in this stage, in tokens, when there is one: the\nstage's own setting, held to what the model can write and to the room\nits regions leave. Not the model's own maximum, which the resolver\nreads and this replaces.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "stage": {
             "description": "The stage.",
@@ -7940,10 +7956,7 @@
         },
         "required": [
           "stage",
-          "provider",
           "model",
-          "context_window",
-          "fallbacks",
           "tools",
           "region_budgets",
           "notes"

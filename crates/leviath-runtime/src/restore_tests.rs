@@ -101,6 +101,7 @@ fn held_issues() -> crate::spec::issues::SpawnIssues {
         crate::spec::issues::SpecPath::root()
             .field("stages")
             .key("ask")
+            .field("model")
             .field("provider"),
         crate::spec::issues::IssueCode::Unavailable,
         "provider 'openai' is no longer configured on this machine",
@@ -119,6 +120,7 @@ fn a_problem_held_at_several_places_is_said_once() {
             SpecPath::root()
                 .field("stages")
                 .key(stage)
+                .field("model")
                 .field("provider"),
             IssueCode::Unavailable,
             "provider 'openai' is no longer configured on this machine",
@@ -142,7 +144,8 @@ fn a_problem_held_at_several_places_is_said_once() {
     };
     assert_eq!(
         remedy,
-        "stages.ask.provider, stages.red.provider, stages.blue.provider: unavailable: provider \
+        "stages.ask.model.provider, stages.red.model.provider, stages.blue.model.provider: \
+         unavailable: provider \
          'openai' is no longer configured on this machine; stages.ask.tools: changed: MCP \
          server 'tiny' offers a different tool list; put that back, then `lev resume` this run \
          or restart the daemon"
@@ -168,7 +171,7 @@ fn a_held_run_is_listed_with_why_and_resumed_unheld() {
         blocker,
         leviath_core::run_meta::SetupBlocker::MachineChanged
     );
-    assert!(remedy.contains("stages.ask.provider"), "{remedy}");
+    assert!(remedy.contains("stages.ask.model.provider"), "{remedy}");
     assert!(remedy.contains("lev resume"), "{remedy}");
 
     run.state.held = Some(issues);

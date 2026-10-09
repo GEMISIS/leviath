@@ -29,8 +29,8 @@ use leviath_runtime::spec::names::{
     SecretRef, StageName, ToolName, WorkdirPath,
 };
 use leviath_runtime::spec::run_spec::{
-    AutoAnswers, EnvFingerprint, RunSpec as CoreSpec, SeededContent, SpecOrigin, StagePlan,
-    ToolDef as CoreTool, ToolSource,
+    AutoAnswers, ChosenModel, EnvFingerprint, RunSpec as CoreSpec, SeededContent, SpecOrigin,
+    StagePlan, ToolDef as CoreTool, ToolSource,
 };
 use leviath_runtime::state::context::{
     BlobState, ContextDiff as CoreDiff, ContextState as CoreContext, EntryKind, EntryMeta,
@@ -388,11 +388,13 @@ fn spec() -> CoreSpec {
         inputs: input_values(),
         stages: vec![StagePlan {
             stage: stage("analyze"),
-            provider: named!(ProviderName, "mock"),
-            model: named!(ModelId, "gpt-mock"),
-            context_window: 128_000,
-            max_output_tokens: Some(8_000),
-            fallbacks: vec![ModelRef::parse("other/m").expect("a model")],
+            model: ChosenModel {
+                provider: named!(ProviderName, "mock"),
+                id: named!(ModelId, "gpt-mock"),
+                context_window: 128_000,
+                fallbacks: vec![ModelRef::parse("other/m").expect("a model")],
+            },
+            reply_cap: Some(8_000),
             tools: vec![
                 tool("read_file", ToolSource::Builtin),
                 tool("spawn_agent", ToolSource::Subagent),
@@ -691,6 +693,7 @@ fn held() -> leviath_runtime::spec::issues::SpawnIssues {
         leviath_runtime::spec::issues::SpecPath::root()
             .field("stages")
             .key("ask")
+            .field("model")
             .field("provider"),
         leviath_runtime::spec::issues::IssueCode::Unavailable,
         "provider 'openai' is no longer configured on this machine",
@@ -1214,7 +1217,7 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(full["checkpoint"]["round"], 2);
     assert_eq!(step["changes"][25]["held"][0]["code"], "UNAVAILABLE");
     assert_eq!(step["changes"][26]["held"], serde_json::Value::Null);
-    assert_eq!(full["held"][0]["path"], "stages.ask.provider");
+    assert_eq!(full["held"][0]["path"], "stages.ask.model.provider");
     assert_eq!(
         step["events"].as_array().map(Vec::len),
         Some(7 + 8 + 6 + 5 + 13)

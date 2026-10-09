@@ -17,7 +17,7 @@ use leviath_runtime::dynamic_interaction::BLOCKING_INTERACTION_TOOLS;
 use leviath_runtime::spec::env::{CodeFiles, ModelPlan};
 use leviath_runtime::spec::graph::{CodeRef, OutputCap, OutputDef, RunGraph, StageDef};
 use leviath_runtime::spec::names::{ModelId, ModelRef, ProviderName, RegionName};
-use leviath_runtime::spec::run_spec::{AutoAnswers, StagePlan, ToolDef};
+use leviath_runtime::spec::run_spec::{AutoAnswers, ChosenModel, StagePlan, ToolDef};
 
 use crate::StageLookup;
 use crate::context::n32;
@@ -127,7 +127,7 @@ fn recorded_model(
         }
     };
     report.fill(
-        format!("{at}.context_window"),
+        format!("{at}.model.context_window"),
         window,
         "an old run did not record its models' windows; this is the context budget it last ran with",
     );
@@ -136,16 +136,18 @@ fn recorded_model(
         model: model.clone(),
     };
     ModelPlan {
-        fallbacks: stage
-            .model
-            .models
-            .iter()
-            .filter(|m| **m != current)
-            .cloned()
-            .collect(),
-        provider,
-        model,
-        context_window: window,
+        model: ChosenModel {
+            provider,
+            id: model,
+            context_window: window,
+            fallbacks: stage
+                .model
+                .models
+                .iter()
+                .filter(|m| **m != current)
+                .cloned()
+                .collect(),
+        },
         max_output_tokens: 0,
         notes: Vec::new(),
     }
@@ -177,18 +179,15 @@ fn plan(
         .iter()
         .filter_map(|r| Some((RegionName::new(r.name.as_str()).ok()?, n32(r.max_tokens))))
         .collect();
-    let max_output_tokens = output_cap(stage, &model, &region_budgets, &at, report);
+    let reply_cap = output_cap(stage, &model, &region_budgets, &at, report);
     let mut tools = tools(cx, stage, found, &at, report);
     describe_submit(&mut tools, stage.output.as_ref());
     let mut notes = vec!["converted from an old run directory".to_string()];
     notes.extend(model.notes);
     StagePlan {
         stage: stage.name.clone(),
-        provider: model.provider,
         model: model.model,
-        context_window: model.context_window,
-        max_output_tokens,
-        fallbacks: model.fallbacks,
+        reply_cap,
         tools,
         output: stage.output.clone(),
         region_budgets,
@@ -212,13 +211,13 @@ fn output_cap(
         OutputCap::Tokens(n) => Some(*n),
         _ if most == 0 => {
             report.fill(
-                format!("{at}.max_output_tokens"),
+                format!("{at}.reply_cap"),
                 "None",
                 "the cap was relative to a model nothing looked up",
             );
             None
         }
-        OutputCap::WindowPercent(fraction) => Some(share(model.context_window, *fraction)),
+        OutputCap::WindowPercent(fraction) => Some(share(model.model.context_window, *fraction)),
         OutputCap::RegionPercent { percent, region } => {
             Some(budgets.get(region).map_or(most, |b| share(*b, *percent)))
         }

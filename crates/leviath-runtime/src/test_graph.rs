@@ -24,7 +24,9 @@ use crate::spec::names::{
     BlueprintName, BlueprintRef, EdgeName, ModelId, ModelRef, ProviderName, RegionName, RunId,
     StageName, ToolName,
 };
-use crate::spec::run_spec::{EnvFingerprint, RunSpec, SpecOrigin, StagePlan, ToolDef, ToolSource};
+use crate::spec::run_spec::{
+    ChosenModel, EnvFingerprint, RunSpec, SpecOrigin, StagePlan, ToolDef, ToolSource,
+};
 
 /// The context window every plan of [`spec_of`] and [`spec_with`] claims, so a
 /// percentage budget resolves the way a spawn without a registered provider
@@ -292,11 +294,13 @@ fn spec_from(graph: RunGraph, agent_id: &str, stages: &[StageInference], window:
         .enumerate()
         .map(|(i, (def, inference))| StagePlan {
             stage: def.name.clone(),
-            provider: ProviderName::new(&inference.provider_name).expect("a test's provider"),
-            model: ModelId::new(&inference.model).expect("a test's model id"),
-            context_window: window,
-            max_output_tokens: None,
-            fallbacks: inference.fallbacks.clone(),
+            model: ChosenModel {
+                provider: ProviderName::new(&inference.provider_name).expect("a test's provider"),
+                id: ModelId::new(&inference.model).expect("a test's model id"),
+                context_window: window,
+                fallbacks: inference.fallbacks.clone(),
+            },
+            reply_cap: None,
             tools: inference.tools.iter().map(tool_def).collect(),
             output: inference
                 .output
@@ -397,6 +401,7 @@ pub(crate) mod spawning {
         ModelRef, ProviderName, RegionName, RunId, WorkdirPath,
     };
     use crate::spec::request::{SpawnRequest, SpawnSource};
+    use crate::spec::run_spec::ChosenModel;
     use crate::spec::run_spec::{SeededContent, ToolDef};
 
     /// Spawn a run of `graph` into `world` with `task` in its task region and
@@ -561,11 +566,13 @@ pub(crate) mod spawning {
             |p| p.capabilities(&stage.model).max_output_tokens,
         );
         ModelPlan {
-            provider: ProviderName::new(&stage.provider_name).expect("a test's provider"),
-            model: ModelId::new(&stage.model).expect("a test's model id"),
-            context_window: super::clamp(window),
+            model: ChosenModel {
+                provider: ProviderName::new(&stage.provider_name).expect("a test's provider"),
+                id: ModelId::new(&stage.model).expect("a test's model id"),
+                context_window: super::clamp(window),
+                fallbacks: stage.fallbacks.clone(),
+            },
             max_output_tokens: super::clamp(most),
-            fallbacks: stage.fallbacks.clone(),
             notes: stage.notes.clone(),
         }
     }

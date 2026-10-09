@@ -26,7 +26,7 @@ fn two_stage_spec() -> RunSpec {
     let mut spec = crate::spec::run_spec::tests::spec();
     let mut build = spec.stages[0].clone();
     build.stage = sn("build");
-    build.model = crate::spec::names::ModelId::new("builder").unwrap();
+    build.model.id = crate::spec::names::ModelId::new("builder").unwrap();
     build.notes = vec![];
     spec.stages.push(build);
     spec

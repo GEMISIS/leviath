@@ -104,12 +104,12 @@ fn plan(spec: &RunSpec, idx: usize) -> Option<&StagePlan> {
 
 /// The window a stage's percentage budgets are sized against.
 fn window_of(spec: &RunSpec, idx: usize) -> u32 {
-    plan(spec, idx).map_or(FALLBACK_WINDOW, |p| p.context_window)
+    plan(spec, idx).map_or(FALLBACK_WINDOW, |p| p.model.context_window)
 }
 
 /// One region's budget in one stage: the plan's figure, or the region's own
 /// budget sized against the stage's window when the plan has none.
-fn budget_in(spec: &RunSpec, idx: usize, region: &RegionDef) -> usize {
+pub(crate) fn budget_in(spec: &RunSpec, idx: usize, region: &RegionDef) -> usize {
     let planned = plan(spec, idx).and_then(|p| p.region_budgets.get(region.name.as_str()));
     match planned {
         Some(tokens) => *tokens as usize,
@@ -405,11 +405,11 @@ pub(crate) fn stage_inference(
         None => plan.tools.iter().map(tool).collect(),
     };
     StageInference {
-        provider_name: plan.provider.to_string(),
-        model: plan.model.to_string(),
+        provider_name: plan.model.provider.to_string(),
+        model: plan.model.id.to_string(),
         tools,
         tool_filter: None,
-        fallbacks: plan.fallbacks.clone(),
+        fallbacks: plan.model.fallbacks.clone(),
         output: plan.output.as_ref().map(output_spec),
     }
 }

@@ -6,7 +6,7 @@ use crate::spec::graph::{
 use crate::spec::names::{
     MimePattern, ModelId, ModelRef, ProviderName, RegionName, StageName, ToolName,
 };
-use crate::spec::run_spec::{StagePlan, ToolSource};
+use crate::spec::run_spec::{ChosenModel, StagePlan, ToolSource};
 
 /// A region of `regions` by name.
 fn find<'a>(regions: &'a [leviath_core::Region], name: &str) -> &'a leviath_core::Region {
@@ -23,11 +23,13 @@ fn rn(name: &str) -> RegionName {
 fn plan(name: &str, window: u32) -> StagePlan {
     StagePlan {
         stage: StageName::new(name).unwrap(),
-        provider: ProviderName::new("p").unwrap(),
-        model: ModelId::new("m").unwrap(),
-        context_window: window,
-        max_output_tokens: None,
-        fallbacks: vec![],
+        model: ChosenModel {
+            provider: ProviderName::new("p").unwrap(),
+            id: ModelId::new("m").unwrap(),
+            context_window: window,
+            fallbacks: vec![],
+        },
+        reply_cap: None,
         tools: vec![],
         output: None,
         region_budgets: BTreeMap::new(),

@@ -62,15 +62,17 @@ fn provider_paths(spec: &RunSpec, provider: &ProviderName) -> Vec<SpecPath> {
     let mut paths = Vec::new();
     for plan in &spec.stages {
         let stage = SpecPath::root().field("stages").key(plan.stage.as_str());
-        if plan.provider == *provider {
-            paths.push(stage.field("provider"));
+        let model = stage.field("model");
+        if plan.model.provider == *provider {
+            paths.push(model.field("provider"));
         }
         let falls_back = plan
+            .model
             .fallbacks
             .iter()
             .any(|f| f.provider.as_ref() == Some(provider));
         if falls_back {
-            paths.push(stage.field("fallbacks"));
+            paths.push(model.field("fallbacks"));
         }
     }
     if paths.is_empty() {

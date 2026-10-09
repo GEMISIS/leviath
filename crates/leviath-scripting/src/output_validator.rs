@@ -53,8 +53,7 @@ pub struct OutputValidator {
 
 /// Build the hardened engine every validator call runs on.
 fn build_engine() -> Engine {
-    let mut engine = Engine::new();
-    crate::harden(&mut engine, VALIDATOR_MAX_OPERATIONS);
+    let mut engine = crate::sandboxed(VALIDATOR_MAX_OPERATIONS);
     crate::functions::register_functions(&mut engine);
     crate::types::register_types(&mut engine);
     engine

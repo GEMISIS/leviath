@@ -157,9 +157,11 @@ async fn a_recorded_world_is_streamed_and_its_end_ends_the_stream() {
 }
 
 /// Events that overran the world's channel before the recorder read them are
-/// lost, and recording goes on with the next.
+/// lost, but not silently: each still takes its number, so the next event's
+/// number jumps and a subscriber can see the gap. A subscription picking up
+/// inside the gap is sent what follows it.
 #[tokio::test]
-async fn a_lagging_recorder_skips_what_it_missed_and_carries_on() {
+async fn a_lagging_recorder_numbers_what_it_missed_and_carries_on() {
     let (tx, _keep) = broadcast::channel(1);
     let log = EventLog::recording(&tx);
     // Sent before the recorder task first runs: only the last fits.
@@ -172,7 +174,9 @@ async fn a_lagging_recorder_skips_what_it_missed_and_carries_on() {
     })
     .await;
     let (events, _) = log.since(0);
-    assert_eq!(events, vec![(1, completed("kept"))]);
+    assert_eq!(events, vec![(2, completed("kept"))]);
+    assert_eq!(log.since(1).0, vec![(2, completed("kept"))]);
+    assert!(log.since(2).0.is_empty());
 }
 
 /// A subscriber that hangs up ends its stream even when no event comes, so

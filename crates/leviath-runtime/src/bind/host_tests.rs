@@ -129,11 +129,11 @@ fn a_stage_gets_its_own_model_on_a_registered_provider_with_its_window() {
         &registry(&["mock"]),
     )
     .unwrap();
-    assert_eq!(plan.provider.as_str(), "mock");
-    assert_eq!(plan.model.as_str(), "gpt-mock");
-    assert_eq!(plan.context_window, 5000);
+    assert_eq!(plan.model.provider.as_str(), "mock");
+    assert_eq!(plan.model.id.as_str(), "gpt-mock");
+    assert_eq!(plan.model.context_window, 5000);
     assert_eq!(
-        plan.fallbacks,
+        plan.model.fallbacks,
         vec![ModelRef::parse("mock/backup").unwrap()],
         "a fallback on a provider that is not registered is left out"
     );
@@ -150,7 +150,7 @@ fn a_requested_model_wins_and_an_unservable_stage_is_an_issue() {
         &r,
     )
     .unwrap();
-    assert_eq!(plan.model.as_str(), "forced");
+    assert_eq!(plan.model.id.as_str(), "forced");
 
     let mut nowhere = stage(&["gone/x"]);
     nowhere.model.allow_user_default = false;

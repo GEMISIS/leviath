@@ -209,7 +209,7 @@ fn spec(graph: crate::spec::graph::RunGraph) -> crate::insert::RunSpecC {
     let infs: Vec<StageInference> = graph.stages.iter().map(|_| si()).collect();
     let mut spec = crate::test_graph::spec_with(graph, &infs);
     for plan in &mut Arc::make_mut(&mut spec.0).stages {
-        plan.context_window = 0;
+        plan.model.context_window = 0;
     }
     spec
 }

@@ -129,12 +129,7 @@ async fn output_caps_resolve_against_the_window_the_regions_and_the_models_most(
         stage.model.params.max_output_tokens = Some(cap);
     }
     let resolved = spawn(&raw(g), &Fake::default()).await.unwrap();
-    let caps: Vec<Option<u32>> = resolved
-        .spec
-        .stages
-        .iter()
-        .map(|s| s.max_output_tokens)
-        .collect();
+    let caps: Vec<Option<u32>> = resolved.spec.stages.iter().map(|s| s.reply_cap).collect();
     // A quarter of the 100k window is more than the model writes in one reply
     // (4096), and a cap on a region the stage lacks is the model's own most.
     assert_eq!(caps, [Some(512), Some(4096), Some(500), Some(4096)]);
@@ -271,7 +266,7 @@ async fn the_callers_model_reaches_only_stages_that_allow_it() {
         ]
     );
     assert_eq!(resolved.spec.requested_model, Some(model("other/big")));
-    assert_eq!(resolved.spec.stages[0].provider.as_str(), "other");
+    assert_eq!(resolved.spec.stages[0].model.provider.as_str(), "other");
 }
 
 #[tokio::test]
@@ -286,7 +281,7 @@ async fn the_fingerprint_covers_every_provider_and_server_the_run_uses() {
     });
     g.stages[0].connectors = vec![n("linear")];
     let mut chosen = plan("mock", "m", 100_000);
-    chosen.fallbacks = vec![model("backup/m"), model("bare")];
+    chosen.model.fallbacks = vec![model("backup/m"), model("bare")];
     chosen.notes = vec!["[model] moved".into()];
     let mcp = ToolDef {
         source: ToolSource::Mcp {
@@ -316,5 +311,5 @@ async fn the_fingerprint_covers_every_provider_and_server_the_run_uses() {
     let servers: Vec<&str> = fp.mcp_servers.keys().map(|s| s.as_str()).collect();
     assert_eq!(servers, ["gh", "linear"]);
     assert_eq!(resolved.spec.stages[0].notes, ["[model] moved"]);
-    assert_eq!(resolved.spec.stages[0].fallbacks.len(), 2);
+    assert_eq!(resolved.spec.stages[0].model.fallbacks.len(), 2);
 }

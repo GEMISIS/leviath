@@ -36,6 +36,20 @@ const WS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// the send timeout to notice.
 const WS_MAX_WRITE_BUFFER: usize = 256 * 1024;
 
+/// The `events_dropped` frame: this subscriber fell further behind than the
+/// bus holds, and the oldest `count` events went before it read them.
+///
+/// Not a [`ServerEvent`], because it never goes on the bus: it is about one
+/// connection, made by the socket that lagged. It reaches a per-run
+/// subscription too, since nothing can say whether the lost events were that
+/// run's. The client re-reads what it shows rather than trusting the stream.
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename = "events_dropped")]
+struct EventsDropped {
+    /// How many events were dropped.
+    count: u64,
+}
+
 pub(super) async fn ws_global(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
@@ -145,7 +159,8 @@ async fn handle_ws_with(
                 }
             }
             event = rx.recv() => {
-                match event {
+                // Both always serialize; a failure is a bug.
+                let json = match event {
                     Ok(stamped) => {
                         // The stamp is the bus's own bookkeeping. `/ws` sends
                         // the event and nothing else, which is what keeps its
@@ -158,19 +173,16 @@ async fn handle_ws_with(
                         {
                             continue;
                         }
-
-                        // ServerEvent always serializes; a failure is a bug.
-                        let json = serde_json::to_string(&ev)
-                            .expect("ServerEvent serialization must not fail");
-                        if !send_within(&mut socket, send_timeout, Message::Text(json.into())).await
-                        {
-                            break; // dead or wedged peer either way
-                        }
+                        serde_json::to_string(&ev).expect("ServerEvent serialization must not fail")
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("WebSocket subscriber lagged by {} events", n);
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::warn!("WebSocket subscriber lagged by {count} events");
+                        serde_json::to_string(&EventsDropped { count }).expect("a count serializes")
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
+                };
+                if !send_within(&mut socket, send_timeout, Message::Text(json.into())).await {
+                    break; // dead or wedged peer either way
                 }
             }
             _ = ping.tick() => {
@@ -534,6 +546,49 @@ mod tests {
 
         // Close so the server-side handle_ws task terminates instead of
         // idling forever on rx.recv() for the rest of the process lifetime.
+        client.send_close().await;
+    }
+
+    /// A subscriber that falls further behind than the bus holds is told how
+    /// many events it missed, before the ones it still gets, rather than
+    /// handed a stream with a silent hole in it.
+    #[tokio::test]
+    async fn a_lagging_subscriber_is_told_how_many_events_it_missed() {
+        let state = test_state();
+        let tx = state.event_tx.clone();
+        let addr = spawn_test_server(state).await;
+        let mut client = WsTestClient::connect(addr, "/ws").await;
+        wait_for_receiver_count(&tx, 1).await;
+
+        // Sent without yielding, so the server reads none of them before the
+        // 64-slot bus has dropped the oldest.
+        for i in 0..100 {
+            send_event(
+                &tx,
+                ServerEvent::Log {
+                    agent_id: "a".to_string(),
+                    run_id: "run-1".to_string(),
+                    line: format!("line {i}"),
+                },
+            );
+        }
+
+        let (opcode, payload) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
+                .await
+                .expect("timed out waiting for the first frame");
+        assert_text_frame(opcode);
+        let first: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(
+            first,
+            serde_json::json!({"type": "events_dropped", "count": 36})
+        );
+        let (_, payload) = client.recv_frame().await;
+        let next: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(
+            next["line"], "line 36",
+            "the oldest event the bus still held"
+        );
         client.send_close().await;
     }
 

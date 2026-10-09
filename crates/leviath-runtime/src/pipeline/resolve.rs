@@ -1167,8 +1167,8 @@ mod tests {
             .stages
             .into_iter()
             .map(|plan| ResolvedStage {
-                provider_name: plan.provider.to_string(),
-                model: plan.model.to_string(),
+                provider_name: plan.model.provider.to_string(),
+                model: plan.model.id.to_string(),
                 tools: plan
                     .tools
                     .iter()
@@ -1178,7 +1178,7 @@ mod tests {
                         parameters: d.schema.value().clone(),
                     })
                     .collect(),
-                fallbacks: plan.fallbacks,
+                fallbacks: plan.model.fallbacks,
                 output: plan
                     .output
                     .as_ref()
