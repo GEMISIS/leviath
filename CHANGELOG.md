@@ -282,6 +282,10 @@ same list.
   name the feature to rebuild with. `lev --version` lists the providers when
   some are missing, and the Docker image takes them as `LEV_FEATURES`.
   Released binaries still carry every provider.
+- `leviath_cli::run()` runs the whole of `lev`, so a fork can wrap it in a
+  binary of its own: `fn main() -> anyhow::Result<()> { leviath_cli::run() }`.
+  `leviath_cli::run_from(argv)` does the same on arguments the wrapper has
+  rewritten first.
 
 ## 0.6.4 - 2026-09-26
 

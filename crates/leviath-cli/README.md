@@ -51,6 +51,28 @@ and budgets, tools, and the workflow graph. `lev validate my-agent` checks it.
 
 Full documentation is at [leviath.dev](https://leviath.dev).
 
+## Wrapping lev
+
+The whole of `lev` is `leviath_cli::run()`. A binary of your own that wraps
+it, under another name or with setup of its own, can be this small:
+
+```rust
+fn main() -> anyhow::Result<()> {
+    leviath_cli::run()
+}
+```
+
+`leviath_cli::run_from(argv)` takes the arguments from you instead of the
+process, so you can add or rewrite them before lev parses them.
+
+Two things to keep:
+
+- lev starts its daemon by running its own executable as `<exe> daemon`. Pass
+  that through to `run` unchanged.
+- The allocator belongs to your binary. `lev` uses mimalloc, and its
+  [`main.rs`](src/main.rs) shows the two lines that set it up. A long-running
+  daemon holds far less memory with them.
+
 ## Embedding
 
 To use the runtime as a library instead of a binary, depend on the
