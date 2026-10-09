@@ -870,13 +870,13 @@ fn every_bundled_stage_runs_the_first_model_anything_serves() {
 
             let got = leviath_runtime::bind::host::choose_model(stage, None, &defaults, &registry)
                 .expect("a reachable stage resolves");
-            let got_key = bare(got.model.as_str());
+            let got_key = bare(got.model.id.as_str());
             assert_eq!(
                 got_key, want,
                 "{}/{} lists {listed:?} and the first one reachable is {want}, but it \
                  resolved to {got_key} on {}: the host chose a different model, not a \
                  different route",
-                agent.name, stage.name, got.provider,
+                agent.name, stage.name, got.model.provider,
             );
         }
     }
@@ -1078,6 +1078,7 @@ fn lint_env_for(agent: &BundledAgent) -> crate::lint::LintEnv {
         unrouted_models: std::collections::HashSet::new(),
         model_windows: crate::commands::models::builtin_model_windows(),
         retention_refusals: std::collections::HashMap::new(),
+        unloadable_workers: None,
     }
 }
 

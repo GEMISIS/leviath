@@ -415,11 +415,16 @@ impl From<&CorePlan> for StagePlan {
     fn from(plan: &CorePlan) -> Self {
         Self {
             stage: plan.stage.to_string(),
-            provider: plan.provider.to_string(),
-            model: plan.model.to_string(),
-            context_window: saturating(plan.context_window),
-            max_output_tokens: plan.max_output_tokens.map(saturating),
-            fallbacks: plan.fallbacks.iter().map(ToString::to_string).collect(),
+            provider: plan.model.provider.to_string(),
+            model: plan.model.id.to_string(),
+            context_window: saturating(plan.model.context_window),
+            max_output_tokens: plan.reply_cap.map(saturating),
+            fallbacks: plan
+                .model
+                .fallbacks
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             tools: plan.tools.iter().map(ToolDef::from).collect(),
             output: plan.output.as_ref().map(OutputShape::from),
             region_budgets: plan

@@ -430,9 +430,8 @@ impl ResolveEnv for DaemonEnv {
     fn check_code(&self, code: &[u8], used_as: CodeUse) -> Result<(), String> {
         host::check_code(code, used_as)?;
         match used_as {
-            CodeUse::Seed => rhai::Engine::new()
-                .compile(String::from_utf8_lossy(code).as_ref())
-                .map(drop)
+            CodeUse::Seed => leviath_scripting::ScriptEngine::new()
+                .check(String::from_utf8_lossy(code).as_ref())
                 .map_err(|e| e.to_string()),
             _ => Ok(()),
         }

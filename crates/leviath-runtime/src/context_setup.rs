@@ -15,15 +15,10 @@ pub(crate) use parts::{PartSink, text_part};
 
 /// The tokens a region gets in one stage: what that stage's plan resolved it
 /// to, or its budget against that stage's window when the plan has no entry
-/// for it (a region the stage hides).
+/// for it (a region the stage hides). The same figure the pipeline's stage
+/// setup uses: both read it from `pipeline::spec_view::budget_in`.
 pub fn stage_region_budget(spec: &RunSpec, stage: usize, def: &RegionDef) -> usize {
-    let plan = spec.stages.get(stage);
-    match plan.and_then(|p| p.region_budgets.get(&def.name)) {
-        Some(n) => *n as usize,
-        None => def
-            .budget
-            .resolve(plan.map_or(0, |p| p.context_window) as usize),
-    }
+    crate::pipeline::spec_view::budget_in(spec, stage, def)
 }
 
 /// The window's region for a declared one, holding `budget` tokens.
@@ -306,7 +301,7 @@ mod tests {
         let spec = crate::test_graph::spec_with(graph, &[crate::test_graph::plan_inference(0)]);
         let mut spec = (*spec.0).clone();
         for plan in &mut spec.stages {
-            plan.context_window = 100_000;
+            plan.model.context_window = 100_000;
         }
         spec
     }
@@ -909,8 +904,8 @@ mod tests {
         );
         assert_eq!(
             stage_region_budget(&spec, 9, &half),
-            0,
-            "no plan, no window"
+            crate::pipeline::DEFAULT_CONTEXT_WINDOW_TOKENS / 2,
+            "no plan: the default window, as the stage setup sizes it"
         );
     }
 }

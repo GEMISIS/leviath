@@ -25,7 +25,7 @@
 //! (`leviath-runtime`), which receives plain [`serde_json::Value`]s so it
 //! needs no `rhai` dependency of its own.
 //!
-//! Execution runs on a fresh hardened engine per call (see [`crate::harden`])
+//! Execution runs on a fresh hardened engine per call (see [`crate::sandboxed`])
 //! over the precompiled AST: no filesystem, no network, no `eval`, operation-
 //! bounded. The registered helpers are the same pure function/type sets every
 //! Leviath script engine gets.
@@ -62,8 +62,7 @@ impl RegionScript {
 
 /// Build the hardened engine every region-hook call runs on.
 fn build_engine() -> Engine {
-    let mut engine = Engine::new();
-    crate::harden(&mut engine, REGION_HOOK_MAX_OPERATIONS);
+    let mut engine = crate::sandboxed(REGION_HOOK_MAX_OPERATIONS);
     crate::functions::register_functions(&mut engine);
     crate::types::register_types(&mut engine);
     engine

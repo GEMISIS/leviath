@@ -34,8 +34,7 @@ pub(crate) enum Outcome {
 /// The engine a check compiles and runs on: hardened to `max_operations`,
 /// with the crate's functions and types, plus whatever `extras` registers.
 pub(crate) fn build_engine(max_operations: u64, extras: fn(&mut Engine)) -> Engine {
-    let mut engine = Engine::new();
-    crate::harden(&mut engine, max_operations);
+    let mut engine = crate::sandboxed(max_operations);
     crate::functions::register_functions(&mut engine);
     crate::types::register_types(&mut engine);
     extras(&mut engine);

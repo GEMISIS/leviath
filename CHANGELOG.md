@@ -185,6 +185,27 @@ same list.
 
 ### Fixed
 
+- A completion webhook survives a restart of `lev serve`. A server records
+  each delivery once it is over, and one that starts sends every finished
+  run that still owes a webhook: a retry the last server was waiting on,
+  and a run that finished while no server was running. The delivery id is
+  unchanged, so a receiver drops a repeat.
+- A fan-out to a worker blueprint that is not installed is refused at
+  spawn, with every other problem in the request, and `lev validate` reports
+  it as `fanout-worker-missing`. It used to pass every check and fail each
+  worker only after the stages before the fan-out had run and been paid for.
+- A script tool that called `eval` was compiled by an engine without the
+  sandbox's rules, so the ban on `eval` never applied to it. Every Rhai
+  engine is now made by one constructor, and a test holds every crate to it.
+- The run file's stage plan keeps the chosen model as one value, and names
+  the stage's reply cap `reply_cap`, apart from the model's own maximum.
+  **Breaking** for run files written by alpha builds since the run file
+  arrived: they are refused by name. Spec paths for a stage's provider read
+  `stages.<stage>.model.provider`.
+- A daemon event recorder that falls behind numbers the events it lost, so
+  the gap shows in the sequence instead of the stream looking whole.
+- The docs say a retried model call can be billed twice, and no longer
+  claim interrupted tool batches replay exactly once.
 - `lev timeline` counted a tool that finished while its run was parked (an
   approval prompt, children it started) as tool time for the whole wait, and
   the wait as waiting too, so the parts added up to more than the wall clock:
@@ -286,6 +307,9 @@ same list.
   binary of its own: `fn main() -> anyhow::Result<()> { leviath_cli::run() }`.
   `leviath_cli::run_from(argv)` does the same on arguments the wrapper has
   rewritten first.
+- `/ws` and `/ws/agents/{id}` send an `events_dropped` frame, with a
+  `count`, when a socket falls behind and the oldest events are dropped
+  before it reads them. Announced as the `events.dropped` capability.
 
 ## 0.6.4 - 2026-09-26
 

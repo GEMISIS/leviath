@@ -27,7 +27,8 @@ use rhai::AST;
 use crate::script_check::{self, Outcome};
 
 /// Operation budget for a check: a handful of probes and some string work.
-const CHECK_MAX_OPERATIONS: u64 = 1_000_000;
+/// `lev deps install` runs install scripts on the same budget.
+pub const CHECK_MAX_OPERATIONS: u64 = 1_000_000;
 
 /// A compiled dependency check, ready to run.
 #[derive(Debug, Clone)]
@@ -71,8 +72,7 @@ pub fn compile(path: &str, source: &str) -> crate::Result<DependencyCheck> {
 /// define `fn install()` with no parameters, which `lev deps install` calls
 /// with `sh(command)` in hand. Nothing runs here.
 pub fn compile_install(path: &str, source: &str) -> crate::Result<()> {
-    let mut engine = rhai::Engine::new();
-    crate::harden(&mut engine, CHECK_MAX_OPERATIONS);
+    let engine = crate::sandboxed(CHECK_MAX_OPERATIONS);
     let ast = engine
         .compile(source)
         .map_err(|e| crate::Error::CompilationFailed(format!("{path}: {e}")))?;

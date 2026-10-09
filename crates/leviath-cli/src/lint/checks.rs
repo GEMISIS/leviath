@@ -1013,11 +1013,7 @@ pub(super) fn lint_unbounded_percentage(graph: &RunGraph, env: &LintEnv) -> Vec<
             {
                 continue;
             }
-            named.push((
-                region.name.as_str(),
-                resolve_budget(&region.budget, window),
-                percent,
-            ));
+            named.push((region.name.as_str(), region.budget.resolve(window), percent));
         }
     }
 

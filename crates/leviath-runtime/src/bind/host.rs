@@ -27,11 +27,11 @@ use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::names::{
     Digest, McpServerName, MimePattern, ModelId, ModelRef, ProviderName, ToolName, WorkdirPath,
 };
-use crate::spec::run_spec::{ToolDef, ToolSource};
+use crate::spec::run_spec::{ChosenModel, ToolDef, ToolSource};
 
 /// The window assumed for a model whose provider cannot say, matching the
 /// pipeline's own fallback for percentage budgets.
-const FALLBACK_WINDOW: u32 = 8192;
+const FALLBACK_WINDOW: u32 = crate::pipeline::DEFAULT_CONTEXT_WINDOW_TOKENS as u32;
 
 /// Read the code a graph names. A file is read from `base`, the directory of
 /// the blueprint that named it, and never from outside it: code is logic a
@@ -131,11 +131,13 @@ pub fn choose_model(
         .unwrap_or(leviath_providers::ModelCapabilities::default().max_output_tokens);
     let max_output_tokens = u32::try_from(max_output_tokens).unwrap_or(u32::MAX);
     Ok(ModelPlan {
-        provider,
-        model,
-        context_window,
+        model: ChosenModel {
+            provider,
+            id: model,
+            context_window,
+            fallbacks: resolved.fallbacks,
+        },
         max_output_tokens,
-        fallbacks: resolved.fallbacks,
         notes: resolved.notes,
     })
 }

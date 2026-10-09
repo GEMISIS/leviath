@@ -11,7 +11,7 @@ use axum::response::Json;
 use super::blueprint_types::{BlueprintDetail, RoutePair, StageRoutingInfo};
 use super::types::*;
 use leviath_runtime::spec::graph::{
-    Budget, RegionDef, RegionKind, RunGraph, StageMode, WorkerFailure, WorkerSource,
+    RegionDef, RegionKind, RunGraph, StageMode, WorkerFailure, WorkerSource,
 };
 
 /// Resolve the installed agents directory.
@@ -404,7 +404,10 @@ fn region_info(region: &RegionDef, total_budget_tokens: u32) -> RegionInfo {
         kind: region_kind_word(&region.kind).to_string(),
         description: region.description.clone(),
         describe_in_prompt: region.describe_in_prompt,
-        max_tokens: budget_tokens(&region.budget, total_budget_tokens),
+        // As far as the blueprint alone allows: a share is taken of the
+        // layout's total, since the model (and so its window) is not known
+        // until a run resolves it.
+        max_tokens: region.budget.resolve(total_budget_tokens as usize),
     }
 }
 
@@ -420,20 +423,6 @@ fn region_kind_word(kind: &RegionKind) -> &'static str {
         RegionKind::Keyed { .. } => "keyed",
         RegionKind::Checklist => "checklist",
         RegionKind::Custom { .. } => "custom",
-    }
-}
-
-/// A region's token ceiling, resolved as far as the blueprint alone allows: a
-/// fixed budget as written, and a share as that share of the layout's total
-/// budget, held between its floor and its ceiling.
-fn budget_tokens(budget: &Budget, total_budget_tokens: u32) -> usize {
-    match budget {
-        Budget::Tokens(n) => *n as usize,
-        Budget::Percent { percent, min, max } => {
-            let share = (f64::from(total_budget_tokens) * percent).round() as usize;
-            let floored = min.map_or(share, |m| share.max(m as usize));
-            max.map_or(floored, |m| floored.min(m as usize))
-        }
     }
 }
 
@@ -1100,6 +1089,7 @@ regions = [
     { name = "chat", kind = { kind = "sliding_window", max_items = 20 }, budget = 900 },
     { name = "notes", kind = "keyed", budget = { percent = "50%", max = 600 } },
     { name = "scratch", kind = "temporary", budget = { percent = "1%", min = 50 } },
+    { name = "crossed", kind = "clearable", budget = { percent = "10%", min = 500, max = 100 } },
 ]
 "#;
         let dir = tempfile::tempdir().unwrap();
@@ -1154,6 +1144,13 @@ regions = [
                     "kind": "temporary",
                     "describe_in_prompt": false,
                     "max_tokens": 50,
+                },
+                {
+                    // A floor above the cap wins, as it does in the run.
+                    "name": "crossed",
+                    "kind": "clearable",
+                    "describe_in_prompt": false,
+                    "max_tokens": 500,
                 },
             ])
         );

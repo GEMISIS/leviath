@@ -279,21 +279,35 @@ impl SpecOrigin {
     }
 }
 
+/// A model as chosen for a stage: who serves it, how much it holds, and where
+/// to go when that provider fails. The resolver's [`ModelPlan`] carries one,
+/// and a [`StagePlan`] keeps it whole.
+///
+/// [`ModelPlan`]: super::env::ModelPlan
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ChosenModel {
+    /// The provider that serves it.
+    pub provider: ProviderName,
+    /// The model.
+    pub id: ModelId,
+    /// Its context window, in tokens.
+    pub context_window: u32,
+    /// Where to go if the provider fails, best first.
+    pub fallbacks: Vec<ModelRef>,
+}
+
 /// One stage, decided.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StagePlan {
     /// The stage.
     pub stage: StageName,
-    /// The provider that serves it.
-    pub provider: ProviderName,
-    /// The model it runs.
-    pub model: ModelId,
-    /// That model's context window, in tokens.
-    pub context_window: u32,
-    /// The cap on one reply, in tokens, when there is one.
-    pub max_output_tokens: Option<u32>,
-    /// Where to go if the provider fails, best first.
-    pub fallbacks: Vec<ModelRef>,
+    /// The model it runs on.
+    pub model: ChosenModel,
+    /// The cap on one reply in this stage, in tokens, when there is one: the
+    /// stage's own setting, held to what the model can write and to the room
+    /// its regions leave. Not the model's own maximum, which the resolver
+    /// reads and this replaces.
+    pub reply_cap: Option<u32>,
     /// The tools it gets.
     pub tools: Vec<ToolDef>,
     /// The final-output shape it asks for, with the caller's request applied.
@@ -382,11 +396,13 @@ pub(crate) mod tests {
             },
             stages: vec![StagePlan {
                 stage: StageName::new("plan").unwrap(),
-                provider: ProviderName::new("mock").unwrap(),
-                model: ModelId::new("gpt-mock").unwrap(),
-                context_window: 128_000,
-                max_output_tokens: Some(8000),
-                fallbacks: vec![ModelRef::parse("other/m").unwrap()],
+                model: ChosenModel {
+                    provider: ProviderName::new("mock").unwrap(),
+                    id: ModelId::new("gpt-mock").unwrap(),
+                    context_window: 128_000,
+                    fallbacks: vec![ModelRef::parse("other/m").unwrap()],
+                },
+                reply_cap: Some(8000),
                 tools: vec![
                     ToolDef {
                         name: ToolName::new("read_file").unwrap(),
@@ -499,7 +515,10 @@ pub(crate) mod tests {
         let s = spec();
         let bin = postcard::to_stdvec(&s).unwrap();
         assert_eq!(postcard::from_bytes::<RunSpec>(&bin).unwrap(), s);
-        assert_eq!(s.stage("plan").map(|p| p.model.as_str()), Some("gpt-mock"));
+        assert_eq!(
+            s.stage("plan").map(|p| p.model.id.as_str()),
+            Some("gpt-mock")
+        );
         assert!(s.stage("nope").is_none());
         assert_eq!(
             s.code_digest(&CodeRef::File("hooks/enter.rhai".into())),

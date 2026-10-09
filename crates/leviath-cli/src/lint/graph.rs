@@ -3,7 +3,7 @@
 //! input fills. Answered once here so two checks cannot disagree.
 
 use leviath_runtime::spec::graph::{
-    Budget, ModelChoice, RegionDef, RegionLayoutDef, RunGraph, StageDef, ToolGroup, ToolSelector,
+    ModelChoice, RegionDef, RegionLayoutDef, RunGraph, StageDef, ToolGroup, ToolSelector,
 };
 use leviath_runtime::spec::inputs::InputSlot;
 use leviath_runtime::spec::names::ModelRef;
@@ -55,26 +55,6 @@ pub(super) fn grants_all_builtins(stage: &StageDef) -> bool {
     tool_groups(stage)
         .into_iter()
         .any(|g| covers(g, ToolGroup::Builtin))
-}
-
-/// The tokens `budget` resolves to against a `window`: a percentage rounded,
-/// then capped by `max`, then floored by `min` (the floor wins when the two
-/// cross, since a region starved below a usable size is worse than one a
-/// little over its cap).
-pub(super) fn resolve_budget(budget: &Budget, window: usize) -> usize {
-    match budget {
-        Budget::Tokens(n) => *n as usize,
-        Budget::Percent { percent, min, max } => {
-            let mut v = (window as f64 * percent).round() as usize;
-            if let Some(max) = max {
-                v = v.min(*max as usize);
-            }
-            if let Some(min) = min {
-                v = v.max(*min as usize);
-            }
-            v
-        }
-    }
 }
 
 /// Every layout in the graph: its own, then each stage's that has one.

@@ -24,7 +24,7 @@ use leviath_runtime::spec::names::{
     RunId, SecretRef, StageName,
 };
 use leviath_runtime::spec::run_spec::{
-    AutoAnswers, EnvFingerprint, RunSpec, SeededContent, SpecOrigin, StagePlan,
+    AutoAnswers, ChosenModel, EnvFingerprint, RunSpec, SeededContent, SpecOrigin, StagePlan,
 };
 use leviath_runtime::state::{
     Clock, ContextState, FinalOutputState, Flags, PipelinePhase, RunState, RunStatus as State,
@@ -121,11 +121,13 @@ fn spec_of(meta: &RunMeta, regions: Vec<RegionDef>) -> RunSpec {
             let (provider, model) = model.split_once('/')?;
             Some(StagePlan {
                 stage: graph.stages[0].name.clone(),
-                provider: ProviderName::new(provider).ok()?,
-                model: ModelId::new(model).ok()?,
-                context_window: 100_000,
-                max_output_tokens: None,
-                fallbacks: Vec::new(),
+                model: ChosenModel {
+                    provider: ProviderName::new(provider).ok()?,
+                    id: ModelId::new(model).ok()?,
+                    context_window: 100_000,
+                    fallbacks: Vec::new(),
+                },
+                reply_cap: None,
                 tools: Vec::new(),
                 output: None,
                 region_budgets: BTreeMap::new(),

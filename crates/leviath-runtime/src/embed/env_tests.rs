@@ -142,7 +142,7 @@ fn paths_are_checked_inside_the_workdir_by_kind() {
 async fn models_tools_and_code_answer_through_the_shared_host() {
     let e = env();
     let plan = e.model(&stage(&["mock/m"]), None).await.unwrap();
-    assert_eq!(plan.provider.as_str(), "mock");
+    assert_eq!(plan.model.provider.as_str(), "mock");
     let mut nowhere = stage(&["gone/x"]);
     nowhere.model.allow_user_default = false;
     let issue = e.model(&nowhere, None).await.unwrap_err();

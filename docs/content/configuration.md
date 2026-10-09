@@ -441,6 +441,11 @@ capacity failure about four minutes of waiting rather than about one and a half.
 the retries of a single request sleep **at most five minutes in total**, and the request itself is
 still bounded by its stage's `request_timeout_secs`, so a run can never wait indefinitely.
 
+A retry sends the same request again, and a request that reached the provider may already have
+been processed. So a timeout or a reply that stopped part-way can be billed twice: once for the
+attempt that went quiet, and once for the retry that answered. Tool calls are different. A tool
+call that finished is never run again, on a retry or after a restart.
+
 **`interaction_timeout_secs`** bounds how long a prompt waits on a person: `ask_user_*`, tool
 approvals, taint gates, and interaction points. Leave it unset and the run waits for you until you
 answer, whether that is in ten minutes or on Monday. Nothing else in the daemon fails, reaps, or

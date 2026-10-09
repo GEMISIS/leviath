@@ -357,7 +357,7 @@ pub(crate) fn run_metadata(spec: &RunSpec, state: &RunState) -> RunMetadata {
         None => (
             spec.stages
                 .first()
-                .map(|p| format!("{}/{}", p.provider, p.model)),
+                .map(|p| format!("{}/{}", p.model.provider, p.model.id)),
             spec.graph.stages.len(),
             spec.origin.digest().map(ToString::to_string),
         ),

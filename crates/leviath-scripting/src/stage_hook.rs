@@ -12,7 +12,7 @@
 //!   `ctx` in place does nothing; the script returns its decision.
 //! - **Compiled once**, at agent spawn, by the CLI. A missing or malformed
 //!   script is a spawn error, not a runtime surprise.
-//! - **A fresh hardened engine per call** ([`crate::harden`]): no filesystem,
+//! - **A fresh hardened engine per call** ([`crate::sandboxed`]): no filesystem,
 //!   no network, no `eval`, operation-bounded.
 //! - **JSON at the boundary**, so `leviath-runtime` interprets the outcome
 //!   without depending on `rhai`.
@@ -110,8 +110,7 @@ impl HookScript {
 
 /// Build the hardened engine every stage-hook call runs on.
 fn build_engine() -> Engine {
-    let mut engine = Engine::new();
-    crate::harden(&mut engine, STAGE_HOOK_MAX_OPERATIONS);
+    let mut engine = crate::sandboxed(STAGE_HOOK_MAX_OPERATIONS);
     crate::functions::register_functions(&mut engine);
     crate::types::register_types(&mut engine);
     engine

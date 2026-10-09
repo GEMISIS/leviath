@@ -28,8 +28,7 @@ const MAX_OPERATIONS: u64 = 500_000;
 /// it, anything that could write one file into `~/.leviath/providers/` could
 /// read every key in the process and post it out on the next inference.
 pub fn build_init_engine(env_allowlist: Arc<Vec<String>>) -> Engine {
-    let mut engine = Engine::new();
-    leviath_scripting::harden(&mut engine, MAX_OPERATIONS);
+    let mut engine = leviath_scripting::sandboxed(MAX_OPERATIONS);
     // Provider scripts assemble whole request/response bodies in memory, so they
     // get more headroom than the shared defaults allow.
     engine.set_max_string_size(2_000_000);

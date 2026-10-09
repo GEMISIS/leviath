@@ -23,7 +23,7 @@ use std::path::Path;
 
 use leviath_blueprint::BlueprintFile;
 use leviath_runtime::dynamic_interaction::BLOCKING_INTERACTION_TOOLS;
-use leviath_runtime::spec::graph::{RunGraph, StageMode, ToolGroup};
+use leviath_runtime::spec::graph::{RunGraph, StageMode, ToolGroup, WorkerSource};
 use leviath_tools::canonical_tool_name;
 // The findings every check reports in belong to the blueprint layer, so the
 // daemon's spawn log, `lev validate` and the blueprint editor show them alike.
@@ -148,6 +148,11 @@ pub(crate) struct LintEnv {
     /// registry the spawn gate asks, with the same settings. Empty when
     /// nobody asked or the switch is off.
     pub retention_refusals: HashMap<String, Vec<RetentionRefusal>>,
+
+    /// Each fan-out worker blueprint the graph names that this install cannot
+    /// load, keyed as the graph writes it, with why. `None` means nobody asked
+    /// (the daemon's offline lint, whose spawn makes the same check itself).
+    pub unloadable_workers: Option<HashMap<String, String>>,
 }
 
 /// One model a stage names that cannot run with zero data retention.
@@ -204,7 +209,32 @@ impl LintEnv {
             unrouted_models: HashSet::new(),
             model_windows: crate::commands::models::builtin_model_windows(),
             retention_refusals: HashMap::new(),
+            unloadable_workers: None,
         }
+    }
+
+    /// Add which fan-out worker blueprints the graph names that cannot be
+    /// loaded from `agents_dir`, asked exactly as a spawn asks, so `lev
+    /// validate` refuses what the spawn would.
+    pub(crate) fn with_workers(mut self, graph: &RunGraph, agents_dir: Option<&Path>) -> Self {
+        let unloadable = graph
+            .stages
+            .iter()
+            .filter_map(|stage| match &stage.mode {
+                StageMode::FanOut(fan) => match &fan.worker {
+                    WorkerSource::Blueprint(reference) => Some(reference),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .filter_map(|reference| {
+                crate::daemon::resolve_env::load_installed(agents_dir, reference)
+                    .err()
+                    .map(|issue| (reference.to_string(), issue.message))
+            })
+            .collect();
+        self.unloadable_workers = Some(unloadable);
+        self
     }
 
     /// Add, under `[providers] zero_retention`, which of each stage's models
@@ -256,7 +286,7 @@ impl LintEnv {
                     });
                 }
             };
-            consider(head.provider.as_str(), head.model.as_str(), true);
+            consider(head.model.provider.as_str(), head.model.id.as_str(), true);
             // The pinned entries the stage names after its head, on providers
             // this install has, which are what a failover would reach. An open
             // entry resolves through the same preference the head did, and is
@@ -442,6 +472,7 @@ pub(crate) fn lint_blueprint(file: &BlueprintFile, env: &LintEnv) -> Vec<LintFin
         findings.extend(lint_output_stage_can_answer(stage));
         findings.extend(lint_fanout_escape(graph, stage));
         findings.extend(lint_fanout_worker_task(graph, stage));
+        findings.extend(lint_fanout_worker_loads(stage, env));
         findings.extend(lint_stage_mime(graph, stage));
         findings.extend(lint_tool_accepts(stage));
     }

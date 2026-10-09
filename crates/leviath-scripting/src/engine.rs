@@ -16,8 +16,7 @@ const TRANSFORM_MAX_OPERATIONS: u64 = 100_000;
 impl ScriptEngine {
     /// Create a new sandboxed script engine.
     pub fn new() -> Self {
-        let mut engine = Engine::new();
-        crate::harden(&mut engine, TRANSFORM_MAX_OPERATIONS);
+        let mut engine = crate::sandboxed(TRANSFORM_MAX_OPERATIONS);
 
         crate::functions::register_functions(&mut engine);
         crate::types::register_types(&mut engine);
@@ -33,6 +32,15 @@ impl ScriptEngine {
         self.engine
             .eval_with_scope::<String>(&mut scope, script)
             .map_err(|e| Error::ExecutionFailed(e.to_string()))
+    }
+
+    /// Whether this engine accepts `script`, without running it: the same
+    /// parse, under the same bans, the script meets when it runs.
+    pub fn check(&self, script: &str) -> Result<()> {
+        self.engine
+            .compile(script)
+            .map(drop)
+            .map_err(|e| Error::CompilationFailed(e.to_string()))
     }
 
     /// Execute a generic script with a scope.
@@ -97,6 +105,16 @@ mod tests {
     fn test_engine_creation() {
         let engine = ScriptEngine::new();
         assert!(engine.engine.max_operations() > 0);
+    }
+
+    /// A script is checked under the bans it runs under: `eval` is refused
+    /// before anything runs, and an ordinary script passes.
+    #[test]
+    fn a_check_refuses_what_the_engine_would() {
+        let engine = ScriptEngine::new();
+        assert!(engine.check(r#"input["name"]"#).is_ok());
+        let err = engine.check(r#"eval("1")"#).unwrap_err().to_string();
+        assert!(err.starts_with("Script compilation failed"));
     }
 
     #[test]

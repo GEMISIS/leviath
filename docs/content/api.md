@@ -2038,6 +2038,7 @@ than that feature, not broken.
 | `events.title` | The `run_renamed` frame, plus `title` on every `agent_status` |
 | `events.run_status` | One status vocabulary across the whole API. See [statuses](#statuses) |
 | `events.spend` | The `agent_spend` frame, sent as a run passes a figure in `[limits] notify_spend_usd` |
+| `events.dropped` | The `events_dropped` frame, sent when a socket falls behind and loses events |
 | `runs.cost` | `cost_usd` and `subtree_cost_usd` on the agent tree routes |
 | `blueprints.envelope` | The paginated envelope on the blueprint listing |
 | `blueprints.query` | `q=` on that listing |
@@ -2181,6 +2182,13 @@ with either way.
 | `agent_completed` | The run reaches a terminal status | `status`, `result` (its error), `final_output` |
 | `daemon_link` | This server's link to the daemon changes | `connected`, `daemon`, `restarted`, `restart_advised` |
 | `config_health` | `config.toml` stops loading, loads again, or breaks for a different reason | `healthy`, `path`, `error`, `config_mtime` |
+| `events_dropped` | This socket fell behind and the oldest events were dropped before it read them | `count` |
+
+`events_dropped` is about your connection rather than a run, so it has no `run_id` and reaches
+`/ws/agents/{id}` too: nothing can say whether the lost events were that run's. The server keeps
+the latest few hundred events for each socket, and a client that reads slower than they arrive
+loses the oldest. When one arrives, re-read what you show, such as `GET /api/runs` or the run you
+are watching, rather than trusting what the stream has told you so far.
 
 `agent_spend` arrives while the run is still going, which is the point: a run that quietly spends
 far more than intended looks, from the outside, exactly like one making ordinary progress. Each
@@ -2295,7 +2303,7 @@ curl -X POST http://localhost:3000/api/runs \
 [refusals only this server makes](#refusals-only-this-server-makes). `delivery.metadata` is a map of
 your own string labels, carried on the run's record as `metadata`.
 
-Four things to know about the delivery.
+Five things to know about the delivery.
 
 **It carries the answer.** `final_output` holds whatever the run submitted, so your receiver
 learns what the run concluded without a second request. The `result` field beside it is the run's
@@ -2321,6 +2329,14 @@ base_delay_ms = 500    # first backoff; doubles per retry
 max_delay_ms = 30000   # cap on any single backoff
 timeout_secs = 10      # per-attempt request timeout
 ```
+
+**It survives a restart of `lev serve`.** `lev serve` sends the webhook, not the daemon, so a run
+needs a server running at some point after it finishes. A server records each delivery once it is
+over: delivered, refused, or out of retries. When it starts, it sends every finished run that has
+a callback and no such record. That covers a retry the last server was waiting on when it stopped,
+and a run that finished while no server was running. The `delivery_id` is the same, so a receiver
+that already has it drops the repeat. Only runs that finished after the server first kept this
+record are sent, so upgrading does not resend old webhooks.
 
 > [!TIP]
 > [The Lair](https://leviath.dev/lair) is a full reference client for this API (connection, spawn, live

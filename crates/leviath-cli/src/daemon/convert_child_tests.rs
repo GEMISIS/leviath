@@ -228,7 +228,7 @@ async fn a_child_converts_exactly_as_the_daemon_does() {
     // The child built the run index the daemon starts on.
     assert!(crate::run_index::path_for(&runs).is_file());
     let main = expected[1].1.stage("main").unwrap();
-    assert_eq!(main.context_window, 64_000);
+    assert_eq!(main.model.context_window, 64_000);
     assert!(main.tools.iter().any(|t| t.name.as_str() == "docs__lookup"));
     let now = board.current();
     assert_eq!(
@@ -569,7 +569,7 @@ async fn the_daemon_converts_in_a_child_and_takes_over_from_one_that_fails() {
         assert_eq!(upgrade.dropped_in_runs.len(), dropped, "{mode}");
         let specs = home.specs();
         let main = specs[1].1.stage("main").unwrap();
-        assert_eq!(main.context_window, 64_000, "{mode}");
+        assert_eq!(main.model.context_window, 64_000, "{mode}");
         assert!(
             main.tools.iter().any(|t| t.name.as_str() == "docs__lookup"),
             "{mode}"

@@ -202,8 +202,8 @@ run was started, then the `openai` provider's base URL was changed and the daemo
 
 ```text
 ERROR leviath_cli::daemon::recovery: a run cannot be resumed on this machine as it stands; holding it run_id=release-notes-1790848481-4774f2f3b6fa issues=2 problems with this spawn:
-1. stages.gather.provider: changed: provider 'openai' is configured differently from when the run started: the run was started against a different configuration. put 'openai' back the way it was (its kind, base URL and model list), or start a new run. Known: openai
-2. stages.write.provider: changed: provider 'openai' is configured differently from when the run started: the run was started against a different configuration. put 'openai' back the way it was (its kind, base URL and model list), or start a new run. Known: openai
+1. stages.gather.model.provider: changed: provider 'openai' is configured differently from when the run started: the run was started against a different configuration. put 'openai' back the way it was (its kind, base URL and model list), or start a new run. Known: openai
+2. stages.write.model.provider: changed: provider 'openai' is configured differently from when the run started: the run was started against a different configuration. put 'openai' back the way it was (its kind, base URL and model list), or start a new run. Known: openai
 ```
 
 The daemon writes that to `daemon.log`, and records the issues in the run file as the run's
@@ -214,8 +214,8 @@ comes back.
 
 | What changed | Code | Path |
 |---|---|---|
-| A provider is no longer configured | `unavailable` | `stages.<stage>.provider` |
-| A provider is configured differently | `changed` | `stages.<stage>.provider` |
+| A provider is no longer configured | `unavailable` | `stages.<stage>.model.provider` |
+| A provider is configured differently | `changed` | `stages.<stage>.model.provider` |
 | An MCP server is gone or disconnected | `unavailable` | `stages.<stage>.tools` |
 | An MCP server's tools changed | `changed` | `stages.<stage>.tools`, naming tools removed, changed and added |
 | A script's bytes are missing from the file | `missing` | `code[<n>]` |

@@ -99,7 +99,9 @@ impl EventLog {
     /// its sender. Subscribes before returning, so an event sent after this
     /// call is recorded; the copying happens on a task of its own. Events
     /// that overran the world's channel before the task read them are lost,
-    /// as they would be to any other subscriber.
+    /// as they would be to any other subscriber, but each still takes its
+    /// number: the next event's number jumps, and a subscriber reading the
+    /// numbers sees the gap instead of a stream that looks whole.
     pub fn record(&self, events: &broadcast::Sender<WorldEvent>) {
         let mut rx = events.subscribe();
         let log = self.clone();
@@ -107,7 +109,10 @@ impl EventLog {
             loop {
                 match rx.recv().await {
                     Ok(event) => log.push(event),
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        tracing::warn!(missed, "event recorder fell behind the world");
+                        log.skip(missed);
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -138,6 +143,12 @@ impl EventLog {
         self.0.moved.send_replace(last);
     }
 
+    /// Spend `missed` numbers on events that were never recorded.
+    fn skip(&self, missed: u64) {
+        let mut kept = leviath_core::sync::lock(&self.0.kept);
+        kept.last = kept.last.saturating_add(missed);
+    }
+
     fn close(&self) {
         let last = {
             let mut kept = leviath_core::sync::lock(&self.0.kept);
@@ -164,20 +175,11 @@ impl EventLog {
     /// closed.
     fn since(&self, after: u64) -> (Vec<(u64, WorldEvent)>, bool) {
         let kept = leviath_core::sync::lock(&self.0.kept);
-        // Numbers are consecutive, so the first one wanted sits at a known
-        // offset from the oldest kept, and a live subscriber reads one event
-        // without walking the rest.
-        let oldest = kept
-            .events
-            .front()
-            .map_or(kept.last.saturating_add(1), |(seq, _)| *seq);
-        let skip = after.saturating_add(1).saturating_sub(oldest);
-        let events = kept
-            .events
-            .iter()
-            .skip(usize::try_from(skip).unwrap_or(usize::MAX))
-            .cloned()
-            .collect();
+        // Numbers rise but are not consecutive (a lagging recorder skips
+        // some), so the first one wanted is found by search, and a live
+        // subscriber still reads one event without walking the rest.
+        let first = kept.events.partition_point(|(seq, _)| *seq <= after);
+        let events = kept.events.iter().skip(first).cloned().collect();
         (events, kept.closed)
     }
 }

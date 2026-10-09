@@ -210,7 +210,7 @@ async fn a_removed_provider_is_unavailable_where_the_stage_uses_it() {
         ..same()
     };
     let issues = refused(&spec(), &code(), &env).await;
-    assert_eq!(paths(&issues), ["stages.plan.provider"]);
+    assert_eq!(paths(&issues), ["stages.plan.model.provider"]);
     let issue = issues.iter().next().unwrap();
     assert_eq!(issue.code, IssueCode::Unavailable);
     assert!(issue.message.contains("'mock'"), "{issue}");
@@ -226,7 +226,7 @@ async fn a_changed_provider_names_itself_and_the_different_configuration() {
     let issues = refused(&spec(), &code(), &env).await;
     let issue = issues.iter().next().unwrap();
     assert_eq!(issue.code, IssueCode::Changed);
-    assert_eq!(issue.path.to_string(), "stages.plan.provider");
+    assert_eq!(issue.path.to_string(), "stages.plan.model.provider");
     assert!(
         issue.message.contains("provider 'mock'")
             && issue
@@ -248,11 +248,11 @@ async fn a_fallback_provider_and_an_unused_one_are_reported_where_they_are_recor
     let issues = refused(&s, &code(), &same()).await;
     assert_eq!(
         paths(&issues),
-        ["env.providers.compactor", "stages.plan.fallbacks"]
+        ["env.providers.compactor", "stages.plan.model.fallbacks"]
     );
     assert_eq!(issues.iter().next().unwrap().known, ["mock"]);
     // A fallback without a provider names none.
-    s.stages[0].fallbacks = vec![ModelRef::parse("bare").unwrap()];
+    s.stages[0].model.fallbacks = vec![ModelRef::parse("bare").unwrap()];
     let issues = refused(&s, &code(), &same()).await;
     assert_eq!(
         paths(&issues),
@@ -410,7 +410,7 @@ async fn every_problem_is_reported_at_once() {
     assert_eq!(
         paths(&issues),
         [
-            "stages.plan.provider",
+            "stages.plan.model.provider",
             "stages.plan.tools",
             "env.sandbox.plan",
             "code[0]"

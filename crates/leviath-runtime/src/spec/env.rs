@@ -19,10 +19,10 @@ use super::inputs::PathKind;
 use super::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use super::launch::{LaunchPolicy, Unattended};
 use super::names::{
-    BlueprintPath, BlueprintRef, Digest, McpServerName, MimePattern, ModelId, ModelRef,
-    ProviderName, RunId, SecretRef, StageName, WorkdirPath,
+    BlueprintPath, BlueprintRef, Digest, McpServerName, MimePattern, ModelRef, ProviderName, RunId,
+    SecretRef, StageName, WorkdirPath,
 };
-use super::run_spec::{AutoAnswers, RunSpec, SeededContent, ToolDef};
+use super::run_spec::{AutoAnswers, ChosenModel, RunSpec, SeededContent, ToolDef};
 
 /// Who is asking for a run.
 #[derive(Debug, Clone, PartialEq)]
@@ -125,16 +125,13 @@ impl Default for OperatorDefaults {
 /// The model a stage runs on, chosen.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelPlan {
-    /// The provider.
-    pub provider: ProviderName,
-    /// The model.
-    pub model: ModelId,
-    /// Its context window, in tokens.
-    pub context_window: u32,
-    /// The most it writes in one reply, in tokens.
+    /// The model, as the stage's plan keeps it.
+    pub model: ChosenModel,
+    /// The most the model itself writes in one reply, in tokens. The stage's
+    /// cap is worked out from this and kept as [`StagePlan::reply_cap`].
+    ///
+    /// [`StagePlan::reply_cap`]: super::run_spec::StagePlan::reply_cap
     pub max_output_tokens: u32,
-    /// Where to go if the provider fails, best first.
-    pub fallbacks: Vec<ModelRef>,
     /// Lines worth logging about the choice.
     pub notes: Vec<String>,
 }

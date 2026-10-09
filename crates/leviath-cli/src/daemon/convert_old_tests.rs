@@ -134,7 +134,7 @@ async fn old_runs_convert_at_start_with_this_machines_models_and_tools() {
         .unwrap()
         .expect("the old run is a run file now");
     let main = run.spec.stage("main").unwrap();
-    assert_eq!(main.context_window as usize, window);
+    assert_eq!(main.model.context_window as usize, window);
     let names: Vec<&str> = main.tools.iter().map(|t| t.name.as_str()).collect();
     for name in ["shell", "current_time", "docs__lookup"] {
         assert!(names.contains(&name), "{name} in {names:?}");
@@ -172,7 +172,7 @@ async fn an_old_run_found_on_resume_converts_against_the_daemon() {
         leviath_runtime::runfile::RunFileReader::open(&old.join(leviath_core::files::RUN_FILE))
             .unwrap();
     let main = run.spec().stage("main").unwrap();
-    assert_eq!(main.context_window, 64_000);
+    assert_eq!(main.model.context_window, 64_000);
     assert!(main.tools.iter().any(|t| t.name.as_str() == "shell"));
     // It recorded no child-run limit, so it has the operator's default.
     use leviath_runtime::spec::env::ResolveEnv;

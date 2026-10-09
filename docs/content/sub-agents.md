@@ -221,7 +221,7 @@ on the first refusal.
 `worker` takes one of three shapes. `{ stage = "x" }` runs a stage of *this* blueprint, which must
 set `allow_as_worker = true`. `{ blueprint = { name = "x" } }` runs a separate installed blueprint.
 `{ query = "..." }` is a hint matched against installed blueprints. `lev validate` checks that a
-named worker stage exists.
+named worker stage exists, and that a named worker blueprint is installed on this machine.
 
 ### If the stage never fans out
 
@@ -312,11 +312,11 @@ A worker's bibliography merges back into its parent's `sources_index`, deduplica
 entries name the worker they came from and carry no `[n]` marker, because numbering is per agent and
 renumbering would repoint the citations already in the merged findings.
 
-The cost is a dependency. The named blueprint has to be installed. `lev validate` cannot check
-that for you the way it checks a worker stage, because what is installed is a property of the
-machine rather than of the blueprint. A missing one fails per item, so with the default
-`on_worker_failure = "continue"` the run reports it rather than dying. `lev setup` installs the
-bundled agents together, so this only bites when an agent has been installed on its own.
+The cost is a dependency. The named blueprint has to be installed. What is installed is a property
+of the machine rather than of the blueprint, so `lev validate` checks it against this machine. A
+spawn refuses a run whose worker blueprint is missing before any stage runs, along with whatever
+else is wrong with the request. `lev setup` installs the bundled agents together, so this only
+bites when an agent has been installed on its own.
 
 ## What a worker hands back
 

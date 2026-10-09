@@ -3,7 +3,7 @@ use leviath_core::policy::ToolPolicy;
 use leviath_runtime::spec::graph::{CodeRef, StageHooks};
 use leviath_runtime::spec::launch::{DeliveryPlan, LaunchPolicy, Placement};
 use leviath_runtime::spec::names::{ModelId, ProfileName, RunId, StageName, ToolName};
-use leviath_runtime::spec::run_spec::StagePlan;
+use leviath_runtime::spec::run_spec::{ChosenModel, StagePlan};
 
 use super::*;
 use crate::daemon::resolve_env::tests::{MANIFEST, env, install};
@@ -25,11 +25,13 @@ fn spec(workdir: &Path) -> RunSpec {
         .iter()
         .map(|s| StagePlan {
             stage: s.name.clone(),
-            provider: ProviderName::new("mock").unwrap(),
-            model: ModelId::new("m").unwrap(),
-            context_window: 1000,
-            max_output_tokens: None,
-            fallbacks: vec![],
+            model: ChosenModel {
+                provider: ProviderName::new("mock").unwrap(),
+                id: ModelId::new("m").unwrap(),
+                context_window: 1000,
+                fallbacks: vec![],
+            },
+            reply_cap: None,
             tools: vec![],
             output: None,
             region_budgets: Default::default(),
@@ -312,7 +314,7 @@ async fn a_bound_run_carries_what_only_the_daemon_knows() {
     s.graph.taint_tracking = Some(true);
     s.graph.tool_rescan = leviath_runtime::spec::graph::ToolRescan::AfterWrites;
     s.graph.read_paths = vec!["~/notes".into()];
-    s.stages[0].fallbacks = vec![
+    s.stages[0].model.fallbacks = vec![
         ModelRef::parse("mock/backup").unwrap(),
         ModelRef::parse("bare-model").unwrap(),
     ];

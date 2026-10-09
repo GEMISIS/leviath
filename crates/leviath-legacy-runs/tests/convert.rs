@@ -171,8 +171,8 @@ fn a_finished_run_keeps_its_answer_and_its_blueprint_pin() {
     // Nothing is installed under its name, so its workers are not pinned.
     assert_eq!(blueprint.digest, None);
     assert!(report.defaulted("origin.blueprint.digest").is_some());
-    assert_eq!(file.spec.stages[0].provider.as_str(), "codex");
-    assert_eq!(file.spec.stages[0].model.as_str(), "gpt-5.5");
+    assert_eq!(file.spec.stages[0].model.provider.as_str(), "codex");
+    assert_eq!(file.spec.stages[0].model.id.as_str(), "gpt-5.5");
     assert_eq!(
         file.spec.inputs.get("task"),
         Some(&InputValue::Text("tell me a joke".into()))

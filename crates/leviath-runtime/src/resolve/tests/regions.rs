@@ -83,7 +83,7 @@ async fn inputs_fill_their_slots_in_the_graph() {
     let output = graph.output.as_ref().unwrap();
     assert_eq!(output.format.as_deref(), Some("json"));
     assert_eq!(output.instructions.as_deref(), Some("terse"));
-    assert_eq!(resolved.spec.stages[0].model.as_str(), "new");
+    assert_eq!(resolved.spec.stages[0].model.id.as_str(), "new");
     assert_eq!(
         resolved.spec.stages[1]
             .output

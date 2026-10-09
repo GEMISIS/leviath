@@ -22,7 +22,7 @@ use crate::spec::names::{
     BlueprintRef, Digest, McpServerName, MimePattern, ModelRef, ProviderName, RunId, WorkdirPath,
 };
 use crate::spec::request::{SpawnRequest, SpawnSource};
-use crate::spec::run_spec::{AutoAnswers, SeededContent, ToolDef, ToolSource};
+use crate::spec::run_spec::{AutoAnswers, ChosenModel, SeededContent, ToolDef, ToolSource};
 
 mod attachments;
 mod basics;
@@ -109,11 +109,13 @@ impl Fake {
 /// A model plan on the fake's usual provider.
 pub(super) fn plan(provider: &str, model: &str, window: u32) -> ModelPlan {
     ModelPlan {
-        provider: n(provider),
-        model: n(model),
-        context_window: window,
+        model: ChosenModel {
+            provider: n(provider),
+            id: n(model),
+            context_window: window,
+            fallbacks: Vec::new(),
+        },
         max_output_tokens: 4096,
-        fallbacks: Vec::new(),
         notes: Vec::new(),
     }
 }
@@ -189,13 +191,15 @@ impl ResolveEnv for Fake {
         }
         let chosen = requested.or(stage.model.models.first());
         Ok(ModelPlan {
-            provider: chosen
-                .and_then(|m| m.provider.clone())
-                .unwrap_or_else(|| n("mock")),
-            model: chosen.map_or_else(|| n("gpt-mock"), |m| m.model.clone()),
-            context_window: 100_000,
+            model: ChosenModel {
+                provider: chosen
+                    .and_then(|m| m.provider.clone())
+                    .unwrap_or_else(|| n("mock")),
+                id: chosen.map_or_else(|| n("gpt-mock"), |m| m.model.clone()),
+                context_window: 100_000,
+                fallbacks: Vec::new(),
+            },
             max_output_tokens: 4096,
-            fallbacks: Vec::new(),
             notes: Vec::new(),
         })
     }

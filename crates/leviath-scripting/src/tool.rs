@@ -416,9 +416,9 @@ impl ScriptToolSet {
     pub fn discover(dirs: &[PathBuf]) -> (Self, Vec<SkippedTool>) {
         let mut tools: BTreeMap<String, ScriptTool> = BTreeMap::new();
         let mut skipped: Vec<SkippedTool> = Vec::new();
-        // A bare engine is enough to compile (produce an AST); host functions are
-        // only needed at eval time.
-        let engine = Engine::new();
+        // Compiling needs no host functions, only the sandbox's rules: a ban is
+        // enforced when a script is parsed, and this is where tools are parsed.
+        let engine = crate::sandboxed(SCRIPT_TOOL_MAX_OPERATIONS);
         for dir in dirs {
             let entries = match std::fs::read_dir(dir) {
                 Ok(e) => e,
@@ -496,7 +496,7 @@ impl ScriptToolSet {
     /// messages. Returns the tool's name.
     pub fn add_source(&mut self, label: &str, source: &str) -> Result<String> {
         let meta = parse_annotations(source)?;
-        let ast = Engine::new()
+        let ast = crate::sandboxed(SCRIPT_TOOL_MAX_OPERATIONS)
             .compile(source)
             .map_err(|e| Error::CompilationFailed(format!("{label}: {e}")))?;
         let name = meta.name.clone();
@@ -522,7 +522,7 @@ impl ScriptToolSet {
 /// nothing is on disk to sit beside.
 pub fn check_source(label: &str, source: &str) -> Result<ScriptToolMeta> {
     let meta = parse_annotations(source)?;
-    Engine::new()
+    crate::sandboxed(SCRIPT_TOOL_MAX_OPERATIONS)
         .compile(source)
         .map_err(|e| Error::CompilationFailed(format!("{label}: {e}")))?;
     Ok(meta)
@@ -650,8 +650,7 @@ fn dynamic_to_result_string(value: Dynamic) -> String {
 /// A Rhai engine with sandbox limits, the shared Leviath helpers, and the
 /// script-tool host functions registered.
 fn build_tool_engine(host: Arc<dyn ScriptHost>) -> Engine {
-    let mut engine = Engine::new();
-    crate::harden(&mut engine, SCRIPT_TOOL_MAX_OPERATIONS);
+    let mut engine = crate::sandboxed(SCRIPT_TOOL_MAX_OPERATIONS);
     crate::functions::register_functions(&mut engine);
     crate::types::register_types(&mut engine);
     register_host_functions(&mut engine, host);
@@ -1284,7 +1283,7 @@ mod tests {
     }
 
     fn tool_from(src: &str) -> ScriptTool {
-        let engine = Engine::new();
+        let engine = crate::sandboxed(SCRIPT_TOOL_MAX_OPERATIONS);
         let ast = engine.compile(src).expect("compile");
         ScriptTool {
             meta: parse_annotations(src).expect("annotations"),
@@ -1584,6 +1583,21 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         let meta = check_source("draft", "// @tool draft\n// @description d\n1").unwrap();
         assert_eq!(meta.name, "draft");
         assert_eq!(meta.description, "d");
+    }
+
+    /// `eval` is refused wherever a tool is compiled, not only where it runs:
+    /// the run-time engine never parses a tool's body, so a ban that only it
+    /// carried would let `eval` through on an AST compiled elsewhere.
+    #[test]
+    fn a_tool_that_calls_eval_is_refused_wherever_it_is_compiled() {
+        let src = "// @tool sneaky\n// @description d\neval(\"40 + 2\")";
+        assert!(check_source("draft", src).is_err());
+        assert!(ScriptToolSet::default().add_source("draft", src).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("sneaky.rhai"), src).unwrap();
+        let (set, skipped) = ScriptToolSet::discover(&[dir.path().to_path_buf()]);
+        assert!(set.is_empty());
+        assert_eq!(skipped.len(), 1);
     }
 
     #[test]
@@ -1934,7 +1948,7 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
 
     #[test]
     fn compile_tool_read_error() {
-        let engine = Engine::new();
+        let engine = crate::sandboxed(SCRIPT_TOOL_MAX_OPERATIONS);
         let err = compile_tool(&engine, Path::new("/no/such/dir/tool.rhai")).unwrap_err();
         assert!(err.to_string().contains("read"));
     }
@@ -2168,7 +2182,7 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
         map.insert("a".into(), Dynamic::from(1_i64));
         assert_eq!(to_json_fn(&Dynamic::from_map(map)).unwrap(), "{\"a\":1}");
         // A function pointer has no JSON representation → Err.
-        let engine = Engine::new();
+        let engine = crate::sandboxed(SCRIPT_TOOL_MAX_OPERATIONS);
         let fnptr: Dynamic = engine.eval("|| 1").unwrap();
         assert!(to_json_fn(&fnptr).is_err());
     }
@@ -2462,7 +2476,7 @@ mod parts_tests {
     }
 
     fn tool_from(src: &str) -> ScriptTool {
-        let engine = Engine::new();
+        let engine = crate::sandboxed(SCRIPT_TOOL_MAX_OPERATIONS);
         ScriptTool {
             meta: parse_annotations(src).expect("annotations"),
             ast: engine.compile(src).expect("compile"),

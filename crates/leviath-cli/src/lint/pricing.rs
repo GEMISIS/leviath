@@ -10,7 +10,7 @@
 
 use leviath_runtime::spec::graph::RunGraph;
 
-use super::{LintEnv, LintFinding, LintSeverity, resolve_budget, route};
+use super::{LintEnv, LintFinding, LintSeverity, route};
 
 /// The note for each model a stage names whose long-context tier its context
 /// budget can reach, once per stage and model.
@@ -32,7 +32,7 @@ pub(super) fn lint_long_context_price(graph: &RunGraph, env: &LintEnv) -> Vec<Li
             let budget: usize = layout
                 .regions
                 .iter()
-                .map(|region| resolve_budget(&region.budget, *window))
+                .map(|region| region.budget.resolve(*window))
                 .sum::<usize>()
                 .min(*window);
             if budget < tier.threshold_tokens {
