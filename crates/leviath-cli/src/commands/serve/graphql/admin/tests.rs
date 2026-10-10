@@ -292,31 +292,48 @@ async fn an_mcp_server_can_be_written_replaced_and_removed() {
     .await;
 }
 
-/// A server written while the login file will not load is written, and the
-/// answer says the file will not load rather than describing the server as
-/// logged out.
+/// A server written while the login file will not load is written and
+/// described, shown not logged in the way the listing shows it. A write that
+/// landed is never answered with a failure: a retry would only meet the
+/// server it already wrote.
 #[tokio::test]
-async fn a_write_beside_a_login_file_that_will_not_load_says_so() {
+async fn a_write_beside_a_login_file_that_will_not_load_is_written_and_described() {
     crate::commands::serve::testutil::with_home(|home| async move {
         let paths = paths_in(&home);
         std::fs::write(&paths.config, "").expect("a config file");
         std::fs::write(&paths.store, "not json").expect("a broken login file");
-        let config = paths.config.clone();
+        let (config, store) = (paths.config.clone(), paths.store.clone());
         crate::commands::serve::mcp::TEST_PATHS
             .scope(paths, async {
-                for call in [
-                    r#"mutation { createMcpServer(request: { server: { name: "docs",
-                         transport: { stdio: { command: "/bin/echo" } } } })
-                         { mcpServer { name } } }"#,
+                let create = r#"mutation { createMcpServer(request: { server: { name: "docs",
+                     transport: { http: { url: "https://docs.example/mcp" } } } })
+                     { mcpServer { name auth } } }"#;
+                let created = ask(create).await;
+                assert_eq!(created["createMcpServer"]["mcpServer"]["auth"], "NONE");
+                let again = schema(true).execute(Request::new(create)).await;
+                assert_eq!(refusal_code(&again), "\"CONFLICT\"", "written once");
+
+                let updated = ask(
                     r#"mutation { updateMcpServer(request: { server: { name: "docs",
                          transport: { stdio: { command: "/bin/true" } } } })
-                         { mcpServer { name } } }"#,
-                ] {
-                    let answer = schema(true).execute(Request::new(call)).await;
-                    assert_eq!(refusal_code(&answer), "\"INTERNAL\"", "{call}");
-                }
+                         { mcpServer { name auth } } }"#,
+                )
+                .await;
+                assert_eq!(
+                    updated["updateMcpServer"]["mcpServer"]["auth"],
+                    "NOT_APPLICABLE"
+                );
                 let written = crate::config::Config::load_from_path(&config).unwrap();
+                assert_eq!(written.mcp_servers.len(), 1);
                 assert_eq!(written.mcp_servers[0].command.as_deref(), Some("/bin/true"));
+
+                let listed = ask("{ mcpServers { results { name auth } } }").await;
+                assert_eq!(listed["mcpServers"]["results"][0]["name"], "docs");
+                let node =
+                    ask(r#"{ node(id: "mcpServer:docs") { ... on McpServerOutput { auth } } }"#)
+                        .await;
+                assert_eq!(node["node"]["auth"], "NOT_APPLICABLE");
+                assert_eq!(std::fs::read_to_string(&store).unwrap(), "not json");
             })
             .await;
     })

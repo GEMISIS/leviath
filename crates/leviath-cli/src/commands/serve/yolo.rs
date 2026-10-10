@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
 use super::blocking::blocking;
-use super::types::{ApiError, AppState};
+use super::types::AppState;
 use crate::commands::yolo::TestArgs;
 use crate::yolo::{ProfileSummary, YoloError, YoloFile, yolo_path};
 
@@ -108,10 +108,8 @@ pub(super) async fn list_profiles(State(_state): State<AppState>) -> Json<YoloLi
 pub(super) async fn get_profile(
     State(_state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let profile = blocking(move || profile_named(&name))
-        .await
-        .map_err(|e| super::core::error::as_api_error(&e))?;
+) -> Result<Json<serde_json::Value>, super::core::error::ServeError> {
+    let profile = blocking(move || profile_named(&name)).await?;
     Ok(Json(serde_json::json!({
         "name": profile.name,
         "spec": profile.spec,
@@ -153,11 +151,8 @@ pub(super) struct TestReq {
 pub(super) async fn test_profile(
     State(state): State<AppState>,
     Json(req): Json<TestReq>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    blocking(move || decided(&state, req))
-        .await
-        .map(Json)
-        .map_err(|e| super::core::error::as_api_error(&e))
+) -> Result<Json<serde_json::Value>, super::core::error::ServeError> {
+    blocking(move || decided(&state, req)).await.map(Json)
 }
 
 /// What one profile would do with one call, for whichever surface asked.
@@ -202,11 +197,10 @@ pub(super) struct WriteYoloReq {
 pub(super) async fn put_profiles(
     State(_state): State<AppState>,
     Json(req): Json<WriteYoloReq>,
-) -> Result<Json<YoloListing>, ApiError> {
+) -> Result<Json<YoloListing>, super::core::error::ServeError> {
     blocking(move || write_profiles(&req.text).map(|()| listing()))
         .await
         .map(Json)
-        .map_err(|e| super::core::error::as_api_error(&e))
 }
 
 /// Replace the profiles file, for whichever surface asked.
@@ -500,6 +494,11 @@ mod tests {
         super::super::testutil::state_with_agent_paths(Vec::new())
     }
 
+    /// A handler's failure as the status and body a REST client receives.
+    fn rest(e: super::super::core::error::ServeError) -> super::super::types::ApiError {
+        super::super::core::error::as_api_error(&e)
+    }
+
     fn test_req(profile: &str, tool: &str, command: Option<&str>) -> TestReq {
         TestReq {
             profile: profile.to_string(),
@@ -547,6 +546,7 @@ mod tests {
                 }),
             )
             .await
+            .map_err(rest)
             .expect_err("a file that does not load is refused");
             assert_eq!(refused.0, StatusCode::BAD_REQUEST);
             assert!(
@@ -569,6 +569,7 @@ mod tests {
                 }),
             )
             .await
+            .map_err(rest)
             .expect_err("a directory in the way");
             assert_eq!(failed.0, StatusCode::INTERNAL_SERVER_ERROR);
             assert!(
@@ -595,6 +596,7 @@ mod tests {
         crate::config::with_isolated_config_path_async("api-yolo-get", |cfg| async move {
             let missing = get_profile(State(state()), Path("careful".to_string()))
                 .await
+                .map_err(rest)
                 .expect_err("no file");
             assert_eq!(missing.0, StatusCode::NOT_FOUND);
             std::fs::write(cfg.join("yolo.toml"), EXAMPLE_TOML).unwrap();
@@ -607,12 +609,14 @@ mod tests {
             assert!(got["holds"].as_array().unwrap().len() >= 2);
             let unknown = get_profile(State(state()), Path("nope".to_string()))
                 .await
+                .map_err(rest)
                 .expect_err("unknown");
             assert_eq!(unknown.0, StatusCode::NOT_FOUND);
             assert!(unknown.1.0.error.contains("build-only, careful"));
             std::fs::write(cfg.join("yolo.toml"), "[").unwrap();
             let broken = get_profile(State(state()), Path("careful".to_string()))
                 .await
+                .map_err(rest)
                 .expect_err("broken file");
             assert_eq!(broken.0, StatusCode::UNPROCESSABLE_ENTITY);
         })
@@ -716,16 +720,19 @@ mod tests {
             req.kind = Some("robot".to_string());
             let bad = test_profile(State(state()), Json(req))
                 .await
+                .map_err(rest)
                 .expect_err("a bad kind");
             assert_eq!(bad.0, StatusCode::BAD_REQUEST);
             let mut req = test_req("careful", "shell", Some("ls"));
             req.configured = Some("maybe".to_string());
             let bad = test_profile(State(state()), Json(req))
                 .await
+                .map_err(rest)
                 .expect_err("a bad policy word");
             assert_eq!(bad.0, StatusCode::BAD_REQUEST);
             let unknown = test_profile(State(state()), Json(test_req("nope", "shell", Some("ls"))))
                 .await
+                .map_err(rest)
                 .expect_err("unknown profile");
             assert_eq!(unknown.0, StatusCode::NOT_FOUND);
         })

@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::blocking::blocking;
-use super::core::error::{ServeError, as_api_error};
+use super::core::error::ServeError;
 use super::types::AppState;
 use crate::config::Config;
 use crate::credentials::McpGrants;
+use leviath_core::CredentialStoreKind;
 use leviath_mcp::{AuthStore, LoginOutcome, MCPServerConfig, OAuthClient};
 
 /// Where this server reads and rewrites the operator's files.
@@ -187,7 +188,7 @@ fn auth_status(server: &MCPServerConfig, store: &AuthStore, now: u64) -> String 
 pub(super) async fn list_servers(State(state): State<AppState>) -> impl IntoResponse {
     match server_infos(&state).await {
         Ok(servers) => Json(servers).into_response(),
-        Err(e) => as_api_error(&e).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -201,12 +202,12 @@ async fn read_config(path: PathBuf) -> Result<Config, ServeError> {
         .map_err(|e| ServeError::Internal(e.to_string()))
 }
 
-/// The config, the grants it keeps, and what they hold, read on the blocking
-/// pool: under the keychain the grants are a round trip to the OS store.
+/// The config, the grants it keeps, and what they hold, for a login, read on
+/// the blocking pool: under the keychain the grants are a round trip to the OS
+/// store.
 ///
-/// A grant file that will not load is an error here, not an empty set: a
-/// listing would show every server logged out, and a login would save over
-/// every other server's grant.
+/// A grant file that will not load is an error here, not an empty set: the
+/// login would save over every other server's grant.
 async fn read_admin(paths: AdminPaths) -> Result<(Config, McpGrants, AuthStore), ServeError> {
     blocking(move || {
         let config = Config::load_from_path(&paths.config)?;
@@ -218,9 +219,28 @@ async fn read_admin(paths: AdminPaths) -> Result<(Config, McpGrants, AuthStore),
     .map_err(|e: anyhow::Error| ServeError::Internal(e.to_string()))
 }
 
+/// The grants a description shows, read on the blocking pool: under the
+/// keychain they are a round trip to the OS store.
+///
+/// Never a failure, for the reason [`McpGrants::shown`] gives; why they could
+/// not be read goes to the log. A login, a remove and every save still refuse
+/// a grant file that will not load.
+async fn shown_grants(store: PathBuf, kind: CredentialStoreKind) -> AuthStore {
+    blocking(move || {
+        let (held, unread) = McpGrants::at(store, kind).shown();
+        if let Some(why) = unread {
+            tracing::warn!("MCP servers are shown not logged in: {why}");
+        }
+        held
+    })
+    .await
+}
+
 /// Every MCP server the config declares, with its auth state.
 pub(super) async fn server_infos(state: &AppState) -> Result<Vec<McpServerInfo>, ServeError> {
-    let (config, _, held) = read_admin(admin_paths()).await?;
+    let paths = admin_paths();
+    let config = read_config(paths.config).await?;
+    let held = shown_grants(paths.store, config.security.credential_store).await;
     let now = (state.mcp.clock)() as u64;
     Ok(config
         .mcp_servers
@@ -260,7 +280,7 @@ pub(super) async fn add_server(Json(req): Json<AddServerRequest>) -> impl IntoRe
             Json(serde_json::json!({ "name": written.name })),
         )
             .into_response(),
-        Err(e) => as_api_error(&e).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -307,16 +327,22 @@ pub(super) async fn install_server(
 /// The counterpart of [`server_infos`] for a caller that has just written or
 /// just resolved the entry: there is no name to look up, and so no miss to
 /// report about a server it is looking at.
-pub(super) async fn described(
-    state: &AppState,
-    server: &MCPServerConfig,
-) -> Result<McpServerInfo, ServeError> {
-    let (_, _, held) = read_admin(admin_paths()).await?;
-    Ok(McpServerInfo::describe(
-        server,
-        &held,
-        (state.mcp.clock)() as u64,
-    ))
+///
+/// Never a failure. Every caller has already written, signed in to or reached
+/// the entry, and a failed description would report that act as failed when
+/// it was not: a retried write would meet the server it already wrote. A
+/// config that will not read here leaves the server shown not logged in, and
+/// the reason in the log.
+pub(super) async fn described(state: &AppState, server: &MCPServerConfig) -> McpServerInfo {
+    let paths = admin_paths();
+    let held = match read_config(paths.config).await {
+        Ok(config) => shown_grants(paths.store, config.security.credential_store).await,
+        Err(e) => {
+            tracing::warn!("MCP servers are shown not logged in: {e}");
+            AuthStore::default()
+        }
+    };
+    McpServerInfo::describe(server, &held, (state.mcp.clock)() as u64)
 }
 
 /// Replace an MCP server's entry, whole, and hand back what now stands there.
@@ -386,7 +412,7 @@ fn checked(
 pub(super) async fn remove_server(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
     match uninstall_server(&name).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => as_api_error(&e).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -436,7 +462,7 @@ pub(super) async fn login(
         Ok((status, _server)) => {
             Json(serde_json::json!({ "status": status.wire(), "server": name })).into_response()
         }
-        Err(e) => as_api_error(&e).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -529,7 +555,7 @@ pub(super) async fn status(
     });
     match found {
         Ok(info) => Json(info).into_response(),
-        Err(e) => as_api_error(&e).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -542,7 +568,7 @@ pub(super) async fn test_server(
         Ok((tools, _server)) => {
             Json(serde_json::json!({ "server": name, "tools": tools })).into_response()
         }
-        Err(e) => as_api_error(&e).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -585,15 +611,25 @@ pub(crate) async fn list_mcp_tools(
 
 /// Connect to `server`, signed in with the grant `config` keeps for it in
 /// `store`, and name its tools.
+///
+/// The grants are read the way an agent's run reads them, the file alone when
+/// the keychain cannot be reached, so a server that needs no grant is still
+/// reached. The bearer is resolved on the blocking pool, refresh included:
+/// under the keychain both the probe and every read and write are round trips
+/// to the OS store.
 async fn listed(
     server: &MCPServerConfig,
     config: &Config,
     store: PathBuf,
     now: u64,
 ) -> anyhow::Result<Vec<String>> {
-    let auth_header = McpGrants::at(store, config.security.credential_store)
-        .authorization_header(&server.name, now)
-        .await?;
+    let kind = config.security.credential_store;
+    let name = server.name.clone();
+    let auth_header = blocking(move || {
+        let grants = McpGrants::at_or_file(store, kind);
+        tokio::runtime::Handle::current().block_on(grants.authorization_header(&name, now))
+    })
+    .await?;
     crate::commands::mcp::connect_and_list(
         server,
         auth_header,
@@ -1509,36 +1545,114 @@ for line in sys.stdin:
         });
     }
 
-    /// A grant file that will not load is an error, not every server shown
-    /// logged out, and a login leaves it as it was: it holds every other
-    /// server's grant.
+    /// A grant file that will not load still lists every server, each shown
+    /// not logged in: a listing writes nothing. A login refuses it and leaves
+    /// it as it was, because it holds every other server's grant.
     #[tokio::test]
-    async fn a_grant_file_that_will_not_load_is_an_error_and_is_left_alone() {
+    async fn a_grant_file_that_will_not_load_lists_every_server_and_is_left_alone() {
         let base = mock_oauth_server().await;
         let dir = tempfile::tempdir().unwrap();
         let app = app_at(dir.path(), auto_consent);
-        send(
-            &app,
-            "POST",
-            "/api/mcp/servers",
-            Some(serde_json::json!({ "name": "navigator", "url": format!("{base}/mcp") })),
-        )
-        .await;
         let store = paths_in(dir.path()).store;
         std::fs::write(&store, "not json").unwrap();
-        for (method, uri) in [
-            ("GET", "/api/mcp/servers"),
-            ("GET", "/api/mcp/servers/navigator/status"),
-            ("POST", "/api/mcp/servers/navigator/login"),
+        for server in [
+            serde_json::json!({ "name": "navigator", "url": format!("{base}/mcp") }),
+            serde_json::json!({ "name": "local", "command": "npx" }),
         ] {
-            let (status_code, body) = send(&app, method, uri, None).await;
-            assert_eq!(
-                status_code,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "{method} {uri}: {body}"
-            );
+            let (status_code, body) = send(&app, "POST", "/api/mcp/servers", Some(server)).await;
+            assert_eq!(status_code, StatusCode::CREATED, "{body}");
         }
+
+        let (status_code, body) = send(&app, "GET", "/api/mcp/servers", None).await;
+        assert_eq!(status_code, StatusCode::OK, "{body}");
+        let listed: Vec<(&str, &str)> = body
+            .as_array()
+            .expect("a list")
+            .iter()
+            .map(|server| {
+                (
+                    server["name"].as_str().unwrap_or_default(),
+                    server["auth"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(listed, [("navigator", "none"), ("local", "n/a")]);
+        let (status_code, body) =
+            send(&app, "GET", "/api/mcp/servers/navigator/status", None).await;
+        assert_eq!(status_code, StatusCode::OK, "{body}");
+        assert_eq!(body["auth"], "none");
+
+        let (status_code, body) =
+            send(&app, "POST", "/api/mcp/servers/navigator/login", None).await;
+        assert_eq!(status_code, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
         assert_eq!(std::fs::read_to_string(&store).unwrap(), "not json");
+    }
+
+    /// A keychain that cannot be reached lists every server from the grant
+    /// file alone, as an agent's run reads it, rather than failing the list.
+    #[test]
+    fn an_unreachable_keychain_lists_the_servers_from_the_file() {
+        let _keychain = crate::credentials::test_store::unreachable();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            // Written as text: saving a config that names the keychain needs
+            // the keychain.
+            std::fs::write(
+                paths_in(dir.path()).config,
+                "[security]\ncredential_store = \"keychain\"\n\n\
+                 [[mcp_servers]]\nname = \"remote\"\nurl = \"https://e.com/mcp\"\n",
+            )
+            .unwrap();
+            let mut held = AuthStore::default();
+            held.set(
+                "remote",
+                leviath_mcp::ServerAuth {
+                    expires_at: 10_000,
+                    ..Default::default()
+                },
+            );
+            held.save(&paths_in(dir.path()).store).unwrap();
+            let app = app_at(dir.path(), never_opens);
+            let (status_code, body) = send(&app, "GET", "/api/mcp/servers", None).await;
+            assert_eq!(status_code, StatusCode::OK, "{body}");
+            assert_eq!(body[0]["auth"], "authenticated", "{body}");
+            let (status_code, body) =
+                send(&app, "GET", "/api/mcp/servers/remote/status", None).await;
+            assert_eq!(status_code, StatusCode::OK, "{body}");
+        });
+    }
+
+    /// The agent editor's tool chooser reaches a server that needs no grant
+    /// while the keychain cannot be reached, reading grants from the file
+    /// alone as an agent's run does.
+    #[test]
+    fn the_tool_chooser_lists_a_server_needing_no_grant_without_the_keychain() {
+        let _keychain = crate::credentials::test_store::unreachable();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let stub = r#"
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    req = json.loads(line); m = req.get("method",""); i = req.get("id")
+    if m == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":i,"result":{"capabilities":{},"protocolVersion":"2024-11-05"}}), flush=True)
+    elif m == "tools/list":
+        print(json.dumps({"jsonrpc":"2.0","id":i,"result":{"tools":[{"name":"ping","inputSchema":{}}]}}), flush=True)
+"#;
+            let server = MCPServerConfig::stdio(
+                "local",
+                "python3",
+                vec!["-c".to_string(), stub.to_string()],
+            );
+            let mut config = Config::default();
+            config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
+            let home = tempfile::tempdir().unwrap();
+            let tools = TEST_PATHS
+                .scope(paths_in(home.path()), list_mcp_tools(config, server))
+                .await;
+            assert_eq!(tools, Ok(vec!["ping".to_string()]));
+        });
     }
 
     /// Removing a server whose grant file will not load takes the server out
@@ -1646,6 +1760,30 @@ for line in sys.stdin:
                 .to_string_lossy()
                 .contains("config.toml")
         );
+    }
+
+    /// A description answers even when the config will not read: the caller
+    /// has already done what it came for, and the server is shown not logged
+    /// in rather than the act reported failed.
+    #[tokio::test]
+    async fn a_description_answers_beside_a_config_that_will_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let unreadable = dir.path().join("cfg-dir");
+        std::fs::create_dir(&unreadable).unwrap();
+        let paths = AdminPaths {
+            config: unreadable,
+            ..paths_in(dir.path())
+        };
+        let info = TEST_PATHS
+            .scope(paths, async {
+                described(
+                    &state_at(never_opens),
+                    &MCPServerConfig::http("remote", "https://e.com/mcp"),
+                )
+                .await
+            })
+            .await;
+        assert_eq!(info.auth, "none");
     }
 
     #[test]

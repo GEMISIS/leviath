@@ -174,14 +174,8 @@ pub(crate) struct SignInMcpServerResult {
 /// From the entry rather than by name: every caller here is holding the entry
 /// already, so there is no lookup to miss and no absent case to invent an
 /// answer for.
-async fn described(
-    state: &AppState,
-    server: &leviath_mcp::MCPServerConfig,
-) -> async_graphql::Result<McpServer> {
-    super::super::super::mcp::described(state, server)
-        .await
-        .map(McpServer::from_info)
-        .gql()
+async fn described(state: &AppState, server: &leviath_mcp::MCPServerConfig) -> McpServer {
+    McpServer::from_info(super::super::super::mcp::described(state, server).await)
 }
 
 /// Add an MCP server to the config.
@@ -205,9 +199,9 @@ pub(crate) async fn create_mcp_server(
     )
     .await
     .gql()?;
-    described(state, &written)
-        .await
-        .map(|mcp_server| CreateMcpServerResult { mcp_server })
+    Ok(CreateMcpServerResult {
+        mcp_server: described(state, &written).await,
+    })
 }
 
 /// Replace an MCP server's configuration, whole.
@@ -231,9 +225,9 @@ pub(crate) async fn update_mcp_server(
     )
     .await
     .gql()?;
-    described(state, &written)
-        .await
-        .map(|mcp_server| UpdateMcpServerResult { mcp_server })
+    Ok(UpdateMcpServerResult {
+        mcp_server: described(state, &written).await,
+    })
 }
 
 /// Remove an MCP server from the config, and its stored credential with it.
@@ -260,12 +254,10 @@ pub(crate) async fn check_mcp_server(
     let (tool_names, server) = super::super::super::mcp::tools_of(state, &request.name)
         .await
         .gql()?;
-    described(state, &server)
-        .await
-        .map(|mcp_server| CheckMcpServerResult {
-            mcp_server,
-            tool_names,
-        })
+    Ok(CheckMcpServerResult {
+        mcp_server: described(state, &server).await,
+        tool_names,
+    })
 }
 
 /// What signing in to an MCP server ended as.
@@ -302,10 +294,8 @@ pub(crate) async fn sign_in_mcp_server(
     let (status, server) = super::super::super::mcp::signed_in(state, &request.name)
         .await
         .gql()?;
-    described(state, &server)
-        .await
-        .map(|mcp_server| SignInMcpServerResult {
-            mcp_server,
-            status: McpLoginStatus::from(status),
-        })
+    Ok(SignInMcpServerResult {
+        mcp_server: described(state, &server).await,
+        status: McpLoginStatus::from(status),
+    })
 }

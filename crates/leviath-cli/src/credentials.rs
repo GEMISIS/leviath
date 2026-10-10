@@ -53,6 +53,10 @@ impl CredentialStore for KeychainStore {
 ///
 /// `None` is the ordinary answer, not a failure: `file` is the default backend.
 pub fn store_for(kind: CredentialStoreKind) -> Resolved {
+    #[cfg(test)]
+    if test_store::UNREACHABLE.load(std::sync::atomic::Ordering::SeqCst) {
+        return store_for_with(kind, no_store_available);
+    }
     store_for_with(kind, leviath_sys::keychain::probe)
 }
 
@@ -93,8 +97,11 @@ fn store_for_with(kind: CredentialStoreKind, probe: fn(&str) -> Result<(), Strin
 /// on disk.
 ///
 /// A keychain that was asked for and cannot be reached is kept here and given
-/// back by every read and write, so each surface reports it where it reports a
-/// grant file that will not load, and nothing falls back to the file.
+/// back by every load, save and forget, so each surface reports it where it
+/// reports a grant file that will not load, and no write lands in the file
+/// instead. The readers that save nothing read the file alone: an agent's
+/// connections through [`at_or_file`](Self::at_or_file), a listing through
+/// [`shown`](Self::shown).
 #[derive(Clone)]
 pub struct McpGrants {
     path: PathBuf,
@@ -113,6 +120,28 @@ impl McpGrants {
             path,
             store: resolved.map(|store| store.map(Arc::from)),
         }
+    }
+
+    /// The grants in `path`, kept where `kind` says, or in the file alone when
+    /// the keychain cannot be reached.
+    ///
+    /// For connecting on someone's behalf: an agent's MCP servers, the tools
+    /// the agent editor offers. A warning rather than a failure, because
+    /// servers that need no OAuth still work, and refusing every one over a
+    /// locked keychain would be worse than losing the ones that need it. The
+    /// file alone holds none of a keychain user's tokens, so those servers
+    /// read as logged out and nothing writes a token into the file.
+    pub fn at_or_file(path: PathBuf, kind: CredentialStoreKind) -> Self {
+        Self::or_file(path, store_for(kind))
+    }
+
+    /// [`at_or_file`](Self::at_or_file) with the backend already resolved.
+    pub(crate) fn or_file(path: PathBuf, resolved: Resolved) -> Self {
+        let resolved = resolved.or_else(|e| {
+            tracing::warn!("{e}. MCP servers needing OAuth will appear logged out.");
+            Ok(None)
+        });
+        Self::new(path, resolved)
     }
 
     /// The grant file.
@@ -142,14 +171,46 @@ impl McpGrants {
         grants.save_with(&self.path, self.store()?)
     }
 
-    /// Forget `server`'s grant, reporting whether it had one.
-    pub fn forget(&self, server: &str) -> anyhow::Result<bool> {
-        let mut grants = self.load()?;
-        if !grants.remove(server) {
-            return Ok(false);
+    /// Every grant a listing shows, and why it could not show them, when it
+    /// could not.
+    ///
+    /// Never a failure: a listing writes nothing, so a server shown not logged
+    /// in loses nothing, where a failed listing hides every server, the ones
+    /// that need no grant with them. A keychain that cannot be reached leaves
+    /// the file alone to read, as [`at_or_file`](Self::at_or_file) does; a
+    /// file that will not load leaves nothing. A save still refuses both.
+    pub fn shown(&self) -> (AuthStore, Option<String>) {
+        let (store, unreached) = match &self.store {
+            Ok(store) => (store.as_deref(), None),
+            Err(e) => (None, Some(e.clone())),
+        };
+        match AuthStore::load_with(&self.path, store) {
+            Ok(held) => (held, unreached),
+            Err(e) => (AuthStore::default(), Some(e.to_string())),
         }
-        self.save(&grants)?;
-        Ok(true)
+    }
+
+    /// Forget `server`'s grant, reporting whether it had one.
+    ///
+    /// Under the keychain the secret is deleted before the file stops naming
+    /// it: a delete that fails leaves the name for the next attempt to find,
+    /// where the other order would strand a refresh token nothing points at.
+    /// A secret the file does not name is deleted too, so a stranded one has
+    /// a way out.
+    pub fn forget(&self, server: &str) -> anyhow::Result<bool> {
+        let store = self.store()?;
+        let mut grants = AuthStore::load_with(&self.path, store)?;
+        let named = grants.remove(server);
+        let deleted = match store {
+            Some(store) => store
+                .delete(&leviath_core::mcp_account(server))
+                .map_err(|e| anyhow::anyhow!("could not forget the login for '{server}': {e}"))?,
+            None => false,
+        };
+        if named {
+            grants.save_with(&self.path, store)?;
+        }
+        Ok(named || deleted)
     }
 
     /// The `Authorization` header for `server`, its token refreshed first when
@@ -213,6 +274,34 @@ pub(crate) mod test_store {
         let guard = lock();
         keyring_core::set_default_store(keyring_core::mock::Store::new().expect("mock store"));
         guard
+    }
+
+    /// Whether [`store_for`](super::store_for) answers as a machine with no
+    /// credential store. Set only while an [`Unreachable`] guard lives.
+    pub(crate) static UNREACHABLE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// A machine with no credential store, for as long as the guard lives.
+    ///
+    /// What lets a surface that resolves its own backend be driven down its
+    /// "keychain asked for and unreachable" path: the real probe cannot be
+    /// made to fail without reaching the real keychain. Holds the store lock,
+    /// so no other test resolves the keychain meanwhile.
+    pub(crate) fn unreachable() -> Unreachable {
+        let guard = lock();
+        UNREACHABLE.store(true, std::sync::atomic::Ordering::SeqCst);
+        Unreachable { _guard: guard }
+    }
+
+    /// See [`unreachable`]: clears the flag, then releases the lock.
+    pub(crate) struct Unreachable {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Unreachable {
+        fn drop(&mut self) {
+            UNREACHABLE.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
@@ -310,6 +399,130 @@ mod tests {
         assert!(grants.forget("remote").unwrap());
         assert!(!grants.forget("remote").unwrap(), "nothing left to forget");
         assert!(grants.load().unwrap().get("remote").is_none());
+    }
+
+    /// Forgetting a grant held in the store takes the secret out of the store,
+    /// not only its name out of the file: a refresh token left there outlives
+    /// the login it was for.
+    #[test]
+    fn forgetting_a_grant_takes_its_secret_out_of_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let grants = McpGrants::new(
+            dir.path().join("mcp-auth.json"),
+            Ok(Some(Box::new(leviath_core::MemoryStore::new()))),
+        );
+        let mut held = AuthStore::default();
+        for server in ["remote", "other"] {
+            held.set(
+                server,
+                leviath_mcp::ServerAuth {
+                    refresh_token: Some("refresh-secret".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+        grants.save(&held).unwrap();
+        let store = grants.store().unwrap().unwrap();
+        let account = leviath_core::mcp_account("remote");
+        assert!(store.get(&account).unwrap().is_some());
+
+        assert!(grants.forget("remote").unwrap());
+        assert_eq!(store.get(&account).unwrap(), None, "the secret went too");
+        assert!(
+            store
+                .get(&leviath_core::mcp_account("other"))
+                .unwrap()
+                .is_some(),
+            "and only that one"
+        );
+
+        // A secret the file no longer names goes too, so one already stranded
+        // there has a way out.
+        let stray = leviath_core::mcp_account("stray");
+        store.set(&stray, "{}").unwrap();
+        assert!(grants.forget("stray").unwrap());
+        assert_eq!(store.get(&stray).unwrap(), None);
+    }
+
+    /// A locked keychain costs the MCP servers that need OAuth, not every
+    /// server an agent connects to: the file alone is read instead.
+    #[test]
+    fn an_unreachable_keychain_leaves_the_file_alone_to_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let file_alone = McpGrants::or_file(path.clone(), Err("no keychain here".to_string()));
+        assert!(file_alone.load().unwrap().server_names().is_empty());
+
+        let keychain = McpGrants::or_file(
+            path.clone(),
+            Ok(Some(Box::new(leviath_core::MemoryStore::new()))),
+        );
+        assert!(keychain.store().unwrap().is_some());
+        assert!(
+            McpGrants::at_or_file(path, CredentialStoreKind::File)
+                .store()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A listing reads what it can and says what it could not: the file alone
+    /// when the keychain is unreachable, nothing when the file will not load.
+    #[test]
+    fn a_listing_shows_what_it_can_read_and_says_why_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let mut held = AuthStore::default();
+        held.set("remote", leviath_mcp::ServerAuth::default());
+        held.save(&path).unwrap();
+
+        let (shown, why) = McpGrants::at(path.clone(), CredentialStoreKind::File).shown();
+        assert!(shown.get("remote").is_some());
+        assert_eq!(why, None);
+
+        let (shown, why) =
+            McpGrants::new(path.clone(), Err("no keychain here".to_string())).shown();
+        assert!(shown.get("remote").is_some(), "the file alone is read");
+        assert_eq!(why.as_deref(), Some("no keychain here"));
+
+        std::fs::write(&path, "not json").unwrap();
+        let (shown, why) = McpGrants::at(path.clone(), CredentialStoreKind::File).shown();
+        assert!(shown.server_names().is_empty());
+        assert!(why.is_some_and(|why| why.contains("corrupt")));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
+    }
+
+    /// A store that will not delete fails the forget before the file is
+    /// touched, so the server is still named there for the next attempt.
+    #[test]
+    fn a_store_that_will_not_delete_fails_the_forget() {
+        struct KeepsEverything(leviath_core::MemoryStore);
+        impl CredentialStore for KeepsEverything {
+            fn get(&self, account: &str) -> Result<Option<String>, String> {
+                self.0.get(account)
+            }
+            fn set(&self, account: &str, secret: &str) -> Result<(), String> {
+                self.0.set(account, secret)
+            }
+            fn delete(&self, _: &str) -> Result<bool, String> {
+                Err("the keychain is locked".to_string())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let grants = McpGrants::new(
+            dir.path().join("mcp-auth.json"),
+            Ok(Some(Box::new(KeepsEverything(
+                leviath_core::MemoryStore::new(),
+            )))),
+        );
+        let mut held = AuthStore::default();
+        held.set("remote", leviath_mcp::ServerAuth::default());
+        grants.save(&held).unwrap();
+
+        let err = grants.forget("remote").unwrap_err();
+        assert!(err.to_string().contains("the keychain is locked"), "{err}");
+        assert!(grants.load().unwrap().get("remote").is_some());
     }
 
     /// A keychain that cannot be reached is every read's and write's answer,

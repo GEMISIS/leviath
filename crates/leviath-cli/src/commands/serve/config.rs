@@ -105,10 +105,8 @@ pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedCo
 pub(super) async fn put_config(
     State(state): State<AppState>,
     Json(req): Json<WriteConfigReq>,
-) -> Result<Json<RedactedConfig>, ApiError> {
-    let config = super::core::config::write(req)
-        .await
-        .map_err(|e| super::core::error::as_api_error(&e))?;
+) -> Result<Json<RedactedConfig>, super::core::error::ServeError> {
+    let config = super::core::config::write(req).await?;
     // Health read *after* the write, so the answer describes the file this
     // request just left behind. A write this route made always parses - it
     // serializes a `Config` and the refusals inside ran first - so this is
@@ -133,7 +131,7 @@ pub(super) async fn put_config(
 /// act as `POST /api/mcp/servers/{name}/test`.
 pub(super) async fn probe_models(
     Json(req): Json<ProbeModelsReq>,
-) -> Result<Json<ProbeModelsResp>, ApiError> {
+) -> Result<Json<ProbeModelsResp>, super::core::error::ServeError> {
     probe_models_with(req, &leviath_providers::provider::build_http_client).await
 }
 
@@ -142,11 +140,10 @@ pub(super) async fn probe_models(
 pub(super) async fn probe_models_with(
     req: ProbeModelsReq,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
-) -> Result<Json<ProbeModelsResp>, ApiError> {
+) -> Result<Json<ProbeModelsResp>, super::core::error::ServeError> {
     probed(req, build_client)
         .await
         .map(|models| Json(ProbeModelsResp { models }))
-        .map_err(|e| super::core::error::as_api_error(&e))
 }
 
 /// What an OpenAI-compatible endpoint says it serves, for whichever surface
@@ -1942,7 +1939,7 @@ mod tests {
             failing,
         )
         .await;
-        let (status, _) = result.expect_err("fails");
+        let (status, _) = super::super::core::error::as_api_error(&result.expect_err("fails"));
         assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
     }
 

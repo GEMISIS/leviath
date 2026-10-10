@@ -123,27 +123,13 @@ impl ToolRegistry {
 }
 
 /// The MCP grants an agent connects with: `kind`'s, or the grant file alone
-/// when the keychain cannot be reached.
-///
-/// A warning rather than a hard failure: MCP servers that need no OAuth still
-/// work, and refusing every tool over a locked keychain would be worse than
-/// losing the ones that need it. The file alone holds none of a keychain
-/// user's tokens, so those servers read as logged out and nothing writes a
-/// token into the file.
+/// when the keychain cannot be reached, for the reason
+/// [`McpGrants::at_or_file`] gives.
 pub(crate) fn agent_grants(kind: leviath_core::CredentialStoreKind) -> McpGrants {
-    grants_or_file(
+    McpGrants::at_or_file(
         leviath_mcp::AuthStore::default_path().unwrap_or_default(),
-        crate::credentials::store_for(kind),
+        kind,
     )
-}
-
-/// Core of [`agent_grants`] with the backend already resolved.
-fn grants_or_file(path: PathBuf, resolved: crate::credentials::Resolved) -> McpGrants {
-    let resolved = resolved.or_else(|e| {
-        tracing::warn!("{e}. MCP servers needing OAuth will appear logged out.");
-        Ok(None)
-    });
-    McpGrants::new(path, resolved)
 }
 
 /// Connect `server` for an agent.
@@ -1141,17 +1127,9 @@ for line in sys.stdin:
         assert!(registry.mcp_tool_defs.is_empty());
     }
 
-    /// A locked keychain costs the MCP servers that need OAuth, not every tool
-    /// the agent has - so the read path warns and carries on with the file.
+    /// An agent's grants are the ones in Leviath's own grant file.
     #[tokio::test]
-    async fn an_unreachable_credential_store_leaves_the_file_alone_to_read() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcp-auth.json");
-        let file_alone = grants_or_file(path.clone(), Err("no keychain here".to_string()));
-        assert!(file_alone.load().unwrap().server_names().is_empty());
-
-        let keychain = grants_or_file(path, Ok(Some(Box::new(leviath_core::MemoryStore::new()))));
-        assert!(keychain.load().is_ok());
+    async fn an_agent_reads_the_default_grant_file() {
         let file = agent_grants(leviath_core::CredentialStoreKind::File);
         assert!(file.path().ends_with("mcp-auth.json"));
     }
