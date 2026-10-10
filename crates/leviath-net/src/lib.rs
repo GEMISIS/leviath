@@ -24,6 +24,7 @@
 //! surface for a model that is picking URLs rather than running an attack.
 
 pub mod read_caps;
+pub mod sse;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::time::Duration;
@@ -123,6 +124,42 @@ pub fn checked_client(timeouts: ClientTimeouts, allow_local: bool) -> reqwest::C
         .expect("building an HTTP client fails only on TLS backend init")
 }
 
+/// A redirect policy for a client whose requests carry credentials: a hop is
+/// followed only while it stays on the origin the request started on, and
+/// only five of them.
+///
+/// reqwest strips `Authorization` across origins by itself but leaves custom
+/// headers alone, and the keys these clients send travel as `x-api-key`,
+/// `x-goog-api-key` and whatever an MCP server's config names. A redirect to
+/// another host would hand them over, and a 307 or 308 would replay the body
+/// with them. A hop off the origin is not followed: the 3xx comes back as the
+/// response, and the caller's status check fails it there, which is one error
+/// path instead of two.
+///
+/// An origin check rather than [`check_url`]'s address policy, because a
+/// configured endpoint legitimately points at loopback: an Ollama server, an
+/// MCP server on the same machine.
+pub fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        match same_origin_hop(attempt.previous(), attempt.url()) {
+            true => attempt.follow(),
+            false => attempt.stop(),
+        }
+    })
+}
+
+/// Whether a hop to `next`, after the URLs already visited, stays on the
+/// origin of the last of them and within five hops.
+///
+/// Split out of the policy closure so the hop cap can be tested without
+/// standing up five redirecting servers.
+fn same_origin_hop(previous: &[url::Url], next: &url::Url) -> bool {
+    previous.len() <= 5
+        && previous
+            .last()
+            .is_some_and(|prev| prev.origin() == next.origin())
+}
+
 /// Why a URL was refused. Rendered into the tool result the model sees, so it
 /// says what to do differently rather than just failing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,7 +223,7 @@ impl std::fmt::Display for UrlRejection {
 /// broadcast, and documentation ranges - plus the IPv6 equivalents. IPv4-mapped
 /// IPv6 addresses are unwrapped first, so `::ffff:127.0.0.1` cannot be used to
 /// smuggle a loopback address past a v6 check.
-pub fn is_restricted_addr(addr: IpAddr) -> bool {
+fn is_restricted_addr(addr: IpAddr) -> bool {
     match addr {
         IpAddr::V4(v4) => is_restricted_v4(v4),
         // `::ffff:a.b.c.d` is the same host as `a.b.c.d`; classify it as v4 so
@@ -411,6 +448,70 @@ mod tests {
             .await
             .expect("a permitted hop is followed to its destination");
         assert_eq!(resp.status().as_u16(), 204);
+    }
+
+    /// A redirect on the same origin is ordinary - a gateway moving a path -
+    /// and is followed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn same_origin_redirects_follows_a_hop_on_the_same_origin() {
+        let addr = redirecting_server("/moved".to_string(), 1).await;
+        let client = client_builder(ClientTimeouts::default())
+            .redirect(same_origin_redirects())
+            .build()
+            .expect("a client builds");
+        let resp = client
+            .get(format!("http://{addr}/first"))
+            .header("x-api-key", "secret")
+            .send()
+            .await
+            .expect("a same-origin hop is followed");
+        assert_eq!(resp.status().as_u16(), 204);
+    }
+
+    /// A hop to another origin is not followed: the 307 is the answer, so
+    /// the headers on the request never reach the other host.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn same_origin_redirects_stops_at_a_hop_to_another_origin() {
+        let elsewhere = redirecting_server(String::new(), 0).await;
+        let addr = redirecting_server(format!("http://{elsewhere}/steal"), 1).await;
+        let client = client_builder(ClientTimeouts::default())
+            .redirect(same_origin_redirects())
+            .build()
+            .expect("a client builds");
+        let resp = client
+            .get(format!("http://{addr}/first"))
+            .header("x-api-key", "secret")
+            .send()
+            .await
+            .expect("stopping returns the 3xx rather than erroring");
+        assert_eq!(resp.status().as_u16(), 307);
+    }
+
+    /// The origin is scheme, host and port together, and the chain is capped
+    /// even when every hop stays home.
+    #[test]
+    fn a_same_origin_hop_is_bounded_and_compares_the_whole_origin() {
+        let home = u("https://api.example.com/a");
+        let chain = |n: usize| vec![home.clone(); n];
+        assert!(same_origin_hop(
+            &chain(1),
+            &u("https://api.example.com:443/b")
+        ));
+        assert!(same_origin_hop(&chain(5), &u("https://api.example.com/b")));
+        assert!(!same_origin_hop(&chain(6), &u("https://api.example.com/b")));
+        assert!(!same_origin_hop(&chain(1), &u("http://api.example.com/b")));
+        assert!(!same_origin_hop(
+            &chain(1),
+            &u("https://evil.example.com/b")
+        ));
+        assert!(!same_origin_hop(
+            &chain(1),
+            &u("https://api.example.com:8443/b")
+        ));
+        assert!(
+            !same_origin_hop(&[], &home),
+            "a hop with no start is no hop"
+        );
     }
 
     /// A hop is a destination the caller's original check never saw. 307/308

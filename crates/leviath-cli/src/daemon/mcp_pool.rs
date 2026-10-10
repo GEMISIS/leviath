@@ -569,7 +569,11 @@ impl McpPool {
                 // access token re-auths on a 401 instead of failing every call.
                 if auth_was_resolved && let Some(path) = store_path.clone() {
                     client.set_refresher(std::sync::Arc::new(
-                        leviath_mcp::StoredTokenRefresher::new(config.name.clone(), path),
+                        leviath_mcp::StoredTokenRefresher::new(
+                            config.name.clone(),
+                            path,
+                            credentials.clone(),
+                        ),
                     ));
                 }
                 let advertised = self.shared.lock().await.add_client_advertised(

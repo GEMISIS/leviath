@@ -54,29 +54,17 @@ pub(super) fn parse_sse_event(
     buffer: &mut String,
     open_tool_block: &mut Option<usize>,
 ) -> Option<Result<StreamChunk>> {
-    // `None` until the double newline that terminates an event has arrived;
-    // the caller polls again with more bytes.
-    let (event_text, rest) = buffer.split_once("\n\n")?;
-    let event_text = event_text.to_string();
-    *buffer = rest.to_string();
-
-    // Parse event type and data
-    let mut event_type = String::new();
-    let mut data = String::new();
-
-    for line in event_text.lines() {
-        if let Some(et) = line.strip_prefix("event: ") {
-            event_type = et.to_string();
-        } else if let Some(d) = line.strip_prefix("data: ") {
-            data = d.to_string();
-        }
-    }
-
-    if data.is_empty() {
+    // `None` until a whole event has arrived; the caller polls again with
+    // more bytes.
+    let event = leviath_net::sse::next_event(buffer)?;
+    if event.data.is_empty() {
         return None;
     }
+    // The `event:` name, not a field of the payload, is what says an event
+    // is the stream's error.
+    let event_type = event.event.unwrap_or_default();
 
-    let json: serde_json::Value = match serde_json::from_str(&data) {
+    let json: serde_json::Value = match serde_json::from_str(&event.data) {
         Ok(json) => json,
         Err(e) => {
             tracing::warn!(

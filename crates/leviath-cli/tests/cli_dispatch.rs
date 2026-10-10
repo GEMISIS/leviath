@@ -40,7 +40,7 @@ fn crate_root() -> PathBuf {
 /// Windows (`SHGetKnownFolderPath`) - confirmed via real Windows CI
 /// failures in `add`/`remove` even after overriding `HOME`+`USERPROFILE`.
 /// `LEVIATH_HOME` (`crate::config::leviath_home_dir()`, and a matching
-/// local override inside `leviath-package`'s `AgentInstaller::new()`) is
+/// local override inside `leviath-package`'s `AgentInstaller::try_new()`) is
 /// the actual mechanism that redirects every `~/.leviath/...`-rooted path
 /// this binary uses; `HOME`/`USERPROFILE` are kept too since some
 /// lower-level dependencies may still consult them directly.

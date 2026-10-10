@@ -707,9 +707,8 @@ impl Provider for OpenRouterProvider {
         let headers = self.chat_headers();
         // The same temperature-refusal handling as the buffered path: the
         // refusal is the initial HTTP response, before any stream bytes, so it
-        // is caught and retried here too. Streaming used to skip this, and an
-        // image model reached by streaming failed the run over a temperature it
-        // never needed.
+        // is caught and retried here too. Without it an image model reached by
+        // streaming fails the run over a temperature it never needed.
         let response = self
             .send_with_temperature_retry(&url, &headers, &mut body, request)
             .await?;
@@ -1957,9 +1956,9 @@ mod tests {
     }
 
     /// The streaming path retries the same way: an image or reasoning model is
-    /// reached by `infer_stream`, and the refusal used to sail past it and fail
-    /// the run. The refusal is the initial HTTP response, before any SSE bytes,
-    /// so it is caught and the stream resent without temperature.
+    /// reached by `infer_stream`, where an uncaught refusal fails the run. The
+    /// refusal is the initial HTTP response, before any SSE bytes, so it is
+    /// caught and the stream resent without temperature.
     #[tokio::test]
     async fn a_streamed_request_retries_a_refused_temperature_too() {
         let refusal = br#"{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model.","type":"invalid_request_error","param":"temperature","code":null}}"#;

@@ -69,43 +69,6 @@ pub fn apply_request_timeout(
     }
 }
 
-/// Build a `reqwest::Client` for talking to an LLM HTTP API.
-///
-/// All providers should use this instead of `Client::new()`. It applies:
-/// - **`pool_max_idle_per_host(0)`** - never reuse an idle connection. A large
-///   request sent over a *reused* pooled connection to `api.anthropic.com`
-///   stalls indefinitely (the server never responds), 100% reproducibly on some
-///   setups, while the *same* large request over a *fresh* connection succeeds
-///   (confirmed via `curl`: a 40KB POST on a fresh connection returns HTTP 200,
-///   and small requests, which don't trigger the stall, share the pool fine).
-///   It is transport-independent - it reproduces over both HTTP/2 and HTTP/1.1 -
-///   so forcing a fresh connection per request, not the protocol, is the fix.
-///   The cost is a TLS handshake per request, negligible for the sequential
-///   request/response calls these providers make. **This** is the real fix for
-///   the never-responding-connection hang; the per-request timeout below is the
-///   time bound on top of it.
-/// - a `connect_timeout` so connection establishment can't hang; and TCP
-///   keep-alive.
-///
-/// A *stall*/duration bound is deliberately **not** set on the client here.
-/// Inference calls are bounded per-request instead (see [`apply_request_timeout`]
-/// and `DEFAULT_INFERENCE_TIMEOUT_SECS`) so each stage can pick its own deadline,
-/// with the dispatch `job_timeout` as the final backstop. `timeout_secs`
-/// (`InferenceRequest::request_timeout_secs`) still applies an optional
-/// client-level hard cap on total request duration for callers that set it; a
-/// per-request timeout, when present, overrides it.
-/// Whether a redirect keeps the request on the origin it started from.
-///
-/// Split out so the decision is a plain function the tests can drive, rather
-/// than a closure only reachable through a real redirect.
-fn same_origin_hop(attempt: &reqwest::redirect::Attempt<'_>) -> bool {
-    attempt.previous().last().is_some_and(|prev| {
-        prev.scheme() == attempt.url().scheme()
-            && prev.host_str() == attempt.url().host_str()
-            && prev.port_or_known_default() == attempt.url().port_or_known_default()
-    })
-}
-
 /// The error `reqwest` reports when a client cannot be built, re-exported for
 /// the same reason as [`HttpClient`].
 pub use reqwest::Error as HttpError;
@@ -172,14 +135,31 @@ pub fn with_extra_header_pairs<'a>(
 
 /// The HTTP client every provider talks through.
 ///
-/// Redirects are capped and confined to the origin the request started on. That
-/// second part is the load-bearing one: reqwest strips `Authorization` across
-/// origins by itself but leaves custom headers alone, and the provider keys
-/// travel as `x-api-key` and `x-goog-api-key`. A redirect to another host would
-/// hand them over.
-///
-/// `timeout_secs` of `None` leaves the request untimed, which is what a
-/// streaming call needs - a long generation is not a stalled one.
+/// All providers should use this instead of `Client::new()`, which has no
+/// timeouts and follows any redirect. It applies:
+/// - **`pool_max_idle_per_host(0)`** - never reuse an idle connection. A large
+///   request sent over a *reused* pooled connection to `api.anthropic.com`
+///   stalls indefinitely (the server never responds), 100% reproducibly on some
+///   setups, while the *same* large request over a *fresh* connection succeeds
+///   (confirmed via `curl`: a 40KB POST on a fresh connection returns HTTP 200,
+///   and small requests, which don't trigger the stall, share the pool fine).
+///   It is transport-independent - it reproduces over both HTTP/2 and HTTP/1.1 -
+///   so forcing a fresh connection per request, not the protocol, is the fix.
+///   The cost is a TLS handshake per request, negligible for the sequential
+///   request/response calls these providers make. **This** is the real fix for
+///   the never-responding-connection hang; the per-request timeout below is the
+///   time bound on top of it.
+/// - a `connect_timeout` so connection establishment can't hang; and TCP
+///   keep-alive.
+/// - redirects confined to the origin the request started on, so a key sent
+///   as `x-api-key` (Anthropic) or `x-goog-api-key` (Gemini) is never carried
+///   to whatever a redirect names. An origin check rather than `leviath-net`'s
+///   SSRF policy, because `base_url` is user-configured and legitimately
+///   points at loopback for Ollama.
+/// - a total timeout of `timeout_secs`, or [`DEFAULT_INFERENCE_TIMEOUT_SECS`]
+///   when that is `None`. A per-request timeout (see [`apply_request_timeout`])
+///   overrides it, so each stage can pick its own deadline, with the dispatch
+///   `job_timeout` as the final backstop.
 pub fn build_http_client(
     timeout_secs: Option<u64>,
 ) -> std::result::Result<reqwest::Client, reqwest::Error> {
@@ -242,30 +222,15 @@ pub fn side_call_client() -> &'static reqwest::Client {
     })
 }
 
-/// The builder both outbound clients share.
+/// The builder both outbound clients share, carrying every setting
+/// [`build_http_client`] lists.
 ///
 /// Visible to the provider tests so one can swap in a resolver and still get
 /// every other setting production uses.
 pub(super) fn outbound_builder(timeout_secs: Option<u64>) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .pool_max_idle_per_host(0)
-        // Follow a redirect only while it stays on the host the key was meant
-        // for. reqwest strips `Authorization` across origins by itself, but not
-        // a custom header - and the provider keys travel as `x-api-key`
-        // (Anthropic) and `x-goog-api-key` (Gemini), which it would carry
-        // straight to whatever a redirect named. `base_url` is user-configured
-        // and legitimately points at loopback for Ollama, so this is an origin
-        // check rather than `leviath-net`'s SSRF policy, which would
-        // refuse that.
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            match same_origin_hop(&attempt) && attempt.previous().len() <= 5 {
-                true => attempt.follow(),
-                // `stop` rather than `error`: the 3xx comes back as an ordinary
-                // response and fails the status check downstream, which is one
-                // error path instead of two.
-                false => attempt.stop(),
-            }
-        }))
+        .redirect(leviath_net::same_origin_redirects())
         .connect_timeout(std::time::Duration::from_secs(30))
         .tcp_keepalive(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(

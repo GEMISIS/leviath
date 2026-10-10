@@ -174,3 +174,41 @@ fn a_sign_in_provider_with_nowhere_to_keep_its_grant_is_skipped() {
         assert!(built.is_none(), "{kind}");
     }
 }
+
+/// `[rate_limits.ollama]` reaches Ollama the way every other provider's limit
+/// reaches it: a second call inside the window waits for the window to turn
+/// over rather than going straight out.
+#[tokio::test]
+async fn ollama_takes_its_rate_limit() {
+    let body = br#"{"message":{"content":"hi"},"done":true,"eval_count":1,"prompt_eval_count":1}"#;
+    let mut spec = Spec::new("ollama");
+    spec.base_url = Some(leviath_testkit::spawn_mock_server(200, "OK", body.to_vec()).await);
+    spec.rate_limit = Some(RateLimitConfig {
+        requests_per_minute: 1,
+        tokens_per_minute: 0,
+    });
+    let provider = built(spec).expect("registered");
+    let request = crate::provider::InferenceRequest {
+        system: vec![],
+        messages: vec![],
+        model: "llama3".to_string(),
+        max_tokens: 16,
+        temperature: 0.0,
+        tools: vec![],
+        extra: serde_json::json!({}),
+        request_timeout_secs: None,
+    };
+    provider
+        .infer(&request)
+        .await
+        .expect("the first call is admitted");
+    let second = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        provider.infer(&request),
+    )
+    .await;
+    assert!(
+        second.is_err(),
+        "the second call must wait for the request window"
+    );
+}

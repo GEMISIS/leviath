@@ -2,9 +2,9 @@
 //!
 //! Provides file system and shell tools sandboxed to a working directory.
 
+use leviath_core::Tool;
 use leviath_core::region::EntryContent;
 use leviath_core::resolves_within;
-use leviath_providers::Tool;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -1936,13 +1936,16 @@ mod tests {
     #[test]
     fn a_file_under_the_cap_comes_back_whole() {
         let content = "hello".repeat(10);
-        assert_eq!(cap_file_content(&content, 1024), content);
+        assert_eq!(
+            cap_file_content(&content, 1024, content.len() as u64),
+            content
+        );
     }
 
     #[test]
     fn a_file_over_the_cap_is_truncated_and_says_so() {
         let content = "x".repeat(5000);
-        let capped = cap_file_content(&content, 1000);
+        let capped = cap_file_content(&content, 1000, content.len() as u64);
         assert!(capped.starts_with(&"x".repeat(1000)));
         assert!(capped.contains("[truncated]"), "{capped}");
         assert!(
@@ -1956,7 +1959,7 @@ mod tests {
         // The cap is a byte count and file content is arbitrary text, so a
         // naive slice would panic on the way back to a `String`.
         let content = "é".repeat(100);
-        let capped = cap_file_content(&content, 51);
+        let capped = cap_file_content(&content, 51, content.len() as u64);
         assert!(capped.starts_with("é"));
         assert!(capped.contains("[truncated]"));
     }
@@ -1973,6 +1976,90 @@ mod tests {
         let out = tools.read_file(&json!({ "path": "big.txt" })).await;
         assert!(out.contains("[truncated]"), "an unbounded read is the bug");
         assert!(out.len() < MAX_READ_FILE_BYTES + 4096);
+    }
+
+    /// `read_files` holds each file to the cap `read_file` does, so a batch
+    /// is not a way around it.
+    #[tokio::test]
+    async fn read_files_caps_each_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("big.txt"),
+            "y".repeat(MAX_READ_FILE_BYTES + 4096),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("small.txt"), "hi").unwrap();
+        let tools = make_tools(dir.path());
+        let out = tools
+            .read_files(&json!({ "paths": ["big.txt", "small.txt"] }))
+            .await;
+        assert!(
+            out.contains("[truncated]"),
+            "an uncapped batch read is the bug"
+        );
+        assert!(out.len() < MAX_READ_FILE_BYTES + 4096);
+        assert!(out.ends_with("### [small.txt]\nhi"));
+    }
+
+    /// Only as much of a file as the cap needs is read: bytes far past it
+    /// are never looked at, so they cannot turn a long text file into a
+    /// binary one, and the note still gives the file's real size.
+    #[tokio::test]
+    async fn read_file_reads_no_further_than_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut content = "z".repeat(MAX_READ_FILE_BYTES + 1000).into_bytes();
+        content.push(0xff);
+        std::fs::write(dir.path().join("long.log"), &content).unwrap();
+        let tools = make_tools(dir.path());
+        let out = tools.read_file(&json!({ "path": "long.log" })).await;
+        assert!(out.contains("[truncated]"), "read as text, and capped");
+        let size = format!("The file is {} bytes", content.len());
+        assert!(out.contains(&size), "the note gives the size on disk");
+    }
+
+    /// The cap is a byte count and can land inside a character; the read
+    /// stops a few bytes past it so that character is read whole or not at
+    /// all, never as broken bytes that make the file look binary.
+    #[tokio::test]
+    async fn a_cap_inside_a_character_still_reads_as_text() {
+        let dir = tempfile::tempdir().unwrap();
+        // Three bytes each, so some character straddles any cap that is not
+        // a multiple of three.
+        std::fs::write(
+            dir.path().join("euros.txt"),
+            "\u{20ac}".repeat(MAX_READ_FILE_BYTES / 3 + 1000),
+        )
+        .unwrap();
+        let tools = make_tools(dir.path());
+        let out = tools.read_file(&json!({ "path": "euros.txt" })).await;
+        assert!(out.starts_with('\u{20ac}'));
+        assert!(out.contains("[truncated]"));
+    }
+
+    /// A directory in a batch gets the answer `read_file` gives: what is in
+    /// it, rather than the OS's "is a directory".
+    #[tokio::test]
+    async fn read_files_answers_a_directory_with_its_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src").join("main.rs"), "fn main() {}").unwrap();
+        let tools = make_tools(dir.path());
+        let out = tools.read_files(&json!({ "paths": ["src"] })).await;
+        assert!(out.starts_with("### [src]\n[error] 'src' is a directory, not a file."));
+        assert!(out.contains("main.rs"));
+    }
+
+    /// A short file that ends inside a character was not cut by the read:
+    /// those bytes are the file's, and it is not text.
+    #[tokio::test]
+    async fn a_file_that_ends_inside_a_character_is_not_text() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("torn.txt"), b"abc\xe2\x82").unwrap();
+        let tools = make_tools(dir.path());
+        let out = tools.read_file(&json!({ "path": "torn.txt" })).await;
+        assert!(out.contains("is not a text file"));
+        let out = tools.read_files(&json!({ "paths": ["torn.txt"] })).await;
+        assert!(out.contains("is not a text file"));
     }
 
     #[test]

@@ -1,8 +1,11 @@
 # leviath-providers
 
-LLM provider integrations for Leviath: Anthropic, OpenAI, Gemini, Ollama,
-OpenRouter, and drop-in providers written in Rhai. Also holds the shared
-retry, rate-limit, and tokenizer plumbing the providers have in common.
+LLM provider integrations for Leviath: Anthropic, OpenAI (with an API key,
+or OpenAI Codex signed in with a ChatGPT subscription), xAI (with an API key,
+or Grok signed in with a subscription), Google Gemini, OpenRouter, AWS
+Bedrock, Meta, Ollama, Meshy, any OpenAI-compatible endpoint, and drop-in
+providers written in Rhai. Also holds the shared retry, rate-limit, and
+tokenizer plumbing the providers have in common.
 
 Each provider is a cargo feature, all on by default: `anthropic`, `openai`,
 `openai-subscription`, `xai`, `xai-subscription`, `google`, `openrouter`,

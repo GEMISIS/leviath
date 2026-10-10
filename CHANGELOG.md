@@ -182,6 +182,16 @@ same list.
 - `leviath-providers` is a workspace dependency without its default
   features, so a crate built on `leviath-runtime` alone carries no vendor
   providers until it asks for them.
+- **Breaking, library.** `StoredTokenRefresher::new` takes the credential
+  store the grants live in, as `OAuthClient::authorization_header_with`
+  does. `Tool` lives in `leviath-core` (still re-exported as
+  `leviath_providers::Tool`), so `leviath-tools` no longer depends on
+  `leviath-providers`. `leviath-net` gains `sse`, the Server-Sent Events
+  framer every streaming client uses, and `same_origin_redirects`.
+  `AgentInstaller::try_new` reports a missing home directory instead of
+  panicking.
+- `read_files` answers a directory with its listing, as `read_file` does,
+  and a file that is not text with an error naming it.
 
 ### Fixed
 
@@ -300,6 +310,37 @@ same list.
 - Through OpenRouter, a Claude model named with a dotted version
   (`anthropic/claude-opus-4.8`) or from the Claude 5 line was sent a
   temperature it refuses when the gateway's listing could not be read.
+- A streamed reply whose server-sent events ended their lines in `\r\n`, or
+  wrote `data:` without the space after the colon, was read as nothing, so
+  the reply stalled or came back empty. Anthropic, OpenAI, Codex, xAI, Grok,
+  Meta, Gemini, OpenRouter, OpenAI-compatible endpoints and Rhai script
+  providers now read events the way the spec writes them, and a script
+  provider gets an event with several `data:` lines whole.
+- `lev mcp login` sent an MCP server's configured headers (an `x-api-key`,
+  say) on to another host when the server redirected there, and the token
+  and registration requests followed such a redirect too. They now stop at a
+  redirect off the server's origin. Fetching the OAuth metadata still
+  follows one, but only to https, or http on loopback.
+- With `[security] credential_store = "keychain"`, an MCP server's token that
+  expired mid-session could not be refreshed: the refresh read the token file,
+  which holds no keychain grants. It now reads and writes the keychain.
+- An MCP server started over stdio is stopped when its connection is dropped
+  without being closed, rather than left running.
+- `lev mcp login` panicked when it could not open a loopback port for the
+  browser to return to, as in a sandbox with no network, or could not accept
+  the browser's connection. It now says so and exits with an error.
+- `read_files` returned every file whole, however large. Each file is now
+  capped at 256 KiB with the note `read_file` adds, and `read_file` reads no
+  further into a file than it shows. A file that is not text and is over
+  `[mime] max_part_bytes` is refused before it is read. The file tools no
+  longer read and write on the daemon's async threads, where a large file
+  stalled every other run.
+- `lev add` and `lev remove` panicked on a machine with no home directory and
+  no `LEVIATH_HOME`. They now report it.
+- `[rate_limits.ollama]` was accepted and never applied. Ollama now honours it
+  like every other provider, and the docs list each provider that takes one.
+- `LEVIATH_DUMP_REQUEST_DIR` was documented as writing every provider's
+  requests; it writes Anthropic's, and the docs now say so.
 
 ### Added
 
@@ -328,6 +369,18 @@ same list.
 - `/ws` and `/ws/agents/{id}` send an `events_dropped` frame, with a
   `count`, when a socket falls behind and the oldest events are dropped
   before it reads them. Announced as the `events.dropped` capability.
+
+### Removed
+
+- **Breaking, library.** Public items nothing called:
+  `leviath_tools::has_builtin` and `BUILTIN_FORMATS`,
+  `AgentInstaller::list_installed`, `AgentBundler::with_exclude`,
+  `leviath_providers::compiled::not_built`, `CapabilityCache::is_fresh`
+  (`age_secs` remains), `CodexProvider::with_user_agent`,
+  `mime_tables::modalities_read_on` and `files::now_secs` (use
+  `leviath_core::duration::now_secs`). `leviath_net::is_restricted_addr`,
+  `read_caps::describe_cap`, `leviath_sys::perms::write_atomic_with` and
+  `editor::launch_via` are private.
 
 ## 0.6.4 - 2026-09-26
 

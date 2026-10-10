@@ -1,6 +1,6 @@
 [package]
 name = "leviath-net"
-description = "Outbound-request policy for Leviath: which URLs an agent-driven fetch may reach, and the shared HTTP client that enforces it"
+description = "Outbound-request policy for Leviath: which URLs an agent-driven fetch may reach, the HTTP clients that enforce it, and the SSE framing they share"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,10 +13,10 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-# The whole reason this crate exists. `reqwest` pulls a little over a hundred
-# crates, and it sat in `leviath-core` - a crate whose own module doc says it
-# holds plain serializable data with no async dependencies. Depending on
-# Leviath's data types cost a full HTTP client and everything under it.
+# The reason this is a crate of its own: `reqwest` pulls a little over a
+# hundred crates, and `leviath-core` holds plain serializable data with no
+# async dependencies, so depending on Leviath's data types must not cost a full
+# HTTP client and everything under it.
 reqwest = { workspace = true }
 # The decoder `reqwest::Response::text` uses, so a capped read of a body
 # declaring `charset=` decodes it the same way the uncapped one did.

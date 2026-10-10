@@ -44,7 +44,7 @@ pub const MCP_LINE_CAP: usize = 1024 * 1024;
 
 /// A cap as a person reads it: `64 MiB`, `1 MiB`, or `4096 bytes` for a
 /// figure that is not a whole number of MiB (which only test-sized caps are).
-pub fn describe_cap(cap: usize) -> String {
+fn describe_cap(cap: usize) -> String {
     const MIB: usize = 1024 * 1024;
     if cap >= MIB && cap.is_multiple_of(MIB) {
         format!("{} MiB", cap / MIB)

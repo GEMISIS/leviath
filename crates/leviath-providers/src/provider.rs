@@ -521,18 +521,7 @@ pub struct Message {
     pub reasoning: Option<String>,
 }
 
-/// A tool that can be called by the model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tool {
-    /// Tool name
-    pub name: String,
-
-    /// Tool description
-    pub description: String,
-
-    /// JSON schema for tool parameters
-    pub parameters: serde_json::Value,
-}
+pub use leviath_core::Tool;
 
 /// Response from LLM inference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1397,7 +1386,7 @@ mod tests {
     /// A labelled message still classifies. The `[kind]` prefix goes in front
     /// of the status, and a prefix that hid it would have silently stopped a 402
     /// from failing over - which is the behaviour the status extraction exists
-    /// to drive, and the bug the prefix introduced before this.
+    /// to drive.
     #[test]
     fn a_labelled_message_still_yields_its_status() {
         assert_eq!(

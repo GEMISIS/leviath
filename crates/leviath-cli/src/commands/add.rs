@@ -22,8 +22,8 @@ fn agents_dir_or_error(dir: Option<std::path::PathBuf>) -> anyhow::Result<std::p
 
 /// Run `lev add`: install an agent from a directory or a bundle file.
 pub(crate) async fn execute(args: AddArgs) -> anyhow::Result<()> {
-    let installer = leviath_package::AgentInstaller::new();
     let agents_dir = resolve_agents_dir()?;
+    let installer = leviath_package::AgentInstaller::with_install_dir(agents_dir.clone());
     // Best-effort, unlike `lev list`: a config that will not parse is a reason
     // to say less about the package being installed, never a reason to refuse
     // to install it.
@@ -1473,7 +1473,7 @@ mod tests {
 
     #[test]
     fn execute_real_wrapper_fails_fast_without_touching_real_agents_dir() {
-        // Drives the real `execute()` (dirs::home_dir() + AgentInstaller::new()
+        // Drives the real `execute()` (the resolved agents dir + its installer
         // + delegation to execute_with) - safe because a nonexistent
         // ".leviath-bundle" path bails out in execute_with's "Package file
         // not found" check before any real file under ~/.leviath/agents is

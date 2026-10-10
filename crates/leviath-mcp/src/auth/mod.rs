@@ -17,6 +17,7 @@ pub(crate) mod metadata;
 pub mod pkce;
 pub mod store;
 
+use anyhow::Context as _;
 use leviath_net::read_caps::{JSON_BODY_CAP, read_body_capped, read_text_capped};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -111,7 +112,17 @@ impl LoginOutcome {
 
 /// Drives OAuth against one MCP server's authorization server.
 pub struct OAuthClient {
+    /// For every request that carries something secret: the probe with the
+    /// server's configured headers, registration, and the token exchange and
+    /// refresh. A redirect is followed only on the origin it started from.
     http: reqwest::Client,
+    /// For the metadata documents, which carry nothing secret and may move
+    /// (an apex domain to its `www`). A redirect is followed only to a URL
+    /// discovery would have fetched directly.
+    discovery: reqwest::Client,
+    /// Where the browser's callback listener binds: loopback, on a port the
+    /// OS picks. A field so a test can name an address that cannot be bound.
+    callback_addr: std::net::SocketAddr,
 }
 
 impl Default for OAuthClient {
@@ -123,12 +134,16 @@ impl Default for OAuthClient {
 impl OAuthClient {
     /// Build a client with sensible network timeouts.
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(60))
-            .build()
-            .expect("failed to build reqwest client");
-        Self { http }
+        Self {
+            http: client_with(leviath_net::same_origin_redirects()),
+            discovery: client_with(reqwest::redirect::Policy::custom(
+                |attempt| match discovery_hop(attempt.previous().len(), attempt.url()) {
+                    Ok(()) => attempt.follow(),
+                    Err(e) => attempt.error(e),
+                },
+            )),
+            callback_addr: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+        }
     }
 
     /// Run the full interactive login for `mcp_url`.
@@ -168,16 +183,12 @@ impl OAuthClient {
 
         // Bind the loopback listener first, so its port is known before both
         // registration (which needs the redirect URI) and the authorize URL.
-        // Binding an OS-assigned loopback port does not fail in practice; a
-        // failure here would mean the machine has no working loopback stack.
-        let listener = TcpListener::bind("127.0.0.1:0")
+        // A sandbox with no network, or a machine with no loopback, refuses.
+        let (listener, addr) = TcpListener::bind(self.callback_addr)
             .await
-            .expect("binding an ephemeral loopback port cannot fail");
-        let port = listener
-            .local_addr()
-            .expect("a bound listener always has a local address")
-            .port();
-        let redirect_uri = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
+            .and_then(with_local_addr)
+            .context("could not listen on a loopback port for the browser to return to")?;
+        let redirect_uri = format!("http://{addr}{CALLBACK_PATH}");
 
         let client_id = match reuse_client_id {
             Some(id) => id.to_string(),
@@ -501,6 +512,11 @@ impl OAuthClient {
         let Ok(response) = request.send().await else {
             return Probe::Unreachable;
         };
+        // A redirect left unfollowed - to another origin, which the configured
+        // headers must not reach - is no answer either way.
+        if response.status().is_redirection() {
+            return Probe::Unreachable;
+        }
         let challenge = response
             .headers()
             .get(reqwest::header::WWW_AUTHENTICATE)
@@ -601,7 +617,7 @@ impl OAuthClient {
     /// instantiation per return type, and the error arms of the unused ones
     /// read as uncovered. Callers deserialize the returned value concretely.
     async fn get_json(&self, url: &str) -> anyhow::Result<serde_json::Value> {
-        let response = self.http.get(url).send().await?;
+        let response = self.discovery.get(url).send().await?;
         if !response.status().is_success() {
             anyhow::bail!("HTTP {}", response.status());
         }
@@ -629,7 +645,41 @@ impl OAuthClient {
     }
 }
 
-/// A [`crate::transport::BearerRefresher`] backed by the on-disk token store.
+/// Whether discovery may follow a redirect to `url` after `previous_hops`
+/// URLs: only to a URL discovery would have fetched directly, and only five
+/// hops deep.
+fn discovery_hop(previous_hops: usize, url: &Url) -> Result<(), String> {
+    if previous_hops > 5 {
+        return Err("too many redirects".to_string());
+    }
+    match metadata::is_safe_discovery_url(url) {
+        true => Ok(()),
+        false => Err(format!(
+            "refusing to follow an OAuth discovery redirect to an insecure URL ({url}); \
+             only https, or http on loopback, is allowed"
+        )),
+    }
+}
+
+/// `listener` with the address it is bound to, which a freshly bound
+/// listener always has; folded into the bind's own error so the one failure
+/// that can happen is reported once.
+fn with_local_addr(listener: TcpListener) -> std::io::Result<(TcpListener, std::net::SocketAddr)> {
+    listener.local_addr().map(|addr| (listener, addr))
+}
+
+/// A client with the OAuth timeouts, following redirects as `redirects` says.
+fn client_with(redirects: reqwest::redirect::Policy) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(60))
+        .redirect(redirects)
+        .build()
+        .expect("failed to build reqwest client")
+}
+
+/// A [`crate::transport::BearerRefresher`] backed by the stored grants: the
+/// token file, or the OS credential store it indexes under the keychain backend.
 ///
 /// On a mid-session `401` the HTTP transport calls this: it refreshes the
 /// stored token non-interactively, persists the rotation, and hands back the
@@ -637,6 +687,10 @@ impl OAuthClient {
 pub struct StoredTokenRefresher {
     server_name: String,
     store_path: std::path::PathBuf,
+    /// Where the grants live when they are not in the file: the OS credential
+    /// store under `[security] credential_store = "keychain"`. `None` is the
+    /// file backend.
+    credentials: Option<std::sync::Arc<dyn leviath_core::CredentialStore>>,
     /// Current Unix time; a fn so a long-lived transport stays current.
     clock: fn() -> u64,
     /// Built once and reused: a client per 401 would stand up a whole
@@ -645,11 +699,18 @@ pub struct StoredTokenRefresher {
 }
 
 impl StoredTokenRefresher {
-    /// A refresher for `server_name`, reading and writing `store_path`.
-    pub fn new(server_name: impl Into<String>, store_path: std::path::PathBuf) -> Self {
+    /// A refresher for `server_name`, reading and writing `store_path` and,
+    /// when it is `Some`, the grants `credentials` holds - the same backend
+    /// [`OAuthClient::authorization_header_with`] read the token from.
+    pub fn new(
+        server_name: impl Into<String>,
+        store_path: std::path::PathBuf,
+        credentials: Option<std::sync::Arc<dyn leviath_core::CredentialStore>>,
+    ) -> Self {
         Self {
             server_name: server_name.into(),
             store_path,
+            credentials,
             clock: system_now_secs,
             oauth: OAuthClient::new(),
         }
@@ -667,7 +728,8 @@ fn system_now_secs() -> u64 {
 #[async_trait::async_trait]
 impl crate::transport::BearerRefresher for StoredTokenRefresher {
     async fn refresh(&self) -> anyhow::Result<String> {
-        let mut store = AuthStore::load(&self.store_path)?;
+        let credentials = self.credentials.as_deref();
+        let mut store = AuthStore::load_with(&self.store_path, credentials)?;
         let auth = store.get(&self.server_name).ok_or_else(|| {
             anyhow::anyhow!(
                 "no stored credentials for MCP server '{}'",
@@ -677,7 +739,7 @@ impl crate::transport::BearerRefresher for StoredTokenRefresher {
         let refreshed = self.oauth.refresh(auth, (self.clock)()).await?;
         let value = format!("Bearer {}", refreshed.access_token);
         store.set(&self.server_name, refreshed);
-        store.save(&self.store_path)?;
+        store.save_with(&self.store_path, credentials)?;
         Ok(value)
     }
 }
@@ -756,12 +818,12 @@ pub async fn wait_for_callback(
 ) -> anyhow::Result<String> {
     let accept = async {
         loop {
-            // Accepting on a freshly-bound loopback listener does not fail;
-            // connection resets surface later, on read, not here.
+            // Fails when the process is out of file descriptors; a reset
+            // connection surfaces later, on read, not here.
             let (stream, _) = listener
                 .accept()
                 .await
-                .expect("accepting on a bound loopback listener cannot fail");
+                .context("could not accept the browser's connection")?;
             // A browser may make incidental requests (favicon, etc); only the
             // one carrying our params counts.
             if let Some(result) = handle_callback_connection(stream, expected_state, path).await? {
@@ -852,7 +914,7 @@ fn request_target(request: &str) -> Option<&str> {
 /// Parse the query string of a request target into a map.
 fn query_params(target: &str) -> HashMap<String, String> {
     let query = target.split_once('?').map(|(_, q)| q).unwrap_or("");
-    form_urlencoded::parse(query.as_bytes())
+    url::form_urlencoded::parse(query.as_bytes())
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect()
 }
@@ -1396,6 +1458,64 @@ mod tests {
         })
     }
 
+    /// A machine that will not give the login a loopback port (a sandbox
+    /// with no network) gets an error that says so, not a panic.
+    #[tokio::test]
+    async fn login_fails_when_no_loopback_port_can_be_bound() {
+        let server = mock_auth_server("default").await;
+        let mut client = OAuthClient::new();
+        // TEST-NET-1: an address no interface carries, so binding it fails.
+        client.callback_addr = "192.0.2.1:0".parse().unwrap();
+        let err = client
+            .login(
+                &format!("{}/mcp", server.base),
+                &HashMap::new(),
+                &[],
+                auto_consent(),
+                0,
+                None,
+            )
+            .await
+            .expect_err("an unbindable callback address must fail the login");
+        assert!(
+            format!("{err:#}").contains("could not listen on a loopback port"),
+            "got: {err:#}"
+        );
+    }
+
+    /// A listener whose `accept` fails: a UDP socket holding a datagram, so
+    /// it polls readable and the accept is attempted on a socket that is not
+    /// listening for connections at all.
+    fn listener_that_cannot_accept() -> TcpListener {
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.send_to(b"x", udp.local_addr().unwrap()).unwrap();
+        #[cfg(unix)]
+        let socket = std::os::fd::OwnedFd::from(udp);
+        #[cfg(windows)]
+        let socket = std::os::windows::io::OwnedSocket::from(udp);
+        let listener = std::net::TcpListener::from(socket);
+        listener.set_nonblocking(true).unwrap();
+        TcpListener::from_std(listener).unwrap()
+    }
+
+    /// An accept that fails (a process out of file descriptors) ends the wait
+    /// with an error rather than a panic.
+    #[tokio::test]
+    async fn wait_for_callback_fails_when_accept_does() {
+        let err = wait_for_callback(
+            listener_that_cannot_accept(),
+            "s",
+            CALLBACK_PATH,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect_err("a failed accept must end the wait");
+        assert!(
+            format!("{err:#}").contains("could not accept"),
+            "got: {err:#}"
+        );
+    }
+
     #[tokio::test]
     async fn full_login_round_trip() {
         let server = mock_auth_server("default").await;
@@ -1640,6 +1760,7 @@ mod tests {
         StoredTokenRefresher {
             server_name: "srv".to_string(),
             store_path: dir.join("mcp-auth.json"),
+            credentials: None,
             clock: || 2_000,
             oauth: OAuthClient::new(),
         }
@@ -1667,6 +1788,45 @@ mod tests {
         // The rotation is persisted.
         let reloaded = AuthStore::load(&refresher.store_path).unwrap();
         assert_eq!(reloaded.get("srv").unwrap().access_token, "new-access");
+    }
+
+    /// A keychain user's grant lives in the credential store, not the file,
+    /// so a mid-session refresh has to read it from there and write the
+    /// rotation back there.
+    #[tokio::test]
+    async fn stored_refresher_reads_and_writes_through_the_credential_store() {
+        let server = mock_auth_server("default").await;
+        let dir = tempfile::tempdir().unwrap();
+        let credentials: Arc<dyn leviath_core::CredentialStore> =
+            Arc::new(leviath_core::MemoryStore::new());
+        let mut store = AuthStore::default();
+        store.set(
+            "srv",
+            ServerAuth {
+                token_endpoint: format!("{}/token", server.base),
+                refresh_token: Some("good".to_string()),
+                expires_at: 1,
+                ..Default::default()
+            },
+        );
+        let mut refresher = refresher_at(dir.path());
+        refresher.credentials = Some(credentials.clone());
+        store
+            .save_with(&refresher.store_path, Some(credentials.as_ref()))
+            .unwrap();
+
+        let value = refresher.refresh().await.expect("refresh should succeed");
+        assert_eq!(value, "Bearer new-access");
+        let reloaded =
+            AuthStore::load_with(&refresher.store_path, Some(credentials.as_ref())).unwrap();
+        assert_eq!(reloaded.get("srv").unwrap().access_token, "new-access");
+        assert!(
+            AuthStore::load(&refresher.store_path)
+                .unwrap()
+                .get("srv")
+                .is_none(),
+            "the rotated grant must not land in the file"
+        );
     }
 
     #[tokio::test]
@@ -1701,7 +1861,7 @@ mod tests {
 
     #[test]
     fn stored_refresher_new_uses_the_system_clock() {
-        let r = StoredTokenRefresher::new("s", std::path::PathBuf::from("/tmp/x"));
+        let r = StoredTokenRefresher::new("s", std::path::PathBuf::from("/tmp/x"), None);
         assert!((r.clock)() > 1_600_000_000);
     }
 
@@ -2546,6 +2706,154 @@ mod tests {
                 .label(),
             "unreachable"
         );
+    }
+
+    // ─── redirects ────────────────────────────────────────────────────────
+
+    /// Serve `app` on an ephemeral loopback port, returning its base URL.
+    async fn serve(app: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+        base
+    }
+
+    /// A server that counts the requests reaching `/steal`, for asserting
+    /// that a redirect did not carry one there.
+    async fn thief() -> (String, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let app = Router::new().route(
+            "/steal",
+            axum::routing::any(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { "stolen" }
+            }),
+        );
+        (serve(app).await, hits)
+    }
+
+    /// A server whose every route answers `307` to `target`, which keeps the
+    /// method and the body.
+    async fn redirecting_to(target: String) -> String {
+        let app = Router::new().fallback(move || {
+            let target = target.clone();
+            async move {
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(reqwest::header::LOCATION, target)],
+                )
+            }
+        });
+        serve(app).await
+    }
+
+    /// The probe carries the server's configured headers, `${VAR}`-expanded,
+    /// and reqwest strips only `Authorization` across origins: a 307 to
+    /// another host would hand it an `x-api-key`. A redirect the probe does
+    /// not follow says nothing about whether the server wants a login, so it
+    /// reads as no answer.
+    #[tokio::test]
+    async fn a_cross_origin_redirect_on_the_probe_does_not_carry_the_headers() {
+        let (thief, hits) = thief().await;
+        let mcp = Url::parse(&format!(
+            "{}/mcp",
+            redirecting_to(format!("{thief}/steal")).await
+        ))
+        .unwrap();
+        let headers = HashMap::from([("x-api-key".to_string(), "secret".to_string())]);
+
+        let probe = OAuthClient::new()
+            .probe_challenge(&mcp, &headers, &[])
+            .await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "no request carrying the configured headers may reach another origin"
+        );
+        assert_eq!(probe.label(), "unreachable");
+
+        // Positive control, so the zero above cannot be a counter that never
+        // counts.
+        reqwest::Client::new()
+            .post(format!("{thief}/steal"))
+            .send()
+            .await
+            .expect("the thief is listening");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// The token and registration POSTs carry a refresh token, an
+    /// authorization code, a verifier: a 307 replays that body, so a hop off
+    /// the endpoint's origin is not followed and the request fails instead.
+    #[tokio::test]
+    async fn the_token_and_registration_posts_do_not_follow_a_cross_origin_redirect() {
+        let (thief, hits) = thief().await;
+        let endpoint = redirecting_to(format!("{thief}/steal")).await;
+        let client = OAuthClient::new();
+
+        let auth = ServerAuth {
+            token_endpoint: format!("{endpoint}/token"),
+            refresh_token: Some("refresh-secret".to_string()),
+            ..Default::default()
+        };
+        let err = client
+            .refresh(&auth, 0)
+            .await
+            .expect_err("an unfollowed redirect is a failed refresh");
+        assert!(err.to_string().contains("307"), "got: {err}");
+
+        let meta = registration_meta(&format!("{endpoint}/register"));
+        let err = client
+            .register(&meta, "http://127.0.0.1:5000/callback")
+            .await
+            .expect_err("an unfollowed redirect is a failed registration");
+        assert!(err.to_string().contains("307"), "got: {err}");
+
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "nothing reached the thief");
+    }
+
+    /// Metadata carries nothing secret and moves around (an apex domain to
+    /// its `www`), so discovery follows a redirect to another origin.
+    #[tokio::test]
+    async fn discovery_follows_a_redirect_to_another_safe_origin() {
+        let app = Router::new().route(
+            "/meta",
+            get(|| async { Json(serde_json::json!({ "moved": true })) }),
+        );
+        let destination = serve(app).await;
+        let origin = redirecting_to(format!("{destination}/meta")).await;
+        let value = OAuthClient::new()
+            .get_json(&format!("{origin}/.well-known/x"))
+            .await
+            .expect("a safe hop is followed");
+        assert_eq!(value["moved"], true);
+    }
+
+    /// But only to a URL discovery would accept directly: a hop to plain
+    /// http on a remote host is refused rather than fetched.
+    #[tokio::test]
+    async fn discovery_refuses_a_redirect_to_an_insecure_url() {
+        let origin = redirecting_to("http://auth.example.com/meta".to_string()).await;
+        let err = OAuthClient::new()
+            .get_json(&format!("{origin}/.well-known/x"))
+            .await
+            .expect_err("an insecure hop is refused");
+        assert!(format!("{err:#}").contains("insecure"), "got: {err:#}");
+    }
+
+    /// The hop decision itself: the chain is capped, and every hop has to be
+    /// a URL discovery could have been pointed at directly.
+    #[test]
+    fn a_discovery_hop_is_bounded_and_checked() {
+        let safe = Url::parse("https://auth.example.com/meta").unwrap();
+        assert!(discovery_hop(5, &safe).is_ok());
+        let err = discovery_hop(6, &safe).expect_err("the sixth hop is refused");
+        assert!(err.contains("too many redirects"), "{err}");
+        let insecure = Url::parse("http://auth.example.com/meta").unwrap();
+        assert!(discovery_hop(1, &insecure).is_err());
     }
 
     /// The case this whole path exists for. A server holding its own API token

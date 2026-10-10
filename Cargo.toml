@@ -225,6 +225,8 @@ schemars = "1"
 rand = "0.10"
 futures-core = "0.3"
 tokio-stream = "0.1"
+# The chunks a streamed response arrives in, as `reqwest` hands them over.
+bytes = "1"
 flate2 = "1.0"
 tar = "0.4"
 # `lev rage` writes its bug-report bundle as a `.zip` rather than the
@@ -240,6 +242,9 @@ dotenvy = "0.15"
 # from driving the daemon.
 nix = { version = "0.31", default-features = false, features = ["signal", "process", "user", "socket", "hostname"] }
 temp-env = "0.3"
+# The `Entry` API under the OS credential store, used directly so tests can
+# install an in-memory store as the process default.
+keyring-core = "1"
 # Property tests (a test dependency only). The default features fork each
 # case into a process of its own and time it out, which these tests need not.
 proptest = { version = "1", default-features = false, features = ["std"] }

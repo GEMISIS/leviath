@@ -305,70 +305,17 @@ impl BuiltinTools {
 
     pub(crate) async fn read_file(&self, args: &Value) -> EntryContent {
         let path_str = match args.get("path").and_then(|v| v.as_str()) {
-            Some(p) => p,
+            Some(p) => p.to_string(),
             None => return "[error] missing 'path' argument".into(),
         };
 
-        let path = match self.resolve_read(path_str) {
+        let path = match self.resolve_read(&path_str) {
             Ok(p) => p,
             Err(e) => return format!("[error] {}", e).into(),
         };
 
-        let text = match std::fs::read(&path) {
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(content) => cap_file_content(&content, MAX_READ_FILE_BYTES),
-                Err(not_text) => return self.read_binary(path_str, &path, not_text.into_bytes()),
-            },
-            // A directory is not a malformed path, it is the wrong tool: the
-            // model wanted to see what is in there. The raw OS message ("Is a
-            // directory (os error 21)") names the problem without naming the
-            // fix, so the next call is another guess.
-            //
-            // The listing comes back with the error rather than a pointer to
-            // `list_dir`, because 21 of the bundled agents' stages grant
-            // `read_file` and not `list_dir`: there, naming that tool asks for
-            // something the stage cannot do. Answering here settles it in one
-            // call and reads the same in every stage.
-            Err(_) if path.is_dir() => {
-                let listing = directory_listing(&path);
-                format!(
-                    "[error] '{path_str}' is a directory, not a file. It contains:\n{listing}\n\
-                     Call read_file again on one of these entries."
-                )
-            }
-            Err(e) => format!("[error] Failed to read '{}': {}", path_str, e),
-        };
-        text.into()
-    }
-
-    /// A file that is not UTF-8: stored as a part of its own type, so a model
-    /// that takes the type sees the bytes and one that does not sees the
-    /// stand-in. Without a store there is nowhere to put it, and the model
-    /// is told that rather than handed mojibake.
-    fn read_binary(&self, path_str: &str, path: &Path, bytes: Vec<u8>) -> EntryContent {
-        // A path that read as a file has a final component.
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let Some(mime) = &self.ctx.mime else {
-            return format!(
-                "[error] '{path_str}' is not a text file ({}), and this run has no blob store to \
-                 hold it as a part",
-                leviath_core::mime::human_size(bytes.len() as u64)
-            )
-            .into();
-        };
-        let mime_type = mime.type_of(None, Some(&name), &bytes);
-        match mime.store(leviath_core::mime::Blob::new(mime_type, bytes).named(name)) {
-            Ok(part) => EntryContent::from_parts(vec![
-                leviath_core::mime::Part::text(format!(
-                    "'{path_str}' is not text. It is attached to this result as a part:"
-                )),
-                part,
-            ]),
-            Err(e) => format!("[error] {e}").into(),
-        }
+        let mime = self.ctx.mime.clone();
+        off_thread(move || read_file_at(&path_str, &path, mime.as_deref())).await
     }
 
     pub(crate) async fn read_files(&self, args: &Value) -> String {
@@ -381,51 +328,48 @@ impl BuiltinTools {
             return "[error] 'paths' array is empty".to_string();
         }
 
-        let mut results = Vec::with_capacity(paths.len());
+        // Resolved here, then read together on one blocking thread.
+        let mut targets = Vec::with_capacity(paths.len());
         for path_val in paths {
-            let path_str = match path_val.as_str() {
-                Some(p) => p,
-                None => {
-                    results.push("[error] non-string path in array".to_string());
-                    continue;
-                }
+            let Some(path_str) = path_val.as_str() else {
+                targets.push(Err("[error] non-string path in array".to_string()));
+                continue;
             };
-
-            let path = match self.resolve_read(path_str) {
-                Ok(p) => p,
-                Err(e) => {
-                    results.push(format!("### [{}]\n[error] {}", path_str, e));
-                    continue;
-                }
-            };
-
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    results.push(format!("### [{}]\n{}", path_str, content));
-                }
-                Err(e) => {
-                    results.push(format!("### [{}]\n[error] Failed to read: {}", path_str, e));
-                }
-            }
+            targets.push(match self.resolve_read(path_str) {
+                Ok(path) => Ok((path_str.to_string(), path)),
+                Err(e) => Err(format!("### [{}]\n[error] {}", path_str, e)),
+            });
         }
 
-        results.join("\n\n")
+        off_thread(move || {
+            let results: Vec<String> = targets
+                .into_iter()
+                .map(|target| match target {
+                    Ok((path_str, path)) => {
+                        format!("### [{}]\n{}", path_str, file_text(&path_str, &path))
+                    }
+                    Err(e) => e,
+                })
+                .collect();
+            results.join("\n\n")
+        })
+        .await
     }
 
     pub(crate) async fn write_file(&self, args: &Value) -> String {
         let path_str = match args.get("path").and_then(|v| v.as_str()) {
-            Some(p) => p,
+            Some(p) => p.to_string(),
             None => return "[error] missing 'path' argument".to_string(),
         };
         let content = match args.get("content").and_then(|v| v.as_str()) {
-            Some(c) => c,
+            Some(c) => c.to_string(),
             None => return "[error] missing 'content' argument".to_string(),
         };
         if let Err(e) = self.ensure_workspace() {
             return e;
         }
 
-        let path = match self.resolve(path_str) {
+        let path = match self.resolve(&path_str) {
             Ok(p) => p,
             Err(e) => return format!("[error] {}", e),
         };
@@ -434,60 +378,31 @@ impl BuiltinTools {
         let lock = self.ctx.lock_for(&path);
         let _guard = lock.lock().await;
 
-        let parent = {
-            let mut p = path.clone();
-            p.pop();
-            p
-        };
-        if let Err(e) = std::fs::create_dir_all(&parent) {
-            return format!(
-                "[error] Failed to create directories for '{}': {}",
-                path_str, e
-            );
-        }
-
         // `append` lets a model write a file too large for one reply in parts:
         // a call cut off by the output cap is refused, and this is the way
         // the refusal tells it to go on.
         let append = args.get("append").and_then(|v| v.as_bool()) == Some(true);
-        let (written, verb) = if append {
-            let written = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .and_then(|mut file| std::io::Write::write_all(&mut file, content.as_bytes()));
-            (written, "appended")
-        } else {
-            (std::fs::write(&path, content), "wrote")
-        };
-        match written {
-            Ok(()) => format!(
-                "Successfully {verb} {} bytes to '{}'",
-                content.len(),
-                path_str
-            ),
-            Err(e) => format!("[error] Failed to write '{}': {}", path_str, e),
-        }
+        off_thread(move || write_file_at(&path_str, &path, &content, append)).await
     }
 
     pub(crate) async fn edit_file(&self, args: &Value) -> String {
         let path_str = match args.get("path").and_then(|v| v.as_str()) {
-            Some(p) => p,
+            Some(p) => p.to_string(),
             None => return "[error] missing 'path' argument".to_string(),
         };
         let old_str = match args.get("old_str").and_then(|v| v.as_str()) {
-            Some(s) => s,
+            Some(s) => s.to_string(),
             None => return "[error] missing 'old_str' argument".to_string(),
         };
         let new_str = match args.get("new_str").and_then(|v| v.as_str()) {
-            Some(s) => s,
+            Some(s) => s.to_string(),
             None => return "[error] missing 'new_str' argument".to_string(),
         };
         if let Err(e) = self.ensure_workspace() {
             return e;
         }
 
-        let path = match self.resolve(path_str) {
+        let path = match self.resolve(&path_str) {
             Ok(p) => p,
             Err(e) => return format!("[error] {}", e),
         };
@@ -497,64 +412,22 @@ impl BuiltinTools {
         let lock = self.ctx.lock_for(&path);
         let _guard = lock.lock().await;
 
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => return format!("[error] Failed to read '{}': {}", path_str, e),
-        };
-
-        let count = content.matches(old_str).count();
-        match count {
-            0 => format!(
-                "[error] String not found in '{}'. Ensure old_str matches the file exactly.",
-                path_str
-            ),
-            1 => {
-                let new_content = content.replacen(old_str, new_str, 1);
-                match std::fs::write(&path, &new_content) {
-                    Ok(()) => format!("Successfully edited '{}'", path_str),
-                    Err(e) => format!("[error] Failed to write '{}': {}", path_str, e),
-                }
-            }
-            n => format!(
-                "[error] Found {} occurrences of the string in '{}'. old_str must be unique.",
-                n, path_str
-            ),
-        }
+        off_thread(move || edit_file_at(&path_str, &path, &old_str, &new_str)).await
     }
 
     pub(crate) async fn list_dir(&self, args: &Value) -> String {
-        let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let path_str = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".")
+            .to_string();
 
-        let path = match self.resolve_read(path_str) {
+        let path = match self.resolve_read(&path_str) {
             Ok(p) => p,
             Err(e) => return format!("[error] {}", e),
         };
 
-        let entries = match std::fs::read_dir(&path) {
-            Ok(e) => e,
-            Err(e) => return format!("[error] Failed to read directory '{}': {}", path_str, e),
-        };
-
-        let mut items: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        items.sort_by_key(|e| e.file_name());
-
-        let mut lines = Vec::new();
-        for entry in items {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-            if is_dir {
-                lines.push(format!("{}/", name));
-            } else {
-                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                lines.push(format!("{} ({}B)", name, size));
-            }
-        }
-
-        if lines.is_empty() {
-            format!("(empty directory: {})", path_str)
-        } else {
-            lines.join("\n")
-        }
+        off_thread(move || list_dir_at(&path_str, &path)).await
     }
 
     /// Detect the best available shell on the system.
@@ -787,6 +660,255 @@ impl BuiltinTools {
     }
 }
 
+/// Run a file tool's filesystem work on the blocking pool, off the async
+/// workers: reading a large file or listing a large directory there stalls
+/// every other task on the runtime for as long as the disk takes.
+async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::task::spawn_blocking(work)
+        .await
+        .expect("a file tool's filesystem work does not panic")
+}
+
+/// What a file holds, read for the model.
+enum FileRead {
+    /// Its text, capped at [`MAX_READ_FILE_BYTES`] with a note when it is
+    /// longer.
+    Text(String),
+    /// Bytes that are not UTF-8: the file's length, and its bytes - all of
+    /// them when the caller's limit allowed, the first few otherwise.
+    NotText { len: u64, bytes: Vec<u8> },
+}
+
+/// Read the file at `path` for the model: no further than the cap needs when
+/// it is text, and the whole of it when it is not and is no longer than
+/// `whole_limit`, because only a whole file can be stored as a part.
+///
+/// One chain with one error, rather than a `?` per step: opening is the step
+/// that fails (a missing file, a directory on Windows) and reading the one
+/// after it (a directory elsewhere), while the steps between have failures
+/// no test could arrange.
+fn read_for_model(path: &Path, whole_limit: u64) -> std::io::Result<FileRead> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.metadata().map(|meta| (file, meta.len())))
+        .and_then(|(mut file, len)| {
+            // Past the cap by the most a character can run over it, so a
+            // character the cap lands inside is read whole.
+            (&mut file)
+                .take(MAX_READ_FILE_BYTES as u64 + 3)
+                .read_to_end(&mut bytes)
+                .map(|_| (file, len))
+        })
+        .and_then(|(file, len)| {
+            let rest = match text_len(&bytes, len).is_none() && len <= whole_limit {
+                true => u64::MAX,
+                false => 0,
+            };
+            file.take(rest).read_to_end(&mut bytes).map(|_| len)
+        })
+        .map(|len| match text_len(&bytes, len) {
+            Some(n) => {
+                let text = std::str::from_utf8(&bytes[..n]).expect("text_len checked these bytes");
+                FileRead::Text(cap_file_content(text, MAX_READ_FILE_BYTES, len))
+            }
+            None => FileRead::NotText { len, bytes },
+        })
+}
+
+/// How many of `head`'s bytes are text, read from the start of a file `len`
+/// bytes long, or `None` when they are not text.
+///
+/// A read that stopped short of the end may stop inside a character, leaving
+/// its first bytes last: those are the start of the next character rather
+/// than broken text, so they are left off. At the end of the file the same
+/// bytes are the file's own, and a file that ends inside a character is not
+/// text.
+fn text_len(head: &[u8], len: u64) -> Option<usize> {
+    match std::str::from_utf8(head) {
+        Ok(_) => Some(head.len()),
+        Err(e) if e.error_len().is_none() && (head.len() as u64) < len => Some(e.valid_up_to()),
+        Err(_) => None,
+    }
+}
+
+/// [`BuiltinTools::read_file`] once its path is resolved.
+fn read_file_at(path_str: &str, path: &Path, mime: Option<&ToolMime>) -> EntryContent {
+    // With nowhere to store a part, the first bytes are enough to say so.
+    match read_for_model(path, mime.map_or(0, |m| m.max_part_bytes)) {
+        Ok(FileRead::Text(text)) => text.into(),
+        Ok(FileRead::NotText { len, bytes }) => read_binary(path_str, path, len, bytes, mime),
+        // A directory is not a malformed path, it is the wrong tool: the
+        // model wanted to see what is in there. The raw OS message ("Is a
+        // directory (os error 21)") names the problem without naming the
+        // fix, so the next call is another guess.
+        //
+        // The listing comes back with the error rather than a pointer to
+        // `list_dir`, because 21 of the bundled agents' stages grant
+        // `read_file` and not `list_dir`: there, naming that tool asks for
+        // something the stage cannot do. Answering here settles it in one
+        // call and reads the same in every stage.
+        Err(_) if path.is_dir() => directory_answer(path_str, path).into(),
+        Err(e) => format!("[error] Failed to read '{}': {}", path_str, e).into(),
+    }
+}
+
+/// One file of a [`BuiltinTools::read_files`] batch: capped like `read_file`,
+/// and an error in place of bytes that are not text, since a batch answer has
+/// nowhere to attach a part.
+fn file_text(path_str: &str, path: &Path) -> String {
+    match read_for_model(path, 0) {
+        Ok(FileRead::Text(text)) => text,
+        Ok(FileRead::NotText { .. }) => {
+            format!("[error] '{path_str}' is not a text file; read_file attaches it as a part")
+        }
+        Err(_) if path.is_dir() => directory_answer(path_str, path),
+        Err(e) => format!("[error] Failed to read: {}", e),
+    }
+}
+
+/// The answer to reading a directory as a file: what it holds, and what to do
+/// next.
+fn directory_answer(path_str: &str, path: &Path) -> String {
+    let listing = directory_listing(path);
+    format!(
+        "[error] '{path_str}' is a directory, not a file. It contains:\n{listing}\n\
+         Call read_file again on one of these entries."
+    )
+}
+
+/// A file that is not UTF-8: stored as a part of its own type, so a model
+/// that takes the type sees the bytes and one that does not sees the
+/// stand-in. Without a store there is nowhere to put it, and over the store's
+/// ceiling it is refused before the file is read; either way the model is
+/// told that rather than handed mojibake.
+fn read_binary(
+    path_str: &str,
+    path: &Path,
+    len: u64,
+    bytes: Vec<u8>,
+    mime: Option<&ToolMime>,
+) -> EntryContent {
+    // A path that read as a file has a final component.
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let Some(mime) = mime else {
+        return format!(
+            "[error] '{path_str}' is not a text file ({}), and this run has no blob store to \
+             hold it as a part",
+            leviath_core::mime::human_size(len)
+        )
+        .into();
+    };
+    // Sized before it is typed: over the ceiling, `bytes` is only the first
+    // few of the file's.
+    let stored = mime.fits(&name, len).and_then(|()| {
+        let mime_type = mime.type_of(None, Some(&name), &bytes);
+        mime.store(leviath_core::mime::Blob::new(mime_type, bytes).named(name))
+    });
+    match stored {
+        Ok(part) => EntryContent::from_parts(vec![
+            leviath_core::mime::Part::text(format!(
+                "'{path_str}' is not text. It is attached to this result as a part:"
+            )),
+            part,
+        ]),
+        Err(e) => format!("[error] {e}").into(),
+    }
+}
+
+/// [`BuiltinTools::write_file`] once its path is resolved and locked.
+fn write_file_at(path_str: &str, path: &Path, content: &str, append: bool) -> String {
+    let parent = {
+        let mut p = path.to_path_buf();
+        p.pop();
+        p
+    };
+    if let Err(e) = std::fs::create_dir_all(&parent) {
+        return format!(
+            "[error] Failed to create directories for '{}': {}",
+            path_str, e
+        );
+    }
+
+    let (written, verb) = if append {
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, content.as_bytes()));
+        (written, "appended")
+    } else {
+        (std::fs::write(path, content), "wrote")
+    };
+    match written {
+        Ok(()) => format!(
+            "Successfully {verb} {} bytes to '{}'",
+            content.len(),
+            path_str
+        ),
+        Err(e) => format!("[error] Failed to write '{}': {}", path_str, e),
+    }
+}
+
+/// [`BuiltinTools::edit_file`] once its path is resolved and locked.
+fn edit_file_at(path_str: &str, path: &Path, old_str: &str, new_str: &str) -> String {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => return format!("[error] Failed to read '{}': {}", path_str, e),
+    };
+
+    let count = content.matches(old_str).count();
+    match count {
+        0 => format!(
+            "[error] String not found in '{}'. Ensure old_str matches the file exactly.",
+            path_str
+        ),
+        1 => {
+            let new_content = content.replacen(old_str, new_str, 1);
+            match std::fs::write(path, &new_content) {
+                Ok(()) => format!("Successfully edited '{}'", path_str),
+                Err(e) => format!("[error] Failed to write '{}': {}", path_str, e),
+            }
+        }
+        n => format!(
+            "[error] Found {} occurrences of the string in '{}'. old_str must be unique.",
+            n, path_str
+        ),
+    }
+}
+
+/// [`BuiltinTools::list_dir`] once its path is resolved.
+fn list_dir_at(path_str: &str, path: &Path) -> String {
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(e) => return format!("[error] Failed to read directory '{}': {}", path_str, e),
+    };
+
+    let mut items: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    items.sort_by_key(|e| e.file_name());
+
+    let mut lines = Vec::new();
+    for entry in items {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        if is_dir {
+            lines.push(format!("{}/", name));
+        } else {
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            lines.push(format!("{} ({}B)", name, size));
+        }
+    }
+
+    if lines.is_empty() {
+        format!("(empty directory: {})", path_str)
+    } else {
+        lines.join("\n")
+    }
+}
+
 /// Largest slice of one stream (stdout or stderr) a single shell call keeps.
 ///
 /// Unbounded capture is a memory-exhaustion hole: `wait_with_output()` holds a
@@ -831,21 +953,21 @@ pub fn is_null_device(path: &str) -> bool {
 /// wants more sets `max_result_tokens` for the tool.
 pub(crate) const MAX_READ_FILE_BYTES: usize = 256 * 1024;
 
-/// `content` truncated to `cap` bytes, with a line saying so when it was.
+/// `content`, the start of a file `file_len` bytes long, truncated to `cap`
+/// bytes, with a line saying so when the file is longer than that.
 ///
 /// Said rather than silently dropped, for the reason [`capture_note`] gives: an
 /// agent reading a truncated file as the whole file draws a wrong conclusion
 /// from it, and the conclusion is worse than the gap.
-pub(crate) fn cap_file_content(content: &str, cap: usize) -> String {
-    if content.len() <= cap {
+pub(crate) fn cap_file_content(content: &str, cap: usize, file_len: u64) -> String {
+    if content.len() <= cap && file_len <= cap as u64 {
         return content.to_string();
     }
     // On a char boundary, or the result is not a `String` at all.
     let kept = leviath_core::text::substring(content, 0, cap);
     format!(
-        "{kept}\n[truncated] The file is {} bytes; the first {} are shown. Read a range, or \
-         narrow with a search, rather than re-reading the whole file.",
-        content.len(),
+        "{kept}\n[truncated] The file is {file_len} bytes; the first {} are shown. Read a \
+         range, or narrow with a search, rather than re-reading the whole file.",
         kept.len(),
     )
 }

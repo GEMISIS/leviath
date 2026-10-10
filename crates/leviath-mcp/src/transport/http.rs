@@ -59,26 +59,13 @@ fn build_http_client() -> reqwest::Client {
         .read_timeout(Duration::from_secs(READ_STALL_TIMEOUT_SECS))
         .tcp_keepalive(Duration::from_secs(30))
         // Follow a redirect only while it stays on the origin the credentials
-        // were meant for, and no more than five hops.
-        //
-        // Capping alone was not enough. reqwest strips `Authorization` across
-        // origins by itself but not a custom header, and an MCP server's
+        // were meant for. A hop cap alone does not do it: an MCP server's
         // headers come from config with `${VAR}` expansion - `x-api-key` and
-        // friends. So a server could pass the endpoint-event origin check by
+        // friends - so a server could pass the endpoint-event origin check by
         // naming its own `/messages`, then answer the POST with a 307 to
-        // another host and have reqwest replay the body and the secret headers
-        // there. Same reasoning, and same shape, as the provider client.
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            let same_origin = attempt.previous().last().is_some_and(|prev| {
-                prev.scheme() == attempt.url().scheme()
-                    && prev.host_str() == attempt.url().host_str()
-                    && prev.port_or_known_default() == attempt.url().port_or_known_default()
-            });
-            match same_origin && attempt.previous().len() <= 5 {
-                true => attempt.follow(),
-                false => attempt.stop(),
-            }
-        }))
+        // another host and have reqwest replay the body and the secret
+        // headers there.
+        .redirect(leviath_net::same_origin_redirects())
         .build()
         .expect("failed to build reqwest client")
 }
@@ -696,13 +683,13 @@ async fn next_sse_event<S, B>(
     buffer: &mut String,
     frame_cap: usize,
     peer: &str,
-) -> Result<super::sse::SseEvent, SseEnd>
+) -> Result<leviath_net::sse::SseEvent, SseEnd>
 where
     S: StreamExt<Item = Result<B, reqwest::Error>> + Unpin,
     B: AsRef<[u8]>,
 {
     loop {
-        while let Some(event) = super::sse::parse_sse_frame(buffer) {
+        while let Some(event) = leviath_net::sse::next_event(buffer) {
             if !event.data.is_empty() {
                 return Ok(event);
             }

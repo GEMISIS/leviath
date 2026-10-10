@@ -48,7 +48,11 @@ impl UsageWindow {
             (None, None, _) => "no usage reported".to_string(),
         };
         match self.resets_at.map(|at| at.saturating_sub(now)) {
-            Some(secs) => format!("{}: {spent}, resets in {}", self.label, duration(secs)),
+            Some(secs) => format!(
+                "{}: {spent}, resets in {}",
+                self.label,
+                leviath_core::duration::compact(secs)
+            ),
             None => format!("{}: {spent}", self.label),
         }
     }
@@ -68,16 +72,6 @@ fn trimmed(value: f64) -> String {
     match value.fract() == 0.0 {
         true => format!("{value:.0}"),
         false => format!("{value:.2}"),
-    }
-}
-
-/// Seconds as the largest sensible unit: `3d`, `5h`, `12m`, `40s`.
-fn duration(secs: u64) -> String {
-    match secs {
-        s if s >= 86_400 => format!("{}d", s / 86_400),
-        s if s >= 3_600 => format!("{}h", s / 3_600),
-        s if s >= 60 => format!("{}m", s / 60),
-        s => format!("{s}s"),
     }
 }
 

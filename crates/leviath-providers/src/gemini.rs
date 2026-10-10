@@ -132,8 +132,8 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
     ("gemini-2.5-pro", "Gemini 2.5 Pro"),
     ("gemini-2.5-flash", "Gemini 2.5 Flash"),
     ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite"),
-    // The one that draws: an offline listing used to offer no model that
-    // makes images, so the picker's "makes images" tag had nothing to sit on.
+    // The one that draws, so an offline listing still offers a model that
+    // makes images and the picker's "makes images" tag has something to sit on.
     ("gemini-2.5-flash-image", "Gemini 2.5 Flash Image"),
 ];
 

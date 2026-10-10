@@ -3,13 +3,15 @@
 Outbound-request policy for Leviath: which URLs an agent-driven fetch may
 reach, and the shared HTTP client that enforces it. An agent fetches URLs the
 model chose, and the model chose them from context an attacker can influence, so
-the check runs before the request and again on every redirect hop.
+the check runs before the request and again on every redirect hop. Also here:
+the redirect policy for clients that carry credentials, which keeps a key on
+the origin it was meant for, and the Server-Sent Events framing every streaming
+client shares.
 
-Split out of [`leviath-core`](https://crates.io/crates/leviath-core), whose own
-documentation describes it as plain serializable data with no async
-dependencies. It was not: this module's HTTP client brought a little over a
-hundred crates with it, so depending on Leviath's data types meant compiling all
-of them.
+It is a crate of its own so that [`leviath-core`](https://crates.io/crates/leviath-core)
+can stay plain serializable data with no async dependencies: an HTTP client
+brings a little over a hundred crates with it, and depending on Leviath's data
+types should not mean compiling all of them.
 
 Part of [Leviath](https://github.com/GEMISIS/leviath), a structured
 agent runtime for LLMs. Most applications should depend on the

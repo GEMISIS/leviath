@@ -121,20 +121,8 @@ pub(crate) fn parse_event(
     buffer: &mut String,
     turn: &mut Turn,
 ) -> Option<Option<crate::provider::Result<StreamChunk>>> {
-    let (event_text, rest) = buffer.split_once("\n\n")?;
-    let event_text = event_text.to_string();
-    *buffer = rest.to_string();
-
-    let mut data = String::new();
-    for line in event_text.lines() {
-        if let Some(d) = line.strip_prefix("data: ") {
-            data = d.to_string();
-        }
-    }
-    if data.is_empty() {
-        return None;
-    }
-    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+    let event = leviath_net::sse::next_event(buffer)?;
+    let json: serde_json::Value = serde_json::from_str(&event.data).ok()?;
 
     // The `type` inside the payload, not the `event:` line. Both are sent, and
     // the JSON is the one that is always present and always authoritative.

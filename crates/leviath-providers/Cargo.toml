@@ -1,6 +1,6 @@
 [package]
 name = "leviath-providers"
-description = "LLM provider integrations for Leviath (Anthropic, OpenAI)"
+description = "LLM provider integrations for Leviath: Anthropic, OpenAI, Codex, xAI, Grok, Gemini, OpenRouter, Bedrock, Meta, Ollama, Meshy, OpenAI-compatible endpoints and Rhai scripts"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -78,12 +78,12 @@ tiktoken-rs = { workspace = true }
 async-trait = { workspace = true }
 futures-core = { workspace = true }
 tokio-stream = { workspace = true }
-bytes = "1"
+bytes = { workspace = true }
 # A vendor's upload answer names the file's expiry as an RFC 3339 time.
 chrono = { workspace = true }
 # Bedrock streams a reply as binary event-stream frames, each checked with
 # the CRC32 gzip uses. Already in the graph through flate2.
-crc32fast = { version = "1", optional = true }
+crc32fast = { workspace = true, optional = true }
 # Decoding the `exp` and plan-tier claims out of the ChatGPT id and access
 # tokens. Payload only: the signature is the issuer's to verify, not ours.
 base64 = { workspace = true }
@@ -104,7 +104,7 @@ temp-env = { workspace = true }
 # keychain adapter is tested against the real `leviath_sys::keychain` path
 # rather than a stand-in. No CI runner has an unlocked login keychain, and
 # reaching a developer's real one would raise an OS prompt and hang.
-keyring-core = "1"
+keyring-core = { workspace = true }
 
 [lints]
 workspace = true

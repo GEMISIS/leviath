@@ -80,15 +80,8 @@ pub(crate) fn parse_event(
     buffer: &mut String,
     turn: &mut Turn,
 ) -> Option<Option<crate::provider::Result<StreamChunk>>> {
-    let (event_text, rest) = buffer.split_once("\n\n")?;
-    let event_text = event_text.to_string();
-    *buffer = rest.to_string();
-    let data: String = event_text
-        .lines()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .map(str::trim_start)
-        .collect();
-    let json: Value = serde_json::from_str(&data).ok()?;
+    let event = leviath_net::sse::next_event(buffer)?;
+    let json: Value = serde_json::from_str(&event.data).ok()?;
     let index = json.get("index").and_then(Value::as_u64).unwrap_or(0);
 
     match json.get("event_type").and_then(Value::as_str)? {

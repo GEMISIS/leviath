@@ -122,8 +122,8 @@ fn message_cache_breakpoints(block_counts: &[usize], budget: usize) -> Vec<usize
     // at its end. Size in blocks is what the lookback counts, but it is not what
     // makes content worth caching: two messages carrying a large file read are
     // only two blocks and plenty of tokens. Without this such a conversation
-    // goes uncached for its first several turns, which is a regression against
-    // simply marking near the end.
+    // goes uncached for its first several turns, which is worse than simply
+    // marking near the end.
     if positions.is_empty() && !block_counts.is_empty() {
         positions.push(block_counts.len() - 1);
     }
@@ -243,9 +243,10 @@ fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
         .unwrap_or(0);
     let path = std::path::Path::new(dir).join(format!("anthropic-req-{nanos}.json"));
     // The dump is the whole system prompt, transcript and tool results - file
-    // contents and `env_var` output included. It was written at the process
-    // umask into a directory created the same way, so pointing this at `/tmp` on
-    // a shared host handed every local account the conversation.
+    // contents and `env_var` output included. Written at the process umask,
+    // into a directory created the same way, pointing this at `/tmp` on a
+    // shared host would hand every local account the conversation, so both are
+    // owner-only.
     let dir_path = std::path::Path::new(dir);
     // `body` is an already-built `serde_json::Value`, which is infallibly
     // serializable (no NaN/Inf numbers, keys always strings) - `to_string_pretty`
@@ -271,13 +272,11 @@ fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
 
 /// Cache TTL for Anthropic prompt caching.
 ///
-/// Settable as `[providers] anthropic_cache_ttl`. The 1-hour option was
-/// implemented and unreachable: no config key, no blueprint field, no env var,
-/// so every run took the 5-minute default however long its stages ran. Staged
-/// agents routinely take longer than five minutes between reuses of the same
-/// prefix - a compute stage running scripts is the normal case - so the cache
-/// written at the start of a run was usually cold by the time a later stage
-/// could have reused it.
+/// Settable as `[providers] anthropic_cache_ttl`. Staged agents routinely take
+/// longer than five minutes between reuses of the same prefix - a compute
+/// stage running scripts is the normal case - so a 5-minute cache written at
+/// the start of a run is often cold by the time a later stage could reuse it;
+/// the 1-hour one is still there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CacheTtl {
     /// 5-minute ephemeral cache (default, no extra cost).
@@ -1344,8 +1343,6 @@ mod tests {
 
     #[test]
     fn selecting_the_hour_ttl_marks_it_and_sends_the_beta_header() {
-        // Implemented but unreachable before this: no config key, no blueprint
-        // field, no env var, so every run took the five-minute default.
         let provider = AnthropicProvider::new(
             crate::provider::build_http_client(None).expect("a test client builds"),
             "k".to_string(),
@@ -1925,7 +1922,7 @@ mod tests {
                     .is_some()
             })
             .count();
-        // Placement belongs to the provider now, so the exact count is whatever
+        // Placement belongs to the provider, so the exact count is whatever
         // its rule yields. What must hold is the hard API limit, and that a
         // permitted conversation is served at all.
         assert!(bp_count >= 1, "a permitted conversation carries a marker");
@@ -2963,6 +2960,28 @@ mod tests {
         assert!(buffer.is_empty());
     }
 
+    /// CRLF line endings and fields written without the optional space are
+    /// both SSE; a gateway in front of the API may send either. The event
+    /// name still decides what the event is: an `error` read this way is
+    /// still the stream's error.
+    #[test]
+    fn test_parse_sse_event_crlf_and_fields_without_a_space() {
+        let mut buffer = "event:content_block_delta\r\n\
+                          data:{\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\r\n\r\n\
+                          event:error\r\ndata:{\"error\":{\"type\":\"api_error\",\"message\":\"x\"}}\r\n\r\n"
+            .to_string();
+        let mut tool_index: Option<usize> = None;
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunk.delta, "Hi");
+        let err = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap_err();
+        assert!(err.to_string().contains("api_error"), "{err}");
+        assert!(buffer.is_empty());
+    }
+
     #[test]
     fn test_parse_sse_event_input_json_delta() {
         let mut buffer = "event: content_block_delta\ndata: {\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"key\\\"\"}}\n\n".to_string();
@@ -3407,7 +3426,7 @@ mod tests {
                     .is_some()
             })
             .count();
-        // Placement belongs to the provider now, so the exact count is whatever
+        // Placement belongs to the provider, so the exact count is whatever
         // its rule yields. What must hold is the hard API limit, and that a
         // permitted conversation is served at all.
         assert!(bp_count >= 1, "a permitted conversation carries a marker");

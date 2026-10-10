@@ -73,7 +73,7 @@ pub struct CapabilityCache {
     /// treated as absent.
     version: u32,
     /// When it was written, Unix seconds. The daemon reloads a cache of any
-    /// age and re-primes on its own schedule; [`Self::is_fresh`] is for an
+    /// age and re-primes on its own schedule; [`Self::age_secs`] is for an
     /// embedder that wants an age bound.
     saved_at: i64,
     /// provider name -> (model id -> what that provider's listing said).
@@ -182,11 +182,6 @@ impl CapabilityCache {
     /// stamped in the future (a clock that moved back).
     pub fn age_secs(&self, now: i64) -> i64 {
         now.saturating_sub(self.saved_at).max(0)
-    }
-
-    /// Whether it is younger than `max_age_secs` at `now`.
-    pub fn is_fresh(&self, now: i64, max_age_secs: i64) -> bool {
-        self.age_secs(now) < max_age_secs
     }
 
     /// Write to `path` atomically, creating parent directories. The file is
@@ -393,12 +388,10 @@ mod tests {
     }
 
     #[test]
-    fn age_and_freshness_read_the_clock_the_caller_passes() {
+    fn the_age_reads_the_clock_the_caller_passes() {
         let cache = CapabilityCache::new(1_000);
         assert_eq!(cache.age_secs(1_600), 600);
         // A clock that moved back never reports a negative age.
         assert_eq!(cache.age_secs(900), 0);
-        assert!(cache.is_fresh(1_600, 3_600));
-        assert!(!cache.is_fresh(5_000, 3_600));
     }
 }
