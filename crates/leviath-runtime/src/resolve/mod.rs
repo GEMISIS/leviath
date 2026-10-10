@@ -251,7 +251,7 @@ pub async fn resolve(
         },
         delivery,
         env: env_fingerprint,
-        created_at: now_secs(),
+        created_at: leviath_core::duration::now_secs(),
         listed: None,
     };
     issues.into_result(Resolved {
@@ -300,13 +300,6 @@ fn dependency_issue(
         Some(remedy) => issue.hint(remedy.clone()),
         None => issue.hint("run `lev deps` to see what the run needs and how to get it"),
     }
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// Where the graph came from, and what the resolver needs to know about that.

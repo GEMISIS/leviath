@@ -9,30 +9,22 @@
 //! field.
 //!
 //! Best-effort, in that nothing here ever fails a run: a run with no name shows
-//! the task the user typed instead. It is not, however, one shot at one
-//! provider any more. The call retries a transient refusal on the dispatch
-//! lane's schedule, and a call that fails outright moves to the next candidate
-//! - the same chain stage inference fails over along.
+//! the task the user typed instead. It still tries more than once: the call
+//! retries a transient refusal on the dispatch lane's schedule, and a call that
+//! fails outright moves to the next candidate - the same chain stage inference
+//! fails over along. What stopped it is recorded in
+//! [`RunMetadata::title_error`](crate::persistence::RunMetadata::title_error),
+//! not only logged: a daemon's stdout usually goes to `/dev/null`, and a run
+//! that comes out nameless while every stage completed needs a reason
+//! somewhere a person will look.
 //!
-//! That last part is the fix for a failure worth describing, because every
-//! decision in it was individually reasonable. Titling took the head of the
-//! run's model chain, called it once, and on any error wrote the reason to
-//! `tracing::debug!` - in a daemon whose stdout goes to `/dev/null`. So when an
-//! account went over its limit on one gateway, every stage of every run
-//! completed (stage inference retried, then failed over) while the runs
-//! themselves came out nameless, with nothing anywhere saying why. The lane now
-//! retries, fails over, and records what stopped it in
-//! [`RunMetadata::title_error`](crate::persistence::RunMetadata::title_error).
-//!
-//! Retrying makes a title *later*, which brought a second failure into view: a
-//! terminal run is unloaded from memory a pass after it finishes, and a title
-//! landing on an unloaded run was dropped, reason and all. A run making two
-//! provider calls finishes well inside one title call, so it lost even a single
-//! 50ms retry. The host now holds a finished run resident while the title lane
-//! still has a live claim on it (see `title_outstanding`), the claim is
-//! bounded by [`TITLE_JOB_BUDGET_SECS`] so nothing is held long, and the
-//! persistence lane treats a landed name as worth a write - without which the
-//! title reached the entity and never reached disk.
+//! A retried title lands *later*, often after a short run has finished, and a
+//! terminal run is unloaded from memory a pass after it finishes. So the host
+//! holds a finished run resident while the title lane still has a live claim
+//! on it (see `title_outstanding`), the claim is bounded by
+//! [`TITLE_JOB_BUDGET_SECS`] so nothing is held long, and the persistence lane
+//! treats a landed name as worth a write, so the title reaches disk and not
+//! only the entity.
 //!
 //! What still stops the attempt without a second opinion is a call that
 //! *completed* and produced nothing usable: an empty reply, or one cut off at
@@ -868,10 +860,9 @@ pub(crate) fn collect_title(
         if title.is_empty() {
             record_title_failure(
                 &mut meta,
-                // Not "nothing short enough" any more: length is only one of
-                // the reasons a reply is refused now, and a run whose reply
-                // was a stop token or the instruction read back deserves a
-                // reason that is true of it.
+                // Length is only one of the reasons a reply is refused, and a
+                // run whose reply was a stop token or the instruction read
+                // back deserves a reason that is true of it.
                 format!(
                     "{}/{} replied with nothing usable as a title",
                     outcome.provider_name, outcome.model

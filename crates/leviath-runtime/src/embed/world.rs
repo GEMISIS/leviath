@@ -403,9 +403,9 @@ impl AgentWorld {
     /// [`result`](Self::result)'s `artifacts`.
     ///
     /// `None` for an artifact the run's store does not hold (one too large to
-    /// store, or from a run this world never ran). An embedder used to get the
-    /// artifact's name, type and hash from `result` and no way to read it
-    /// short of knowing where the world keeps its files.
+    /// store, or from a run this world never ran). `result` names the artifact,
+    /// its type and its hash; this reads it without knowing where the world
+    /// keeps its files.
     pub async fn artifact_bytes(
         &self,
         id: &RunId,

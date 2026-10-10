@@ -84,11 +84,10 @@ fn specificity(pattern: &str) -> u8 {
 /// bytes.
 ///
 /// One entry per part rather than one per reply, because an entry is the
-/// unit `context_delete` and `context_read` address. A reply that drew nine
-/// views used to land as one entry, so a stage asked to drop the one bad
-/// render among them could only drop all nine - and kept a stock photo in
-/// the set a mesh was built from rather than do that. Keyed by name so the
-/// stage can name the render it means, the way `context_list` shows it.
+/// unit `context_delete` and `context_read` address: a stage asked to drop
+/// the one bad render among nine views drops that one and keeps the other
+/// eight. Keyed by name so the stage can name the render it means, the way
+/// `context_list` shows it.
 ///
 /// A region the write cannot reach (unknown, over budget) is skipped rather
 /// than fatal - the conversation still recorded the reply.

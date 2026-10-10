@@ -65,7 +65,7 @@ pub fn between(from: i64, to: i64) -> u64 {
 ///
 /// Zero if the clock is before 1970, which `SystemTime` can report on a
 /// machine whose clock is unset; every consumer treats zero as "unknown"
-/// rather than as a date. Five crates had their own copy of these four lines.
+/// rather than as a date.
 pub fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

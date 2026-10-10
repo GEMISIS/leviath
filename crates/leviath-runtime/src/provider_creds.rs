@@ -464,8 +464,8 @@ fn host_and_port(base_url: &str) -> Option<(String, u16)> {
 /// [`build_provider_registry`], with client construction injected.
 ///
 /// One client per distinct request timeout, shared by every provider that wants
-/// it. Previously each provider built its own, so a daemon with five providers
-/// configured held five connection pools; the timeout is part of the key because
+/// it, so a daemon with five providers configured holds one connection pool
+/// rather than five. The timeout is part of the key because
 /// `apply_request_timeout` deliberately defers to the client-level timeout when
 /// a stage sets none, so collapsing distinct timeouts onto one client would
 /// silently retime requests.

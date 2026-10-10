@@ -270,7 +270,7 @@ pub(crate) fn apply_one_tool_result(
     if let Some(max_tokens) = tool_cap {
         let max_chars = max_tokens * 4;
         if result_text.len() > max_chars {
-            result_text = truncate_on_char_boundary(&result_text, max_chars);
+            result_text = leviath_core::truncate_chars(&result_text, max_chars);
             result_text.push_str("\n[...truncated]");
         }
     }
@@ -354,7 +354,7 @@ pub(crate) fn apply_one_tool_result(
             .unwrap_or(0);
         let (truncated, omitted) = if available > 100 {
             let char_budget = (available - 10) * 4;
-            let prefix = truncate_on_char_boundary(&content, char_budget);
+            let prefix = leviath_core::truncate_chars(&content, char_budget);
             let omitted = content.len().saturating_sub(prefix.len());
             (
                 format!("{}... [truncated, {} chars omitted]", prefix, omitted),

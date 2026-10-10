@@ -211,20 +211,14 @@ pub(crate) struct LandedResults(pub Arc<std::sync::Mutex<Vec<crate::tool_bridge:
 impl LandedResults {
     /// What has landed so far.
     pub(crate) fn snapshot(&self) -> Vec<crate::tool_bridge::ToolResult> {
-        self.0
-            .lock()
-            .expect("the landed results are never held across a panic")
-            .clone()
+        leviath_core::sync::lock(&self.0).clone()
     }
 
     /// `progress`, also keeping each result here as it lands.
     pub(super) fn keeping(&self, progress: ToolProgress) -> ToolProgress {
         let landed = self.0.clone();
         Arc::new(move |call_id, result| {
-            landed
-                .lock()
-                .expect("the landed results are never held across a panic")
-                .push((call_id.to_string(), result.clone()));
+            leviath_core::sync::lock(&landed).push((call_id.to_string(), result.clone()));
             progress(call_id, result);
         })
     }
