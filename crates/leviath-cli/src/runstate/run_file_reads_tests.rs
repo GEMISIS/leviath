@@ -119,8 +119,23 @@ async fn a_history_holds_every_window_change_and_every_edge_taken() {
     });
     let history = history_in(&dir).expect("a history");
     let at: Vec<i64> = history.points.iter().map(|p| p.at).collect();
-    assert_eq!(at[1..], [10, 20]);
-    assert_eq!(history.points.len(), 3);
+    // The step that wrote "two" on its way out of `analyze` is listed under
+    // `analyze`, holding it, and then under the stage it entered.
+    assert_eq!(at[1..], [10, 20, 20]);
+    let stages: Vec<&str> = history
+        .points
+        .iter()
+        .map(|p| p.meta.current_stage.as_str())
+        .collect();
+    assert_eq!(stages[2..], ["analyze", "implement"]);
+    let wrote = |p: &RunPoint| {
+        p.context
+            .regions
+            .iter()
+            .flat_map(|r| &r.entries)
+            .any(|e| e.content == "two")
+    };
+    assert!(wrote(&history.points[2]));
     assert_eq!(
         history.transitions,
         Some(vec![

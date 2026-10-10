@@ -15,6 +15,7 @@
 //! checkpoint, with [`RunFileTail`]: listings read that for every run they
 //! show. Only a reader of the steps themselves opens the whole file.
 
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use leviath_core::run_meta::{ContextSnapshot, StageRecord};
@@ -24,7 +25,7 @@ use leviath_runtime::secret_store::SecretStore;
 use leviath_runtime::spec::launch::Secret;
 use leviath_runtime::spec::names::SecretRef;
 use leviath_runtime::spec::run_spec::RunSpec;
-use leviath_runtime::state::{Change, RunState};
+use leviath_runtime::state::RunState;
 
 /// Where the run file of the run in `dir` is.
 pub(crate) fn path_in(dir: &Path) -> PathBuf {
@@ -154,17 +155,13 @@ pub(crate) fn walk_history_in(
     each(point(spec, &state, spec.created_at));
     let mut transitions = Vec::new();
     for delta in deltas {
-        delta.apply(&mut state);
         for taken in delta.transitions() {
             transitions.push((taken.from.to_string(), taken.to.to_string()));
         }
-        if delta
-            .changes
-            .iter()
-            .any(|c| matches!(c, Change::Context(_)))
-        {
-            each(point(spec, &state, delta.at));
-        }
+        let _ = leviath_runtime::runfile::history::step_points(&delta, &mut state, &mut |at| {
+            each(point(spec, at, delta.at));
+            ControlFlow::Continue(())
+        });
     }
     Some(transitions)
 }

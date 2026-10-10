@@ -185,6 +185,13 @@ same list.
 
 ### Fixed
 
+- A run's context history credits each stage with what it wrote on its way
+  out. A stage's last output is stored in the same step that moves the run
+  on, so it was listed under the next stage, and when that stage cleared it,
+  as a stage that filters images does, it showed under no stage at all: the
+  images a stage drew were missing from it in the dashboard and the Lair.
+  That step is now listed under the stage that wrote it, then under the
+  stage it entered, for runs already on disk as well as new ones.
 - A completion webhook survives a restart of `lev serve`. A server records
   each delivery once it is over, and one that starts sends every finished
   run that still owes a webhook: a retry the last server was waiting on,

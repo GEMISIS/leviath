@@ -794,6 +794,12 @@ Each point of `contextHistory` carries a whole window, so it is paged harder tha
 is. Ask for the regions you draw rather than every point's every region, because
 `regions { content }` is the text itself.
 
+A point's `stage` is the stage the step happened in. A stage's last output is stored in the same
+step that moves the run on, so that step is two points: first under the stage it left, holding what
+that stage wrote on its way out, then under the stage it entered, as the step left the window. The
+first leaves out what entering the next stage rewrote or removed, such as its instructions or a
+region it starts clean. The last point under a stage is the window that stage ended with.
+
 A revision is a content address, derived from what the window holds, so it names that content for
 ever. `contextSnapshot` resolves one to exactly the content it was minted from, never to whatever
 the run holds now. Null means this run never held that window, which is also what a revision from

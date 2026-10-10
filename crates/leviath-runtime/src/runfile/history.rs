@@ -5,6 +5,8 @@
 //! CLI's history, executions and context-change readers build them by walking
 //! a run's deltas, and the API, the dashboard and `lev context` show them.
 
+use std::ops::ControlFlow;
+
 use serde::{Deserialize, Serialize};
 
 use leviath_core::ContextCause;
@@ -12,6 +14,8 @@ use leviath_core::execution::ToolOutcome;
 use leviath_core::run_meta::{ContextSnapshot, RunMeta};
 
 use super::record::RegionCommit;
+use crate::state::context::RegionChange;
+use crate::state::{Change, ContextDiff, ContextState, RunState, StateDelta};
 
 /// A run's context window at one step, with the run's summary as it stood
 /// then.
@@ -23,6 +27,68 @@ pub struct RunPoint {
     pub context: ContextSnapshot,
     /// Unix seconds this point was recorded.
     pub at: i64,
+}
+
+/// Apply one step to `state`, handing `each` the states it adds to the run's
+/// history: none for a step that left the window alone, otherwise the run as
+/// the step left it.
+///
+/// A stage's last step is usually also the step that leaves it: persistence
+/// writes a step when the stage moves, not when a reply is stored, so the
+/// output a stage routes on its way out lands in the same step as the move.
+/// Read as one point, that output would be listed under the stage being
+/// entered, and a stage that then cleared it would leave it listed nowhere.
+/// So a step that moves the run to another stage first hands over the window
+/// as the stage it left ended it: what it held, with every entry the step
+/// added. What the step rewrote or removed is left out of that one, because
+/// entering a stage is what rewrites and removes (its instructions, its
+/// layout, a region it starts clean, the edge's carry), and those belong to
+/// the stage being entered, whose point follows as before.
+pub fn step_points(
+    delta: &StateDelta,
+    state: &mut RunState,
+    each: &mut dyn FnMut(&RunState) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+    let diff = delta.changes.iter().find_map(|change| match change {
+        Change::Context(diff) => Some(diff),
+        _ => None,
+    });
+    let moves = delta
+        .changes
+        .iter()
+        .any(|change| matches!(change, Change::Cursor(to) if to.stage != state.cursor.stage));
+    let ended = match (diff, moves) {
+        (Some(diff), true) => ended_with(&state.context, diff).map(|c| (state.cursor.clone(), c)),
+        _ => None,
+    };
+    delta.apply(state);
+    if diff.is_none() {
+        return ControlFlow::Continue(());
+    }
+    if let Some((cursor, context)) = ended {
+        let mut left = state.clone();
+        left.cursor = cursor;
+        left.context = context;
+        each(&left)?;
+    }
+    each(state)
+}
+
+/// `before` with the entries `diff` appended to the regions it already had,
+/// and nothing else of `diff`. `None` when it appended none.
+fn ended_with(before: &ContextState, diff: &ContextDiff) -> Option<ContextState> {
+    let mut ended = before.clone();
+    let mut added = false;
+    for (name, head, change) in &diff.regions {
+        let region = ended.regions.iter_mut().find(|r| &r.name == name);
+        if let (Some(RegionChange::Append(more)), Some(region)) = (change, region) {
+            region.entries.extend(more.iter().cloned());
+            region.current_tokens = head.current_tokens;
+            region.taint = head.taint.clone();
+            added = true;
+        }
+    }
+    added.then_some(ended)
 }
 
 /// One attempt to execute one tool call.

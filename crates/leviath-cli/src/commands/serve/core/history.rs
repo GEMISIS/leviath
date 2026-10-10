@@ -10,7 +10,7 @@ use std::ops::ControlFlow;
 
 use leviath_runtime::runfile::history::RunPoint;
 use leviath_runtime::spec::run_spec::RunSpec;
-use leviath_runtime::state::{Change, RunState};
+use leviath_runtime::state::RunState;
 
 use super::error::ServeError;
 use super::run_file;
@@ -148,16 +148,8 @@ fn visit_points(
     if point(start.seq, started, &start).is_break() {
         return Some(());
     }
-    run_file::walk(run_id, &reader, &mut |step| {
-        let moved = step
-            .delta
-            .changes
-            .iter()
-            .any(|change| matches!(change, Change::Context(_)));
-        if !moved {
-            return ControlFlow::Continue(());
-        }
-        point(step.delta.seq, step.delta.at, step.after)
+    run_file::walk_points(run_id, &reader, &mut |delta, state| {
+        point(delta.seq, delta.at, state)
     })
     .ok()
 }
