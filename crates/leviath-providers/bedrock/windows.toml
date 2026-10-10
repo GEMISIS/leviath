@@ -15,7 +15,7 @@
 # `reasoning` says the card has a Reasoning line, and `count_tokens` whether
 # the card lists CountTokens as supported on `bedrock-runtime`.
 
-read_on = "2026-10-08"
+read_on = "2026-10-10"
 
 [[model]]
 id = "ai21.jamba-1-5-large-v1:0"
@@ -61,17 +61,17 @@ source = "aws-model-card"
 id = "amazon.nova-lite-v1:0"
 name = "Nova Lite"
 context = 300000
-output = 5000
+output = 10000
 reasoning = false
 count_tokens = false
-profiles = ["us.amazon.nova-lite-v1:0", "eu.amazon.nova-lite-v1:0"]
+profiles = ["us.amazon.nova-lite-v1:0", "eu.amazon.nova-lite-v1:0", "apac.amazon.nova-lite-v1:0"]
 source = "aws-model-card"
 
 [[model]]
 id = "amazon.nova-micro-v1:0"
 name = "Nova Micro"
 context = 128000
-output = 5000
+output = 10000
 reasoning = false
 count_tokens = false
 profiles = ["us.amazon.nova-micro-v1:0", "eu.amazon.nova-micro-v1:0"]
@@ -91,7 +91,7 @@ source = "aws-model-card"
 id = "amazon.nova-pro-v1:0"
 name = "Nova Pro"
 context = 300000
-output = 5000
+output = 10000
 reasoning = false
 count_tokens = false
 profiles = ["us.amazon.nova-pro-v1:0", "eu.amazon.nova-pro-v1:0", "apac.amazon.nova-pro-v1:0"]
@@ -304,7 +304,7 @@ context = 1000000
 output = 128000
 reasoning = true
 count_tokens = false
-profiles = ["us.anthropic.claude-sonnet-5-5", "eu.anthropic.claude-sonnet-5-5", "global.anthropic.claude-sonnet-5-5"]
+profiles = ["us.anthropic.claude-sonnet-5-5", "eu.anthropic.claude-sonnet-5-5", "au.anthropic.claude-sonnet-5-5", "global.anthropic.claude-sonnet-5-5"]
 source = "aws-model-card"
 
 [[model]]
