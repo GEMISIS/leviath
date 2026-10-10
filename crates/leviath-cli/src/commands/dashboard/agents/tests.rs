@@ -1826,7 +1826,19 @@ mode = "autonomous"
     dash.editor_adjust(1);
     dash.handle_key(key(KeyCode::Char('2')));
     dash.handle_key(key(KeyCode::Char('z')));
-    assert_eq!(dash.agents().editor.as_ref().unwrap().panel_edge(), None);
+    // A path's fields reaching a panel that is not a path's do nothing, the
+    // way a stage's fields reaching one that is not a stage's do.
+    let before = dash.agents().editor.as_ref().unwrap().doc.to_toml();
+    dash.editor_set_toggle(&FieldId::EdgeGate, true);
+    for id in [FieldId::EdgeKind, FieldId::EdgeTransform] {
+        assert_eq!(dash.editor_choice_options(&id), (Vec::new(), None));
+        dash.editor_pick(&id, "x");
+    }
+    dash.editor_button(&FieldId::DeletePath);
+    dash.editor_commit_line(&FieldId::EdgeHint, "x");
+    dash.editor_commit_line(&FieldId::CompactPrompt, "x");
+    dash.editor_cycle_segment(&FieldId::TransformRule("x".into()), 1);
+    assert_eq!(dash.agents().editor.as_ref().unwrap().doc.to_toml(), before);
     // The arms only tests reach: a toggle, number, choice, button or line
     // committed for a field of another kind does nothing.
     dash.agents()

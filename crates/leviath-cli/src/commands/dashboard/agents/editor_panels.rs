@@ -141,8 +141,8 @@ impl Dashboard {
         &mut self,
         id: &FieldId,
     ) -> (Vec<String>, Option<usize>) {
-        match (id, self.editor().panel_stage()) {
-            (FieldId::RoutingDefault, Some(stage)) => {
+        match (id, self.editor().panel.clone()) {
+            (FieldId::RoutingDefault, Panel::Stage { name: stage, .. }) => {
                 let options = self.routing_regions(&stage);
                 let current = self
                     .editor()
@@ -153,8 +153,7 @@ impl Dashboard {
                     .or(Some(0));
                 (options, current)
             }
-            (FieldId::EdgeTransform, _) => {
-                let (from, to) = self.editor().panel_edge().expect("a path field");
+            (FieldId::EdgeTransform, Panel::Edge { from, to }) => {
                 let options: Vec<String> = TransformKind::CHOICES
                     .iter()
                     .map(|t| t.as_str().to_string())
@@ -201,14 +200,16 @@ impl Dashboard {
     /// A pick the core does not know.
     pub(super) fn editor_pick_more(&mut self, id: &FieldId, value: &str) {
         let value = value.to_string();
-        match (id, self.editor().panel_stage()) {
+        match (id, self.editor().panel.clone()) {
             // The "another…" row asks for the name; anything else is it.
             (FieldId::WorkerRef, _) if value == TYPE_ANOTHER => {
                 self.editor().line =
                     Some((FieldId::WorkerRef, LineEdit::new(String::new(), false)));
             }
-            (FieldId::WorkerRef, Some(stage)) => self.editor_set_worker(&stage, &value),
-            (FieldId::RoutingDefault, Some(stage)) => {
+            (FieldId::WorkerRef, Panel::Stage { name: stage, .. }) => {
+                self.editor_set_worker(&stage, &value)
+            }
+            (FieldId::RoutingDefault, Panel::Stage { name: stage, .. }) => {
                 let region = if value == "(default)" {
                     String::new()
                 } else {
@@ -216,8 +217,7 @@ impl Dashboard {
                 };
                 self.editor_mutate(|d| d.set_tool_routing_default(&stage, &region));
             }
-            (FieldId::EdgeTransform, _) => {
-                let (from, to) = self.editor().panel_edge().expect("a path field");
+            (FieldId::EdgeTransform, Panel::Edge { from, to }) => {
                 let kind = TransformKind::parse(&value);
                 self.editor_mutate(|d| d.set_transform(&from, &to, &kind));
             }
@@ -346,9 +346,8 @@ impl Dashboard {
     /// A typed line the core does not know.
     pub(super) fn editor_commit_line_more(&mut self, id: &FieldId, text: &str) {
         let text = text.to_string();
-        match (id, self.editor().panel_stage()) {
-            (FieldId::CompactPrompt, _) => {
-                let (from, to) = self.editor().panel_edge().expect("a path field");
+        match (id, self.editor().panel.clone()) {
+            (FieldId::CompactPrompt, Panel::Edge { from, to }) => {
                 self.editor_mutate(|d| d.set_compact_prompt(&from, &to, &text));
             }
             (FieldId::RegionName, _) => {
@@ -373,14 +372,14 @@ impl Dashboard {
                 | FieldId::ArtifactType,
                 _,
             ) => self.editor_write_types(id, split_list(&text)),
-            (FieldId::OutputFormat, Some(stage)) => {
+            (FieldId::OutputFormat, Panel::Stage { name: stage, .. }) => {
                 self.editor_mutate(|d| d.set_output_format(&stage, &text));
             }
-            (FieldId::OutputRouting, Some(stage)) => {
+            (FieldId::OutputRouting, Panel::Stage { name: stage, .. }) => {
                 let entries = super::inspector::parse_routing(&text);
                 self.editor_mutate(|d| d.set_output_routing(&stage, &entries));
             }
-            (FieldId::ContextReset, Some(stage)) => {
+            (FieldId::ContextReset, Panel::Stage { name: stage, .. }) => {
                 let regions = super::inspector::parse_region_list(&text);
                 self.editor_mutate(|d| d.set_context_reset(&stage, &regions));
             }
@@ -548,10 +547,11 @@ impl Dashboard {
 
     /// `←`/`→`/Enter on a segment: the next rule for the region.
     pub(super) fn editor_cycle_segment(&mut self, id: &FieldId, delta: isize) {
-        let FieldId::TransformRule(region) = id else {
+        let (FieldId::TransformRule(region), Panel::Edge { from, to }) =
+            (id, self.editor().panel.clone())
+        else {
             return;
         };
-        let (from, to) = self.editor().panel_edge().expect("a path field");
         let Some(edge) = self.editor().doc.edge(&from, &to) else {
             return;
         };
