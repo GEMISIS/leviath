@@ -5,11 +5,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use leviath_mcp::{ToolDiscovery, ToolExecutor};
+use leviath_mcp::{MCPClient, MCPServerConfig, ToolDiscovery, ToolExecutor};
 use leviath_providers::Tool;
 use leviath_tools::{BuiltinTools, ToolContext};
 
 use crate::config::{Config, ToolPolicy};
+use crate::credentials::McpGrants;
 
 /// Combined tool registry: native built-in tools + MCP-discovered tools.
 ///
@@ -44,62 +45,12 @@ impl ToolRegistry {
         let mut mcp_tool_defs: Vec<Tool> = Vec::new();
 
         if !config.mcp_servers.is_empty() {
-            let mut discovery = ToolDiscovery::new();
-            let oauth = leviath_mcp::OAuthClient::new();
-            let store_path = leviath_mcp::AuthStore::default_path();
-            let now = unix_now_secs();
-            // Resolved once for the whole loop. An unreachable keychain is a
-            // warning rather than a hard failure: MCP servers that need no
-            // OAuth still work, and refusing to build any tools at all over a
-            // locked keychain would be a worse outcome than losing the ones
-            // that need it.
-            let credentials = credential_store_or_warn(crate::credentials::store_for(
-                config.security.credential_store,
-            ));
+            // Resolved once for the whole loop.
+            let grants = agent_grants(config.security.credential_store);
             for server_cfg in &config.mcp_servers {
-                // For an HTTP server, resolve a stored OAuth token (refreshing
-                // it non-interactively if it has lapsed) and inject it as the
-                // bearer. `None` covers stdio servers, unauthenticated HTTP
-                // servers, and ones using a static `headers` token.
-                let auth_header = match resolve_bearer(
-                    &oauth,
-                    &server_cfg.name,
-                    store_path.as_deref(),
-                    now,
-                    credentials.as_deref(),
-                )
-                .await
+                match connect_for_agent(server_cfg, &grants, &config.security.allow_env_vars).await
                 {
-                    Ok(header) => header,
-                    Err(e) => {
-                        tracing::warn!(server = %server_cfg.name, error = %e, "MCP auth unavailable - skipping");
-                        continue;
-                    }
-                };
-                // A resolved bearer means this HTTP server is OAuth-backed (a
-                // static-header or stdio server resolves to `None`).
-                let auth_was_resolved = auth_header.is_some();
-                match discovery
-                    .discover_from_config_with_auth(
-                        server_cfg,
-                        auth_header,
-                        &config.security.allow_env_vars,
-                    )
-                    .await
-                {
-                    Ok((_tool_metas, mut client)) => {
-                        // If this is an OAuth-backed HTTP server, attach a
-                        // refresher so a run that outlives its access token
-                        // re-auths on a 401 instead of failing every later call.
-                        if auth_was_resolved && let Some(path) = store_path.clone() {
-                            client.set_refresher(std::sync::Arc::new(
-                                leviath_mcp::StoredTokenRefresher::new(
-                                    server_cfg.name.clone(),
-                                    path,
-                                    credentials.clone(),
-                                ),
-                            ));
-                        }
+                    Ok(client) => {
                         // Advertise under provider-safe, collision-free names,
                         // reserving the built-in names and every MCP name already
                         // advertised so nothing the LLM sees is duplicated or
@@ -171,55 +122,55 @@ impl ToolRegistry {
     }
 }
 
-/// Current Unix time in seconds, for token-expiry checks. `0` if the clock is
-/// somehow before the epoch - which reads every token as expired and forces a
-/// refresh attempt, the safe direction.
-pub(crate) fn unix_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+/// The MCP grants an agent connects with: `kind`'s, or the grant file alone
+/// when the keychain cannot be reached.
+///
+/// A warning rather than a hard failure: MCP servers that need no OAuth still
+/// work, and refusing every tool over a locked keychain would be worse than
+/// losing the ones that need it. The file alone holds none of a keychain
+/// user's tokens, so those servers read as logged out and nothing writes a
+/// token into the file.
+pub(crate) fn agent_grants(kind: leviath_core::CredentialStoreKind) -> McpGrants {
+    grants_or_file(
+        leviath_mcp::AuthStore::default_path().unwrap_or_default(),
+        crate::credentials::store_for(kind),
+    )
 }
 
-/// Resolve the `Authorization` header for one server, or `None` when there is
-/// no store (no home directory) or no stored auth for it.
-///
-/// Split out of [`ToolRegistry::build`] so the store-present / store-absent and
-/// refresh-failure paths are unit-testable without the real home directory.
-/// The configured credential backend, or `None` with a warning if it cannot be
-/// reached.
-///
-/// Used on the *read* paths, where a locked keychain should cost the servers
-/// that need OAuth rather than every tool the agent has. The write paths do not
-/// use this: there, a store that cannot be written is a hard error, because
-/// falling back would put refresh tokens on disk.
-pub(crate) fn credential_store_or_warn(
-    resolved: crate::credentials::Resolved,
-) -> Option<Arc<dyn leviath_core::CredentialStore>> {
-    match resolved {
-        Ok(store) => store.map(Arc::from),
-        Err(e) => {
-            tracing::warn!("{e}. MCP servers needing OAuth will appear logged out.");
-            None
-        }
-    }
+/// Core of [`agent_grants`] with the backend already resolved.
+fn grants_or_file(path: PathBuf, resolved: crate::credentials::Resolved) -> McpGrants {
+    let resolved = resolved.or_else(|e| {
+        tracing::warn!("{e}. MCP servers needing OAuth will appear logged out.");
+        Ok(None)
+    });
+    McpGrants::new(path, resolved)
 }
 
-pub(crate) async fn resolve_bearer(
-    oauth: &leviath_mcp::OAuthClient,
-    server_name: &str,
-    store_path: Option<&std::path::Path>,
-    now: u64,
-    credentials: Option<&dyn leviath_core::CredentialStore>,
-) -> anyhow::Result<Option<(String, String)>> {
-    match store_path {
-        Some(path) => {
-            oauth
-                .authorization_header_with(server_name, path, now, credentials)
-                .await
-        }
-        None => Ok(None),
+/// Connect `server` for an agent.
+///
+/// An HTTP server's stored OAuth token is sent as its bearer, refreshed first
+/// if it has lapsed, and the client keeps a refresher so a run that outlives
+/// the token re-auths on a 401 instead of failing every later call. A stdio
+/// server, an unauthenticated one and one with a static `headers` token have
+/// no grant and connect as they are.
+pub(crate) async fn connect_for_agent(
+    server: &MCPServerConfig,
+    grants: &McpGrants,
+    allow_env: &[String],
+) -> anyhow::Result<MCPClient> {
+    let now = leviath_core::duration::now_secs() as u64;
+    let bearer = grants
+        .authorization_header(&server.name, now)
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP auth unavailable: {e}"))?;
+    let refreshes = bearer.is_some();
+    let (_metas, mut client) = ToolDiscovery::new()
+        .discover_from_config_with_auth(server, bearer, allow_env)
+        .await?;
+    if refreshes {
+        client.set_refresher(Arc::new(grants.refresher(&server.name)));
     }
+    Ok(client)
 }
 
 /// Default policy for a tool: read-only builtins are allowed, mutating ones ask,
@@ -1152,9 +1103,8 @@ for line in sys.stdin:
     #[tokio::test]
     async fn build_skips_http_server_whose_token_cannot_be_refreshed() {
         // An HTTP server with a stored-but-expired token whose refresh endpoint
-        // is dead: `resolve_bearer` errors, so build logs and skips it rather
-        // than connecting unauthenticated. Exercises the auth `Err(e) => continue`
-        // arm.
+        // is dead: the bearer cannot be resolved, so build logs and skips it
+        // rather than connecting unauthenticated.
         with_tracing(|| {});
         let registry = with_temp_home(|| async {
             // Seed an expired token with an unreachable refresh endpoint.
@@ -1184,28 +1134,18 @@ for line in sys.stdin:
     }
 
     /// A locked keychain costs the MCP servers that need OAuth, not every tool
-    /// the agent has - so the read path warns and carries on.
-    #[test]
-    fn an_unreachable_credential_store_warns_rather_than_failing_tool_setup() {
-        assert!(
-            credential_store_or_warn(Err("no keychain here".to_string())).is_none(),
-            "an unreachable store yields no credentials"
-        );
-        assert!(
-            credential_store_or_warn(Ok(None)).is_none(),
-            "and so does the file backend"
-        );
-        assert!(
-            credential_store_or_warn(Ok(Some(Box::new(leviath_core::MemoryStore::new()))))
-                .is_some()
-        );
-    }
-
+    /// the agent has - so the read path warns and carries on with the file.
     #[tokio::test]
-    async fn resolve_bearer_without_a_store_is_none() {
-        let oauth = leviath_mcp::OAuthClient::new();
-        let header = resolve_bearer(&oauth, "srv", None, 0, None).await.unwrap();
-        assert!(header.is_none());
+    async fn an_unreachable_credential_store_leaves_the_file_alone_to_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let file_alone = grants_or_file(path.clone(), Err("no keychain here".to_string()));
+        assert!(file_alone.load().unwrap().server_names().is_empty());
+
+        let keychain = grants_or_file(path, Ok(Some(Box::new(leviath_core::MemoryStore::new()))));
+        assert!(keychain.load().is_ok());
+        let file = agent_grants(leviath_core::CredentialStoreKind::File);
+        assert!(file.path().ends_with("mcp-auth.json"));
     }
 
     #[tokio::test]

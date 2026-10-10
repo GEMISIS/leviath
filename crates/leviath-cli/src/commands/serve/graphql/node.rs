@@ -100,7 +100,7 @@ pub(crate) async fn resolve(ctx: &Context<'_>, id: &str) -> async_graphql::Resul
     // word, a second and a counter.
     if let Some((tag, rest)) = id.split_once(':') {
         return match tag {
-            MCP_SERVER_TAG => mcp_server(ctx, rest),
+            MCP_SERVER_TAG => mcp_server(ctx, rest).await,
             YOLO_PROFILE_TAG => Ok(yolo_profile(rest)),
             SCRIPT_TAG => script(ctx, rest),
             PROVIDER_TAG => Ok(super::query::provider_by_id(ctx, rest).map(Node::Provider)),
@@ -146,11 +146,11 @@ pub(crate) async fn resolve_many(
 }
 
 /// The MCP server one tagged id names.
-fn mcp_server(ctx: &Context<'_>, name: &str) -> async_graphql::Result<Option<Node>> {
+async fn mcp_server(ctx: &Context<'_>, name: &str) -> async_graphql::Result<Option<Node>> {
     let state = ctx.data_unchecked::<AppState>();
     // The same failure `mcpServers` answers with, rather than a null: a config
     // that will not parse is not this server having been deleted.
-    let servers = super::super::mcp::server_infos(state).gql()?;
+    let servers = super::super::mcp::server_infos(state).await.gql()?;
     Ok(servers
         .into_iter()
         .find(|server| server.name == name)

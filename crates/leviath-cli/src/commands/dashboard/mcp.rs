@@ -12,23 +12,20 @@ use tokio::sync::mpsc;
 use super::state::Dashboard;
 use super::types::{ConfirmAction, McpCommand, McpContext, McpOutcome, McpRow, ToastLevel};
 use crate::config::Config;
-use leviath_mcp::{AuthStore, MCPClient, MCPServerConfig, OAuthClient};
+use crate::credentials::McpGrants;
+use leviath_mcp::{AuthStore, MCPServerConfig, OAuthClient};
 
 impl Dashboard {
     /// Re-read the config + token store and rebuild the MCP row list, clamping
     /// the selection. Cheap file I/O, called when the screen opens and after any
-    /// change so it always reflects disk.
+    /// change so it always reflects disk. A file that will not read is said in
+    /// a toast and the rows are left as they were, rather than every server
+    /// shown logged out.
     pub(super) fn refresh_mcp_rows(&mut self) {
-        let ctx = &self.mcp_ctx;
-        let servers = Config::load_from_path_public(&ctx.config_path)
-            .map(|c| c.mcp_servers)
-            .unwrap_or_default();
-        let store = AuthStore::load(&ctx.store_path).unwrap_or_default();
-        let now = (ctx.clock)();
-        self.mcp_rows = servers
-            .iter()
-            .map(|s| describe_row(s, &store, now))
-            .collect();
+        match listed(&self.mcp_ctx) {
+            Ok(rows) => self.mcp_rows = rows,
+            Err(e) => self.toast(e, ToastLevel::Error),
+        }
         if self.mcp_selected >= self.mcp_rows.len() {
             self.mcp_selected = self.mcp_rows.len().saturating_sub(1);
         }
@@ -111,12 +108,13 @@ impl Dashboard {
             self.toast(format!("Could not save config: {e}"), ToastLevel::Error);
             return;
         }
-        if let Ok(mut store) = AuthStore::load(&ctx.store_path)
-            && store.remove(&name)
-        {
-            let _ = store.save(&ctx.store_path);
+        match grants_of(ctx, &config).forget(&name) {
+            Ok(_) => self.toast(format!("Removed MCP server '{name}'"), ToastLevel::Info),
+            Err(e) => self.toast(
+                format!("Removed MCP server '{name}', but its login could not be forgotten: {e}"),
+                ToastLevel::Error,
+            ),
         }
-        self.toast(format!("Removed MCP server '{name}'"), ToastLevel::Info);
         self.refresh_mcp_rows();
     }
 
@@ -160,6 +158,26 @@ impl Dashboard {
             self.refresh_mcp_rows();
         }
     }
+}
+
+/// Every configured server as a row, with the grant it is logged in with.
+fn listed(ctx: &McpContext) -> Result<Vec<McpRow>, String> {
+    let config = Config::load_from_path_public(&ctx.config_path)
+        .map_err(|e| format!("Could not read config: {e}"))?;
+    let store = grants_of(ctx, &config)
+        .load()
+        .map_err(|e| format!("Could not read MCP logins: {e}"))?;
+    let now = (ctx.clock)();
+    Ok(config
+        .mcp_servers
+        .iter()
+        .map(|s| describe_row(s, &store, now))
+        .collect())
+}
+
+/// The grants `config` keeps, in the screen's grant file.
+fn grants_of(ctx: &McpContext, config: &Config) -> McpGrants {
+    McpGrants::at(ctx.store_path.clone(), config.security.credential_store)
 }
 
 /// Build a display row for one server.
@@ -244,27 +262,28 @@ pub(super) async fn mcp_background_loop(
     }
 }
 
-/// Load the configured server by name, or an error outcome.
-/// The server entry plus the `${VAR}` allowlist that goes with it.
+/// The configured server named `name` and the config it came from, or an
+/// error outcome.
 ///
-/// Both come out of the same config read. Returning only the server is what
-/// left the callers passing an empty allowlist, which refuses every `${VAR}`
-/// header and made a server that works for an agent fail here.
-fn find_server(ctx: &McpContext, name: &str) -> Result<(MCPServerConfig, Vec<String>), McpOutcome> {
+/// The config travels with the server because both of its other halves are
+/// needed: the `${VAR}` allowlist, without which every `${VAR}` header is
+/// refused and a server that works for an agent fails here, and the
+/// credential store its grants are kept in.
+fn find_server(ctx: &McpContext, name: &str) -> Result<(MCPServerConfig, Config), McpOutcome> {
     let config = Config::load_from_path_public(&ctx.config_path)
         .map_err(|e| fail(format!("Could not read config: {e}")))?;
-    let allow_env = config.security.allow_env_vars.clone();
-    config
+    let server = config
         .mcp_servers
-        .into_iter()
+        .iter()
         .find(|s| s.name == name)
-        .map(|server| (server, allow_env))
-        .ok_or_else(|| fail(format!("No MCP server named '{name}'")))
+        .cloned()
+        .ok_or_else(|| fail(format!("No MCP server named '{name}'")))?;
+    Ok((server, config))
 }
 
 /// Run the OAuth browser login for `name`.
 async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
-    let (server, allow_env) = match find_server(ctx, name) {
+    let (server, config) = match find_server(ctx, name) {
         Ok(found) => found,
         Err(outcome) => return outcome,
     };
@@ -272,13 +291,17 @@ async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
         Ok(leviath_mcp::ResolvedTransport::Http { url, .. }) => url.to_string(),
         _ => return fail(format!("'{name}' uses stdio transport and cannot log in")),
     };
-    let mut store = AuthStore::load(&ctx.store_path).unwrap_or_default();
+    let grants = grants_of(ctx, &config);
+    let mut store = match grants.load() {
+        Ok(store) => store,
+        Err(e) => return fail(format!("Could not read MCP logins: {e}")),
+    };
     let reuse = store.get(name).map(|a| a.client_id.clone());
     match OAuthClient::new()
         .login(
             &url,
             &server.headers,
-            &allow_env,
+            &config.security.allow_env_vars,
             ctx.opener.clone(),
             (ctx.clock)(),
             reuse.as_deref(),
@@ -287,7 +310,7 @@ async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
     {
         Ok(leviath_mcp::LoginOutcome::Authenticated(auth)) => {
             store.set(name, *auth);
-            match store.save(&ctx.store_path) {
+            match grants.save(&store) {
                 Ok(()) => ok(format!("Authenticated with '{name}'")),
                 Err(e) => fail(format!("Login succeeded but saving failed: {e}")),
             }
@@ -301,37 +324,28 @@ async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
 
 /// Connect to `name` and report its tool count.
 async fn run_test(ctx: &McpContext, name: &str) -> McpOutcome {
-    let (server, allow_env) = match find_server(ctx, name) {
+    let (server, config) = match find_server(ctx, name) {
         Ok(found) => found,
         Err(outcome) => return outcome,
     };
-    let auth_header = match OAuthClient::new()
-        .authorization_header(name, &ctx.store_path, (ctx.clock)())
+    let auth_header = match grants_of(ctx, &config)
+        .authorization_header(name, (ctx.clock)())
         .await
     {
         Ok(header) => header,
         Err(e) => return fail(format!("Auth failed for '{name}': {e}")),
     };
-    match connect_and_count(&server, auth_header, &allow_env, ctx.connect_timeout).await {
-        Ok(count) => ok(format!("'{name}' connected · {count} tool(s)")),
+    let listed = crate::commands::mcp::connect_and_list(
+        &server,
+        auth_header,
+        &config.security.allow_env_vars,
+        ctx.connect_timeout,
+    )
+    .await;
+    match listed {
+        Ok(tools) => ok(format!("'{name}' connected · {} tool(s)", tools.len())),
         Err(e) => fail(format!("'{name}' failed: {e}")),
     }
-}
-
-/// Connect and return the tool count.
-async fn connect_and_count(
-    server: &MCPServerConfig,
-    auth_header: Option<(String, String)>,
-    allow_env: &[String],
-    connect_timeout: std::time::Duration,
-) -> anyhow::Result<usize> {
-    let mut client = MCPClient::from_config_with_auth(server, auth_header, allow_env)
-        .await?
-        .with_connect_timeout(connect_timeout);
-    client.connect().await?;
-    let tools = client.list_tools().await?;
-    let _ = client.shutdown().await;
-    Ok(tools.len())
 }
 
 fn ok(message: String) -> McpOutcome {
@@ -1117,6 +1131,189 @@ for line in sys.stdin:
         // Dropping the command sender ends the loop.
         drop(cmd_tx);
         handle.await.unwrap();
+    }
+
+    // ─── grants under the keychain, and a grant file that will not load ───
+
+    /// A config at `ctx` that keeps its grants in the keychain, naming
+    /// `server`.
+    fn keychain_config(ctx: &McpContext, server: MCPServerConfig) {
+        let mut config = Config::default();
+        config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
+        config.mcp_servers.push(server);
+        config.save_to_path_public(&ctx.config_path).unwrap();
+    }
+
+    /// Store `auth` for `server` in the keychain, as `lev mcp login` does.
+    fn keychain_grant(ctx: &McpContext, server: &str, auth: leviath_mcp::ServerAuth) {
+        let keychain = crate::credentials::store_for(leviath_core::CredentialStoreKind::Keychain)
+            .unwrap()
+            .unwrap();
+        let mut store = AuthStore::default();
+        store.set(server, auth);
+        store
+            .save_with(&ctx.store_path, Some(keychain.as_ref()))
+            .unwrap();
+    }
+
+    /// The screen reads a keychain user's grant through the keychain, so a
+    /// server they logged in to does not show as logged out.
+    #[test]
+    fn a_grant_in_the_keychain_reads_as_authenticated() {
+        let _keychain = crate::credentials::test_store::with_mock();
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = dash_at(dir.path());
+        keychain_config(
+            &dash.mcp_ctx,
+            MCPServerConfig::http("remote", "https://e.com/mcp"),
+        );
+        keychain_grant(
+            &dash.mcp_ctx,
+            "remote",
+            leviath_mcp::ServerAuth {
+                expires_at: 10_000,
+                ..Default::default()
+            },
+        );
+        dash.refresh_mcp_rows();
+        assert_eq!(dash.mcp_rows[0].auth, "authenticated");
+    }
+
+    /// A grant file that will not load is said, not shown as every server
+    /// logged out.
+    #[test]
+    fn a_grant_file_that_will_not_load_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = dash_at(dir.path());
+        assert!(dash.mcp_add_from_line("remote https://e.com/mcp"));
+        std::fs::write(&dash.mcp_ctx.store_path, "not json").unwrap();
+        dash.refresh_mcp_rows();
+        assert!(
+            dash.toast_messages_for_test()
+                .iter()
+                .any(|m| m.contains("MCP auth store is corrupt")),
+            "{:?}",
+            dash.toast_messages_for_test()
+        );
+    }
+
+    /// A config that will not load is said too, and the rows already shown
+    /// stay.
+    #[test]
+    fn a_config_that_will_not_load_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = dash_at(dir.path());
+        assert!(dash.mcp_add_from_line("remote https://e.com/mcp"));
+        std::fs::write(&dash.mcp_ctx.config_path, "not = = toml").unwrap();
+        dash.refresh_mcp_rows();
+        assert_eq!(dash.mcp_rows.len(), 1);
+        assert!(
+            dash.toast_messages_for_test()
+                .iter()
+                .any(|m| m.contains("Could not read config")),
+            "{:?}",
+            dash.toast_messages_for_test()
+        );
+    }
+
+    /// Removing a server whose grant file will not load removes the server
+    /// and says the login was left behind.
+    #[test]
+    fn a_remove_says_when_the_login_could_not_be_forgotten() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = dash_at(dir.path());
+        assert!(dash.mcp_add_from_line("remote https://e.com/mcp"));
+        std::fs::write(&dash.mcp_ctx.store_path, "not json").unwrap();
+        dash.mcp_remove_named("remote");
+        assert!(
+            dash.toast_messages_for_test()
+                .iter()
+                .any(|m| m.contains("could not be forgotten")),
+            "{:?}",
+            dash.toast_messages_for_test()
+        );
+        let config = Config::load_from_path_public(&dash.mcp_ctx.config_path).unwrap();
+        assert!(config.mcp_servers.is_empty());
+    }
+
+    /// A login never replaces a grant file it could not read: that file holds
+    /// every other server's grant.
+    #[tokio::test]
+    async fn a_login_leaves_a_grant_file_it_could_not_read() {
+        let base = mock_oauth_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_at(dir.path(), auto_consent);
+        write_config(
+            &ctx,
+            MCPServerConfig::http("navigator", format!("{base}/mcp")),
+        );
+        std::fs::write(&ctx.store_path, "not json").unwrap();
+        let outcome = run_login(&ctx, "navigator").await;
+        assert!(!outcome.ok, "got: {}", outcome.message);
+        assert_eq!(
+            std::fs::read_to_string(&ctx.store_path).unwrap(),
+            "not json"
+        );
+    }
+
+    /// Under the keychain a login's tokens go to the keychain, and the file
+    /// keeps only the server's name.
+    #[test]
+    fn a_login_under_the_keychain_keeps_the_tokens_out_of_the_file() {
+        let _keychain = crate::credentials::test_store::with_mock();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let base = mock_oauth_server().await;
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = ctx_at(dir.path(), auto_consent);
+            keychain_config(
+                &ctx,
+                MCPServerConfig::http("navigator", format!("{base}/mcp")),
+            );
+            let outcome = run_login(&ctx, "navigator").await;
+            assert!(outcome.ok, "got: {}", outcome.message);
+            let file = std::fs::read_to_string(&ctx.store_path).unwrap();
+            assert!(!file.contains("tui-refresh"), "{file}");
+            let keychain =
+                crate::credentials::store_for(leviath_core::CredentialStoreKind::Keychain)
+                    .unwrap()
+                    .unwrap();
+            let held = keychain
+                .get(&leviath_core::mcp_account("navigator"))
+                .unwrap()
+                .unwrap();
+            assert!(held.contains("tui-refresh"), "{held}");
+        });
+    }
+
+    /// `test` resolves the bearer through the keychain too: an expired grant
+    /// held there is refreshed, and a refresh that fails is the answer.
+    #[test]
+    fn test_reads_a_grant_kept_in_the_keychain() {
+        let _keychain = crate::credentials::test_store::with_mock();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = ctx_at(dir.path(), no_browser);
+            keychain_config(
+                &ctx,
+                MCPServerConfig::http("remote", "http://127.0.0.1:1/mcp"),
+            );
+            keychain_grant(
+                &ctx,
+                "remote",
+                leviath_mcp::ServerAuth {
+                    token_endpoint: "http://127.0.0.1:1/token".to_string(),
+                    refresh_token: Some("good".to_string()),
+                    expires_at: 1,
+                    ..Default::default()
+                },
+            );
+            let outcome = run_test(&ctx, "remote").await;
+            assert!(
+                outcome.message.contains("Auth failed"),
+                "got: {}",
+                outcome.message
+            );
+        });
     }
 
     #[tokio::test]

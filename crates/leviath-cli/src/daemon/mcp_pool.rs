@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 
-use leviath_mcp::{MCPServerConfig, ToolDiscovery, ToolExecutor};
+use leviath_mcp::{MCPServerConfig, ToolExecutor};
 use leviath_providers::Tool;
 use tokio::sync::Mutex;
 
@@ -529,53 +529,15 @@ impl McpPool {
         {
             return defs.clone();
         }
-        // Resolve a stored OAuth bearer for an HTTP server (refreshing it
-        // non-interactively if lapsed); `None` for stdio / unauthenticated /
-        // static-header servers. Mirrors `ToolRegistry::build`.
-        let oauth = leviath_mcp::OAuthClient::new();
-        let store_path = leviath_mcp::AuthStore::default_path();
         // Read out before the connect: both sit behind a `std` mutex, and the
         // connect awaits.
         let (store_kind, allow_env) = {
             let security = self.lock_security();
             (security.credential_store, security.allow_env_vars.clone())
         };
-        let credentials =
-            crate::tools::credential_store_or_warn(crate::credentials::store_for(store_kind));
-        let auth = match crate::tools::resolve_bearer(
-            &oauth,
-            &config.name,
-            store_path.as_deref(),
-            crate::tools::unix_now_secs(),
-            credentials.as_deref(),
-        )
-        .await
-        {
-            Ok(header) => header,
-            Err(e) => {
-                let err = e.to_string();
-                tracing::warn!(server = %config.name, error = %err, "MCP auth unavailable - skipping");
-                return Vec::new();
-            }
-        };
-        let auth_was_resolved = auth.is_some();
-        let mut discovery = ToolDiscovery::new();
-        match discovery
-            .discover_from_config_with_auth(config, auth, &allow_env)
-            .await
-        {
-            Ok((_metas, mut client)) => {
-                // Attach a refresher so an OAuth-backed server that outlives its
-                // access token re-auths on a 401 instead of failing every call.
-                if auth_was_resolved && let Some(path) = store_path.clone() {
-                    client.set_refresher(std::sync::Arc::new(
-                        leviath_mcp::StoredTokenRefresher::new(
-                            config.name.clone(),
-                            path,
-                            credentials.clone(),
-                        ),
-                    ));
-                }
+        let grants = crate::tools::agent_grants(store_kind);
+        match crate::tools::connect_for_agent(config, &grants, &allow_env).await {
+            Ok(client) => {
                 let advertised = self.shared.lock().await.add_client_advertised(
                     config.name.clone(),
                     client,
@@ -836,8 +798,8 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_returns_empty_when_bearer_cannot_be_resolved() {
-        // An expired token with an unreachable refresh endpoint → resolve_bearer
-        // errors → the auth `Err` arm returns no defs.
+        // An expired token with an unreachable refresh endpoint: the bearer
+        // cannot be resolved, so the server is skipped and no defs come back.
         with_tracing(|| {});
         let defs = with_temp_home(|| async {
             let mut store = leviath_mcp::AuthStore::default();

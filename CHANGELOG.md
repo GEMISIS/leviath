@@ -357,6 +357,15 @@ same list.
   in `config.toml` in plaintext: saving the config kept it there, `lev auth
   migrate` never moved it, and `lev auth status` did not list it. It now
   moves to the OS credential store with every other provider key.
+- With `[security] credential_store = "keychain"`, the dashboard's MCP
+  screen and `lev serve`'s MCP routes read MCP logins from `mcp-auth.json`
+  alone, so a server signed in with `lev mcp login` showed as logged out, and
+  a login from either wrote its refresh token to that file in plaintext.
+  `lev mcp test` sent no keychain-held token either. All of them now read
+  and write logins through the keychain. A login file that will not load is
+  reported (a toast, or a 500) instead of every server shown logged out, and
+  a login refuses rather than replace it with a file holding only the new
+  login, which lost every other server's.
 
 ### Added
 

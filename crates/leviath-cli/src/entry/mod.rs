@@ -294,21 +294,19 @@ impl RiskyExecutors for RealExecutors {
         // the command, not silently drop the user's credential-store choice
         // and env allowlist (a missing file still loads as defaults).
         let config = crate::config::Config::load()?;
+        let store_path = leviath_mcp::AuthStore::default_path().ok_or_else(|| {
+            anyhow::anyhow!("could not resolve a home directory for the MCP auth store")
+        })?;
+        // Resolved here, once, so a keychain that cannot be reached fails the
+        // whole command.
+        let store = crate::credentials::store_for(config.security.credential_store)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let env = commands::mcp::McpEnv {
             config_path: crate::config::Config::config_path(),
-            store_path: leviath_mcp::AuthStore::default_path().ok_or_else(|| {
-                anyhow::anyhow!("could not resolve a home directory for the MCP auth store")
-            })?,
+            grants: crate::credentials::McpGrants::new(store_path, Ok(store)),
             opener: std::sync::Arc::new(leviath_sys::open_url),
-            now: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            now: leviath_core::duration::now_secs() as u64,
             tools_dir: leviath_core::tools_dir(),
-            // Resolved here, once, so a keychain that cannot be reached fails
-            // the command instead of silently writing a refresh token to disk.
-            credential_store: crate::credentials::store_for(config.security.credential_store)
-                .map_err(|e| anyhow::anyhow!("{e}"))?,
             allow_env_vars: config.security.allow_env_vars,
             // A person is waiting at a terminal, so the handshake keeps the
             // deadline that is right for one.

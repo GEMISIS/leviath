@@ -6,6 +6,7 @@
 use clap::{Args, Subcommand};
 
 use crate::config::Config;
+use crate::credentials::McpGrants;
 use leviath_mcp::{AuthStore, LoginOutcome, MCPClient, MCPServerConfig, OAuthClient};
 
 /// Arguments for `lev mcp`.
@@ -94,8 +95,13 @@ struct ServerArg {
 pub struct McpEnv {
     /// Path to the config file to read and rewrite.
     pub config_path: std::path::PathBuf,
-    /// Path to the OAuth token store.
-    pub store_path: std::path::PathBuf,
+    /// Where OAuth grants are kept. `lev mcp login` writes a refresh token,
+    /// so it has to write it where the user asked for it to be kept.
+    ///
+    /// Resolved by the caller, and *before* any subcommand runs: a keychain
+    /// that was asked for but cannot be reached fails the command outright
+    /// rather than any one subcommand.
+    pub grants: McpGrants,
     /// How to open the browser during a login.
     pub opener: leviath_mcp::BrowserOpener,
     /// Current Unix time, for token-expiry math.
@@ -105,17 +111,6 @@ pub struct McpEnv {
     /// every external tool provider, not only MCP servers. `None`
     /// disables the script scan (used by tests that only care about servers).
     pub tools_dir: Option<std::path::PathBuf>,
-    /// Where OAuth grants are kept, already resolved. `lev mcp login` writes a
-    /// refresh token, so it has to write it where the user asked for it to be
-    /// kept.
-    ///
-    /// Resolved by the caller rather than here, and *before* any subcommand
-    /// runs: a keychain that was asked for but cannot be reached has to fail the
-    /// command outright, because falling back to the file would put a refresh
-    /// token on disk that the user asked to keep out of it. Doing that once at
-    /// the edge also means these code paths carry no error arm that only an
-    /// unreachable keychain could take.
-    pub credential_store: Option<Box<dyn leviath_core::CredentialStore>>,
     /// `[security] allow_env_vars`: which credential-shaped variables an MCP
     /// server's `${VAR}` headers may interpolate.
     pub allow_env_vars: Vec<String>,
@@ -220,7 +215,7 @@ async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
         }
     };
 
-    let mut store = AuthStore::load_with(&env.store_path, env.credential_store.as_deref())?;
+    let mut store = env.grants.load()?;
     // Reuse a prior registration if we have one, so re-login doesn't re-register.
     let reuse = store.get(name).map(|a| a.client_id.clone());
     let outcome = OAuthClient::new()
@@ -236,7 +231,7 @@ async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
     match outcome {
         LoginOutcome::Authenticated(auth) => {
             store.set(name, *auth);
-            store.save_with(&env.store_path, env.credential_store.as_deref())?;
+            env.grants.save(&store)?;
             println!("✓ Authenticated with '{name}'.");
         }
         LoginOutcome::NotRequired => {
@@ -247,9 +242,7 @@ async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
 }
 
 fn logout(name: &str, env: &McpEnv) -> anyhow::Result<()> {
-    let mut store = AuthStore::load_with(&env.store_path, env.credential_store.as_deref())?;
-    if store.remove(name) {
-        store.save_with(&env.store_path, env.credential_store.as_deref())?;
+    if env.grants.forget(name)? {
         println!("Removed stored credentials for '{name}'.");
     } else {
         println!("No stored credentials for '{name}'.");
@@ -266,10 +259,7 @@ fn remove_server(remove: RemoveArgs, env: &McpEnv) -> anyhow::Result<()> {
     }
     config.save_to_path_public(&env.config_path)?;
     // Drop any stored credentials too, so a removed server leaves nothing behind.
-    let mut store = AuthStore::load_with(&env.store_path, env.credential_store.as_deref())?;
-    if store.remove(&remove.name) {
-        store.save_with(&env.store_path, env.credential_store.as_deref())?;
-    }
+    env.grants.forget(&remove.name)?;
     println!("Removed MCP server '{}'.", remove.name);
     Ok(())
 }
@@ -277,26 +267,49 @@ fn remove_server(remove: RemoveArgs, env: &McpEnv) -> anyhow::Result<()> {
 async fn test(name: &str, env: &McpEnv) -> anyhow::Result<()> {
     let config = Config::load_from_path_public(&env.config_path)?;
     let server = find_server(&config, name)?;
-    let auth_header = OAuthClient::new()
-        .authorization_header(name, &env.store_path, env.now)
-        .await?;
-    let mut client = MCPClient::from_config_with_auth(server, auth_header, &env.allow_env_vars)
-        .await?
-        .with_connect_timeout(env.connect_timeout);
-    client.connect().await?;
-    let tools = client.list_tools().await?;
+    let auth_header = env.grants.authorization_header(name, env.now).await?;
+    let tools = connect_and_list(
+        server,
+        auth_header,
+        &env.allow_env_vars,
+        env.connect_timeout,
+    )
+    .await?;
     println!("✓ '{name}' connected · {} tool(s):", tools.len());
     for tool in &tools {
-        println!("  - {}", tool.name);
+        println!("  - {tool}");
     }
-    // `shutdown` swallows subprocess errors by design, so it never fails.
-    let _ = client.shutdown().await;
     Ok(())
+}
+
+/// Connect to `server` and name the tools it advertises: what `test` asks on
+/// every surface that offers it.
+///
+/// `allow_env` is the config's `[security] allow_env_vars`. An empty list
+/// refuses every `${VAR}` header, and a server whose token comes from the
+/// environment would then fail here while working for an agent. The client is
+/// shut down whichever way the listing went.
+pub(crate) async fn connect_and_list(
+    server: &MCPServerConfig,
+    auth_header: Option<(String, String)>,
+    allow_env: &[String],
+    connect_timeout: std::time::Duration,
+) -> anyhow::Result<Vec<String>> {
+    let mut client = MCPClient::from_config_with_auth(server, auth_header, allow_env)
+        .await?
+        .with_connect_timeout(connect_timeout);
+    let listed = async {
+        client.connect().await?;
+        client.list_tools().await
+    }
+    .await;
+    let _ = client.shutdown().await;
+    Ok(listed?.into_iter().map(|t| t.name).collect())
 }
 
 fn list_servers(list: ListArgs, env: &McpEnv) -> anyhow::Result<()> {
     let config = Config::load_from_path_public(&env.config_path)?;
-    let store = AuthStore::load_with(&env.store_path, env.credential_store.as_deref())?;
+    let store = env.grants.load()?;
 
     let mut rows: Vec<ServerRow> = config
         .mcp_servers
@@ -427,13 +440,12 @@ mod tests {
     ) -> McpEnv {
         McpEnv {
             config_path: dir.join("config.toml"),
-            store_path: dir.join("mcp-auth.json"),
+            grants: McpGrants::new(dir.join("mcp-auth.json"), Ok(None)),
             opener: std::sync::Arc::new(opener),
             now,
             // Default: no script scan, so server-focused tests stay hermetic. The
             // script-row path has its own dedicated test with a seeded dir.
             tools_dir: None,
-            credential_store: None,
             allow_env_vars: Vec::new(),
             connect_timeout: TEST_CONNECT_TIMEOUT,
         }
@@ -574,7 +586,7 @@ mod tests {
         // Seed a credential to prove removal clears it too.
         let mut store = AuthStore::default();
         store.set("gone", leviath_mcp::ServerAuth::default());
-        store.save(&env.store_path).unwrap();
+        store.save(env.grants.path()).unwrap();
 
         execute_with(
             McpArgs {
@@ -590,7 +602,7 @@ mod tests {
         let config = Config::load_from_path_public(&env.config_path).unwrap();
         assert!(config.mcp_servers.is_empty());
         assert!(
-            AuthStore::load(&env.store_path)
+            AuthStore::load(env.grants.path())
                 .unwrap()
                 .get("gone")
                 .is_none()
@@ -692,7 +704,7 @@ mod tests {
         let env = env_at(dir.path(), never_opens, 0);
         let mut store = AuthStore::default();
         store.set("srv", leviath_mcp::ServerAuth::default());
-        store.save(&env.store_path).unwrap();
+        store.save(env.grants.path()).unwrap();
 
         execute_with(
             McpArgs {
@@ -705,7 +717,7 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            AuthStore::load(&env.store_path)
+            AuthStore::load(env.grants.path())
                 .unwrap()
                 .get("srv")
                 .is_none()
@@ -917,7 +929,7 @@ mod tests {
         );
         // Nothing to store: the header is the credential, and it stays in the
         // config rather than being duplicated into the OAuth store.
-        let stored = AuthStore::load(&env.store_path).unwrap();
+        let stored = AuthStore::load(env.grants.path()).unwrap();
         assert!(stored.get("hub").is_none());
 
         // And an explicit login says so rather than failing.
@@ -925,7 +937,7 @@ mod tests {
             .await
             .expect("an explicit login on such a server is a no-op, not an error");
         assert!(
-            AuthStore::load(&env.store_path)
+            AuthStore::load(env.grants.path())
                 .unwrap()
                 .get("hub")
                 .is_none()
@@ -933,7 +945,7 @@ mod tests {
 
         // The listing reports the header as the credential it is. "none" here
         // is what tells a user to go and log in.
-        let store = AuthStore::load(&env.store_path).unwrap();
+        let store = AuthStore::load(env.grants.path()).unwrap();
         assert_eq!(auth_status(&config.mcp_servers[0], &store, 1_000), "header");
     }
 
@@ -965,7 +977,7 @@ mod tests {
         // The server is in config and the token landed in the store.
         let config = Config::load_from_path_public(&env.config_path).unwrap();
         assert_eq!(config.mcp_servers[0].name, "navigator");
-        let stored = AuthStore::load(&env.store_path).unwrap();
+        let stored = AuthStore::load(env.grants.path()).unwrap();
         assert_eq!(stored.get("navigator").unwrap().access_token, "cli-access");
         // And no token leaked into the config file.
         let config_text = std::fs::read_to_string(&env.config_path).unwrap();
@@ -1018,7 +1030,7 @@ mod tests {
         // First login registers, second reuses the stored client_id.
         login("navigator", &env).await.unwrap();
         login("navigator", &env).await.unwrap();
-        let stored = AuthStore::load(&env.store_path).unwrap();
+        let stored = AuthStore::load(env.grants.path()).unwrap();
         assert_eq!(stored.get("navigator").unwrap().client_id, "cli-client");
     }
 
@@ -1142,11 +1154,10 @@ for line in sys.stdin:
         std::fs::create_dir(&store).unwrap();
         McpEnv {
             config_path: cfg,
-            store_path: store,
+            grants: McpGrants::new(store, Ok(None)),
             opener: std::sync::Arc::new(never_opens),
             now: 0,
             tools_dir: None,
-            credential_store: None,
             allow_env_vars: Vec::new(),
             connect_timeout: TEST_CONNECT_TIMEOUT,
         }
@@ -1164,10 +1175,10 @@ for line in sys.stdin:
     fn seed_readonly_store(env: &McpEnv, name: &str) {
         let mut store = AuthStore::default();
         store.set(name, leviath_mcp::ServerAuth::default());
-        store.save(&env.store_path).unwrap();
-        let mut perms = std::fs::metadata(&env.store_path).unwrap().permissions();
+        store.save(env.grants.path()).unwrap();
+        let mut perms = std::fs::metadata(env.grants.path()).unwrap().permissions();
         perms.set_readonly(true);
-        std::fs::set_permissions(&env.store_path, perms).unwrap();
+        std::fs::set_permissions(env.grants.path(), perms).unwrap();
     }
 
     #[tokio::test]
@@ -1222,11 +1233,10 @@ for line in sys.stdin:
         std::fs::write(&file, b"x").unwrap();
         let ro_env = McpEnv {
             config_path: file.join("config.toml"),
-            store_path: dir.path().join("s.json"),
+            grants: McpGrants::new(dir.path().join("s.json"), Ok(None)),
             opener: std::sync::Arc::new(never_opens),
             now: 0,
             tools_dir: None,
-            credential_store: None,
             allow_env_vars: Vec::new(),
             connect_timeout: TEST_CONNECT_TIMEOUT,
         };
@@ -1252,7 +1262,7 @@ for line in sys.stdin:
         );
         // Config + resolve succeed; the store is a directory, so its load fails
         // before any browser flow.
-        std::fs::create_dir(&env.store_path).unwrap();
+        std::fs::create_dir(env.grants.path()).unwrap();
         assert!(login("remote", &env).await.is_err());
     }
 
@@ -1310,7 +1320,7 @@ for line in sys.stdin:
         let env = env_at(dir.path(), never_opens, 0);
         seed_config(&env, MCPServerConfig::stdio("x", "npx", vec![]));
         // Config load + save succeed; the store is a directory, so its load fails.
-        std::fs::create_dir(&env.store_path).unwrap();
+        std::fs::create_dir(env.grants.path()).unwrap();
         assert!(
             remove_server(
                 RemoveArgs {
@@ -1346,7 +1356,7 @@ for line in sys.stdin:
         let dir = tempfile::tempdir().unwrap();
         let env = env_at(dir.path(), never_opens, 0);
         seed_config(&env, MCPServerConfig::http("remote", "https://e.com/mcp"));
-        std::fs::create_dir(&env.store_path).unwrap();
+        std::fs::create_dir(env.grants.path()).unwrap();
         assert!(list_servers(ListArgs { json: false }, &env).is_err());
     }
 
@@ -1370,8 +1380,39 @@ for line in sys.stdin:
                 ..Default::default()
             },
         );
-        store.save(&env.store_path).unwrap();
+        store.save(env.grants.path()).unwrap();
         assert!(test("remote", &env).await.is_err());
+    }
+
+    /// `test` reads the bearer through the credential store the grants are
+    /// kept in: an expired grant held there is refreshed, and a refresh that
+    /// fails is the answer rather than a connection attempt with no token.
+    #[tokio::test]
+    async fn test_reads_a_grant_kept_in_the_credential_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env_at(dir.path(), never_opens, 1_000);
+        seed_config(
+            &env,
+            MCPServerConfig::http("remote", "http://127.0.0.1:1/mcp"),
+        );
+        let keychain = leviath_core::MemoryStore::new();
+        let mut store = AuthStore::default();
+        store.set(
+            "remote",
+            leviath_mcp::ServerAuth {
+                token_endpoint: "http://127.0.0.1:1/token".to_string(),
+                refresh_token: Some("good".to_string()),
+                expires_at: 1,
+                ..Default::default()
+            },
+        );
+        store.save_with(env.grants.path(), Some(&keychain)).unwrap();
+        env.grants = McpGrants::new(
+            env.grants.path().to_path_buf(),
+            Ok(Some(Box::new(keychain))),
+        );
+        let err = test("remote", &env).await.unwrap_err();
+        assert!(err.to_string().contains("could not be refreshed"), "{err}");
     }
 
     #[tokio::test]

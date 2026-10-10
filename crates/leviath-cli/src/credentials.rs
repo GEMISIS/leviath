@@ -3,10 +3,14 @@
 //! [`leviath_core::credentials`] defines the vocabulary and the
 //! [`CredentialStore`] trait; `leviath_sys::keychain` owns the OS binding and
 //! its no-store fallback. This module is the seam between them: it turns a
-//! `[security] credential_store` setting into something the config loader and
-//! the `lev auth` command can call.
+//! `[security] credential_store` setting into something the config loader,
+//! the `lev auth` command and every MCP login surface can call.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use leviath_core::{CredentialStore, CredentialStoreKind};
+use leviath_mcp::AuthStore;
 
 /// A [`CredentialStore`] backed by the OS credential store.
 ///
@@ -76,6 +80,99 @@ fn store_for_with(kind: CredentialStoreKind, probe: fn(&str) -> Result<(), Strin
             })?;
             Ok(Some(Box::new(KeychainStore::new(service))))
         }
+    }
+}
+
+/// Where MCP OAuth grants are kept: the grant file, and under `[security]
+/// credential_store = "keychain"` the OS store holding the tokens the file
+/// only names.
+///
+/// One value for the pair, because a grant has to be read and written through
+/// the backend that holds it. Read through the file alone, a keychain user's
+/// login shows as logged out; written through it, their refresh token lands
+/// on disk.
+///
+/// A keychain that was asked for and cannot be reached is kept here and given
+/// back by every read and write, so each surface reports it where it reports a
+/// grant file that will not load, and nothing falls back to the file.
+#[derive(Clone)]
+pub struct McpGrants {
+    path: PathBuf,
+    store: Result<Option<Arc<dyn CredentialStore>>, String>,
+}
+
+impl McpGrants {
+    /// The grants in `path`, kept where `kind` says.
+    pub fn at(path: PathBuf, kind: CredentialStoreKind) -> Self {
+        Self::new(path, store_for(kind))
+    }
+
+    /// [`at`](Self::at) with the backend already resolved.
+    pub(crate) fn new(path: PathBuf, resolved: Resolved) -> Self {
+        Self {
+            path,
+            store: resolved.map(|store| store.map(Arc::from)),
+        }
+    }
+
+    /// The grant file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The store holding the tokens, `None` for the file itself.
+    fn store(&self) -> anyhow::Result<Option<&dyn CredentialStore>> {
+        self.store
+            .as_ref()
+            .map(Option::as_deref)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Every grant, or none when there is no file yet.
+    ///
+    /// A file that will not load is an error rather than an empty set: it
+    /// holds every server's grant, and a save over an empty set would lose
+    /// them all.
+    pub fn load(&self) -> anyhow::Result<AuthStore> {
+        AuthStore::load_with(&self.path, self.store()?)
+    }
+
+    /// Write `grants` back through the backend they belong in.
+    pub fn save(&self, grants: &AuthStore) -> anyhow::Result<()> {
+        grants.save_with(&self.path, self.store()?)
+    }
+
+    /// Forget `server`'s grant, reporting whether it had one.
+    pub fn forget(&self, server: &str) -> anyhow::Result<bool> {
+        let mut grants = self.load()?;
+        if !grants.remove(server) {
+            return Ok(false);
+        }
+        self.save(&grants)?;
+        Ok(true)
+    }
+
+    /// The `Authorization` header for `server`, its token refreshed first when
+    /// it has lapsed; `None` when the server holds no grant.
+    pub async fn authorization_header(
+        &self,
+        server: &str,
+        now: u64,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        let store = self.store()?;
+        leviath_mcp::OAuthClient::new()
+            .authorization_header_with(server, &self.path, now, store)
+            .await
+    }
+
+    /// What renews `server`'s token on a 401 mid-session, through these same
+    /// grants.
+    pub fn refresher(&self, server: &str) -> leviath_mcp::StoredTokenRefresher {
+        leviath_mcp::StoredTokenRefresher::new(
+            server,
+            self.path.clone(),
+            self.store.clone().unwrap_or_default(),
+        )
     }
 }
 
@@ -182,6 +279,83 @@ mod tests {
             .expect("a failing probe must not yield a store");
         assert!(err.contains(r#"credential_store = "keychain""#), "{err}");
         assert!(err.contains("credential store unavailable"), "{err}");
+    }
+
+    /// Grants read and written through a store keep the tokens out of the
+    /// file, and forgetting one takes it out of both.
+    #[test]
+    fn grants_kept_in_a_store_stay_out_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let grants = McpGrants::new(
+            dir.path().join("mcp-auth.json"),
+            Ok(Some(Box::new(leviath_core::MemoryStore::new()))),
+        );
+        let mut held = grants.load().unwrap();
+        assert!(held.server_names().is_empty());
+        held.set(
+            "remote",
+            leviath_mcp::ServerAuth {
+                access_token: "secret-token".to_string(),
+                ..Default::default()
+            },
+        );
+        grants.save(&held).unwrap();
+        let file = std::fs::read_to_string(grants.path()).unwrap();
+        assert!(!file.contains("secret-token"), "{file}");
+        assert_eq!(
+            grants.load().unwrap().get("remote").unwrap().access_token,
+            "secret-token"
+        );
+
+        assert!(grants.forget("remote").unwrap());
+        assert!(!grants.forget("remote").unwrap(), "nothing left to forget");
+        assert!(grants.load().unwrap().get("remote").is_none());
+    }
+
+    /// A keychain that cannot be reached is every read's and write's answer,
+    /// and never a quiet fall back to the file.
+    #[tokio::test]
+    async fn an_unreachable_keychain_is_the_answer_to_every_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let grants = McpGrants::new(
+            dir.path().join("mcp-auth.json"),
+            Err("no keychain here".to_string()),
+        );
+        let err = grants.load().unwrap_err();
+        assert!(err.to_string().contains("no keychain"), "{err}");
+        assert!(grants.save(&AuthStore::default()).is_err());
+        assert!(grants.forget("remote").is_err());
+        assert!(grants.authorization_header("remote", 0).await.is_err());
+        assert!(!grants.path().exists(), "nothing was written");
+        // A refresher is only made for a grant that was read; this one has
+        // only the file to read.
+        let _ = grants.refresher("remote");
+    }
+
+    /// The bearer comes from the stored grant, and a server with none has
+    /// none.
+    #[tokio::test]
+    async fn the_bearer_is_the_stored_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let grants = McpGrants::at(dir.path().join("mcp-auth.json"), CredentialStoreKind::File);
+        assert_eq!(
+            grants.authorization_header("remote", 0).await.unwrap(),
+            None
+        );
+        let mut held = AuthStore::default();
+        held.set(
+            "remote",
+            leviath_mcp::ServerAuth {
+                access_token: "live".to_string(),
+                expires_at: u64::MAX,
+                ..Default::default()
+            },
+        );
+        grants.save(&held).unwrap();
+        assert_eq!(
+            grants.authorization_header("remote", 0).await.unwrap(),
+            Some(("Authorization".to_string(), "Bearer live".to_string()))
+        );
     }
 
     #[test]
