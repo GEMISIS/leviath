@@ -31,7 +31,16 @@ pub(super) async fn run_doctor(State(_state): State<AppState>) -> Json<DoctorRes
 }
 
 /// The checks, run offline. Both surfaces call this.
+///
+/// Every offline check reads the disk (the config, the profiles file, the
+/// sign-in grants) and none of them waits on the network, so the whole run is
+/// driven to its end on the blocking pool.
 pub(super) async fn offline_report() -> DoctorResp {
+    super::blocking::blocking(|| tokio::runtime::Handle::current().block_on(offline_checks())).await
+}
+
+/// [`offline_report`], on whichever thread drives it.
+async fn offline_checks() -> DoctorResp {
     let args = DoctorArgs {
         offline: true,
         ..DoctorArgs::default()

@@ -247,6 +247,7 @@ impl ParentFilter {
 ///
 /// `fields` is carried here rather than applied here: projection is how one
 /// surface renders a run, and GraphQL does it with a selection set instead.
+#[derive(Clone)]
 pub(crate) struct RunSpec {
     pub(crate) limit: usize,
     pub(crate) cursor: Option<Cursor>,
@@ -406,6 +407,14 @@ pub(crate) fn record_record_reads(record: RecordReadRecorder) {
     drop(RECORDER.set(record));
 }
 
+/// [`read_by_id`] on the blocking pool, where a file read per id belongs.
+///
+/// Both listings read a batch by id through here.
+async fn read_ids(ids: &[String]) -> (Vec<Arc<RunMeta>>, Vec<String>) {
+    let ids = ids.to_vec();
+    super::super::blocking::blocking(move || read_by_id(&ids)).await
+}
+
 /// Note that one run's record is about to be opened.
 fn noted(run_id: &str) {
     if let Some(record) = RECORDER.get() {
@@ -418,10 +427,10 @@ fn noted(run_id: &str) {
 /// `held` is the records a caller that already walked the store is carrying.
 /// The ids came out of those records, so reading them back would open every
 /// one of them a second time for the same answer.
-fn by_ids(ids: &[String], held: Option<&[Arc<RunMeta>]>, server_time: i64) -> RunListing {
+async fn by_ids(ids: &[String], held: Option<&[Arc<RunMeta>]>, server_time: i64) -> RunListing {
     let (found, missing) = match held {
         Some(held) => (held.to_vec(), Vec::new()),
-        None => read_by_id(ids),
+        None => read_ids(ids).await,
     };
     let total = found.len();
     RunListing {
@@ -451,7 +460,7 @@ pub(crate) async fn list(state: &AppState, spec: &RunSpec) -> RunListing {
     let server_time = leviath_core::duration::now_secs();
 
     if let Some(ref ids) = spec.ids {
-        return by_ids(ids, spec.preloaded.as_deref(), server_time);
+        return by_ids(ids, spec.preloaded.as_deref(), server_time).await;
     }
 
     let snapshot = state.caches.run_index.snapshot().await;
@@ -488,21 +497,26 @@ pub(crate) async fn list(state: &AppState, spec: &RunSpec) -> RunListing {
     // asked to see first.
     sort_runs(&mut runs, spec);
 
-    let (runs, scan_truncated) = apply_search(runs, spec);
+    // The deep sources open each run's files, so the search runs on the
+    // blocking pool.
+    let searching = spec.clone();
+    let (runs, scan_truncated) =
+        super::super::blocking::blocking(move || apply_search(runs, &searching)).await;
     // Null when the scan was cut short: a count taken from a partial scan is
     // worse than no count, because a UI renders it as fact.
     let total = (!scan_truncated).then_some(runs.len());
 
     let (page_runs, next_cursor) = paginate(runs, spec);
+    let found = match spec.q.clone() {
+        None => Vec::new(),
+        Some(q) => highlights_of(page_runs.clone(), q, spec.sources.clone()).await,
+    };
+    let mut found = found.into_iter();
     let hits = page_runs
         .into_iter()
-        .map(|meta| {
-            let highlights = spec
-                .q
-                .as_deref()
-                .map(|q| highlights_for(&meta, q, &spec.sources))
-                .unwrap_or_default();
-            RunHit { meta, highlights }
+        .map(|meta| RunHit {
+            meta,
+            highlights: found.next().unwrap_or_default(),
         })
         .collect();
 
@@ -578,11 +592,7 @@ async fn prepared(state: &AppState, spec: &RunSpec) -> (lazy::RunSift, Vec<Arc<R
     };
     let items = match spec.ids {
         None => indexed,
-        // One record read off the disk per id, on the blocking pool.
-        Some(ref ids) => {
-            let ids = ids.clone();
-            super::super::blocking::blocking(move || read_by_id(&ids).0).await
-        }
+        Some(ref ids) => read_ids(ids).await.0,
     };
     (lazy::RunSift::new(spec, descendants, ctx), items)
 }

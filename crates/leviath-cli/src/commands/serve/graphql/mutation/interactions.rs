@@ -174,19 +174,22 @@ pub(crate) async fn answer_interaction(
             interaction_id,
             outcome: AnswerOutcome::Accepted,
         }),
-        // Nothing open under that id, and a run here asked it: answered
-        // already, or expired. The other failures, a held run's question among
-        // them, stay failures.
-        Err(ServeError::NotFound(_)) if asked_here(&interaction_id) => {
-            Ok(AnswerInteractionResult {
-                interaction_id,
-                outcome: AnswerOutcome::AlreadySettled,
-            })
+        // Nothing open under that id. A run here asked it, so it was answered
+        // already or expired; or none did, and it is a miss. The other
+        // failures, a held run's question among them, stay failures.
+        Err(ServeError::NotFound(_)) => {
+            let id = interaction_id.to_string();
+            match crate::commands::serve::blocking::blocking(move || asked_here(&id)).await {
+                true => Ok(AnswerInteractionResult {
+                    interaction_id,
+                    outcome: AnswerOutcome::AlreadySettled,
+                }),
+                false => Err(graphql_error(&ServeError::NotFound(format!(
+                    "No interaction '{}': no run on this machine asked it",
+                    interaction_id.as_str()
+                )))),
+            }
         }
-        Err(ServeError::NotFound(_)) => Err(graphql_error(&ServeError::NotFound(format!(
-            "No interaction '{}': no run on this machine asked it",
-            interaction_id.as_str()
-        )))),
         Err(other) => Err(graphql_error(&other)),
     }
 }
@@ -197,7 +200,8 @@ pub(crate) async fn answer_interaction(
 /// dash is tried as the end of the run's part. The run's directory is the
 /// test rather than its record of what it settled: an answer is written to
 /// the run file a tick after the hub hands it over, and a second click inside
-/// that tick is still a second click.
+/// that tick is still a second click. A `stat` per dash, so it is asked on the
+/// blocking pool.
 fn asked_here(id: &str) -> bool {
     id.match_indices('-')
         .any(|(at, _)| crate::runstate::run_dir(id.get(..at).unwrap_or_default()).is_dir())

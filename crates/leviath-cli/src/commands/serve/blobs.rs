@@ -463,9 +463,10 @@ pub(super) fn registry_rows(registry: &MimeRegistry) -> Vec<MimeTypeEntry> {
 
 /// `GET /api/mime`: the effective mime registry.
 pub(super) async fn list_mime(State(state): State<AppState>) -> Json<MimeListing> {
-    Json(MimeListing {
-        types: mime_rows(&state),
-    })
+    // Building the registry reads the providers' scripts and the operator's
+    // file, and compiles every check a row names.
+    let types = super::blocking::blocking(move || mime_rows(&state)).await;
+    Json(MimeListing { types })
 }
 
 /// The operator's registry rows, before any blueprint's own. Both surfaces

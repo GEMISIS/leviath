@@ -39,7 +39,8 @@ pub(super) async fn list_dirs(
     State(state): State<AppState>,
     Query(query): Query<DirsQuery>,
 ) -> Result<Json<DirsResp>, ApiError> {
-    dir_listing(&state, query.path.as_deref(), query.hidden)
+    super::blocking::blocking(move || dir_listing(&state, query.path.as_deref(), query.hidden))
+        .await
         .map(Json)
         .map_err(|e| super::core::error::as_api_error(&e))
 }
@@ -177,7 +178,8 @@ pub(super) async fn create_dir(
     State(state): State<AppState>,
     Json(req): Json<MkdirReq>,
 ) -> Result<(StatusCode, Json<MkdirResp>), ApiError> {
-    made(&state, &req.path, &req.name)
+    super::blocking::blocking(move || made(&state, &req.path, &req.name))
+        .await
         .map(|made| (StatusCode::CREATED, Json(made)))
         .map_err(|e| super::core::error::as_api_error(&e))
 }

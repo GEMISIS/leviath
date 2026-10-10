@@ -38,7 +38,9 @@ use crate::commands::update::{UpdateArgs, UpdateEnv, plan, plan_json};
 /// discovery degrades to worse detection rather than to an error - a copy this
 /// build cannot place is `unknown` with advice, an answer rather than a 500.
 pub(super) async fn get_update(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let plan = planned();
+    // Planning reads the disk: where the binary is, the installed blueprints,
+    // and the config.
+    let plan = super::blocking::blocking(planned).await;
     // Reports what is known now and, if that has gone stale, starts a lookup for
     // whoever asks next. Never waits on one.
     //

@@ -193,17 +193,9 @@ pub(crate) async fn discover(
     // tool directories belong on the blocking pool.
     let dirs = super::super::super::tools::AgentDirs::of(&state.current_config());
     let named = blueprint.map(str::to_string);
-    let found = blocking(move || {
-        let dir = match named.as_deref() {
-            Some(name) => Some(dirs.dir(name)?),
-            None => None,
-        };
-        Ok::<_, super::super::super::core::error::ServeError>(
-            crate::tool_inventory::ToolInventory::discover(dir.as_deref(), named.as_deref()),
-        )
-    })
-    .await
-    .gql()?;
+    let found = blocking(move || super::super::super::tools::inventory(&dirs, named.as_deref()))
+        .await
+        .gql()?;
     Ok(Inventory {
         tools: found.tools.into_iter().map(Tool::of).collect(),
         skipped: found
