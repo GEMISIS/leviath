@@ -183,8 +183,16 @@ pub(crate) fn from_meta(state: &mut RunState, meta: &RunMeta, graph: &RunGraph) 
         .map(leviath_runtime::state::WaitState::from);
 }
 
-/// The state the run was last in.
-pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunState {
+/// The state the run was last in. What reading its window leaves out is
+/// added to `losses`, and `named` is every stored part its steps named, in
+/// the order they named them.
+pub(crate) fn last(
+    old: &LegacyRun,
+    spec: &RunSpec,
+    losses: &mut Losses,
+    named: Vec<BlobFile>,
+    report: &mut Report,
+) -> RunState {
     let meta = old.meta();
     let graph = &spec.graph;
     let stage = stage_of(graph, meta).unwrap_or_else(|| {
@@ -198,9 +206,7 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
         );
         entry(graph)
     });
-    let mut losses = Losses::default();
-    let ctx = context_in(graph, stage, &old.folded.context, &mut losses);
-    losses.report(report);
+    let ctx = context_in(graph, stage, &old.folded.context, losses);
     let mut state = RunState::initial(stage.name.clone(), ctx, stage.accepts_messages);
     state.pending = old
         .folded
@@ -271,7 +277,7 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
         .collect();
     state.final_output = final_output(old, stage, report);
     state.files = files(old);
-    state.blobs = blobs(old, &state.context);
+    state.blobs = blobs(old, named, &state.context);
     if let Some(why) = spec.origin.never_resumes()
         && !matches!(
             state.status,
@@ -727,10 +733,14 @@ fn files(old: &LegacyRun) -> RunFiles {
     files
 }
 
-/// The stored parts the old run keeps under `blobs/`: each one its context
-/// holds, with where it came from, then any other there by digest.
-fn blobs(old: &LegacyRun, context: &leviath_runtime::state::ContextState) -> Vec<BlobFile> {
-    let mut named = Vec::new();
+/// The stored parts the old run keeps under `blobs/`: each one `named` by
+/// its steps and each one its last context holds, with where it came from,
+/// then any other there by digest.
+fn blobs(
+    old: &LegacyRun,
+    mut named: Vec<BlobFile>,
+    context: &leviath_runtime::state::ContextState,
+) -> Vec<BlobFile> {
     leviath_runtime::state::files::note_blobs(&mut named, context);
     for (digest, size) in &old.blobs {
         if !named.iter().any(|b| b.digest == *digest) {

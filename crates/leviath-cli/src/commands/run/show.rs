@@ -57,8 +57,9 @@ pub(crate) fn render(args: &ShowArgs) -> anyhow::Result<String> {
     let id = &resolve(&args.run_id)?;
     let reader = runstate::run_file::open_in(&runstate::run_dir(id)).with_context(|| {
         format!(
-            "run '{id}' has no run file to read; `lev ps --all` lists the runs there are, and \
-             a run from an older release is converted when the daemon starts"
+            "run '{id}' has no run file this build reads; `lev ps --all` lists the runs there \
+             are, and a run from an older release or an alpha build is converted when the \
+             daemon starts"
         )
     })?;
     if let Some(note) = torn_note(id, reader.cut_bytes()) {

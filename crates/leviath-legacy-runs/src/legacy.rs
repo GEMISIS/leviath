@@ -154,6 +154,11 @@ pub(crate) struct LegacyRun {
     /// held the window. `None` for a run that kept no journal, which those
     /// releases listed no history for.
     pub(crate) first_point_at: Option<i64>,
+    /// How many frames of its journal held no record this build reads.
+    pub(crate) skipped_records: usize,
+    /// How many bytes at the end of its journal were a record a crash cut
+    /// short.
+    pub(crate) torn_bytes: usize,
 }
 
 impl LegacyRun {
@@ -188,10 +193,15 @@ impl LegacyRun {
             .flatten()
             .unwrap_or_default();
         let journaled = journal.is_some();
-        let records = match journal {
+        let read = match journal {
             Some(bytes) => journal_records(&journal_path, &bytes)?,
-            None => records_without_journal(dir, meta.clone())?,
+            None => journal::Records {
+                records: records_without_journal(dir, meta.clone())?,
+                ..journal::Records::default()
+            },
         };
+        let (skipped_records, torn_bytes) = (read.skipped, read.torn);
+        let records = read.records;
         let Some(JournalRecord::Header { meta: header, .. }) = records.first() else {
             return Err(ConvertError::Unreadable {
                 path: journal_path,
@@ -221,6 +231,8 @@ impl LegacyRun {
             blobs,
             stray_blobs,
             first_point_at,
+            skipped_records,
+            torn_bytes,
         })
     }
 }
@@ -279,7 +291,7 @@ fn json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, Con
         })
 }
 
-fn journal_records(path: &Path, bytes: &[u8]) -> Result<Vec<JournalRecord>, ConvertError> {
+fn journal_records(path: &Path, bytes: &[u8]) -> Result<journal::Records, ConvertError> {
     let unreadable = |why: String| ConvertError::Unreadable {
         path: path.to_path_buf(),
         why,
@@ -289,7 +301,7 @@ fn journal_records(path: &Path, bytes: &[u8]) -> Result<Vec<JournalRecord>, Conv
             "it is neither an LVR1 journal nor a run file".into(),
         ));
     }
-    journal::read(bytes).map_err(unreadable)
+    journal::read_counted(bytes).map_err(unreadable)
 }
 
 /// A run from before the journal: its header is `meta.json` and its one

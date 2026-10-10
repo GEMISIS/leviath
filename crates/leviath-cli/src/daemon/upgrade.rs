@@ -6,10 +6,10 @@
 //! Each step reports its progress on the daemon's
 //! [`StartupBoard`](leviath_runtime::control_socket::StartupBoard) while it
 //! runs, and adds what it did to an [`Upgrade`]. At the end the upgrade is
-//! summed up in a few lines: how many blueprints were upgraded and runs
-//! converted, where the backup is, and a warning for every key the upgrade
-//! dropped. They go to the daemon's log and are kept in the backup for the
-//! first command a person runs to show once
+//! summed up in a few lines: how many blueprints were upgraded, runs
+//! converted and run files upgraded, where the backup is, and a warning for
+//! every key the upgrade dropped. They go to the daemon's log and are kept in
+//! the backup for the first command a person runs to show once
 //! ([`Backup::announce_later`](crate::home_backup::Backup::announce_later)).
 
 use std::collections::BTreeMap;
@@ -28,6 +28,8 @@ pub(crate) struct Upgrade {
     pub(crate) left: Vec<String>,
     /// Old runs converted into run files.
     pub(crate) converted: usize,
+    /// Run files in binary layout 2 upgraded to this build's layout.
+    pub(crate) upgraded: usize,
     /// Old runs tried this time that did not convert.
     pub(crate) failed: usize,
     /// One warning per key dropped from an installed blueprint, and per
@@ -44,13 +46,14 @@ pub(crate) struct Upgrade {
 impl Upgrade {
     /// Whether it did anything worth saying.
     fn is_empty(&self) -> bool {
-        self.blueprints + self.blueprints_failed + self.converted + self.failed == 0
+        self.blueprints + self.blueprints_failed + self.converted + self.upgraded + self.failed == 0
     }
 
     /// Add what converting the old runs did, to an upgrade that has not
     /// converted any.
     pub(crate) fn add_runs(&mut self, runs: Upgrade) {
         self.converted = runs.converted;
+        self.upgraded = runs.upgraded;
         self.failed = runs.failed;
         self.unconverted = runs.unconverted;
         self.dropped_in_runs = runs.dropped_in_runs;
@@ -75,6 +78,13 @@ impl Upgrade {
             count(self.blueprints, "blueprint", "upgraded"),
             count(self.converted, "old run", "converted"),
         ];
+        if self.upgraded > 0 {
+            done.push(count(
+                self.upgraded,
+                "run file",
+                "from an alpha build upgraded",
+            ));
+        }
         if self.blueprints_failed > 0 {
             done.push(count(
                 self.blueprints_failed,
@@ -119,8 +129,8 @@ impl Upgrade {
     /// `lev list` names what is still waiting.
     pub(crate) fn finish(&self, backup: &Backup) -> Vec<String> {
         let named_before = backup.name_left(&self.left);
-        let only_left =
-            self.blueprints + self.converted + self.failed == 0 && self.dropped_in_runs.is_empty();
+        let only_left = self.blueprints + self.converted + self.upgraded + self.failed == 0
+            && self.dropped_in_runs.is_empty();
         if only_left && named_before {
             return Vec::new();
         }
@@ -226,6 +236,45 @@ mod tests {
             ..left(0)
         };
         assert!(!two.finish(&backup).is_empty());
+    }
+
+    /// Run files an alpha build wrote are counted apart from the old runs
+    /// converted, and only when there were any; an upgrade that did nothing
+    /// else is still said once.
+    #[test]
+    fn upgraded_run_files_are_counted_when_there_are_any() {
+        let home = tempfile::tempdir().unwrap();
+        let backup = Backup::of_home(home.path());
+        let mut runs = Upgrade {
+            converted: 2,
+            upgraded: 984,
+            ..Upgrade::default()
+        };
+        let mut upgrade = Upgrade::default();
+        upgrade.add_runs(std::mem::take(&mut runs));
+        let line = &upgrade.lines(&backup)[0];
+        assert!(
+            line.contains(
+                "0 blueprints upgraded, 2 old runs converted, 984 run files from an alpha \
+                 build upgraded."
+            ),
+            "{line}"
+        );
+        let one = Upgrade {
+            upgraded: 1,
+            ..Upgrade::default()
+        };
+        let lines = one.finish(&backup);
+        assert!(
+            lines[0].contains("1 run file from an alpha build upgraded."),
+            "{lines:?}"
+        );
+        let none = Upgrade {
+            converted: 1,
+            ..Upgrade::default()
+        };
+        let line = &none.lines(&backup)[0];
+        assert!(!line.contains("alpha"), "{line}");
     }
 
     #[test]

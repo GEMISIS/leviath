@@ -11,8 +11,10 @@
 //! writer.
 //!
 //! A run directory in the older many-file layout has no run file of its own
-//! until the daemon converts it, which it does for every such directory when it
-//! starts. This server reads only run files: an unconverted directory answers
+//! until the daemon converts it, and a run file an alpha build wrote in an
+//! earlier binary layout does not read until the daemon upgrades it; the
+//! daemon does both for every such directory when it starts. This server
+//! reads only run files in this build's layout: any other directory answers
 //! as a run whose file cannot be read, and the message says that a daemon
 //! start converts it.
 
@@ -56,7 +58,8 @@ pub(crate) fn require(run_id: &str) -> Result<RunFileReader, ServeError> {
 pub(crate) fn unreadable(run_id: &str, e: &dyn std::fmt::Display) -> ServeError {
     ServeError::Internal(format!(
         "Run '{run_id}' has a run file this server cannot read ({e}). A run directory \
-         from an older release is converted when the daemon starts."
+         from an older release, or a run file an alpha build wrote, is converted when the \
+         daemon starts."
     ))
 }
 

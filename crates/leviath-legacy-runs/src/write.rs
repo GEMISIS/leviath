@@ -57,7 +57,7 @@ pub(crate) fn encode(
 
 /// One frame. Every run-file type is plain data that postcard encodes, and
 /// nothing an old run holds comes near a frame's 4 GiB limit.
-fn frame<T: serde::Serialize>(kind: FrameKind, payload: &T) -> Vec<u8> {
+pub(crate) fn frame<T: serde::Serialize>(kind: FrameKind, payload: &T) -> Vec<u8> {
     codec::encode(kind, payload).expect("a run-file frame always encodes")
 }
 

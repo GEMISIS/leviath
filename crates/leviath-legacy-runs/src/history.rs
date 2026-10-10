@@ -12,11 +12,16 @@
 //! them showed them. A last delta then carries the run to the state rebuilt
 //! from every file, with the conversion's report in its log, so folding the
 //! deltas always ends exactly at the last state.
+//!
+//! Every state names the stored parts its window has held so far, as a
+//! running world names them at each step: a part stays named once its window
+//! lets it go, with the region it first appeared in.
 
 use leviath_core::run_meta::{ContextSnapshot, RunMeta};
 use leviath_runtime::runfile::record::{InferenceKind, RunRecord};
 use leviath_runtime::runfile::{Answered, journal_events_with};
 use leviath_runtime::spec::run_spec::RunSpec;
+use leviath_runtime::state::files::note_blobs;
 use leviath_runtime::state::{Change, ContextDiff, MessageState, RunEvent, RunState, StateDelta};
 
 use crate::context::Losses;
@@ -38,6 +43,8 @@ struct Replay<'a> {
     at: i64,
     /// Whether the checkpoint the start state was seeded from has been read.
     seeded: bool,
+    /// What reading each step's window left out.
+    losses: Losses,
 }
 
 impl Replay<'_> {
@@ -64,12 +71,8 @@ impl Replay<'_> {
         from_meta(&mut next, &self.meta, &self.spec.graph);
         if context_moved {
             let stage = stage_of(&self.spec.graph, &self.meta).unwrap_or(entry(&self.spec.graph));
-            next.context = context_in(
-                &self.spec.graph,
-                stage,
-                &self.context,
-                &mut Losses::default(),
-            );
+            next.context = context_in(&self.spec.graph, stage, &self.context, &mut self.losses);
+            note_blobs(&mut next.blobs, &next.context);
         }
         let mut delta = StateDelta::between(&self.state, &next, self.stamp(self.at), events);
         if context_moved
@@ -400,6 +403,23 @@ fn dropped(r: &JournalRecord) -> Option<String> {
     }
 }
 
+/// Name in the report what reading the old journal left out: records this
+/// build does not read, and a record a crash cut short at its end.
+fn left_out(old: &LegacyRun, report: &mut Report) {
+    if old.skipped_records > 0 {
+        report.note(format!(
+            "{} records of the old journal were left out: they are not records this build reads",
+            old.skipped_records
+        ));
+    }
+    if old.torn_bytes > 0 {
+        report.note(format!(
+            "the old journal ends in {} bytes of a record cut short, which were left out",
+            old.torn_bytes
+        ));
+    }
+}
+
 /// The state the run started in, its deltas, and the state it was last in.
 pub(crate) fn build(
     old: &LegacyRun,
@@ -418,9 +438,11 @@ pub(crate) fn build(
         regions: Vec::new(),
     };
     let context = old.first_context().cloned().unwrap_or(empty);
-    let start_ctx = context_in(graph, first, &context, &mut Losses::default());
+    let mut losses = Losses::default();
+    let start_ctx = context_in(graph, first, &context, &mut losses);
     let mut start = RunState::initial(first.name.clone(), start_ctx, first.accepts_messages);
     start.visits.extend(named.map(|s| (s.name.clone(), 1)));
+    note_blobs(&mut start.blobs, &start.context);
     let mut replay = Replay {
         spec,
         meta: old.header.clone(),
@@ -430,11 +452,15 @@ pub(crate) fn build(
         answered: Answered::default(),
         at: old.header.started_at,
         seeded: false,
+        losses,
     };
     for r in old.records.iter().skip(1) {
         replay.record(r);
     }
-    let mut last = last(old, spec, report);
+    let named = replay.state.blobs.clone();
+    let mut last = last(old, spec, &mut replay.losses, named, report);
+    replay.losses.report(report);
+    left_out(old, report);
     let events = report.log_lines().into_iter().map(RunEvent::Log).collect();
     let at = replay.stamp(old.meta().updated_at);
     let end = StateDelta::between(&replay.state, &last, at, events);

@@ -45,10 +45,11 @@ pub(crate) fn callback_secret(dir: &Path, spec: &RunSpec) -> CallbackSecret {
     Some(held.ok_or_else(|| reference.clone()))
 }
 
-/// Whether `dir` holds a run file this build reads, told from its first few
-/// bytes alone: a directory from an earlier release holds an older file
-/// under the same name, and reading the whole of it to find that out is what
-/// a listing of a thousand such runs cannot afford.
+/// Whether `dir` holds a run file, told from its first few bytes alone: a
+/// directory from an earlier release holds an older file under the same
+/// name, and reading the whole of it to find that out is what a listing of a
+/// thousand such runs cannot afford. A run file in an earlier binary layout
+/// passes too, and is refused by its fingerprint when it is read.
 pub(crate) fn is_run_file(dir: &Path) -> bool {
     use std::io::Read;
     let magic = leviath_runtime::runfile::codec::MAGIC;

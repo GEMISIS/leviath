@@ -62,8 +62,9 @@ system_prompt = "probe"
 }
 
 /// A home whose runs directory holds a finished old run whose blueprint has
-/// a key the old release never read (`a-done`), and an unfinished one
-/// stopped mid tool batch whose stage uses an MCP server (`b-old`).
+/// a key the old release never read (`a-done`), an unfinished one stopped
+/// mid tool batch whose stage uses an MCP server (`b-old`), and a run file an
+/// alpha build wrote in layout 2 (`c-alpha`).
 struct Home {
     dir: tempfile::TempDir,
     _stub: tempfile::TempDir,
@@ -93,7 +94,7 @@ impl Home {
         self.dir.path().join("runs")
     }
 
-    /// Put the two old runs back, as a fresh copy, with nothing else.
+    /// Put the three runs back, as a fresh copy, with nothing else.
     fn fill(&self) {
         for entry in std::fs::read_dir(self.dir.path()).unwrap().flatten() {
             match entry.file_type().unwrap().is_dir() {
@@ -109,6 +110,7 @@ impl Home {
         let old = self.runs().join("b-old");
         copy_dir(&fixture("mid-tool-batch"), &old);
         std::fs::write(old.join("blueprint.leviath"), probe_with_server(&self.stub)).unwrap();
+        copy_dir(&fixture("layout-2"), &self.runs().join("c-alpha"));
     }
 
     /// Each run's spec, by directory name.
@@ -210,7 +212,7 @@ async fn a_child_converts_exactly_as_the_daemon_does() {
     })
     .await;
     let expected = home.specs();
-    assert_eq!(in_daemon.converted, 2);
+    assert_eq!((in_daemon.converted, in_daemon.upgraded), (2, 1));
 
     home.fill();
     assert!(!crate::run_index::path_for(&runs).exists());
@@ -233,7 +235,7 @@ async fn a_child_converts_exactly_as_the_daemon_does() {
     let now = board.current();
     assert_eq!(
         (now.step.as_str(), now.done, now.total),
-        ("converting runs", 2, 2)
+        ("converting runs", 3, 3)
     );
 }
 
@@ -354,6 +356,7 @@ async fn the_daemon_stops_on_a_child_that_ends_goes_quiet_or_cannot_be_answered(
         done: 1,
         so_far: Tally {
             converted: 1,
+            upgraded: 0,
             failed: 0,
             dropped: vec![("probe".into(), "a line".into(), 1)],
         },
@@ -415,20 +418,23 @@ fn what_a_stopped_child_did_adds_to_what_the_daemon_did_after_it() {
     let runs = Path::new("/runs");
     let child = Tally {
         converted: 2,
+        upgraded: 1,
         failed: 1,
         dropped: vec![("probe".into(), "a line".into(), 2)],
     }
     .upgrade(runs);
+    assert_eq!(child.upgraded, 1);
     let mut rest = Upgrade {
         converted: 3,
+        upgraded: 1,
         failed: 2,
         unconverted: Some(Unconverted::path_for(runs)),
         ..Upgrade::default()
     };
     rest.dropped_in_run("probe", "a line".into());
     rest.dropped_in_run("other", "b line".into());
-    let all = then(child, rest, 6);
-    assert_eq!((all.converted, all.failed), (6, 2));
+    let all = then(child, rest, (6, 3));
+    assert_eq!((all.converted, all.upgraded, all.failed), (6, 3, 2));
     assert_eq!(
         all.dropped_in_runs
             .get(&("probe".to_string(), "a line".to_string())),
@@ -563,7 +569,7 @@ async fn the_daemon_converts_in_a_child_and_takes_over_from_one_that_fails() {
             convert_at_start(&runs, at_start(&config, &agents, &pool, Some(cmd)), &board).await
         })
         .await;
-        assert_eq!(upgrade.converted, 2, "{mode}");
+        assert_eq!((upgrade.converted, upgrade.upgraded), (2, 1), "{mode}");
         // A run the child did not report keeps what it dropped in its own log.
         let dropped = usize::from(mode != "die-at-done");
         assert_eq!(upgrade.dropped_in_runs.len(), dropped, "{mode}");

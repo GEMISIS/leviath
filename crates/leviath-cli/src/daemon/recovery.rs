@@ -20,7 +20,8 @@
 //! twice), a question put to a person or a stage checkpoint is asked again, a
 //! choice of edge is asked again, and a fan-out picks its workers back up. A
 //! run directory in the older many-file layout is converted to a run file
-//! first, when this build carries the converter.
+//! first, and a run file an alpha build wrote in an earlier binary layout is
+//! upgraded, when this build carries the converter.
 //!
 //! A start reads only the runs that have not finished, found through the run
 //! index, so a home with a thousand finished runs starts as fast as an empty
