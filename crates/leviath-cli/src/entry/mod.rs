@@ -358,9 +358,7 @@ impl RiskyExecutors for RealExecutors {
     }
 
     async fn update(&self, args: commands::update::UpdateArgs) -> anyhow::Result<()> {
-        // On the blocking pool: the release lookup is a blocking HTTP call,
-        // which panics on an async worker in a debug build.
-        tokio::task::spawn_blocking(move || real_update(args)).await?
+        real_update(args).await
     }
 }
 
@@ -370,7 +368,7 @@ impl RiskyExecutors for RealExecutors {
 /// The machine half lives in `UpdateEnv::real` rather than here, because
 /// `GET /api/update` needs exactly the same discovery and only differs in what
 /// it is willing to do with the answer.
-fn real_update(args: commands::update::UpdateArgs) -> anyhow::Result<()> {
+async fn real_update(args: commands::update::UpdateArgs) -> anyhow::Result<()> {
     // A config that will not load is not a reason to refuse the check: the
     // default is on, and `lev update` on a machine with a broken config is
     // exactly when somebody wants to know whether a newer build exists.
@@ -382,7 +380,7 @@ fn real_update(args: commands::update::UpdateArgs) -> anyhow::Result<()> {
         std::sync::Arc::new(ask_yes_no),
         update_check,
     );
-    commands::update::execute_with(&args, &env, env!("CARGO_PKG_VERSION"))
+    commands::update::execute_blocking(args, env, env!("CARGO_PKG_VERSION")).await
 }
 
 /// Run the upgrade command, letting it draw on the terminal it inherits - a

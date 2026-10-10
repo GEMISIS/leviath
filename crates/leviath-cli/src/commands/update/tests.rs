@@ -1373,6 +1373,39 @@ fn a_config_write_failure_fails_the_whole_command() {
     });
 }
 
+/// From an async caller the command runs off the runtime: the release lookup
+/// builds a blocking HTTP client, which panics on an async worker thread in a
+/// debug build.
+#[tokio::test]
+async fn an_async_caller_runs_the_command_off_the_runtime() {
+    let fixture = Fixture::new();
+    let mut env = fixture.env("/opt/homebrew/bin/lev", false, true);
+    env.latest = Arc::new(|_: &str| {
+        let _client = reqwest::blocking::Client::new();
+        Err("offline".to_string())
+    });
+    let args = UpdateArgs {
+        check: true,
+        ..Default::default()
+    };
+    execute_blocking(args, env, "0.3.4")
+        .await
+        .expect("the plan is reported");
+}
+
+/// A command that panics off the runtime is an error for its caller.
+#[tokio::test]
+async fn a_command_that_panics_off_the_runtime_is_an_error() {
+    let fixture = Fixture::new();
+    let mut env = fixture.env("/opt/homebrew/bin/lev", false, true);
+    env.latest = Arc::new(|_: &str| panic!("the lookup broke"));
+    let args = UpdateArgs {
+        check: true,
+        ..Default::default()
+    };
+    assert!(execute_blocking(args, env, "0.3.4").await.is_err());
+}
+
 #[test]
 fn load_config_reads_the_document_behind_the_parsed_value() {
     let dir = tempfile::tempdir().expect("a temp dir");

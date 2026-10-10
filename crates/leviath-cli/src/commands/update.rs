@@ -740,6 +740,18 @@ fn format_latest(newest: &latest::LatestCheck, running: &str) -> String {
     }
 }
 
+/// [`execute_with`] for an async caller, on tokio's blocking pool.
+///
+/// The release lookup is a blocking HTTP call, and a blocking client on an
+/// async worker thread panics in a debug build.
+pub async fn execute_blocking(
+    args: UpdateArgs,
+    env: UpdateEnv,
+    version: &'static str,
+) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || execute_with(&args, &env, version)).await?
+}
+
 /// Run `lev update` against an injected environment.
 pub fn execute_with(args: &UpdateArgs, env: &UpdateEnv, version: &str) -> anyhow::Result<()> {
     let plan = plan(args, env);

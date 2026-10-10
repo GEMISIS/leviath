@@ -45,13 +45,7 @@ fn crate_root() -> PathBuf {
 /// this binary uses; `HOME`/`USERPROFILE` are kept too since some
 /// lower-level dependencies may still consult them directly.
 fn lev_command(tmp_home: &std::path::Path) -> Command {
-    lev_command_at(std::path::Path::new(env!("CARGO_BIN_EXE_lev")), tmp_home)
-}
-
-/// [`lev_command`] for a `lev` binary at `lev`, for a test that needs the
-/// binary somewhere in particular.
-fn lev_command_at(lev: &std::path::Path, tmp_home: &std::path::Path) -> Command {
-    let mut cmd = Command::new(lev);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lev"));
     cmd.env("HOME", tmp_home)
         .env("USERPROFILE", tmp_home)
         .env("LEVIATH_HOME", tmp_home)
@@ -372,50 +366,5 @@ fn rage_subcommand_writes_a_zip_without_a_terminal() {
         &bytes[..2],
         b"PK",
         "a zip starts with the local file header"
-    );
-}
-
-// ─── update ──────────────────────────────────────────────────────────────
-//
-// `lev update --check` reports the plan and changes nothing. For a copy whose
-// channel it can tell, it also looks up the latest release, a blocking HTTP
-// call that a debug build refuses to make on an async worker thread. A copy
-// under a `scoop` directory is one such: the binary is linked there rather
-// than copied, since a copied binary loses its ad-hoc signature on macOS. The
-// proxy is a closed local port, so the lookup fails at once and nothing
-// leaves the machine.
-
-#[test]
-fn update_check_runs_its_release_lookup_off_the_async_runtime() {
-    let tmp = tempfile::tempdir().unwrap();
-    let bin = tmp
-        .path()
-        .join("scoop")
-        .join("apps")
-        .join("leviath")
-        .join("current");
-    std::fs::create_dir_all(&bin).unwrap();
-    let lev = bin.join(
-        std::path::Path::new(env!("CARGO_BIN_EXE_lev"))
-            .file_name()
-            .unwrap(),
-    );
-    if std::fs::hard_link(env!("CARGO_BIN_EXE_lev"), &lev).is_err() {
-        std::fs::copy(env!("CARGO_BIN_EXE_lev"), &lev).unwrap();
-    }
-    let closed = "http://127.0.0.1:9";
-    let output = lev_command_at(&lev, tmp.path())
-        .args(["update", "--check"])
-        .env("HTTPS_PROXY", closed)
-        .env("https_proxy", closed)
-        .env("ALL_PROXY", closed)
-        .env_remove("NO_PROXY")
-        .env_remove("no_proxy")
-        .output()
-        .expect("failed to spawn lev binary");
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
     );
 }
