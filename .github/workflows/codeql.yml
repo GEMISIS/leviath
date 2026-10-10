@@ -7,6 +7,13 @@ on:
     branches: [main]
   merge_group:
 
+# A second push to a PR supersedes the analysis of the first, so that one is
+# cancelled. Pull requests only: a push to main and a merge group must run to
+# completion, since each is the result `CodeQL` reports for that ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
   security-events: write
@@ -14,18 +21,21 @@ permissions:
 jobs:
   CodeQL:
     runs-on: ubuntu-latest
+    # Roughly double the longest run seen, about 20 minutes, nearly all of it
+    # the analysis step.
+    timeout-minutes: 40
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           languages: actions, python, rust
           queries: security-and-quality
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v4
+        uses: github/codeql-action/autobuild@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
