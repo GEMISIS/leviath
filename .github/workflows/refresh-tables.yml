@@ -1,0 +1,172 @@
+name: Refresh tables (Weekly Monday)
+
+# Refresh the tables crates/leviath-providers compiles in, one matrix leg per
+# table, each from the source that publishes it:
+#
+#   prices           pricing/rates.toml, from OpenRouter's public catalogue
+#                    cross-checked against LiteLLM's price table, written only
+#                    where the two agree
+#   bedrock-windows  bedrock/windows.toml, from the context and output limits
+#                    on every model card in the AWS Bedrock user guide
+#   modalities       mime/modalities.toml, from the input and output
+#                    modalities in OpenRouter's catalogue
+#
+# Each leg runs `cargo xtask <table>` and, when its file moves, opens a PR of
+# its own. The prices and Bedrock PRs are set to auto-merge, so the required
+# checks gate them exactly as they gate a person's PR. The modalities PR never
+# auto-merges: a bad upstream row silently changes what a model is sent, and
+# `cargo xtask modalities`, unlike the other two, refuses no implausible move,
+# so a person reads the diff.
+#
+# TOKEN: `PRICES_PAT` if set, else `RELEASE_TOKEN` (the release workflows'
+# token, which already has `contents: write` here). Whichever is used needs
+# `contents: write` (push the branch) and `pull requests: write` (open the
+# PR, enable auto-merge). It cannot be `GITHUB_TOKEN`: a PR opened with that
+# token gets no CI run on this repo, so it could never merge.
+#
+# Nothing in ci.yml runs these commands with `--check`. CI must not depend on
+# third-party sites being up; this workflow is the only network path.
+
+on:
+  schedule:
+    # Every Monday at 10am PST (5pm UTC), an hour after the beta promotion.
+    - cron: '0 17 * * 1'
+  workflow_dispatch:
+
+# One refresh at a time. A manual run during the scheduled one queues behind
+# it rather than opening a second PR for the same diff.
+concurrency:
+  group: tables-refresh
+  cancel-in-progress: false
+
+# The PAT carries the write scopes; the workflow token stays read-only.
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    name: Refresh ${{ matrix.table }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      # Each table has its own source and its own PR, so one leg failing says
+      # nothing about the others.
+      fail-fast: false
+      matrix:
+        include:
+          - table: prices
+            file: crates/leviath-providers/pricing/rates.toml
+            title: "chore(prices): refresh vendor list prices"
+            source: |-
+              Produced by `cargo xtask prices` from OpenRouter's catalogue
+              cross-checked against LiteLLM. Rows both sources agree on within
+              5% are written; disagreements are listed and left as they were.
+            auto-merge: true
+          - table: bedrock-windows
+            file: crates/leviath-providers/bedrock/windows.toml
+            title: "chore(bedrock): refresh model token limits"
+            source: |-
+              Produced by `cargo xtask bedrock-windows` from the model cards in
+              the AWS Bedrock user guide.
+            auto-merge: true
+          - table: modalities
+            file: crates/leviath-providers/mime/modalities.toml
+            title: "chore(modalities): refresh model input and output modalities"
+            source: |-
+              Produced by `cargo xtask modalities` from the architecture block
+              of OpenRouter's catalogue.
+            auto-merge: false
+    env:
+      TABLE: ${{ matrix.table }}
+      FILE: ${{ matrix.file }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The push below uses this identity, so the branch lands under the
+          # PAT and the PR it opens triggers CI.
+          token: ${{ secrets.PRICES_PAT || secrets.RELEASE_TOKEN }}
+
+      - uses: ./.github/actions/rust-setup
+        with:
+          shared-key: tables-refresh
+
+      - name: Refresh the table
+        id: refresh
+        run: |
+          set -euo pipefail
+          # Exit 2 is "could not reach a source": nothing to do this week and
+          # nothing to alarm about. Any other failure is a refusal (a source
+          # went empty or changed its layout, a row would move implausibly
+          # far) and the leg stays red so somebody looks.
+          set +e
+          cargo xtask "$TABLE" | tee "$TABLE.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -eq 2 ]; then
+            echo "A source was unreachable; $FILE is untouched."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open the PR
+        if: steps.refresh.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRICES_PAT || secrets.RELEASE_TOKEN }}
+          TITLE: ${{ matrix.title }}
+          SOURCE: ${{ matrix.source }}
+          AUTO_MERGE: ${{ matrix.auto-merge }}
+        run: |
+          set -euo pipefail
+          date="$(date -u +%Y-%m-%d)"
+          branch="chore/${TABLE}-${date}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add "$FILE"
+
+          # The diff `cargo xtask` printed: one line per row that moved,
+          # anything it declined to write, and the summary.
+          {
+            echo "${TITLE} ${date}"
+            echo
+            echo "$SOURCE"
+            echo
+            echo '```'
+            cat "$TABLE.log"
+            echo '```'
+          } > commit-message.txt
+          git commit -F commit-message.txt
+          git push -u origin "$branch"
+
+          if [ "$AUTO_MERGE" = true ]; then
+            merging="Auto-merges once the required checks pass."
+          else
+            merging="Does not auto-merge: read the diff before merging."
+          fi
+          {
+            echo "Weekly refresh of \`${FILE}\`"
+            echo "by \`cargo xtask ${TABLE}\`. ${merging}"
+            echo
+            echo '```'
+            cat "$TABLE.log"
+            echo '```'
+          } > pr-body.txt
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "${TITLE} ${date}" \
+            --body-file pr-body.txt
+
+          # Rebase merge, matching how every PR lands here (linear history). The
+          # branch protection's required checks hold it until they are green.
+          if [ "$AUTO_MERGE" = true ]; then
+            gh pr merge "$branch" --auto --rebase
+          fi
