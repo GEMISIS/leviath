@@ -42,9 +42,16 @@ fn validated(
 }
 
 /// Apply a partial edit to the config on disk, and answer with what it became.
-pub(crate) fn write(req: WriteConfigReq) -> Result<Config, ServeError> {
-    let paths = super::super::mcp::admin_paths();
-    let path = &paths.config;
+///
+/// The read, the checks and the write run on the blocking pool.
+pub(crate) async fn write(req: WriteConfigReq) -> Result<Config, ServeError> {
+    let path = super::super::mcp::admin_paths().config;
+    super::super::blocking::blocking(move || written(&path, req)).await
+}
+
+/// [`write`] on the blocking pool's side: the edit applied to the file at
+/// `path`.
+fn written(path: &std::path::Path, req: WriteConfigReq) -> Result<Config, ServeError> {
     let mut config = Config::load_from_path_public(path)
         .map_err(|e| ServeError::Internal(format!("failed to read config: {e}")))?;
 

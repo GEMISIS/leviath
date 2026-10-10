@@ -27,7 +27,9 @@ pub(crate) async fn update_config(
     request: UpdateConfigRequest,
 ) -> async_graphql::Result<UpdateConfigResult> {
     let state = ctx.data_unchecked::<AppState>();
-    let written = super::super::super::core::config::write(request.into_request().gql()?).gql()?;
+    let written = super::super::super::core::config::write(request.into_request().gql()?)
+        .await
+        .gql()?;
     // The models a settings page asks for next are the new config's, so the
     // catalogue starts on them now rather than when that request arrives.
     state

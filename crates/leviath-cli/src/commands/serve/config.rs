@@ -106,8 +106,9 @@ pub(super) async fn put_config(
     State(state): State<AppState>,
     Json(req): Json<WriteConfigReq>,
 ) -> Result<Json<RedactedConfig>, ApiError> {
-    let config =
-        super::core::config::write(req).map_err(|e| super::core::error::as_api_error(&e))?;
+    let config = super::core::config::write(req)
+        .await
+        .map_err(|e| super::core::error::as_api_error(&e))?;
     // Health read *after* the write, so the answer describes the file this
     // request just left behind. A write this route made always parses - it
     // serializes a `Config` and the refusals inside ran first - so this is

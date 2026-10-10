@@ -15,13 +15,15 @@
 //! Every handler reads the file as it stands through
 //! [`crate::yolo::yolo_path`], a plain function over the environment rather
 //! than anything reachable from a request, for the reason `AdminPaths` gives:
-//! a file location that is request data is a path-injection finding.
+//! a file location that is request data is a path-injection finding. The
+//! routes read and write it on the blocking pool.
 
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
+use super::blocking::blocking;
 use super::types::{ApiError, AppState};
 use crate::commands::yolo::TestArgs;
 use crate::yolo::{ProfileSummary, YoloError, YoloFile, yolo_path};
@@ -98,7 +100,7 @@ fn profile_named(
 
 /// `GET /api/yolo`.
 pub(super) async fn list_profiles(State(_state): State<AppState>) -> Json<YoloListing> {
-    Json(listing())
+    Json(blocking(listing).await)
 }
 
 /// `GET /api/yolo/{name}`: one profile in full, as its parsed spec, with what
@@ -107,7 +109,9 @@ pub(super) async fn get_profile(
     State(_state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let profile = profile_named(&name).map_err(|e| super::core::error::as_api_error(&e))?;
+    let profile = blocking(move || profile_named(&name))
+        .await
+        .map_err(|e| super::core::error::as_api_error(&e))?;
     Ok(Json(serde_json::json!({
         "name": profile.name,
         "spec": profile.spec,
@@ -150,7 +154,8 @@ pub(super) async fn test_profile(
     State(state): State<AppState>,
     Json(req): Json<TestReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    decided(&state, req)
+    blocking(move || decided(&state, req))
+        .await
         .map(Json)
         .map_err(|e| super::core::error::as_api_error(&e))
 }
@@ -198,8 +203,9 @@ pub(super) async fn put_profiles(
     State(_state): State<AppState>,
     Json(req): Json<WriteYoloReq>,
 ) -> Result<Json<YoloListing>, ApiError> {
-    write_profiles(&req.text)
-        .map(|()| Json(listing()))
+    blocking(move || write_profiles(&req.text).map(|()| listing()))
+        .await
+        .map(Json)
         .map_err(|e| super::core::error::as_api_error(&e))
 }
 

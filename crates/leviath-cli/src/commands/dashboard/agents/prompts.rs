@@ -80,15 +80,14 @@ pub(in crate::commands::dashboard) struct ExternalEdit {
 }
 
 impl Dashboard {
-    /// Open the prompts overlay on the panel's stage.
-    pub(super) fn editor_open_prompts(&mut self) {
-        let stage = self.editor().panel_stage().expect("a stage field");
-        let Some(view) = self.editor().doc.stage(&stage) else {
+    /// Open the prompts overlay on `stage`.
+    pub(super) fn editor_open_prompts(&mut self, stage: &str) {
+        let Some(view) = self.editor().doc.stage(stage) else {
             return;
         };
         let mode = self.md_mode();
         self.editor().overlay = Some(Overlay::Prompts(Box::new(PromptsEditor::new(
-            &stage,
+            stage,
             &view.system_prompt,
             &view.transition_prompt,
             mode,

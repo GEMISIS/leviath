@@ -141,9 +141,8 @@ impl Dashboard {
         &mut self,
         id: &FieldId,
     ) -> (Vec<String>, Option<usize>) {
-        match id {
-            FieldId::RoutingDefault => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+        match (id, self.editor().panel_stage()) {
+            (FieldId::RoutingDefault, Some(stage)) => {
                 let options = self.routing_regions(&stage);
                 let current = self
                     .editor()
@@ -154,7 +153,7 @@ impl Dashboard {
                     .or(Some(0));
                 (options, current)
             }
-            FieldId::EdgeTransform => {
+            (FieldId::EdgeTransform, _) => {
                 let (from, to) = self.editor().panel_edge().expect("a path field");
                 let options: Vec<String> = TransformKind::CHOICES
                     .iter()
@@ -167,7 +166,7 @@ impl Dashboard {
                 });
                 (options, current)
             }
-            FieldId::RegionKind => {
+            (FieldId::RegionKind, _) => {
                 let options: Vec<String> =
                     REGION_KINDS.iter().map(|(k, _)| k.to_string()).collect();
                 let current = self
@@ -202,15 +201,14 @@ impl Dashboard {
     /// A pick the core does not know.
     pub(super) fn editor_pick_more(&mut self, id: &FieldId, value: &str) {
         let value = value.to_string();
-        match id {
+        match (id, self.editor().panel_stage()) {
             // The "another…" row asks for the name; anything else is it.
-            FieldId::WorkerRef if value == TYPE_ANOTHER => {
+            (FieldId::WorkerRef, _) if value == TYPE_ANOTHER => {
                 self.editor().line =
                     Some((FieldId::WorkerRef, LineEdit::new(String::new(), false)));
             }
-            FieldId::WorkerRef => self.editor_set_worker(&value),
-            FieldId::RoutingDefault => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::WorkerRef, Some(stage)) => self.editor_set_worker(&stage, &value),
+            (FieldId::RoutingDefault, Some(stage)) => {
                 let region = if value == "(default)" {
                     String::new()
                 } else {
@@ -218,12 +216,12 @@ impl Dashboard {
                 };
                 self.editor_mutate(|d| d.set_tool_routing_default(&stage, &region));
             }
-            FieldId::EdgeTransform => {
+            (FieldId::EdgeTransform, _) => {
                 let (from, to) = self.editor().panel_edge().expect("a path field");
                 let kind = TransformKind::parse(&value);
                 self.editor_mutate(|d| d.set_transform(&from, &to, &kind));
             }
-            FieldId::RegionKind => {
+            (FieldId::RegionKind, _) => {
                 if let Some((scope, name)) = self.panel_region() {
                     self.editor_mutate(|d| {
                         d.set_region_field(
@@ -241,14 +239,13 @@ impl Dashboard {
 
     /// A button the core does not know.
     pub(super) fn editor_button_more(&mut self, id: &FieldId) {
-        match id {
-            FieldId::EditPrompts => self.editor_open_prompts(),
-            FieldId::AddModel => self.editor_open_model_picker(PickerFor::AddModel),
-            FieldId::AddRegion => {
+        match (id, self.editor().panel_stage()) {
+            (FieldId::EditPrompts, Some(stage)) => self.editor_open_prompts(&stage),
+            (FieldId::AddModel, _) => self.editor_open_model_picker(PickerFor::AddModel),
+            (FieldId::AddRegion, _) => {
                 self.editor().add_region = Some(LineEdit::new(String::new(), false));
             }
-            FieldId::OwnLayout => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::OwnLayout, Some(stage)) => {
                 if self.editor().doc.effective_regions(Some(&stage)).inherited {
                     self.editor_mutate(|d| d.create_stage_override(&stage));
                 } else {
@@ -264,8 +261,7 @@ impl Dashboard {
                     self.pending_confirm = Some((ConfirmAction::OverrideRemove { stage }, dialog));
                 }
             }
-            FieldId::AddRouting => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::AddRouting, Some(stage)) => {
                 let routed = self.editor().doc.tool_routing(&stage);
                 let tools: Vec<String> = self
                     .editor()
@@ -298,17 +294,17 @@ impl Dashboard {
                 );
                 self.editor().picker = Some((PickerFor::RoutingTool, picker));
             }
-            FieldId::AddArtifact => {
+            (FieldId::AddArtifact, _) => {
                 self.editor().add_artifact = Some(LineEdit::new(String::new(), false));
             }
-            FieldId::DeleteArtifact => {
+            (FieldId::DeleteArtifact, _) => {
                 if let Some((stage, i)) = self.panel_artifact()
                     && self.editor_mutate(|d| d.delete_artifact(&stage, i))
                 {
                     self.editor_close_modal();
                 }
             }
-            FieldId::DeleteRegion => {
+            (FieldId::DeleteRegion, _) => {
                 let Some((scope, name)) = self.panel_region() else {
                     return;
                 };
@@ -350,12 +346,12 @@ impl Dashboard {
     /// A typed line the core does not know.
     pub(super) fn editor_commit_line_more(&mut self, id: &FieldId, text: &str) {
         let text = text.to_string();
-        match id {
-            FieldId::CompactPrompt => {
+        match (id, self.editor().panel_stage()) {
+            (FieldId::CompactPrompt, _) => {
                 let (from, to) = self.editor().panel_edge().expect("a path field");
                 self.editor_mutate(|d| d.set_compact_prompt(&from, &to, &text));
             }
-            FieldId::RegionName => {
+            (FieldId::RegionName, _) => {
                 let Some((scope, name)) = self.panel_region() else {
                     return;
                 };
@@ -369,26 +365,26 @@ impl Dashboard {
             }
             // A typed list of types: the chooser's "another…" row lands
             // here with what was picked already in the box.
-            FieldId::StageAccepts
-            | FieldId::StageAsText
-            | FieldId::RegionAccepts
-            | FieldId::ToolLimitRow(_)
-            | FieldId::ArtifactType => self.editor_write_types(id, split_list(&text)),
-            FieldId::OutputFormat => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (
+                FieldId::StageAccepts
+                | FieldId::StageAsText
+                | FieldId::RegionAccepts
+                | FieldId::ToolLimitRow(_)
+                | FieldId::ArtifactType,
+                _,
+            ) => self.editor_write_types(id, split_list(&text)),
+            (FieldId::OutputFormat, Some(stage)) => {
                 self.editor_mutate(|d| d.set_output_format(&stage, &text));
             }
-            FieldId::OutputRouting => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::OutputRouting, Some(stage)) => {
                 let entries = super::inspector::parse_routing(&text);
                 self.editor_mutate(|d| d.set_output_routing(&stage, &entries));
             }
-            FieldId::ContextReset => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::ContextReset, Some(stage)) => {
                 let regions = super::inspector::parse_region_list(&text);
                 self.editor_mutate(|d| d.set_context_reset(&stage, &regions));
             }
-            FieldId::ArtifactName | FieldId::ArtifactDescription => {
+            (FieldId::ArtifactName | FieldId::ArtifactDescription, _) => {
                 let Some((stage, i)) = self.panel_artifact() else {
                     return;
                 };
@@ -398,10 +394,13 @@ impl Dashboard {
                 };
                 self.editor_mutate(|d| d.set_artifact(&stage, i, field));
             }
-            FieldId::RegionStrategy
-            | FieldId::RegionMessage
-            | FieldId::RegionSeed
-            | FieldId::RegionDescription => {
+            (
+                FieldId::RegionStrategy
+                | FieldId::RegionMessage
+                | FieldId::RegionSeed
+                | FieldId::RegionDescription,
+                _,
+            ) => {
                 let field = match id {
                     FieldId::RegionStrategy => RegionField::Strategy,
                     FieldId::RegionMessage => RegionField::RequiredMessage,
@@ -428,12 +427,11 @@ impl Dashboard {
     /// Enter on a row: a region opens its panel, a model entry swaps it, the
     /// tools open the multi-chooser, a routing row changes its region.
     pub(super) fn editor_open_row(&mut self, id: &FieldId) {
-        match id {
-            FieldId::RegionRow(name) => {
+        match (id, self.editor().panel_stage()) {
+            (FieldId::RegionRow(name), _) => {
                 self.editor_open_region(RegionScope::Shared, name);
             }
-            FieldId::StageRegionRow(name) | FieldId::IoRegionRow(name) => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::StageRegionRow(name) | FieldId::IoRegionRow(name), Some(stage)) => {
                 let scope = if self.editor().doc.effective_regions(Some(&stage)).inherited {
                     RegionScope::Shared
                 } else {
@@ -441,26 +439,27 @@ impl Dashboard {
                 };
                 self.editor_open_region(scope, name);
             }
-            FieldId::ArtifactRow(i) => {
-                let stage = self.editor().panel_stage().expect("a stage field");
-                self.editor_open_artifact(&stage, *i);
+            (FieldId::ArtifactRow(i), Some(stage)) => self.editor_open_artifact(&stage, *i),
+            (
+                FieldId::StageAccepts
+                | FieldId::StageAsText
+                | FieldId::RegionAccepts
+                | FieldId::ToolLimitRow(_)
+                | FieldId::ArtifactType
+                | FieldId::OutputFormat,
+                _,
+            ) => self.editor_open_type_chooser(id),
+            (FieldId::WorkerRef, Some(stage)) => self.editor_open_worker_picker(&stage),
+            (FieldId::ModelEntry(i), _) => {
+                self.editor_open_model_picker(PickerFor::ReplaceModel(*i))
             }
-            FieldId::StageAccepts
-            | FieldId::StageAsText
-            | FieldId::RegionAccepts
-            | FieldId::ToolLimitRow(_)
-            | FieldId::ArtifactType
-            | FieldId::OutputFormat => self.editor_open_type_chooser(id),
-            FieldId::WorkerRef => self.editor_open_worker_picker(),
-            FieldId::ModelEntry(i) => self.editor_open_model_picker(PickerFor::ReplaceModel(*i)),
             // The empty chain reads as a model row; Enter still adds.
-            FieldId::AddModel => self.editor_open_model_picker(PickerFor::AddModel),
-            FieldId::ToolSet => self.editor_open_tools_picker(),
-            FieldId::RoutingRow(tool) => self.editor_open_routing_region_picker(tool),
-            FieldId::SelfLoop => {
-                let stage = self.editor().panel_stage().expect("a stage field");
-                self.editor_open_self_loop(&stage);
+            (FieldId::AddModel, _) => self.editor_open_model_picker(PickerFor::AddModel),
+            (FieldId::ToolSet, Some(stage)) => self.editor_open_tools_picker(&stage),
+            (FieldId::RoutingRow(tool), Some(stage)) => {
+                self.editor_open_routing_region_picker(&stage, tool)
             }
+            (FieldId::SelfLoop, Some(stage)) => self.editor_open_self_loop(&stage),
             _ => {}
         }
     }
@@ -471,21 +470,22 @@ impl Dashboard {
         let Some(field) = self.editor().current_field() else {
             return;
         };
-        match field.id {
-            FieldId::ArtifactRow(i) => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+        match (field.id, self.editor().panel_stage()) {
+            (FieldId::ArtifactRow(i), Some(stage)) => {
                 self.editor_mutate(|d| d.delete_artifact(&stage, i));
             }
             // A list of types cleared: the stage's, a tool's, a region's; the
             // output type back to none.
-            FieldId::StageAccepts
-            | FieldId::StageAsText
-            | FieldId::RegionAccepts
-            | FieldId::ToolLimitRow(_)
-            | FieldId::OutputFormat => self.editor_write_types(&field.id, Vec::new()),
-            FieldId::WorkerRef => self.editor_set_worker(""),
-            FieldId::ModelEntry(i) => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (
+                id @ (FieldId::StageAccepts
+                | FieldId::StageAsText
+                | FieldId::RegionAccepts
+                | FieldId::ToolLimitRow(_)
+                | FieldId::OutputFormat),
+                _,
+            ) => self.editor_write_types(&id, Vec::new()),
+            (FieldId::WorkerRef, Some(stage)) => self.editor_set_worker(&stage, ""),
+            (FieldId::ModelEntry(i), Some(stage)) => {
                 let chain: Vec<String> = self
                     .editor()
                     .doc
@@ -499,23 +499,22 @@ impl Dashboard {
                     .collect();
                 self.editor_mutate(|d| d.set_models(&stage, &chain));
             }
-            FieldId::RoutingRow(tool) => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::RoutingRow(tool), Some(stage)) => {
                 self.editor_mutate(|d| d.set_tool_routing_override(&stage, &tool, ""));
             }
             _ => {}
         }
     }
 
-    /// `←`/`→` on a model entry: move it one place along the chain.
-    pub(super) fn editor_move_model(&mut self, index: usize, delta: isize) {
+    /// `←`/`→` on a model entry: move it one place along `stage`'s chain.
+    pub(super) fn editor_move_model(&mut self, stage: &str, index: usize, delta: isize) {
         let Some(to) = index.checked_add_signed(delta) else {
             return;
         };
-        self.editor_reorder_model(index, to);
+        self.editor_reorder_model(stage, index, to);
     }
 
-    /// Put the chain's `from`th entry at `to`, the cursor following it.
+    /// Put `stage`'s chain's `from`th entry at `to`, the cursor following it.
     ///
     /// Lift-and-insert rather than a swap. The two agree for the one-step
     /// move the arrow keys make, but a drag crosses several rows at once, and
@@ -528,12 +527,11 @@ impl Dashboard {
     /// The cursor is a field index and `from`/`to` are chain indices; on the
     /// model tab the chain is drawn first, so the two are the same number and
     /// the shift applies directly.
-    pub(super) fn editor_reorder_model(&mut self, from: usize, to: usize) {
-        let stage = self.editor().panel_stage().expect("a stage field");
+    pub(super) fn editor_reorder_model(&mut self, stage: &str, from: usize, to: usize) {
         let mut chain = self
             .editor()
             .doc
-            .stage(&stage)
+            .stage(stage)
             .map(|s| s.models)
             .unwrap_or_default();
         if from >= chain.len() || to >= chain.len() || from == to {
@@ -543,7 +541,7 @@ impl Dashboard {
         chain.insert(to, entry);
         // The stage is the one the panel shows, so the write cannot be
         // refused.
-        self.editor_mutate(|d| d.set_models(&stage, &chain));
+        self.editor_mutate(|d| d.set_models(stage, &chain));
         let editor = self.editor();
         editor.cursor = (editor.cursor + to).saturating_sub(from);
     }
@@ -774,9 +772,8 @@ impl Dashboard {
 
     /// Write a list of types to the field it belongs to.
     fn editor_write_types(&mut self, id: &FieldId, types: Vec<String>) {
-        match id {
-            FieldId::StageAccepts | FieldId::StageAsText => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+        match (id, self.editor().panel_stage()) {
+            (FieldId::StageAccepts | FieldId::StageAsText, Some(stage)) => {
                 let which = if *id == FieldId::StageAccepts {
                     InputList::Accepts
                 } else {
@@ -784,11 +781,10 @@ impl Dashboard {
                 };
                 self.editor_mutate(|d| d.set_stage_input(&stage, which, &types));
             }
-            FieldId::ToolLimitRow(tool) => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::ToolLimitRow(tool), Some(stage)) => {
                 self.editor_mutate(|d| d.set_tool_accepts(&stage, tool, &types));
             }
-            FieldId::ArtifactType => {
+            (FieldId::ArtifactType, _) => {
                 let Some((stage, i)) = self.panel_artifact() else {
                     return;
                 };
@@ -797,8 +793,7 @@ impl Dashboard {
                 };
                 self.editor_mutate(|d| d.set_artifact(&stage, i, ArtifactField::Type(first)));
             }
-            FieldId::OutputFormat => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::OutputFormat, Some(stage)) => {
                 let format = types
                     .into_iter()
                     .next()
@@ -870,13 +865,12 @@ impl Dashboard {
         self.editor().picker = Some((purpose, picker));
     }
 
-    /// The tools multi-chooser, preselected with the stage's tools.
-    fn editor_open_tools_picker(&mut self) {
-        let stage = self.editor().panel_stage().expect("a stage field");
+    /// The tools multi-chooser, preselected with `stage`'s tools.
+    fn editor_open_tools_picker(&mut self, stage: &str) {
         let (have, connectors) = self
             .editor()
             .doc
-            .stage(&stage)
+            .stage(stage)
             .map(|s| (s.tools, s.connectors))
             .unwrap_or_default();
         let all = self.editor().tools.clone();
@@ -911,10 +905,10 @@ impl Dashboard {
         self.editor().picker = Some((PickerFor::Tools, picker));
     }
 
-    /// The region chooser for a routing row, or for a tool just picked.
-    fn editor_open_routing_region_picker(&mut self, tool: &str) {
-        let stage = self.editor().panel_stage().expect("a stage field");
-        let options = self.routing_regions(&stage);
+    /// The region chooser for a routing row on `stage`, or for a tool just
+    /// picked.
+    fn editor_open_routing_region_picker(&mut self, stage: &str, tool: &str) {
+        let options = self.routing_regions(stage);
         let rows: Vec<PickerOption> = options
             .into_iter()
             .skip(1)
@@ -934,9 +928,8 @@ impl Dashboard {
 
     /// A pick from the choosers the core does not settle itself.
     pub(super) fn editor_settle_more(&mut self, purpose: PickerFor, value: &str) {
-        match purpose {
-            PickerFor::AddModel | PickerFor::ReplaceModel(_) => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+        match (purpose, self.editor().panel_stage()) {
+            (purpose @ (PickerFor::AddModel | PickerFor::ReplaceModel(_)), Some(stage)) => {
                 let mut chain = self
                     .editor()
                     .doc
@@ -949,16 +942,14 @@ impl Dashboard {
                 }
                 self.editor_mutate(|d| d.set_models(&stage, &chain));
             }
-            PickerFor::RoutingTool => self.editor_open_routing_region_picker(value),
-            PickerFor::RoutingRegion(tool) => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (PickerFor::RoutingTool, Some(stage)) => {
+                self.editor_open_routing_region_picker(&stage, value)
+            }
+            (PickerFor::RoutingRegion(tool), Some(stage)) => {
                 let region = value.to_string();
                 self.editor_mutate(|d| d.set_tool_routing_override(&stage, &tool, &region));
             }
-            PickerFor::Tools
-            | PickerFor::Field(_)
-            | PickerFor::ConnectFrom(_)
-            | PickerFor::MimeTypes(_) => {}
+            _ => {}
         }
     }
 
@@ -966,12 +957,11 @@ impl Dashboard {
     /// stage of it, every agent in the catalog when they are another agent
     /// (with an "another…" row for one that is not installed here). A query
     /// is a text row, so Enter on it types rather than coming here.
-    fn editor_open_worker_picker(&mut self) {
-        let stage = self.editor().panel_stage().expect("a stage field");
+    fn editor_open_worker_picker(&mut self, stage: &str) {
         let worker = self
             .editor()
             .doc
-            .stage(&stage)
+            .stage(stage)
             .and_then(|s| s.fan_out.worker);
         let current = worker.as_ref().map(|(_, v)| v.clone()).unwrap_or_default();
         let kind = worker.map(|(k, _)| k);
@@ -1021,25 +1011,23 @@ impl Dashboard {
         self.editor().picker = Some((PickerFor::Field(FieldId::WorkerRef), picker));
     }
 
-    /// Write the worker the fan-out runs as, keeping its kind; empty clears
-    /// it.
-    pub(super) fn editor_set_worker(&mut self, value: &str) {
-        let stage = self.editor().panel_stage().expect("a stage field");
+    /// Write the worker `stage`'s fan-out runs as, keeping its kind; empty
+    /// clears it.
+    pub(super) fn editor_set_worker(&mut self, stage: &str, value: &str) {
         let kind = self
             .editor()
             .doc
-            .stage(&stage)
+            .stage(stage)
             .and_then(|s| s.fan_out.worker.map(|(k, _)| k))
             .unwrap_or(WorkerKind::Stage);
         let worker = (!value.is_empty()).then(|| (kind, value.to_string()));
         self.editor_mutate(|d| {
-            d.set_fan_out(&stage, crate::blueprint_edit::FanOutField::Worker(worker))
+            d.set_fan_out(stage, crate::blueprint_edit::FanOutField::Worker(worker))
         });
     }
 
-    /// The tools chosen in the multi-chooser.
-    pub(super) fn editor_settle_tools(&mut self, chosen: &[usize]) {
-        let stage = self.editor().panel_stage().expect("a stage field");
+    /// The tools chosen in the multi-chooser, for `stage`.
+    pub(super) fn editor_settle_tools(&mut self, stage: &str, chosen: &[usize]) {
         let all = self.editor().tools.clone();
         let (connectors, tools): (Vec<&ToolChoice>, Vec<&ToolChoice>) = chosen
             .iter()
@@ -1048,19 +1036,19 @@ impl Dashboard {
         let tools: Vec<String> = tools.into_iter().map(|t| t.name.clone()).collect();
         let connectors: Vec<String> = connectors.into_iter().map(|t| t.name.clone()).collect();
         self.editor_mutate(|d| {
-            d.set_tools(&stage, &tools)
-                .and_then(|()| d.set_connectors(&stage, &connectors))
+            d.set_tools(stage, &tools)
+                .and_then(|()| d.set_connectors(stage, &connectors))
         });
     }
 
-    /// Enter on the add-artifact prompt: a new declaration on the stage the
-    /// panel shows, opened in its window so its type can be picked at once.
-    pub(super) fn editor_add_artifact(&mut self, name: &str) {
-        let stage = self.editor().panel_stage().expect("a stage field");
+    /// Enter on the add-artifact prompt: a new declaration on `stage`, the
+    /// stage the panel shows, opened in its window so its type can be picked
+    /// at once.
+    pub(super) fn editor_add_artifact(&mut self, stage: &str, name: &str) {
         let name = name.to_string();
-        if self.editor_mutate(|d| d.add_artifact(&stage, &name)) {
-            let last = self.editor().doc.artifacts(&stage).len().saturating_sub(1);
-            self.editor_open_artifact(&stage, last);
+        if self.editor_mutate(|d| d.add_artifact(stage, &name)) {
+            let last = self.editor().doc.artifacts(stage).len().saturating_sub(1);
+            self.editor_open_artifact(stage, last);
         }
     }
 

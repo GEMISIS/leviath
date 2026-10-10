@@ -351,11 +351,11 @@ impl Dashboard {
                 editor.view.select_stage(&name);
                 editor.sync_panel();
                 editor.panel = Panel::Stage {
-                    name,
+                    name: name.clone(),
                     tab: StageTab::Behaviour,
                 };
                 editor.focus = Focus::Inspector;
-                self.editor_open_prompts();
+                self.editor_open_prompts(&name);
             }
             MenuAction::DeleteStage(name) => {
                 let editor = self.editor();
