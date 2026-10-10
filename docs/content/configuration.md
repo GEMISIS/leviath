@@ -1439,7 +1439,10 @@ directory, managed with [`lev policy`](/docs/cli):
 | Windows | `%APPDATA%\leviath\policy.toml` |
 
 With `LEVIATH_HOME` set, `policy.toml` and `rules/` sit beside `config.toml` instead, like
-`yolo.toml`, so a redirected home has a policy of its own.
+`yolo.toml`, so a redirected home has a policy of its own. The Docker image sets `LEVIATH_HOME`
+to `/data`, so its policy is `/data/.leviath/policy.toml`. When the platform path holds a
+policy and the redirected home has none, lev logs a warning naming both, so a policy mounted
+at the old path is moved rather than silently dropped.
 
 ```toml
 [[allowlist]]

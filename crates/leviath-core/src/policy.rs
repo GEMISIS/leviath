@@ -185,10 +185,11 @@ impl PolicyConfig {
         //   [mcp_overrides.<server>__<tool>]        the flat form, which is what
         //                                           `lev policy add` serializes
         //
-        // The nested form used to build a `<server>.<tool>` key, which matches
-        // no dispatched tool, so every override written in it was stored and
-        // never read. The flat form was not parsed at all, so `lev policy add`
-        // wrote a file this function could not read back.
+        // The nested form is keyed by `advertised_name(server, tool)`, the
+        // name the tool is dispatched under: a `<server>.<tool>` key would
+        // match no tool, and every override written that way would be stored
+        // and never read. Both forms are parsed, so a file `lev policy add`
+        // writes reads back.
         if let Some(overrides_table) = parsed.get("mcp_overrides").and_then(|v| v.as_table()) {
             for (entry_name, entry_val) in overrides_table {
                 match entry_val.get("tools").and_then(|v| v.as_table()) {

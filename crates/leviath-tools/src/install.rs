@@ -21,7 +21,6 @@
 //! compiler, and it is the final text, comment included, that is compiled.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use leviath_scripting::ParamSpec;
 use serde_json::Value;
@@ -144,10 +143,7 @@ fn params_summary(params: &[ParamSpec]) -> String {
 fn stamped_source(source: &str, provenance: Option<&str>) -> String {
     match provenance {
         Some(who) => {
-            let at = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or_default();
+            let at = leviath_core::duration::now_secs();
             format!("// installed by leviath: {who} at {at}\n{source}")
         }
         None => source.to_string(),

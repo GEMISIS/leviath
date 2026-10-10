@@ -719,10 +719,7 @@ impl StoredTokenRefresher {
 
 /// Wall-clock Unix time in seconds.
 fn system_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    leviath_core::duration::now_secs_u64()
 }
 
 #[async_trait::async_trait]
@@ -818,8 +815,9 @@ pub async fn wait_for_callback(
 ) -> anyhow::Result<String> {
     let accept = async {
         loop {
-            // Fails when the process is out of file descriptors; a reset
-            // connection surfaces later, on read, not here.
+            // Fails when the process is out of file descriptors, or, on some
+            // systems, when a connection was reset while it waited to be
+            // taken. Either ends the login with this error.
             let (stream, _) = listener
                 .accept()
                 .await

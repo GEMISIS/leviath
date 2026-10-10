@@ -130,7 +130,7 @@ pub async fn execute(args: AuthArgs, env: AuthEnv) -> anyhow::Result<()> {
                 "{}",
                 crate::commands::providers::quota::section(
                     &usage,
-                    leviath_core::duration::now_secs() as u64
+                    leviath_core::duration::now_secs_u64()
                 )
             );
             Ok(())

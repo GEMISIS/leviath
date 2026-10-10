@@ -98,9 +98,15 @@ impl LedgerLock {
 impl Drop for LedgerLock {
     fn drop(&mut self) {
         let mut locks = leviath_core::sync::lock(&LOCKS);
-        // The table's copy and this one, with the table held so nobody can
-        // take another: the next to want this ledger makes a fresh lock.
-        if Arc::strong_count(&self.lock) == 2 {
+        // This copy goes with the table held, so of two letting go at once
+        // the second always finds the first gone. Nobody can take another
+        // while the table is held, so when the table's copy is the last one
+        // it comes out, and the next to want this ledger makes a fresh lock.
+        drop(std::mem::take(&mut self.lock));
+        if locks
+            .get(&self.path)
+            .is_some_and(|lock| Arc::strong_count(lock) == 1)
+        {
             locks.remove(&self.path);
         }
     }

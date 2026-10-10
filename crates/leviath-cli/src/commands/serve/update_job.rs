@@ -240,7 +240,7 @@ pub(super) struct UpdateJobs {
     /// against a temp directory and a runner that spawns nothing.
     env: Arc<dyn Fn() -> UpdateEnv + Send + Sync>,
     /// Current unix time; a fn so a long-lived server stays current.
-    clock: fn() -> i64,
+    clock: fn() -> u64,
     /// Distinguishes two jobs started in the same second.
     seq: Arc<AtomicU64>,
 }
@@ -286,7 +286,7 @@ impl UpdateJobs {
         Self {
             jobs: Arc::new(Mutex::new(Vec::new())),
             env,
-            clock: leviath_core::duration::now_secs,
+            clock: leviath_core::duration::now_secs_u64,
             seq: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -319,7 +319,7 @@ impl UpdateJobs {
         if let Some(running) = jobs.iter().find(|job| job.status == JobStatus::Running) {
             return Err(running.id.clone());
         }
-        let now = (self.clock)() as u64;
+        let now = (self.clock)();
         let id = format!(
             "update-{now}-{}",
             self.seq.fetch_add(1, Ordering::SeqCst) + 1
@@ -397,7 +397,7 @@ impl UpdateJobs {
             };
             job.restart_required = restart_required;
             job.restart_hint = restart_required.then(|| RESTART_HINT.to_string());
-            job.finished_at = Some((self.clock)() as u64);
+            job.finished_at = Some((self.clock)());
             job.clone()
         };
         super::events::send(

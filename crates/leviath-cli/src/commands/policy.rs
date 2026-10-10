@@ -105,12 +105,32 @@ fn leviath_config_dir(
 /// beside its `config.toml`, as it keeps `yolo.toml`, so a test, a sandbox or
 /// a second install reads its own policy rather than the user's.
 fn in_policy_dir(name: &str) -> anyhow::Result<std::path::PathBuf> {
-    if std::env::var_os("LEVIATH_HOME").is_some() {
-        let mut path = crate::config::Config::config_path();
-        path.set_file_name(name);
-        return Ok(path);
+    let platform =
+        leviath_config_dir(dirs::config_dir(), dirs::home_dir()).map(|dir| dir.join(name));
+    if std::env::var_os("LEVIATH_HOME").is_none() {
+        return platform;
     }
-    leviath_config_dir(dirs::config_dir(), dirs::home_dir()).map(|dir| dir.join(name))
+    let mut path = crate::config::Config::config_path();
+    path.set_file_name(name);
+    warn_if_passed_over(&path, platform.ok().as_deref());
+    Ok(path)
+}
+
+/// Say so when `LEVIATH_HOME` passes over a policy in the platform's config
+/// directory and its own home holds none. The Docker image sets
+/// `LEVIATH_HOME`, so a policy mounted at the platform path there would stop
+/// applying without a word. Whether it said so, for tests.
+fn warn_if_passed_over(used: &std::path::Path, platform: Option<&std::path::Path>) -> bool {
+    let Some(platform) = platform.filter(|p| p.exists() && !used.exists()) else {
+        return false;
+    };
+    tracing::warn!(
+        used = %used.display(),
+        passed_over = %platform.display(),
+        "LEVIATH_HOME is set, so the taint policy is read from beside its config.toml, \
+         not from the platform config directory; move it there to keep it"
+    );
+    true
 }
 
 /// Get the default policy file path.
@@ -478,6 +498,28 @@ mod tests {
             assert!(policy_path().unwrap().ends_with("leviath/policy.toml"));
             assert!(rules_dir().unwrap().ends_with("leviath/rules"));
         });
+    }
+
+    /// A policy in the platform directory that a redirected home passes over
+    /// is reported; one the home already holds, or none at all, is not.
+    #[test]
+    fn a_policy_left_in_the_platform_directory_is_reported() {
+        let _guard = leviath_testkit::tracing_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let used = dir.path().join("home-policy.toml");
+        let platform = dir.path().join("platform-policy.toml");
+        assert!(
+            !warn_if_passed_over(&used, Some(&platform)),
+            "nothing to pass over"
+        );
+        std::fs::write(&platform, "").unwrap();
+        assert!(warn_if_passed_over(&used, Some(&platform)));
+        std::fs::write(&used, "").unwrap();
+        assert!(
+            !warn_if_passed_over(&used, Some(&platform)),
+            "the home has its own"
+        );
+        assert!(!warn_if_passed_over(&used, None));
     }
 
     #[test]

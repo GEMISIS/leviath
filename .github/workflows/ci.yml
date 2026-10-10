@@ -28,11 +28,12 @@ on:
 
 # A second push to a PR supersedes the first, whose run is a full ~55-job
 # suite, so the older run is cancelled. Pull requests only: a push to main and
-# a release calling this file must run to completion, and `github.workflow` is
-# the caller's name when this file is called, so a release run never shares a
-# group with the CI run for the same ref.
+# a release calling this file must run to completion, so each is grouped by its
+# commit, where no later run can cancel it even while it waits. And
+# `github.workflow` is the caller's name when this file is called, so a release
+# run never shares a group with the CI run for the same commit.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

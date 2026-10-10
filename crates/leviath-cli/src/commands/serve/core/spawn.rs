@@ -190,27 +190,23 @@ async fn server_issues(state: &AppState, request: &mut Request) -> SpawnIssues {
     if limits.no_remote_seed_commands {
         launch.seed_commands = false;
     }
-    // On the blocking pool: the check resolves the callback's host, and a
-    // resolver can take seconds to answer.
-    let callback = request
-        .delivery
-        .callback
-        .as_ref()
-        .map(|c| c.url.to_string());
-    let limits = std::sync::Arc::clone(limits);
-    let checked = super::super::blocking::blocking(move || {
-        callback.map(|url| limits.check_callback_url(&url))
-    })
-    .await;
-    if let Some(Err(message)) = checked {
-        issues.push(SpawnIssue::new(
-            SpecPath::root()
-                .field("delivery")
-                .field("callback")
-                .field("url"),
-            IssueCode::NotAllowed,
-            message,
-        ));
+    if let Some(callback) = &request.delivery.callback {
+        // On the blocking pool: the check resolves the callback's host, and a
+        // resolver can take seconds to answer.
+        let url = callback.url.to_string();
+        let limits = std::sync::Arc::clone(limits);
+        let checked =
+            super::super::blocking::blocking(move || limits.check_callback_url(&url)).await;
+        if let Err(message) = checked {
+            issues.push(SpawnIssue::new(
+                SpecPath::root()
+                    .field("delivery")
+                    .field("callback")
+                    .field("url"),
+                IssueCode::NotAllowed,
+                message,
+            ));
+        }
     }
     issues
 }

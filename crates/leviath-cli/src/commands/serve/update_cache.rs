@@ -64,7 +64,7 @@ impl UpdateCheckCache {
         channel: Option<crate::commands::update::Channel>,
         running: &str,
     ) {
-        let now = leviath_core::duration::now_secs() as u64;
+        let now = leviath_core::duration::now_secs_u64();
         if !self.peek().is_stale(now, latest::CHECK_TTL_SECS) {
             return;
         }

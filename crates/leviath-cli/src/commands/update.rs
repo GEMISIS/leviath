@@ -718,7 +718,7 @@ fn check_latest(plan: &UpdatePlan, env: &UpdateEnv, version: &str) -> latest::La
             channel,
             version,
             &env.latest,
-            leviath_core::duration::now_secs() as u64,
+            leviath_core::duration::now_secs_u64(),
         ),
         None => latest::LatestCheck::default(),
     }

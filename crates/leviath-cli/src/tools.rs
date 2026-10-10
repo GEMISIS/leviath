@@ -158,7 +158,7 @@ pub(crate) async fn connect_for_agent(
     grants: &McpGrants,
     allow_env: &[String],
 ) -> anyhow::Result<MCPClient> {
-    let now = leviath_core::duration::now_secs() as u64;
+    let now = leviath_core::duration::now_secs_u64();
     let bearer = grants
         .authorization_header(&server.name, now)
         .await

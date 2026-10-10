@@ -9,9 +9,11 @@ on:
 
 # A second push to a PR supersedes the analysis of the first, so that one is
 # cancelled. Pull requests only: a push to main and a merge group must run to
-# completion, since each is the result `CodeQL` reports for that ref.
+# completion, since each is the result `CodeQL` reports for that ref, so each
+# is grouped by its commit, where no later run can cancel it even while it
+# waits.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

@@ -14,9 +14,10 @@
 name = "leviath-alloc"
 description = "Allocator tuning for the leviath binary: one audited mimalloc option call"
 # Published, and it has to be: `leviath-cli` pins it by version, so
-# `cargo install leviath-cli` fetches it from crates.io. Marking it `publish = false` once looked like hygiene
-# (the one `unsafe` call, kept off the registry) and stalled the 0.5.8
-# release at this crate; `cargo xtask version --check` now refuses that.
+# `cargo install leviath-cli` fetches it from crates.io. Do not mark it
+# `publish = false` to keep the one `unsafe` call off the registry: the
+# release would stop at this crate, and `cargo xtask version --check`
+# refuses it.
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -37,9 +38,9 @@ libmimalloc-sys = { version = "0.1", features = ["extended"], optional = true }
 temp-env = { workspace = true }
 
 # A copy of `[workspace.lints]` minus `unsafe_code`, for the reason in the
-# header note. Without this the crate inherited *nothing*, so `missing_docs` and
-# `clippy::string_slice` did not apply to it either - a wider hole than the one
-# opt-out it was documented as.
+# header note. Without it the crate would inherit *nothing*, so `missing_docs`
+# and `clippy::string_slice` would not apply to it either - a wider hole than
+# the one opt-out it is meant to be.
 [lints.rust]
 missing_docs = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("legacy-runs"))'] }

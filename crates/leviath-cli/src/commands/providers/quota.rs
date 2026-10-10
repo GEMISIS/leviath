@@ -154,7 +154,7 @@ pub(super) async fn show(json_out: bool, config_path: &std::path::Path) -> anyho
     let usage = usage(&config, &registry_for(&config)).await;
     print!(
         "{}",
-        report_text(&usage, json_out, leviath_core::duration::now_secs() as u64)
+        report_text(&usage, json_out, leviath_core::duration::now_secs_u64())
     );
     Ok(())
 }

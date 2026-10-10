@@ -12,6 +12,7 @@
 
 use super::*;
 use leviath_net::read_caps::{STREAM_FRAME_CAP, frame_within_cap};
+use leviath_net::sse::Utf8Carry;
 
 /// The raw bytes a provider's streaming endpoint sends back.
 ///
@@ -39,74 +40,6 @@ pub type FrameFn = Box<dyn FnMut(&mut String) -> Option<Option<Result<StreamChun
 /// torn frame and there is nothing to do. Ollama's NDJSON does not promise a
 /// trailing newline, so its last line can only be read here.
 pub type FlushFn = Box<dyn FnMut(&mut String) -> Option<StreamChunk> + Send>;
-
-/// The bytes of a character the transport cut in half, held until the rest
-/// arrives.
-///
-/// `bytes_stream()` hands over whatever the socket had, and the socket does
-/// not know where a character ends: a four-byte emoji, a CJK character or a
-/// dash inside a delta is routinely split over two chunks. Checking each
-/// chunk on its own and dropping the ones that failed lost the whole chunk
-/// around the split, silently. Decoding the longest valid prefix and carrying
-/// the rest into the next chunk loses nothing; bytes that could never be
-/// UTF-8 become U+FFFD, so a peer that sends garbage is visible in the
-/// output rather than absent from it.
-#[derive(Default)]
-pub(crate) struct Utf8Carry {
-    tail: Vec<u8>,
-}
-
-impl Utf8Carry {
-    /// Decode `bytes` (after whatever was carried) onto `out`, keeping an
-    /// incomplete trailing character back for the next call.
-    pub(crate) fn push(&mut self, bytes: &[u8], out: &mut String) {
-        let owned;
-        let mut input: &[u8] = if self.tail.is_empty() {
-            bytes
-        } else {
-            self.tail.extend_from_slice(bytes);
-            owned = std::mem::take(&mut self.tail);
-            &owned
-        };
-        loop {
-            match std::str::from_utf8(input) {
-                Ok(text) => {
-                    out.push_str(text);
-                    return;
-                }
-                Err(e) => {
-                    let valid = e.valid_up_to();
-                    // The prefix was checked by the failed call above.
-                    out.push_str(&String::from_utf8_lossy(&input[..valid]));
-                    match e.error_len() {
-                        Some(bad) => {
-                            out.push('\u{FFFD}');
-                            input = &input[valid + bad..];
-                        }
-                        None => {
-                            self.tail = input[valid..].to_vec();
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// How many bytes are held back, so a frame cap can count them.
-    pub(crate) fn pending(&self) -> usize {
-        self.tail.len()
-    }
-
-    /// The bytes are over: a character still waiting for its end is not
-    /// coming, so mark it rather than lose it.
-    pub(crate) fn finish(&mut self, out: &mut String) {
-        if !self.tail.is_empty() {
-            self.tail.clear();
-            out.push('\u{FFFD}');
-        }
-    }
-}
 
 /// A byte stream cut into [`StreamChunk`]s by a provider-specific framer.
 ///
@@ -511,29 +444,6 @@ mod tests {
         let text = "done 🎉".as_bytes();
         let stream = line_framed(vec![text[..7].to_vec()]);
         assert_eq!(deltas(stream).await, vec!["done \u{FFFD}".to_string()]);
-    }
-
-    /// Bytes that can never be UTF-8 are replaced, one marker per bad
-    /// sequence, and the good text around them is kept. The frame cap counts
-    /// the bytes held back for the next chunk.
-    #[test]
-    fn utf8_carry_replaces_invalid_bytes_and_counts_its_tail() {
-        let mut carry = Utf8Carry::default();
-        let mut out = String::new();
-        carry.push(&[b'a', 0xFF, 0xFE, b'b'], &mut out);
-        assert_eq!(out, "a\u{FFFD}\u{FFFD}b");
-        assert_eq!(carry.pending(), 0);
-        // One lead byte of a three-byte character is held, not decoded.
-        carry.push(&[0xE5], &mut out);
-        assert_eq!(out, "a\u{FFFD}\u{FFFD}b");
-        assert_eq!(carry.pending(), 1);
-        carry.push(&[0xAE, 0x8C], &mut out);
-        assert_eq!(out, "a\u{FFFD}\u{FFFD}b完");
-        assert_eq!(carry.pending(), 0);
-        carry.push(&[0xF0, 0x9F], &mut out);
-        carry.finish(&mut out);
-        assert_eq!(out, "a\u{FFFD}\u{FFFD}b完\u{FFFD}");
-        assert_eq!(carry.pending(), 0);
     }
 
     #[tokio::test]

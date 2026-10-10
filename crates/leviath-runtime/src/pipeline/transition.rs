@@ -722,11 +722,13 @@ pub(crate) fn watched_region_digests(
 /// A hash of everything a region currently holds.
 ///
 /// Content only: token counts and timestamps would make an unchanged region
-/// look changed, which is the failure this gate exists to prevent.
+/// look changed, which is the failure this gate exists to prevent. Stable
+/// across builds, because the digest taken on stage entry is stored in the
+/// run file and compared again after a resume.
 pub(crate) fn region_digest(region: &leviath_core::Region) -> u64 {
     use std::hash::{Hash, Hasher};
 
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = leviath_core::hash::stable_hasher();
     for entry in &region.content {
         entry.content.hash(&mut hasher);
     }
