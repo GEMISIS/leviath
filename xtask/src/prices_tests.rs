@@ -1,6 +1,9 @@
 //! Tests for `cargo xtask prices`: the parsers and the merge rules, against
 //! fixture JSON. Nothing here touches the network.
 
+use std::path::PathBuf;
+
+use super::fetch::NetworkError;
 use super::*;
 
 /// A per-token string as OpenRouter writes it.
@@ -613,7 +616,7 @@ fn the_file_round_trips_sorted_with_float_literals() {
 
 #[test]
 fn the_shipped_file_parses_and_renders_to_itself() {
-    let path = workspace_root().join(RATES_FILE);
+    let path = fetch::workspace_root().join(RATES_FILE);
     // A Windows checkout with `core.autocrlf` hands us CRLF; the refresh
     // always writes LF, so compare the file as git stores it.
     let text = std::fs::read_to_string(&path)
@@ -846,19 +849,6 @@ fn a_refusal_leaves_the_file_untouched() {
     let err = run_with(PricesMode::Write, fixture_fetch, &path, "2026-08-29").unwrap_err();
     assert!(err.to_string().contains("would move by 6.0x"), "{err}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
-}
-
-#[test]
-fn today_is_a_civil_date_and_the_root_holds_the_table() {
-    assert_eq!(today().len(), "YYYY-MM-DD".len());
-    assert!(workspace_root().join(RATES_FILE).is_file());
-}
-
-#[test]
-fn the_network_error_reads_as_one() {
-    let err = NetworkError("x".to_owned());
-    assert_eq!(err.to_string(), "network: x");
-    assert!(std::error::Error::source(&err).is_none());
 }
 
 // ── New vendors, tiers and unit rows ────────────────────────────────────────

@@ -61,10 +61,12 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+
+use fetch::{Fetch, Outcome, is_network_error};
 
 /// Path of the price table, relative to the workspace root.
 pub const RATES_FILE: &str = "crates/leviath-providers/pricing/rates.toml";
@@ -87,9 +89,6 @@ const AGREE_TOLERANCE: f64 = 0.05;
 
 /// An existing row moving by more than this ratio, either way, is refused.
 const REFUSE_RATIO: f64 = 3.0;
-
-/// How long to wait on either source before calling it a network failure.
-const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Header written above the rows, so the file explains itself.
 const FILE_HEADER: &str = "\
@@ -130,43 +129,6 @@ impl PricesMode {
             Some(other) => anyhow::bail!("Unknown `prices` argument: '{other}'. Try `--check`."),
         }
     }
-}
-
-// ── Fetching ─────────────────────────────────────────────────────────────────
-
-/// A fetch of a URL to its body. A plain `fn` pointer so the merge can be
-/// tested against fixture JSON without a network.
-pub type Fetch = fn(&str) -> Result<String>;
-
-/// A source could not be read. Distinguished from every other failure because
-/// it maps to exit 2 and says nothing about the table.
-#[derive(Debug)]
-pub struct NetworkError(pub String);
-
-impl fmt::Display for NetworkError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "network: {}", self.0)
-    }
-}
-
-impl std::error::Error for NetworkError {}
-
-/// Whether an error from [`run_with`] was the network rather than the data.
-pub fn is_network_error(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<NetworkError>().is_some()
-}
-
-/// The real fetch: a GET with a bounded wait, any failure a [`NetworkError`].
-fn fetch_http(url: &str) -> Result<String> {
-    let body = reqwest::blocking::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .user_agent("leviath-xtask-prices")
-        .build()
-        .and_then(|client| client.get(url).send())
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .and_then(reqwest::blocking::Response::text)
-        .map_err(|e| NetworkError(format!("{url}: {e}")))?;
-    Ok(body)
 }
 
 // ── The table ────────────────────────────────────────────────────────────────
@@ -998,15 +960,6 @@ fn rate_summary(rate: &Rate) -> String {
 
 // ── Running ──────────────────────────────────────────────────────────────────
 
-/// What a run did.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Outcome {
-    /// Nothing moved; the file is untouched.
-    Unchanged,
-    /// This many rows were written (or, under `--check`, would be).
-    Changed(usize),
-}
-
 /// Fetch both sources, merge, and write or check, reporting on stdout.
 pub fn run_with(mode: PricesMode, fetch: Fetch, path: &Path, today: &str) -> Result<Outcome> {
     let text =
@@ -1136,26 +1089,14 @@ fn codex_ids() -> Result<Vec<String>> {
     ))
 }
 
-/// The workspace root, from this crate's manifest directory.
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// Today as `YYYY-MM-DD`, UTC, so two machines on one day agree.
-fn today() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
-}
-
 /// Entry point for `cargo xtask prices [--check]`.
 ///
 /// A network failure exits 2 here rather than through `main`'s exit 1, so a
 /// workflow can tell "could not check" from "the table is wrong".
 pub fn run(mode: PricesMode) -> Result<()> {
-    let path = workspace_root().join(RATES_FILE);
-    match run_with(mode, fetch_http, &path, &today()) {
+    let path = fetch::workspace_root().join(RATES_FILE);
+    let http: Fetch = |url| fetch::http(url, "leviath-xtask-prices");
+    match run_with(mode, http, &path, &fetch::today()) {
         Ok(_) => Ok(()),
         Err(err) if is_network_error(&err) => {
             eprintln!("prices: {err}");
@@ -1165,10 +1106,14 @@ pub fn run(mode: PricesMode) -> Result<()> {
     }
 }
 
+/// The fetch, error and paths the three table refreshers share. Declared here,
+/// like the two modules below, rather than in `main.rs`, which is
+/// coverage-excluded and guarded in CI for that reason - a module belonging to
+/// these tasks has no business changing the binary's entrypoint.
+#[path = "fetch.rs"]
+pub mod fetch;
+
 /// The Codex model catalog check, fed by the same fetch as the prices above.
-/// Declared here rather than in `main.rs`, which is coverage-excluded and
-/// guarded in CI for that reason - a module belonging to this task has no
-/// business changing the binary's entrypoint.
 #[path = "codex_catalog.rs"]
 pub mod codex_catalog;
 
