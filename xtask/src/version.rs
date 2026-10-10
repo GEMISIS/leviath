@@ -2,13 +2,13 @@
 //!
 //! A release is triggered by the workspace version moving, which makes the bump
 //! the single most consequential edit in the repo - and it is spread across
-//! thirteen lines of two manifests. `[workspace.package] version` is what every
-//! crate inherits, and the eleven `[workspace.dependencies]` entries each repeat
-//! it because `cargo publish` refuses a path dependency with no version
+//! two manifests. `[workspace.package] version` is what every crate inherits,
+//! and each workspace crate's `[workspace.dependencies]` entry repeats it
+//! because `cargo publish` refuses a path dependency with no version
 //! requirement. Cargo offers no way to make those requirements inherit the
 //! workspace version, so they have to be written out, and they have to agree.
-//! The thirteenth is `leviath-cli`'s allocator pin, which lives in that crate's
-//! own manifest on purpose - only the composition-root binary should pick an
+//! The last is `leviath-cli`'s allocator pin, which lives in that crate's own
+//! manifest on purpose - only the composition-root binary should pick an
 //! allocator - and so is invisible from the root.
 //!
 //! Getting that wrong is quiet. Within a `0.1.x` line a stale `version =
@@ -17,8 +17,8 @@
 //! previous version. It only turns loud on a bump that crosses the caret
 //! boundary (`0.1.x` to `0.2.0`), and by then the alpha shipped a week earlier.
 //!
-//! So: `set` writes all thirteen at once, and `check` is the CI guard that
-//! fails a hand-edit which touched only some of them.
+//! So: `set` writes every one of them at once, and `check` is the CI guard
+//! that fails a hand-edit which touched only some of them.
 //!
 //! `check` also compares the two `[profile.release]` blocks, for the same
 //! reason: `leviath-cli`'s copy is what a `cargo install leviath-cli` build
@@ -27,7 +27,7 @@
 
 use anyhow::{Context, Result};
 
-use crate::coverage::Runner;
+use crate::coverage::{Runner, UNGATED};
 
 /// Path of the manifest holding every version declaration, relative to the
 /// workspace root.
@@ -35,8 +35,8 @@ const MANIFEST: &str = "Cargo.toml";
 
 /// Path of the `leviath-cli` manifest, relative to the workspace root.
 ///
-/// The twelve declarations in the root manifest are not all of them: this one
-/// carries a thirteenth (the allocator pin, deliberately kept out of the
+/// The declarations in the root manifest are not all of them: this one
+/// carries one more (the allocator pin, deliberately kept out of the
 /// workspace table) and a copy of `[profile.release]` that a `cargo install`
 /// build depends on. Both are checked here, because both are invisible from
 /// the root.
@@ -395,17 +395,17 @@ pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month, day)
 }
 
-// ── Release lists that must track the workspace ──────────────────────────────
+// ── Workflow lists that must track the workspace ─────────────────────────────
 
 /// Path of the workflow carrying the crates.io publish order.
 const PROD_WORKFLOW: &str = ".github/workflows/prod.yml";
 
-/// Path of the workflow carrying the per-package coverage matrix.
+/// Path of the workflow carrying the per-package coverage matrix and the
+/// build-each-provider loop.
 const CI_WORKFLOW: &str = ".github/workflows/ci.yml";
 
-/// Members the coverage gate does not run, matching
-/// [`crate::coverage::parse_workspace_packages`].
-const UNGATED: &[&str] = &["xtask", "leviath-testkit", "leviath"];
+/// Path of the manifest whose `providers` feature names every provider.
+const PROVIDERS_MANIFEST: &str = "crates/leviath-providers/Cargo.toml";
 
 /// Workspace member names, read from the root manifest's `members` list.
 ///
@@ -570,15 +570,15 @@ fn dependency_line<'a>(manifest: &'a str, dep: &str) -> &'a str {
         .unwrap_or_default()
 }
 
-/// The crate names in `prod`'s publish loop, in the order it publishes them.
+/// The words of the shell loop `for <var> in a b \ c; do` in `text`, in order.
 ///
-/// The loop is a shell `for c in a b \ c; do`, so this reads the words
-/// between `for c in ` and the `; do` that closes it, dropping the line
-/// continuations. A rewritten loop yields nothing, and the membership check
-/// then reports every crate missing rather than this passing an empty list
-/// off as a correct one.
-fn publish_loop(prod: &str) -> Vec<String> {
-    let Some((_, after)) = prod.split_once("for c in ") else {
+/// Reads the words between `for <var> in ` and the `; do` that closes it,
+/// dropping the line continuations. prod.yml's publish loop is `for c in`, and
+/// ci.yml's per-provider build is `for provider in`. A rewritten loop yields
+/// nothing, and the check reading it then reports every name missing rather
+/// than this passing an empty list off as a correct one.
+fn loop_words(text: &str, var: &str) -> Vec<String> {
+    let Some((_, after)) = text.split_once(&format!("for {var} in ")) else {
         return Vec::new();
     };
     let Some((body, _)) = after.split_once("; do") else {
@@ -618,7 +618,7 @@ fn workspace_deps(manifest: &str, members: &[String]) -> Vec<String> {
 /// hit this after the opt-out above was patched around: `leviath-agent-client`
 /// sat before `leviath-tools`, which it tests against.
 fn published_before_dependency(prod: &str, manifests: &[(String, String)]) -> Vec<String> {
-    let order = publish_loop(prod);
+    let order = loop_words(prod, "c");
     let members: Vec<String> = manifests.iter().map(|(name, _)| name.clone()).collect();
     let position = |name: &str| order.iter().position(|o| o == name);
     let mut wrong = Vec::new();
@@ -682,6 +682,47 @@ fn missing_from_release_lists(
     missing
 }
 
+/// The provider features, as the `providers` feature of `manifest` (the
+/// providers crate's) turns them on.
+fn provider_features(manifest: &str) -> Result<Vec<String>> {
+    let parsed: toml::Table =
+        toml::from_str(manifest).with_context(|| format!("{PROVIDERS_MANIFEST} does not parse"))?;
+    let names = parsed
+        .get("features")
+        .and_then(|features| features.get("providers"))
+        .and_then(toml::Value::as_array)
+        .with_context(|| format!("{PROVIDERS_MANIFEST} has no `providers` feature list"))?;
+    Ok(names
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Every way ci.yml's build-each-provider loop differs from the provider
+/// features.
+///
+/// The `default-features` job compiles each provider on its own, which is the
+/// one build where a helper only some providers call goes dead. Its loop is
+/// written out by hand, so a provider added to the crate and not to the loop
+/// is a configuration nothing compiles.
+fn provider_loop_drift(providers_manifest: &str, ci: &str) -> Result<Vec<String>> {
+    let features = provider_features(providers_manifest)?;
+    let built = loop_words(ci, "provider");
+    let mut drift: Vec<String> = features
+        .iter()
+        .filter(|feature| !built.contains(feature))
+        .map(|feature| format!("`{feature}` is not in the loop"))
+        .collect();
+    drift.extend(
+        built
+            .iter()
+            .filter(|name| !features.contains(name))
+            .map(|name| format!("`{name}` is in the loop but is not a provider feature")),
+    );
+    Ok(drift)
+}
+
 /// Real entry point: reads and writes the workspace files.
 pub fn run(mode: VersionMode) -> Result<()> {
     run_with(&crate::coverage::RealRunner, mode)
@@ -732,6 +773,17 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
                 missing.join("; ")
             );
 
+            let providers = std::fs::read_to_string(PROVIDERS_MANIFEST)
+                .with_context(|| format!("reading {PROVIDERS_MANIFEST}"))?;
+            let drift = provider_loop_drift(&providers, &ci)?;
+            anyhow::ensure!(
+                drift.is_empty(),
+                "{CI_WORKFLOW}'s `for provider in` loop does not match the `providers` \
+                 feature in {PROVIDERS_MANIFEST}: {}. Make the loop name every provider \
+                 feature, and nothing else.",
+                drift.join("; ")
+            );
+
             let mut pins: Vec<(String, String)> = pinned_versions(&manifest)
                 .into_iter()
                 .map(|(dep, _)| (MANIFEST.to_owned(), dep))
@@ -769,9 +821,9 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
             println!(
                 "Every intra-workspace pin matches [workspace.package] version {expected}, \
                  both [profile.release] blocks agree, every member is in the \
-                 publish list and the coverage matrix, nothing the release \
-                 needs has opted out of publishing, and the publish list is in \
-                 dependency order."
+                 publish list and the coverage matrix, CI builds every provider \
+                 feature on its own, nothing the release needs has opted out of \
+                 publishing, and the publish list is in dependency order."
             );
             Ok(())
         }
@@ -1431,13 +1483,68 @@ members = [
     /// The loop's words come back in order with the line continuations
     /// dropped; a rewritten loop yields nothing rather than a guess.
     #[test]
-    fn publish_loop_reads_the_for_loop_in_order() {
+    fn loop_words_reads_the_named_for_loop_in_order() {
         let prod = "          for c in leviath-alloc leviath-core \\\n                   leviath-cli; do\n            cargo publish";
         assert_eq!(
-            publish_loop(prod),
+            loop_words(prod, "c"),
             vec!["leviath-alloc", "leviath-core", "leviath-cli"]
         );
-        assert!(publish_loop("while read c; do").is_empty());
+        assert!(loop_words(prod, "provider").is_empty());
+        assert!(loop_words("while read c; do", "c").is_empty());
+        assert!(loop_words("for c in a b", "c").is_empty());
+    }
+
+    /// The providers manifest's `[features]`, cut down to two providers and a
+    /// feature that is not one.
+    const PROVIDERS: &str = "[features]\ndefault = [\"providers\"]\n\
+                             providers = [\n    \"anthropic\",\n    \"rhai\",\n]\n\
+                             anthropic = []\nrhai = []\ndebug-http = []\n";
+
+    /// A loop naming exactly the provider features passes, in any order and
+    /// across a line continuation.
+    #[test]
+    fn a_loop_naming_every_provider_feature_passes() {
+        let ci = "for provider in rhai \\\n    anthropic; do\n  cargo clippy\ndone";
+        assert!(provider_loop_drift(PROVIDERS, ci).unwrap().is_empty());
+    }
+
+    /// A provider left out of the loop and a name that is not a provider
+    /// feature (`debug-http` is a feature, but not a provider) are each
+    /// reported, and a missing loop reports every provider.
+    #[test]
+    fn a_loop_that_drifted_from_the_provider_features_is_reported() {
+        let drift =
+            provider_loop_drift(PROVIDERS, "for provider in anthropic debug-http; do").unwrap();
+        assert_eq!(
+            drift,
+            vec![
+                "`rhai` is not in the loop",
+                "`debug-http` is in the loop but is not a provider feature"
+            ]
+        );
+        assert_eq!(provider_loop_drift(PROVIDERS, "").unwrap().len(), 2);
+    }
+
+    /// A manifest that does not parse, or has no `providers` list, is an
+    /// error rather than an empty list that an empty loop would match.
+    #[test]
+    fn a_manifest_without_a_provider_list_is_an_error() {
+        assert!(provider_loop_drift("[features\n", "").is_err());
+        assert!(provider_loop_drift("[features]\nanthropic = []\n", "").is_err());
+        assert!(provider_loop_drift("[features]\nproviders = \"x\"\n", "").is_err());
+    }
+
+    /// The real workflow and the real manifest agree, so a commit that adds a
+    /// provider without adding it to CI fails the test suite as well as
+    /// `cargo xtask version --check`.
+    #[test]
+    fn ci_builds_every_shipped_provider_on_its_own() {
+        let drift = provider_loop_drift(
+            include_str!("../../crates/leviath-providers/Cargo.toml"),
+            include_str!("../../.github/workflows/ci.yml"),
+        )
+        .unwrap();
+        assert!(drift.is_empty(), "{drift:?}");
     }
 
     /// Both spellings of a versioned workspace dependency are read, under any

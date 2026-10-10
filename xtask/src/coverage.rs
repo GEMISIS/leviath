@@ -247,14 +247,20 @@ pub fn parse_uncovered(json: &serde_json::Value) -> Vec<String> {
     out
 }
 
-/// Parse workspace package names from `cargo metadata` JSON. Three members
-/// are excluded from the gate: `xtask` (the coverage tool itself),
-/// `leviath-testkit` (dev-dependency-only test scaffolding whose every line
-/// executes inside other packages' gated suites - self-gating it at 100%
-/// would force tests-of-test-helpers with no defect-finding power), and
-/// `leviath` (the re-export-only crates.io facade: it has zero executable
-/// regions, so llvm-cov has nothing to count; CI's `guard-facade` job is what
-/// keeps executable code from ever landing there).
+/// The workspace members the coverage gate does not run: `xtask` (the
+/// coverage tool itself), `leviath-testkit` (dev-dependency-only test
+/// scaffolding whose every line executes inside other packages' gated suites -
+/// self-gating it at 100% would force tests-of-test-helpers with no
+/// defect-finding power), and `leviath` (the re-export-only crates.io facade:
+/// it has zero executable regions, so llvm-cov has nothing to count; CI's
+/// `guard-facade` job is what keeps executable code from ever landing there).
+///
+/// `cargo xtask version --check` holds ci.yml's coverage matrix to every
+/// other member.
+pub const UNGATED: &[&str] = &["xtask", "leviath-testkit", "leviath"];
+
+/// Parse workspace package names from `cargo metadata` JSON, leaving out the
+/// [`UNGATED`] members.
 pub fn parse_workspace_packages(meta: &serde_json::Value) -> Vec<String> {
     let members: std::collections::HashSet<String> = meta["workspace_members"]
         .as_array()
@@ -270,7 +276,7 @@ pub fn parse_workspace_packages(meta: &serde_json::Value) -> Vec<String> {
         .iter()
         .filter(|p| p["id"].as_str().is_some_and(|id| members.contains(id)))
         .filter_map(|p| p["name"].as_str())
-        .filter(|n| *n != "xtask" && *n != "leviath-testkit" && *n != "leviath")
+        .filter(|n| !UNGATED.contains(n))
         .map(str::to_owned)
         .collect()
 }
