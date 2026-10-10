@@ -63,6 +63,53 @@ async fn the_points_are_the_start_and_every_step_that_moved_the_window() {
     .await;
 }
 
+/// What a stage wrote on the step that took it to the next one is listed
+/// under the stage that wrote it, and the stage entered still starts with the
+/// window as that step left it.
+#[tokio::test]
+async fn a_stage_is_credited_with_what_it_wrote_on_its_way_out() {
+    crate::runstate::with_isolated_runs_dir_async("history-way-out", |_d| async move {
+        let run_id = recorded();
+        let start = run_file::require(&run_id).unwrap();
+        let from = start.state_at(0).unwrap().cursor.stage.to_string();
+        said(&run_id, 10, "one");
+        step(&run_id, 20, Vec::new(), |s| {
+            s.context.regions[0].entries.push(EntryState {
+                text: "the render".to_string(),
+                parts: Vec::new(),
+                tokens: 2,
+                timestamp: 20,
+                kind: EntryKind::Text,
+                meta: EntryMeta::None,
+                key: None,
+                reasoning: None,
+            });
+            s.cursor.stage = leviath_runtime::spec::names::StageName::new("implement").unwrap();
+        });
+
+        let every = every_window(&run_id);
+        let listed: Vec<(i64, &str)> = every
+            .iter()
+            .map(|p| (p.at, p.meta.current_stage.as_str()))
+            .collect();
+        assert_eq!(
+            listed[1..],
+            [(10, from.as_str()), (20, from.as_str()), (20, "implement")]
+        );
+        let holds = |p: &RunPoint| {
+            p.context
+                .regions
+                .iter()
+                .flat_map(|r| &r.entries)
+                .any(|e| e.content == "the render")
+        };
+        assert!(holds(&every[2]), "the stage that wrote it ends with it");
+        assert!(holds(&every[3]));
+        assert_eq!(point_count(&run_id), Some(4));
+    })
+    .await;
+}
+
 /// A state with no window at all is no point of the history, and the points
 /// after it keep counting from where the last one left off.
 #[tokio::test]
@@ -192,6 +239,19 @@ async fn a_run_with_no_readable_file_has_no_history() {
 
         let run_id = recorded();
         stateless(&run_id);
+        assert!(point_count(&run_id).is_none());
+
+        // A start that reads and a step that does not.
+        let run_id = recorded();
+        let mut bytes = std::fs::read(run_file::path(&run_id)).unwrap();
+        bytes.extend(
+            leviath_runtime::runfile::codec::encode(
+                leviath_runtime::runfile::codec::FrameKind::Delta,
+                &1u64,
+            )
+            .unwrap(),
+        );
+        super::super::run_file::tests::garbage(&run_id, &bytes);
         assert!(point_count(&run_id).is_none());
     })
     .await;

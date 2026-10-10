@@ -118,6 +118,30 @@ pub(crate) fn walk(
     Ok(())
 }
 
+/// Replay the run from the state it started in, handing `visit` each state a
+/// step adds to the run's history, with the step that added it: none for a
+/// step that left the window alone, and two for one that wrote to the window
+/// on its way to another stage (see [`step_points`]). Stops early when
+/// `visit` breaks.
+///
+/// [`step_points`]: leviath_runtime::runfile::history::step_points
+pub(crate) fn walk_points(
+    run_id: &str,
+    reader: &RunFileReader,
+    visit: &mut dyn FnMut(&StateDelta, &RunState) -> ControlFlow<()>,
+) -> Result<(), ServeError> {
+    let (mut state, deltas) = steps(run_id, reader)?;
+    for delta in &deltas {
+        let flow = leviath_runtime::runfile::history::step_points(delta, &mut state, &mut |at| {
+            visit(delta, at)
+        });
+        if flow.is_break() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// [`walk`], handing `visit` the whole state before each step too. Each step
 /// costs a copy of the state, so this is for a reader that compares the two.
 pub(crate) fn walk_pairs(
