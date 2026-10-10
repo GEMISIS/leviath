@@ -23,14 +23,10 @@ pub enum CacheHint {
     /// assembly sorts it to the same position as `UntilChanged`, and its text
     /// is untouched.
     RecentlyChanged,
-    /// Cache the stable prefix of a sliding window.
-    /// `stable_fraction` is 0.0..1.0 (default 0.75 = oldest 75% of messages are stable).
-    SlidingPrefix {
-        /// How much of the window counts as stable, in `0.0..1.0`. The oldest
-        /// that fraction is cached; the newest tail is not, because it is what
-        /// changes every turn and would invalidate the whole prefix with it.
-        stable_fraction: f32,
-    },
+    /// Cache the stable prefix of a sliding window: its older entries, but not
+    /// the newest tail, which changes every turn and would invalidate the whole
+    /// prefix with it.
+    SlidingPrefix,
     /// Never cache (temporary, clearable, new messages).
     Never,
 }
@@ -66,32 +62,15 @@ mod tests {
 
     #[test]
     fn cache_hint_sliding_prefix_equality() {
-        let a = CacheHint::SlidingPrefix {
-            stable_fraction: 0.75,
-        };
-        let b = CacheHint::SlidingPrefix {
-            stable_fraction: 0.75,
-        };
-        assert_eq!(a, b);
-
-        let c = CacheHint::SlidingPrefix {
-            stable_fraction: 0.5,
-        };
-        assert_ne!(a, c);
+        assert_eq!(CacheHint::SlidingPrefix, CacheHint::SlidingPrefix);
+        assert_ne!(CacheHint::SlidingPrefix, CacheHint::UntilChanged);
     }
 
     #[test]
     fn cache_hint_clone() {
-        let hint = CacheHint::SlidingPrefix {
-            stable_fraction: 0.8,
-        };
+        let hint = CacheHint::SlidingPrefix;
         let cloned = hint;
-        assert_eq!(
-            cloned,
-            CacheHint::SlidingPrefix {
-                stable_fraction: 0.8
-            }
-        );
+        assert_eq!(cloned, CacheHint::SlidingPrefix);
     }
 
     #[test]
@@ -107,9 +86,7 @@ mod tests {
             CacheHint::Always,
             CacheHint::UntilChanged,
             CacheHint::RecentlyChanged,
-            CacheHint::SlidingPrefix {
-                stable_fraction: 0.75,
-            },
+            CacheHint::SlidingPrefix,
             CacheHint::Never,
         ];
         for hint in hints {
@@ -117,5 +94,10 @@ mod tests {
             let parsed: CacheHint = serde_json::from_str(&json).unwrap();
             assert_eq!(hint, parsed);
         }
+        // What a Rhai provider reads in `cache_hint`: the variant's name.
+        assert_eq!(
+            serde_json::to_string(&CacheHint::SlidingPrefix).unwrap(),
+            "\"SlidingPrefix\""
+        );
     }
 }

@@ -2,7 +2,7 @@
 //! its kind, its budget (a token count or a share of the model's window), and
 //! what fills it at spawn.
 
-use leviath_core::region::{RegionKind, RegionSchema};
+use leviath_core::region::{EvictionStrategy, RegionKind};
 use serde::{Deserialize, Serialize};
 
 /// How a region's token ceiling is expressed before it is resolved against a
@@ -287,6 +287,37 @@ mod seed_refresh_tests {
     }
 }
 
+/// How an old manifest's region kind was written: the shape of
+/// [`RegionKind`] as [`RegionDefinition`] carries it, kept here because
+/// nothing but an old manifest reads or writes it.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "RegionKind")]
+enum OldRegionKind {
+    Pinned,
+    SlidingWindow {
+        max_items: usize,
+        eviction_strategy: EvictionStrategy,
+    },
+    Temporary,
+    Compacting {
+        threshold_tokens: usize,
+    },
+    Clearable,
+    CompactHistory {
+        source_region: String,
+    },
+    HashMap {
+        max_entries: Option<usize>,
+    },
+    Checklist,
+    Custom {
+        script: String,
+        /// Written `persistent` by the oldest manifests; both spellings parse.
+        #[serde(alias = "persistent")]
+        pinned: bool,
+    },
+}
+
 /// Definition of a region in a layout.
 ///
 /// This is the blueprint for creating a Region instance. It specifies the
@@ -297,6 +328,7 @@ pub struct RegionDefinition {
     pub name: String,
 
     /// Region lifecycle policy
+    #[serde(with = "OldRegionKind")]
     pub kind: RegionKind,
 
     /// The region's token ceiling as written; for a percentage budget, its cap
@@ -315,9 +347,6 @@ pub struct RegionDefinition {
     /// "80%"`). `None` keeps the absolute `threshold_tokens` carried on the kind.
     #[serde(default)]
     pub compact_at: Option<f64>,
-
-    /// Optional validation schema
-    pub schema: Option<RegionSchema>,
 
     /// Human-readable description of this region's purpose
     pub description: Option<String>,
@@ -396,7 +425,6 @@ impl RegionDefinition {
             max_tokens,
             budget: BudgetSpec::Absolute(max_tokens),
             compact_at: None,
-            schema: None,
             description: None,
             describe_in_prompt: false,
             required: false,
@@ -501,5 +529,52 @@ mod tests {
     #[test]
     fn budget_spec_default_is_absolute_zero() {
         assert_eq!(BudgetSpec::default(), BudgetSpec::Absolute(0));
+    }
+
+    /// Every kind round-trips in the old shape, a custom region's `pinned`
+    /// also reads under its oldest name, and a definition still carrying the
+    /// `schema` key old manifests wrote loads without it.
+    #[test]
+    fn a_region_definition_reads_and_writes_every_kind_in_the_old_shape() {
+        let kinds = [
+            RegionKind::Pinned,
+            RegionKind::SlidingWindow {
+                max_items: 3,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            RegionKind::Temporary,
+            RegionKind::Compacting {
+                threshold_tokens: 10,
+            },
+            RegionKind::Clearable,
+            RegionKind::CompactHistory {
+                source_region: "notes".to_string(),
+            },
+            RegionKind::HashMap {
+                max_entries: Some(4),
+            },
+            RegionKind::Checklist,
+            RegionKind::Custom {
+                script: "r.rhai".to_string(),
+                pinned: true,
+            },
+        ];
+        for kind in kinds {
+            let def = RegionDefinition::new("r".to_string(), kind.clone(), 100);
+            let json = serde_json::to_string(&def).unwrap();
+            let back: RegionDefinition = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.kind, kind, "{json}");
+        }
+
+        let old = r#"{"name":"r","kind":{"Custom":{"script":"r.rhai","persistent":true}},
+            "max_tokens":100,"schema":null,"description":null}"#;
+        let def: RegionDefinition = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            def.kind,
+            RegionKind::Custom {
+                script: "r.rhai".to_string(),
+                pinned: true
+            }
+        );
     }
 }

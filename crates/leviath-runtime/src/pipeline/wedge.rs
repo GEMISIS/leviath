@@ -19,8 +19,8 @@
 //!
 //! The trigger is structural, not temporal. It is not "this run looks old" -
 //! that is the shape of every misdiagnosis in this area, where a fresh
-//! `updated_at`, a bare `waiting`, or a `pid` field gets read as evidence it
-//! was never able to give. It is "the pipeline's own
+//! `updated_at` or a bare `waiting` gets read as evidence it was never able
+//! to give. It is "the pipeline's own
 //! invariants say this state cannot exist", and the timeout only absorbs the
 //! transient windows inside a tick.
 //!

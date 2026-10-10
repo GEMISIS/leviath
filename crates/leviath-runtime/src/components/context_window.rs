@@ -989,9 +989,7 @@ mod tests {
         // breakpoints. Splitting further would take the messages' one.
         let mut blocks = vec![
             block(CacheHint::Always),
-            block(CacheHint::SlidingPrefix {
-                stable_fraction: 0.75,
-            }),
+            block(CacheHint::SlidingPrefix),
             block(CacheHint::UntilChanged),
             block(CacheHint::UntilChanged),
         ];

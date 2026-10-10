@@ -116,6 +116,7 @@ impl EntryContent {
     }
 
     /// The same content with `part` appended.
+    #[cfg(test)]
     pub fn with_part(self, part: Part) -> Self {
         self.with_parts(std::iter::once(part))
     }
@@ -440,22 +441,6 @@ mod tests {
         let open = Region::new("any".into(), RegionKind::Pinned, 10);
         assert!(open.accepts_content(&EntryContent::text("x")).is_ok());
         assert_eq!(region.stored_count(), 1);
-    }
-
-    #[test]
-    fn a_region_with_a_schema_takes_text_only() {
-        use crate::region::schema::{ContentFormat, RegionSchema};
-        use crate::region::{Region, RegionKind};
-        let mut region = Region::new("plan".into(), RegionKind::Pinned, 10_000);
-        region.schema = Some(RegionSchema::new(ContentFormat::Json));
-        region.add_entry(EntryContent::text("{}"), 1).unwrap();
-        let err = region
-            .add_entry(EntryContent::from_parts(vec![stored("a.png")]), 5)
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("cannot hold a stored part"),
-            "{err}"
-        );
     }
 
     #[test]

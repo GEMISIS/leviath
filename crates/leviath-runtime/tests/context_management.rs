@@ -103,37 +103,6 @@ fn test_eviction_cascade_temporary_then_compacting() {
 }
 
 #[test]
-fn test_schema_validation_json() {
-    use leviath_core::region::{ContentFormat, RegionSchema};
-
-    let schema = RegionSchema::new(ContentFormat::Json);
-
-    // Valid JSON should pass
-    assert!(schema.validate(r#"{"key": "value"}"#).is_ok());
-
-    // Invalid JSON should fail
-    assert!(schema.validate("not json").is_err());
-}
-
-#[test]
-fn test_schema_validation_mermaid() {
-    use leviath_core::region::{ContentFormat, RegionSchema};
-
-    let schema = RegionSchema::new(ContentFormat::Mermaid);
-
-    // Valid mermaid should pass
-    assert!(schema.validate("graph TD\n  A --> B").is_ok());
-    assert!(
-        schema
-            .validate("sequenceDiagram\n  Alice->>Bob: Hello")
-            .is_ok()
-    );
-
-    // Invalid mermaid should fail
-    assert!(schema.validate("just plain text").is_err());
-}
-
-#[test]
 fn test_token_budget_enforcement() {
     let mut region = Region::new("test".to_string(), RegionKind::Pinned, 1000);
 

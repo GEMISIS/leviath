@@ -3722,9 +3722,7 @@ mod tests {
         // Most stable first (lowest priority), volatile last.
         assert_eq!(block_cache::cache_hint_sort_priority(CacheHint::Always), 0);
         assert_eq!(
-            block_cache::cache_hint_sort_priority(CacheHint::SlidingPrefix {
-                stable_fraction: 0.75
-            }),
+            block_cache::cache_hint_sort_priority(CacheHint::SlidingPrefix),
             1
         );
         assert_eq!(
@@ -3735,9 +3733,7 @@ mod tests {
         // The four priorities are strictly increasing by volatility.
         assert!(
             block_cache::cache_hint_sort_priority(CacheHint::Always)
-                < block_cache::cache_hint_sort_priority(CacheHint::SlidingPrefix {
-                    stable_fraction: 0.5
-                })
+                < block_cache::cache_hint_sort_priority(CacheHint::SlidingPrefix)
         );
     }
 

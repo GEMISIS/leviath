@@ -13,9 +13,8 @@ use std::collections::HashMap;
 pub mod revision;
 mod stage_ledger;
 
-// Re-exported flat rather than left behind a path of their own: the stage ledger
-// moved out of this file because the file got long, and that is a fact about
-// where the source lives, not about what a caller should have to type.
+// Re-exported flat rather than left behind a path of their own: which file the
+// stage ledger's source lives in is not something a caller should have to type.
 pub use stage_ledger::{
     MAX_STAGE_VISITS, StageCall, StageModelUse, StageRecord, StageRunStatus, StageVisitRecord,
     stage_models_of,
@@ -437,17 +436,6 @@ pub struct RunMeta {
     /// nothing about the stages after it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stage_models: Vec<StageModelUse>,
-    /// Always 0. There is no worker process per run: the daemon hosts every run
-    /// as an entity in one shared world, so no run has a pid of its own.
-    ///
-    /// Kept because it is part of every run record, and served from
-    /// `GET /api/runs`. Do not key liveness on it. `pid == 0`
-    /// is true of a run that is working, a run that has finished, and a run
-    /// nothing is driving, so a sweeper that reverts on it reverts everything.
-    /// Ask the daemon (`lev ps`) whether it is still hosting the run, and read
-    /// `status` and `last_progress_at` off disk for what became of it.
-    #[serde(default)]
-    pub pid: u32,
     /// Where the run stands. The durable counterpart to the ECS world's live
     /// `AgentStatus`, and the one that survives a daemon restart.
     pub status: RunStatus,
@@ -817,7 +805,6 @@ impl RunMeta {
             task,
             model,
             stage_models: Vec::new(),
-            pid: 0,
             status: RunStatus::Starting,
             current_stage: String::new(),
             stage_index: 0,
@@ -895,15 +882,6 @@ impl RunMeta {
             Some(clock) => clock.total_secs(now),
             None => crate::duration::between(self.started_at, self.updated_at),
         }
-    }
-
-    /// Stamp `updated_at` with the current time.
-    ///
-    /// Deliberately does **not** touch `last_progress_at`: the 30-second
-    /// persistence heartbeat calls this, and a run that is wedged must not look
-    /// like one that just moved. See [`RunMeta::last_progress_at`].
-    pub fn touch(&mut self) {
-        self.updated_at = crate::duration::now_secs();
     }
 }
 
@@ -1188,7 +1166,6 @@ mod tests {
         assert_eq!(m.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(m.workdir, "/work");
         assert_eq!(m.num_stages, 3);
-        assert_eq!(m.pid, 0);
         assert_eq!(m.status, RunStatus::Starting);
         assert_eq!(m.stage_index, 0);
         assert_eq!(m.iteration, 0);
@@ -1207,14 +1184,6 @@ mod tests {
         assert_eq!(m.max_child_depth, 0);
         assert!(m.current_stage.is_empty());
         assert_eq!(m.started_at, m.updated_at);
-    }
-
-    #[test]
-    fn run_meta_touch_advances_updated_at() {
-        let mut m = sample_meta();
-        m.updated_at = 0;
-        m.touch();
-        assert!(m.updated_at > 0);
     }
 
     /// A record without `waiting_on` still loads.

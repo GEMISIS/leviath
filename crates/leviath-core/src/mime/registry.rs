@@ -327,6 +327,7 @@ impl MimeRegistry {
     }
 
     /// [`Self::builtin`], reporting why the compiled rows would not load.
+    #[cfg(test)]
     pub fn builtin_checked() -> Result<Self, RegistryError> {
         Self::from_toml_str(DEFAULTS, "builtin")
     }
