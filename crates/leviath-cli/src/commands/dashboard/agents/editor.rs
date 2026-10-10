@@ -399,14 +399,6 @@ impl Editor {
             _ => None,
         }
     }
-
-    /// The path the panel is on, when it is on one.
-    pub(in crate::commands::dashboard) fn panel_edge(&self) -> Option<(String, String)> {
-        match &self.panel {
-            Panel::Edge { from, to } => Some((from.clone(), to.clone())),
-            _ => None,
-        }
-    }
 }
 
 impl Dashboard {
@@ -691,12 +683,11 @@ impl Dashboard {
     }
 
     pub(in crate::commands::dashboard) fn editor_set_toggle(&mut self, id: &FieldId, on: bool) {
-        match (id, self.editor().panel_stage()) {
-            (FieldId::AllowComplete, Some(stage)) => {
+        match (id, self.editor().panel.clone()) {
+            (FieldId::AllowComplete, Panel::Stage { name: stage, .. }) => {
                 self.editor_mutate(|d| d.set_allow_complete(&stage, on.then_some(true)));
             }
-            (FieldId::EdgeGate, _) => {
-                let (from, to) = self.editor().panel_edge().expect("a path field");
+            (FieldId::EdgeGate, Panel::Edge { from, to }) => {
                 self.editor_mutate(|d| d.set_edge_gate(&from, &to, on));
             }
             _ => self.editor_set_toggle_more(id, on),
@@ -741,7 +732,7 @@ impl Dashboard {
         id: &FieldId,
     ) -> (Vec<String>, Option<usize>) {
         let editor = self.editor();
-        match (id, editor.panel_stage()) {
+        match (id, editor.panel.clone()) {
             (FieldId::EntryStage, _) => {
                 let names = editor.doc.stage_names();
                 let current = editor
@@ -759,7 +750,7 @@ impl Dashboard {
                     .and_then(|m| editor.models.iter().position(|n| *n == m));
                 (editor.models.clone(), current)
             }
-            (FieldId::StageMode, Some(stage)) => {
+            (FieldId::StageMode, Panel::Stage { name: stage, .. }) => {
                 let mode = editor.doc.stage(&stage).map(|s| s.mode);
                 let options: Vec<String> = StageModeView::CHOICES
                     .iter()
@@ -768,7 +759,7 @@ impl Dashboard {
                 let current = mode.and_then(|m| options.iter().position(|o| *o == m.as_str()));
                 (options, current)
             }
-            (FieldId::WorkerKind, Some(stage)) => {
+            (FieldId::WorkerKind, Panel::Stage { name: stage, .. }) => {
                 let kind = editor
                     .doc
                     .stage(&stage)
@@ -781,7 +772,7 @@ impl Dashboard {
                 let current = kind.and_then(|k| options.iter().position(|o| *o == k.key()));
                 (options, current)
             }
-            (FieldId::MergeStage, Some(stage)) => {
+            (FieldId::MergeStage, Panel::Stage { name: stage, .. }) => {
                 let mut names = vec!["(none)".to_string()];
                 names.extend(editor.doc.stage_names().into_iter().filter(|n| *n != stage));
                 let merge = editor.doc.stage(&stage).and_then(|s| s.fan_out.merge_stage);
@@ -790,7 +781,7 @@ impl Dashboard {
                     .or(Some(0));
                 (names, current)
             }
-            (FieldId::OnWorkerFailure, Some(stage)) => {
+            (FieldId::OnWorkerFailure, Panel::Stage { name: stage, .. }) => {
                 let options = vec!["continue".to_string(), "fail_all".to_string()];
                 let policy = editor
                     .doc
@@ -801,8 +792,7 @@ impl Dashboard {
                     .or(Some(0));
                 (options, current)
             }
-            (FieldId::EdgeKind, _) => {
-                let (from, to) = editor.panel_edge().expect("a path field");
+            (FieldId::EdgeKind, Panel::Edge { from, to }) => {
                 let options: Vec<String> = EdgeKind::CHOICES
                     .iter()
                     .map(|k| k.label().to_string())
@@ -901,7 +891,7 @@ impl Dashboard {
     /// Write a chosen value into a choice field.
     pub(in crate::commands::dashboard) fn editor_pick(&mut self, id: &FieldId, value: &str) {
         let value = value.to_string();
-        match (id, self.editor().panel_stage()) {
+        match (id, self.editor().panel.clone()) {
             (FieldId::EntryStage, _) => {
                 self.editor_mutate(|d| d.set_entry_stage(&value));
             }
@@ -911,11 +901,11 @@ impl Dashboard {
                     Ok(())
                 });
             }
-            (FieldId::StageMode, Some(stage)) => {
+            (FieldId::StageMode, Panel::Stage { name: stage, .. }) => {
                 let mode = StageModeView::parse(&value);
                 self.editor_mutate(|d| d.set_stage_mode(&stage, &mode));
             }
-            (FieldId::WorkerKind, Some(stage)) => {
+            (FieldId::WorkerKind, Panel::Stage { name: stage, .. }) => {
                 let kind = [WorkerKind::Stage, WorkerKind::Agent, WorkerKind::Query]
                     .into_iter()
                     .find(|k| k.key() == value)
@@ -933,7 +923,7 @@ impl Dashboard {
                     )
                 });
             }
-            (FieldId::MergeStage, Some(stage)) => {
+            (FieldId::MergeStage, Panel::Stage { name: stage, .. }) => {
                 let merge = (value != "(none)").then_some(value);
                 self.editor_mutate(|d| {
                     d.set_fan_out(
@@ -942,7 +932,7 @@ impl Dashboard {
                     )
                 });
             }
-            (FieldId::OnWorkerFailure, Some(stage)) => {
+            (FieldId::OnWorkerFailure, Panel::Stage { name: stage, .. }) => {
                 self.editor_mutate(|d| {
                     d.set_fan_out(
                         &stage,
@@ -950,8 +940,7 @@ impl Dashboard {
                     )
                 });
             }
-            (FieldId::EdgeKind, _) => {
-                let (from, to) = self.editor().panel_edge().expect("a path field");
+            (FieldId::EdgeKind, Panel::Edge { from, to }) => {
                 let kind = EdgeKind::CHOICES
                     .into_iter()
                     .find(|k| k.label() == value)
@@ -964,10 +953,11 @@ impl Dashboard {
 
     /// Enter on a button row.
     pub(in crate::commands::dashboard) fn editor_button(&mut self, id: &FieldId) {
-        match (id, self.editor().panel_stage()) {
-            (FieldId::DeleteStage, Some(stage)) => self.editor_request_delete_stage(&stage),
-            (FieldId::DeletePath, _) => {
-                let (from, to) = self.editor().panel_edge().expect("a path field");
+        match (id, self.editor().panel.clone()) {
+            (FieldId::DeleteStage, Panel::Stage { name: stage, .. }) => {
+                self.editor_request_delete_stage(&stage)
+            }
+            (FieldId::DeletePath, Panel::Edge { from, to }) => {
                 self.editor_delete_edge(&from, &to);
             }
             _ => self.editor_button_more(id),
@@ -1020,14 +1010,14 @@ impl Dashboard {
     /// The text of a line editor, committed to its field.
     pub(in crate::commands::dashboard) fn editor_commit_line(&mut self, id: &FieldId, text: &str) {
         let text = text.trim().to_string();
-        match (id, self.editor().panel_stage()) {
+        match (id, self.editor().panel.clone()) {
             (FieldId::AgentDescription, _) => {
                 self.editor_mutate(|d| {
                     d.set_description(&text);
                     Ok(())
                 });
             }
-            (FieldId::StageName, Some(stage)) => {
+            (FieldId::StageName, Panel::Stage { name: stage, .. }) => {
                 // The box keeps its place under the new name.
                 let positions = self
                     .editor()
@@ -1044,7 +1034,7 @@ impl Dashboard {
                     editor.sync_panel();
                 }
             }
-            (FieldId::StageDescription, Some(stage)) => {
+            (FieldId::StageDescription, Panel::Stage { name: stage, .. }) => {
                 self.editor_mutate(|d| {
                     d.set_stage_text(&stage, crate::blueprint_edit::StageText::Description, &text)
                 });
@@ -1071,9 +1061,10 @@ impl Dashboard {
                 };
                 self.editor_set_number(id, value);
             }
-            (FieldId::WorkerRef, Some(stage)) => self.editor_set_worker(&stage, &text),
-            (FieldId::EdgeHint, _) => {
-                let (from, to) = self.editor().panel_edge().expect("a path field");
+            (FieldId::WorkerRef, Panel::Stage { name: stage, .. }) => {
+                self.editor_set_worker(&stage, &text)
+            }
+            (FieldId::EdgeHint, Panel::Edge { from, to }) => {
                 self.editor_mutate(|d| d.set_edge_hint(&from, &to, &text));
             }
             _ => self.editor_commit_line_more(id, &text),
