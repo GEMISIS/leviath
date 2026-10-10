@@ -188,9 +188,16 @@ same list.
   does. `Tool` lives in `leviath-core` (still re-exported as
   `leviath_providers::Tool`), so `leviath-tools` no longer depends on
   `leviath-providers`. `leviath-net` gains `sse`, the Server-Sent Events
-  framer every streaming client uses, and `same_origin_redirects`.
-  `AgentInstaller::try_new` reports a missing home directory instead of
-  panicking.
+  framer and split-character decoder (`Utf8Carry`) every event-stream client
+  uses, and `same_origin_redirects`. `leviath-core` gains
+  `hash::stable_hasher`, for hashes kept across builds, and
+  `duration::now_secs_u64`. `AgentInstaller::try_new` reports a missing home
+  directory instead of panicking.
+- **Library, `leviath-cli`.** `credentials::PROVIDER_KEYS` is no longer
+  public; the provider key table lives in `config`. `commands::mcp::McpEnv`
+  holds a `credentials::McpGrants` (the grant file and the store its tokens
+  are kept in) in place of its `store_path` and `credential_store` fields.
+  `commands::update::execute_blocking` runs `lev update` from async code.
 - `read_files` answers a directory with its listing, as `read_file` does,
   and a file that is not text with an error naming it.
 - `lev providers retention set` and `lev providers retention bedrock` take
@@ -336,9 +343,14 @@ same list.
 - `read_files` returned every file whole, however large. Each file is now
   capped at 256 KiB with the note `read_file` adds, and `read_file` reads no
   further into a file than it shows. A file that is not text and is over
-  `[mime] max_part_bytes` is refused before it is read. The file tools no
-  longer read and write on the daemon's async threads, where a large file
-  stalled every other run.
+  `[mime] max_part_bytes` is refused before it is read, and one that reports
+  no size, such as `/dev/urandom`, is read no further than that limit. The
+  file tools no longer read and write on the daemon's async threads, where a
+  large file stalled every other run.
+- An MCP server reached over HTTP that streamed its reply failed the request
+  when the network split a character (an accented letter, CJK text, an
+  emoji) across two reads. The halves are now joined, as the model providers
+  already did.
 - `lev add` and `lev remove` panicked on a machine with no home directory and
   no `LEVIATH_HOME`. They now report it.
 - `[rate_limits.ollama]` was accepted and never applied. Ollama now honours it
@@ -350,6 +362,14 @@ same list.
   turn, before the rest of their kind; a stage with its own layout uses that
   layout's order. `lev validate` warns (`eviction-order-unevictable`) when
   it names a region that is never evicted, such as a pinned one.
+- A full context window made room only in blueprints that set
+  `[graph] compaction`. Every other run, including the bundled
+  `sprite-to-3d`, `image-to-model`, `text-to-image-to-model` and
+  `model-to-animated-model`, sent the whole window and failed with "Token
+  limit exceeded" once it no longer fit. Every run now clears its clearable
+  regions and trims its temporary and custom ones oldest-first when the
+  window is 90% full, as the context docs describe; summarizing compacting
+  regions still needs a compaction model.
 - Two processes embedding the runtime over one state directory could mint
   the same run id, from a counter each started at zero, and write into one
   run's directory. Every run id now ends in 48 random bits, as `lev`'s
@@ -366,16 +386,26 @@ same list.
   alone, so a server signed in with `lev mcp login` showed as logged out, and
   a login from either wrote its refresh token to that file in plaintext.
   `lev mcp test` sent no keychain-held token either. All of them now read
-  and write logins through the keychain. A login file that will not load is
-  reported (a toast, or a 500) instead of every server shown logged out, and
-  a login refuses rather than replace it with a file holding only the new
-  login, which lost every other server's.
+  and write logins through the keychain. A login file that will not load, or
+  a keychain that cannot be reached, no longer hides your MCP servers: the
+  dashboard's MCP screen and `lev serve`'s listings show every server, not
+  logged in, and say why. A login refuses rather than replace that file with
+  one holding only the new login, which lost every other server's.
+- With `[security] credential_store = "keychain"`, `lev mcp logout`, `lev mcp
+  remove` and removing a server from the dashboard or `lev serve` left the
+  server's refresh token in the keychain. It is now deleted, and logging out
+  again clears one already left there.
+- The agent editor's tool chooser lists the servers that need no login when
+  the keychain cannot be reached, as a run does.
 - With `LEVIATH_HOME` set, `lev policy` and the daemon still used the
   `policy.toml` and `rules/` in your own config directory, so a redirected
   home (a test, a sandbox, a second install) shared your taint policy. They
   now sit beside that home's `config.toml`; without `LEVIATH_HOME` nothing
-  moves. A machine with no config or home directory gets an error from `lev
-  policy` instead of a panic.
+  moves. The Docker image sets `LEVIATH_HOME=/data`, so its policy is now
+  `/data/.leviath/policy.toml`: when a policy sits at the platform path and
+  the home has none, lev logs a warning naming both, so move it. A machine
+  with no config or home directory gets an error from `lev policy` instead of
+  a panic.
 - The daemon shuts down cleanly on SIGTERM, which launchd, systemd and
   `kill` send, as it already did on Ctrl-C. SIGTERM used to end it on the
   spot.
@@ -421,8 +451,8 @@ same list.
   (`age_secs` remains), `CodexProvider::with_user_agent`,
   `mime_tables::modalities_read_on` and `files::now_secs` (use
   `leviath_core::duration::now_secs`). `leviath_net::is_restricted_addr`,
-  `read_caps::describe_cap`, `leviath_sys::perms::write_atomic_with` and
-  `editor::launch_via` are private.
+  `read_caps::describe_cap`, `leviath_sys::perms::write_atomic_with`, and
+  `editor::launch_via` with its `EditorRunOutcome`, are private.
 - The Rhai functions `region_pinned`, `region_temporary`,
   `region_clearable`, `region_sliding_window`, `region_compacting`,
   `region_custom` and `region_entry`. Each built a map or a string that

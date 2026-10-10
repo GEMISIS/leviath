@@ -11119,6 +11119,26 @@ async fn compaction_evicts_but_needs_no_summary() {
     );
 }
 
+/// A blueprint with no compaction model still makes room in a full window:
+/// eviction needs no model, only a summary does.
+#[tokio::test]
+async fn a_full_window_without_a_compaction_model_still_evicts() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    let mut w = ContextWindow::new(100);
+    let mut scratch = Region::new("scratch".to_string(), RegionKind::Clearable, 100);
+    let _ = scratch.add_entry("y".repeat(360), 95);
+    w.add_region(scratch);
+    w.current_tokens = w.calculate_tokens();
+    let e = world.spawn((w, agent_state(), ReadyToInfer)).id();
+
+    run_dispatch_compaction(&mut world);
+
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(world.get::<AwaitingCompaction>(e).is_none());
+    let window = world.get::<ContextWindow>(e).unwrap();
+    assert_eq!(window.get_region("scratch").unwrap().current_tokens, 0);
+}
+
 #[tokio::test]
 async fn compaction_skips_when_eviction_errors() {
     // Pinned content over the total budget makes try_evict return

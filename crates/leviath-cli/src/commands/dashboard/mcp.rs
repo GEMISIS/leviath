@@ -179,7 +179,7 @@ fn listed(ctx: &McpContext) -> Result<(Vec<McpRow>, Option<String>), String> {
     let config = Config::load_from_path(&ctx.config_path)
         .map_err(|e| format!("Could not read config: {e}"))?;
     let (store, unread) = grants_of(ctx, &config).shown();
-    let now = (ctx.clock)() as u64;
+    let now = (ctx.clock)();
     let rows = config
         .mcp_servers
         .iter()
@@ -316,7 +316,7 @@ async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
             &server.headers,
             &config.security.allow_env_vars,
             ctx.opener.clone(),
-            (ctx.clock)() as u64,
+            (ctx.clock)(),
             reuse.as_deref(),
         )
         .await
@@ -342,7 +342,7 @@ async fn run_test(ctx: &McpContext, name: &str) -> McpOutcome {
         Err(outcome) => return outcome,
     };
     let auth_header = match grants_of(ctx, &config)
-        .authorization_header(name, (ctx.clock)() as u64)
+        .authorization_header(name, (ctx.clock)())
         .await
     {
         Ok(header) => header,
