@@ -238,6 +238,18 @@ pub(crate) fn graph_layout(spec: &RunSpec) -> LaidOut {
     LaidOut { regions, total }
 }
 
+/// The regions a stage's window gives up entries from first, in order: the
+/// `eviction_order` of the layout the stage uses, its own or the graph's. With
+/// no stage, the graph's.
+pub(crate) fn eviction_order(graph: &RunGraph, stage: Option<&StageDef>) -> Vec<String> {
+    let layout = stage.map_or(&graph.layout, |s| graph.layout_for(s));
+    layout
+        .eviction_order
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
 /// A stage's own layout's regions, sized for that stage, when it declares one.
 pub(crate) fn stage_layout(spec: &RunSpec, idx: usize) -> Option<Vec<leviath_core::Region>> {
     let def = spec.graph.stages.get(idx)?.layout.as_ref()?;
@@ -378,6 +390,7 @@ pub(crate) fn stage_setup(spec: &RunSpec, idx: usize) -> StageSetup {
         routing: stage.tool_routing.clone(),
         accepts_messages: stage.accepts_messages,
         context_layout: stage_layout(spec, idx),
+        eviction_order: eviction_order(graph, Some(stage)),
         context_hide: stage.hide.iter().map(ToString::to_string).collect(),
         context_reset: stage.reset.iter().map(ToString::to_string).collect(),
         system_prompt: system_prompt(stage, output.as_ref()),

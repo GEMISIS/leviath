@@ -195,7 +195,7 @@ impl ContextWindow {
                 .zip(&digests)
                 .map(|(region, digest)| RegionFacts {
                     name: &region.name,
-                    kind: crate::persistence::region_kind_str(&region.kind),
+                    kind: region.kind.word(),
                     current_tokens: region.current_tokens,
                     max_tokens: region.max_tokens,
                     digest,

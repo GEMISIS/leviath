@@ -582,14 +582,19 @@ impl WorldHost {
             } => {
                 // The store is content-addressed per run and outlives the
                 // entity, so a finished run's artifact is still readable here
-                // after the daemon has unloaded it.
-                let bytes = self
+                // after the daemon has unloaded it. Read off the host loop: a
+                // whole blob read from disk would hold up every run's tick.
+                let store = self
                     .world
                     .world()
                     .get_resource::<crate::blob_store::BlobStoreHandle>()
-                    .and_then(|store| store.0.read(&run_id, &sha256).ok())
-                    .map(|bytes| bytes.to_vec());
-                let _ = reply.send(bytes);
+                    .map(|store| store.0.clone());
+                tokio::task::spawn_blocking(move || {
+                    let bytes = store
+                        .and_then(|store| store.read(&run_id, &sha256).ok())
+                        .map(|bytes| bytes.to_vec());
+                    let _ = reply.send(bytes);
+                });
             }
             ControlOp::Status { run_id, reply } => {
                 // A run the daemon has unloaded still has an answer for a

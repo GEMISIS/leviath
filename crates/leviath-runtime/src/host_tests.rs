@@ -197,6 +197,7 @@ fn setup() -> StageSetup {
         routing: None,
         accepts_messages: true,
         context_layout: None,
+        eviction_order: Vec::new(),
         context_hide: Vec::new(),
         context_reset: Vec::new(),
         system_prompt: None,

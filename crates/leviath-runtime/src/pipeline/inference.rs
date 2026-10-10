@@ -220,7 +220,7 @@ pub const MODEL_INPUT_ASSEMBLY_VERSION: &str = "1";
 /// do not. Order participates: a model reads the list in the order it is given.
 pub(crate) fn tool_catalog_version(tools: &[Tool]) -> String {
     use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = leviath_core::hash::stable_hasher();
     for tool in tools {
         tool.name.hash(&mut hasher);
         tool.description.hash(&mut hasher);

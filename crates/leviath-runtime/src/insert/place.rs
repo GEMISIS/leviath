@@ -279,7 +279,7 @@ pub(crate) fn stage_ledger(state: &RunState) -> StageLedger {
 /// `context`: each region shaped as the graph declares it (the current stage's
 /// layout first, then the graph's, then any stage's), and the regions the
 /// runtime adds shaped as it adds them. Each region's budget, entries and taint
-/// are the state's.
+/// are the state's; the eviction order is the current stage's layout's.
 pub(crate) fn context_window(spec: &RunSpec, state: &RunState) -> ContextWindow {
     let graph = &spec.graph;
     let current = graph.stage(state.cursor.stage.as_str());
@@ -296,7 +296,9 @@ pub(crate) fn context_window(spec: &RunSpec, state: &RunState) -> ContextWindow 
             None => runtime_region(name, max_tokens),
         }
     };
-    ContextWindow::from_state(&state.context, &shape)
+    let mut window = ContextWindow::from_state(&state.context, &shape);
+    window.eviction_order = crate::pipeline::spec_view::eviction_order(graph, current);
+    window
 }
 
 /// A region the runtime adds to every window, shaped as it adds it: the

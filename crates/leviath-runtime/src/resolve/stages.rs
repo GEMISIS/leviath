@@ -276,25 +276,26 @@ fn working_room(
     }
 }
 
-/// The cap on one reply, in tokens, as the pipeline works it out for each
-/// request: a relative cap is never more than the model's own maximum reply,
-/// and never less than one token. A cap on a region the stage does not carry
-/// is the model's own maximum, which is what the author was reaching for.
+/// The cap on one reply, in tokens, planned for the stage's primary model:
+/// [`OutputCap::resolve`] against that model's limits and the stage's region
+/// budgets. Dispatch resolves the same cap again for whichever model serves
+/// each call, so a fallback is held to its own limits rather than this.
 fn output_cap(
     cap: Option<&OutputCap>,
     model: &ModelPlan,
     budgets: &BTreeMap<RegionName, u32>,
 ) -> Option<u32> {
-    let most = model.max_output_tokens.max(1);
-    let share =
-        |whole: u32, fraction: f64| ((f64::from(whole) * fraction).round() as u32).clamp(1, most);
-    match cap? {
-        OutputCap::Tokens(n) => Some(*n),
-        OutputCap::WindowPercent(fraction) => Some(share(model.model.context_window, *fraction)),
-        OutputCap::RegionPercent { percent, region } => {
-            Some(budgets.get(region).map_or(most, |b| share(*b, *percent)))
-        }
-    }
+    let tokens = cap?.resolve(
+        model.model.context_window as usize,
+        model.max_output_tokens as usize,
+        |region| {
+            budgets
+                .iter()
+                .find(|(name, _)| name.as_str() == region)
+                .map(|(_, budget)| *budget as usize)
+        },
+    );
+    Some(u32::try_from(tokens).unwrap_or(u32::MAX))
 }
 
 /// What the run relies on from this machine: every provider its stages,

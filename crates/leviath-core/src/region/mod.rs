@@ -369,6 +369,27 @@ impl Region {
 }
 
 impl RegionKind {
+    /// The kind as a blueprint writes it: `pinned`, `sliding_window`, `keyed`
+    /// and so on.
+    ///
+    /// Context snapshots and the blueprint API both report a region's kind as
+    /// this word, so a console reading either agrees about what a region is. A
+    /// reader that renders kinds should also accept `sliding` for a
+    /// `sliding_window` and `history` for a `compact_history`.
+    pub fn word(&self) -> &'static str {
+        match self {
+            RegionKind::Pinned => "pinned",
+            RegionKind::Temporary => "temporary",
+            RegionKind::Clearable => "clearable",
+            RegionKind::SlidingWindow { .. } => "sliding_window",
+            RegionKind::Compacting { .. } => "compacting",
+            RegionKind::CompactHistory { .. } => "compact_history",
+            RegionKind::HashMap { .. } => "keyed",
+            RegionKind::Checklist => "checklist",
+            RegionKind::Custom { .. } => "custom",
+        }
+    }
+
     /// Return the cache hint appropriate for this region kind.
     pub fn cache_hint(&self) -> crate::cache::CacheHint {
         match self {
@@ -1437,6 +1458,72 @@ mod tests {
         };
         let region = Region::new("history".to_string(), kind.clone(), 5000);
         assert_eq!(region.kind, kind);
+    }
+
+    /// Every kind, paired with the word a blueprint writes for it.
+    fn every_kind() -> [(RegionKind, &'static str); 9] {
+        [
+            (RegionKind::Pinned, "pinned"),
+            (RegionKind::Temporary, "temporary"),
+            (RegionKind::Clearable, "clearable"),
+            (
+                RegionKind::SlidingWindow {
+                    max_items: 3,
+                    eviction_strategy: EvictionStrategy::PerItem,
+                },
+                "sliding_window",
+            ),
+            (
+                RegionKind::Compacting {
+                    threshold_tokens: 10,
+                },
+                "compacting",
+            ),
+            (
+                RegionKind::CompactHistory {
+                    source_region: "notes".to_string(),
+                },
+                "compact_history",
+            ),
+            (RegionKind::HashMap { max_entries: None }, "keyed"),
+            (RegionKind::Checklist, "checklist"),
+            (
+                RegionKind::Custom {
+                    script: "r.rhai".to_string(),
+                    pinned: false,
+                },
+                "custom",
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_kind_reads_as_the_word_a_blueprint_writes() {
+        for (kind, word) in every_kind() {
+            assert_eq!(kind.word(), word);
+        }
+    }
+
+    #[test]
+    fn only_clearable_temporary_and_unpinned_custom_regions_are_evictable() {
+        let evictable: Vec<&str> = every_kind()
+            .into_iter()
+            .filter(|(kind, _)| Region::new("r".to_string(), kind.clone(), 100).evictable())
+            .map(|(_, word)| word)
+            .collect();
+        assert_eq!(evictable, ["temporary", "clearable", "custom"]);
+
+        let pinned_custom = RegionKind::Custom {
+            script: "r.rhai".to_string(),
+            pinned: true,
+        };
+        assert!(!Region::new("r".to_string(), pinned_custom, 100).evictable());
+        let mut rejecting = Region::new("r".to_string(), RegionKind::Temporary, 100);
+        rejecting.admission = Admission::Reject;
+        assert!(
+            !rejecting.evictable(),
+            "the agent releases these, nothing else"
+        );
     }
 
     #[test]

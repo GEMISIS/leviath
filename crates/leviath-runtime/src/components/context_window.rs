@@ -1,10 +1,9 @@
 //! The agent's context window: what it remembers, and what it forgets first.
 //!
 //! Every region an agent holds lives here, along with the assembly that turns
-//! them into a request and the eviction that keeps them inside a budget. Split
-//! out of `components` because it was two thirds of that file on its own, and
-//! because "what an agent *is*" and "what an agent *remembers*" are different
-//! questions to arrive with.
+//! them into a request and the eviction that keeps them inside a budget. Apart
+//! from the rest of `components` because "what an agent *is*" and "what an
+//! agent *remembers*" are different questions to arrive with.
 
 use super::block_cache::{
     block_hash, block_sort_priority, lifecycle_cache_hint, mark_recently_changed_run,
@@ -201,6 +200,14 @@ pub struct ContextWindow {
     /// Reset on every stage entry by `crate::context_setup::apply_layout`, so
     /// it describes the stage in front of it rather than accumulating.
     pub hidden: std::collections::HashSet<String>,
+
+    /// The regions that give up entries first when the window is full, in the
+    /// order they give them up: the `eviction_order` of the layout the current
+    /// stage uses. See [`Self::try_evict`].
+    ///
+    /// Read from the run's spec wherever a window is laid out, never from its
+    /// recorded state, so a resumed window gets it the same way.
+    pub eviction_order: Vec<String>,
 }
 
 /// Put a region's own name above its contents, and its description under that
@@ -233,6 +240,7 @@ impl ContextWindow {
         Self {
             regions: Vec::new(),
             hidden: std::collections::HashSet::new(),
+            eviction_order: Vec::new(),
             current_tokens: 0,
             max_tokens,
             region_scripts: std::collections::HashMap::new(),

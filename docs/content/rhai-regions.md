@@ -157,6 +157,23 @@ whole unfiltered store so its indices stay honest.
 `ctx = { region, entries, needed_tokens }`. Return an array of entry indices to drop. If the hook is
 absent, or your drops do not free enough, oldest-first eviction makes up the difference.
 
+### Budget helpers
+
+Three functions do the budget arithmetic a hook tends to need, on the numbers in `ctx.region`:
+
+| Function | Returns |
+|---|---|
+| `tokens_remaining(budget, used)` | `budget - used`, held at the integer limits rather than overflowing |
+| `usage_ratio(budget, used)` | `used / budget` as a float, or `1.0` when the budget is 0 |
+| `needs_eviction(budget, used, threshold)` | Whether `usage_ratio` has reached `threshold`; always `true` for a budget of 0 |
+
+```rhai
+fn render(ctx) {
+    let room = tokens_remaining(ctx.region.budget, ctx.region.current_tokens);
+    `${ctx.region.entry_count} notes, room for about ${room} more tokens`
+}
+```
+
 ## A complete region
 
 This region keeps a running "brain", drops noisy successful tool results on write, and under budget

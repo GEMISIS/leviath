@@ -566,6 +566,111 @@ mod tests {
         assert_eq!(region.content[0].content, "middle content");
     }
 
+    /// A window of `regions`, in that order, each holding three 1000-token
+    /// entries `<name> 0`..`<name> 2`, with `order` as its eviction order.
+    fn window_of(regions: &[(&str, RegionKind)], order: &[&str]) -> ContextWindow {
+        let mut window = ContextWindow::new(10_000);
+        for (name, kind) in regions {
+            let mut region = Region::new(name.to_string(), kind.clone(), 5000);
+            for i in 0..3 {
+                region.add_entry(format!("{name} {i}"), 1000).unwrap();
+            }
+            window.add_region(region);
+        }
+        window.eviction_order = order.iter().map(ToString::to_string).collect();
+        window
+    }
+
+    /// What each region still holds, by name.
+    fn held(window: &ContextWindow, name: &str) -> Vec<String> {
+        let region = window.get_region(name).unwrap();
+        region
+            .content
+            .iter()
+            .map(|e| e.content.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn eviction_empties_the_named_region_first_then_takes_the_rest_in_turn() {
+        let mut window = window_of(
+            &[("a", RegionKind::Temporary), ("b", RegionKind::Temporary)],
+            &["b"],
+        );
+
+        // 6000 held of 10000; making 8000 free takes four entries.
+        let result = window.try_evict(8000).unwrap();
+
+        assert_eq!(result.tokens_freed, 4000);
+        assert!(held(&window, "b").is_empty(), "the named region goes first");
+        assert_eq!(held(&window, "a"), ["a 1", "a 2"]);
+    }
+
+    #[test]
+    fn eviction_takes_named_regions_in_the_order_given() {
+        let mut window = window_of(
+            &[
+                ("a", RegionKind::Temporary),
+                ("b", RegionKind::Temporary),
+                ("c", RegionKind::Temporary),
+            ],
+            &["gone", "c", "b", "c"],
+        );
+
+        // 9000 held; making 5000 free takes four entries. A name with no
+        // region, and one named twice, change nothing.
+        window.try_evict(5000).unwrap();
+
+        assert!(held(&window, "c").is_empty());
+        assert_eq!(held(&window, "b"), ["b 1", "b 2"]);
+        assert_eq!(held(&window, "a"), ["a 0", "a 1", "a 2"]);
+    }
+
+    #[test]
+    fn eviction_clears_a_named_clearable_region_before_an_unnamed_one() {
+        let mut window = window_of(
+            &[("a", RegionKind::Clearable), ("b", RegionKind::Clearable)],
+            &["b"],
+        );
+
+        window.try_evict(5000).unwrap();
+
+        assert!(held(&window, "b").is_empty());
+        assert_eq!(held(&window, "a").len(), 3);
+    }
+
+    #[test]
+    fn eviction_order_never_makes_a_protected_region_evictable() {
+        let mut rejecting = Region::new("guarded".to_string(), RegionKind::Temporary, 5000);
+        rejecting.admission = leviath_core::region::Admission::Reject;
+        rejecting.add_entry("guarded 0".to_string(), 1000).unwrap();
+        let mut window = window_of(
+            &[("pinned", RegionKind::Pinned), ("t", RegionKind::Temporary)],
+            &["pinned", "guarded", "t"],
+        );
+        window.add_region(rejecting);
+
+        // 7000 held; asking for all 10000 free takes everything that can go.
+        window.try_evict(10_000).unwrap();
+
+        assert_eq!(held(&window, "pinned").len(), 3);
+        assert_eq!(held(&window, "guarded"), ["guarded 0"]);
+        assert!(held(&window, "t").is_empty());
+    }
+
+    #[test]
+    fn eviction_with_no_order_takes_one_entry_from_each_region_in_turn() {
+        let mut window = window_of(
+            &[("a", RegionKind::Temporary), ("b", RegionKind::Temporary)],
+            &[],
+        );
+
+        window.try_evict(8000).unwrap();
+
+        assert_eq!(held(&window, "a"), ["a 2"]);
+        assert_eq!(held(&window, "b"), ["b 2"]);
+    }
+
     fn assert_sliding_window_unreduced(initial_count: usize, after_count: usize) {
         assert_eq!(
             initial_count, after_count,

@@ -169,8 +169,19 @@ impl ResolveEnv for EmbedEnv {
     }
 
     fn new_run_id(&self, title: &str) -> RunId {
-        let stem: String = title.chars().take(RUN_ID_STEM_CHARS).collect();
-        RunId::new(super::spawner::mint_run_id(&stem))
+        let stem: String = title
+            .chars()
+            .take(RUN_ID_STEM_CHARS)
+            .map(|c| match c.is_ascii_alphanumeric() {
+                true => c.to_ascii_lowercase(),
+                false => '-',
+            })
+            .collect();
+        let stem = match stem.is_empty() {
+            true => "agent".to_string(),
+            false => stem,
+        };
+        RunId::new(crate::spec::names::mint_run_id(&stem))
             .expect("a minted id uses only letters, digits and `-`")
     }
 

@@ -330,7 +330,7 @@ pub enum RunRecord {
 /// take part: two windows that differ anywhere fingerprint differently.
 pub fn context_fingerprint(snapshot: &ContextSnapshot) -> String {
     use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = leviath_core::hash::stable_hasher();
     for region in &snapshot.regions {
         region.name.hash(&mut hasher);
         region.kind.hash(&mut hasher);
@@ -346,7 +346,7 @@ pub fn context_fingerprint(snapshot: &ContextSnapshot) -> String {
 /// anywhere must digest differently.
 fn entry_digest(entry: &RegionEntrySnapshot) -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = leviath_core::hash::stable_hasher();
     entry.content.hash(&mut hasher);
     entry.tokens.hash(&mut hasher);
     entry.key.hash(&mut hasher);

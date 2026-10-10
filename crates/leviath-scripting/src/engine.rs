@@ -37,9 +37,14 @@ impl ScriptEngine {
     /// Whether this engine accepts `script`, without running it: the same
     /// parse, under the same bans, the script meets when it runs.
     pub fn check(&self, script: &str) -> Result<()> {
+        self.compile(script).map(drop)
+    }
+
+    /// Compile `script` once, under the bans it runs under, for a script that
+    /// runs again and again: a taint gate rule is asked on every gated call.
+    pub fn compile(&self, script: &str) -> Result<rhai::AST> {
         self.engine
             .compile(script)
-            .map(drop)
             .map_err(|e| Error::CompilationFailed(e.to_string()))
     }
 
@@ -50,15 +55,15 @@ impl ScriptEngine {
             .map_err(|e| Error::ExecutionFailed(e.to_string()))
     }
 
-    /// Evaluate a taint gate check script.
+    /// Evaluate a taint gate rule, compiled by [`Self::compile`].
     ///
-    /// The script is evaluated with `context` in scope and must produce a
+    /// The rule is evaluated with `context` in scope and must produce a
     /// bool: an expression over `context`, or a body that ends by calling a
     /// `check(context)` it defines. `context` holds `tool`, `target` and
     /// `taint_level`.
     pub fn check_gate_rule(
         &self,
-        script: &str,
+        rule: &rhai::AST,
         tool: &str,
         target: Option<&str>,
         taint_level: &str,
@@ -78,7 +83,7 @@ impl ScriptEngine {
         scope.push("context", context);
 
         self.engine
-            .eval_with_scope::<bool>(&mut scope, script)
+            .eval_ast_with_scope::<bool>(&mut scope, rule)
             .map_err(|e| Error::ExecutionFailed(e.to_string()))
     }
 }
@@ -199,6 +204,11 @@ mod tests {
 
     // ─── Default ────────────────────────────────────────────────────────────
 
+    /// A gate rule as the daemon holds it: compiled once.
+    fn rule(engine: &ScriptEngine, script: &str) -> rhai::AST {
+        engine.compile(script).unwrap()
+    }
+
     #[test]
     fn test_gate_rule_allows_matching_tool() {
         let engine = ScriptEngine::new();
@@ -209,7 +219,7 @@ mod tests {
         "#;
         let result = engine
             .check_gate_rule(
-                script,
+                &rule(&engine, script),
                 "send_email",
                 Some("alice@mycompany.com"),
                 "internal",
@@ -226,7 +236,12 @@ mod tests {
             && context["target"].ends_with("@mycompany.com")
         "#;
         let result = engine
-            .check_gate_rule(script, "send_email", Some("bob@external.com"), "internal")
+            .check_gate_rule(
+                &rule(&engine, script),
+                "send_email",
+                Some("bob@external.com"),
+                "internal",
+            )
             .unwrap();
         assert!(!result);
     }
@@ -236,7 +251,7 @@ mod tests {
         let engine = ScriptEngine::new();
         let script = r#"context["tool"] == "send_email""#;
         let result = engine
-            .check_gate_rule(script, "post_to_slack", None, "public")
+            .check_gate_rule(&rule(&engine, script), "post_to_slack", None, "public")
             .unwrap();
         assert!(!result);
     }
@@ -246,15 +261,42 @@ mod tests {
         let engine = ScriptEngine::new();
         let script = r#"context["target"] == """#;
         let result = engine
-            .check_gate_rule(script, "shell", None, "public")
+            .check_gate_rule(&rule(&engine, script), "shell", None, "public")
             .unwrap();
         assert!(result);
     }
 
+    /// A rule that does not parse fails to compile; one that parses and does
+    /// not produce a bool fails each time it is asked.
     #[test]
     fn test_gate_rule_script_error() {
         let engine = ScriptEngine::new();
-        let result = engine.check_gate_rule("invalid {{ syntax", "shell", None, "public");
+        let err = engine.compile("invalid {{ syntax").unwrap_err().to_string();
+        assert!(err.starts_with("Script compilation failed"), "{err}");
+        let not_a_bool = rule(&engine, "1");
+        let result = engine.check_gate_rule(&not_a_bool, "shell", None, "public");
         assert!(result.is_err());
+    }
+
+    /// A rule may define `check(context)` and end by calling it; the
+    /// functions a compiled rule defines are there when it is evaluated.
+    #[test]
+    fn a_compiled_gate_rule_keeps_the_functions_it_defines() {
+        let engine = ScriptEngine::new();
+        let script = r#"
+            fn check(context) { context["tool"] == "shell" }
+            check(context)
+        "#;
+        let compiled = rule(&engine, script);
+        assert!(
+            engine
+                .check_gate_rule(&compiled, "shell", None, "public")
+                .unwrap()
+        );
+        assert!(
+            !engine
+                .check_gate_rule(&compiled, "web_fetch", None, "public")
+                .unwrap()
+        );
     }
 }

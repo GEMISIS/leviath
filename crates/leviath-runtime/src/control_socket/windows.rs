@@ -30,7 +30,7 @@ pub type ServerStream = NamedPipeServer;
 /// `<leviath-home>/.leviath`). Different homes hash to different pipe names, so
 /// they never collide.
 pub fn control_id(base: &Path) -> ControlId {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = leviath_core::hash::stable_hasher();
     base.hash(&mut hasher);
     format!(r"\\.\pipe\leviath-control-{:016x}", hasher.finish())
 }

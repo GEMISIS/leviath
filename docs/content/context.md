@@ -683,6 +683,24 @@ flowchart TD
   T -->|clearable / temporary| CL["Trimmed or cleared under budget pressure"]
 ```
 
+When the whole window is full, the runtime makes room by kind as well. Clearable regions are
+emptied whole first. Then temporary and unpinned custom regions give up their oldest entries, and
+compacting regions are summarized last. Pinned regions, sliding windows, histories, keyed regions,
+checklists and anything under `admission = "reject"` are never touched.
+
+A layout's `eviction_order` says which regions go first within each of those steps:
+
+```toml
+[graph.layout]
+total_budget_tokens = 0
+eviction_order = ["raw_pages", "scratch"]
+```
+
+Here `raw_pages` is emptied before `scratch` loses anything, and both before the other regions of
+their kind. Those others take turns, one entry each. Naming a region that is never touched changes
+nothing, and `lev validate` warns about it. A stage with its own `layout` uses that layout's order;
+every other stage uses the graph's.
+
 A summary is text. When a compacting region's entries carried stored [parts](/docs/mime) (an
 attached image, a file a tool stored), the summary is written from their stand-ins and the parts
 leave the window with the entries they sat on. The bytes stay in the run's store, `lev blobs`

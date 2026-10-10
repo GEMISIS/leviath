@@ -36,6 +36,9 @@ pub(crate) struct StageSetup {
     /// The regions of the stage's own layout, each holding its budget, to swap
     /// the window to on entry. `None` keeps the window's regions.
     pub context_layout: Option<Vec<leviath_core::Region>>,
+    /// The regions the window gives up entries from first, in order: its own
+    /// layout's `eviction_order`, or the graph's when it has no layout.
+    pub eviction_order: Vec<String>,
     /// Regions this stage leaves out of its prompt.
     pub context_hide: Vec<String>,
     /// Regions this stage empties on entry.
@@ -806,6 +809,10 @@ pub(crate) fn apply_stage_context(
         Some(regions) => crate::context_setup::apply_layout(window, regions.clone()),
         None => window.hidden.clear(),
     }
+    // The eviction order is the stage's in the same way: the order of the
+    // layout it uses, never one a previous stage left behind, which is also
+    // what a resumed run can work out from the stage it is in.
+    window.eviction_order = setup.eviction_order.clone();
     for name in &setup.context_hide {
         if !crate::spec::graph::ALWAYS_VISIBLE_REGIONS.contains(&name.as_str()) {
             window.hidden.insert(name.clone());

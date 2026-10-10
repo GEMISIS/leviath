@@ -110,6 +110,30 @@ fn run_ids_are_minted_from_a_short_safe_stem() {
     assert!(env().new_run_id("").as_str().starts_with("agent-"));
 }
 
+/// Two processes embedding the runtime over one state directory mint ids
+/// without knowing of each other, so nothing one process counts can be what
+/// keeps their ids apart: the suffix is 48 random bits.
+#[test]
+fn run_ids_carry_a_random_suffix_another_process_cannot_repeat() {
+    let suffixes: Vec<String> = (0..64)
+        .map(|_| {
+            env()
+                .new_run_id("same")
+                .as_str()
+                .rsplit('-')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    for suffix in &suffixes {
+        assert_eq!(suffix.len(), 12, "{suffix}");
+        assert!(u64::from_str_radix(suffix, 16).is_ok(), "{suffix}");
+    }
+    let distinct: std::collections::HashSet<&String> = suffixes.iter().collect();
+    assert_eq!(distinct.len(), suffixes.len());
+}
+
 #[test]
 fn a_workdir_must_be_an_existing_directory() {
     let dir = tempfile::tempdir().unwrap();

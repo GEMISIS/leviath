@@ -3351,6 +3351,80 @@ fn an_unenforceable_required_region_is_named_once_across_stages() {
     assert_eq!(hits, 1);
 }
 
+// ─── eviction-order-unevictable ──────────────────────────────────────────────
+
+/// The fixture's layout with `extra` as one more region, its eviction order
+/// set to `order`.
+fn manifest_evicting(extra: &str, order: &str) -> String {
+    manifest_with_regions(extra).replace(
+        "total_budget_tokens = 0\n",
+        &format!("total_budget_tokens = 0\neviction_order = {order}\n"),
+    )
+}
+
+/// Naming a pinned region asks it to give way first, and nothing ever takes
+/// from it; naming a temporary one is what the order is for.
+#[test]
+fn an_eviction_order_naming_a_region_eviction_never_takes_from_is_warned_about() {
+    let toml = manifest_evicting(
+        "name = \"scratch\"\nkind = \"temporary\"\nbudget = 2000",
+        "[\"scratch\", \"system\"]",
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    let found = with_code(&findings, "eviction-order-unevictable");
+    assert_eq!(found.len(), 1, "{:?}", codes(&findings));
+    assert_eq!(found[0].severity, LintSeverity::Warning);
+    assert!(
+        found[0].message.contains("'system'"),
+        "{}",
+        found[0].message
+    );
+    assert!(
+        found[0]
+            .fix
+            .as_deref()
+            .is_some_and(|f| f.contains("out of eviction_order")),
+        "{:?}",
+        found[0].fix
+    );
+}
+
+/// `admission = "reject"` keeps eviction away from a region whatever its kind.
+#[test]
+fn an_eviction_order_naming_a_rejecting_region_is_warned_about() {
+    let toml = manifest_evicting(
+        "name = \"scratch\"\nkind = \"temporary\"\nbudget = 2000\nadmission = \"reject\"",
+        "[\"scratch\"]",
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    let found = with_code(&findings, "eviction-order-unevictable");
+    assert_eq!(found.len(), 1, "{:?}", codes(&findings));
+    assert!(
+        found[0].message.contains("'scratch'"),
+        "{}",
+        found[0].message
+    );
+}
+
+/// A region two layouts both name is one mistake, said once.
+#[test]
+fn an_unevictable_region_two_layouts_name_is_warned_about_once() {
+    let toml = manifest_evicting(
+        "name = \"scratch\"\nkind = \"temporary\"\nbudget = 2000",
+        "[\"system\"]",
+    )
+    .replace(
+        "allow_complete = true\n",
+        "allow_complete = true\nlayout = { total_budget_tokens = 0, eviction_order = [\"system\"], \
+         regions = [{ name = \"system\", kind = \"pinned\", budget = 1000 }] }\n",
+    );
+    let hits = codes(&lint(&toml, &LintEnv::default()))
+        .into_iter()
+        .filter(|c| *c == "eviction-order-unevictable")
+        .count();
+    assert_eq!(hits, 1);
+}
+
 // ─── with_provider_catalogs ───────────────────────────────────────────────────
 
 /// A blueprint pinning `<provider>/<model>` on its one stage, for the builder

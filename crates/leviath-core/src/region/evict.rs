@@ -5,6 +5,19 @@
 use super::*;
 
 impl Region {
+    /// Whether a full context window may take entries from this region: a
+    /// clearable, temporary or unpinned custom region, unless it is under
+    /// [`Admission::Reject`], whose entries only the agent releases.
+    pub fn evictable(&self) -> bool {
+        self.admission != Admission::Reject
+            && matches!(
+                self.kind,
+                RegionKind::Clearable
+                    | RegionKind::Temporary
+                    | RegionKind::Custom { pinned: false, .. }
+            )
+    }
+
     /// Roll off the oldest entries until `tokens` more would fit, and report
     /// how many were dropped.
     ///

@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::{BasicToolService, EmbedEnv};
@@ -110,42 +109,5 @@ impl RunStarter for EmbedStarter {
         let env = self.env();
         let resolved = resolve(&request, &caller, &env, ResolveMode::Check).await?;
         Ok(SpawnSummary::of(&resolved.spec))
-    }
-}
-
-/// Mint a run id: `<stem>-<unix-secs>-<counter>`. The per-process counter
-/// keeps ids unique even when several spawns land in the same second.
-pub(crate) fn mint_run_id(stem: &str) -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let stem: String = stem
-        .chars()
-        .map(|c| match c.is_ascii_alphanumeric() {
-            true => c.to_ascii_lowercase(),
-            false => '-',
-        })
-        .collect();
-    let stem = match stem.is_empty() {
-        true => "agent".to_string(),
-        false => stem,
-    };
-    format!("{stem}-{secs}-{n:04x}")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn minted_run_ids_are_sanitized_and_unique() {
-        let a = mint_run_id("My Coder!");
-        let b = mint_run_id("My Coder!");
-        assert!(a.starts_with("my-coder-"));
-        assert_ne!(a, b);
-        assert!(mint_run_id("").starts_with("agent-"));
     }
 }
