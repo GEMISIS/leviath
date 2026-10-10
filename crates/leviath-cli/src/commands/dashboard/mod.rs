@@ -436,7 +436,7 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
         config_path: crate::config::Config::config_path(),
         store_path: leviath_mcp::AuthStore::default_path().unwrap_or_default(),
         opener: std::sync::Arc::new(leviath_sys::open_url),
-        clock: leviath_core::duration::now_secs,
+        clock: leviath_core::duration::now_secs_u64,
         // Somebody is watching the MCP screen, so the handshake keeps the
         // deadline that is right for a person.
         connect_timeout: leviath_mcp::DEFAULT_CONNECT_TIMEOUT,

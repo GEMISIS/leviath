@@ -542,7 +542,7 @@ pub(super) struct McpContext {
     pub(super) config_path: std::path::PathBuf,
     pub(super) store_path: std::path::PathBuf,
     pub(super) opener: leviath_mcp::BrowserOpener,
-    pub(super) clock: fn() -> i64,
+    pub(super) clock: fn() -> u64,
     /// How long the MCP screen's `test` waits for the `initialize` handshake.
     /// Production uses [`leviath_mcp::DEFAULT_CONNECT_TIMEOUT`]; the tests use
     /// a far longer one, for the reason

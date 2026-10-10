@@ -157,7 +157,7 @@ The graph-wide settings sit directly under `[graph]`. Everything has a default e
 | `read_paths` | none | Paths outside the workdir the run may read. |
 | `safe_commands` | none | `{ tools = [...], shell = [...] }` that run without approval. |
 | `output` | none | The shape of the run's final answer. See [Outputs](/docs/outputs). |
-| `compaction` | none | The model and prompts that summarize a full context. |
+| `compaction` | none | The model and prompts that summarize compacting regions. |
 | `taint_tracking` | off | Track where sensitive data flows. See [Security](/docs/security). |
 | `sandbox` | the operator's | Where tools run. See [Containers](/docs/containers). |
 | `nudge`, `repetition` | the operator's | The empty-reply nudge and loop detection. |

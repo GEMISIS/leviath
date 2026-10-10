@@ -81,14 +81,14 @@ pub(crate) struct McpAdmin {
     /// How to open the browser during a login.
     pub opener: leviath_mcp::BrowserOpener,
     /// Current Unix time; a fn so a long-lived server stays current per request.
-    pub clock: fn() -> i64,
+    pub clock: fn() -> u64,
 }
 
 impl Default for McpAdmin {
     fn default() -> Self {
         Self {
             opener: std::sync::Arc::new(leviath_sys::open_url),
-            clock: leviath_core::duration::now_secs,
+            clock: leviath_core::duration::now_secs_u64,
         }
     }
 }
@@ -241,7 +241,7 @@ pub(super) async fn server_infos(state: &AppState) -> Result<Vec<McpServerInfo>,
     let paths = admin_paths();
     let config = read_config(paths.config).await?;
     let held = shown_grants(paths.store, config.security.credential_store).await;
-    let now = (state.mcp.clock)() as u64;
+    let now = (state.mcp.clock)();
     Ok(config
         .mcp_servers
         .iter()
@@ -342,7 +342,7 @@ pub(super) async fn described(state: &AppState, server: &MCPServerConfig) -> Mcp
             AuthStore::default()
         }
     };
-    McpServerInfo::describe(server, &held, (state.mcp.clock)() as u64)
+    McpServerInfo::describe(server, &held, (state.mcp.clock)())
 }
 
 /// Replace an MCP server's entry, whole, and hand back what now stands there.
@@ -527,7 +527,7 @@ pub(super) async fn signed_in(
             &server.headers,
             &config.security.allow_env_vars,
             admin.opener.clone(),
-            (admin.clock)() as u64,
+            (admin.clock)(),
             reuse.as_deref(),
         )
         .await
@@ -586,7 +586,7 @@ pub(super) async fn tools_of(
     let paths = admin_paths();
     let config = read_config(paths.config).await?;
     let server = named(&config, name)?;
-    let tools = listed(&server, &config, paths.store, (state.mcp.clock)() as u64)
+    let tools = listed(&server, &config, paths.store, (state.mcp.clock)())
         .await
         .map_err(|e| ServeError::Upstream(e.to_string()))?;
     Ok((tools, server))
@@ -603,7 +603,7 @@ pub(crate) async fn list_mcp_tools(
         &server,
         &config,
         admin_paths().store,
-        leviath_core::duration::now_secs() as u64,
+        leviath_core::duration::now_secs_u64(),
     )
     .await
     .map_err(|e| e.to_string())
@@ -654,7 +654,7 @@ mod tests {
         false
     }
 
-    fn fixed_clock() -> i64 {
+    fn fixed_clock() -> u64 {
         1_000
     }
 

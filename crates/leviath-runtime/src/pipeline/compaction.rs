@@ -4,8 +4,9 @@ use super::*;
 
 // ─── Compaction (LLM context summarization) ──────────────────────────────────
 
-/// Per-agent compaction configuration; its presence opts the agent into
-/// automatic eviction + LLM compaction before each inference.
+/// Per-agent compaction configuration: the model that summarizes compacting
+/// regions before an inference. Without it those regions are not summarized;
+/// a full window still makes room by eviction either way.
 #[derive(Component, Clone)]
 pub struct CompactionSettings(pub leviath_core::CompactionConfig);
 
@@ -82,14 +83,14 @@ type CompactionQuery = (
     Entity,
     &'static AgentState,
     &'static mut ContextWindow,
-    &'static CompactionSettings,
+    Option<&'static CompactionSettings>,
     Option<&'static crate::pipeline::PromptCalibration>,
 );
 
-/// Compaction-dispatch system: for each `ReadyToInfer` agent with
-/// [`CompactionSettings`], summarize every compacting region that is past its
-/// own threshold (`compact_at`), and when the window as a whole is over the
-/// eviction threshold, run the synchronous eviction first. Builds one request
+/// Compaction-dispatch system: for each `ReadyToInfer` agent, when the window
+/// as a whole is over the eviction threshold, run the synchronous eviction;
+/// then, for an agent with [`CompactionSettings`], summarize every compacting
+/// region that is past its own threshold (`compact_at`). Builds one request
 /// per region with content to summarize, acquires a permit for the compaction
 /// model, spawns the job, and holds the agent as `AwaitingCompaction`. Anything
 /// that can't proceed (nothing past a threshold, nothing to summarize, provider
@@ -128,10 +129,14 @@ pub(crate) fn dispatch_compaction(
         if pressed && window.try_evict(target_free).is_err() {
             continue; // couldn't evict - proceed to inference as-is
         }
+        // Summarizing needs a compaction model. Without one, the eviction
+        // above is all the room a full window gets.
+        let Some(CompactionSettings(config)) = settings else {
+            continue;
+        };
 
         // Build a summarize request per region that is past its threshold and
         // has content to summarize.
-        let config = &settings.0;
         let mut requests = Vec::new();
         for region in window
             .regions

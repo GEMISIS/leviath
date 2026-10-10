@@ -685,7 +685,8 @@ flowchart TD
 
 When the whole window is full, the runtime makes room by kind as well. Clearable regions are
 emptied whole first. Then temporary and unpinned custom regions give up their oldest entries, and
-compacting regions are summarized last. Pinned regions, sliding windows, histories, keyed regions,
+compacting regions are summarized last, by the graph's `compaction` model. A blueprint without one
+still has room made the first two ways; its compacting regions are left as they are. Pinned regions, sliding windows, histories, keyed regions,
 checklists and anything under `admission = "reject"` are never touched.
 
 A layout's `eviction_order` says which regions go first when clearable regions are emptied and
