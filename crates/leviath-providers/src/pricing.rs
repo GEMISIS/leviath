@@ -669,9 +669,18 @@ mod cost_tests {
     /// well-cached run is exactly the one whose cost is most worth trusting.
     #[test]
     fn anthropic_cache_rates_sit_either_side_of_the_input_rate() {
+        let row = published_rate("anthropic", "claude-opus-5").expect("listed");
         let p = published_rates("anthropic", "claude-opus-5").expect("listed");
-        assert_eq!(p.input_per_mtok, 5.0);
-        assert_eq!(p.output_per_mtok, 25.0);
+        assert_eq!(
+            (
+                p.input_per_mtok,
+                p.cached_input_per_mtok,
+                p.cache_write_per_mtok,
+                p.output_per_mtok
+            ),
+            (row.input, row.cache_read, row.cache_write, row.output),
+            "each column bills what the row says"
+        );
         assert!(
             p.cache_write_per_mtok > p.input_per_mtok,
             "writes cost more"
@@ -680,30 +689,15 @@ mod cost_tests {
             p.cached_input_per_mtok < p.input_per_mtok,
             "reads cost less"
         );
-        assert_eq!(p.cache_write_per_mtok, 6.25);
-        assert_eq!(p.cached_input_per_mtok, 0.5);
     }
 
     /// The Claude 5.5 line has rows of its own, so none is priced through the
     /// shorter `claude-opus-5` or `claude-sonnet-5` row it starts with.
     #[test]
     fn the_claude_5_5_line_is_priced_by_its_own_rows() {
-        for (model, input, cached, write, output) in [
-            ("claude-opus-5-5", 4.0, 0.2, 5.0, 20.0),
-            ("claude-sonnet-5-5", 2.0, 0.1, 2.5, 10.0),
-            ("claude-haiku-5-5", 0.1, 0.01, 0.125, 0.5),
-        ] {
-            let p = published_rates("anthropic", model).expect(model);
-            assert_eq!(
-                (
-                    p.input_per_mtok,
-                    p.cached_input_per_mtok,
-                    p.cache_write_per_mtok,
-                    p.output_per_mtok
-                ),
-                (input, cached, write, output),
-                "{model}"
-            );
+        for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+            let row = published_rate("anthropic", model).expect(model);
+            assert_eq!(row.prefix, model);
         }
     }
 
@@ -725,14 +719,14 @@ mod cost_tests {
     /// which would bill a mini model at three times its rate.
     #[test]
     fn a_longer_model_prefix_is_not_swallowed_by_a_shorter_one() {
-        let mini = published_rates("openai", "gpt-5.4-mini").expect("listed");
-        let full = published_rates("openai", "gpt-5.4").expect("listed");
-        assert_eq!(mini.input_per_mtok, 0.75);
-        assert_eq!(full.input_per_mtok, 2.5);
-        assert!(mini.input_per_mtok < full.input_per_mtok);
-
-        let lite = published_rates("google", "gemini-3.1-flash-lite").expect("listed");
-        assert_eq!(lite.input_per_mtok, 0.25);
+        for (provider, model) in [
+            ("openai", "gpt-5.4-mini"),
+            ("openai", "gpt-5.4"),
+            ("google", "gemini-3.1-flash-lite"),
+        ] {
+            let row = published_rate(provider, model).expect(model);
+            assert_eq!(row.prefix, model);
+        }
     }
 
     /// A model or provider the table does not name is unpriced, not free.

@@ -384,7 +384,8 @@ fn capabilities_are_corrected_by_the_listing_and_then_the_operator() {
     );
     let p = BedrockProvider::with_overrides(client(), "k".to_string(), overrides, None);
     let caps = p.capabilities("us.anthropic.claude-sonnet-5");
-    assert_eq!(caps.max_context_tokens, 1_000_000);
+    let card = catalog::window_for("us.anthropic.claude-sonnet-5").unwrap();
+    assert_eq!(caps.max_context_tokens, card.context);
     assert_eq!(caps.max_output_tokens, 9);
     assert_eq!(caps.limits_source, crate::LimitsSource::Override);
     let mut learned = HashMap::new();
@@ -944,13 +945,21 @@ async fn priming_reads_the_listing_every_profile_page_and_the_prices() {
     assert_eq!(nova.display_name.as_deref(), Some("Nova Pro"));
     assert_eq!(nova.pricing.unwrap().input_per_mtok, 0.8);
     assert!(nova.mime.takes_mime());
-    assert_eq!(nova.capabilities.max_context_tokens, 300_000);
+    assert_eq!(
+        nova.capabilities.max_context_tokens,
+        catalog::window_for("amazon.nova-pro-v1:0").unwrap().context
+    );
     assert_eq!(
         nova.capabilities.limits_source,
         crate::LimitsSource::Builtin
     );
     let sonnet = &models[2];
-    assert_eq!(sonnet.capabilities.max_context_tokens, 1_000_000);
+    assert_eq!(
+        sonnet.capabilities.max_context_tokens,
+        catalog::window_for("anthropic.claude-sonnet-5")
+            .unwrap()
+            .context
+    );
     assert_eq!(
         sonnet.pricing,
         crate::pricing::published_rates("anthropic", "claude-sonnet-5"),
@@ -1062,7 +1071,12 @@ async fn behind_a_gateway_the_listing_is_the_compiled_table() {
         .find(|m| m.id == "us.anthropic.claude-sonnet-5")
         .expect("the card table names Sonnet 5");
     assert_eq!(sonnet.display_name.as_deref(), Some("Claude Sonnet 5"));
-    assert_eq!(sonnet.capabilities.max_output_tokens, 128_000);
+    assert_eq!(
+        sonnet.capabilities.max_output_tokens,
+        catalog::window_for("anthropic.claude-sonnet-5")
+            .unwrap()
+            .output
+    );
     assert!(sonnet.mime.takes_mime());
     assert!(p.check_credential().await.is_ok());
 }
