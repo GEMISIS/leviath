@@ -491,7 +491,10 @@ pub(super) async fn validate_blueprint(
         .as_deref()
         .and_then(|name| blueprint_dir(name).ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    Json(validate_manifest_text(&body.manifest, &dir))
+    // The lint walks the tool directories the manifest could name.
+    let verdict =
+        super::blocking::blocking(move || validate_manifest_text(&body.manifest, &dir)).await;
+    Json(verdict)
 }
 
 /// Parse, validate and lint a manifest posted as text.

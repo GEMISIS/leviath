@@ -233,10 +233,11 @@ async fn listing(
 
     let highlights = match spec.q.clone() {
         None => Vec::new(),
-        // A search inside runs reads their files for the snippet.
         Some(query) => {
-            let (runs, sources) = (results.clone(), spec.sources.clone());
-            blocking(move || highlights(&runs, &query, &sources)).await
+            let found =
+                run_core::matching::highlights_of(results.clone(), query, spec.sources.clone())
+                    .await;
+            highlights(&results, found)
         }
     };
     // One instant for the whole answer, so two runs on one page do not report
@@ -253,22 +254,20 @@ async fn listing(
     ))
 }
 
-/// Why each run on the page matched, for the search that was run.
+/// Why each run on the page matched, from what the search found in each.
 fn highlights(
     runs: &[Arc<crate::runstate::RunMeta>],
-    query: &str,
-    sources: &[Source],
+    found: Vec<Vec<crate::commands::serve::types::Highlight>>,
 ) -> Vec<RunHighlight> {
     runs.iter()
-        .flat_map(|meta| {
-            run_core::matching::highlights_for(meta, query, sources)
-                .into_iter()
-                .map(|hit| RunHighlight {
-                    run_id: ID(meta.run_id.clone()),
-                    field: hit.field,
-                    snippet: hit.snippet,
-                    stage_index: hit.stage.and_then(|at| i32::try_from(at).ok()),
-                })
+        .zip(found)
+        .flat_map(|(meta, hits)| {
+            hits.into_iter().map(|hit| RunHighlight {
+                run_id: ID(meta.run_id.clone()),
+                field: hit.field,
+                snippet: hit.snippet,
+                stage_index: hit.stage.and_then(|at| i32::try_from(at).ok()),
+            })
         })
         .collect()
 }

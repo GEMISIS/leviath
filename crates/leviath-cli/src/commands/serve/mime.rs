@@ -144,7 +144,10 @@ pub(super) async fn put_mime_row(
         stand_in: req.stand_in,
         check: req.check,
     };
-    write_edit(&mime_types_path(), &req.mime_type, edit).map(Json)
+    let path = mime_types_path();
+    super::blocking::blocking(move || write_edit(&path, &req.mime_type, edit))
+        .await
+        .map(Json)
 }
 
 /// Write one registry row into the file at `path`, for whichever surface asked.
@@ -167,7 +170,9 @@ pub(super) fn write_edit(
 pub(super) async fn delete_mime_row(
     Query(q): Query<DeleteMimeQuery>,
 ) -> Result<StatusCode, ServeError> {
-    match remove_row_named(&mime_types_path(), &q.mime_type) {
+    let path = mime_types_path();
+    let mime_type = q.mime_type.clone();
+    match super::blocking::blocking(move || remove_row_named(&path, &mime_type)).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
         Ok(false) => Err(ServeError::NotFound(format!(
             "no row for '{}'",

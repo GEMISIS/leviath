@@ -17,6 +17,7 @@ use async_graphql::{Context, Enum, ID, InputObject, SimpleObject};
 use futures_util::StreamExt;
 use leviath_graphql_derive::mirror;
 
+use super::super::super::blocking::blocking;
 use super::super::super::core::error::ServeError;
 use super::super::super::core::lifecycle::{self, Action};
 use super::super::super::core::runs as run_core;
@@ -127,13 +128,16 @@ pub(super) fn has_landed(action: Action, status: &leviath_core::run_meta::RunSta
 ///
 /// `read` is handed in so a test can decide what the record says on each look
 /// without a daemon, a disk or a real clock behind it.
-pub(super) async fn settle(
+pub(super) async fn settle<F>(
     action: Action,
     deadline: std::time::Instant,
-    mut read: impl FnMut() -> Result<leviath_core::run_meta::RunMeta, ServeError>,
-) -> Result<leviath_core::run_meta::RunMeta, ServeError> {
+    mut read: impl FnMut() -> F,
+) -> Result<leviath_core::run_meta::RunMeta, ServeError>
+where
+    F: std::future::Future<Output = Result<leviath_core::run_meta::RunMeta, ServeError>>,
+{
     loop {
-        let meta = read()?;
+        let meta = read().await?;
         if has_landed(action, &meta.status) || std::time::Instant::now() >= deadline {
             return Ok(meta);
         }
@@ -141,12 +145,15 @@ pub(super) async fn settle(
     }
 }
 
-/// The run's record, or this server's own failure for one that will not read.
+/// The run's record, read on the blocking pool, or this server's own failure
+/// for one that will not read.
 ///
 /// The daemon accepted the act, so the run exists: saying "not found" about a
 /// run that just moved would blame the caller for this server's problem.
-fn read_meta(run_id: &str) -> Result<leviath_core::run_meta::RunMeta, ServeError> {
-    runstate::read_meta(run_id).map_err(|e| {
+async fn read_meta(run_id: &str) -> Result<leviath_core::run_meta::RunMeta, ServeError> {
+    let owned = run_id.to_string();
+    let read = blocking(move || runstate::read_meta(&owned)).await;
+    read.map_err(|e| {
         ServeError::Internal(format!(
             "Run '{run_id}' changed, but its record would not read: {e}"
         ))
@@ -476,19 +483,20 @@ pub(crate) async fn send_message(
     let parts = match listed.is_empty() {
         true => Vec::new(),
         false => {
-            let meta = runstate::read_meta(&run_id)
-                .map_err(|_| {
+            // The record and the files it leads to are read on the blocking
+            // pool.
+            let id = run_id.clone();
+            let max_bytes = state.limits.request_limits.max_upload_bytes;
+            blocking(move || {
+                let meta = runstate::read_meta(&id).map_err(|_| {
                     ServeError::NotFound(format!(
-                        "Run '{run_id}' has no working directory this server can read \
+                        "Run '{id}' has no working directory this server can read \
                          attachments from"
                     ))
-                })
-                .gql()?;
-            parts_of(
-                listed,
-                std::path::Path::new(&meta.workdir),
-                state.limits.request_limits.max_upload_bytes,
-            )
+                })?;
+                parts_of(listed, std::path::Path::new(&meta.workdir), max_bytes)
+            })
+            .await
             .gql()?
         }
     };
@@ -497,7 +505,7 @@ pub(crate) async fn send_message(
         .await
         .gql()?;
     Ok(SendMessageResult {
-        run: run_of(read_meta(&run_id).gql()?),
+        run: run_of(read_meta(&run_id).await.gql()?),
     })
 }
 

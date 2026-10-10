@@ -927,12 +927,12 @@ pub(super) async fn list_scripts(
     let candidates =
         wants_candidates(q.include.as_deref()).map_err(|e| super::core::error::as_api_error(&e))?;
     let config = state.current_config();
-    let scripts = registered_with(
-        &config,
-        &AgentDirs::of(&config),
-        q.agent.as_deref(),
-        candidates,
-    )
+    // Resolved on this task, walked on the blocking pool.
+    let dirs = AgentDirs::of(&config);
+    let scripts = super::blocking::blocking(move || {
+        registered_with(&config, &dirs, q.agent.as_deref(), candidates)
+    })
+    .await
     .map_err(|e| super::core::error::as_api_error(&e))?;
     Ok(Json(ScriptsResp { scripts }))
 }
@@ -976,7 +976,8 @@ pub(super) async fn get_script(
     Query(q): Query<ScriptQuery>,
 ) -> Result<Json<ScriptSource>, ApiError> {
     let dirs = AgentDirs::of(&state.current_config());
-    read_one(&dirs, &kind, &name, q.agent.as_deref())
+    super::blocking::blocking(move || read_one(&dirs, &kind, &name, q.agent.as_deref()))
+        .await
         .map(Json)
         .map_err(|e| super::core::error::as_api_error(&e))
 }
@@ -1040,13 +1041,11 @@ pub(super) async fn put_script(
     Query(q): Query<ScriptQuery>,
     Json(body): Json<WriteScriptReq>,
 ) -> Result<Json<ScriptWritten>, ApiError> {
-    write_one(
-        &AgentDirs::of(&state.current_config()),
-        &kind,
-        &name,
-        q.agent.as_deref(),
-        &body.content,
-    )
+    let dirs = AgentDirs::of(&state.current_config());
+    super::blocking::blocking(move || {
+        write_one(&dirs, &kind, &name, q.agent.as_deref(), &body.content)
+    })
+    .await
     .map(Json)
     .map_err(|e| super::core::error::as_api_error(&e))
 }
@@ -1100,14 +1099,11 @@ pub(super) async fn delete_script(
     AxumPath((kind, name)): AxumPath<(String, String)>,
     Query(q): Query<ScriptQuery>,
 ) -> Result<StatusCode, ApiError> {
-    remove_one(
-        &AgentDirs::of(&state.current_config()),
-        &kind,
-        &name,
-        q.agent.as_deref(),
-    )
-    .map(|()| StatusCode::NO_CONTENT)
-    .map_err(|e| super::core::error::as_api_error(&e))
+    let dirs = AgentDirs::of(&state.current_config());
+    super::blocking::blocking(move || remove_one(&dirs, &kind, &name, q.agent.as_deref()))
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| super::core::error::as_api_error(&e))
 }
 
 /// Remove one script, for whichever surface asked.

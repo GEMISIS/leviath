@@ -69,13 +69,7 @@ pub(crate) async fn yolo_file() -> ConfigFileStatus {
 /// the request to run the checks succeeded, and what they found is the
 /// answer.
 pub(crate) async fn doctor() -> DoctorReport {
-    // Every offline check reads the disk (the config, the profiles file, the
-    // sign-in grants) and none of them waits on the network, so the whole run
-    // is driven to its end on the blocking pool.
-    let report = blocking(|| {
-        tokio::runtime::Handle::current().block_on(super::super::super::doctor::offline_report())
-    })
-    .await;
+    let report = super::super::super::doctor::offline_report().await;
     doctor_report(report.checks)
 }
 

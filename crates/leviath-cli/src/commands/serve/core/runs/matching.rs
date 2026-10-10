@@ -34,6 +34,23 @@ pub(crate) fn apply_search(runs: Vec<Arc<RunMeta>>, spec: &RunSpec) -> (Vec<Arc<
     (kept, truncated)
 }
 
+/// Why each of `runs` matched `q`, in their order.
+///
+/// Read on the blocking pool: the deep sources open each run's files. Both
+/// listings answer their highlights from here.
+pub(crate) async fn highlights_of(
+    runs: Vec<Arc<RunMeta>>,
+    q: String,
+    sources: Vec<Source>,
+) -> Vec<Vec<Highlight>> {
+    crate::commands::serve::blocking::blocking(move || {
+        runs.iter()
+            .map(|meta| highlights_for(meta, &q, &sources))
+            .collect()
+    })
+    .await
+}
+
 /// Does this run match, according to the requested sources? Sources are OR-ed.
 ///
 /// The cheap sources read already-parsed metadata. The deep ones read the

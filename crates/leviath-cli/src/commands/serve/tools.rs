@@ -51,30 +51,6 @@ pub(crate) const TOOL_GROUPS: &[(ToolGroup, &str, &str)] = &[
     ),
 ];
 
-/// The directory of the agent called `name`, refusing a name that is not a
-/// single safe path component.
-///
-/// The name is looked up in the same catalog `GET /api/blueprints` lists, so an
-/// agent found through `config.agent_paths` resolves to where it actually is.
-/// A plain `agents_dir().join(name)` would point every caller at
-/// `~/.leviath/agents/<name>/` instead: an agent under development in a
-/// configured path is listed and can be spawned, but its `tools/` and hooks
-/// live beside it, and a `PUT /api/scripts/...?agent=` would write into an
-/// empty directory nothing loads. A name the catalog does not know still falls
-/// back to the installed directory, so a new agent can be created there.
-///
-/// The same gate, on the same directory, that `blueprint_dir` applies in
-/// `blueprints.rs`: `Path::join` neither normalizes `..` nor resists an
-/// absolute path, and this name arrives in a query string. Shared from here
-/// because the tools and scripts routes both take an `?agent=` and both would
-/// otherwise write their own copy of the check.
-pub(super) fn agent_dir(
-    config: &crate::config::Config,
-    name: &str,
-) -> Result<PathBuf, super::core::error::ServeError> {
-    AgentDirs::of(config).dir(name)
-}
-
 /// Where an agent's own directory is looked for: every root the catalog walks,
 /// and the installed directory a name it does not list falls back to.
 ///
@@ -97,7 +73,24 @@ impl AgentDirs {
         }
     }
 
-    /// [`agent_dir`], over directories resolved already.
+    /// The directory of the agent called `name`, refusing a name that is not
+    /// a single safe path component.
+    ///
+    /// The name is looked up in the same catalog `GET /api/blueprints` lists,
+    /// so an agent found through `config.agent_paths` resolves to where it
+    /// actually is. A plain `agents_dir().join(name)` would point every caller
+    /// at `~/.leviath/agents/<name>/` instead: an agent under development in a
+    /// configured path is listed and can be spawned, but its `tools/` and hooks
+    /// live beside it, and a `PUT /api/scripts/...?agent=` would write into an
+    /// empty directory nothing loads. A name the catalog does not know still
+    /// falls back to the installed directory, so a new agent can be created
+    /// there.
+    ///
+    /// The same gate, on the same directory, that `blueprint_dir` applies in
+    /// `blueprints.rs`: `Path::join` neither normalizes `..` nor resists an
+    /// absolute path, and this name arrives in a query string. Shared from
+    /// here because the tools and scripts routes both take an `?agent=` and
+    /// both would otherwise write their own copy of the check.
     pub(super) fn dir(&self, name: &str) -> Result<PathBuf, super::core::error::ServeError> {
         if !leviath_core::is_safe_path_component(name) {
             return Err(super::core::error::ServeError::BadRequest(format!(
@@ -111,6 +104,22 @@ impl AgentDirs {
             .map(|b| PathBuf::from(b.path));
         Ok(known.unwrap_or_else(|| self.installed.join(name)))
     }
+}
+
+/// The tools one scope can offer: the machine's, and an agent's own as well
+/// when `agent` names one.
+///
+/// A walk of the tool directories, so both listings call it on the blocking
+/// pool.
+pub(super) fn inventory(
+    dirs: &AgentDirs,
+    agent: Option<&str>,
+) -> Result<ToolInventory, super::core::error::ServeError> {
+    let dir = match agent {
+        Some(name) => Some(dirs.dir(name)?),
+        None => None,
+    };
+    Ok(ToolInventory::discover(dir.as_deref(), agent))
 }
 
 /// Query parameters for `GET /api/tools`.
@@ -191,14 +200,11 @@ pub(super) async fn list_tools(
     State(state): State<AppState>,
     Query(q): Query<ToolsQuery>,
 ) -> Result<Json<ToolsResp>, ApiError> {
-    let dir = match q.agent.as_deref() {
-        Some(name) => Some(
-            agent_dir(&state.current_config(), name)
-                .map_err(|e| super::core::error::as_api_error(&e))?,
-        ),
-        None => None,
-    };
-    let inventory = ToolInventory::discover(dir.as_deref(), q.agent.as_deref());
+    // Resolved on this task, walked on the blocking pool.
+    let dirs = AgentDirs::of(&state.current_config());
+    let inventory = super::blocking::blocking(move || inventory(&dirs, q.agent.as_deref()))
+        .await
+        .map_err(|e| super::core::error::as_api_error(&e))?;
 
     let groups = TOOL_GROUPS
         .iter()
@@ -393,9 +399,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_dir_accepts_a_plain_name() {
+    async fn an_agent_dir_accepts_a_plain_name() {
         with_home(|home| async move {
-            let dir = agent_dir(&Config::default(), "researcher").expect("a plain name resolves");
+            let dir = AgentDirs::of(&Config::default())
+                .dir("researcher")
+                .expect("a plain name resolves");
             assert!(dir.starts_with(home.join(".leviath").join("agents")));
         })
         .await;
@@ -424,7 +432,9 @@ mod tests {
                 ..Default::default()
             };
             assert_eq!(
-                agent_dir(&config, "researcher").expect("a known name resolves"),
+                AgentDirs::of(&config)
+                    .dir("researcher")
+                    .expect("a known name resolves"),
                 agent
             );
 

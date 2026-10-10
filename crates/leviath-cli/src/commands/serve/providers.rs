@@ -266,7 +266,10 @@ pub(super) async fn listing_with(
     // The grant store's location comes from `admin_paths` rather than from
     // `state`; see `ProviderAdmin`.
     let grants = super::mcp::admin_paths().grants;
-    let mut providers: Vec<ProviderInfo> = provider_infos(state, &grants);
+    // The grant store is a file, so the rows are built on the blocking pool.
+    let (owned, at) = (state.clone(), grants.clone());
+    let mut providers: Vec<ProviderInfo> =
+        super::blocking::blocking(move || provider_infos(&owned, &at)).await;
     let mut headers = HeaderMap::new();
     if query.quota {
         // Built from the rows above rather than from a second look at the

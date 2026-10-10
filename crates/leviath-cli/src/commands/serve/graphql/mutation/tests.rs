@@ -1713,7 +1713,7 @@ async fn a_record_that_already_shows_the_act_is_answered_at_once() {
         std::time::Instant::now() + std::time::Duration::from_secs(30),
         || {
             looks.set(looks.get() + 1);
-            Ok(run_in("run-a", RunStatus::Paused))
+            std::future::ready(Ok(run_in("run-a", RunStatus::Paused)))
         },
     )
     .await
@@ -1733,10 +1733,10 @@ async fn a_record_that_catches_up_is_waited_for() {
         std::time::Instant::now() + std::time::Duration::from_secs(30),
         || {
             looks.set(looks.get() + 1);
-            Ok(match looks.get() {
+            std::future::ready(Ok(match looks.get() {
                 1 => run_in("run-a", RunStatus::Running),
                 _ => run_in("run-a", RunStatus::Cancelled),
-            })
+            }))
         },
     )
     .await
@@ -1754,7 +1754,7 @@ async fn a_window_that_closes_answers_with_what_is_there() {
     let settled = settle(
         Action::Pause,
         std::time::Instant::now() - std::time::Duration::from_millis(1),
-        || Ok(run_in("run-a", RunStatus::Running)),
+        || std::future::ready(Ok(run_in("run-a", RunStatus::Running))),
     )
     .await
     .expect("the record reads");
@@ -1771,9 +1771,9 @@ async fn a_record_that_will_not_read_is_reported() {
         Action::Pause,
         std::time::Instant::now() + std::time::Duration::from_secs(30),
         || {
-            Err(ServeError::Internal(
+            std::future::ready(Err(ServeError::Internal(
                 "the record would not read".to_string(),
-            ))
+            )))
         },
     )
     .await
