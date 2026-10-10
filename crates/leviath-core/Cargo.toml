@@ -28,6 +28,8 @@ regex = { workspace = true }
 sha2 = { workspace = true }
 # A digest's text (`leviath_core::names::Digest`).
 hex = { workspace = true }
+# Hashes stored or compared across builds (`leviath_core::hash`).
+siphasher = { workspace = true }
 # A part's bytes on the control socket and in a JSON request
 # (`leviath_core::mime::inbound`), which are text transports.
 base64 = { workspace = true }

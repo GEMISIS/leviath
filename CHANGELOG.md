@@ -341,6 +341,18 @@ same list.
   like every other provider, and the docs list each provider that takes one.
 - `LEVIATH_DUMP_REQUEST_DIR` was documented as writing every provider's
   requests; it writes Anthropic's, and the docs now say so.
+- A layout's `eviction_order` was checked and then ignored. When the context
+  is full, the regions it names now give up entries first, each emptied in
+  turn, before the rest of their kind; a stage with its own layout uses that
+  layout's order. `lev validate` warns (`eviction-order-unevictable`) when
+  it names a region that is never evicted, such as a pinned one.
+- Two processes embedding the runtime over one state directory could mint
+  the same run id, from a counter each started at zero, and write into one
+  run's directory. Every run id now ends in 48 random bits, as `lev`'s
+  always did.
+- A taint gate rule in `~/.config/leviath/rules/` that does not compile was
+  silently never matched. It is now reported once when the rules load, and
+  each rule is compiled once rather than on every gated call.
 
 ### Added
 
@@ -381,6 +393,13 @@ same list.
   `leviath_core::duration::now_secs`). `leviath_net::is_restricted_addr`,
   `read_caps::describe_cap`, `leviath_sys::perms::write_atomic_with` and
   `editor::launch_via` are private.
+- The Rhai functions `region_pinned`, `region_temporary`,
+  `region_clearable`, `region_sliding_window`, `region_compacting`,
+  `region_custom` and `region_entry`. Each built a map or a string that
+  nothing read; a region's kind is declared in `agent.toml`. The budget
+  helpers `tokens_remaining`, `usage_ratio` and `needs_eviction` stay, and
+  are now documented on the [Rhai regions](https://leviath.dev/docs/rhai-regions)
+  page.
 
 ## 0.6.4 - 2026-09-26
 

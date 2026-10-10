@@ -1432,6 +1432,66 @@ fn a_worker_starts_in_its_worker_stage() {
     assert_eq!(initial_state(&spec).cursor.stage.as_str(), "a");
 }
 
+/// A window gives up entries in the eviction order of the layout its stage
+/// uses: the stage's own, else the graph's. A new run, a worker started in
+/// another stage, a stage entered later and a run placed back mid-way all
+/// read it from the spec the same way.
+#[test]
+fn a_window_takes_the_eviction_order_of_its_stages_layout() {
+    let graph = crate::test_graph::graph_of(
+        "entry = \"a\"\n\
+         edges = [{ name = \"next\", from = \"a\", to = \"b\" }]\n\
+         layout = { total_budget_tokens = 1000, eviction_order = [\"scratch\"], regions = [\
+           { name = \"scratch\", kind = \"temporary\", budget = 500 },\
+         ] }\n\
+         [[stages]]\nname = \"a\"\n\
+         [[stages]]\nname = \"b\"\nallow_as_worker = true\n\
+         [stages.layout]\ntotal_budget_tokens = 1000\neviction_order = [\"notes\"]\n\
+         regions = [{ name = \"notes\", kind = \"temporary\", budget = 500 }]\n",
+    );
+    let mut spec = crate::test_graph::spec_named("t", graph);
+    let placed = |spec: &RunSpec| {
+        let mut world = World::new();
+        let state = initial_state(spec);
+        let e = insert(&mut world, Arc::new(spec.clone()), Bindings::new(), &state);
+        world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .eviction_order
+            .clone()
+    };
+    assert_eq!(
+        placed(&spec),
+        ["scratch"],
+        "a new run, in the graph's layout"
+    );
+
+    let mut window = place::context_window(&spec, &initial_state(&spec));
+    crate::pipeline::apply_stage_context(&spec_view::stage_setup(&spec, 1), &mut window).unwrap();
+    assert_eq!(
+        window.eviction_order,
+        ["notes"],
+        "entering a stage's own layout"
+    );
+    crate::pipeline::apply_stage_context(&spec_view::stage_setup(&spec, 0), &mut window).unwrap();
+    assert_eq!(
+        window.eviction_order,
+        ["scratch"],
+        "and back to the graph's"
+    );
+
+    let mut resumed = initial_state(&spec);
+    resumed.cursor.stage = sn("b");
+    assert_eq!(
+        place::context_window(&spec, &resumed).eviction_order,
+        ["notes"],
+        "a run placed back in a stage with its own layout"
+    );
+
+    spec.placement.worker_stage = Some(sn("b"));
+    assert_eq!(placed(&spec), ["notes"], "a worker started in `b`");
+}
+
 /// The entry stage is entered by starting the run, not by a transition, and
 /// a `require_region_updated` gate on its way out compares against the
 /// region as the run started. With no baseline the gate read the region as

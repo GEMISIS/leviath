@@ -18,6 +18,7 @@ pub mod duration;
 pub mod error;
 pub mod execution;
 pub mod files;
+pub mod hash;
 pub mod interaction;
 pub mod json_doc;
 pub mod lifecycle;

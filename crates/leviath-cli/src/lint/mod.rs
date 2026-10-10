@@ -456,6 +456,7 @@ pub(crate) fn lint_blueprint(file: &BlueprintFile, env: &LintEnv) -> Vec<LintFin
     findings.extend(lint_dead_end_possible(graph));
     findings.extend(lint_compacted_deliverables(graph));
     findings.extend(lint_required_regions_enforceable(graph));
+    findings.extend(lint_eviction_order(graph));
     findings.extend(lint_unbounded_percentage(graph, env));
     findings.extend(lint_long_context_price(graph, env));
     findings.extend(lint_mime_types(graph));

@@ -67,14 +67,14 @@ impl Provider for Storage {
 
 struct Run {
     _dir: tempfile::TempDir,
-    store: FsBlobStore,
+    store: Arc<dyn BlobStore>,
     run_dir: PathBuf,
     registry: MimeRegistry,
 }
 
 fn run() -> Run {
     let dir = tempfile::tempdir().unwrap();
-    let store = FsBlobStore::new(dir.path().to_path_buf());
+    let store: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(dir.path().to_path_buf()));
     let run_dir = store.run_dir("run-1").unwrap();
     Run {
         run_dir,
@@ -239,6 +239,28 @@ async fn a_part_uploads_once_and_every_later_request_names_it() {
     assert_eq!(forget_run(&run.run_dir, &registry).await, 1);
     assert!(!run.run_dir.join(LEDGER_FILE).exists());
     assert_eq!(forget_run(&run.run_dir, &registry).await, 0, "nothing left");
+    assert!(
+        !leviath_core::sync::lock(&LOCKS).contains_key(&route.ledger),
+        "a run done with its ledger leaves no lock behind"
+    );
+}
+
+/// Everyone using a ledger at once shares one lock, and the last to let go
+/// takes it out of the table.
+#[test]
+fn a_ledger_lock_is_shared_while_held_and_dropped_after() {
+    let path = PathBuf::from("/nowhere/run-locks/provider-files.json");
+    let in_table = || leviath_core::sync::lock(&LOCKS).contains_key(&path);
+    let first = LedgerLock::new(&path);
+    let second = LedgerLock::new(&path);
+    assert!(
+        Arc::ptr_eq(&first.lock, &second.lock),
+        "one lock per ledger"
+    );
+    drop(first);
+    assert!(in_table(), "still held by the second");
+    drop(second);
+    assert!(!in_table(), "nobody holds it");
 }
 
 #[tokio::test]
@@ -501,7 +523,7 @@ fn a_route_needs_file_storage_the_switch_no_zero_retention_and_a_run_dir() {
         "anthropic",
         &files,
         &allowed,
-        &run.store,
+        run.store.as_ref(),
         "run-1",
         60,
     );
@@ -520,7 +542,7 @@ fn a_route_needs_file_storage_the_switch_no_zero_retention_and_a_run_dir() {
         "anthropic",
         &files,
         &zero,
-        &run.store,
+        run.store.as_ref(),
         "run-1",
         60,
     );
@@ -544,7 +566,7 @@ fn a_route_needs_file_storage_the_switch_no_zero_retention_and_a_run_dir() {
 
     let none = MediaLimits::NONE;
     assert_eq!(
-        route_for(&storage, "x", &none, &zero, &run.store, "run-1", 60).1,
+        route_for(&storage, "x", &none, &zero, run.store.as_ref(), "run-1", 60).1,
         ""
     );
 }

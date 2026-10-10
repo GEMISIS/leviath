@@ -467,6 +467,7 @@ does not, and a **note** never does. Each finding prints with its code in bracke
 | warning | `no-reachable-provider` | Nothing in the stage's models list can run here. See below |
 | warning | `compact-summarizes-deliverable` | A `compact` edge would hand a `required` region to the summarizer. See below |
 | warning | `required-region-unenforceable` | A `required` region no stage using it can write to. See below |
+| warning | `eviction-order-unevictable` | An `eviction_order` names a region a full context never takes from |
 | warning | `unbounded-percentage-budget` | An evicting region whose percentage budget is huge on the widest model named. See below |
 | warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `graph.read_paths` shape |
 | warning | `dead-end-possible` | Every route out of a stage can run out of budget. See below |

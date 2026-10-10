@@ -31,7 +31,6 @@
 //! breakpoints here, only implicit prefix caching, so that stable-first order
 //! is not an optimisation, it is the entire caching strategy.
 
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash as _, Hasher as _};
 
 use serde_json::{Value, json};
@@ -361,7 +360,7 @@ fn tool_item(tool: &Tool) -> Value {
 /// Fixed width by construction, so the length limit is unreachable regardless
 /// of what a region is named.
 fn cache_key(request: &InferenceRequest) -> String {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = leviath_core::hash::stable_hasher();
     request.model.hash(&mut hasher);
     for block in &request.system {
         if block.volatility == leviath_core::Volatility::Stable {

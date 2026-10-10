@@ -212,6 +212,9 @@ sha2 = "0.11"
 hmac = "0.13"
 hex = "0.4"
 base64 = "0.23"
+# Hashes that must come out the same from every build (`leviath_core::hash`):
+# std's `DefaultHasher` leaves its algorithm free to change between releases.
+siphasher = "1.0"
 # The run file (`leviath_runtime::runfile`): typed binary frames. Postcard is not
 # self-describing, so a frame decodes only into the exact Rust type that wrote
 # it; zstd keeps context-heavy state small and crc32 catches a torn tail.

@@ -965,6 +965,45 @@ pub(super) fn lint_required_regions_enforceable(graph: &RunGraph) -> Vec<LintFin
     findings
 }
 
+/// A region an `eviction_order` names that eviction never takes from.
+///
+/// A full context empties only clearable, temporary and unpinned custom
+/// regions, and none under `admission = "reject"`; the order says which of
+/// those go first. Naming any other region reads like asking it to give way
+/// early and changes nothing, so the context fills with what the author meant
+/// to drop.
+pub(super) fn lint_eviction_order(graph: &RunGraph) -> Vec<LintFinding> {
+    let mut named: Vec<&str> = Vec::new();
+    for layout in layouts(graph) {
+        for def in &layout.regions {
+            if layout.eviction_order.contains(&def.name)
+                && !leviath_runtime::context_setup::region_from_def(def, 0).evictable()
+                && !named.contains(&def.name.as_str())
+            {
+                named.push(def.name.as_str());
+            }
+        }
+    }
+    named
+        .into_iter()
+        .map(|region| {
+            LintFinding::new(
+                LintSeverity::Warning,
+                "eviction-order-unevictable",
+                format!(
+                    "region '{region}' is named in eviction_order, but eviction never takes \
+                     from it: only clearable, temporary and unpinned custom regions give up \
+                     entries when the context is full, and none under admission = \"reject\""
+                ),
+            )
+            .with_fix(format!(
+                "take '{region}' out of eviction_order, or make it a temporary or clearable \
+                 region if it should give way when the context is full"
+            ))
+        })
+        .collect()
+}
+
 /// A region that evicts, bounded by a share of a window nobody has measured.
 ///
 /// Percentage budgets exist so an author's intent survives a change of model:

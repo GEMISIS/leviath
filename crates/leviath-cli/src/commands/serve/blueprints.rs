@@ -10,9 +10,7 @@ use axum::response::Json;
 
 use super::blueprint_types::{BlueprintDetail, RoutePair, StageRoutingInfo};
 use super::types::*;
-use leviath_runtime::spec::graph::{
-    RegionDef, RegionKind, RunGraph, StageMode, WorkerFailure, WorkerSource,
-};
+use leviath_runtime::spec::graph::{RegionDef, RunGraph, StageMode, WorkerFailure, WorkerSource};
 
 /// Resolve the installed agents directory.
 ///
@@ -399,30 +397,20 @@ fn stage_routing_infos(graph: &RunGraph) -> Vec<StageRoutingInfo> {
 
 /// One region of the graph's layout, as the detail route reports it.
 fn region_info(region: &RegionDef, total_budget_tokens: u32) -> RegionInfo {
+    // As far as the blueprint alone allows: a share is taken of the layout's
+    // total, since the model (and so its window) is not known until a run
+    // resolves it.
+    let max_tokens = region.budget.resolve(total_budget_tokens as usize);
     RegionInfo {
         name: region.name.to_string(),
-        kind: region_kind_word(&region.kind).to_string(),
+        // The word a context snapshot reports for the same region.
+        kind: leviath_runtime::context_setup::region_from_def(region, max_tokens)
+            .kind
+            .word()
+            .to_string(),
         description: region.description.clone(),
         describe_in_prompt: region.describe_in_prompt,
-        // As far as the blueprint alone allows: a share is taken of the
-        // layout's total, since the model (and so its window) is not known
-        // until a run resolves it.
-        max_tokens: region.budget.resolve(total_budget_tokens as usize),
-    }
-}
-
-/// A region kind as `agent.toml` spells it.
-fn region_kind_word(kind: &RegionKind) -> &'static str {
-    match kind {
-        RegionKind::Pinned => "pinned",
-        RegionKind::SlidingWindow { .. } => "sliding_window",
-        RegionKind::Temporary => "temporary",
-        RegionKind::Compacting { .. } => "compacting",
-        RegionKind::Clearable => "clearable",
-        RegionKind::CompactHistory { .. } => "compact_history",
-        RegionKind::Keyed { .. } => "keyed",
-        RegionKind::Checklist => "checklist",
-        RegionKind::Custom { .. } => "custom",
+        max_tokens,
     }
 }
 
@@ -892,40 +880,27 @@ mod tests {
     /// Every region kind is reported in the word `agent.toml` writes for it.
     #[test]
     fn every_region_kind_reads_as_its_blueprint_word() {
-        use leviath_runtime::spec::graph::{CodeRef, Eviction};
         let kinds = [
-            (RegionKind::Pinned, "pinned"),
+            (r#""pinned""#, "pinned"),
             (
-                RegionKind::SlidingWindow {
-                    max_items: 3,
-                    eviction: Eviction::PerItem,
-                },
+                r#"{ kind = "sliding_window", max_items = 3 }"#,
                 "sliding_window",
             ),
-            (RegionKind::Temporary, "temporary"),
+            (r#""temporary""#, "temporary"),
+            (r#""compacting""#, "compacting"),
+            (r#""clearable""#, "clearable"),
+            (r#""compact_history""#, "compact_history"),
+            (r#""keyed""#, "keyed"),
+            (r#""checklist""#, "checklist"),
             (
-                RegionKind::Compacting {
-                    threshold_tokens: None,
-                },
-                "compacting",
-            ),
-            (RegionKind::Clearable, "clearable"),
-            (
-                RegionKind::CompactHistory { source: None },
-                "compact_history",
-            ),
-            (RegionKind::Keyed { max_entries: None }, "keyed"),
-            (RegionKind::Checklist, "checklist"),
-            (
-                RegionKind::Custom {
-                    code: CodeRef::Inline("fn render() { \"\" }".to_string()),
-                    pinned: false,
-                },
+                r#"{ kind = "custom", code = { file = "r.rhai" } }"#,
                 "custom",
             ),
         ];
         for (kind, word) in kinds {
-            assert_eq!(region_kind_word(&kind), word);
+            let def: RegionDef =
+                toml::from_str(&format!("name = \"r\"\nkind = {kind}\nbudget = 100\n")).unwrap();
+            assert_eq!(region_info(&def, 1000).kind, word);
         }
     }
 

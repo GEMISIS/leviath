@@ -1,55 +1,10 @@
-//! Leviath types registered in Rhai.
+//! The helpers every Rhai engine has besides its own surface: a content
+//! format check and the budget arithmetic a region hook needs.
 
 use rhai::Engine;
 
-/// Register Leviath types in the Rhai engine.
+/// Register the content format check and the token budget helpers.
 pub fn register_types(engine: &mut Engine) {
-    // Region kind constructors
-    engine.register_fn("region_pinned", || -> String { "pinned".to_string() });
-
-    engine.register_fn("region_temporary", || -> String { "temporary".to_string() });
-
-    engine.register_fn("region_clearable", || -> String { "clearable".to_string() });
-
-    engine.register_fn("region_sliding_window", |max_items: i64| -> rhai::Map {
-        let mut map = rhai::Map::new();
-        map.insert(
-            "kind".into(),
-            rhai::Dynamic::from("sliding_window".to_string()),
-        );
-        map.insert("max_items".into(), rhai::Dynamic::from(max_items));
-        map
-    });
-
-    engine.register_fn("region_compacting", |threshold: i64| -> rhai::Map {
-        let mut map = rhai::Map::new();
-        map.insert("kind".into(), rhai::Dynamic::from("compacting".to_string()));
-        map.insert("threshold_tokens".into(), rhai::Dynamic::from(threshold));
-        map
-    });
-
-    engine.register_fn(
-        "region_custom",
-        |script: String, pinned: bool| -> rhai::Map {
-            let mut map = rhai::Map::new();
-            map.insert("kind".into(), rhai::Dynamic::from("custom".to_string()));
-            map.insert("script".into(), rhai::Dynamic::from(script));
-            map.insert("pinned".into(), rhai::Dynamic::from(pinned));
-            map
-        },
-    );
-
-    // Region entry constructor
-    engine.register_fn(
-        "region_entry",
-        |content: String, tokens: i64| -> rhai::Map {
-            let mut map = rhai::Map::new();
-            map.insert("content".into(), rhai::Dynamic::from(content));
-            map.insert("tokens".into(), rhai::Dynamic::from(tokens));
-            map
-        },
-    );
-
     // Content format validator
     engine.register_fn("content_format", |format: &str| -> String {
         match format {
@@ -96,107 +51,6 @@ mod tests {
         let mut e = crate::sandboxed(1_000_000);
         register_types(&mut e);
         e
-    }
-
-    // --- region constructors ---
-
-    #[test]
-    fn region_pinned_returns_pinned() {
-        let e = engine();
-        let result: String = e.eval("region_pinned()").unwrap();
-        assert_eq!(result, "pinned");
-    }
-
-    #[test]
-    fn region_temporary_returns_temporary() {
-        let e = engine();
-        let result: String = e.eval("region_temporary()").unwrap();
-        assert_eq!(result, "temporary");
-    }
-
-    #[test]
-    fn region_clearable_returns_clearable() {
-        let e = engine();
-        let result: String = e.eval("region_clearable()").unwrap();
-        assert_eq!(result, "clearable");
-    }
-
-    // --- region_sliding_window ---
-
-    #[test]
-    fn region_sliding_window_returns_map_with_kind_and_max_items() {
-        let e = engine();
-        let result: rhai::Map = e.eval("region_sliding_window(10)").unwrap();
-        assert_eq!(
-            result.get("kind").unwrap().clone_cast::<String>(),
-            "sliding_window"
-        );
-        assert_eq!(result.get("max_items").unwrap().clone_cast::<i64>(), 10);
-    }
-
-    #[test]
-    fn region_sliding_window_zero() {
-        let e = engine();
-        let result: rhai::Map = e.eval("region_sliding_window(0)").unwrap();
-        assert_eq!(result.get("max_items").unwrap().clone_cast::<i64>(), 0);
-    }
-
-    // --- region_compacting ---
-
-    #[test]
-    fn region_compacting_returns_map_with_kind_and_threshold() {
-        let e = engine();
-        let result: rhai::Map = e.eval("region_compacting(5000)").unwrap();
-        assert_eq!(
-            result.get("kind").unwrap().clone_cast::<String>(),
-            "compacting"
-        );
-        assert_eq!(
-            result.get("threshold_tokens").unwrap().clone_cast::<i64>(),
-            5000
-        );
-    }
-
-    // --- region_custom ---
-
-    #[test]
-    fn region_custom_returns_map_with_script_and_pinned() {
-        let e = engine();
-        let result: rhai::Map = e.eval(r#"region_custom("hooks/conv.rhai", true)"#).unwrap();
-        assert_eq!(result.get("kind").unwrap().clone_cast::<String>(), "custom");
-        assert_eq!(
-            result.get("script").unwrap().clone_cast::<String>(),
-            "hooks/conv.rhai"
-        );
-        assert!(result.get("pinned").unwrap().clone_cast::<bool>());
-    }
-
-    #[test]
-    fn region_custom_unpinned() {
-        let e = engine();
-        let result: rhai::Map = e.eval(r#"region_custom("r.rhai", false)"#).unwrap();
-        assert!(!result.get("pinned").unwrap().clone_cast::<bool>());
-    }
-
-    // --- region_entry ---
-
-    #[test]
-    fn region_entry_returns_map_with_content_and_tokens() {
-        let e = engine();
-        let result: rhai::Map = e.eval(r#"region_entry("content", 42)"#).unwrap();
-        assert_eq!(
-            result.get("content").unwrap().clone_cast::<String>(),
-            "content"
-        );
-        assert_eq!(result.get("tokens").unwrap().clone_cast::<i64>(), 42);
-    }
-
-    #[test]
-    fn region_entry_empty_content() {
-        let e = engine();
-        let result: rhai::Map = e.eval(r#"region_entry("", 0)"#).unwrap();
-        assert_eq!(result.get("content").unwrap().clone_cast::<String>(), "");
-        assert_eq!(result.get("tokens").unwrap().clone_cast::<i64>(), 0);
     }
 
     // --- content_format ---

@@ -66,17 +66,51 @@ fn save(path: &Path, ledger: &Ledger) {
     }
 }
 
+/// The lock of every ledger in use, by its path.
+static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Default::default);
+
 /// One lock per ledger, so two requests of one run never upload the same
 /// part twice or write the ledger over each other.
-fn lock_for(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
-        LazyLock::new(Default::default);
-    LOCKS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .entry(path.to_path_buf())
-        .or_default()
-        .clone()
+///
+/// Everyone using a ledger at once shares the one lock in [`LOCKS`], and the
+/// last of them to let go takes it out again, so the table holds only the
+/// ledgers in use rather than one for every run the process has seen.
+struct LedgerLock {
+    path: PathBuf,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl LedgerLock {
+    /// The lock for the ledger at `path`.
+    fn new(path: &Path) -> Self {
+        let lock = leviath_core::sync::lock(&LOCKS)
+            .entry(path.to_path_buf())
+            .or_default()
+            .clone();
+        Self {
+            path: path.to_path_buf(),
+            lock,
+        }
+    }
+}
+
+impl Drop for LedgerLock {
+    fn drop(&mut self) {
+        let mut locks = leviath_core::sync::lock(&LOCKS);
+        // The table's copy and this one, with the table held so nobody can
+        // take another: the next to want this ledger makes a fresh lock.
+        if Arc::strong_count(&self.lock) == 2 {
+            locks.remove(&self.path);
+        }
+    }
+}
+
+/// `work` on tokio's blocking pool, as every ledger and blob read and write
+/// here runs: a file read on an async worker stalls every task queued behind
+/// it. `None` if the work never finished, as when the runtime shuts down.
+async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    tokio::task::spawn_blocking(work).await.ok()
 }
 
 /// Where a job's uploads go and how long they live.
@@ -161,7 +195,7 @@ pub(crate) async fn attach(
     route: &FileRoute,
     mime: &ModelMime,
     registry: &leviath_core::mime::MimeRegistry,
-    store: &dyn leviath_core::mime::BlobStore,
+    store: &Arc<dyn leviath_core::mime::BlobStore>,
     run_id: &str,
     again: bool,
 ) -> usize {
@@ -169,9 +203,10 @@ pub(crate) async fn attach(
     if limits.file_bytes.is_none() {
         return 0;
     }
-    let lock = lock_for(&route.ledger);
-    let _held = lock.lock().await;
-    let mut ledger = load(&route.ledger);
+    let lock = LedgerLock::new(&route.ledger);
+    let _held = lock.lock.lock().await;
+    let path = route.ledger.clone();
+    let mut ledger = off_thread(move || load(&path)).await.unwrap_or_default();
     let now = now_secs();
     let mut uploaded = 0;
     let mut renewed: Vec<String> = Vec::new();
@@ -206,7 +241,8 @@ pub(crate) async fn attach(
                 *remote = Some(entry.file.clone());
                 continue;
             }
-            let Ok(bytes) = store.read(run_id, &part.sha256) else {
+            let (store, run, sha256) = (store.clone(), run_id.to_string(), part.sha256.clone());
+            let Some(Ok(bytes)) = off_thread(move || store.read(&run, &sha256)).await else {
                 continue;
             };
             let upload = FileUpload {
@@ -246,7 +282,8 @@ pub(crate) async fn attach(
         }
     }
     if uploaded > 0 {
-        save(&route.ledger, &ledger);
+        let path = route.ledger.clone();
+        off_thread(move || save(&path, &ledger)).await;
         tracing::info!(provider = %route.provider_name, uploaded, "[mime] parts uploaded to provider file storage");
     }
     uploaded
@@ -306,10 +343,13 @@ pub async fn delete_entries(entries: &[Entry], registry: &crate::ProviderRegistr
 /// Delete every file the run at `run_dir` uploaded, and its ledger. Returns
 /// how many files were deleted.
 pub async fn forget_run(run_dir: &Path, registry: &crate::ProviderRegistry) -> usize {
-    let lock = lock_for(&run_dir.join(LEDGER_FILE));
     let entries = {
-        let _held = lock.lock().await;
-        take_ledger(run_dir)
+        let lock = LedgerLock::new(&run_dir.join(LEDGER_FILE));
+        let _held = lock.lock.lock().await;
+        let dir = run_dir.to_path_buf();
+        off_thread(move || take_ledger(&dir))
+            .await
+            .unwrap_or_default()
     };
     delete_entries(&entries, registry).await
 }

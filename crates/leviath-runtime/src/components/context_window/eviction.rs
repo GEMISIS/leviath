@@ -1,6 +1,4 @@
 //! The eviction cascade a full context window runs before an inference.
-//! Moved out of `context_window.rs` whole; nothing here changed but the file
-//! it lives in.
 
 use super::*;
 
@@ -10,28 +8,24 @@ impl ContextWindow {
     /// Returns an `EvictionResult` with tokens freed and any regions that need
     /// LLM-based compaction. The caller is responsible for performing compaction
     /// on the listed regions (since it requires async LLM access).
+    ///
+    /// The phases go by region kind. Within each, the regions
+    /// [`eviction_order`](Self::eviction_order) names go first, in its order,
+    /// and the rest follow in the window's own order. A named region the phase
+    /// cannot take from is passed over: naming a region never makes it
+    /// evictable.
     pub fn try_evict(&mut self, target_free_tokens: usize) -> leviath_core::Result<EvictionResult> {
         use leviath_core::RegionKind;
 
         let initial_tokens = self.current_tokens;
+        let (named, rest) = self.eviction_turns();
 
         // A region under `admission = "reject"` is exempt from every phase
         // below. Refusing writes to protect what a region holds would mean
         // nothing if the window-level cascade could take the same entries a
         // moment later - `reject` would only change which code did the silent
         // dropping. The agent releases from these, or nothing does.
-        let evictable = |r: &Region| {
-            r.admission != leviath_core::region::Admission::Reject
-                && matches!(
-                    r.kind,
-                    RegionKind::Clearable
-                        | RegionKind::Temporary
-                        | RegionKind::Custom { pinned: false, .. }
-                )
-        };
-
-        // Check if we have any evictable regions
-        let has_evictable = self.regions.iter().any(evictable);
+        let has_evictable = self.regions.iter().any(Region::evictable);
 
         if !has_evictable {
             tracing::warn!(
@@ -41,7 +35,8 @@ impl ContextWindow {
         }
 
         // Phase 1: Clear Clearable regions (all-or-nothing)
-        for region in &mut self.regions {
+        for &i in named.iter().chain(&rest) {
+            let region = &mut self.regions[i];
             if matches!(region.kind, RegionKind::Clearable)
                 && region.admission != leviath_core::region::Admission::Reject
                 && !region.content.is_empty()
@@ -71,7 +66,7 @@ impl ContextWindow {
         // absent/failing/insufficient → phase 2 makes the guaranteed
         // progress.
         let mut custom_freed = 0usize;
-        for i in 0..self.regions.len() {
+        for &i in named.iter().chain(&rest) {
             let needed = target_free_tokens
                 .saturating_sub(self.max_tokens.saturating_sub(self.current_tokens));
             if needed == 0 {
@@ -105,7 +100,7 @@ impl ContextWindow {
         // otherwise phase 2 would immediately evict one more entry (it checks
         // the target *after* each eviction), overriding the script's
         // retention choice. Windows with no custom drops (custom_freed == 0)
-        // fall through with phase 2's pre-existing behavior, byte-identical.
+        // go on to phase 2 unchanged.
         if custom_freed > 0
             && self.max_tokens.saturating_sub(self.current_tokens) >= target_free_tokens
         {
@@ -119,14 +114,41 @@ impl ContextWindow {
         // Non-persistent Custom regions join this phase: their script's
         // on_overflow hook (when present) has already had its say in phase
         // 1.5; oldest-first is the guaranteed-progress fallback.
+        let gives_oldest = |r: &Region| {
+            matches!(
+                r.kind,
+                RegionKind::Temporary | RegionKind::Custom { pinned: false, .. }
+            ) && r.admission != leviath_core::region::Admission::Reject
+        };
+        // A region the eviction order names is emptied before the next one is
+        // touched: that is what naming it asks for.
+        for &i in &named {
+            if !gives_oldest(&self.regions[i]) {
+                continue;
+            }
+            while let Some(entry) = self.regions[i].remove_oldest() {
+                let freed = entry.tokens;
+                self.current_tokens -= freed;
+                tracing::debug!(
+                    region = %self.regions[i].name,
+                    tokens_freed = freed,
+                    "Evicted named region entry (oldest first)"
+                );
+                if self.max_tokens.saturating_sub(self.current_tokens) >= target_free_tokens {
+                    return Ok(EvictionResult {
+                        tokens_freed: initial_tokens - self.current_tokens,
+                        needs_compaction: Vec::new(),
+                    });
+                }
+            }
+        }
+        // The rest take turns, one entry each per round.
         loop {
             let mut evicted_any = false;
 
-            for region in &mut self.regions {
-                if matches!(
-                    region.kind,
-                    RegionKind::Temporary | RegionKind::Custom { pinned: false, .. }
-                ) && region.admission != leviath_core::region::Admission::Reject
+            for &i in &rest {
+                let region = &mut self.regions[i];
+                if gives_oldest(region)
                     && let Some(entry) = region.remove_oldest()
                 {
                     let freed = entry.tokens;
@@ -192,5 +214,24 @@ impl ContextWindow {
             tokens_freed: initial_tokens - self.current_tokens,
             needs_compaction,
         })
+    }
+
+    /// The window's regions by position, in the two groups every eviction
+    /// phase takes them in: the ones [`eviction_order`](Self::eviction_order)
+    /// names, in its order, and then the rest, in the window's. A name with no
+    /// region behind it, or one named twice, adds nothing.
+    fn eviction_turns(&self) -> (Vec<usize>, Vec<usize>) {
+        let mut named: Vec<usize> = Vec::new();
+        for name in &self.eviction_order {
+            if let Some(i) = self.regions.iter().position(|r| &r.name == name)
+                && !named.contains(&i)
+            {
+                named.push(i);
+            }
+        }
+        let rest = (0..self.regions.len())
+            .filter(|i| !named.contains(i))
+            .collect();
+        (named, rest)
     }
 }

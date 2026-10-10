@@ -216,7 +216,7 @@ impl JobHydration {
                 route,
                 &self.mime,
                 &self.registry,
-                self.store.as_ref(),
+                &self.store,
                 &self.run_id,
                 false,
             )
@@ -286,7 +286,7 @@ impl JobHydration {
             route,
             &self.mime,
             &self.registry,
-            self.store.as_ref(),
+            &self.store,
             &self.run_id,
             true,
         )

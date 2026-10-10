@@ -8,7 +8,6 @@
 //! top of these.
 
 use bevy_ecs::prelude::*;
-use leviath_core::RegionKind;
 use leviath_core::run_meta::{
     ContextSnapshot, RegionEntrySnapshot, RegionSnapshot, RunMeta, RunStatus, StageRunStatus,
     WaitMarkers, wait_reason_from,
@@ -231,27 +230,6 @@ pub(crate) fn stage_status_from(status: &AgentStatus) -> StageRunStatus {
     }
 }
 
-/// The stringified region kind used in snapshots and by the blueprint API.
-///
-/// One word per kind, and it is the word the blueprint's own TOML uses, so a
-/// console reading a context snapshot and a console reading a blueprint agree
-/// about what the same region is. A reader that renders kinds should also
-/// accept `sliding` for a `sliding_window` and `history` for a
-/// `compact_history`.
-pub fn region_kind_str(kind: &RegionKind) -> &'static str {
-    match kind {
-        RegionKind::Pinned => "pinned",
-        RegionKind::Temporary => "temporary",
-        RegionKind::Clearable => "clearable",
-        RegionKind::SlidingWindow { .. } => "sliding_window",
-        RegionKind::Compacting { .. } => "compacting",
-        RegionKind::CompactHistory { .. } => "compact_history",
-        RegionKind::HashMap { .. } => "keyed",
-        RegionKind::Checklist => "checklist",
-        RegionKind::Custom { .. } => "custom",
-    }
-}
-
 /// Build the full context snapshot from a window. Pure over the
 /// window - no engine/entity.
 pub(crate) fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> ContextSnapshot {
@@ -284,7 +262,7 @@ fn snapshot_of(
             let taint = r.taint;
             RegionSnapshot {
                 name: r.name,
-                kind: region_kind_str(&r.kind).to_string(),
+                kind: r.kind.word().to_string(),
                 description: r.description,
                 current_tokens: r.current_tokens,
                 max_tokens: r.max_tokens,
@@ -466,8 +444,8 @@ pub(crate) fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> Ru
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::Region;
     use leviath_core::run_meta::WaitReason;
+    use leviath_core::{Region, RegionKind};
     use leviath_providers::TokenUsage;
 
     fn state(status: AgentStatus) -> AgentState {

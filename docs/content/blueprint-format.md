@@ -239,6 +239,11 @@ a part of the run's memory with its own budget and rules.
 With any percentage budget, the total is worked out from each stage's model window and
 `total_budget_tokens` is not used. Write `0` there.
 
+`eviction_order` lists regions in the order they give way when the whole context is full. Only
+clearable, temporary and unpinned custom regions ever do, and the named ones go before the rest of
+their kind. A stage with its own `layout` uses that layout's order. [Eviction is
+deterministic](/docs/context#eviction-is-deterministic) has the details.
+
 Each `[[graph.layout.regions]]` entry:
 
 | Key | Default | What it is |

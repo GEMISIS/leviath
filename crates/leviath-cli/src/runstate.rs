@@ -313,44 +313,17 @@ pub(crate) fn forget_provider_files(run_id: &str) {
     }
 }
 
-/// How many random bits go in a run ID's suffix, rendered as 12 hex digits.
-/// Collisions only matter within one wall-clock second for one agent name, so 48
-/// bits is many orders of magnitude more than needed while staying short enough
-/// to read in `lev ps` and the dashboard.
-const RUN_ID_ENTROPY_BITS: u32 = 48;
-
-/// Generate a unique run ID: `<agent_name>-<timestamp>-<random>`.
-///
-/// The suffix is **random**, not derived. A derived suffix like
-/// `(now ^ (now >> 16) ^ counter)` over a process-local counter defends a
-/// `lev run --count N` batch inside one process but degenerates to a pure
-/// function of the current second across separate processes: three concurrent
-/// `lev run` invocations all mint `fetcher-1785127214-8b48` and silently share
-/// one run directory. Nothing downstream detects that - `create_dir_all` is a
-/// no-op on an existing directory and the persistence worker then
-/// last-writer-wins over the run file and the files beside it, interleaving
-/// two runs' state irrecoverably.
-///
-/// The `<name>-<secs>-<hex>` shape is preserved: the timestamp keeps IDs sorting
-/// and reading chronologically, and the dashboard's short-ID display
-/// (`split('-').next_back()`) still lands on the unique component.
+/// Generate a unique run ID: `<agent_name>-<timestamp>-<random>`, minted by
+/// [`leviath_runtime::spec::names::mint_run_id`] from the agent name.
 ///
 /// The name is folded to **ASCII** alphanumerics, which is stricter than it
 /// looks necessary. The id becomes a directory name, and [`run_dir`] resolves an
-/// id that is not a safe path component to `<invalid>`. A Unicode fold let an
-/// agent named `café` mint `café-...`: the daemon created that directory
-/// happily, and then every CLI read of the run looked in `<invalid>` and found
-/// nothing. The minter has to satisfy the rule the readers enforce.
+/// id that is not a safe path component to `<invalid>`: under a Unicode fold an
+/// agent named `café` would start a run the daemon writes and no CLI read can
+/// find. The minter has to satisfy the rule the readers enforce.
 pub(crate) fn new_run_id(agent_name: &str) -> String {
-    use rand::RngExt as _;
-    let entropy: u64 = rand::rng().random::<u64>() >> (u64::BITS - RUN_ID_ENTROPY_BITS);
     let safe_name = agent_name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-");
-    format!(
-        "{}-{}-{:012x}",
-        safe_name,
-        leviath_core::duration::now_secs(),
-        entropy
-    )
+    leviath_runtime::spec::names::mint_run_id(&safe_name)
 }
 
 /// Read run metadata for a given run ID.
@@ -1563,58 +1536,6 @@ mod tests {
                 "agent {name:?} minted {id:?}, which run_dir resolves to <invalid>"
             );
         }
-    }
-
-    #[test]
-    fn new_run_id_is_unique_across_rapid_calls_in_same_second() {
-        // `--count N` calls `new_run_id` N times in a tight loop, all within the
-        // same wall-clock second.
-        let ids: std::collections::HashSet<String> =
-            (0..100).map(|_| new_run_id("same-agent")).collect();
-        assert_eq!(ids.len(), 100);
-    }
-
-    /// Split `<name>-<secs>-<hex>` from the right - the agent name itself may
-    /// contain dashes.
-    fn split_run_id(id: &str) -> (&str, &str) {
-        let mut parts = id.rsplitn(3, '-');
-        let suffix = parts.next().expect("run id has a suffix");
-        let secs = parts.next().expect("run id has a timestamp");
-        (secs, suffix)
-    }
-
-    #[test]
-    fn new_run_id_suffix_is_random_not_derived_from_the_clock() {
-        // The collision this guards against is *across processes*: a suffix
-        // derived as `(now ^ (now >> 16) ^ counter)` over a process-local
-        // counter that every new process starts at 0 degenerates to a pure
-        // function of the current second. Three concurrent `lev run`
-        // invocations all mint `fetcher-1785127214-8b48` and silently share
-        // one run directory. A fresh process has no state to vary, so the
-        // property that has to hold is: IDs that share a timestamp still differ.
-        let ids: Vec<String> = (0..200).map(|_| new_run_id("same-agent")).collect();
-        let mut by_second: std::collections::HashMap<&str, Vec<&str>> =
-            std::collections::HashMap::new();
-        for id in &ids {
-            let (secs, suffix) = split_run_id(id);
-            by_second.entry(secs).or_default().push(suffix);
-        }
-        let mut largest = 0;
-        for (secs, suffixes) in &by_second {
-            let distinct: std::collections::HashSet<&&str> = suffixes.iter().collect();
-            assert_eq!(
-                distinct.len(),
-                suffixes.len(),
-                "two runs in second {secs} share a suffix: {suffixes:?}"
-            );
-            largest = largest.max(suffixes.len());
-        }
-        // 200 calls take microseconds, so they cannot all land in distinct
-        // seconds - without this the assertion above would be vacuous.
-        assert!(
-            largest > 1,
-            "expected IDs sharing a second, got {by_second:?}"
-        );
     }
 
     // ─── write_meta / read_meta roundtrip ───────────────────────────────────

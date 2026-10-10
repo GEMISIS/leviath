@@ -15,8 +15,8 @@ use leviath_runtime::taint::ScriptRuleChecker;
 /// (`tool` / `target` / `taint_level`) and should evaluate to `true` to allow the
 /// call; the first script that allows wins and its file stem is the rule name.
 ///
-/// The sources are read once, here, and captured by the returned closure, so a
-/// checker built from a directory is a snapshot of it. That is why the daemon
+/// The sources are read and compiled once, here, and captured by the returned
+/// closure, so a checker built from a directory is a snapshot of it. That is why the daemon
 /// holds the sources too (`policy_reload`): re-reading them is how an edited
 /// rule reaches a run without a restart.
 pub(crate) fn build_gate_script_checker(rules_dir: &Path) -> Arc<ScriptRuleChecker> {
@@ -52,22 +52,37 @@ pub(crate) fn read_rule_scripts(rules_dir: &Path) -> Vec<(String, String)> {
     scripts
 }
 
-/// Compile `scripts` into the checker the gate consults. Empty ⇒ a checker that
-/// never allows anything, so the daemon can install one unconditionally.
+/// Compile `scripts` into the checker the gate consults. No rule that compiles
+/// ⇒ a checker that never allows anything, so the daemon can install one
+/// unconditionally.
+///
+/// Each rule is compiled here, once, rather than on every gated call. A rule
+/// that does not compile is reported now and allows nothing; one that fails
+/// as it runs, or answers anything but `true`, does not allow that call.
 pub(crate) fn checker_from_scripts(scripts: Vec<(String, String)>) -> Arc<ScriptRuleChecker> {
-    if scripts.is_empty() {
+    let engine = leviath_scripting::ScriptEngine::new();
+    let rules: Vec<_> = scripts
+        .into_iter()
+        .filter_map(|(name, source)| match engine.compile(&source) {
+            Ok(rule) => Some((name, rule)),
+            Err(e) => {
+                tracing::warn!(rule = %name, error = %e, "a taint gate rule does not compile; it allows nothing");
+                None
+            }
+        })
+        .collect();
+    if rules.is_empty() {
         return Arc::new(|_tool, _target, _taint| None);
     }
 
-    let engine = leviath_scripting::ScriptEngine::new();
     Arc::new(
         move |tool: &str,
               target: Option<&str>,
               taint: leviath_core::TaintLevel|
               -> Option<String> {
-            scripts.iter().find_map(|(name, source)| {
+            rules.iter().find_map(|(name, rule)| {
                 engine
-                    .check_gate_rule(source, tool, target, taint.as_str())
+                    .check_gate_rule(rule, tool, target, taint.as_str())
                     .unwrap_or(false)
                     .then(|| name.clone())
             })
@@ -160,9 +175,31 @@ mod tests {
     #[test]
     fn a_script_that_errors_is_treated_as_no_match() {
         let dir = tempfile::tempdir().unwrap();
-        // Not a bool expression ⇒ eval error ⇒ unwrap_or(false) ⇒ no match.
+        // Does not compile ⇒ reported at load and left out ⇒ no match.
         write_rule(dir.path(), "broken.rhai", "this is not valid rhai @@@");
         let checker = build_gate_script_checker(dir.path());
         assert_eq!(checker("shell", None, TaintLevel::Public), None);
+    }
+
+    /// A rule that does not compile is left out, and the rules beside it still
+    /// answer; one that compiles and answers no bool matches nothing.
+    #[test]
+    fn a_broken_rule_does_not_silence_the_others() {
+        let checker = checker_from_scripts(vec![
+            (
+                "broken".to_string(),
+                "this is not valid rhai @@@".to_string(),
+            ),
+            ("number".to_string(), "1".to_string()),
+            (
+                "shell".to_string(),
+                r#"context.tool == "shell""#.to_string(),
+            ),
+        ]);
+        assert_eq!(
+            checker("shell", None, TaintLevel::Public),
+            Some("shell".to_string())
+        );
+        assert_eq!(checker("read_file", None, TaintLevel::Public), None);
     }
 }
