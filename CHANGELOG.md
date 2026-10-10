@@ -353,6 +353,10 @@ same list.
 - A taint gate rule in `~/.config/leviath/rules/` that does not compile was
   silently never matched. It is now reported once when the rules load, and
   each rule is compiled once rather than on every gated call.
+- With `[security] credential_store = "keychain"`, the Meshy API key stayed
+  in `config.toml` in plaintext: saving the config kept it there, `lev auth
+  migrate` never moved it, and `lev auth status` did not list it. It now
+  moves to the OS credential store with every other provider key.
 
 ### Added
 

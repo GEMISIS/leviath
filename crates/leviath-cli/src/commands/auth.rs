@@ -332,9 +332,9 @@ pub(crate) fn status_with(
     // live in the same backend and have to be read through it.
     let (unavailable, in_store, backend) = match resolved {
         Ok(Some(store)) => {
-            let accounts: Vec<String> = crate::credentials::PROVIDER_KEYS
+            let accounts: Vec<String> = crate::config::PROVIDER_KEYS
                 .iter()
-                .map(|p| leviath_core::provider_account(p))
+                .map(crate::config::ProviderKey::account)
                 .collect();
             let found = store.read_all(&accounts).into_keys().collect();
             (None, found, Some(store))
@@ -406,37 +406,20 @@ fn oauth_provider_summaries(
 
 /// The provider accounts that have a key written in the config *file*.
 ///
-/// Parsed straight out of the TOML because `Config::load` merges the
+/// Parsed straight out of the file because `Config::load` merges the
 /// environment and the credential store in, which is exactly the distinction
 /// this needs to make.
 fn providers_in_file(path: &std::path::Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let Ok(value) = text.parse::<toml::Table>() else {
+    let Ok(file) = toml::from_str::<Config>(&text) else {
         return Vec::new();
     };
-    crate::credentials::PROVIDER_KEYS
-        .iter()
-        .filter(|p| file_has_key(&value, p))
-        .map(|p| leviath_core::provider_account(p))
+    file.provider_secrets()
+        .into_iter()
+        .map(|(account, _)| account)
         .collect()
-}
-
-/// Whether the parsed config file carries a key for `provider`.
-///
-/// `openrouter_api_key` sits at the top level while every other key lives under
-/// `[providers]`, as the config struct lays them out.
-fn file_has_key(value: &toml::Table, provider: &str) -> bool {
-    let field = format!("{provider}_api_key");
-    if provider == "openrouter" {
-        return value.get(&field).and_then(|v| v.as_str()).is_some();
-    }
-    value
-        .get("providers")
-        .and_then(|p| p.get(&field))
-        .and_then(|v| v.as_str())
-        .is_some()
 }
 
 /// Render a [`Status`] for the terminal.

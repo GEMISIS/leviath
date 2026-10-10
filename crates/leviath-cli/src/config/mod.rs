@@ -23,6 +23,10 @@ mod mime;
 pub(crate) use mime::*;
 mod nudge;
 pub(crate) use nudge::NudgeSettings;
+// The provider API keys, in one table, and the moves that keep them in the
+// credential store the user chose.
+mod secrets;
+pub(crate) use secrets::{PROVIDER_KEYS, ProviderKey};
 
 // Why a config file would not load, kept structured rather than flattened into
 // a string, so the surfaces that have to explain a broken file can point at
@@ -797,30 +801,7 @@ impl Config {
     fn with_env_fallbacks(self) -> Self {
         let mut config = self;
 
-        if config.providers.anthropic_api_key.is_none() {
-            config.providers.anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-        }
-        if config.providers.openai_api_key.is_none() {
-            config.providers.openai_api_key = std::env::var("OPENAI_API_KEY").ok();
-        }
-        if config.providers.google_api_key.is_none() {
-            config.providers.google_api_key = std::env::var("GOOGLE_API_KEY").ok();
-        }
-        if config.providers.meshy_api_key.is_none() {
-            config.providers.meshy_api_key = std::env::var("MESHY_API_KEY").ok();
-        }
-        if config.providers.bedrock_api_key.is_none() {
-            config.providers.bedrock_api_key =
-                std::env::var(leviath_providers::bedrock::KEY_ENV).ok();
-        }
-        if config.providers.xai_api_key.is_none() {
-            config.providers.xai_api_key = std::env::var("XAI_API_KEY").ok();
-        }
-        // Not Meta's own `MODEL_API_KEY`: a name that generic could belong to
-        // anything on the machine.
-        if config.providers.meta_api_key.is_none() {
-            config.providers.meta_api_key = std::env::var("META_AI_API_KEY").ok();
-        }
+        config.keys_from_env();
         // The region AWS's own tooling reads, so a machine set up for the AWS
         // CLI is set up for this. Blank is unset: an exported empty variable
         // is not a region.
@@ -830,9 +811,6 @@ impl Config {
                 .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
                 .map(|r| r.trim().to_string())
                 .filter(|r| !r.is_empty());
-        }
-        if config.openrouter_api_key.is_none() {
-            config.openrouter_api_key = std::env::var("OPENROUTER_API_KEY").ok();
         }
         // OLLAMA_HOST is the standard env var for Ollama
         if config.ollama_base_url.is_none() {
@@ -871,103 +849,6 @@ impl Config {
         config
     }
 
-    /// Fill any provider key still unset from the configured credential store.
-    fn fill_from_credential_store(&mut self) {
-        let resolved = crate::credentials::store_for(self.security.credential_store);
-        self.fill_from_credential_store_with(resolved);
-    }
-
-    /// Core of [`fill_from_credential_store`](Self::fill_from_credential_store)
-    /// with the backend already resolved.
-    ///
-    /// Runs *after* the file and the environment, so precedence is file > env >
-    /// keychain: what the user can see wins over what they cannot. In keychain
-    /// mode `lev auth migrate` strips the keys out of the file, so in practice
-    /// the keychain is the only source - but a key left behind by hand keeps
-    /// working rather than being silently ignored, and `lev auth status` reports
-    /// when a secret exists in both places.
-    ///
-    /// A store that cannot be opened is a warning, not a hard failure. The user
-    /// may still have working keys in their environment, and refusing to load
-    /// the config at all would take down `lev auth status` - the one command
-    /// that can explain what is wrong. The resolution is the caller's so that
-    /// path is testable: "no store is installed in this process" is not the same
-    /// as "this machine has no keychain", and on a developer's Mac the first
-    /// silently becomes the second.
-    fn fill_from_credential_store_with(&mut self, resolved: crate::credentials::Resolved) {
-        match resolved {
-            Ok(Some(store)) => self.apply_credential_store(store.as_ref()),
-            // The file backend keeps its keys in this struct already.
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!("{e}. Falling back to keys from the config file and environment.");
-            }
-        }
-    }
-
-    /// Overlay `store`'s secrets onto whichever provider keys are still unset.
-    fn apply_credential_store(&mut self, store: &dyn leviath_core::CredentialStore) {
-        let accounts: Vec<String> = crate::credentials::PROVIDER_KEYS
-            .iter()
-            .map(|p| leviath_core::provider_account(p))
-            .collect();
-        let mut found = store.read_all(&accounts);
-        let mut take = |provider: &str| found.remove(&leviath_core::provider_account(provider));
-
-        let anthropic = take("anthropic");
-        let openai = take("openai");
-        let google = take("google");
-        let openrouter = take("openrouter");
-        let bedrock = take("bedrock");
-        let xai = take("xai");
-        let meta = take("meta");
-
-        self.providers.anthropic_api_key = self.providers.anthropic_api_key.take().or(anthropic);
-        self.providers.openai_api_key = self.providers.openai_api_key.take().or(openai);
-        self.providers.google_api_key = self.providers.google_api_key.take().or(google);
-        self.openrouter_api_key = self.openrouter_api_key.take().or(openrouter);
-        self.providers.bedrock_api_key = self.providers.bedrock_api_key.take().or(bedrock);
-        self.providers.xai_api_key = self.providers.xai_api_key.take().or(xai);
-        self.providers.meta_api_key = self.providers.meta_api_key.take().or(meta);
-    }
-
-    /// This config with every provider API key removed.
-    ///
-    /// What gets serialized in keychain mode: the secrets go to the OS store and
-    /// the file keeps only the settings. Returning a stripped copy rather than
-    /// mutating in place matters - the caller is usually saving a config it is
-    /// still going to use for inference, and blanking its keys would break the
-    /// run that triggered the save.
-    fn without_secrets(&self) -> Self {
-        let mut copy = self.clone();
-        copy.providers.anthropic_api_key = None;
-        copy.providers.openai_api_key = None;
-        copy.providers.google_api_key = None;
-        copy.openrouter_api_key = None;
-        copy.providers.bedrock_api_key = None;
-        copy.providers.xai_api_key = None;
-        copy.providers.meta_api_key = None;
-        copy
-    }
-
-    /// Every provider key currently set, as `(account, secret)` pairs.
-    pub(crate) fn provider_secrets(&self) -> Vec<(String, String)> {
-        [
-            ("anthropic", self.providers.anthropic_api_key.as_deref()),
-            ("openai", self.providers.openai_api_key.as_deref()),
-            ("google", self.providers.google_api_key.as_deref()),
-            ("openrouter", self.openrouter_api_key.as_deref()),
-            ("bedrock", self.providers.bedrock_api_key.as_deref()),
-            ("xai", self.providers.xai_api_key.as_deref()),
-            ("meta", self.providers.meta_api_key.as_deref()),
-        ]
-        .into_iter()
-        .filter_map(|(name, key)| {
-            key.map(|k| (leviath_core::provider_account(name), k.to_string()))
-        })
-        .collect()
-    }
-
     /// Save configuration to a path, parameterized so it can be exercised in
     /// tests against a tempfile instead of the real `~/.leviath/config.toml`.
     /// `pub(crate)` so in-crate callers (e.g. the `setup` wizard) can inject a
@@ -987,44 +868,6 @@ impl Config {
         // with plaintext keys on disk and no indication of it.
         let resolved = crate::credentials::store_for(self.security.credential_store);
         self.write_to(path, resolved)
-    }
-
-    /// Core of [`save_to_path`](Self::save_to_path) with the backend already
-    /// resolved - see
-    /// [`fill_from_credential_store_with`](Self::fill_from_credential_store_with)
-    /// for why the resolution is the caller's.
-    fn write_to(
-        &self,
-        path: &std::path::Path,
-        resolved: crate::credentials::Resolved,
-    ) -> anyhow::Result<()> {
-        let to_write = match resolved.map_err(|e| anyhow::anyhow!("{e}"))? {
-            Some(store) => {
-                for (account, secret) in self.provider_secrets() {
-                    store
-                        .set(&account, &secret)
-                        .map_err(|e| anyhow::anyhow!("failed to store {account}: {e}"))?;
-                }
-                self.without_secrets()
-            }
-            None => self.clone(),
-        };
-
-        // Config contains only primitive-typed fields; toml serialization is infallible.
-        let content =
-            toml::to_string_pretty(&to_write).expect("Config serialization is infallible");
-
-        // `write_private`, not `fs::write` + `chmod`. This file holds every
-        // provider API key, and the two-step version left it at the umask
-        // default (typically 0644) between the write and the mode change - so
-        // every save had a moment where any local user could read the keys.
-        leviath_sys::write_private(path, content.as_bytes()).map_err(|e| {
-            anyhow::anyhow!("Failed to write config to '{}': {}", path.display(), e)
-        })?;
-
-        let path_display = path.display();
-        tracing::debug!("Saved config to {}", path_display);
-        Ok(())
     }
 
     /// Load a config from an explicit path (`lev mcp` uses this to read the
@@ -3300,6 +3143,30 @@ meshy_api_key = "msy-existing"
             rendered.contains("bedrock_region: Some(\"eu-west-1\")"),
             "{rendered}"
         );
+    }
+
+    /// The Meshy key moves with the others: in keychain mode a key left in
+    /// the file stays there in plaintext, and `lev auth migrate` never
+    /// moves it, unless every path knows about it.
+    #[test]
+    fn the_meshy_key_travels_through_the_credential_store_like_the_others() {
+        use leviath_core::{CredentialStore, MemoryStore};
+
+        let store = MemoryStore::new();
+        store
+            .set(&leviath_core::provider_account("meshy"), "msy-keychain")
+            .unwrap();
+        let mut config = Config::default();
+        config.apply_credential_store(&store);
+        assert_eq!(
+            config.providers.meshy_api_key.as_deref(),
+            Some("msy-keychain")
+        );
+        assert_eq!(
+            config.provider_secrets(),
+            vec![("provider/meshy".to_string(), "msy-keychain".to_string())]
+        );
+        assert!(config.without_secrets().providers.meshy_api_key.is_none());
     }
 
     /// The Bedrock settings follow AWS's own variables when the file is
