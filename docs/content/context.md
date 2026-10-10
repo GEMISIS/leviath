@@ -688,7 +688,8 @@ emptied whole first. Then temporary and unpinned custom regions give up their ol
 compacting regions are summarized last. Pinned regions, sliding windows, histories, keyed regions,
 checklists and anything under `admission = "reject"` are never touched.
 
-A layout's `eviction_order` says which regions go first within each of those steps:
+A layout's `eviction_order` says which regions go first when clearable regions are emptied and
+when temporary and custom ones give up entries:
 
 ```toml
 [graph.layout]

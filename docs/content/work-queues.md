@@ -13,7 +13,7 @@ question about every run it started: is this still going?
 
 Getting that wrong is expensive in both directions. Decide a healthy run is dead and you cancel real
 work. Decide a dead run is healthy and you leak a slot forever. This page covers how to ask, and
-three fields that will mislead you if you read them the obvious way.
+two things that will mislead you if you read them the obvious way.
 
 > [!TIP]
 > **Building a service rather than a script? Use the [HTTP API](/docs/api), not the CLI.** Shelling

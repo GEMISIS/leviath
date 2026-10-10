@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 
@@ -126,11 +126,7 @@ pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// The system clock, in Unix seconds.
 pub fn system_clock() -> Clock {
-    Arc::new(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
-    })
+    Arc::new(leviath_core::duration::now_secs_u64)
 }
 
 /// How long a lock file may sit before it is treated as abandoned.

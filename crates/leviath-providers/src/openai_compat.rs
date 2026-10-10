@@ -974,11 +974,8 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                         cache_write_tokens,
                         completion_tokens,
                     )
-                    // And the same cost passthrough, which this arm was
-                    // missing. A choice-less usage chunk is exactly how
-                    // OpenRouter reports what it charged, so the one
-                    // shape that carries a real price was the one that
-                    // dropped it.
+                    // And the same cost passthrough: a choice-less usage
+                    // chunk is how OpenRouter reports what it charged.
                     .with_reported_cost(usage.get("cost").and_then(|v| v.as_f64())),
                 ),
                 finish_reason: None,

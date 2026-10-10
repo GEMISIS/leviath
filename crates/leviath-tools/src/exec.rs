@@ -374,15 +374,20 @@ impl BuiltinTools {
             Err(e) => return format!("[error] {}", e),
         };
 
-        // Serialize concurrent writes to the same file (fan-out workers).
-        let lock = self.ctx.lock_for(&path);
-        let _guard = lock.lock().await;
+        // Serialize concurrent writes to the same file (fan-out workers). The
+        // write holds the lock, not this call: a call dropped mid-write (a
+        // cancelled run) leaves the file locked until the write is done.
+        let guard = self.ctx.lock_for(&path).lock_owned().await;
 
         // `append` lets a model write a file too large for one reply in parts:
         // a call cut off by the output cap is refused, and this is the way
         // the refusal tells it to go on.
         let append = args.get("append").and_then(|v| v.as_bool()) == Some(true);
-        off_thread(move || write_file_at(&path_str, &path, &content, append)).await
+        off_thread(move || {
+            let _guard = guard;
+            write_file_at(&path_str, &path, &content, append)
+        })
+        .await
     }
 
     pub(crate) async fn edit_file(&self, args: &Value) -> String {
@@ -408,11 +413,15 @@ impl BuiltinTools {
         };
 
         // Serialize the read-modify-write against concurrent edits/writes to the
-        // same file (fan-out workers), preventing lost updates.
-        let lock = self.ctx.lock_for(&path);
-        let _guard = lock.lock().await;
+        // same file (fan-out workers), preventing lost updates. Held by the
+        // edit itself, as in `write_file`.
+        let guard = self.ctx.lock_for(&path).lock_owned().await;
 
-        off_thread(move || edit_file_at(&path_str, &path, &old_str, &new_str)).await
+        off_thread(move || {
+            let _guard = guard;
+            edit_file_at(&path_str, &path, &old_str, &new_str)
+        })
+        .await
     }
 
     pub(crate) async fn list_dir(&self, args: &Value) -> String {
@@ -701,11 +710,18 @@ fn read_for_model(path: &Path, whole_limit: u64) -> std::io::Result<FileRead> {
                 .map(|_| (file, len))
         })
         .and_then(|(file, len)| {
+            // Read whole up to one byte past the limit, which is enough to
+            // refuse a file whose reported size was wrong: one that grew, or
+            // a device that reports none and never ends.
             let rest = match text_len(&bytes, len).is_none() && len <= whole_limit {
-                true => u64::MAX,
+                true => whole_limit
+                    .saturating_add(1)
+                    .saturating_sub(bytes.len() as u64),
                 false => 0,
             };
-            file.take(rest).read_to_end(&mut bytes).map(|_| len)
+            file.take(rest)
+                .read_to_end(&mut bytes)
+                .map(|_| len.max(bytes.len() as u64))
         })
         .map(|len| match text_len(&bytes, len) {
             Some(n) => {
@@ -1038,4 +1054,28 @@ pub(crate) fn capture_note(stdout: &Captured, stderr: &Captured, cap: usize) -> 
          limit and only the beginning is shown. Narrow the command (a filter, a line count, a \
          smaller range) rather than re-running it."
     ))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A device that reports no size and never ends is read no further than
+    /// the limit allows, and then reports a length over it, so it is refused
+    /// rather than read until memory runs out.
+    #[test]
+    fn an_endless_file_is_read_no_further_than_the_limit() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_for_model(Path::new("/dev/urandom"), 64));
+        });
+        let read = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the read stops");
+        assert!(matches!(
+            read,
+            Ok(FileRead::NotText { len, ref bytes })
+                if bytes.len() == MAX_READ_FILE_BYTES + 3 && len > 64
+        ));
+    }
 }

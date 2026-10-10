@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn the_millisecond_clock_agrees_with_the_second_one() {
         let millis = system_now_millis();
-        let secs = leviath_core::duration::now_secs() as u64;
+        let secs = leviath_core::duration::now_secs_u64();
         assert!(millis / 1000 >= secs.saturating_sub(2), "got {millis}");
         assert!(millis / 1000 <= secs + 2, "got {millis}");
     }

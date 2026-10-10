@@ -73,6 +73,12 @@ pub fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// [`now_secs`] as a `u64`, the type token expiries, quota resets and job
+/// stamps count in. Never negative, so nothing is lost.
+pub fn now_secs_u64() -> u64 {
+    now_secs() as u64
+}
+
 /// The JSON key carrying a run's age in seconds, on every API that serves runs.
 pub const AGE_SECS_KEY: &str = "age_secs";
 
@@ -161,5 +167,10 @@ mod tests {
         // zero slipping in, without pinning the test to today.
         let now = now_secs();
         assert!((1_704_067_200..4_102_444_800).contains(&now), "{now}");
+        let unsigned = now_secs_u64();
+        assert!(
+            (1_704_067_200..4_102_444_800).contains(&unsigned),
+            "{unsigned}"
+        );
     }
 }

@@ -271,9 +271,7 @@ impl XaiProvider {
             && self.endpoint.is_signin()
             && crate::provider::retry_after_secs(response.headers()).is_none()
         {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
+            let now = leviath_core::duration::now_secs_u64();
             let wait = match self.quota().await {
                 Some(Ok(report)) => report.resets_in(now),
                 _ => None,

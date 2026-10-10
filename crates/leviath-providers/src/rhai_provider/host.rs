@@ -7,10 +7,10 @@
 //! tests inject a fake so no socket is ever bound. Rate limiting lives in the
 //! provider (around the executor), not here - the executor is pure transport.
 
-use crate::provider::stream::Utf8Carry;
 use leviath_net::read_caps::{
     BodyReadError, JSON_BODY_CAP, STREAM_FRAME_CAP, frame_within_cap, peer_of, read_text_capped,
 };
+use leviath_net::sse::Utf8Carry;
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;

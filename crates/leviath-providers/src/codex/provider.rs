@@ -262,10 +262,7 @@ impl CodexProvider {
     /// Seconds until the soonest quota window resets.
     async fn quota_reset_secs(&self) -> Option<u64> {
         let quota = self.quota().await.ok()?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        quota.resets_in(now)
+        quota.resets_in(leviath_core::duration::now_secs_u64())
     }
 
     /// Read the subscription's quota windows.

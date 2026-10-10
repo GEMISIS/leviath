@@ -1256,8 +1256,8 @@ mod tests {
 
     #[test]
     fn run_meta_optional_fields_deserialize() {
-        // A record without its optional fields, from a build that still wrote
-        // a `pid`: a key the record no longer has is ignored.
+        // A record without its optional fields, carrying a key the struct
+        // lacks (`pid`), which is ignored.
         let json = serde_json::json!({
             "run_id": "r1",
             "agent_name": "a",

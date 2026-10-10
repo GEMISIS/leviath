@@ -949,7 +949,22 @@ impl Dashboard {
                 let region = value.to_string();
                 self.editor_mutate(|d| d.set_tool_routing_override(&stage, &tool, &region));
             }
-            _ => {}
+            // A stage's chooser settled off a stage panel, or a chooser the
+            // core settles itself: nothing to write here.
+            (
+                PickerFor::AddModel
+                | PickerFor::ReplaceModel(_)
+                | PickerFor::RoutingTool
+                | PickerFor::RoutingRegion(_),
+                None,
+            )
+            | (
+                PickerFor::Tools
+                | PickerFor::Field(_)
+                | PickerFor::ConnectFrom(_)
+                | PickerFor::MimeTypes(_),
+                _,
+            ) => {}
         }
     }
 

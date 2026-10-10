@@ -20,7 +20,7 @@ use crate::config::Config;
 
 /// A fixed clock, so a recorded timestamp is an assertion rather than a
 /// reading of the wall.
-fn fixed_now() -> i64 {
+fn fixed_now() -> u64 {
     1_700_000_000
 }
 

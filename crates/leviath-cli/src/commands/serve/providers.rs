@@ -67,7 +67,7 @@ pub(crate) struct ProviderAdmin {
     /// What each provider's sign-in is doing, for the poll to read.
     pub(crate) in_flight: Arc<Mutex<HashMap<String, Progress>>>,
     /// Current Unix time; a fn so a long-lived server stays current.
-    pub(crate) now: fn() -> i64,
+    pub(crate) now: fn() -> u64,
     /// Where the credential check reads the subscription's quota, when it is
     /// not the provider's own route.
     ///
@@ -84,7 +84,7 @@ impl Default for ProviderAdmin {
             issuer: None,
             ports: None,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
-            now: leviath_core::duration::now_secs,
+            now: leviath_core::duration::now_secs_u64,
             usage_url: None,
         }
     }
@@ -475,13 +475,7 @@ pub(super) async fn sign_in_started(
                 let _ = leviath_core::sync::lock(&slot)
                     .take()
                     .map(|tx| tx.send(Err(message.clone())));
-                in_flight.insert(
-                    name.to_string(),
-                    Progress::Failed {
-                        message,
-                        at: now() as u64,
-                    },
-                );
+                in_flight.insert(name.to_string(), Progress::Failed { message, at: now() });
             }
         }
     });
@@ -505,7 +499,7 @@ pub(super) async fn sign_in_started(
                 name.to_string(),
                 Progress::Waiting {
                     authorize_url: url.clone(),
-                    started_at: (state.providers.now)() as u64,
+                    started_at: (state.providers.now)(),
                 },
             );
             Ok(SignInStarted {

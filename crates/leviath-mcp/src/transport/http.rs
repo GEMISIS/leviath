@@ -370,17 +370,14 @@ impl HttpTransport {
         response: reqwest::Response,
         id: Option<u64>,
     ) -> anyhow::Result<JsonRpcResponse> {
-        let mut buffer = String::new();
+        let mut text = SseText::default();
         let peer = peer_of(&response);
         let mut stream = response.bytes_stream();
 
         loop {
-            let event = next_sse_event(&mut stream, &mut buffer, STREAM_FRAME_CAP, &peer)
+            let event = next_sse_event(&mut stream, &mut text, STREAM_FRAME_CAP, &peer)
                 .await
                 .map_err(|end| match end {
-                    SseEnd::NotUtf8(e) => {
-                        anyhow::anyhow!("MCP event stream is not UTF-8: {}", e)
-                    }
                     SseEnd::Failed(e) => anyhow::anyhow!("MCP event stream failed: {}", e),
                     SseEnd::TooLarge(msg) => anyhow::anyhow!("MCP event {}", msg),
                     SseEnd::Closed => {
@@ -618,17 +615,13 @@ async fn error_for_status(status: StatusCode, response: reqwest::Response) -> an
 
 /// Decode an SSE response, forwarding decoded events onto `tx`.
 async fn read_event_stream(response: reqwest::Response, tx: mpsc::UnboundedSender<LegacyEvent>) {
-    let mut buffer = String::new();
+    let mut text = SseText::default();
     let peer = peer_of(&response);
     let mut stream = response.bytes_stream();
 
     loop {
-        let event = match next_sse_event(&mut stream, &mut buffer, STREAM_FRAME_CAP, &peer).await {
+        let event = match next_sse_event(&mut stream, &mut text, STREAM_FRAME_CAP, &peer).await {
             Ok(event) => event,
-            Err(SseEnd::NotUtf8(e)) => {
-                tracing::warn!(error = %e, "MCP event stream is not UTF-8");
-                return;
-            }
             Err(SseEnd::Failed(e)) => {
                 tracing::warn!(error = %e, "MCP event stream failed");
                 return;
@@ -657,10 +650,16 @@ async fn read_event_stream(response: reqwest::Response, tx: mpsc::UnboundedSende
     }
 }
 
+/// The text of an event stream read so far: whole events and the start of
+/// the next one, and the bytes of a character the last chunk ended inside.
+#[derive(Default)]
+struct SseText {
+    buffer: String,
+    carry: leviath_net::sse::Utf8Carry,
+}
+
 /// Why [`next_sse_event`] stopped delivering events.
 enum SseEnd {
-    /// A chunk was not UTF-8; SSE is text, so nothing after it can be framed.
-    NotUtf8(std::str::Utf8Error),
     /// The HTTP body stream itself failed.
     Failed(reqwest::Error),
     /// A partial event grew past the frame cap; the message names the cap
@@ -670,7 +669,7 @@ enum SseEnd {
     Closed,
 }
 
-/// The next SSE event with a body, pulling bytes from `stream` into `buffer`
+/// The next SSE event with a body, pulling bytes from `stream` into `text`
 /// until one is framed.
 ///
 /// Keepalive frames (an event with empty data) are skipped here, so a caller
@@ -680,7 +679,7 @@ enum SseEnd {
 /// ending is theirs, how bytes become events is not.
 async fn next_sse_event<S, B>(
     stream: &mut S,
-    buffer: &mut String,
+    text: &mut SseText,
     frame_cap: usize,
     peer: &str,
 ) -> Result<leviath_net::sse::SseEvent, SseEnd>
@@ -689,22 +688,21 @@ where
     B: AsRef<[u8]>,
 {
     loop {
-        while let Some(event) = leviath_net::sse::next_event(buffer) {
+        while let Some(event) = leviath_net::sse::next_event(&mut text.buffer) {
             if !event.data.is_empty() {
                 return Ok(event);
             }
         }
         // Measured once the whole events are off the front, so this is one
         // partial event: a peer that never sends the blank line.
-        if let Err(msg) = frame_within_cap(buffer.len(), frame_cap, peer) {
-            buffer.clear();
+        if let Err(msg) =
+            frame_within_cap(text.buffer.len() + text.carry.pending(), frame_cap, peer)
+        {
+            text.buffer.clear();
             return Err(SseEnd::TooLarge(msg));
         }
         match stream.next().await {
-            Some(Ok(chunk)) => match std::str::from_utf8(chunk.as_ref()) {
-                Ok(text) => buffer.push_str(text),
-                Err(e) => return Err(SseEnd::NotUtf8(e)),
-            },
+            Some(Ok(chunk)) => text.carry.push(chunk.as_ref(), &mut text.buffer),
             Some(Err(e)) => return Err(SseEnd::Failed(e)),
             None => return Err(SseEnd::Closed),
         }
@@ -1839,20 +1837,39 @@ mod tests {
             Ok(b"data: this partial event is longer than the cap"),
         ];
         let mut stream = futures_util::stream::iter(chunks);
-        let mut buffer = String::new();
-        let first = next_sse_event(&mut stream, &mut buffer, 16, "mcp.example")
+        let mut text = SseText::default();
+        let first = next_sse_event(&mut stream, &mut text, 16, "mcp.example")
             .await
             .ok()
             .expect("a whole event under the cap");
         assert_eq!(first.data, "ok");
-        let err = next_sse_event(&mut stream, &mut buffer, 16, "mcp.example")
+        let err = next_sse_event(&mut stream, &mut text, 16, "mcp.example")
             .await
             .expect_err("the partial event overruns the cap");
         assert!(
             matches!(err, SseEnd::TooLarge(ref msg) if msg == "stream frame exceeded 16 bytes from mcp.example"),
             "got a different ending"
         );
-        assert!(buffer.is_empty(), "the oversized partial event is released");
+        assert!(
+            text.buffer.is_empty(),
+            "the oversized partial event is released"
+        );
+    }
+
+    /// A reply carrying non-ASCII text, cut by the transport inside a
+    /// character, reads whole: the first bytes of the character wait for the
+    /// rest rather than failing the stream.
+    #[tokio::test]
+    async fn next_sse_event_reads_a_character_split_across_chunks() {
+        let chunks: Vec<Result<&[u8], reqwest::Error>> =
+            vec![Ok(b"data: {\"text\":\"\xe5"), Ok(b"\xae\x8c\"}\n\n")];
+        let mut stream = futures_util::stream::iter(chunks);
+        let mut text = SseText::default();
+        let event = next_sse_event(&mut stream, &mut text, 1024, "mcp.example")
+            .await
+            .ok()
+            .expect("the split character is carried, not refused");
+        assert_eq!(event.data, "{\"text\":\"\u{5b8c}\"}");
     }
 
     #[tokio::test]
@@ -2154,7 +2171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_event_stream_stops_on_invalid_utf8() {
+    async fn read_event_stream_discards_an_event_that_is_not_utf8() {
         let _guard = always_on_tracing_guard();
         let url = serve_raw(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\

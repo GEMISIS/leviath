@@ -323,7 +323,7 @@ impl RiskyExecutors for RealExecutors {
             config_path: crate::config::Config::config_path(),
             grants: crate::credentials::McpGrants::new(store_path, Ok(store)),
             opener: std::sync::Arc::new(leviath_sys::open_url),
-            now: leviath_core::duration::now_secs() as u64,
+            now: leviath_core::duration::now_secs_u64(),
             tools_dir: leviath_core::tools_dir(),
             allow_env_vars: config.security.allow_env_vars,
             // A person is waiting at a terminal, so the handshake keeps the
