@@ -319,28 +319,6 @@ pub fn resolve_taint_enabled(
     global || manifest.unwrap_or(false)
 }
 
-/// Resolve the effective [`SecurityConfig`] for a stage: the most specific
-/// present config (stage over agent), or a default whose `taint_tracking`
-/// follows the global toggle when neither level configures it.
-///
-/// `taint_tracking` is clamped by [`resolve_taint_enabled`] so the two agree -
-/// a manifest cannot disable what the user enabled.
-#[cfg(test)]
-pub fn resolve_security(
-    global: bool,
-    agent: Option<&SecurityConfig>,
-    stage: Option<&SecurityConfig>,
-) -> SecurityConfig {
-    let mut resolved = match stage.or(agent) {
-        Some(c) => c.clone(),
-        None => SecurityConfig {
-            taint_tracking: global,
-        },
-    };
-    resolved.taint_tracking = resolve_taint_enabled(global, agent, stage);
-    resolved
-}
-
 /// The shared stage → agent → global cascade behind the system-prompt hint
 /// toggles. A `Some(_)` at a narrower level overrides broader levels; when
 /// neither the stage nor the agent sets it, the global toggle applies. (Same
@@ -1213,7 +1191,7 @@ mod tests {
         );
     }
 
-    // ─── resolve_taint_enabled / resolve_security cascade ───────────────────
+    // ─── resolve_taint_enabled cascade ───────────────────
 
     fn sec(taint: bool) -> SecurityConfig {
         SecurityConfig {
@@ -1287,18 +1265,6 @@ mod tests {
             Some((TaintLevel::Private, TaintLevel::Public))
         );
         assert_eq!(GateDecision::Allowed.blocked_levels(), None);
-    }
-
-    #[test]
-    fn resolve_security_prefers_most_specific_but_clamps_taint() {
-        // Neither set → default whose taint_tracking follows global.
-        assert!(resolve_security(true, None, None).taint_tracking);
-        assert!(!resolve_security(false, None, None).taint_tracking);
-        // Stage present → wins over agent for opting *in*.
-        assert!(resolve_security(false, Some(&sec(false)), Some(&sec(true))).taint_tracking);
-        // An agent opt-out cannot beat the user's global on - `resolve_security`
-        // agrees with `resolve_taint_enabled` rather than disagreeing with it.
-        assert!(resolve_security(true, Some(&sec(false)), None).taint_tracking);
     }
 
     #[test]
