@@ -18,12 +18,21 @@ use leviath_mcp::{AuthStore, MCPServerConfig, OAuthClient};
 impl Dashboard {
     /// Re-read the config + token store and rebuild the MCP row list, clamping
     /// the selection. Cheap file I/O, called when the screen opens and after any
-    /// change so it always reflects disk. A file that will not read is said in
-    /// a toast and the rows are left as they were, rather than every server
-    /// shown logged out.
+    /// change so it always reflects disk. A config that will not read is said
+    /// in a toast and the rows are left as they were. Logins that will not
+    /// read are said in a toast beside the rows, every server listed and shown
+    /// not logged in, so a row can still be selected and removed.
     pub(super) fn refresh_mcp_rows(&mut self) {
         match listed(&self.mcp_ctx) {
-            Ok(rows) => self.mcp_rows = rows,
+            Ok((rows, unread)) => {
+                self.mcp_rows = rows;
+                if let Some(why) = unread {
+                    self.toast(
+                        format!("Could not read MCP logins: {why}"),
+                        ToastLevel::Error,
+                    );
+                }
+            }
             Err(e) => self.toast(e, ToastLevel::Error),
         }
         if self.mcp_selected >= self.mcp_rows.len() {
@@ -160,19 +169,23 @@ impl Dashboard {
     }
 }
 
-/// Every configured server as a row, with the grant it is logged in with.
-fn listed(ctx: &McpContext) -> Result<Vec<McpRow>, String> {
+/// Every configured server as a row, with the grant it is logged in with, and
+/// why the grants could not be read when they could not.
+///
+/// A config that will not read is the error: it is where the servers are.
+/// Grants that will not read are not, for the reason [`McpGrants::shown`]
+/// gives.
+fn listed(ctx: &McpContext) -> Result<(Vec<McpRow>, Option<String>), String> {
     let config = Config::load_from_path(&ctx.config_path)
         .map_err(|e| format!("Could not read config: {e}"))?;
-    let store = grants_of(ctx, &config)
-        .load()
-        .map_err(|e| format!("Could not read MCP logins: {e}"))?;
+    let (store, unread) = grants_of(ctx, &config).shown();
     let now = (ctx.clock)() as u64;
-    Ok(config
+    let rows = config
         .mcp_servers
         .iter()
         .map(|s| describe_row(s, &store, now))
-        .collect())
+        .collect();
+    Ok((rows, unread))
 }
 
 /// The grants `config` keeps, in the screen's grant file.
@@ -1179,20 +1192,87 @@ for line in sys.stdin:
         assert_eq!(dash.mcp_rows[0].auth, "authenticated");
     }
 
-    /// A grant file that will not load is said, not shown as every server
-    /// logged out.
+    /// The rows a screen opened on `dir` shows, as name and auth word.
+    fn opened_rows(dash: &Dashboard) -> Vec<(String, String)> {
+        dash.mcp_rows
+            .iter()
+            .map(|row| (row.name.clone(), row.auth.clone()))
+            .collect()
+    }
+
+    /// A grant file that will not load still lists every server, each shown
+    /// not logged in, and says why in one toast: a listing writes nothing, and
+    /// a server that is not listed cannot be selected to remove it.
     #[test]
-    fn a_grant_file_that_will_not_load_is_reported() {
+    fn a_grant_file_that_will_not_load_lists_every_server_and_says_so() {
         let dir = tempfile::tempdir().unwrap();
+        let mut setup = dash_at(dir.path());
+        assert!(setup.mcp_add_from_line("remote https://e.com/mcp"));
+        assert!(setup.mcp_add_from_line("local npx"));
+        std::fs::write(&setup.mcp_ctx.store_path, "not json").unwrap();
+
         let mut dash = dash_at(dir.path());
-        assert!(dash.mcp_add_from_line("remote https://e.com/mcp"));
-        std::fs::write(&dash.mcp_ctx.store_path, "not json").unwrap();
         dash.refresh_mcp_rows();
+        assert_eq!(
+            opened_rows(&dash),
+            [
+                ("remote".to_string(), "none".to_string()),
+                ("local".to_string(), "n/a".to_string()),
+            ]
+        );
         let toasts = dash.toast_messages_for_test();
-        assert!(
+        assert_eq!(
             toasts
                 .iter()
-                .any(|m| m.contains("MCP auth store is corrupt")),
+                .filter(|m| m.contains("MCP auth store is corrupt"))
+                .count(),
+            1,
+            "{toasts:?}"
+        );
+        dash.mcp_request_remove();
+        assert!(
+            dash.pending_confirm.is_some(),
+            "a listed row can be removed"
+        );
+    }
+
+    /// A keychain that cannot be reached lists every server from the grant
+    /// file alone, as an agent's run reads it, and says why.
+    #[test]
+    fn an_unreachable_keychain_lists_the_servers_from_the_file() {
+        let _keychain = crate::credentials::test_store::unreachable();
+        let dir = tempfile::tempdir().unwrap();
+        let mut dash = dash_at(dir.path());
+        // Written as text: saving a config that names the keychain needs the
+        // keychain.
+        std::fs::write(
+            &dash.mcp_ctx.config_path,
+            "[security]\ncredential_store = \"keychain\"\n\n\
+             [[mcp_servers]]\nname = \"remote\"\nurl = \"https://e.com/mcp\"\n\n\
+             [[mcp_servers]]\nname = \"local\"\ncommand = \"npx\"\n",
+        )
+        .unwrap();
+        let mut held = AuthStore::default();
+        held.set(
+            "remote",
+            leviath_mcp::ServerAuth {
+                expires_at: 10_000,
+                ..Default::default()
+            },
+        );
+        held.save(&dash.mcp_ctx.store_path).unwrap();
+
+        dash.refresh_mcp_rows();
+        assert_eq!(
+            opened_rows(&dash),
+            [
+                ("remote".to_string(), "authenticated".to_string()),
+                ("local".to_string(), "n/a".to_string()),
+            ]
+        );
+        let toasts = dash.toast_messages_for_test();
+        assert!(
+            toasts.iter().any(|m| m.contains("credential_store")),
             "{toasts:?}"
         );
     }
