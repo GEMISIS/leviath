@@ -63,14 +63,16 @@ pub(crate) struct DeleteBlueprintResult {
 }
 
 /// Write a blueprint and describe what was written.
-fn installed(
+async fn installed(
     ctx: &Context<'_>,
     name: &str,
     manifest: String,
     replacing: bool,
 ) -> async_graphql::Result<Blueprint> {
     let state = ctx.data_unchecked::<AppState>();
-    let written = blueprint_core::write_blueprint(name, manifest, replacing).gql()?;
+    let written = blueprint_core::write_blueprint(name, manifest, replacing)
+        .await
+        .gql()?;
     // Into the parse cache by digest, so the listing that follows this mutation
     // does not parse the same text again. Best effort on purpose: the text was
     // parsed to write it, the blueprint is on disk either way, and a cache that
@@ -93,7 +95,7 @@ pub(crate) async fn create_blueprint(
     request: CreateBlueprintRequest,
 ) -> async_graphql::Result<CreateBlueprintResult> {
     Ok(CreateBlueprintResult {
-        blueprint: installed(ctx, &request.name, request.manifest, false)?,
+        blueprint: installed(ctx, &request.name, request.manifest, false).await?,
     })
 }
 
@@ -110,7 +112,7 @@ pub(crate) async fn update_blueprint(
     // with nothing written rather than after the fact.
     let name = request.blueprint.installed(state).await.gql()?;
     Ok(UpdateBlueprintResult {
-        blueprint: installed(ctx, &name, request.manifest, true)?,
+        blueprint: installed(ctx, &name, request.manifest, true).await?,
     })
 }
 
@@ -125,7 +127,7 @@ pub(crate) async fn delete_blueprint(
 ) -> async_graphql::Result<DeleteBlueprintResult> {
     let state = ctx.data_unchecked::<AppState>();
     let name = request.blueprint.installed(state).await.gql()?;
-    blueprint_core::remove_blueprint(&name).gql()?;
+    blueprint_core::remove_blueprint(&name).await.gql()?;
     Ok(DeleteBlueprintResult {
         deleted_id: ID::from(name),
     })

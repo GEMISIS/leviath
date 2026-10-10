@@ -286,7 +286,24 @@ pub(crate) struct WrittenBlueprint {
 /// finds an installed blueprint by its directory and refuses one whose
 /// `[blueprint] name` says otherwise, so writing one would install an agent
 /// nothing can run.
-pub(crate) fn write_blueprint(
+///
+/// The directory is found on the request's own task, where a test's agents
+/// directory is visible; the parse and the file work run on the blocking pool.
+pub(crate) async fn write_blueprint(
+    name: &str,
+    manifest: String,
+    replacing: bool,
+) -> Result<WrittenBlueprint, ServeError> {
+    let dir = blueprint_dir(name);
+    let name = name.to_string();
+    super::super::blocking::blocking(move || write_at(dir, &name, manifest, replacing)).await
+}
+
+/// [`write_blueprint`], on the thread that writes. `dir` is the name's checked
+/// directory, or why the name was refused, which is reported only once the
+/// manifest itself has been found sound.
+fn write_at(
+    dir: Result<PathBuf, ServeError>,
     name: &str,
     manifest: String,
     replacing: bool,
@@ -296,7 +313,7 @@ pub(crate) fn write_blueprint(
     })?;
     let parsed = parse_blueprint(&manifest)
         .map_err(|e| ServeError::BadRequest(format!("Invalid blueprint: {}", e.join("; "))))?;
-    let dir = blueprint_dir(name)?;
+    let dir = dir?;
     if parsed.name != name {
         return Err(ServeError::BadRequest(format!(
             "The blueprint calls itself '{}' in [blueprint] name; install it as '{}' or \
@@ -335,14 +352,19 @@ pub(crate) fn write_blueprint(
 /// Uninstall a blueprint.
 ///
 /// Runs that used it keep the graph they ran in their own files, so removing
-/// the installed copy does not take their history with it.
-pub(crate) fn remove_blueprint(name: &str) -> Result<(), ServeError> {
+/// the installed copy does not take their history with it. The directory is
+/// found on the request's task and removed on the blocking pool.
+pub(crate) async fn remove_blueprint(name: &str) -> Result<(), ServeError> {
     let dir = blueprint_dir(name)?;
-    if !dir.exists() {
-        return Err(ServeError::NotFound(format!(
-            "Blueprint '{name}' not found"
-        )));
-    }
-    std::fs::remove_dir_all(&dir)
-        .map_err(|e| ServeError::Internal(format!("Failed to delete blueprint: {e}")))
+    let name = name.to_string();
+    super::super::blocking::blocking(move || {
+        if !dir.exists() {
+            return Err(ServeError::NotFound(format!(
+                "Blueprint '{name}' not found"
+            )));
+        }
+        std::fs::remove_dir_all(&dir)
+            .map_err(|e| ServeError::Internal(format!("Failed to delete blueprint: {e}")))
+    })
+    .await
 }

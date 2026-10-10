@@ -233,6 +233,7 @@ async fn a_blueprint_is_installed_under_its_own_name() {
     TEST_AGENTS_DIR
         .scope(agents.path().to_path_buf(), async {
             let refused = write_blueprint("other", tiny_blueprint("mine"), false)
+                .await
                 .err()
                 .expect("the names differ");
             assert_eq!(refused.code(), "BAD_USER_INPUT");
@@ -240,16 +241,19 @@ async fn a_blueprint_is_installed_under_its_own_name() {
             assert!(!agents.path().join("other").exists(), "nothing was written");
 
             let invalid = write_blueprint("mine", "not a blueprint".to_string(), false)
+                .await
                 .err()
                 .expect("it does not parse");
             assert_eq!(invalid.code(), "BAD_USER_INPUT");
 
-            let written = write_blueprint("mine", tiny_blueprint("mine"), false).expect("written");
+            let written = write_blueprint("mine", tiny_blueprint("mine"), false)
+                .await
+                .expect("written");
             assert_eq!(written.parsed.name, "mine");
             assert!(written.dir.join(leviath_blueprint::FILE_NAME).is_file());
             assert_eq!(written.manifest.digest, digest_of(&tiny_blueprint("mine")));
 
-            remove_blueprint("mine").expect("removed");
+            remove_blueprint("mine").await.expect("removed");
             assert!(!written.dir.exists());
         })
         .await;
@@ -284,6 +288,7 @@ async fn an_old_blueprint_is_saved_as_the_agent_toml_it_converts_to() {
     TEST_AGENTS_DIR
         .scope(agents.path().to_path_buf(), async {
             let written = write_blueprint("oldie", OLD_MANIFEST.to_string(), false)
+                .await
                 .expect("an old blueprint converts");
             assert_eq!(written.parsed.name, "oldie");
             let stored =
@@ -293,6 +298,7 @@ async fn an_old_blueprint_is_saved_as_the_agent_toml_it_converts_to() {
 
             let broken = OLD_MANIFEST.replace("[stages.work]", "[stages.work]\nbogus_key = 1");
             let refused = write_blueprint("oldie", broken, true)
+                .await
                 .err()
                 .expect("it does not convert");
             assert_eq!(refused.code(), "BAD_USER_INPUT");
