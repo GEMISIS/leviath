@@ -582,16 +582,13 @@ mod tests {
                 std::iter::once("lev").chain(words.iter().copied()),
             )
             .ok()
-            .and_then(|cli| match cli.args.command {
-                Some(ProvidersCommand::Retention(RetentionArgs {
-                    command: Some(command),
-                    ..
-                })) => Some(command),
-                _ => None,
-            })
+            .and_then(|cli| cli.args.command)
         };
         let want = |word: &str| match parse(&["retention", "set", word]) {
-            Some(RetentionCommand::Set(set)) => Some(set.want),
+            Some(ProvidersCommand::Retention(RetentionArgs {
+                command: Some(RetentionCommand::Set(set)),
+                ..
+            })) => Some(set.want),
             _ => None,
         };
         assert_eq!(want("ZERO"), Some(Retention::Zero));
@@ -601,7 +598,10 @@ mod tests {
         assert_eq!(want("default"), Some(Retention::Off));
         assert_eq!(want("maybe"), None);
         let mode = |word: &str| match parse(&["retention", "bedrock", word]) {
-            Some(RetentionCommand::Bedrock(args)) => Some(args.mode),
+            Some(ProvidersCommand::Retention(RetentionArgs {
+                command: Some(RetentionCommand::Bedrock(args)),
+                ..
+            })) => Some(args.mode),
             _ => None,
         };
         assert_eq!(mode("AWS_Review").as_deref(), Some("aws_review"));
