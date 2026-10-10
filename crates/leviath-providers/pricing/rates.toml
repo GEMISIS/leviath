@@ -14,7 +14,7 @@
 # rewritten by the refresh; any other row a person wrote from the vendor's
 # price page, with `checked_on`, and the refresh keeps it as it is.
 
-read_on = "2026-10-08"
+read_on = "2026-10-10"
 
 [[rate]]
 provider = "anthropic"
@@ -770,10 +770,10 @@ source = "openrouter"
 [[rate]]
 provider = "google"
 prefix = "gemma-4-26b-a4b-it"
-input = 0.0765
-cache_read = 0.0425
-cache_write = 0.0765
-output = 0.255
+input = 0.0675
+cache_read = 0.0375
+cache_write = 0.0675
+output = 0.225
 source = "openrouter"
 
 [[rate]]
@@ -1480,6 +1480,15 @@ cache_read = 0.0375
 cache_write = 0.075
 output = 0.3
 source = "openrouter"
+
+[[rate]]
+provider = "openai"
+prefix = "gpt-rosalind-discovery"
+input = 5.0
+cache_read = 0.5
+cache_write = 5.0
+output = 25.0
+source = "litellm"
 
 [[rate]]
 provider = "openai"
