@@ -118,12 +118,11 @@ jobs:
 
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
 
-  # The gate is CI itself, not a restatement of it. This job used to spell out
-  # its own build + test + clippy, and the two definitions drifted: it linted
-  # all three OSes while ci.yml's clippy job linted only ubuntu, so a
-  # `#[cfg(windows)]` lint failure that no PR could ever see took the nightly
-  # down. Calling the workflow means "green here" and "green on main" are the
-  # same statement by construction.
+  # The gate is CI itself, not a restatement of it. A build + test + clippy
+  # spelled out here would drift from ci.yml's - lint a different set of OSes,
+  # say, and fail the release on a `#[cfg(windows)]` lint no PR ever saw.
+  # Calling the workflow means "green here" and "green on main" are the same
+  # statement by construction.
   #
   # Two jobs inside ci.yml self-handle being called from here: `guard-main-rs`
   # is `if: github.event_name == 'pull_request'`, and the badge steps carry a
@@ -440,17 +439,15 @@ jobs:
 
   # See prod.yml for why the tap has to be told what shipped.
   #
-  # This used to append the build date - `0.1.1-alpha.20260802` - because alpha
-  # rebuilt the same source every night, so a constant `0.1.1-alpha` would have
-  # left every alpha user pinned to their first install until someone bumped
-  # Cargo.toml. `check-version` ended that: alpha only republishes when the
-  # workspace version moves, so plain `X.Y.Z-alpha` is already monotonic and
-  # both Homebrew and Scoop order `0.1.2-alpha` before `0.1.3-alpha`.
+  # The version is plain `X.Y.Z-alpha`, with no build date in it.
+  # `check-version` republishes alpha only when the workspace version moves,
+  # so the string is already monotonic, and both Homebrew and Scoop order
+  # `0.1.2-alpha` before `0.1.3-alpha`.
   #
-  # The one thing lost with the date: a `force=true` republish of an unchanged
-  # version now writes an identical string and offers no upgrade. That is the
-  # right answer for the case force exists to serve - recovering from an
-  # infrastructure failure, where the source is the same either way.
+  # A `force=true` republish of an unchanged version therefore writes an
+  # identical string and offers no upgrade. That is the right answer for the
+  # case force exists to serve - recovering from an infrastructure failure,
+  # where the source is the same either way.
   bump-tap:
     name: Bump tap manifests (alpha)
     needs: release

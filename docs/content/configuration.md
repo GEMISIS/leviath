@@ -160,9 +160,9 @@ writes the switch. `zero_retention_agreements` names the providers (`openai`, `a
 a contract, so it is declared here, and a declared provider counts as keeping nothing.
 
 `ollama_enabled` turns Ollama on. It is opt-in like every other provider. It needs no key and
-answers on a well-known local port, which used to be reason enough to register it on every
-machine. That made a bare model name in a blueprint resolvable against whatever happened to
-be running locally. Setting `ollama_base_url` counts as choosing it too.
+answers on a well-known local port. Registering it everywhere for that reason would let a bare
+model name in a blueprint resolve against whatever happens to be running locally. Setting
+`ollama_base_url` counts as choosing it too.
 
 `codex_reasoning_effort` takes `none`, `minimal`, `low`, `medium`, `high` or `xhigh`, but **the
 route decides per model which of those it accepts**, and rejects the rest outright. `gpt-5.5`
@@ -790,8 +790,8 @@ A throttle is visible, not silent. The first time a run waits on the token
 window, the daemon logs a `warn` naming the limit. `lev doctor` (and
 `GET /api/doctor`) flags a `tokens_per_minute` low enough to throttle almost
 every call. Both point at the same fix: raise it, or set `0`. This matters
-because the limit was parsed but not enforced in older versions, so a value set
-back then now shapes a run for the first time.
+because a stale or placeholder value can hold a run to about one call a minute,
+which otherwise looks just like a slow model.
 
 This shapes request *rate*. `[limits] max_concurrent_inferences` and
 `[limits.max_concurrent_inferences_by_provider]` bound *concurrency*. Both apply. Script providers
@@ -805,10 +805,9 @@ config to read at all, so nothing can be applied.
 
 Leviath never falls back to defaults there, and never stops. **The last version of the file that
 loaded stays in force**, so runs in flight keep going and new ones still start. What changes is that
-your edits are not being read. That is the part that used to be silent, which is what made a
-single typo cost an afternoon.
+your edits are not being read. Left unsaid, that turns a single typo into a lost afternoon.
 
-Every surface now says so, and each one clears itself when the file parses again. Nothing has to be
+Every surface says so, and each one clears itself when the file parses again. Nothing has to be
 restarted:
 
 | Where | What you see |

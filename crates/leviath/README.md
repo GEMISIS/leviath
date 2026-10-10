@@ -9,7 +9,7 @@ one namespace so an application only needs a single dependency:
 
 ```toml
 [dependencies]
-leviath = "0.1"
+leviath = "0.6"
 ```
 
 Every model provider is built in by default. To compile only the ones your
