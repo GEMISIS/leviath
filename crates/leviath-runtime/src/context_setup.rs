@@ -7,7 +7,7 @@
 use leviath_core::{EvictionStrategy, Region, RegionKind, truncate_at_boundary};
 
 use crate::ContextWindow;
-use crate::spec::graph::{RegionDef, RegionLayoutDef};
+use crate::spec::graph::RegionDef;
 use crate::spec::run_spec::RunSpec;
 
 pub(crate) mod parts;
@@ -111,11 +111,12 @@ pub(crate) fn fit_seed_to_budget(content: &str, max_tokens: usize) -> String {
 /// Swap a [`ContextWindow`] to one stage's own layout in place, keeping each
 /// carried-over region's content by name. Each region gets the budget the
 /// stage's plan resolved it to.
+#[cfg(test)]
 pub fn apply_stage_layout(
     window: &mut ContextWindow,
     spec: &RunSpec,
     stage: usize,
-    layout: &RegionLayoutDef,
+    layout: &crate::spec::graph::RegionLayoutDef,
 ) {
     let regions = layout
         .regions
@@ -126,7 +127,7 @@ pub fn apply_stage_layout(
 }
 
 /// Swap a window to a stage's own layout, given as its regions each already
-/// holding its budget. [`apply_stage_layout`] is the same step from a spec.
+/// holding its budget.
 pub(crate) fn apply_layout(window: &mut ContextWindow, regions: Vec<Region>) {
     swap_layout(window, regions);
 }
@@ -140,9 +141,9 @@ fn swap_layout(window: &mut ContextWindow, declared: Vec<Region>) {
     for mut new_region in declared {
         if let Some(existing) = window.get_region(&new_region.name) {
             // Carry entries verbatim - kind, metadata, key, timestamp survive
-            // the swap. Rebuilding via `add_entry` flattened every carried
-            // entry to `EntryKind::Text`, which destroyed the typed tool_use/
-            // tool_result pairing of any message-bearing region and left the
+            // the swap. Rebuilding via `add_entry` would flatten every carried
+            // entry to `EntryKind::Text`, destroying the typed tool_use/
+            // tool_result pairing of any message-bearing region and leaving the
             // assembler's orphan sanitizer to strip the whole history.
             for entry in &existing.content {
                 let _ = new_region.carry_entry(entry.clone());
@@ -159,12 +160,12 @@ fn swap_layout(window: &mut ContextWindow, declared: Vec<Region>) {
     // Everything the stage layout did not declare is carried anyway, and
     // hidden instead of deleted.
     //
-    // Dropping them made `[stages.X.context.regions]` unusable for the thing it
-    // looks designed for: narrowing what one stage attends to, in a pipeline
-    // whose later stages still need the data. Re-declaring a region downstream
-    // brought it back empty, so an author had to choose between carrying a
-    // 6,700-token data preview through every call of every stage and destroying
-    // it. Omission now means "not assembled for this stage" and nothing else.
+    // Dropping them would make a stage layout unusable for the thing it looks
+    // designed for: narrowing what one stage attends to, in a pipeline whose
+    // later stages still need the data. A region re-declared downstream would
+    // come back empty, leaving an author to choose between carrying a large
+    // data preview through every call of every stage and destroying it.
+    // Omission means "not assembled for this stage" and nothing else.
     //
     // `conversation`, `tool_results` and `final_output` are carried *visible*
     // regardless: the first two hold the typed tool_use/tool_result turns, and
@@ -213,35 +214,31 @@ fn swap_layout(window: &mut ContextWindow, declared: Vec<Region>) {
 
 /// Give the stage prompts a region of their own when the blueprint did not.
 ///
-/// [`STAGE_INSTRUCTIONS_REGION`] is, in this file's own words further up, "the
-/// runtime's to fill, not something an author has to remember to re-declare".
-/// It was only ever *used* when an author declared it, though - and when they
-/// did not, the prompt went into whatever pinned region happened to be first.
-/// That is usually `task`, whose budget is sized for a sentence from the caller
-/// and not for a stage's instructions.
-///
-/// Under window pressure that is a spawn failure rather than a squeeze:
+/// [`STAGE_INSTRUCTIONS_REGION`] is the runtime's to fill, not something an
+/// author has to remember to declare. Without it a stage's prompt goes into
+/// whatever pinned region comes first, usually `task`, whose budget is sized
+/// for a sentence from the caller and not for a stage's instructions. Under
+/// window pressure that is a spawn failure rather than a squeeze:
 ///
 /// ```text
 /// stage system prompt does not fit region 'task' (2887 > 2560)
 /// ```
 ///
-/// The workaround is to floor every `task` declaration with a `min_tokens` sized
-/// for the largest *stage prompt* - which couples an unrelated region's floor to
-/// prompt lengths, and only shows up at spawn on a small window, so it reads as
-/// the caller's fault rather than as routing.
+/// and the only way around it would be to floor every `task` declaration with
+/// a `min_tokens` sized for the largest *stage prompt*, coupling an unrelated
+/// region's floor to prompt lengths in a way that shows up only at spawn on a
+/// small window, where it reads as the caller's fault rather than as routing.
 ///
 /// Sized to the largest prompt the blueprint actually carries, because that is
 /// the one that has to fit and anything beyond it is budget taken from the work.
 /// A blueprint whose stages have no prompts gets no region: there would be
 /// nothing to put in it.
 ///
-/// Capped at a quarter of the window, which is what keeps
-/// this from turning a real failure into a silent one. A prompt larger than the
-/// whole window cannot be made to fit by giving it a bigger region, and a spawn
-/// that says so is right to. What changes is only which region the message
-/// names: `stage_instructions`, which is where the prompt was going, rather than
-/// `task`, which is the caller's.
+/// Capped at a quarter of the window, which is what keeps this from turning a
+/// real failure into a silent one. A prompt larger than the whole window cannot
+/// be made to fit by giving it a bigger region, and a spawn that says so is
+/// right to. The message then names `stage_instructions`, where the prompt
+/// goes, rather than `task`, which is the caller's.
 ///
 /// [`STAGE_INSTRUCTIONS_REGION`]: crate::spec::graph::STAGE_INSTRUCTIONS_REGION
 pub(crate) fn ensure_stage_instructions_region(

@@ -20,7 +20,7 @@ three fields that will mislead you if you read them the obvious way.
 > out to `lev` costs a process per check, gives you no way to filter server-side, and makes you
 > poll for something the daemon can push. See [Prefer the API](#prefer-the-api) below.
 
-## Three things that are not what they look like
+## Two things that are not what they look like
 
 **A run's `updated_at` is a heartbeat, not progress.** The daemon writes to a run's file every
 30 seconds whether or not the run moved. That is deliberate: a stale timestamp tells you the
@@ -31,10 +31,6 @@ Read `last_progress_at` instead. It only advances on a new iteration, a new stag
 status. Two cases where it is absent: runs written before the field existed, and runs whose first
 snapshot has not landed yet. A daemon restart resets it, because a reloaded run really is being
 re-driven from its saved context.
-
-**`pid` is always 0.** There is no process per run. The daemon hosts every agent in one shared
-world, so no run has a process id of its own. The field is still written because it always has
-been. You cannot conclude anything from it.
 
 **A finished run leaves the listing eventually.** `lev ps` shows the runs the daemon is holding,
 plus any that ended within the last `[limits] finished_retention_secs` (five minutes by default).

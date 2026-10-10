@@ -48,7 +48,7 @@ pub use context_cause::ContextCause;
 pub use credentials::{
     CredentialStore, CredentialStoreKind, MemoryStore, mcp_account, provider_account,
 };
-pub use error::{Error, Result, ValidationError};
+pub use error::{Error, Result};
 pub use json_doc::JsonDoc;
 pub use lifecycle::CompactionConfig;
 pub use output::{
@@ -65,8 +65,7 @@ pub use read_paths::{
     ReadPathDecision, ReadPathEntry, ReadPathPolicy, ReadPathSet, validate_entry_syntax,
 };
 pub use region::{
-    ContentFormat, EntryKind, EvictionStrategy, Region, RegionEntry, RegionKind, RegionSchema,
-    SerializedToolCall, Volatility,
+    EntryKind, EvictionStrategy, Region, RegionEntry, RegionKind, SerializedToolCall, Volatility,
 };
 pub use sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig, resolve_sandbox};
 pub use secrets::{

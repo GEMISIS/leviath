@@ -385,7 +385,6 @@ pub(crate) fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> Ru
         task: md.task.clone(),
         model: md.model.clone(),
         stage_models,
-        pid: 0, // no per-run worker process in the shared world; see RunMeta::pid
         status,
         current_stage: state.current_stage.clone(),
         stage_index,

@@ -400,6 +400,27 @@ same list.
   helpers `tokens_remaining`, `usage_ratio` and `needs_eviction` stay, and
   are now documented on the [Rhai regions](https://leviath.dev/docs/rhai-regions)
   page.
+- **REST.** A run object no longer carries `pid`, which was always 0, and
+  `?fields=pid` is refused as an unknown field. A run record that still has
+  the key loads as before.
+- **Rhai providers.** A system block's `cache_hint` for a sliding window is
+  the plain string `"SlidingPrefix"`, like every other hint, rather than a
+  map carrying a `stable_fraction` nothing read.
+- **Library.** `leviath_core` drops the region content schemas
+  (`RegionSchema`, `ContentFormat`, `Validator`, `Region::schema` and
+  `Region::with_schema`), which no region ever set, the unused
+  `ValidationError` and the `BlueprintInvalid`, `LayoutInvalid` and
+  `TransformFailed` errors, `RunMeta::touch`, and the serde impls of
+  `Region` and `RegionKind`. `leviath_runtime` drops
+  `persistence::region_kind_str` for `RegionKind::word`, and
+  `interaction_points::restore_interaction_point` with its
+  `InteractionPointState`: a resumed run reopens its point as it is placed.
+  Functions only tests called are built for tests alone:
+  `taint::resolve_security`, `Region::add_tainted_entry`,
+  `EntryContent::with_part`, `MimeRegistry::builtin_checked`,
+  `MemoryBlobStore::bytes_for`, `CredentialStoreKind::is_keychain`,
+  `interaction::make_interaction_id`, `interaction::request_id_prefix`,
+  `context_setup::apply_stage_layout` and `state::inspect::content_of`.
 
 ## 0.6.4 - 2026-09-26
 

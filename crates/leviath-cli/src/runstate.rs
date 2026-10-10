@@ -1227,7 +1227,6 @@ mod tests {
         assert_eq!(meta.model.as_deref(), Some("gpt-4"));
         assert_eq!(meta.num_stages, 3);
         assert_eq!(meta.status, RunStatus::Starting);
-        assert_eq!(meta.pid, 0);
         assert_eq!(meta.stage_index, 0);
         assert!(meta.error.is_none());
         assert!(meta.title.is_none());
@@ -1256,17 +1255,9 @@ mod tests {
     }
 
     #[test]
-    fn run_meta_touch_updates_timestamp() {
-        let mut meta = fixtures::run_meta("r");
-        let before = meta.updated_at;
-        // Touch should update (or at least not decrease) updated_at
-        meta.touch();
-        assert!(meta.updated_at >= before);
-    }
-
-    #[test]
     fn run_meta_optional_fields_deserialize() {
-        // A record without its optional fields.
+        // A record without its optional fields, from a build that still wrote
+        // a `pid`: a key the record no longer has is ignored.
         let json = serde_json::json!({
             "run_id": "r1",
             "agent_name": "a",
@@ -1296,32 +1287,6 @@ mod tests {
         // why the field is an Option: `Some(0)` would read as "last moved in 1970"
         // and invite a reconciler to declare it abandoned.
         assert!(meta.last_progress_at.is_none());
-    }
-
-    /// `pid` is always 0 in the shared world. A record that omits it entirely
-    /// must still load, so the field can be dropped without stranding a run.
-    #[test]
-    fn run_meta_without_a_pid_still_loads() {
-        let json = serde_json::json!({
-            "run_id": "r1",
-            "agent_name": "a",
-            "agent_path": "/p",
-            "task": "t",
-            "model": null,
-            "status": "running",
-            "current_stage": "init",
-            "stage_index": 0,
-            "num_stages": 1,
-            "iteration": 0,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "workdir": "/w",
-            "started_at": 1000,
-            "updated_at": 1000,
-            "error": null
-        });
-        let meta: RunMeta = serde_json::from_value(json).unwrap();
-        assert_eq!(meta.pid, 0);
     }
 
     // ─── StageRecord ────────────────────────────────────────────────────────

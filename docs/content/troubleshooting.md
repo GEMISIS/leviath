@@ -375,9 +375,9 @@ healthy daemon sits at zero dead cycles.
 ## My work queue thinks runs are still running
 
 A scheduler that hands work to Leviath and marks a slot busy has to learn when the run ends, and
-two things get in the way of the obvious approach. A run's `updated_at` is a 30-second
-heartbeat, so it stays fresh on a run that has stopped dead. `pid` is 0 for every run, live or
-finished, so a sweeper that reverts on `pid == 0` reverts everything.
+the obvious approach does not work: a run's `updated_at` is a 30-second heartbeat, so it stays
+fresh on a run that has stopped dead. There is no process per run to watch either. The daemon hosts
+every run in one shared world.
 
 Poll `lev ps --all --json` instead, and read `last_progress_at` rather than `updated_at`. The
 [reconciliation recipe](/docs/work-queues) covers the four cases and,

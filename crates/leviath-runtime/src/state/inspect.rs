@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use bevy_ecs::prelude::{Entity, World};
 use leviath_core::JsonDoc;
 use leviath_core::mime::Part;
-use leviath_core::region::{EntryContent, Region, RegionEntry};
+use leviath_core::region::{Region, RegionEntry};
 
 use super::context::{
     BlobState, ContextState, EntryKind, EntryMeta, EntryState, PartBody, PartState, RegionState,
@@ -426,8 +426,7 @@ fn region_of(region: &Region) -> Option<RegionState> {
     })
 }
 
-/// One region entry, as the run file stores it. See [`content_of`] for the
-/// way back.
+/// One region entry, as the run file stores it.
 pub fn entry_of(entry: &RegionEntry) -> EntryState {
     let text_only = is_plain_text(entry.content.parts());
     EntryState {
@@ -468,7 +467,9 @@ pub fn entry_of(entry: &RegionEntry) -> EntryState {
 
 /// The content an [`EntryState`] holds: its parts when it has any, and its
 /// text as one plain part when it has none. The inverse of [`entry_of`].
-pub fn content_of(entry: &EntryState) -> EntryContent {
+#[cfg(test)]
+pub fn content_of(entry: &EntryState) -> leviath_core::region::EntryContent {
+    use leviath_core::region::EntryContent;
     match entry.parts.is_empty() {
         true => EntryContent::text(entry.text.clone()),
         false => EntryContent::from_parts(entry.parts.iter().filter_map(part_from).collect()),
@@ -476,7 +477,7 @@ pub fn content_of(entry: &EntryState) -> EntryContent {
 }
 
 /// Whether content is one plain text part and nothing else, which is how
-/// [`EntryContent::text`] builds it and how [`content_of`] rebuilds it.
+/// [`EntryContent::text`](leviath_core::region::EntryContent::text) builds it.
 fn is_plain_text(parts: &[Part]) -> bool {
     match parts {
         [p] => {

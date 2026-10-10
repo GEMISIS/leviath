@@ -1,8 +1,8 @@
-//! Memory region types and validation schemas.
+//! Memory region types.
 //!
 //! Regions are typed sections of an agent's context window with different lifecycle
-//! policies. This module defines the region kinds, content storage, and validation
-//! schemas that enforce content format requirements.
+//! policies. This module defines the region kinds and how a region stores its
+//! entries.
 
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +68,7 @@ pub struct SerializedToolCall {
 /// when the context window fills up. This is inspired by hardware memory
 /// architectures like SNES VRAM, where different memory regions serve
 /// distinct purposes with their own access patterns and constraints.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum RegionKind {
     /// Never evicted or compacted. Architecture diagrams, constraints, identity.
     ///
@@ -158,17 +158,11 @@ pub enum RegionKind {
     /// [`Pinned`](Self::Pinned) for lifecycle - never evicted, immune to edge
     /// `Clear` transforms, counted as fixed budget - while an unpinned one
     /// behaves like [`Temporary`](Self::Temporary).
-    ///
-    /// Note: this kind is orthogonal to [`RegionSchema`]'s (unwired)
-    /// `custom_script` field, which is a content-*validation* concept.
     Custom {
         /// Blueprint-dir-relative path to the Rhai script backing this region
         script: String,
         /// Lifecycle: `true` = Pinned-like (protected, fixed budget),
         /// `false` = Temporary-like (stage-specific, evictable).
-        ///
-        /// Written `persistent` before it was renamed; both spellings parse.
-        #[serde(alias = "persistent")]
         pinned: bool,
     },
 }
@@ -397,9 +391,7 @@ impl RegionKind {
                 crate::cache::CacheHint::Always
             }
             RegionKind::Compacting { .. } => crate::cache::CacheHint::UntilChanged,
-            RegionKind::SlidingWindow { .. } => crate::cache::CacheHint::SlidingPrefix {
-                stable_fraction: 0.75,
-            },
+            RegionKind::SlidingWindow { .. } => crate::cache::CacheHint::SlidingPrefix,
             RegionKind::HashMap { .. } => crate::cache::CacheHint::UntilChanged,
             // Changes only when an item is added or ticked off, which is rarer
             // than a tool result and far rarer than a turn.
@@ -421,9 +413,8 @@ impl RegionKind {
 
 /// A single region in the context window with its content and metadata.
 ///
-/// Each region tracks its own token budget, current usage, and optional
-/// validation schema to enforce content format requirements.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Each region tracks its own token budget and current usage.
+#[derive(Debug, Clone)]
 pub struct Region {
     /// Unique name identifying this region
     pub name: String,
@@ -440,17 +431,12 @@ pub struct Region {
     /// Current token count
     pub current_tokens: usize,
 
-    /// Optional validation schema enforcing content format
-    pub schema: Option<RegionSchema>,
-
     /// Taint tracking state. Present when taint tracking is enabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taint: Option<crate::taint::RegionTaint>,
 
     /// When true, the Compact eviction strategy has determined that oldest
     /// entries should be summarized. The runtime checks this flag and
     /// performs the compaction externally (requires an LLM call).
-    #[serde(default)]
     pub needs_message_compaction: bool,
 
     /// Whether an edge transform may hand this region to the summarizer.
@@ -458,23 +444,19 @@ pub struct Region {
     /// Carried from the region's declaration so the transform can consult it
     /// without the layout: `transform = "compact"` summarizes by region *kind*,
     /// and kind cannot tell a transcript from a table of results.
-    #[serde(default = "crate::default_true")]
     pub summarizable: bool,
 
     /// What this region does when a write does not fit. See [`Admission`].
-    #[serde(default)]
     pub admission: Admission,
 
     /// How much this region's contents move between requests, which decides
     /// where it sits in the prompt and whether it is chunked. See
     /// [`Volatility`].
-    #[serde(default)]
     pub volatility: Volatility,
 
     /// Mime type patterns this region takes (`text/*`, `image/png`). Empty
     /// means anything. A write carrying a part outside the list is refused
     /// with the list, so the writer learns what the region is for.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepts: Vec<String>,
 
     /// One line on what this region is for.
@@ -483,7 +465,6 @@ pub struct Region {
     /// what the dashboard shows beside the region, and in that role it costs
     /// nothing at inference time. Set [`describe_in_prompt`](Self::describe_in_prompt)
     /// to also spend it on the model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
     /// Whether [`description`](Self::description) is also shown to the model,
@@ -495,13 +476,8 @@ pub struct Region {
     /// already the explanation. Turn it on for the ones with a convention the
     /// agent has to follow rather than a purpose it can infer - a bibliography
     /// with a required citation format, a scratch area with a protocol.
-    #[serde(default)]
     pub describe_in_prompt: bool,
 }
-
-mod schema;
-
-pub use schema::{ContentFormat, RegionSchema, Validator};
 
 impl Region {
     /// Create a new region with the specified configuration.
@@ -512,7 +488,6 @@ impl Region {
             content: Vec::new(),
             max_tokens,
             current_tokens: 0,
-            schema: None,
             taint: None,
             needs_message_compaction: false,
             summarizable: true,
@@ -572,15 +547,15 @@ impl Region {
         self.taint.as_ref().map(|t| t.level())
     }
 
-    /// Accept one entry: validate it, charge it against the budget, record it,
-    /// and let the sliding window evict if it now needs to.
+    /// Accept one entry: check it is something the region takes, charge it
+    /// against the budget, record it, and let the sliding window evict if it
+    /// now needs to.
     ///
     /// The single implementation behind the five `add_*_entry` methods, which
     /// differ only in what they supply for `metadata`, `kind` and
-    /// `taint_level`. They were five copies of this body, which is five places
-    /// for the budget check or the taint update to drift out of step - and the
-    /// order matters: content is validated before it is charged for, and the
-    /// window is enforced only after the entry is in.
+    /// `taint_level`, so the budget check and the taint update cannot drift
+    /// apart between them. The order matters: content is checked before it is
+    /// charged for, and the window is enforced only after the entry is in.
     ///
     /// Private, so the public surface is unchanged and every caller keeps the
     /// named method that says which of the three it cares about.
@@ -593,17 +568,6 @@ impl Region {
         taint_level: crate::taint::TaintLevel,
         key: Option<&str>,
     ) -> crate::error::Result<()> {
-        if let Some(schema) = &self.schema {
-            // A schema describes text. A stored part has no text to check, so
-            // a region that validates its entries takes text only.
-            if content.has_stored() {
-                return Err(crate::error::Error::ValidationFailed(format!(
-                    "region '{}' validates its entries and cannot hold a stored part",
-                    self.name
-                )));
-            }
-            schema.validate(&content)?;
-        }
         if let Err(mime_type) = self.accepts_content(&content) {
             return Err(crate::error::Error::RegionRefusedWrite {
                 region: self.name.clone(),
@@ -713,7 +677,8 @@ impl Region {
         true
     }
 
-    /// Add an entry with a taint level. Used when taint tracking is enabled.
+    /// Add an entry with a taint level.
+    #[cfg(test)]
     pub fn add_tainted_entry(
         &mut self,
         content: impl Into<EntryContent>,
@@ -732,10 +697,9 @@ impl Region {
 
     /// Add a typed entry with a taint level.
     ///
-    /// Combines [`add_typed_entry`](Self::add_typed_entry) (the entry carries a
-    /// typed [`EntryKind`] so eviction can group turns) with
-    /// [`add_tainted_entry`](Self::add_tainted_entry) (the entry contributes a
-    /// specific taint level rather than defaulting to `Public`). Used for tool
+    /// [`add_typed_entry`](Self::add_typed_entry) (the entry carries a typed
+    /// [`EntryKind`] so eviction can group turns) whose entry contributes a
+    /// specific taint level rather than defaulting to `Public`. Used for tool
     /// results when taint tracking is enabled, so a sensitive tool's output
     /// both keeps its `ToolResult` kind and raises the region's taint level.
     pub fn add_typed_tainted_entry(
@@ -748,16 +712,10 @@ impl Region {
         self.push_entry(content.into(), tokens, None, kind, taint_level, None)
     }
 
-    /// Add a validation schema to this region.
-    pub fn with_schema(mut self, schema: RegionSchema) -> Self {
-        self.schema = Some(schema);
-        self
-    }
-
     /// Add an entry to this region.
     ///
-    /// Validates content against schema if present, checks token budget,
-    /// and adds the entry to the region.
+    /// Checks the content is something the region takes and fits its token
+    /// budget, and adds the entry to the region.
     pub fn add_entry(
         &mut self,
         content: impl Into<EntryContent>,
@@ -842,10 +800,9 @@ impl Region {
     /// content across: re-adding through [`add_entry`](Self::add_entry) would
     /// stamp every carried entry [`EntryKind::Text`], destroying the typed
     /// `tool_use`/`tool_result` pairing the assembler needs (the orphan
-    /// sanitizer would then strip the whole history). Skips schema validation
-    /// deliberately - the entry passed it when first accepted - but keeps the
-    /// budget check and sliding-window enforcement so the destination region's
-    /// limits still hold. Taint is not touched per entry: a carry copies the
+    /// sanitizer would then strip the whole history). Keeps the budget check
+    /// and sliding-window enforcement so the destination region's limits still
+    /// hold. Taint is not touched per entry: a carry copies the
     /// region-level [`crate::taint::RegionTaint`] wholesale instead of
     /// re-accumulating it.
     pub fn carry_entry(&mut self, entry: RegionEntry) -> crate::error::Result<()> {
@@ -1067,8 +1024,6 @@ pub struct RegionEntry {
     pub reasoning: Option<String>,
 }
 
-/// Validation schema for a region's content.
-///
 #[cfg(test)]
 mod tests {
 
@@ -1588,20 +1543,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_kind_serde_round_trips() {
-        let kind = RegionKind::Custom {
-            script: "hooks/conv.rhai".to_string(),
-            pinned: true,
-        };
-        let json = serde_json::to_string(&kind).unwrap();
-        let back: RegionKind = serde_json::from_str(&json).unwrap();
-        assert_eq!(kind, back);
-        // Pre-existing serialized kinds still deserialize (additive variant).
-        let old: RegionKind = serde_json::from_str("\"Pinned\"").unwrap();
-        assert_eq!(old, RegionKind::Pinned);
-    }
-
-    #[test]
     fn custom_kind_cache_hint_follows_persistent() {
         assert_eq!(
             RegionKind::Custom {
@@ -1775,12 +1716,7 @@ mod tests {
             max_items: 10,
             eviction_strategy: EvictionStrategy::PerItem,
         };
-        assert_eq!(
-            kind.cache_hint(),
-            crate::cache::CacheHint::SlidingPrefix {
-                stable_fraction: 0.75
-            }
-        );
+        assert_eq!(kind.cache_hint(), crate::cache::CacheHint::SlidingPrefix);
     }
 
     #[test]
@@ -1799,35 +1735,7 @@ mod tests {
         );
     }
 
-    // ─── Region::with_schema / add_entry schema + budget checks ────────────
-
-    #[test]
-    fn test_with_schema_attaches_schema() {
-        let schema = RegionSchema::new(ContentFormat::Json);
-        let region =
-            Region::new("data".to_string(), RegionKind::Temporary, 1000).with_schema(schema);
-        assert!(region.schema.is_some());
-    }
-
-    #[test]
-    fn test_add_entry_rejects_content_failing_schema() {
-        let schema = RegionSchema::new(ContentFormat::Json);
-        let mut region =
-            Region::new("data".to_string(), RegionKind::Temporary, 1000).with_schema(schema);
-        let result = region.add_entry("not json".to_string(), 10);
-        assert!(result.is_err());
-        assert_eq!(region.entry_count(), 0);
-    }
-
-    #[test]
-    fn test_add_entry_accepts_content_passing_schema() {
-        let schema = RegionSchema::new(ContentFormat::Json);
-        let mut region =
-            Region::new("data".to_string(), RegionKind::Temporary, 1000).with_schema(schema);
-        let result = region.add_entry("{\"a\":1}".to_string(), 10);
-        assert!(result.is_ok());
-        assert_eq!(region.entry_count(), 1);
-    }
+    // ─── add_entry budget checks ───────────────────────────────────────────
 
     #[test]
     fn accepts_content_allows_a_caption_beside_media_but_gates_the_payload() {
@@ -1864,16 +1772,6 @@ mod tests {
             "Content exceeds token budget: 20 > 10"
         );
         assert_eq!(region.entry_count(), 0);
-    }
-
-    #[test]
-    fn test_add_entry_with_metadata_rejects_content_failing_schema() {
-        let schema = RegionSchema::new(ContentFormat::Json);
-        let mut region =
-            Region::new("data".to_string(), RegionKind::Temporary, 1000).with_schema(schema);
-        let result =
-            region.add_entry_with_metadata("not json".to_string(), 10, serde_json::json!({}));
-        assert!(result.is_err());
     }
 
     #[test]
@@ -1963,121 +1861,6 @@ mod tests {
         assert!(!region.needs_compaction());
     }
 
-    // ─── RegionSchema::with_custom_script ──────────────────────────────────
-
-    #[test]
-    fn test_region_schema_with_custom_script() {
-        let schema = RegionSchema::new(ContentFormat::Custom {
-            format_name: "special".to_string(),
-        })
-        .with_custom_script("validate_special()".to_string());
-        assert_eq!(schema.custom_script.as_deref(), Some("validate_special()"));
-    }
-
-    // ─── RegionSchema::validate - every ContentFormat branch ───────────────
-
-    #[test]
-    fn test_validate_json_valid() {
-        let schema = RegionSchema::new(ContentFormat::Json);
-        assert!(schema.validate("{\"a\": 1}").is_ok());
-    }
-
-    #[test]
-    fn test_validate_json_invalid() {
-        let schema = RegionSchema::new(ContentFormat::Json);
-        let err = schema.validate("not json").unwrap_err();
-        assert!(err.to_string().starts_with("Region validation failed:"));
-    }
-
-    #[test]
-    fn test_validate_mermaid_valid() {
-        let schema = RegionSchema::new(ContentFormat::Mermaid);
-        assert!(schema.validate("graph TD\nA-->B").is_ok());
-    }
-
-    #[test]
-    fn test_validate_mermaid_all_recognized_diagram_types() {
-        let schema = RegionSchema::new(ContentFormat::Mermaid);
-        for kind in [
-            "graph",
-            "sequenceDiagram",
-            "classDiagram",
-            "stateDiagram",
-            "erDiagram",
-            "journey",
-            "gantt",
-            "pie",
-            "flowchart",
-        ] {
-            assert!(schema.validate(&format!("{} content", kind)).is_ok());
-        }
-    }
-
-    #[test]
-    fn test_validate_mermaid_invalid() {
-        let schema = RegionSchema::new(ContentFormat::Mermaid);
-        let err = schema.validate("just some text").unwrap_err();
-        assert!(err.to_string().starts_with("Region validation failed:"));
-    }
-
-    #[test]
-    fn test_validate_code_non_empty_is_ok() {
-        let schema = RegionSchema::new(ContentFormat::Code {
-            language: "rust".to_string(),
-        });
-        assert!(schema.validate("fn main() {}").is_ok());
-    }
-
-    #[test]
-    fn test_validate_code_empty_is_error() {
-        let schema = RegionSchema::new(ContentFormat::Code {
-            language: "rust".to_string(),
-        });
-        let err = schema.validate("   ").unwrap_err();
-        assert!(err.to_string().starts_with("Region validation failed:"));
-    }
-
-    #[test]
-    fn test_validate_markdown_non_empty_is_ok() {
-        let schema = RegionSchema::new(ContentFormat::Markdown);
-        assert!(schema.validate("# Heading").is_ok());
-    }
-
-    #[test]
-    fn test_validate_markdown_empty_is_error() {
-        let schema = RegionSchema::new(ContentFormat::Markdown);
-        let err = schema.validate("").unwrap_err();
-        assert!(err.to_string().starts_with("Region validation failed:"));
-    }
-
-    #[test]
-    fn test_validate_text_has_no_restrictions() {
-        let schema = RegionSchema::new(ContentFormat::Text);
-        assert!(schema.validate("").is_ok());
-        assert!(schema.validate("anything at all").is_ok());
-    }
-
-    #[test]
-    fn test_validate_custom_has_no_restrictions_here() {
-        let schema = RegionSchema::new(ContentFormat::Custom {
-            format_name: "special".to_string(),
-        });
-        // Custom format validation is deferred to the scripting layer -
-        // this schema's own validate() is a no-op for it.
-        assert!(schema.validate("").is_ok());
-        assert!(schema.validate("whatever").is_ok());
-    }
-
-    // ─── RegionSchema Clone impl ────────────────────────────────────────────
-
-    #[test]
-    fn test_region_schema_clone_preserves_fields() {
-        let schema = RegionSchema::new(ContentFormat::Text).with_custom_script("s".to_string());
-        let cloned = schema.clone();
-        assert_eq!(cloned.custom_script.as_deref(), Some("s"));
-        assert_eq!(cloned.format, ContentFormat::Text);
-    }
-
     // ─── Region taint tracking ──────────────────────────────────────────────
 
     #[test]
@@ -2122,20 +1905,6 @@ mod tests {
             Some(crate::taint::TaintLevel::Private)
         );
         assert_eq!(region.entry_count(), 1);
-    }
-
-    #[test]
-    fn test_add_tainted_entry_validates_schema() {
-        let mut region = Region::new("test".to_string(), RegionKind::Temporary, 1000)
-            .with_taint_tracking()
-            .with_schema(RegionSchema::new(ContentFormat::Json));
-        let result = region.add_tainted_entry(
-            "not json".to_string(),
-            10,
-            crate::taint::TaintLevel::Internal,
-        );
-        assert!(result.is_err());
-        assert_eq!(region.entry_count(), 0);
     }
 
     #[test]
@@ -2217,20 +1986,6 @@ mod tests {
             .unwrap();
         assert_eq!(region.entry_count(), 2);
         assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
-    }
-
-    #[test]
-    fn test_taint_field_not_serialized_when_none() {
-        let region = Region::new("test".to_string(), RegionKind::Temporary, 1000);
-        let json = serde_json::to_string(&region).unwrap();
-        assert!(!json.contains("taint"));
-    }
-
-    #[test]
-    fn test_taint_field_deserialized_as_none_when_missing() {
-        let json = r#"{"name":"test","kind":"Temporary","content":[],"max_tokens":1000,"current_tokens":0,"schema":null}"#;
-        let region: Region = serde_json::from_str(json).unwrap();
-        assert!(region.taint.is_none());
     }
 
     #[test]
@@ -2329,22 +2084,6 @@ mod tests {
                 is_error: false,
             },
             crate::taint::TaintLevel::Internal,
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_add_typed_tainted_entry_validates_schema() {
-        let mut region = Region::new("test".to_string(), RegionKind::Pinned, 1000)
-            .with_taint_tracking()
-            .with_schema(RegionSchema::new(ContentFormat::Json));
-
-        // Non-JSON content should fail validation
-        let result = region.add_typed_tainted_entry(
-            "not json".to_string(),
-            5,
-            EntryKind::Text,
-            crate::taint::TaintLevel::Public,
         );
         assert!(result.is_err());
     }
@@ -3040,16 +2779,7 @@ mod tests {
         assert!(!region.needs_message_compaction);
     }
 
-    // ─── add_typed_entry schema + budget edge cases ───────────────────────
-
-    #[test]
-    fn test_add_typed_entry_validates_schema() {
-        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000)
-            .with_schema(RegionSchema::new(ContentFormat::Json));
-        let result = region.add_typed_entry("not json".to_string(), 5, EntryKind::Text);
-        assert!(result.is_err());
-        assert_eq!(region.entry_count(), 0);
-    }
+    // ─── add_typed_entry budget edge cases ─────────────────────────────────
 
     #[test]
     fn test_add_typed_entry_checks_budget() {

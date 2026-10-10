@@ -44,6 +44,7 @@ pub enum CredentialStoreKind {
 
 impl CredentialStoreKind {
     /// True when secrets belong in the OS store rather than in Leviath's files.
+    #[cfg(test)]
     pub fn is_keychain(self) -> bool {
         matches!(self, Self::Keychain)
     }

@@ -71,7 +71,7 @@ pub struct ToolSandboxConfig {
     /// down between them. Ignored for non-container kinds. The container is
     /// still torn down when the run ends.
     ///
-    /// Written `persist` before it was renamed; both spellings parse.
+    /// Also read under its earlier name, `persist`.
     #[serde(default, alias = "persist")]
     pub keep_warm: bool,
     /// What to do when the runtime is unavailable.
@@ -128,11 +128,10 @@ impl ToolSandboxConfig {
     ///
     /// `engine` is spawned as argv[0] on the **host** when the sandbox is built -
     /// before the first inference, and so before any tool-approval prompt.
-    /// A downloaded `agent.toml` naming `engine = "/tmp/payload"` therefore
-    /// executed it, and clamping only against a user who had *pinned* an engine
-    /// missed the ordinary case: auto-detection is the default, so the ceiling
-    /// was `None` and the manifest's value won. With no global `[sandbox]` at
-    /// all it was never clamped either.
+    /// A downloaded `agent.toml` naming `engine = "/tmp/payload"` would execute
+    /// it. Clamping only against a user who *pinned* an engine would miss the
+    /// ordinary case: auto-detection is the default, so there is no ceiling to
+    /// clamp to, and with no global `[sandbox]` at all there is no clamp.
     ///
     /// Which container binary this machine has is a property of the machine,
     /// not of an agent, so a manifest has no legitimate reason to choose. The
@@ -200,7 +199,7 @@ impl ToolSandboxConfig {
 
 /// Resolve the effective [`ToolSandboxConfig`] for a stage: the most specific
 /// present config (stage over agent), or the global default, or host when nothing
-/// is set. Mirrors [`crate::taint::resolve_security`].
+/// is set.
 ///
 /// **A blueprint cannot turn off a sandbox the user turned on.** The `agent` and
 /// `stage` configs come from `agent.toml` - a downloaded file - so when the

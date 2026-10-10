@@ -4,7 +4,7 @@
 //! A test describes a run the way the readers report one, as a [`RunMeta`],
 //! a [`ContextSnapshot`] or a list of [`StageRecord`]s. Each writer here turns
 //! that into what the daemon would have recorded: a spec and a state in the
-//! run's file. A field the run file has no room for (`pid`, `agent_path`,
+//! run's file. A field the run file has no room for (`agent_path`,
 //! `read_paths`, `title_error`, a `Starting` status) reads back as the run
 //! file says it, the same as for a real run.
 //!

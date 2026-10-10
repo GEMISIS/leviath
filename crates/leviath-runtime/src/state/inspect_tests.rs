@@ -4,7 +4,7 @@ use crate::dynamic_interaction::InteractionBackend as _;
 use crate::pipeline as p;
 use leviath_core::interaction::InteractionRequest;
 use leviath_core::mime::{BlobRef, Delivery, MimeType};
-use leviath_core::region::SerializedToolCall;
+use leviath_core::region::{EntryContent, SerializedToolCall};
 use leviath_core::taint::TaintLevel;
 use leviath_core::{RegionKind, region::EntryKind as CoreKind};
 use serde_json::json;

@@ -1,6 +1,6 @@
 //! How assembled system blocks are made cacheable.
 //!
-//! Split out of `context_window` because "what an agent remembers" and "which
+//! Apart from `context_window` because "what an agent remembers" and "which
 //! of those bytes a provider can read back" are different questions, and this
 //! is the half that has to hold still while the region kinds grow.
 //!
@@ -259,9 +259,9 @@ pub(super) fn block_sort_priority(block: &leviath_providers::SystemBlock) -> (u8
 pub(super) fn cache_hint_sort_priority(hint: leviath_core::CacheHint) -> u8 {
     use leviath_core::CacheHint;
     match hint {
-        CacheHint::Always => 0,               // Pinned, CompactHistory - most stable
-        CacheHint::SlidingPrefix { .. } => 1, // Partially stable
-        CacheHint::UntilChanged => 2,         // Compacting - changes on compaction
+        CacheHint::Always => 0,        // Pinned, CompactHistory - most stable
+        CacheHint::SlidingPrefix => 1, // Partially stable
+        CacheHint::UntilChanged => 2,  // Compacting - changes on compaction
         // Same tier as UntilChanged on purpose: the hint marks where a cache
         // breakpoint belongs, never where a block belongs in the prompt.
         CacheHint::RecentlyChanged => 2,

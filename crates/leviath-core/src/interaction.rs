@@ -630,6 +630,7 @@ pub fn response_approved(resp: &InteractionResponse) -> bool {
 }
 
 /// Generate a simple monotonic ID from stage index + iteration.
+#[cfg(test)]
 pub fn make_interaction_id(stage_idx: usize, iteration: usize) -> String {
     format!("{}-{}", stage_idx, iteration)
 }
@@ -655,12 +656,10 @@ pub fn request_id(run_id: &str, kind: &str, tail: &str) -> String {
     format!("{run_id}-{kind}-{tail}")
 }
 
-/// What every id of one kind, for one run, starts with.
-///
-/// For the one reader that has to tell a run's requests apart by kind rather
-/// than by answering them. Built here so it cannot drift from
-/// [`request_id`]: a reader matching a hand-written prefix would still match
-/// after the scheme moved, on the wrong requests.
+/// What every id of one kind, for one run, starts with. Built here so it
+/// cannot drift from [`request_id`]: a reader matching a hand-written prefix
+/// would still match after the scheme moved, on the wrong requests.
+#[cfg(test)]
 pub fn request_id_prefix(run_id: &str, kind: &str) -> String {
     format!("{run_id}-{kind}-")
 }

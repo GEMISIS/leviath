@@ -1,6 +1,6 @@
 //! Making room in a [`Region`]: what leaves when a write does not fit, and
-//! how a sliding window keeps to its item cap. Split out of `mod.rs` for
-//! size; a child module so it stays on the struct's private fields.
+//! how a sliding window keeps to its item cap. A child module of `mod.rs`, so
+//! it stays on the struct's private fields.
 
 use super::*;
 

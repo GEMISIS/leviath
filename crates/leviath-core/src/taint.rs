@@ -289,7 +289,7 @@ impl Default for SecurityConfig {
         // A present `[security]` block (even empty) means "configure security",
         // so the struct default is taint-on; a manifest with no block at all
         // yields `None`, which callers must resolve through
-        // [`resolve_security`]/[`resolve_taint_enabled`] (default off). Do NOT
+        // [`resolve_taint_enabled`] (default off). Do NOT
         // use `unwrap_or_default()` on an optional agent/global config - that
         // conflates "no block" with "empty block" and forces taint on
         // everywhere; cascade through the global setting instead.
@@ -325,6 +325,7 @@ pub fn resolve_taint_enabled(
 ///
 /// `taint_tracking` is clamped by [`resolve_taint_enabled`] so the two agree -
 /// a manifest cannot disable what the user enabled.
+#[cfg(test)]
 pub fn resolve_security(
     global: bool,
     agent: Option<&SecurityConfig>,
@@ -489,8 +490,8 @@ pub fn builtin_tool_classification(tool_name: &str) -> ToolClassification {
 ///
 /// Separate from [`builtin_tool_classification`] so a test can hold every
 /// built-in the registry advertises to an arm of its own: the default is
-/// outbound and gated, and a built-in that reached it was blocked in every
-/// taint-tracking run with anything Private in context, silently.
+/// outbound and gated, and a built-in that reached it would be blocked in
+/// every taint-tracking run with anything Private in context, silently.
 pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
     let classification = match tool_name {
         // `read_files` is `read_file` over several paths.

@@ -307,7 +307,7 @@ pub struct PipelineWorld {
 }
 
 /// Agent status control: read a status, set one, and pause/resume/cancel.
-/// Split out to keep this file inside the workspace structure limit.
+/// A module of its own to keep this file inside the workspace structure limit.
 mod control;
 /// Swapping the provider registry for one built from a newer config.
 mod providers;
@@ -2848,10 +2848,9 @@ mod tests {
     /// The world carries its own identity, so a *raw* `World` can check too.
     ///
     /// This is what lets the free functions called from inside systems -
-    /// `force_transition`, `apply_context_transforms`,
-    /// `restore_interaction_point` - refuse a foreign id. They are handed a
-    /// `&mut World`, never a `PipelineWorld`, so without the resource there is
-    /// nothing for them to compare against.
+    /// `force_transition` and `apply_context_transforms` - refuse a foreign
+    /// id. They are handed a `&mut World`, never a `PipelineWorld`, so without
+    /// the resource there is nothing for them to compare against.
     #[tokio::test]
     async fn a_raw_world_refuses_an_id_another_world_minted() {
         let mut a = build_world(ProviderRegistry::new());
@@ -2875,8 +2874,8 @@ mod tests {
     /// The free functions a system calls refuse a foreign id, and do nothing.
     ///
     /// Each takes a `&mut World` and would otherwise act on whichever local
-    /// agent happened to share the raw entity: move it to another stage, seed it
-    /// from a stranger's context, or park it on a prompt it never asked for.
+    /// agent happened to share the raw entity: move it to another stage, or
+    /// seed it from a stranger's context.
     #[tokio::test]
     async fn the_world_taking_helpers_refuse_a_foreign_agent_id() {
         let mut a = build_world(ProviderRegistry::new());
@@ -2899,23 +2898,6 @@ mod tests {
 
         // Context seeding: nothing copied between worlds.
         crate::context_transform::apply_context_transforms(b.world_mut(), in_a, in_a);
-
-        // A restored interaction point must not land on B's agent.
-        crate::interaction_points::restore_interaction_point(
-            b.world_mut(),
-            in_a,
-            crate::interaction_points::InteractionPointState {
-                cursor: 0,
-                round: 0,
-                body: "not for you".to_string(),
-            },
-        );
-        assert!(
-            b.world()
-                .get::<crate::components::AwaitingInteraction>(in_b.entity())
-                .is_none(),
-            "a foreign id parked B's agent on a prompt"
-        );
 
         // And B's agent is exactly as it was.
         assert_eq!(b.agent_status(in_b), before);

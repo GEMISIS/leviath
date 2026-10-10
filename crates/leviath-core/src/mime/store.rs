@@ -111,6 +111,7 @@ impl MemoryBlobStore {
     }
 
     /// How many bytes the store holds for `run_id`.
+    #[cfg(test)]
     pub fn bytes_for(&self, run_id: &str) -> u64 {
         crate::sync::lock(&self.runs)
             .get(run_id)
