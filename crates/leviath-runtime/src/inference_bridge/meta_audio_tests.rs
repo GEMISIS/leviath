@@ -148,10 +148,10 @@ async fn every_muse_spark_audio_part_goes_by_file_id_however_small() {
     let Setup {
         meta,
         hydration,
-        mut request,
+        request,
         _dir,
     } = setup(false, true, "");
-    hydration.apply(&mut request).await;
+    let request = hydration.apply(request).await;
     let parts = wire(&request);
     let audio: Vec<_> = parts
         .iter()
@@ -176,10 +176,10 @@ async fn audio_that_cannot_be_uploaded_is_refused_and_never_sent_inline() {
     let Setup {
         meta,
         hydration,
-        mut request,
+        request,
         _dir,
     } = setup(false, false, "[providers] file_uploads is off");
-    hydration.apply(&mut request).await;
+    let request = hydration.apply(request).await;
     assert!(meta.uploads.lock().unwrap().is_empty());
     let parts = wire(&request);
     assert!(
@@ -215,10 +215,10 @@ async fn audio_that_cannot_be_uploaded_is_refused_and_never_sent_inline() {
     let Setup {
         meta,
         hydration,
-        mut request,
+        request,
         _dir,
     } = setup(true, true, "");
-    hydration.apply(&mut request).await;
+    let request = hydration.apply(request).await;
     assert!(meta.uploads.lock().unwrap().is_empty());
     let parts = wire(&request);
     assert!(

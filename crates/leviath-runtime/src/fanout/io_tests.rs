@@ -5,7 +5,8 @@ use super::tests::{
 };
 use super::*;
 use crate::spec::graph::StageMode as Mode;
-use leviath_core::mime::{Blob, BlobRef, BlobStore, MemoryBlobStore, MimeRegistry};
+use crate::test_support::WatchedStore;
+use leviath_core::mime::{Blob, BlobStore, MimeRegistry};
 use std::sync::Mutex;
 use std::thread::ThreadId;
 use tokio::sync::Notify;
@@ -146,36 +147,9 @@ fn a_call_waits_for_its_agent_to_be_active() {
     );
 }
 
-/// A store that notes the thread each read ran on, or blows up on one.
-struct Watched {
-    inner: MemoryBlobStore,
-    on: Mutex<Vec<ThreadId>>,
-    panics: bool,
-}
-
-impl BlobStore for Watched {
-    fn put(&self, run_id: &str, blob: &Blob, reg: &MimeRegistry) -> std::io::Result<BlobRef> {
-        self.inner.put(run_id, blob, reg)
-    }
-
-    fn read(&self, run_id: &str, sha256: &str) -> std::io::Result<Arc<[u8]>> {
-        self.on.lock().unwrap().push(std::thread::current().id());
-        assert!(!self.panics, "the store blew up");
-        self.inner.read(run_id, sha256)
-    }
-
-    fn copy(&self, from_run: &str, to_run: &str, sha256: &str) -> std::io::Result<()> {
-        self.inner.copy(from_run, to_run, sha256)
-    }
-
-    fn list(&self, run_id: &str) -> std::io::Result<Vec<String>> {
-        self.inner.list(run_id)
-    }
-}
-
 /// A fan-out over one item whose worker finished with a stored file in
 /// `store`; returns the parent, the worker and the file's hash.
-fn finished_worker(world: &mut World, store: Arc<Watched>) -> (Entity, Entity, String) {
+fn finished_worker(world: &mut World, store: Arc<WatchedStore>) -> (Entity, Entity, String) {
     let registry = MimeRegistry::builtin();
     let png = leviath_core::mime::MimeType::parse("image/png").unwrap();
     let stored = store
@@ -218,11 +192,7 @@ fn finished_worker(world: &mut World, store: Arc<Watched>) -> (Entity, Entity, S
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_workers_files_are_handed_up_off_the_tick() {
     let mut world = io_world();
-    let store = Arc::new(Watched {
-        inner: MemoryBlobStore::new(),
-        on: Mutex::new(Vec::new()),
-        panics: false,
-    });
+    let store = Arc::new(WatchedStore::new(false));
     let (parent, _, sha) = finished_worker(&mut world, store.clone());
     fan_out_collect(&mut world);
     let w = world.get::<FanOutWaiting>(parent).expect("still waiting");
@@ -248,11 +218,7 @@ async fn a_workers_files_are_handed_up_off_the_tick() {
 async fn a_copy_that_panics_still_finishes_the_fan_out() {
     let silent = crate::test_support::SilentPanics::install();
     let mut world = io_world();
-    let store = Arc::new(Watched {
-        inner: MemoryBlobStore::new(),
-        on: Mutex::new(Vec::new()),
-        panics: true,
-    });
+    let store = Arc::new(WatchedStore::new(true));
     let (parent, _, sha) = finished_worker(&mut world, store.clone());
     until(&mut world, fan_out_collect, |w| {
         w.get::<FanOutWaiting>(parent).is_none()
@@ -266,11 +232,7 @@ async fn a_copy_that_panics_still_finishes_the_fan_out() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_copy_for_a_parent_no_longer_waiting_is_dropped() {
     let mut world = io_world();
-    let store = Arc::new(Watched {
-        inner: MemoryBlobStore::new(),
-        on: Mutex::new(Vec::new()),
-        panics: false,
-    });
+    let store = Arc::new(WatchedStore::new(false));
     let (parent, _, _) = finished_worker(&mut world, store.clone());
     fan_out_collect(&mut world);
     world.get_mut::<AgentState>(parent).unwrap().status = AgentStatus::Cancelled;
@@ -289,11 +251,7 @@ async fn a_copy_for_a_parent_no_longer_waiting_is_dropped() {
 #[test]
 fn with_no_runtime_files_are_handed_up_in_place() {
     let mut world = World::new();
-    let store = Arc::new(Watched {
-        inner: MemoryBlobStore::new(),
-        on: Mutex::new(Vec::new()),
-        panics: false,
-    });
+    let store = Arc::new(WatchedStore::new(false));
     let (parent, _, sha) = finished_worker(&mut world, store.clone());
     fan_out_collect(&mut world);
     assert!(world.get::<FanOutWaiting>(parent).is_none(), "finished");

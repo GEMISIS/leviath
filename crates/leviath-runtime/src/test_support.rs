@@ -62,6 +62,52 @@ pub(crate) fn hints(on: bool) -> leviath_core::config::PromptHints {
     }
 }
 
+/// A blob store that notes the thread each read ran on, or blows up on one:
+/// for the reads that have to stay off the thread that asked for them.
+pub(crate) struct WatchedStore {
+    /// Where the bytes are.
+    pub(crate) inner: leviath_core::mime::MemoryBlobStore,
+    /// The thread of every read, in order.
+    pub(crate) on: std::sync::Mutex<Vec<std::thread::ThreadId>>,
+    /// Whether a read panics.
+    panics: bool,
+}
+
+impl WatchedStore {
+    pub(crate) fn new(panics: bool) -> Self {
+        Self {
+            inner: leviath_core::mime::MemoryBlobStore::new(),
+            on: std::sync::Mutex::new(Vec::new()),
+            panics,
+        }
+    }
+}
+
+impl leviath_core::mime::BlobStore for WatchedStore {
+    fn put(
+        &self,
+        run_id: &str,
+        blob: &leviath_core::mime::Blob,
+        reg: &leviath_core::mime::MimeRegistry,
+    ) -> std::io::Result<leviath_core::mime::BlobRef> {
+        self.inner.put(run_id, blob, reg)
+    }
+
+    fn read(&self, run_id: &str, sha256: &str) -> std::io::Result<std::sync::Arc<[u8]>> {
+        self.on.lock().unwrap().push(std::thread::current().id());
+        assert!(!self.panics, "the store blew up");
+        self.inner.read(run_id, sha256)
+    }
+
+    fn copy(&self, from_run: &str, to_run: &str, sha256: &str) -> std::io::Result<()> {
+        self.inner.copy(from_run, to_run, sha256)
+    }
+
+    fn list(&self, run_id: &str) -> std::io::Result<Vec<String>> {
+        self.inner.list(run_id)
+    }
+}
+
 /// A provider whose `infer` panics, standing in for any bug that kills a lane
 /// task before it can report - the case that would otherwise leave the agent
 /// waiting on an outcome that never arrives.
@@ -85,6 +131,22 @@ impl leviath_providers::Provider for Exploding {
     }
     fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
         leviath_providers::ModelCapabilities::default()
+    }
+}
+
+mod watched_store_tests {
+    use super::WatchedStore;
+    use leviath_core::mime::{Blob, BlobStore, MimeRegistry, MimeType};
+
+    #[test]
+    fn copies_and_listings_pass_through_unwatched() {
+        // Keep the store's untracked trait methods measured.
+        let store = WatchedStore::new(false);
+        let blob = Blob::new(MimeType::parse("text/plain").unwrap(), b"hi".to_vec());
+        let stored = store.put("a", &blob, &MimeRegistry::builtin()).unwrap();
+        store.copy("a", "b", &stored.sha256).unwrap();
+        assert_eq!(store.list("b").unwrap(), vec![stored.sha256]);
+        assert!(store.on.lock().unwrap().is_empty(), "no read was watched");
     }
 }
 
