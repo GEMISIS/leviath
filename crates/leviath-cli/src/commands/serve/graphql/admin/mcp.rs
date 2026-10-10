@@ -174,8 +174,14 @@ pub(crate) struct SignInMcpServerResult {
 /// From the entry rather than by name: every caller here is holding the entry
 /// already, so there is no lookup to miss and no absent case to invent an
 /// answer for.
-fn described(state: &AppState, server: &leviath_mcp::MCPServerConfig) -> McpServer {
-    McpServer::from_info(super::super::super::mcp::described(state, server))
+async fn described(
+    state: &AppState,
+    server: &leviath_mcp::MCPServerConfig,
+) -> async_graphql::Result<McpServer> {
+    let info = super::super::super::mcp::described(state, server)
+        .await
+        .gql()?;
+    Ok(McpServer::from_info(info))
 }
 
 /// Add an MCP server to the config.
@@ -197,9 +203,10 @@ pub(crate) async fn create_mcp_server(
         env,
         parts.headers,
     )
+    .await
     .gql()?;
     Ok(CreateMcpServerResult {
-        mcp_server: described(state, &written),
+        mcp_server: described(state, &written).await?,
     })
 }
 
@@ -222,9 +229,10 @@ pub(crate) async fn update_mcp_server(
         env,
         parts.headers,
     )
+    .await
     .gql()?;
     Ok(UpdateMcpServerResult {
-        mcp_server: described(state, &written),
+        mcp_server: described(state, &written).await?,
     })
 }
 
@@ -232,7 +240,9 @@ pub(crate) async fn update_mcp_server(
 pub(crate) async fn delete_mcp_server(
     request: DeleteMcpServerRequest,
 ) -> async_graphql::Result<DeleteMcpServerResult> {
-    super::super::super::mcp::uninstall_server(&request.name).gql()?;
+    super::super::super::mcp::uninstall_server(&request.name)
+        .await
+        .gql()?;
     Ok(DeleteMcpServerResult {
         deleted_id: super::super::node::mcp_server_id(&request.name),
     })
@@ -251,7 +261,7 @@ pub(crate) async fn check_mcp_server(
         .await
         .gql()?;
     Ok(CheckMcpServerResult {
-        mcp_server: described(state, &server),
+        mcp_server: described(state, &server).await?,
         tool_names,
     })
 }
@@ -291,7 +301,7 @@ pub(crate) async fn sign_in_mcp_server(
         .await
         .gql()?;
     Ok(SignInMcpServerResult {
-        mcp_server: described(state, &server),
+        mcp_server: described(state, &server).await?,
         status: McpLoginStatus::from(status),
     })
 }

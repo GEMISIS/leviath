@@ -61,6 +61,7 @@ pub(crate) async fn doctor() -> DoctorReport {
 async fn configured_servers(ctx: &Context<'_>) -> async_graphql::Result<Vec<McpServer>> {
     let state = ctx.data_unchecked::<AppState>();
     Ok(super::super::super::mcp::server_infos(state)
+        .await
         .gql()?
         .into_iter()
         .map(McpServer::from_info)

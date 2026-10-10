@@ -9,9 +9,14 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 
-use super::types::{AppState, err};
+use std::path::PathBuf;
+
+use super::blocking::blocking;
+use super::core::error::{ServeError, as_api_error};
+use super::types::AppState;
 use crate::config::Config;
-use leviath_mcp::{AuthStore, LoginOutcome, MCPClient, MCPServerConfig, OAuthClient};
+use crate::credentials::McpGrants;
+use leviath_mcp::{AuthStore, LoginOutcome, MCPServerConfig, OAuthClient};
 
 /// Where this server reads and rewrites the operator's files.
 ///
@@ -189,28 +194,48 @@ fn auth_status(server: &MCPServerConfig, store: &AuthStore, now: u64) -> String 
 
 /// `GET /api/mcp/servers` - list configured servers with their auth status.
 pub(super) async fn list_servers(State(state): State<AppState>) -> impl IntoResponse {
-    match server_infos(&state) {
+    match server_infos(&state).await {
         Ok(servers) => Json(servers).into_response(),
-        Err(e) => super::core::error::as_api_error(&e).into_response(),
+        Err(e) => as_api_error(&e).into_response(),
     }
 }
 
-/// Every MCP server the config declares, with its auth state. Both surfaces
-/// read the config file here rather than from `AppState`, because the admin
-/// routes write it and a stale copy would report a server that was just
-/// removed.
-pub(super) fn server_infos(
-    state: &AppState,
-) -> Result<Vec<McpServerInfo>, super::core::error::ServeError> {
+/// The config the admin routes read and rewrite, loaded on the blocking pool.
+///
+/// Read from the file rather than from `AppState`, because these routes write
+/// it and a stale copy would report a server that was just removed.
+async fn read_config(path: PathBuf) -> Result<Config, ServeError> {
+    blocking(move || Config::load_from_path_public(&path))
+        .await
+        .map_err(|e| ServeError::Internal(e.to_string()))
+}
+
+/// The grants `config` keeps in `path`, and what they hold, loaded on the
+/// blocking pool: under the keychain that is a round trip to the OS store.
+///
+/// A grant file that will not load is an error here, not an empty set: a
+/// listing would show every server logged out, and a login would save over
+/// every other server's grant.
+async fn read_grants(path: PathBuf, config: &Config) -> Result<(McpGrants, AuthStore), ServeError> {
+    let grants = McpGrants::at(path, config.security.credential_store);
+    blocking(move || {
+        let held = grants.load()?;
+        Ok((grants, held))
+    })
+    .await
+    .map_err(|e: anyhow::Error| ServeError::Internal(e.to_string()))
+}
+
+/// Every MCP server the config declares, with its auth state.
+pub(super) async fn server_infos(state: &AppState) -> Result<Vec<McpServerInfo>, ServeError> {
     let paths = admin_paths();
-    let config = Config::load_from_path_public(&paths.config)
-        .map_err(|e| super::core::error::ServeError::Internal(e.to_string()))?;
-    let store = AuthStore::load(&paths.store).unwrap_or_default();
+    let config = read_config(paths.config).await?;
+    let (_, held) = read_grants(paths.store, &config).await?;
     let now = (state.mcp.clock)();
     Ok(config
         .mcp_servers
         .iter()
-        .map(|server| McpServerInfo::describe(server, &store, now))
+        .map(|server| McpServerInfo::describe(server, &held, now))
         .collect())
 }
 
@@ -230,20 +255,22 @@ pub(super) struct AddServerRequest {
 
 /// `POST /api/mcp/servers` - add a server.
 pub(super) async fn add_server(Json(req): Json<AddServerRequest>) -> impl IntoResponse {
-    match install_server(
+    let written = install_server(
         req.name,
         req.command,
         req.url,
         req.args,
         std::collections::HashMap::new(),
         req.headers,
-    ) {
+    )
+    .await;
+    match written {
         Ok(written) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "name": written.name })),
         )
             .into_response(),
-        Err(e) => super::core::error::as_api_error(&e).into_response(),
+        Err(e) => as_api_error(&e).into_response(),
     }
 }
 
@@ -257,31 +284,32 @@ pub(super) async fn add_server(Json(req): Json<AddServerRequest>) -> impl IntoRe
 /// Remote code execution by construction: the command written here is what
 /// Leviath spawns, for this run and every future one. Both surfaces gate the
 /// act behind `--allow-admin`; this is what the act itself is.
-pub(super) fn install_server(
+pub(super) async fn install_server(
     name: String,
     command: Option<String>,
     url: Option<String>,
     args: Vec<String>,
     env: std::collections::HashMap<String, String>,
     headers: std::collections::HashMap<String, String>,
-) -> Result<MCPServerConfig, super::core::error::ServeError> {
-    use super::core::error::ServeError;
-
-    let paths = admin_paths();
+) -> Result<MCPServerConfig, ServeError> {
+    let path = admin_paths().config;
     let server = checked(name, command, url, args, env, headers)?;
-    let mut config = Config::load_from_path_public(&paths.config)
-        .map_err(|e| ServeError::Internal(e.to_string()))?;
-    if config.mcp_servers.iter().any(|s| s.name == server.name) {
-        return Err(ServeError::Conflict(format!(
-            "an MCP server named '{}' already exists",
-            server.name
-        )));
-    }
-    config.mcp_servers.push(server.clone());
-    config
-        .save_to_path_public(&paths.config)
-        .map_err(|e| ServeError::Internal(e.to_string()))?;
-    Ok(server)
+    blocking(move || {
+        let mut config = Config::load_from_path_public(&path)
+            .map_err(|e| ServeError::Internal(e.to_string()))?;
+        if config.mcp_servers.iter().any(|s| s.name == server.name) {
+            return Err(ServeError::Conflict(format!(
+                "an MCP server named '{}' already exists",
+                server.name
+            )));
+        }
+        config.mcp_servers.push(server.clone());
+        config
+            .save_to_path_public(&path)
+            .map_err(|e| ServeError::Internal(e.to_string()))?;
+        Ok(server)
+    })
+    .await
 }
 
 /// One server's state, described from an entry the caller is already holding.
@@ -289,9 +317,14 @@ pub(super) fn install_server(
 /// The counterpart of [`server_infos`] for a caller that has just written or
 /// just resolved the entry: there is no name to look up, and so no miss to
 /// report about a server it is looking at.
-pub(super) fn described(state: &AppState, server: &MCPServerConfig) -> McpServerInfo {
-    let store = AuthStore::load(&admin_paths().store).unwrap_or_default();
-    McpServerInfo::describe(server, &store, (state.mcp.clock)())
+pub(super) async fn described(
+    state: &AppState,
+    server: &MCPServerConfig,
+) -> Result<McpServerInfo, ServeError> {
+    let paths = admin_paths();
+    let config = read_config(paths.config).await?;
+    let (_, held) = read_grants(paths.store, &config).await?;
+    Ok(McpServerInfo::describe(server, &held, (state.mcp.clock)()))
 }
 
 /// Replace an MCP server's entry, whole, and hand back what now stands there.
@@ -300,35 +333,36 @@ pub(super) fn described(state: &AppState, server: &MCPServerConfig) -> McpServer
 /// edit that left half of a previous transport behind would describe a server
 /// nobody wrote. A name nothing is configured under is a miss, because
 /// creating one here would turn a typo into a second server.
-pub(super) fn update_server(
+pub(super) async fn update_server(
     name: String,
     command: Option<String>,
     url: Option<String>,
     args: Vec<String>,
     env: std::collections::HashMap<String, String>,
     headers: std::collections::HashMap<String, String>,
-) -> Result<MCPServerConfig, super::core::error::ServeError> {
-    use super::core::error::ServeError;
-
-    let paths = admin_paths();
+) -> Result<MCPServerConfig, ServeError> {
+    let path = admin_paths().config;
     let server = checked(name, command, url, args, env, headers)?;
-    let mut config = Config::load_from_path_public(&paths.config)
-        .map_err(|e| ServeError::Internal(e.to_string()))?;
-    let Some(at) = config
-        .mcp_servers
-        .iter()
-        .position(|s| s.name == server.name)
-    else {
-        return Err(ServeError::NotFound(format!(
-            "no MCP server named '{}'",
-            server.name
-        )));
-    };
-    config.mcp_servers[at] = server.clone();
-    config
-        .save_to_path_public(&paths.config)
-        .map_err(|e| ServeError::Internal(e.to_string()))?;
-    Ok(server)
+    blocking(move || {
+        let mut config = Config::load_from_path_public(&path)
+            .map_err(|e| ServeError::Internal(e.to_string()))?;
+        let Some(at) = config
+            .mcp_servers
+            .iter()
+            .position(|s| s.name == server.name)
+        else {
+            return Err(ServeError::NotFound(format!(
+                "no MCP server named '{}'",
+                server.name
+            )));
+        };
+        config.mcp_servers[at] = server.clone();
+        config
+            .save_to_path_public(&path)
+            .map_err(|e| ServeError::Internal(e.to_string()))?;
+        Ok(server)
+    })
+    .await
 }
 
 /// The entry a write describes, refused here when it describes nothing
@@ -341,7 +375,7 @@ fn checked(
     args: Vec<String>,
     env: std::collections::HashMap<String, String>,
     headers: std::collections::HashMap<String, String>,
-) -> Result<MCPServerConfig, super::core::error::ServeError> {
+) -> Result<MCPServerConfig, ServeError> {
     let server = MCPServerConfig {
         name,
         command,
@@ -353,42 +387,49 @@ fn checked(
     };
     server
         .validate()
-        .map_err(|e| super::core::error::ServeError::BadRequest(e.to_string()))?;
+        .map_err(|e| ServeError::BadRequest(e.to_string()))?;
     Ok(server)
 }
 
 pub(super) async fn remove_server(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
-    match uninstall_server(&name) {
+    match uninstall_server(&name).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => super::core::error::as_api_error(&e).into_response(),
+        Err(e) => as_api_error(&e).into_response(),
     }
 }
 
 /// Take an MCP server out of the config, and its stored credential with it.
-pub(super) fn uninstall_server(name: &str) -> Result<(), super::core::error::ServeError> {
-    use super::core::error::ServeError;
-
+///
+/// The credential goes with the server it was for. Left behind, it would be
+/// silently reused by a later server that happened to take the same name, so
+/// a grant that cannot be forgotten is an error even though the server is
+/// already gone from the config.
+pub(super) async fn uninstall_server(name: &str) -> Result<(), ServeError> {
     let paths = admin_paths();
-    let mut config = Config::load_from_path_public(&paths.config)
-        .map_err(|e| ServeError::Internal(e.to_string()))?;
-    let before = config.mcp_servers.len();
-    config.mcp_servers.retain(|server| server.name != name);
-    if config.mcp_servers.len() == before {
-        return Err(ServeError::NotFound(format!(
-            "no MCP server named '{name}'"
-        )));
-    }
-    config
-        .save_to_path_public(&paths.config)
-        .map_err(|e| ServeError::Internal(e.to_string()))?;
-    // The credential goes with the server it was for. Left behind, it would be
-    // silently reused by a later server that happened to take the same name.
-    if let Ok(mut store) = AuthStore::load(&paths.store)
-        && store.remove(name)
-    {
-        let _ = store.save(&paths.store);
-    }
-    Ok(())
+    let name = name.to_string();
+    blocking(move || {
+        let mut config = Config::load_from_path_public(&paths.config)
+            .map_err(|e| ServeError::Internal(e.to_string()))?;
+        let before = config.mcp_servers.len();
+        config.mcp_servers.retain(|server| server.name != name);
+        if config.mcp_servers.len() == before {
+            return Err(ServeError::NotFound(format!(
+                "no MCP server named '{name}'"
+            )));
+        }
+        config
+            .save_to_path_public(&paths.config)
+            .map_err(|e| ServeError::Internal(e.to_string()))?;
+        McpGrants::at(paths.store, config.security.credential_store)
+            .forget(&name)
+            .map_err(|e| {
+                ServeError::Internal(format!(
+                    "removed '{name}', but its stored login could not be forgotten: {e}"
+                ))
+            })?;
+        Ok(())
+    })
+    .await
 }
 
 /// `POST /api/mcp/servers/{name}/login` - run the OAuth browser flow.
@@ -403,7 +444,7 @@ pub(super) async fn login(
         Ok((status, _server)) => {
             Json(serde_json::json!({ "status": status.wire(), "server": name })).into_response()
         }
-        Err(e) => super::core::error::as_api_error(&e).into_response(),
+        Err(e) => as_api_error(&e).into_response(),
     }
 }
 
@@ -427,6 +468,16 @@ impl LoginStatus {
     }
 }
 
+/// The configured server named `name`, or the miss.
+fn named(config: &Config, name: &str) -> Result<MCPServerConfig, ServeError> {
+    config
+        .mcp_servers
+        .iter()
+        .find(|s| s.name == name)
+        .cloned()
+        .ok_or_else(|| ServeError::NotFound(format!("no MCP server named '{name}'")))
+}
+
 /// Sign in to one MCP server, for whichever surface asked, and hand back the
 /// entry it signed in to.
 ///
@@ -438,19 +489,11 @@ impl LoginStatus {
 pub(super) async fn signed_in(
     state: &AppState,
     name: &str,
-) -> Result<(LoginStatus, MCPServerConfig), super::core::error::ServeError> {
-    use super::core::error::ServeError;
-
+) -> Result<(LoginStatus, MCPServerConfig), ServeError> {
     let admin = &state.mcp;
     let paths = admin_paths();
-    let config = Config::load_from_path_public(&paths.config)
-        .map_err(|e| ServeError::Internal(e.to_string()))?;
-    let server = config
-        .mcp_servers
-        .iter()
-        .find(|s| s.name == name)
-        .ok_or_else(|| ServeError::NotFound(format!("no MCP server named '{name}'")))?
-        .clone();
+    let config = read_config(paths.config).await?;
+    let server = named(&config, name)?;
     let url = match server.resolve() {
         Ok(leviath_mcp::ResolvedTransport::Http { url, .. }) => url.to_string(),
         _ => {
@@ -460,8 +503,8 @@ pub(super) async fn signed_in(
         }
     };
 
-    let mut store = AuthStore::load(&paths.store).unwrap_or_default();
-    let reuse = store.get(name).map(|a| a.client_id.clone());
+    let (grants, mut held) = read_grants(paths.store, &config).await?;
+    let reuse = held.get(name).map(|a| a.client_id.clone());
     let outcome = OAuthClient::new()
         .login(
             &url,
@@ -476,9 +519,9 @@ pub(super) async fn signed_in(
     let LoginOutcome::Authenticated(auth) = outcome else {
         return Ok((LoginStatus::NotRequired, server));
     };
-    store.set(name, *auth);
-    store
-        .save(&paths.store)
+    held.set(name, *auth);
+    blocking(move || grants.save(&held))
+        .await
         .map_err(|e| ServeError::Internal(e.to_string()))?;
     Ok((LoginStatus::Authenticated, server))
 }
@@ -488,21 +531,16 @@ pub(super) async fn status(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
-    let admin = &state.mcp;
-    let paths = admin_paths();
-    let config = match Config::load_from_path_public(&paths.config) {
-        Ok(config) => config,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let Some(server) = config.mcp_servers.iter().find(|s| s.name == name) else {
-        return err(
-            StatusCode::NOT_FOUND,
-            format!("no MCP server named '{name}'"),
-        )
-        .into_response();
-    };
-    let store = AuthStore::load(&paths.store).unwrap_or_default();
-    Json(McpServerInfo::describe(server, &store, (admin.clock)())).into_response()
+    let found = server_infos(&state).await.and_then(|infos| {
+        infos
+            .into_iter()
+            .find(|info| info.name == name)
+            .ok_or_else(|| ServeError::NotFound(format!("no MCP server named '{name}'")))
+    });
+    match found {
+        Ok(info) => Json(info).into_response(),
+        Err(e) => as_api_error(&e).into_response(),
+    }
 }
 
 /// `POST /api/mcp/servers/{name}/test` - connect and report the tool count.
@@ -514,7 +552,7 @@ pub(super) async fn test_server(
         Ok((tools, _server)) => {
             Json(serde_json::json!({ "server": name, "tools": tools })).into_response()
         }
-        Err(e) => super::core::error::as_api_error(&e).into_response(),
+        Err(e) => as_api_error(&e).into_response(),
     }
 }
 
@@ -528,24 +566,11 @@ pub(super) async fn test_server(
 pub(super) async fn tools_of(
     state: &AppState,
     name: &str,
-) -> Result<(Vec<String>, MCPServerConfig), super::core::error::ServeError> {
-    use super::core::error::ServeError;
-
-    let admin = &state.mcp;
+) -> Result<(Vec<String>, MCPServerConfig), ServeError> {
     let paths = admin_paths();
-    let config = Config::load_from_path_public(&paths.config)
-        .map_err(|e| ServeError::Internal(e.to_string()))?;
-    let server = config
-        .mcp_servers
-        .iter()
-        .find(|s| s.name == name)
-        .ok_or_else(|| ServeError::NotFound(format!("no MCP server named '{name}'")))?
-        .clone();
-    let auth_header = OAuthClient::new()
-        .authorization_header(name, &paths.store, (admin.clock)())
-        .await
-        .map_err(|e| ServeError::Upstream(e.to_string()))?;
-    let tools = connect_and_list(&server, auth_header, &config.security.allow_env_vars)
+    let config = read_config(paths.config).await?;
+    let server = named(&config, name)?;
+    let tools = listed(&server, &config, paths.store, (state.mcp.clock)())
         .await
         .map_err(|e| ServeError::Upstream(e.to_string()))?;
     Ok((tools, server))
@@ -558,40 +583,29 @@ pub(crate) async fn list_mcp_tools(
     config: Config,
     server: MCPServerConfig,
 ) -> Result<Vec<String>, String> {
-    let paths = admin_paths();
-    let auth_header = OAuthClient::new()
-        .authorization_header(&server.name, &paths.store, system_now())
-        .await
-        .map_err(|e| e.to_string())?;
-    connect_and_list(&server, auth_header, &config.security.allow_env_vars)
+    listed(&server, &config, admin_paths().store, system_now())
         .await
         .map_err(|e| e.to_string())
 }
 
-/// Connect to `server` and return its tool names.
-///
-/// The client is shut down on EVERY path, not just success: `MCPClient` has no
-/// `Drop` and a stdio transport's child process does not die with the handle,
-/// so the early-return `?`s here each orphaned a spawned MCP server process
-/// per failed test request.
-async fn connect_and_list(
+/// Connect to `server`, signed in with the grant `config` keeps for it in
+/// `store`, and name its tools.
+async fn listed(
     server: &MCPServerConfig,
-    auth_header: Option<(String, String)>,
-    allow_env: &[String],
+    config: &Config,
+    store: PathBuf,
+    now: u64,
 ) -> anyhow::Result<Vec<String>> {
-    // The allowlist has to come from the config, not be an empty slice: an
-    // empty one refuses every `${VAR}` header, so testing a server whose token
-    // comes from the environment failed here while the same server worked for
-    // an agent.
-    let mut client = MCPClient::from_config_with_auth(server, auth_header, allow_env).await?;
-    let listed = async {
-        client.connect().await?;
-        client.list_tools().await
-    }
-    .await;
-    let _ = client.shutdown().await;
-    let tools = listed?;
-    Ok(tools.into_iter().map(|t| t.name).collect())
+    let auth_header = McpGrants::at(store, config.security.credential_store)
+        .authorization_header(&server.name, now)
+        .await?;
+    crate::commands::mcp::connect_and_list(
+        server,
+        auth_header,
+        &config.security.allow_env_vars,
+        leviath_mcp::DEFAULT_CONNECT_TIMEOUT,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -766,61 +780,67 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         std::fs::write(&paths.config, "").unwrap();
-        TEST_PATHS.sync_scope(paths, || {
-            install_server(
-                "docs".to_string(),
-                Some("/bin/echo".to_string()),
-                None,
-                vec!["one".to_string()],
-                std::collections::HashMap::new(),
-                std::collections::HashMap::new(),
-            )
-            .expect("the server is written");
+        TEST_PATHS
+            .scope(paths, async {
+                install_server(
+                    "docs".to_string(),
+                    Some("/bin/echo".to_string()),
+                    None,
+                    vec!["one".to_string()],
+                    std::collections::HashMap::new(),
+                    std::collections::HashMap::new(),
+                )
+                .await
+                .expect("the server is written");
 
-            update_server(
-                "docs".to_string(),
-                None,
-                Some("https://docs.example/mcp".to_string()),
-                Vec::new(),
-                std::collections::HashMap::new(),
-                std::collections::HashMap::from([(
-                    "Authorization".to_string(),
-                    "Bearer t".to_string(),
-                )]),
-            )
-            .expect("the server is replaced");
+                update_server(
+                    "docs".to_string(),
+                    None,
+                    Some("https://docs.example/mcp".to_string()),
+                    Vec::new(),
+                    std::collections::HashMap::new(),
+                    std::collections::HashMap::from([(
+                        "Authorization".to_string(),
+                        "Bearer t".to_string(),
+                    )]),
+                )
+                .await
+                .expect("the server is replaced");
 
-            let config = Config::load_from_path_public(&admin_paths().config).unwrap();
-            assert_eq!(config.mcp_servers.len(), 1, "replaced, not added beside");
-            let server = &config.mcp_servers[0];
-            assert_eq!(server.url.as_deref(), Some("https://docs.example/mcp"));
-            assert!(
-                server.command.is_none() && server.args.is_empty(),
-                "the previous transport is gone, whole"
-            );
+                let config = Config::load_from_path_public(&admin_paths().config).unwrap();
+                assert_eq!(config.mcp_servers.len(), 1, "replaced, not added beside");
+                let server = &config.mcp_servers[0];
+                assert_eq!(server.url.as_deref(), Some("https://docs.example/mcp"));
+                assert!(
+                    server.command.is_none() && server.args.is_empty(),
+                    "the previous transport is gone, whole"
+                );
 
-            let missing = update_server(
-                "ghost".to_string(),
-                Some("/bin/echo".to_string()),
-                None,
-                Vec::new(),
-                std::collections::HashMap::new(),
-                std::collections::HashMap::new(),
-            )
-            .expect_err("nothing is configured under that name");
-            assert_eq!(missing.code(), "NOT_FOUND");
+                let missing = update_server(
+                    "ghost".to_string(),
+                    Some("/bin/echo".to_string()),
+                    None,
+                    Vec::new(),
+                    std::collections::HashMap::new(),
+                    std::collections::HashMap::new(),
+                )
+                .await
+                .expect_err("nothing is configured under that name");
+                assert_eq!(missing.code(), "NOT_FOUND");
 
-            let nowhere = update_server(
-                "docs".to_string(),
-                None,
-                None,
-                Vec::new(),
-                std::collections::HashMap::new(),
-                std::collections::HashMap::new(),
-            )
-            .expect_err("neither a command nor a URL reaches anything");
-            assert_eq!(nowhere.code(), "BAD_USER_INPUT");
-        });
+                let nowhere = update_server(
+                    "docs".to_string(),
+                    None,
+                    None,
+                    Vec::new(),
+                    std::collections::HashMap::new(),
+                    std::collections::HashMap::new(),
+                )
+                .await
+                .expect_err("neither a command nor a URL reaches anything");
+                assert_eq!(nowhere.code(), "BAD_USER_INPUT");
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -1429,6 +1449,177 @@ for line in sys.stdin:
         assert_eq!(status_code, StatusCode::BAD_GATEWAY);
     }
 
+    // ─── grants under the keychain, and a grant file that will not load ───
+
+    /// A config under `dir` that keeps its grants in the keychain, naming
+    /// `server`.
+    fn keychain_config(dir: &std::path::Path, server: MCPServerConfig) {
+        let mut config = Config::default();
+        config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
+        config.mcp_servers.push(server);
+        config.save_to_path_public(&paths_in(dir).config).unwrap();
+    }
+
+    /// Store `auth` for `server` in the keychain, as `lev mcp login` does.
+    fn keychain_grant(dir: &std::path::Path, server: &str, auth: leviath_mcp::ServerAuth) {
+        let keychain = crate::credentials::store_for(leviath_core::CredentialStoreKind::Keychain)
+            .unwrap()
+            .unwrap();
+        let mut store = AuthStore::default();
+        store.set(server, auth);
+        store
+            .save_with(&paths_in(dir).store, Some(keychain.as_ref()))
+            .unwrap();
+    }
+
+    /// The listing and the status read a keychain user's grant through the
+    /// keychain, so a server they logged in to does not show as logged out.
+    #[test]
+    fn a_grant_in_the_keychain_reads_as_authenticated() {
+        let _keychain = crate::credentials::test_store::with_mock();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            keychain_config(
+                dir.path(),
+                MCPServerConfig::http("remote", "https://e.com/mcp"),
+            );
+            keychain_grant(
+                dir.path(),
+                "remote",
+                leviath_mcp::ServerAuth {
+                    expires_at: 10_000,
+                    ..Default::default()
+                },
+            );
+            let app = app_at(dir.path(), never_opens);
+            let (_, body) = send(&app, "GET", "/api/mcp/servers", None).await;
+            assert_eq!(body[0]["auth"], "authenticated", "{body}");
+            let (_, body) = send(&app, "GET", "/api/mcp/servers/remote/status", None).await;
+            assert_eq!(body["auth"], "authenticated", "{body}");
+        });
+    }
+
+    /// A grant file that will not load is an error, not every server shown
+    /// logged out, and a login leaves it as it was: it holds every other
+    /// server's grant.
+    #[tokio::test]
+    async fn a_grant_file_that_will_not_load_is_an_error_and_is_left_alone() {
+        let base = mock_oauth_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_at(dir.path(), auto_consent);
+        send(
+            &app,
+            "POST",
+            "/api/mcp/servers",
+            Some(serde_json::json!({ "name": "navigator", "url": format!("{base}/mcp") })),
+        )
+        .await;
+        let store = paths_in(dir.path()).store;
+        std::fs::write(&store, "not json").unwrap();
+        for (method, uri) in [
+            ("GET", "/api/mcp/servers"),
+            ("GET", "/api/mcp/servers/navigator/status"),
+            ("POST", "/api/mcp/servers/navigator/login"),
+        ] {
+            let (status_code, body) = send(&app, method, uri, None).await;
+            assert_eq!(
+                status_code,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{method} {uri}: {body}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&store).unwrap(), "not json");
+    }
+
+    /// Removing a server whose grant file will not load takes the server out
+    /// of the config and says its login was left behind.
+    #[tokio::test]
+    async fn a_remove_says_when_the_login_could_not_be_forgotten() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_at(dir.path(), never_opens);
+        send(
+            &app,
+            "POST",
+            "/api/mcp/servers",
+            Some(serde_json::json!({ "name": "remote", "url": "https://e.com/mcp" })),
+        )
+        .await;
+        std::fs::write(paths_in(dir.path()).store, "not json").unwrap();
+        let (status_code, body) = send(&app, "DELETE", "/api/mcp/servers/remote", None).await;
+        assert_eq!(status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("could not be forgotten")),
+            "{body}"
+        );
+        let config = Config::load_from_path_public(&paths_in(dir.path()).config).unwrap();
+        assert!(config.mcp_servers.is_empty());
+    }
+
+    /// Under the keychain a login's tokens go to the keychain, and the file
+    /// keeps only the server's name.
+    #[test]
+    fn a_login_under_the_keychain_keeps_the_tokens_out_of_the_file() {
+        let _keychain = crate::credentials::test_store::with_mock();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let base = mock_oauth_server().await;
+            let dir = tempfile::tempdir().unwrap();
+            keychain_config(
+                dir.path(),
+                MCPServerConfig::http("navigator", format!("{base}/mcp")),
+            );
+            let app = app_at(dir.path(), auto_consent);
+            let (status_code, body) =
+                send(&app, "POST", "/api/mcp/servers/navigator/login", None).await;
+            assert_eq!(status_code, StatusCode::OK, "{body}");
+            let file = std::fs::read_to_string(paths_in(dir.path()).store).unwrap();
+            assert!(!file.contains("rest-refresh"), "{file}");
+            let keychain =
+                crate::credentials::store_for(leviath_core::CredentialStoreKind::Keychain)
+                    .unwrap()
+                    .unwrap();
+            let held = keychain
+                .get(&leviath_core::mcp_account("navigator"))
+                .unwrap()
+                .unwrap();
+            assert!(held.contains("rest-refresh"), "{held}");
+        });
+    }
+
+    /// `test` resolves the bearer through the keychain too: an expired grant
+    /// held there is refreshed, and a refresh that fails is the answer rather
+    /// than a connection attempt with no token.
+    #[test]
+    fn test_reads_a_grant_kept_in_the_keychain() {
+        let _keychain = crate::credentials::test_store::with_mock();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            keychain_config(
+                dir.path(),
+                MCPServerConfig::http("remote", "http://127.0.0.1:1/mcp"),
+            );
+            keychain_grant(
+                dir.path(),
+                "remote",
+                leviath_mcp::ServerAuth {
+                    token_endpoint: "http://127.0.0.1:1/token".to_string(),
+                    refresh_token: Some("good".to_string()),
+                    expires_at: 1,
+                    ..Default::default()
+                },
+            );
+            let app = app_at(dir.path(), never_opens);
+            let (_, body) = send(&app, "POST", "/api/mcp/servers/remote/test", None).await;
+            assert!(
+                body["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("could not be refreshed")),
+                "{body}"
+            );
+        });
+    }
+
     #[test]
     fn never_opens_reports_no_browser() {
         assert!(!never_opens("https://x"));
@@ -1490,14 +1681,36 @@ for line in sys.stdin:
         // A directory where the config file belongs, so loading it fails.
         let unreadable = dir.path().join("cfg-dir");
         std::fs::create_dir(&unreadable).unwrap();
-        TEST_PATHS.sync_scope(
-            AdminPaths {
-                config: unreadable,
-                store: dir.path().join("s.json"),
-                grants: dir.path().join("g.json"),
-            },
-            || {
-                let failed = update_server(
+        TEST_PATHS
+            .scope(
+                AdminPaths {
+                    config: unreadable,
+                    store: dir.path().join("s.json"),
+                    grants: dir.path().join("g.json"),
+                },
+                async {
+                    let failed = update_server(
+                        "docs".to_string(),
+                        Some("/bin/echo".to_string()),
+                        None,
+                        Vec::new(),
+                        std::collections::HashMap::new(),
+                        std::collections::HashMap::new(),
+                    )
+                    .await
+                    .expect_err("a config that will not load");
+                    assert_eq!(failed.code(), "INTERNAL");
+                },
+            )
+            .await;
+
+        // And a config that reads fine, with the entry in it, that cannot be
+        // written back.
+        let paths = paths_in(dir.path());
+        std::fs::write(&paths.config, "").unwrap();
+        TEST_PATHS
+            .scope(paths, async {
+                install_server(
                     "docs".to_string(),
                     Some("/bin/echo".to_string()),
                     None,
@@ -1505,41 +1718,26 @@ for line in sys.stdin:
                     std::collections::HashMap::new(),
                     std::collections::HashMap::new(),
                 )
-                .expect_err("a config that will not load");
+                .await
+                .expect("the server is written");
+
+                let config = admin_paths().config;
+                let mut perms = std::fs::metadata(&config).unwrap().permissions();
+                perms.set_readonly(true);
+                std::fs::set_permissions(&config, perms).unwrap();
+
+                let failed = update_server(
+                    "docs".to_string(),
+                    None,
+                    Some("https://docs.example/mcp".to_string()),
+                    Vec::new(),
+                    std::collections::HashMap::new(),
+                    std::collections::HashMap::new(),
+                )
+                .await
+                .expect_err("a config that will not save");
                 assert_eq!(failed.code(), "INTERNAL");
-            },
-        );
-
-        // And a config that reads fine, with the entry in it, that cannot be
-        // written back.
-        let paths = paths_in(dir.path());
-        std::fs::write(&paths.config, "").unwrap();
-        TEST_PATHS.sync_scope(paths, || {
-            install_server(
-                "docs".to_string(),
-                Some("/bin/echo".to_string()),
-                None,
-                Vec::new(),
-                std::collections::HashMap::new(),
-                std::collections::HashMap::new(),
-            )
-            .expect("the server is written");
-
-            let config = admin_paths().config;
-            let mut perms = std::fs::metadata(&config).unwrap().permissions();
-            perms.set_readonly(true);
-            std::fs::set_permissions(&config, perms).unwrap();
-
-            let failed = update_server(
-                "docs".to_string(),
-                None,
-                Some("https://docs.example/mcp".to_string()),
-                Vec::new(),
-                std::collections::HashMap::new(),
-                std::collections::HashMap::new(),
-            )
-            .expect_err("a config that will not save");
-            assert_eq!(failed.code(), "INTERNAL");
-        });
+            })
+            .await;
     }
 }
