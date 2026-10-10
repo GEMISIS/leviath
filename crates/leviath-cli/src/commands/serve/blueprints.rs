@@ -57,7 +57,7 @@ fn blueprint_dir(name: &str) -> Result<PathBuf, ServeError> {
 /// Collapse a raw discovery scan into the canonical catalog: one blueprint per
 /// name, in a stable order.
 ///
-/// Split out of [`discover_blueprints`] because it is the part with the rules,
+/// Split out of [`discover_in`] because it is the part with the rules,
 /// and it can be tested over a hand-built `Vec` instead of a directory tree.
 ///
 /// **Dedup by name, first wins.** `get_blueprint` and `spawn_agent` both resolve
@@ -91,17 +91,8 @@ fn canonicalize(found: Vec<BlueprintInfo>) -> Vec<BlueprintInfo> {
     kept
 }
 
-/// Scan for blueprints from installed agents dir and configured agent_paths.
-///
-/// The result is deduplicated by name and name-sorted - see [`canonicalize`].
-/// Every consumer goes through here (`list_blueprints`, `get_blueprint`,
-/// `spawn_agent`), so they all share one answer to "which blueprint is `x`".
-pub(super) fn discover_blueprints(config: &crate::config::Config) -> Vec<BlueprintInfo> {
-    discover_in(blueprint_roots(config))
-}
-
-/// The directories [`discover_blueprints`] scans: the installed agents dir,
-/// then every configured `agent_paths` entry.
+/// The directories [`discover_in`] scans: the installed agents dir, then every
+/// configured `agent_paths` entry.
 ///
 /// Resolved apart from the scan so a handler can resolve them on its own task
 /// (where a test's agents-dir override is visible) and read them on the
@@ -112,7 +103,11 @@ pub(super) fn blueprint_roots(config: &crate::config::Config) -> Vec<PathBuf> {
     roots
 }
 
-/// [`discover_blueprints`] over the given roots.
+/// Scan `roots` for blueprints.
+///
+/// The result is deduplicated by name and name-sorted - see [`canonicalize`].
+/// Every consumer goes through here (`list_blueprints`, `get_blueprint`,
+/// `spawn_agent`), so they all share one answer to "which blueprint is `x`".
 pub(super) fn discover_in(roots: Vec<PathBuf>) -> Vec<BlueprintInfo> {
     let mut results = Vec::new();
     for dir in roots {
@@ -203,7 +198,7 @@ const MAX_LIMIT: usize = 200;
 /// on `GET /api/config` so a client can tell before it asks.
 ///
 /// Worth being plain about the tradeoff: **pagination buys nothing here.**
-/// `discover_blueprints` scans every configured directory and TOML-parses every
+/// `discover_in` scans every configured directory and TOML-parses every
 /// manifest on every request regardless of page size, so a page of ten costs
 /// what the whole list costs. The saving is wire bytes on a handful of small
 /// objects. The envelope is worth taking for one consistent shape across the
@@ -267,7 +262,7 @@ pub(super) async fn list_blueprints(
         });
     }
 
-    // `discover_blueprints` already sorts by (name, path); re-sort only when
+    // `discover_in` already sorts by (name, path); re-sort only when
     // something other than that default was asked for.
     // Sorting by version needs the name to break ties; sorting by name needs
     // nothing, because `canonicalize` already made names unique.
@@ -607,7 +602,7 @@ layout = {{ total_budget_tokens = 1000, regions = [] }}
     /// catalog that also contains whatever the developer running the tests has
     /// installed.
     ///
-    /// `discover_blueprints` always scans the installed agents dir on top of
+    /// `blueprint_roots` always names the installed agents dir on top of
     /// `agent_paths`, and redirecting `LEVIATH_HOME` to hide it would mutate
     /// process-global env and break every concurrently-running test that
     /// resolves an agents path. So these assert invariants over the discovered
@@ -2128,7 +2123,7 @@ layout = { total_budget_tokens = 1000, regions = [] }
     }
 
     #[test]
-    fn discover_blueprints_with_custom_path() {
+    fn discover_in_with_custom_path() {
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("my-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
@@ -2140,7 +2135,7 @@ layout = { total_budget_tokens = 1000, regions = [] }
             ..Default::default()
         };
 
-        let blueprints = discover_blueprints(&config);
+        let blueprints = discover_in(blueprint_roots(&config));
         let found = blueprints.iter().find(|b| b.name == "discovered");
         assert_discovered_in_custom_path(found.is_some());
     }
@@ -2156,28 +2151,28 @@ layout = { total_budget_tokens = 1000, regions = [] }
     }
 
     #[test]
-    fn discover_blueprints_empty_dir() {
+    fn discover_in_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
         let config = crate::config::Config {
             agent_paths: vec![dir.path().to_path_buf()],
             ..Default::default()
         };
-        let blueprints = discover_blueprints(&config);
+        let blueprints = discover_in(blueprint_roots(&config));
         // May include blueprints from ~/.leviath/agents, but no crash
         let _ = blueprints;
     }
 
     #[test]
-    fn discover_blueprints_nonexistent_path_is_skipped() {
+    fn discover_in_nonexistent_path_is_skipped() {
         let config = crate::config::Config {
             agent_paths: vec![PathBuf::from("/nonexistent/path/unlikely_to_exist_12345")],
             ..Default::default()
         };
-        let _ = discover_blueprints(&config);
+        let _ = discover_in(blueprint_roots(&config));
     }
 
     #[test]
-    fn discover_blueprints_direct_manifest_in_dir() {
+    fn discover_in_direct_manifest_in_dir() {
         let dir = tempfile::tempdir().unwrap();
         write_test_agent(dir.path(), named_manifest("direct"));
 
@@ -2186,7 +2181,7 @@ layout = { total_budget_tokens = 1000, regions = [] }
             ..Default::default()
         };
 
-        let blueprints = discover_blueprints(&config);
+        let blueprints = discover_in(blueprint_roots(&config));
         let found = blueprints.iter().find(|b| b.name == "direct");
         assert_discovered_directly_in_scan_dir(found.is_some());
     }

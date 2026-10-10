@@ -5,6 +5,8 @@
 
 use async_graphql::Context;
 
+use super::super::super::blocking::blocking;
+use super::super::super::tools::AgentDirs;
 use super::super::super::types::AppState;
 use super::super::connection::Connection;
 use super::super::error::IntoGraphql;
@@ -44,7 +46,21 @@ pub(crate) async fn config(ctx: &Context<'_>) -> Config {
         &state.limits.request_limits,
         &health,
         super::super::admin::admin_visible(ctx),
+        yolo_file().await,
     )
+}
+
+/// Where the profiles file is and whether it loads.
+///
+/// Read on the blocking pool: loading the file compiles every rule in it.
+/// Shared with the config write, whose answer carries the same status.
+pub(crate) async fn yolo_file() -> ConfigFileStatus {
+    let listing = blocking(super::super::super::yolo::listing).await;
+    ConfigFileStatus {
+        path: listing.path,
+        exists: listing.exists,
+        error: listing.error,
+    }
 }
 
 /// Environment and configuration diagnostics.
@@ -53,7 +69,13 @@ pub(crate) async fn config(ctx: &Context<'_>) -> Config {
 /// the request to run the checks succeeded, and what they found is the
 /// answer.
 pub(crate) async fn doctor() -> DoctorReport {
-    let report = super::super::super::doctor::offline_report().await;
+    // Every offline check reads the disk (the config, the profiles file, the
+    // sign-in grants) and none of them waits on the network, so the whole run
+    // is driven to its end on the blocking pool.
+    let report = blocking(|| {
+        tokio::runtime::Handle::current().block_on(super::super::super::doctor::offline_report())
+    })
+    .await;
     doctor_report(report.checks)
 }
 
@@ -112,9 +134,13 @@ pub(crate) async fn mcp_server(
 }
 
 /// The operator's mime registry, before any blueprint's own rows.
-fn registry_rows(ctx: &Context<'_>) -> Vec<MimeRow> {
-    let state = ctx.data_unchecked::<AppState>();
-    super::super::super::blobs::mime_rows(state)
+///
+/// Built on the blocking pool: the registry reads the providers' scripts and
+/// the operator's file, and compiles every check a row names.
+async fn registry_rows(ctx: &Context<'_>) -> Vec<MimeRow> {
+    let state = ctx.data_unchecked::<AppState>().clone();
+    blocking(move || super::super::super::blobs::mime_rows(&state))
+        .await
         .into_iter()
         .map(MimeRow::from_entry)
         .collect()
@@ -138,7 +164,7 @@ pub(crate) async fn mime_rows(
     after: Option<Cursor>,
 ) -> async_graphql::Result<Connection<MimeRow>> {
     connection(
-        registry_rows(ctx),
+        registry_rows(ctx).await,
         filter,
         terms(order_by, MimeRowOrder::term, rows_by_type),
         |row: &MimeRow| row.mime_type.clone(),
@@ -159,11 +185,18 @@ pub(crate) async fn registered_scripts(
     blueprint: Option<&str>,
 ) -> async_graphql::Result<Vec<Script>> {
     let state = ctx.data_unchecked::<AppState>();
-    Ok(super::super::super::scripts::registered(state, blueprint)
-        .gql()?
-        .into_iter()
-        .map(Script::from_item)
-        .collect())
+    let config = state.current_config();
+    // Resolved on this task and walked on the blocking pool.
+    let dirs = AgentDirs::of(&config);
+    let blueprint = blueprint.map(str::to_string);
+    Ok(blocking(move || {
+        super::super::super::scripts::registered(&config, &dirs, blueprint.as_deref())
+    })
+    .await
+    .gql()?
+    .into_iter()
+    .map(Script::from_item)
+    .collect())
 }
 
 /// The order the scripts are read in when nothing says otherwise: by id, which
@@ -240,9 +273,12 @@ pub(crate) async fn directory(
     path: Option<String>,
     include_hidden: bool,
 ) -> async_graphql::Result<Directory> {
-    let state = ctx.data_unchecked::<AppState>();
-    let listing =
-        super::super::super::fs::dir_listing(state, path.as_deref(), include_hidden).gql()?;
+    let state = ctx.data_unchecked::<AppState>().clone();
+    let listing = blocking(move || {
+        super::super::super::fs::dir_listing(&state, path.as_deref(), include_hidden)
+    })
+    .await
+    .gql()?;
     Ok(Directory {
         path: listing.path,
         parent: listing.parent,
@@ -270,7 +306,9 @@ pub(crate) async fn daemon(ctx: &Context<'_>) -> DaemonStatus {
 /// page to ask every time it opens.
 pub(crate) async fn update(ctx: &Context<'_>) -> UpdatePlan {
     let state = ctx.data_unchecked::<AppState>();
-    let plan = super::super::super::update::planned();
+    // Planning reads the disk: where the binary is, the installed blueprints,
+    // and the config.
+    let plan = blocking(super::super::super::update::planned).await;
     if state.current_config().update_check {
         state.update_check.read_and_maybe_refresh(
             plan.method.channel(),
@@ -289,9 +327,11 @@ pub(crate) async fn update(ctx: &Context<'_>) -> UpdatePlan {
 /// Shared by the listing, the lookup, `node` and the writes, so "what is there
 /// now" is one shape whichever asked. A file that does not load has no
 /// profiles here and says why on `config.yoloFile.error`, which is the one
-/// place that status lives.
-pub(crate) fn yolo_profiles() -> Vec<YoloProfile> {
-    super::super::super::yolo::profiles()
+/// place that status lives. Read on the blocking pool: loading the file
+/// compiles every rule in it.
+pub(crate) async fn yolo_profiles() -> Vec<YoloProfile> {
+    blocking(super::super::super::yolo::profiles)
+        .await
         .iter()
         .map(|profile| YoloProfile::from_profile(profile))
         .collect()
@@ -314,7 +354,7 @@ pub(crate) async fn yolo_profile_page(
     after: Option<Cursor>,
 ) -> async_graphql::Result<Connection<YoloProfile>> {
     connection(
-        yolo_profiles(),
+        yolo_profiles().await,
         filter,
         terms(order_by, YoloProfileOrder::term, profiles_by_name),
         |profile: &YoloProfile| profile.name.clone(),
@@ -329,8 +369,9 @@ pub(crate) async fn yolo_profile_page(
 }
 
 /// One yolo profile, by the name `--yolo=<name>` spells.
-pub(crate) fn yolo_profile(name: &str) -> Option<YoloProfile> {
+pub(crate) async fn yolo_profile(name: &str) -> Option<YoloProfile> {
     yolo_profiles()
+        .await
         .into_iter()
         .find(|profile| profile.name == name)
 }
@@ -344,9 +385,9 @@ pub(crate) fn config_of(
     requests: &super::super::super::request_limits::RequestLimits,
     health: &crate::daemon::config_reload::ConfigHealth,
     admin_enabled: bool,
+    yolo_file: ConfigFileStatus,
 ) -> Config {
     let redacted = super::super::super::config::redact(config, requests, health);
-    let yolo = super::super::super::yolo::listing();
     // Before the struct below, which takes the config's own fields by value.
     let providers = providers_of(&redacted);
     Config {
@@ -408,11 +449,7 @@ pub(crate) fn config_of(
             }),
             saved_at: redacted.config_mtime.map(Timestamp),
         },
-        yolo_file: ConfigFileStatus {
-            path: yolo.path,
-            exists: yolo.exists,
-            error: yolo.error,
-        },
+        yolo_file,
     }
 }
 

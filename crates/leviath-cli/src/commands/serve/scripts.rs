@@ -59,7 +59,7 @@ use serde::{Deserialize, Serialize};
 use super::core::error::ServeError;
 use super::scripts_address::{addressed_path, declared_address, relative_of};
 use super::scripts_mime::{collect_mime_checks, config_dir};
-use super::tools::agent_dir;
+use super::tools::AgentDirs;
 use super::types::{ApiError, AppState};
 
 /// Which extension point a script plugs into, and so which compiler decides
@@ -171,7 +171,7 @@ struct Target {
 /// address one component could not open the file the listing had just reported.
 /// [`guard`] still checks where the result lands.
 fn resolve(
-    config: &crate::config::Config,
+    dirs: &AgentDirs,
     kind: &str,
     name: &str,
     agent: Option<&str>,
@@ -199,7 +199,7 @@ fn resolve(
             ));
         }
         (Some(agent), _) => {
-            let base = agent_dir(config, agent)?;
+            let base = dirs.dir(agent)?;
             // Tools are scanned out of `tools/`; a hook or validator is named by
             // a manifest path that resolves against the agent's own directory.
             let dir = match kind {
@@ -926,29 +926,37 @@ pub(super) async fn list_scripts(
 ) -> Result<Json<ScriptsResp>, ApiError> {
     let candidates =
         wants_candidates(q.include.as_deref()).map_err(|e| super::core::error::as_api_error(&e))?;
-    let scripts = registered_with(&state, q.agent.as_deref(), candidates)
-        .map_err(|e| super::core::error::as_api_error(&e))?;
+    let config = state.current_config();
+    let scripts = registered_with(
+        &config,
+        &AgentDirs::of(&config),
+        q.agent.as_deref(),
+        candidates,
+    )
+    .map_err(|e| super::core::error::as_api_error(&e))?;
     Ok(Json(ScriptsResp { scripts }))
 }
 
 /// The registered scripts, optionally scoped to one blueprint's own directory.
 pub(super) fn registered(
-    state: &AppState,
+    config: &crate::config::Config,
+    dirs: &AgentDirs,
     agent: Option<&str>,
 ) -> Result<Vec<ScriptItem>, super::core::error::ServeError> {
-    registered_with(state, agent, false)
+    registered_with(config, dirs, agent, false)
 }
 
 /// [`registered`], with the "what could be a script but is not registered"
 /// pass the REST route can ask for.
 fn registered_with(
-    state: &AppState,
+    config: &crate::config::Config,
+    dirs: &AgentDirs,
     agent: Option<&str>,
     candidates: bool,
 ) -> Result<Vec<ScriptItem>, super::core::error::ServeError> {
     let mut scripts = Vec::new();
     if let Some(name) = agent {
-        let dir = agent_dir(&state.current_config(), name)?;
+        let dir = dirs.dir(name)?;
         collect_tools(&dir.join("tools"), "agent", Some(name), &mut scripts);
         collect_declared(&dir, name, &mut scripts);
         if candidates {
@@ -956,7 +964,7 @@ fn registered_with(
         }
     }
     collect_tools(&global_tools_dir(), "global", None, &mut scripts);
-    collect_mime_checks(&state.current_config(), &mut scripts);
+    collect_mime_checks(config, &mut scripts);
     collect_providers(&global_providers_dir(), &mut scripts);
     Ok(scripts)
 }
@@ -967,19 +975,20 @@ pub(super) async fn get_script(
     AxumPath((kind, name)): AxumPath<(String, String)>,
     Query(q): Query<ScriptQuery>,
 ) -> Result<Json<ScriptSource>, ApiError> {
-    read_one(&state.current_config(), &kind, &name, q.agent.as_deref())
+    let dirs = AgentDirs::of(&state.current_config());
+    read_one(&dirs, &kind, &name, q.agent.as_deref())
         .map(Json)
         .map_err(|e| super::core::error::as_api_error(&e))
 }
 
 /// One script's source, for whichever surface asked.
 pub(super) fn read_one(
-    config: &crate::config::Config,
+    dirs: &AgentDirs,
     kind: &str,
     name: &str,
     agent: Option<&str>,
 ) -> Result<ScriptSource, ServeError> {
-    let target = resolve(config, kind, name, agent)?;
+    let target = resolve(dirs, kind, name, agent)?;
     guard(&target, Presence::Required)?;
     read_script(&target)
 }
@@ -1032,7 +1041,7 @@ pub(super) async fn put_script(
     Json(body): Json<WriteScriptReq>,
 ) -> Result<Json<ScriptWritten>, ApiError> {
     write_one(
-        &state.current_config(),
+        &AgentDirs::of(&state.current_config()),
         &kind,
         &name,
         q.agent.as_deref(),
@@ -1044,13 +1053,13 @@ pub(super) async fn put_script(
 
 /// Write one script, for whichever surface asked.
 pub(super) fn write_one(
-    config: &crate::config::Config,
+    dirs: &AgentDirs,
     kind: &str,
     name: &str,
     agent: Option<&str>,
     content: &str,
 ) -> Result<ScriptWritten, ServeError> {
-    let target = resolve(config, kind, name, agent)?;
+    let target = resolve(dirs, kind, name, agent)?;
     std::fs::create_dir_all(&target.dir).map_err(|e| {
         ServeError::Internal(format!("cannot create '{}': {e}", target.dir.display()))
     })?;
@@ -1091,19 +1100,24 @@ pub(super) async fn delete_script(
     AxumPath((kind, name)): AxumPath<(String, String)>,
     Query(q): Query<ScriptQuery>,
 ) -> Result<StatusCode, ApiError> {
-    remove_one(&state.current_config(), &kind, &name, q.agent.as_deref())
-        .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|e| super::core::error::as_api_error(&e))
+    remove_one(
+        &AgentDirs::of(&state.current_config()),
+        &kind,
+        &name,
+        q.agent.as_deref(),
+    )
+    .map(|()| StatusCode::NO_CONTENT)
+    .map_err(|e| super::core::error::as_api_error(&e))
 }
 
 /// Remove one script, for whichever surface asked.
 pub(super) fn remove_one(
-    config: &crate::config::Config,
+    dirs: &AgentDirs,
     kind: &str,
     name: &str,
     agent: Option<&str>,
 ) -> Result<(), ServeError> {
-    let target = resolve(config, kind, name, agent)?;
+    let target = resolve(dirs, kind, name, agent)?;
     guard(&target, Presence::Required)?;
     remove_script(&target)
 }

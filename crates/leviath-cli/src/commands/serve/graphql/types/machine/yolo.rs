@@ -103,21 +103,26 @@ impl YoloProfile {
     ) -> async_graphql::Result<YoloDecision> {
         use super::super::super::error::IntoGraphql;
 
-        let state = ctx.data_unchecked::<super::super::super::super::types::AppState>();
+        let state = ctx
+            .data_unchecked::<super::super::super::super::types::AppState>()
+            .clone();
         let called = tool.clone();
-        let decided = super::super::super::super::yolo::decided(
-            state,
-            super::super::super::super::yolo::TestReq {
-                profile: self.name.clone(),
-                tool,
-                command: None,
-                arguments: args.map(|json| json.0),
-                workdir: None,
-                configured: None,
-                kind: Some(kind.wire().to_string()),
-                allowed: false,
-            },
-        )
+        let asked = super::super::super::super::yolo::TestReq {
+            profile: self.name.clone(),
+            tool,
+            command: None,
+            arguments: args.map(|json| json.0),
+            workdir: None,
+            configured: None,
+            kind: Some(kind.wire().to_string()),
+            allowed: false,
+        };
+        // Deciding loads the profiles file, as the REST route does on the
+        // blocking pool.
+        let decided = crate::commands::serve::blocking::blocking(move || {
+            super::super::super::super::yolo::decided(&state, asked)
+        })
+        .await
         .gql()?;
         Ok(YoloDecision {
             tool: called,

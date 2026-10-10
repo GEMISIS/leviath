@@ -114,7 +114,7 @@ pub(crate) async fn providers(
     after: Option<Cursor>,
 ) -> async_graphql::Result<Connection<Provider>> {
     connection(
-        reachable(ctx),
+        reachable(ctx).await,
         filter,
         terms(order_by, ProviderOrder::term, providers_by_name),
         |provider: &Provider| provider.name.clone(),
@@ -131,13 +131,15 @@ pub(crate) async fn providers(
 /// One provider, by the registry name a blueprint would write.
 pub(crate) async fn provider(ctx: &Context<'_>, name: String) -> Option<Provider> {
     reachable(ctx)
+        .await
         .into_iter()
         .find(|provider| provider.name == name)
 }
 
 /// One provider, by the node id `provider:<name>` carries.
-pub(crate) fn provider_by_id(ctx: &Context<'_>, id: &str) -> Option<Provider> {
+pub(crate) async fn provider_by_id(ctx: &Context<'_>, id: &str) -> Option<Provider> {
     reachable(ctx)
+        .await
         .into_iter()
         .find(|provider| provider.id == provider_id(id))
 }
@@ -145,10 +147,14 @@ pub(crate) fn provider_by_id(ctx: &Context<'_>, id: &str) -> Option<Provider> {
 /// Every provider a person signs in to through a browser, with its state.
 ///
 /// The same rows `GET /api/providers` builds, so the two surfaces cannot
-/// disagree about which providers have a sign-in to offer.
-fn reachable(ctx: &Context<'_>) -> Vec<Provider> {
-    let state = ctx.data_unchecked::<AppState>();
-    super::super::super::providers::provider_infos(state)
+/// disagree about which providers have a sign-in to offer. The grant store is
+/// a file, so it is read on the blocking pool, from the path this task
+/// resolves.
+async fn reachable(ctx: &Context<'_>) -> Vec<Provider> {
+    let state = ctx.data_unchecked::<AppState>().clone();
+    let grants = super::super::super::mcp::admin_paths().grants;
+    blocking(move || super::super::super::providers::provider_infos(&state, &grants))
+        .await
         .iter()
         .map(Provider::from)
         .collect()
@@ -183,17 +189,21 @@ pub(crate) async fn discover(
     blueprint: Option<&str>,
 ) -> async_graphql::Result<Inventory> {
     let state = ctx.data_unchecked::<AppState>();
-    let config = state.current_config();
+    // Resolved on this task; finding the blueprint's directory and walking the
+    // tool directories belong on the blocking pool.
+    let dirs = super::super::super::tools::AgentDirs::of(&state.current_config());
     let named = blueprint.map(str::to_string);
-    let dir = match blueprint {
-        Some(name) => Some(super::super::super::tools::agent_dir(&config, name).gql()?),
-        None => None,
-    };
-    // The walk over a blueprint's own directory belongs on the blocking pool.
     let found = blocking(move || {
-        crate::tool_inventory::ToolInventory::discover(dir.as_deref(), named.as_deref())
+        let dir = match named.as_deref() {
+            Some(name) => Some(dirs.dir(name)?),
+            None => None,
+        };
+        Ok::<_, super::super::super::core::error::ServeError>(
+            crate::tool_inventory::ToolInventory::discover(dir.as_deref(), named.as_deref()),
+        )
     })
-    .await;
+    .await
+    .gql()?;
     Ok(Inventory {
         tools: found.tools.into_iter().map(Tool::of).collect(),
         skipped: found

@@ -177,7 +177,7 @@ async fn a_mime_check_resolves_beside_the_manifest_or_the_config() {
             &crate::test_support::tiny_blueprint("scenes"),
         );
         let target = resolve(
-            &Config::default(),
+            &AgentDirs::of(&Config::default()),
             "mime_check",
             "checks/scene",
             Some("scenes"),
@@ -187,8 +187,13 @@ async fn a_mime_check_resolves_beside_the_manifest_or_the_config() {
         assert_eq!(target.path, agent.join("checks").join("scene.rhai"));
         assert_eq!(target.scope, "agent");
 
-        let global = resolve(&Config::default(), "mime_check", "checks/scene", None)
-            .expect("the config's directory");
+        let global = resolve(
+            &AgentDirs::of(&Config::default()),
+            "mime_check",
+            "checks/scene",
+            None,
+        )
+        .expect("the config's directory");
         assert_eq!(global.dir, config_dir());
         assert_eq!(global.scope, "global");
         assert!(global.agent.is_none());
@@ -354,8 +359,13 @@ fn status_pairs_flatten_both_outcomes() {
 #[tokio::test]
 async fn a_tool_resolves_into_the_agents_tools_directory() {
     with_home(|home| async move {
-        let target =
-            resolve(&Config::default(), "tool", "summarize", Some("researcher")).expect("resolves");
+        let target = resolve(
+            &AgentDirs::of(&Config::default()),
+            "tool",
+            "summarize",
+            Some("researcher"),
+        )
+        .expect("resolves");
         assert_eq!(target.dir, agent_root(&home, "researcher").join("tools"));
         assert_eq!(target.scope, "agent");
         assert_eq!(target.agent.as_deref(), Some("researcher"));
@@ -370,7 +380,7 @@ async fn a_tool_resolves_into_the_agents_tools_directory() {
 async fn a_hook_resolves_beside_the_manifest_not_under_tools() {
     with_home(|home| async move {
         let target = resolve(
-            &Config::default(),
+            &AgentDirs::of(&Config::default()),
             "stage_hook",
             "hooks",
             Some("researcher"),
@@ -388,7 +398,13 @@ async fn a_hook_resolves_beside_the_manifest_not_under_tools() {
 #[tokio::test]
 async fn a_global_tool_resolves_into_the_shared_directory() {
     with_home(|home| async move {
-        let target = resolve(&Config::default(), "tool", "summarize", None).expect("resolves");
+        let target = resolve(
+            &AgentDirs::of(&Config::default()),
+            "tool",
+            "summarize",
+            None,
+        )
+        .expect("resolves");
         assert_eq!(target.dir, global_root(&home));
         assert_eq!(target.scope, "global");
         assert!(target.agent.is_none());
@@ -401,8 +417,20 @@ async fn a_global_tool_resolves_into_the_shared_directory() {
 #[tokio::test]
 async fn a_name_that_already_carries_the_extension_is_the_same_file() {
     with_home(|home| async move {
-        let bare = resolve(&Config::default(), "tool", "summarize", None).expect("resolves");
-        let dotted = resolve(&Config::default(), "tool", "summarize.rhai", None).expect("resolves");
+        let bare = resolve(
+            &AgentDirs::of(&Config::default()),
+            "tool",
+            "summarize",
+            None,
+        )
+        .expect("resolves");
+        let dotted = resolve(
+            &AgentDirs::of(&Config::default()),
+            "tool",
+            "summarize.rhai",
+            None,
+        )
+        .expect("resolves");
         assert_eq!(bare.path, dotted.path);
         assert!(bare.path.starts_with(global_root(&home)));
     })
@@ -412,8 +440,13 @@ async fn a_name_that_already_carries_the_extension_is_the_same_file() {
 #[tokio::test]
 async fn an_unknown_kind_is_refused() {
     with_home(|_home| async move {
-        let refused =
-            resolve(&Config::default(), "model_provider", "x", None).expect_err("no such kind");
+        let refused = resolve(
+            &AgentDirs::of(&Config::default()),
+            "model_provider",
+            "x",
+            None,
+        )
+        .expect_err("no such kind");
         assert_eq!(refused.code(), "BAD_USER_INPUT");
     })
     .await;
@@ -422,8 +455,13 @@ async fn an_unknown_kind_is_refused() {
 #[tokio::test]
 async fn a_traversing_script_name_is_refused() {
     with_home(|_home| async move {
-        let refused =
-            resolve(&Config::default(), "tool", "../../evil", None).expect_err("a traversal");
+        let refused = resolve(
+            &AgentDirs::of(&Config::default()),
+            "tool",
+            "../../evil",
+            None,
+        )
+        .expect_err("a traversal");
         assert_eq!(refused.code(), "BAD_USER_INPUT");
     })
     .await;
@@ -432,8 +470,13 @@ async fn a_traversing_script_name_is_refused() {
 #[tokio::test]
 async fn a_traversing_agent_name_is_refused() {
     with_home(|_home| async move {
-        let refused =
-            resolve(&Config::default(), "tool", "x", Some("../../etc")).expect_err("a traversal");
+        let refused = resolve(
+            &AgentDirs::of(&Config::default()),
+            "tool",
+            "x",
+            Some("../../etc"),
+        )
+        .expect_err("a traversal");
         assert_eq!(refused.code(), "BAD_USER_INPUT");
     })
     .await;
@@ -454,13 +497,31 @@ async fn an_agent_from_a_configured_path_resolves_to_its_own_directory() {
             ..Default::default()
         };
 
-        let tool = resolve(&config, "tool", "summarize", Some("researcher")).expect("resolves");
+        let tool = resolve(
+            &AgentDirs::of(&config),
+            "tool",
+            "summarize",
+            Some("researcher"),
+        )
+        .expect("resolves");
         assert_eq!(tool.dir, agent.join("tools"));
-        let hook = resolve(&config, "stage_hook", "hooks", Some("researcher")).expect("resolves");
+        let hook = resolve(
+            &AgentDirs::of(&config),
+            "stage_hook",
+            "hooks",
+            Some("researcher"),
+        )
+        .expect("resolves");
         assert_eq!(hook.dir, agent);
         // A name the catalog does not know still lands in the installed
         // directory, so a new agent can be created there.
-        let fresh = resolve(&config, "tool", "summarize", Some("newcomer")).expect("resolves");
+        let fresh = resolve(
+            &AgentDirs::of(&config),
+            "tool",
+            "summarize",
+            Some("newcomer"),
+        )
+        .expect("resolves");
         assert_eq!(fresh.dir, agent_root(&home, "newcomer").join("tools"));
     })
     .await;
@@ -471,7 +532,8 @@ async fn an_agent_from_a_configured_path_resolves_to_its_own_directory() {
 #[tokio::test]
 async fn a_hook_without_an_agent_is_refused() {
     with_home(|_home| async move {
-        let refused = resolve(&Config::default(), "region_hook", "x", None).expect_err("no scope");
+        let refused = resolve(&AgentDirs::of(&Config::default()), "region_hook", "x", None)
+            .expect_err("no scope");
         assert_eq!(refused.code(), "BAD_USER_INPUT");
         assert!(refused.to_string().contains("?agent="), "{refused}");
     })
@@ -1623,8 +1685,8 @@ async fn validating_an_unknown_kind_is_a_400() {
 #[tokio::test]
 async fn a_provider_resolves_into_the_providers_directory() {
     with_home(|home| async move {
-        let target =
-            resolve(&Config::default(), "provider", "groq", None).expect("a provider is global");
+        let target = resolve(&AgentDirs::of(&Config::default()), "provider", "groq", None)
+            .expect("a provider is global");
         assert_eq!(target.path, providers_root(&home).join("groq.rhai"));
         assert_eq!(target.scope, "global");
         assert!(target.agent.is_none());
@@ -1637,8 +1699,13 @@ async fn a_provider_resolves_into_the_providers_directory() {
 #[tokio::test]
 async fn a_provider_with_an_agent_is_refused() {
     with_home(|_home| async move {
-        let refused = resolve(&Config::default(), "provider", "groq", Some("researcher"))
-            .expect_err("global");
+        let refused = resolve(
+            &AgentDirs::of(&Config::default()),
+            "provider",
+            "groq",
+            Some("researcher"),
+        )
+        .expect_err("global");
         assert_eq!(refused.code(), "BAD_USER_INPUT");
         assert!(refused.to_string().contains("?agent="), "{refused}");
     })

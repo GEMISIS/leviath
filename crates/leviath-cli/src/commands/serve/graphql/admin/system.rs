@@ -75,8 +75,12 @@ pub(crate) async fn create_directory(
     ctx: &Context<'_>,
     request: CreateDirectoryRequest,
 ) -> async_graphql::Result<CreateDirectoryResult> {
-    let state = ctx.data_unchecked::<AppState>();
-    let made = super::super::super::fs::made(state, &request.parent_path, &request.name).gql()?;
+    let state = ctx.data_unchecked::<AppState>().clone();
+    let made = super::super::super::blocking::blocking(move || {
+        super::super::super::fs::made(&state, &request.parent_path, &request.name)
+    })
+    .await
+    .gql()?;
     Ok(CreateDirectoryResult {
         directory: Directory {
             path: made.path,

@@ -115,7 +115,10 @@ pub(super) struct DeleteMimeQuery {
 }
 
 /// The operator's `mime_types.toml`, beside the config this process edits.
-fn mime_types_path() -> std::path::PathBuf {
+///
+/// Resolved on the request's own task and handed to the writers below, so a
+/// caller that writes on the blocking pool writes where the request would.
+pub(super) fn mime_types_path() -> std::path::PathBuf {
     super::mcp::admin_paths()
         .config
         .with_file_name(crate::config::MIME_TYPES_FILE)
@@ -141,14 +144,18 @@ pub(super) async fn put_mime_row(
         stand_in: req.stand_in,
         check: req.check,
     };
-    write_edit(&req.mime_type, edit).map(Json)
+    write_edit(&mime_types_path(), &req.mime_type, edit).map(Json)
 }
 
-/// Write one registry row, for whichever surface asked.
-pub(super) fn write_edit(mime_type: &str, edit: RowEdit) -> Result<MimeRowWritten, ServeError> {
+/// Write one registry row into the file at `path`, for whichever surface asked.
+pub(super) fn write_edit(
+    path: &std::path::Path,
+    mime_type: &str,
+    edit: RowEdit,
+) -> Result<MimeRowWritten, ServeError> {
     let key = MimeType::parse(mime_type)
         .map_err(|e| ServeError::BadRequest(format!("{mime_type}: {e}")))?;
-    let added = add_row(&mime_types_path(), key.as_str(), &edit).map_err(ServeError::BadRequest)?;
+    let added = add_row(path, key.as_str(), &edit).map_err(ServeError::BadRequest)?;
     Ok(MimeRowWritten {
         mime_type: key.as_str().to_string(),
         created: added == Added::Created,
@@ -160,7 +167,7 @@ pub(super) fn write_edit(mime_type: &str, edit: RowEdit) -> Result<MimeRowWritte
 pub(super) async fn delete_mime_row(
     Query(q): Query<DeleteMimeQuery>,
 ) -> Result<StatusCode, ServeError> {
-    match remove_row_named(&q.mime_type) {
+    match remove_row_named(&mime_types_path(), &q.mime_type) {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
         Ok(false) => Err(ServeError::NotFound(format!(
             "no row for '{}'",
@@ -170,12 +177,15 @@ pub(super) async fn delete_mime_row(
     }
 }
 
-/// Remove one registry row. False when there was none to remove, which is a
-/// fact about the registry rather than a failed request.
-pub(super) fn remove_row_named(mime_type: &str) -> Result<bool, ServeError> {
+/// Remove one registry row from the file at `path`. False when there was none
+/// to remove, which is a fact about the registry rather than a failed request.
+pub(super) fn remove_row_named(
+    path: &std::path::Path,
+    mime_type: &str,
+) -> Result<bool, ServeError> {
     let key = MimeType::parse(mime_type)
         .map_err(|e| ServeError::BadRequest(format!("{mime_type}: {e}")))?;
-    Ok(remove_row(&mime_types_path(), key.as_str()).is_ok())
+    Ok(remove_row(path, key.as_str()).is_ok())
 }
 
 #[cfg(test)]

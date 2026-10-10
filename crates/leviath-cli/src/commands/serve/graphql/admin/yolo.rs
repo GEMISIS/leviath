@@ -8,6 +8,7 @@
 
 use async_graphql::{ID, InputObject, SimpleObject};
 
+use super::super::super::blocking::blocking;
 use super::super::super::core::error::ServeError;
 use super::super::error::IntoGraphql;
 use super::super::types::machine::{YoloHuman, YoloProfile, YoloWaiver};
@@ -174,7 +175,11 @@ pub(crate) async fn upsert_yolo_profile(
 ) -> async_graphql::Result<UpsertYoloProfileResult> {
     let name = request.profile.name.clone();
     let spec = request.profile.into_spec();
-    let written = super::super::super::yolo::upsert_profile(&name, &spec).gql()?;
+    // Read, checked and written back on the blocking pool, as the REST route
+    // does.
+    let written = blocking(move || super::super::super::yolo::upsert_profile(&name, &spec))
+        .await
+        .gql()?;
     Ok(UpsertYoloProfileResult {
         // Read back through the file rather than echoed from the request: what
         // a run resolves is what the saved document loads as.
@@ -190,7 +195,10 @@ pub(crate) async fn upsert_yolo_profile(
 pub(crate) async fn delete_yolo_profile(
     request: DeleteYoloProfileRequest,
 ) -> async_graphql::Result<DeleteYoloProfileResult> {
-    let removed = super::super::super::yolo::remove_profile(&request.name).gql()?;
+    let name = request.name.clone();
+    let removed = blocking(move || super::super::super::yolo::remove_profile(&name))
+        .await
+        .gql()?;
     match removed {
         true => Ok(DeleteYoloProfileResult {
             deleted_id: super::super::node::yolo_profile_id(&request.name),

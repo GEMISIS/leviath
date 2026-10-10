@@ -101,9 +101,11 @@ pub(crate) async fn resolve(ctx: &Context<'_>, id: &str) -> async_graphql::Resul
     if let Some((tag, rest)) = id.split_once(':') {
         return match tag {
             MCP_SERVER_TAG => mcp_server(ctx, rest).await,
-            YOLO_PROFILE_TAG => Ok(yolo_profile(rest)),
-            SCRIPT_TAG => script(ctx, rest),
-            PROVIDER_TAG => Ok(super::query::provider_by_id(ctx, rest).map(Node::Provider)),
+            YOLO_PROFILE_TAG => Ok(yolo_profile(rest).await),
+            SCRIPT_TAG => script(ctx, rest).await,
+            PROVIDER_TAG => Ok(super::query::provider_by_id(ctx, rest)
+                .await
+                .map(Node::Provider)),
             MODEL_TAG => Ok(super::query::model_by_id(ctx, id).await.map(Node::Model)),
             _ => Ok(None),
         };
@@ -158,15 +160,15 @@ async fn mcp_server(ctx: &Context<'_>, name: &str) -> async_graphql::Result<Opti
 }
 
 /// The yolo profile one tagged id names.
-fn yolo_profile(name: &str) -> Option<Node> {
-    profile_named(name).map(Node::YoloProfile)
+async fn yolo_profile(name: &str) -> Option<Node> {
+    profile_named(name).await.map(Node::YoloProfile)
 }
 
 /// The script one tagged id names.
 ///
 /// `rest` is `<kind>:<name>` for a script every blueprint gets, and
 /// `<kind>@<blueprint>:<name>` for one blueprint's own.
-fn script(ctx: &Context<'_>, rest: &str) -> async_graphql::Result<Option<Node>> {
+async fn script(ctx: &Context<'_>, rest: &str) -> async_graphql::Result<Option<Node>> {
     let state = ctx.data_unchecked::<AppState>();
     let Some((scope, name)) = rest.split_once(':') else {
         return Ok(None);
@@ -175,9 +177,16 @@ fn script(ctx: &Context<'_>, rest: &str) -> async_graphql::Result<Option<Node>> 
         Some((kind, blueprint)) => (kind, Some(blueprint)),
         None => (scope, None),
     };
+    // Resolved on this task and walked on the blocking pool, as the listing
+    // does.
+    let config = state.current_config();
+    let dirs = super::super::tools::AgentDirs::of(&config);
+    let owner = blueprint.map(str::to_string);
+    let listed =
+        blocking(move || super::super::scripts::registered(&config, &dirs, owner.as_deref())).await;
     // A blueprint name the script routes refuse is a name no script can be
     // filed under, so an id carrying one names nothing rather than failing.
-    let Ok(listed) = super::super::scripts::registered(state, blueprint) else {
+    let Ok(listed) = listed else {
         return Ok(None);
     };
     Ok(listed

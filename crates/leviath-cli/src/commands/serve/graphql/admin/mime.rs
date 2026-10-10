@@ -3,6 +3,7 @@
 
 use async_graphql::{Context, InputObject, OneofObject, SimpleObject};
 
+use super::super::super::blocking::blocking;
 use super::super::super::core::error::ServeError;
 use super::super::super::types::AppState;
 use super::super::error::IntoGraphql;
@@ -116,30 +117,33 @@ pub(crate) async fn upsert_mime_row(
     ctx: &Context<'_>,
     request: UpsertMimeRowRequest,
 ) -> async_graphql::Result<UpsertMimeRowResult> {
-    let state = ctx.data_unchecked::<AppState>();
+    let state = ctx.data_unchecked::<AppState>().clone();
     let row = request.row;
     let tokens = row.tokens.map(MimeTokensWrite::into_spec);
-    let written = super::super::super::mime::write_edit(
-        &row.mime_type,
-        crate::commands::mime_rows::RowEdit {
-            family: row.family,
-            text: row.is_text,
-            tokens,
-            extensions: row.extensions,
-            magic: row.magic,
-            stand_in: row.stand_in,
-            check: row.check,
-        },
-    )
-    .gql()?;
-    Ok(UpsertMimeRowResult {
+    let edit = crate::commands::mime_rows::RowEdit {
+        family: row.family,
+        text: row.is_text,
+        tokens,
+        extensions: row.extensions,
+        magic: row.magic,
+        stand_in: row.stand_in,
+        check: row.check,
+    };
+    // Resolved on this task; the write, and the registry read back after it,
+    // happen on the blocking pool.
+    let path = super::super::super::mime::mime_types_path();
+    let (written, entry) = blocking(move || {
+        let written = super::super::super::mime::write_edit(&path, &row.mime_type, edit)?;
         // The registry rather than the write: a row inherits from every broader
         // row above it, so what a run resolves for this type is not what the
         // write said on its own.
-        mime_row: MimeRow::from_entry(super::super::super::blobs::mime_row_named(
-            state,
-            &written.mime_type,
-        )),
+        let entry = super::super::super::blobs::mime_row_named(&state, &written.mime_type);
+        Ok::<_, ServeError>((written, entry))
+    })
+    .await
+    .gql()?;
+    Ok(UpsertMimeRowResult {
+        mime_row: MimeRow::from_entry(entry),
         is_new: written.created,
     })
 }
@@ -151,7 +155,11 @@ pub(crate) async fn upsert_mime_row(
 pub(crate) async fn delete_mime_row(
     request: DeleteMimeRowRequest,
 ) -> async_graphql::Result<DeleteMimeRowResult> {
-    let removed = super::super::super::mime::remove_row_named(&request.mime_type).gql()?;
+    let path = super::super::super::mime::mime_types_path();
+    let mime_type = request.mime_type.clone();
+    let removed = blocking(move || super::super::super::mime::remove_row_named(&path, &mime_type))
+        .await
+        .gql()?;
     match removed {
         true => Ok(DeleteMimeRowResult {
             deleted_mime_type: request.mime_type,
