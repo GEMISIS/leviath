@@ -42,14 +42,6 @@ pub enum CredentialStoreKind {
     Keychain,
 }
 
-impl CredentialStoreKind {
-    /// True when secrets belong in the OS store rather than in Leviath's files.
-    #[cfg(test)]
-    pub fn is_keychain(self) -> bool {
-        matches!(self, Self::Keychain)
-    }
-}
-
 /// The account name for a provider's API key.
 ///
 /// Namespaced so a future non-provider secret cannot collide with a provider
@@ -161,8 +153,6 @@ mod tests {
     #[test]
     fn file_is_the_default_backend() {
         assert_eq!(CredentialStoreKind::default(), CredentialStoreKind::File);
-        assert!(!CredentialStoreKind::default().is_keychain());
-        assert!(CredentialStoreKind::Keychain.is_keychain());
     }
 
     #[test]

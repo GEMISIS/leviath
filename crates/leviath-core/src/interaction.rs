@@ -656,14 +656,6 @@ pub fn request_id(run_id: &str, kind: &str, tail: &str) -> String {
     format!("{run_id}-{kind}-{tail}")
 }
 
-/// What every id of one kind, for one run, starts with. Built here so it
-/// cannot drift from [`request_id`]: a reader matching a hand-written prefix
-/// would still match after the scheme moved, on the wrong requests.
-#[cfg(test)]
-pub fn request_id_prefix(run_id: &str, kind: &str) -> String {
-    format!("{run_id}-{kind}-")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,12 +680,6 @@ mod tests {
             request_id("run-a", "gate", "call_1"),
             "one call can be asked about twice, for different reasons"
         );
-        // What a reader telling one run's kinds apart matches on, built from the
-        // same pieces in the same order.
-        let prefix = request_id_prefix("run-a", "point");
-        assert_eq!(prefix, "run-a-point-");
-        assert!(request_id("run-a", "point", "plan-0").starts_with(&prefix));
-        assert!(!request_id("run-a", "approve", "call_1").starts_with(&prefix));
     }
 
     /// "Allow tool call: `bash`?" asks whether to run a shell command without
