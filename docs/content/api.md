@@ -300,8 +300,9 @@ directory already exists, and is announced as `fs.mkdir`.
 ### Routes kept for older clients
 
 The `/api/agents` routes earlier releases served still answer, so a client written against them
-keeps working. They are kept for older clients only and will be removed, so write new code against
-`/api/runs`. The spec lists each one as deprecated.
+keeps working. They are kept for older clients only and are removed in 0.7.0, so write new code
+against `/api/runs`. The spec lists each one as deprecated, and every answer from one carries a
+`Deprecation` header ([RFC 9745](https://www.rfc-editor.org/rfc/rfc9745)).
 
 | Old route | What it is now |
 |---|---|

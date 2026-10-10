@@ -7,6 +7,7 @@ use leviath_core::interaction::{
     AnswerOption, ApprovalScope, InteractionRequest, InteractionResponse,
 };
 
+use super::core::error::ServeError;
 use super::types::*;
 
 /// An open request as the API shows it: the request, and each option it
@@ -26,10 +27,8 @@ struct ShownRequest<'a> {
 pub(super) async fn get_interaction(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let request = super::core::spawn::run_interaction(&state, &id)
-        .await
-        .map_err(|e| super::core::error::as_api_error(&e))?;
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let request = super::core::spawn::run_interaction(&state, &id).await?;
     Ok(Json(
         serde_json::to_value(ShownRequest {
             request: &request,
@@ -61,13 +60,12 @@ pub(super) async fn submit_interaction(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     request: axum::extract::Request,
-) -> Result<StatusCode, ApiError> {
+) -> Result<StatusCode, ServeError> {
     let max_upload = state.limits.request_limits.max_upload_bytes;
     let (mut body, mut parts): (SubmitInteractionReq, _) =
         super::upload::json_or_multipart(&state, request, max_upload).await?;
     if body.approved == Some(true) && body.feedback.is_some() {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
+        return Err(ServeError::BadRequest(
             "feedback goes with a deny: send it with \"approved\": false, or drop it to approve"
                 .to_string(),
         ));
@@ -76,8 +74,7 @@ pub(super) async fn submit_interaction(
     // them to sit beside. Named workdir files need a run this server can
     // see; an upload goes through either way.
     if body.value.is_none() && (!parts.is_empty() || !body.parts.is_empty()) {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
+        return Err(ServeError::BadRequest(
             "files go with a text answer: send them with a \"value\"".to_string(),
         ));
     }
@@ -101,7 +98,6 @@ pub(super) async fn submit_interaction(
     super::core::spawn::answer_interaction(&state, response)
         .await
         .map(|()| StatusCode::ACCEPTED)
-        .map_err(|e| super::core::error::as_api_error(&e))
 }
 
 /// The response an `option` answer names: the word of one of the open
@@ -114,24 +110,21 @@ async fn option_response(
     state: &AppState,
     body: &SubmitInteractionReq,
     word: &str,
-) -> Result<InteractionResponse, ApiError> {
+) -> Result<InteractionResponse, ServeError> {
     if body.value.is_some()
         || body.choice_index.is_some()
         || body.approved.is_some()
         || body.scope.is_some()
     {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
+        return Err(ServeError::BadRequest(
             "`option` is a whole answer: send it without `value`, `choice_index`, `approved` \
              or `scope`"
                 .to_string(),
         ));
     }
-    let request = super::core::spawn::open_request(state, &body.request_id)
-        .await
-        .map_err(|e| super::core::error::as_api_error(&e))?;
+    let request = super::core::spawn::open_request(state, &body.request_id).await?;
     leviath_core::interaction::answer_with_option(&request, word, body.feedback.as_deref())
-        .map_err(|why| err(StatusCode::BAD_REQUEST, why))
+        .map_err(ServeError::BadRequest)
 }
 
 /// The parts a request names inside run `id`'s workdir, by `listed` and by
@@ -146,7 +139,7 @@ fn workdir_parts(
     text: &str,
     listed: &[super::upload::PartRef],
     max_upload: u64,
-) -> Result<(String, Vec<leviath_core::mime::InboundPart>), ApiError> {
+) -> Result<(String, Vec<leviath_core::mime::InboundPart>), ServeError> {
     match crate::runstate::read_meta(id) {
         Ok(meta) => {
             let workdir = std::path::Path::new(&meta.workdir);
@@ -155,10 +148,9 @@ fn workdir_parts(
             parts.extend(named);
             Ok((kept, parts))
         }
-        Err(_) if !listed.is_empty() => Err(err(
-            StatusCode::NOT_FOUND,
-            format!("Agent run '{id}' has no working directory this server can read parts from"),
-        )),
+        Err(_) if !listed.is_empty() => Err(ServeError::NotFound(format!(
+            "Agent run '{id}' has no working directory this server can read parts from"
+        ))),
         Err(_) => Ok((text.to_string(), Vec::new())),
     }
 }
@@ -168,7 +160,7 @@ pub(super) async fn send_message(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     request: axum::extract::Request,
-) -> Result<StatusCode, ApiError> {
+) -> Result<StatusCode, ServeError> {
     let max_upload = state.limits.request_limits.max_upload_bytes;
     let (mut body, mut parts): (SendMessageReq, _) =
         super::upload::json_or_multipart(&state, request, max_upload).await?;
@@ -178,7 +170,6 @@ pub(super) async fn send_message(
     super::core::spawn::send_message(&state, &id, body.message, body.target_region, parts)
         .await
         .map(|()| StatusCode::ACCEPTED)
-        .map_err(|e| super::core::error::as_api_error(&e))
 }
 
 #[cfg(test)]

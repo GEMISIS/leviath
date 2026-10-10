@@ -119,13 +119,6 @@ pub(crate) fn entry(usage: &Usage) -> serde_json::Value {
     }
 }
 
-/// Unix seconds now.
-pub(crate) fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
 /// What `lev providers quota` prints for `usage`.
 pub(crate) fn report_text(usage: &[Usage], json_out: bool, now: u64) -> String {
     match (json_out, usage.is_empty()) {
@@ -159,7 +152,10 @@ pub(crate) fn registry_for(config: &Config) -> leviath_runtime::ProviderRegistry
 pub(super) async fn show(json_out: bool, config_path: &std::path::Path) -> anyhow::Result<()> {
     let config = Config::load_from_path_public(config_path)?;
     let usage = usage(&config, &registry_for(&config)).await;
-    print!("{}", report_text(&usage, json_out, now()));
+    print!(
+        "{}",
+        report_text(&usage, json_out, leviath_core::duration::now_secs() as u64)
+    );
     Ok(())
 }
 
@@ -215,7 +211,6 @@ mod tests {
             0,
         );
         assert!(bare.starts_with("codex\n"), "{bare}");
-        assert!(now() > 0);
     }
 
     #[tokio::test]

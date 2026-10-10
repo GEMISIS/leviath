@@ -25,7 +25,7 @@ pub(super) async fn quota_checks(
     config: &Config,
     registry: &leviath_runtime::ProviderRegistry,
 ) -> Vec<Check> {
-    let now = crate::commands::providers::quota::now();
+    let now = leviath_core::duration::now_secs() as u64;
     crate::commands::providers::quota::usage(config, registry)
         .await
         .into_iter()

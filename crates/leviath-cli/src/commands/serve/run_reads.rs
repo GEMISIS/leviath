@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 
-use super::core::error::as_api_error;
+use super::core::error::ServeError;
 use super::core::{history, inspect, lifecycle};
 use super::runs::run_json;
 use super::types::*;
@@ -22,20 +22,19 @@ use crate::runstate::{self, ContextSnapshot};
 /// `GET /api/runs/{id}`: the run's record.
 pub(super) async fn get_run(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<serde_json::Value>, ServeError> {
     runstate::read_meta(&id)
         .map(|m| Json(run_json(&m, leviath_core::duration::now_secs())))
-        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Run '{id}' not found")))
+        .map_err(|_| ServeError::run_not_found(&id))
 }
 
 /// `GET /api/runs/{id}/spec`: the spec the run was resolved to.
 pub(super) async fn run_spec(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<leviath_runtime::spec::run_spec::RunSpec>, ApiError> {
+) -> Result<Json<leviath_runtime::spec::run_spec::RunSpec>, ServeError> {
     super::blocking::blocking(move || inspect::spec(&id))
         .await
         .map(Json)
-        .map_err(|e| as_api_error(&e))
 }
 
 /// Query for `GET /api/runs/{id}/state`.
@@ -50,11 +49,8 @@ pub(super) async fn run_state(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<StateQuery>,
-) -> Result<Json<leviath_runtime::state::RunState>, ApiError> {
-    inspect::state(&state, &id, query.at)
-        .await
-        .map(Json)
-        .map_err(|e| as_api_error(&e))
+) -> Result<Json<leviath_runtime::state::RunState>, ServeError> {
+    inspect::state(&state, &id, query.at).await.map(Json)
 }
 
 /// Query for `GET /api/runs/{id}/deltas`.
@@ -70,22 +66,20 @@ pub(super) struct DeltasQuery {
 pub(super) async fn run_deltas(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<DeltasQuery>,
-) -> Result<Json<Vec<leviath_runtime::state::StateDelta>>, ApiError> {
+) -> Result<Json<Vec<leviath_runtime::state::StateDelta>>, ServeError> {
     super::blocking::blocking(move || inspect::deltas(&id, query.from, query.to))
         .await
         .map(Json)
-        .map_err(|e| as_api_error(&e))
 }
 
 /// `GET /api/runs/{id}/graph`: the run's stages and edges, with how often it
 /// entered each stage and took each edge.
 pub(super) async fn run_graph(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<inspect::RunGraphView>, ApiError> {
+) -> Result<Json<inspect::RunGraphView>, ServeError> {
     super::blocking::blocking(move || inspect::graph(&id))
         .await
         .map(Json)
-        .map_err(|e| as_api_error(&e))
 }
 
 /// `GET /api/runs/{id}/children`: the runs this one started, one level down.
@@ -106,11 +100,10 @@ pub(super) async fn run_children(
 /// `GET /api/runs/{id}/context`: the run's context window as of its last step.
 pub(super) async fn run_context(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<ContextSnapshot>, ApiError> {
+) -> Result<Json<ContextSnapshot>, ServeError> {
     super::blocking::blocking(move || inspect::context(&id))
         .await
         .map(Json)
-        .map_err(|e| as_api_error(&e))
 }
 
 /// `GET /api/runs/{id}/context/history`: the run's context window over time,
@@ -122,7 +115,7 @@ pub(super) async fn run_context(
 pub(super) async fn run_context_history(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<HistoryQuery>,
-) -> Result<Json<Page<leviath_runtime::runfile::history::RunPoint>>, ApiError> {
+) -> Result<Json<Page<leviath_runtime::runfile::history::RunPoint>>, ServeError> {
     context_history(id, query).await.map(Json)
 }
 
@@ -130,17 +123,14 @@ pub(super) async fn run_context_history(
 pub(super) async fn context_history(
     id: String,
     query: HistoryQuery,
-) -> Result<Page<leviath_runtime::runfile::history::RunPoint>, ApiError> {
+) -> Result<Page<leviath_runtime::runfile::history::RunPoint>, ServeError> {
     let spec = history::HistorySpec::resolve(
         &id,
         query.limit,
         query.order.as_deref(),
         query.cursor.as_deref(),
-    )
-    .map_err(|e| as_api_error(&e))?;
-    let page = super::blocking::blocking(move || history::page(&id, &spec))
-        .await
-        .map_err(|e| as_api_error(&e))?;
+    )?;
+    let page = super::blocking::blocking(move || history::page(&id, &spec)).await?;
     Ok(Page::new(
         page.points,
         page.next_cursor,
@@ -156,16 +146,12 @@ pub(super) async fn context_history(
 pub(super) async fn run_logs(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<LogsQuery>,
-) -> Result<String, ApiError> {
+) -> Result<String, ServeError> {
     if !runstate::run_dir(&id).exists() {
-        return Err(err(StatusCode::NOT_FOUND, format!("Run '{id}' not found")));
+        return Err(ServeError::run_not_found(&id));
     }
-    let selector = query
-        .selector()
-        .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
-    let stream = query
-        .log_stream()
-        .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
+    let selector = query.selector().map_err(ServeError::BadRequest)?;
+    let stream = query.log_stream().map_err(ServeError::BadRequest)?;
     // Clamped like every other limit in this API: `tail` is client-controlled
     // and `stage=all` multiplies it by the stage count, so an unclamped value
     // was an arbitrary-size allocation on request.
@@ -191,19 +177,17 @@ pub(super) async fn run_file(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<FileQuery>,
-) -> Result<Json<FileOrListing>, ApiError> {
+) -> Result<Json<FileOrListing>, ServeError> {
     use super::core::files;
 
-    let meta = runstate::read_meta(&id)
-        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Run '{id}' not found")))?;
-    let source = files::FileSource::parse(query.source.as_deref()).map_err(|e| as_api_error(&e))?;
+    let meta = runstate::read_meta(&id).map_err(|_| ServeError::run_not_found(&id))?;
+    let source = files::FileSource::parse(query.source.as_deref())?;
     // A listing types each row by name with the same registry `/files/raw`
     // types the bytes with, so a console gets the run's answer, not its own.
     let registry = state.current_config().mime_registry_or_defaults();
 
     let Some(ref requested_path) = query.path else {
-        let listed = files::listing(&meta, source, None, query.hidden, &registry)
-            .map_err(|e| as_api_error(&e))?;
+        let listed = files::listing(&meta, source, None, query.hidden, &registry)?;
         return Ok(Json(FileOrListing::Listing(Box::new(listing_resp(listed)))));
     };
 
@@ -213,9 +197,7 @@ pub(super) async fn run_file(
         query.offset.unwrap_or(0),
         query.hidden,
         &registry,
-    )
-    .map_err(|e| as_api_error(&e))?
-    {
+    )? {
         files::FileRead::Listing(listed) => Ok(Json(FileOrListing::Listing(Box::new(
             listing_resp(*listed),
         )))),
@@ -262,9 +244,8 @@ fn listing_resp(listed: super::core::files::FileListing) -> RunFileListing {
 /// stage's output beside it.
 pub(super) async fn run_result(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<RunResultResp>, ApiError> {
-    let meta = runstate::read_meta(&id)
-        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Run '{id}' not found")))?;
+) -> Result<Json<RunResultResp>, ServeError> {
+    let meta = runstate::read_meta(&id).map_err(|_| ServeError::run_not_found(&id))?;
     let output = runstate::tail_run_logs(
         &id,
         runstate::StageSelector::Current,
@@ -289,11 +270,9 @@ pub(super) async fn run_result(
 /// which is an empty list rather than a miss: the run exists.
 pub(super) async fn run_stages(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<RunStagesResp>, ApiError> {
+) -> Result<Json<RunStagesResp>, ServeError> {
     let read = id.clone();
-    let stages = super::blocking::blocking(move || inspect::stages(&read))
-        .await
-        .map_err(|e| as_api_error(&e))?;
+    let stages = super::blocking::blocking(move || inspect::stages(&read)).await?;
     Ok(Json(RunStagesResp { run_id: id, stages }))
 }
 
@@ -303,11 +282,10 @@ pub(super) async fn run_stages(
 pub(super) async fn cancel_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<StatusCode, ServeError> {
     lifecycle::act(&state, &id, lifecycle::Action::Cancel)
         .await
         .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|e| as_api_error(&e))
 }
 
 /// `POST /api/runs/{id}/pause`: park a run.
@@ -318,22 +296,20 @@ pub(super) async fn cancel_run(
 pub(super) async fn pause_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<StatusCode, ServeError> {
     lifecycle::act(&state, &id, lifecycle::Action::Pause)
         .await
         .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|e| as_api_error(&e))
 }
 
 /// `POST /api/runs/{id}/resume`: un-pause a run.
 pub(super) async fn resume_run(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<StatusCode, ServeError> {
     lifecycle::act(&state, &id, lifecycle::Action::Resume)
         .await
         .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|e| as_api_error(&e))
 }
 
 #[cfg(test)]

@@ -11,7 +11,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 
 use super::config_types::API_VERSION;
-use super::types::{AppState, err};
+use super::core::error::ServeError;
+use super::types::AppState;
 use super::update_job::{ApplyRequest, parse_request};
 use crate::commands::update::{UpdateArgs, UpdateEnv, plan, plan_json};
 
@@ -94,15 +95,13 @@ pub(super) async fn post_update(
 ) -> axum::response::Response {
     let req = match parse_request(&body) {
         Ok(req) => req,
-        Err(message) => return err(StatusCode::BAD_REQUEST, message).into_response(),
+        Err(message) => return ServeError::BadRequest(message).into_response(),
     };
     match state.update_jobs.spawn(req, &state.event_tx) {
         Ok(job) => (StatusCode::ACCEPTED, Json(started(&job.id, req))).into_response(),
-        Err(running) => err(
-            StatusCode::CONFLICT,
-            format!("update {running} is already running"),
-        )
-        .into_response(),
+        Err(running) => {
+            ServeError::Conflict(format!("update {running} is already running")).into_response()
+        }
     }
 }
 
@@ -138,7 +137,7 @@ pub(super) async fn get_update_job(
 ) -> axum::response::Response {
     match state.update_jobs.get(&id) {
         Some(job) => Json(job).into_response(),
-        None => err(StatusCode::NOT_FOUND, format!("no update job {id}")).into_response(),
+        None => ServeError::NotFound(format!("no update job {id}")).into_response(),
     }
 }
 

@@ -1437,7 +1437,7 @@ serves it.
 | `lev providers order --clear` | | Remove the order, so `default_provider` alone decides |
 | `lev providers retention` | `--json` | What each provider keeps of a request, how that is controlled, and Bedrock's live account mode. See [data retention](/docs/providers#data-retention) |
 | `lev providers retention set <zero\|off>` | | Write `[providers] zero_retention`; `zero` also sets Bedrock's account mode to `none` |
-| `lev providers retention bedrock <MODE>` | | Set Bedrock's account data retention mode directly: `none`, `default`, `aws_review` or `inherit` |
+| `lev providers retention bedrock <MODE>` | | Set Bedrock's account data retention mode directly: `none`, `default`, `aws_review`, `provider_data_share` or `inherit` |
 | `lev providers quota` | `--json` | How much of each signed-in subscription (Codex, Grok) is used, against what limit, and when each window resets |
 
 The order is the whole list of providers a bare model name may run on. A configured provider that

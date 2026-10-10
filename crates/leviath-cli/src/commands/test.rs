@@ -124,12 +124,9 @@ type RegistryBuilder =
 /// `impl FnOnce` bound so every caller - production's `build_registry_from_config` and every
 /// test's distinct `mock_registry_builder(...)` closure - shares exactly
 /// ONE monomorphization of this (large, many-branch) function instead of
-/// one per closure type. This was a confirmed generic-monomorphization
-/// coverage-attribution artifact: every source position had a covered
-/// instantiation (confirmed via HTML/JSON segment inspection showing no
-/// red/uncovered regions anywhere in this function), but the summary table
-/// still reported 32 regions / 21 lines missed - the largest such residual
-/// in this crate.
+/// one per closure type. With one per closure type, every source position has
+/// a covered instantiation and the coverage summary still counts the
+/// uncovered ones in the others as missed regions.
 async fn execute_with_registry(
     args: TestArgs,
     build_registry: RegistryBuilder,
@@ -157,9 +154,7 @@ async fn execute_with_registry(
         println!("  input = \"Hello\"");
         println!("  expect_contains = \"hello\"");
         // The other two keys are deliberately not spelled out here: a second
-        // partial example is a second thing to drift. `expect_tool_call` and
-        // `max_tokens` were each parsed and ignored for months, which is what
-        // an undocumented format buys.
+        // partial example is a second thing to drift.
         println!("\nAlso available: expect_tool_call, max_tokens.");
         println!("See https://leviath.dev/docs/cli#lev-test-path for what each does.");
         return Ok(());
@@ -564,10 +559,9 @@ async fn run_test_case(
         model: model_name.to_string(),
         max_tokens,
         temperature,
-        // The stage's own tools, so a case can assert on a tool call at all.
-        // Advertising none was the prior behaviour and made `expect_tool_call`
-        // unsatisfiable: the model cannot call a tool it was never offered, so
-        // every such assertion failed whatever the agent did.
+        // The stage's own tools, so a case can assert on a tool call at all:
+        // the model cannot call a tool it was never offered, and with none an
+        // `expect_tool_call` would fail whatever the agent did.
         tools: stage_tools(stage),
         extra,
         request_timeout_secs: None,
@@ -635,7 +629,7 @@ fn validate_test_case(test: &TestCase) -> bool {
 /// Shorten a model response for the assertion-failure preview.
 ///
 /// Cuts on a char boundary: this runs on raw model output, and a byte cut-off
-/// through an emoji once panicked `lev test` outright.
+/// through a multi-byte character panics.
 fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()

@@ -175,9 +175,9 @@ fn warn_held_checkpoints(run: &LocalRun) {
 /// ships.
 ///
 /// The staleness note is not gated on `--yolo`. An install that is versions
-/// behind is worth saying however the run was launched, and it is the reason
-/// this exists: nothing said it at the moment it mattered, so a run could keep
-/// using an old blueprint long after the fix had shipped.
+/// behind is worth saying however the run was launched, and this is the moment
+/// it matters: unsaid, a run keeps using an old blueprint long after the fix
+/// has shipped.
 fn held_checkpoint_warning_for_spawn(run: &LocalRun) -> Vec<String> {
     let path = run.manifest.as_path();
     let Some(loaded) = crate::commands::run::locate::loaded_at(path) else {

@@ -50,7 +50,7 @@ pub(crate) fn open(run_id: &str) -> Result<Option<RunFileReader>, ServeError> {
 
 /// The run's file, or a miss naming the run.
 pub(crate) fn require(run_id: &str) -> Result<RunFileReader, ServeError> {
-    open(run_id)?.ok_or_else(|| ServeError::NotFound(format!("Run '{run_id}' not found")))
+    open(run_id)?.ok_or_else(|| ServeError::run_not_found(run_id))
 }
 
 /// A run file that would not read, said so that whoever reads it knows what

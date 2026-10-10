@@ -714,7 +714,12 @@ fn decline_update_check(_: &str) -> Result<String, String> {
 /// line at all, which is a guess that can be wrong in both directions.
 fn check_latest(plan: &UpdatePlan, env: &UpdateEnv, version: &str) -> latest::LatestCheck {
     match plan.method.channel() {
-        Some(channel) => latest::check_with(channel, version, &env.latest, latest::now_secs()),
+        Some(channel) => latest::check_with(
+            channel,
+            version,
+            &env.latest,
+            leviath_core::duration::now_secs() as u64,
+        ),
         None => latest::LatestCheck::default(),
     }
 }

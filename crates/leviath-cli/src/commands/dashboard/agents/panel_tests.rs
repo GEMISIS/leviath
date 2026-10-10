@@ -1834,8 +1834,8 @@ fn bold_buttons(dash: &mut Dashboard, w: u16, h: u16) -> Vec<(u16, u16)> {
 }
 
 /// The chord path through the same overlay. `Ctrl-E` is inline code here, the
-/// same as in every other long-form box: this is the overlay that used to
-/// spend that chord on `$EDITOR`, which is now on `F2`.
+/// same as in every other long-form box: `$EDITOR` is on `F2`, so the chord is
+/// free.
 #[test]
 fn formatting_chords_reach_the_focused_prompt_box() {
     let (mut dash, root) = dashboard("prompts_chords");
@@ -2239,6 +2239,29 @@ fn a_model_is_dragged_along_the_chain_by_its_grip() {
     assert!(seen("alfa-model") < seen("bravo-model"), "{screen}");
     dash.agents().editor.as_mut().unwrap().model_drag = None;
 
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A tools chooser settled, or a model drag let go, after the inspector has
+/// left the stage it began on changes nothing: the stage it was for is no
+/// longer the one shown.
+#[test]
+fn a_stage_gesture_that_ends_off_its_stage_changes_nothing() {
+    let (mut dash, root) = dashboard("stage_gesture_off_stage");
+    open_stage(&mut dash, "own", "work", StageTab::Model);
+    goto(&mut dash, FieldId::ToolSet);
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(picker_open(&mut dash));
+    dash.handle_key(key(KeyCode::Char(' ')));
+    dash.agents().editor.as_mut().unwrap().panel = Panel::Agent;
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(!picker_open(&mut dash));
+    let editor = dash.agents().editor.as_mut().unwrap();
+    assert!(editor.doc.stage("work").unwrap().tools.is_empty());
+
+    editor.model_drag = Some(ModelDrag { from: 0, to: 1 });
+    assert!(dash.editor_inspector_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 0, 0)));
+    assert!(dash.agents().editor.as_ref().unwrap().model_drag.is_none());
     let _ = std::fs::remove_dir_all(&root);
 }
 

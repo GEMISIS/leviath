@@ -436,7 +436,7 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
         config_path: crate::config::Config::config_path(),
         store_path: leviath_mcp::AuthStore::default_path().unwrap_or_default(),
         opener: std::sync::Arc::new(leviath_sys::open_url),
-        clock: mcp_system_now,
+        clock: leviath_core::duration::now_secs,
         // Somebody is watching the MCP screen, so the handshake keeps the
         // deadline that is right for a person.
         connect_timeout: leviath_mcp::DEFAULT_CONNECT_TIMEOUT,
@@ -511,14 +511,6 @@ fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboar
     dashboard
 }
 
-/// Wall-clock Unix time in seconds, for the production MCP context.
-fn mcp_system_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// Load config, build the dashboard + engine, and run the event loop against
 /// the injected [`TerminalSetup`] and [`EventSource`]. This is the whole
 /// `lev dash` command minus the two real-terminal doubles - so it is fully
@@ -589,11 +581,6 @@ mod tests {
         // Dropping the receiver is how the dashboard says it has exited.
         drop(rx);
         task.await.expect("the loop returns rather than hanging");
-    }
-
-    #[test]
-    fn mcp_system_now_advances_past_the_epoch() {
-        assert!(mcp_system_now() > 1_600_000_000);
     }
 
     #[test]

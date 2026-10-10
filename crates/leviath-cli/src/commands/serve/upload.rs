@@ -13,13 +13,11 @@
 use std::path::Path;
 
 use axum::extract::multipart::Multipart;
-use axum::http::StatusCode;
 use leviath_core::mime::{Delivery, InboundPart, MimeType};
 use serde::{Deserialize, Serialize};
 
 use super::core::attachments;
-use super::core::error::as_api_error;
-use super::types::{ApiError, err};
+use super::core::error::ServeError;
 
 /// One entry of a JSON `parts` list.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,8 +42,8 @@ pub(super) struct PartRef {
 }
 
 /// The `deliver` word a request used, as the runtime's choice.
-fn delivery(word: &str) -> Result<Delivery, ApiError> {
-    attachments::delivery(word).map_err(|e| as_api_error(&e))
+fn delivery(word: &str) -> Result<Delivery, ServeError> {
+    attachments::delivery(word)
 }
 
 /// A file inside `workdir` as a part, refused when the path escapes, the
@@ -54,8 +52,8 @@ fn delivery(word: &str) -> Result<Delivery, ApiError> {
 /// The reading itself is [`attachments::read_within`], which GraphQL's
 /// `attachments` lists call too; this wraps its refusal in the status and body
 /// a REST client reads.
-fn read_within(path: &str, workdir: &Path, max_bytes: u64) -> Result<InboundPart, ApiError> {
-    attachments::read_within(path, workdir, max_bytes).map_err(|e| as_api_error(&e))
+fn read_within(path: &str, workdir: &Path, max_bytes: u64) -> Result<InboundPart, ServeError> {
+    attachments::read_within(path, workdir, max_bytes)
 }
 
 /// Every entry of a JSON `parts` list, read from the workdir.
@@ -63,7 +61,7 @@ pub(super) fn json_parts(
     listed: &[PartRef],
     workdir: &Path,
     max_bytes: u64,
-) -> Result<Vec<InboundPart>, ApiError> {
+) -> Result<Vec<InboundPart>, ServeError> {
     let mut parts = Vec::with_capacity(listed.len());
     for item in listed {
         let mut part = read_within(&item.path, workdir, max_bytes)?;
@@ -72,8 +70,7 @@ pub(super) fn json_parts(
             part.name = name.clone();
         }
         if let Some(t) = &item.mime_type {
-            part.mime_type =
-                Some(attachments::mime_type(&item.path, t).map_err(|e| as_api_error(&e))?);
+            part.mime_type = Some(attachments::mime_type(&item.path, t)?);
         }
         if let Some(d) = &item.deliver {
             part.deliver = Some(delivery(d)?);
@@ -92,7 +89,7 @@ pub(super) fn inline_parts(
     region: Option<&str>,
     workdir: &Path,
     max_bytes: u64,
-) -> Result<(String, Vec<InboundPart>), ApiError> {
+) -> Result<(String, Vec<InboundPart>), ServeError> {
     let (text, parts, unresolved) = leviath_core::mime::inline_refs::parts_from_text(
         text,
         region,
@@ -128,7 +125,7 @@ pub(super) struct MultipartBody {
 pub(super) async fn read_multipart(
     mut multipart: Multipart,
     max_bytes: u64,
-) -> Result<MultipartBody, ApiError> {
+) -> Result<MultipartBody, ServeError> {
     let mut request = None;
     let mut parts = Vec::new();
     loop {
@@ -136,25 +133,18 @@ pub(super) async fn read_multipart(
             Ok(Some(field)) => field,
             Ok(None) => break,
             Err(e) => {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    format!("malformed multipart body: {e}"),
-                ));
+                return Err(ServeError::BadRequest(format!(
+                    "malformed multipart body: {e}"
+                )));
             }
         };
         let name = field.name().unwrap_or_default().to_string();
         if name == "request" {
             let text = field.text().await.map_err(|e| {
-                err(
-                    StatusCode::BAD_REQUEST,
-                    format!("the request field could not be read: {e}"),
-                )
+                ServeError::BadRequest(format!("the request field could not be read: {e}"))
             })?;
             request = Some(serde_json::from_str(&text).map_err(|e| {
-                err(
-                    StatusCode::BAD_REQUEST,
-                    format!("the request field is not JSON: {e}"),
-                )
+                ServeError::BadRequest(format!("the request field is not JSON: {e}"))
             })?);
             continue;
         }
@@ -162,13 +152,10 @@ pub(super) async fn read_multipart(
             .strip_prefix("part")
             .map(|rest| rest.strip_prefix(':').filter(|r| !r.is_empty()))
         else {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "unexpected multipart field '{name}'; send `request` and files named `part` \
+            return Err(ServeError::BadRequest(format!(
+                "unexpected multipart field '{name}'; send `request` and files named `part` \
                      or `part:<region>`"
-                ),
-            ));
+            )));
         };
         let region = region.map(str::to_string);
         let file_name = field
@@ -180,26 +167,17 @@ pub(super) async fn read_multipart(
             .and_then(|t| MimeType::parse(t).ok())
             .filter(|t| t.as_str() != "application/octet-stream");
         let data = field.bytes().await.map_err(|e| {
-            err(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("a file part could not be read: {e}"),
-            )
+            ServeError::PayloadTooLarge(format!("a file part could not be read: {e}"))
         })?;
         if data.is_empty() {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "a file part is empty".to_string(),
-            ));
+            return Err(ServeError::BadRequest("a file part is empty".to_string()));
         }
         if data.len() as u64 > max_bytes {
-            return Err(err(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "file part '{}' is {} bytes, over the {max_bytes} byte ceiling",
-                    file_name.clone().unwrap_or_default(),
-                    data.len()
-                ),
-            ));
+            return Err(ServeError::PayloadTooLarge(format!(
+                "file part '{}' is {} bytes, over the {max_bytes} byte ceiling",
+                file_name.clone().unwrap_or_default(),
+                data.len()
+            )));
         }
         let name = file_name.unwrap_or_else(|| format!("part-{}", parts.len() + 1));
         let mut part = InboundPart::from_bytes(name, data.to_vec());
@@ -208,8 +186,7 @@ pub(super) async fn read_multipart(
         parts.push(part);
     }
     let Some(request) = request else {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
+        return Err(ServeError::BadRequest(
             "a multipart body needs a `request` field holding the JSON request".to_string(),
         ));
     };
@@ -223,7 +200,7 @@ pub(super) async fn json_or_multipart<T: serde::de::DeserializeOwned, S: Send + 
     state: &S,
     request: axum::extract::Request,
     max_bytes: u64,
-) -> Result<(T, Vec<InboundPart>), ApiError> {
+) -> Result<(T, Vec<InboundPart>), ServeError> {
     use axum::extract::FromRequest;
     let is_multipart = request
         .headers()
@@ -233,13 +210,13 @@ pub(super) async fn json_or_multipart<T: serde::de::DeserializeOwned, S: Send + 
     if is_multipart {
         let multipart = Multipart::from_request(request, state)
             .await
-            .map_err(|e| err(StatusCode::BAD_REQUEST, format!("{e}")))?;
+            .map_err(|e| ServeError::BadRequest(format!("{e}")))?;
         let body = read_multipart(multipart, max_bytes).await?;
         return Ok((body_from(body.request)?, body.parts));
     }
     let axum::Json(value) = axum::Json::<serde_json::Value>::from_request(request, state)
         .await
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e.body_text()))?;
+        .map_err(|e| ServeError::BadRequest(e.body_text()))?;
     Ok((body_from(value)?, Vec::new()))
 }
 
@@ -247,14 +224,15 @@ pub(super) async fn json_or_multipart<T: serde::de::DeserializeOwned, S: Send + 
 /// JSON extractor does.
 pub(super) fn body_from<T: serde::de::DeserializeOwned>(
     value: serde_json::Value,
-) -> Result<T, ApiError> {
+) -> Result<T, ServeError> {
     serde_json::from_value(value)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid request: {e}")))
+        .map_err(|e| ServeError::BadRequest(format!("invalid request: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
 
     fn png() -> Vec<u8> {
         b"\x89PNG\r\n\x1a\nbody".to_vec()
@@ -300,7 +278,7 @@ mod tests {
                 deliver: deliver.map(str::to_string),
                 caption: None,
             }];
-            json_parts(&listed, dir.path(), max).unwrap_err().0
+            json_parts(&listed, dir.path(), max).unwrap_err().status()
         };
         assert_eq!(refused("../x.png", None, None, 1024), StatusCode::FORBIDDEN);
         assert_eq!(
@@ -351,7 +329,7 @@ mod tests {
         assert_eq!(
             inline_parts("@hero.png", None, dir.path(), 4)
                 .unwrap_err()
-                .0,
+                .status(),
             StatusCode::PAYLOAD_TOO_LARGE
         );
     }
@@ -363,12 +341,12 @@ mod tests {
             _n: u32,
         }
         let err = body_from::<Shape>(serde_json::json!({"n": "x"})).unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert!(body_from::<Shape>(serde_json::json!({"_n": 1})).is_ok());
     }
 
     /// Read `body` as a form whose boundary is `b`.
-    async fn form(body: Vec<u8>, max: u64) -> Result<MultipartBody, ApiError> {
+    async fn form(body: Vec<u8>, max: u64) -> Result<MultipartBody, ServeError> {
         use axum::extract::FromRequest;
         let request = axum::extract::Request::builder()
             .header("content-type", "multipart/form-data; boundary=b")
@@ -398,22 +376,22 @@ mod tests {
         assert_eq!(body.parts[1].region, None);
 
         let over = form(ok.to_vec(), 2).await.unwrap_err();
-        assert_eq!(over.0, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(over.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let garbage = form(b"garbage".to_vec(), 1024).await.unwrap_err();
-        assert_eq!(garbage.0, StatusCode::BAD_REQUEST);
+        assert_eq!(garbage.status(), StatusCode::BAD_REQUEST);
         // A stream that ends inside the request field, and one that ends
         // inside a file.
         let cut_request =
             b"--b\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{}".to_vec();
         assert_eq!(
-            form(cut_request, 1024).await.unwrap_err().0,
+            form(cut_request, 1024).await.unwrap_err().status(),
             StatusCode::BAD_REQUEST
         );
         let cut_file = b"--b\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{}\r\n\
             --b\r\nContent-Disposition: form-data; name=\"part\"; filename=\"a\"\r\n\r\nxy"
             .to_vec();
         assert_eq!(
-            form(cut_file, 1024).await.unwrap_err().0,
+            form(cut_file, 1024).await.unwrap_err().status(),
             StatusCode::PAYLOAD_TOO_LARGE
         );
         // A request that is not JSON, a field that is neither the request nor
@@ -452,7 +430,7 @@ mod tests {
             ),
         ];
         for (body, max, status) in refused {
-            assert_eq!(form(body, max).await.unwrap_err().0, status);
+            assert_eq!(form(body, max).await.unwrap_err().status(), status);
         }
     }
 
@@ -479,18 +457,18 @@ mod tests {
         let e = json_or_multipart::<Shape, ()>(&(), no_boundary, 1024)
             .await
             .unwrap_err();
-        assert_eq!(e.0, StatusCode::BAD_REQUEST);
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
         let no_form = request("multipart/form-data; boundary=b", "garbage");
         let e = json_or_multipart::<Shape, ()>(&(), no_form, 1024)
             .await
             .unwrap_err();
-        assert_eq!(e.0, StatusCode::BAD_REQUEST);
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
         // JSON that is not JSON, and a form whose request is the wrong shape.
         let not_json = request("application/json", "nope");
         let e = json_or_multipart::<Shape, ()>(&(), not_json, 1024)
             .await
             .unwrap_err();
-        assert_eq!(e.0, StatusCode::BAD_REQUEST);
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
         let wrong_shape = request(
             "multipart/form-data; boundary=b",
             "--b\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{\"k\":\"x\"}\r\n--b--\r\n",
@@ -498,12 +476,12 @@ mod tests {
         let e = json_or_multipart::<Shape, ()>(&(), wrong_shape, 1024)
             .await
             .unwrap_err();
-        assert_eq!(e.0, StatusCode::BAD_REQUEST);
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
         let json_wrong_shape = request("application/json", "{\"k\":\"x\"}");
         let e = json_or_multipart::<Shape, ()>(&(), json_wrong_shape, 1024)
             .await
             .unwrap_err();
-        assert_eq!(e.0, StatusCode::BAD_REQUEST);
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
         // A whole form: the request and its file both come through.
         let whole = request(
             "multipart/form-data; boundary=b",

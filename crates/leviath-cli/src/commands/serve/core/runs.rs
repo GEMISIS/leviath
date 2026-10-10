@@ -744,9 +744,7 @@ impl RunSelection {
 pub(crate) fn deletable(id: &str, force: bool) -> Result<(), super::error::ServeError> {
     let dir = runstate::run_dir(id);
     if !dir.exists() {
-        return Err(super::error::ServeError::NotFound(format!(
-            "Run '{id}' not found"
-        )));
+        return Err(super::error::ServeError::run_not_found(id));
     }
     // Judged from the run's own record, not by asking the daemon: a daemon that
     // is down must not make every run undeletable.

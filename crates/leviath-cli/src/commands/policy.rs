@@ -475,10 +475,8 @@ mod tests {
         );
         // Without one, the platform's config directory, where the docs say.
         temp_env::with_var_unset("LEVIATH_HOME", || {
-            let path = policy_path().unwrap();
-            assert!(path.ends_with("leviath/policy.toml"), "{}", path.display());
-            let rules = rules_dir().unwrap();
-            assert!(rules.ends_with("leviath/rules"), "{}", rules.display());
+            assert!(policy_path().unwrap().ends_with("leviath/policy.toml"));
+            assert!(rules_dir().unwrap().ends_with("leviath/rules"));
         });
     }
 

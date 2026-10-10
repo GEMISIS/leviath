@@ -62,12 +62,7 @@ fn graph_title(
 fn duration_label(visit: &StageVisit) -> String {
     match visit.left_at {
         Some(left) => {
-            let secs = (left - visit.entered_at).max(0);
-            if secs < 60 {
-                format!("{secs}s")
-            } else {
-                format!("{}m{}s", secs / 60, secs % 60)
-            }
+            leviath_core::duration::precise(leviath_core::duration::between(visit.entered_at, left))
         }
         None => "…".to_string(),
     }
@@ -780,6 +775,11 @@ regions = []
             ..closed.clone()
         };
         assert_eq!(super::duration_label(&quick), "10s");
+        let long = StageVisit {
+            left_at: Some(10 + 7_200),
+            ..closed.clone()
+        };
+        assert_eq!(super::duration_label(&long), "2h0m");
         let open = StageVisit {
             left_at: None,
             ..closed

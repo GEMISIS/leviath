@@ -279,9 +279,9 @@ pub(crate) struct Dashboard {
     /// The owner-only, randomly named directory the handoff files live in,
     /// made on the first handoff and removed with the dashboard.
     ///
-    /// A fixed `<temp>/leviath-dash-prompts/<stage>-system.md` was a path
-    /// another local user could create first, as a directory of their own or
-    /// a link to one, and read or replace the prompt through. A directory
+    /// Not a fixed `<temp>/leviath-dash-prompts/<stage>-system.md`: another
+    /// local user could create that path first, as a directory of their own or
+    /// a link to one, and read or replace the prompt through it. A directory
     /// this process made, with a name nobody can guess, closes both.
     pub(super) external_edit_scratch: Option<tempfile::TempDir>,
     /// Sends resolve-and-spawn work to the background lane.
@@ -736,12 +736,11 @@ impl Dashboard {
     /// Only the newest round is applied: each carries the whole answer, so an
     /// older one describes a daemon state that has already been superseded.
     ///
-    /// The polling itself happens on [`daemon_poll_loop`], not here. It used to
-    /// be two `await`ed control round trips wedged between the tick and the
-    /// draw, which meant a busy or restarting daemon stopped the dashboard
-    /// dead - no redraw, no keys - for as long as it took to answer. Draining
-    /// a channel cannot block, so the UI now keeps its own time whatever the
-    /// daemon is doing.
+    /// The polling itself happens on [`daemon_poll_loop`], not here. A control
+    /// round trip awaited between the tick and the draw would stop the
+    /// dashboard dead - no redraw, no keys - for as long as a busy or
+    /// restarting daemon took to answer. Draining a channel cannot block, so
+    /// the UI keeps its own time whatever the daemon is doing.
     ///
     /// [`daemon_poll_loop`]: super::daemon_poll_loop
     pub(super) fn drain_daemon_polls(&mut self) {

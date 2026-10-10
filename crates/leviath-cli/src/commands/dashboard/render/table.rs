@@ -98,6 +98,7 @@ impl Dashboard {
         .height(1);
 
         let spinner_frame = SPINNER[(self.tick_count as usize) % SPINNER.len()];
+        let now = (self.clock)();
 
         // A mark column appears only while at least one run is marked, so the
         // table looks exactly as before until the feature is used.
@@ -129,7 +130,7 @@ impl Dashboard {
                     Some(reason) if !reason.needs_a_person() => C_DIM,
                     _ => agent.status.color(),
                 };
-                let started_str = relative_time(agent.started_at);
+                let started_str = relative_time(agent.started_at, now);
                 let title_str = agent
                     .title
                     .as_deref()

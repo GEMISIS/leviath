@@ -9,6 +9,7 @@ use axum::http::StatusCode;
 use axum::response::Json;
 
 use super::blueprint_types::{BlueprintDetail, RoutePair, StageRoutingInfo};
+use super::core::error::ServeError;
 use super::types::*;
 use leviath_runtime::spec::graph::{RegionDef, RunGraph, StageMode, WorkerFailure, WorkerSource};
 
@@ -43,17 +44,12 @@ tokio::task_local! {
 /// filesystem: `POST /api/blueprints` with `name = "../../../../tmp/x"` created
 /// a directory and wrote attacker-controlled TOML into it, and
 /// `DELETE /api/blueprints/{name}` recursively deleted whatever it landed on.
-fn blueprint_dir(name: &str) -> Result<PathBuf, ApiError> {
+fn blueprint_dir(name: &str) -> Result<PathBuf, ServeError> {
     if !leviath_core::is_safe_path_component(name) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!(
-                    "Invalid blueprint name '{name}': names may contain only letters, \
-                     digits, '.', '_' and '-'"
-                ),
-            }),
-        ));
+        return Err(ServeError::BadRequest(format!(
+            "Invalid blueprint name '{name}': names may contain only letters, digits, '.', \
+             '_' and '-'"
+        )));
     }
     Ok(agents_dir().join(name))
 }
@@ -216,32 +212,29 @@ const MAX_LIMIT: usize = 200;
 pub(super) async fn list_blueprints(
     State(state): State<AppState>,
     Query(query): Query<BlueprintsQuery>,
-) -> Result<Json<Page<BlueprintInfo>>, ApiError> {
+) -> Result<Json<Page<BlueprintInfo>>, ServeError> {
     let descending = match query.order.as_deref() {
         None | Some("asc") => false,
         Some("desc") => true,
         Some(other) => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                format!("Unknown order '{other}': expected asc or desc"),
-            ));
+            return Err(ServeError::BadRequest(format!(
+                "Unknown order '{other}': expected asc or desc"
+            )));
         }
     };
     let sort_name = match query.sort.as_deref() {
         None | Some("name") => "name",
         Some("version") => "version",
         Some(other) => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                format!("Unknown sort '{other}': expected name or version"),
-            ));
+            return Err(ServeError::BadRequest(format!(
+                "Unknown sort '{other}': expected name or version"
+            )));
         }
     };
     let limit = match query.limit {
         None => DEFAULT_LIMIT,
         Some(0) => {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
+            return Err(ServeError::BadRequest(
                 "`limit` must be at least 1; omit it for the default".to_string(),
             ));
         }
@@ -254,7 +247,7 @@ pub(super) async fn list_blueprints(
         None => None,
         Some(raw) => Some(
             super::cursor::decode(raw, sort_name, order_name, &digest)
-                .map_err(|e| err(StatusCode::BAD_REQUEST, e.message()))?,
+                .map_err(|e| ServeError::BadRequest(e.message()))?,
         ),
     };
 
@@ -457,15 +450,15 @@ fn fan_out_infos(graph: &RunGraph) -> Vec<FanOutInfo> {
 
 pub(super) async fn create_blueprint(
     Json(body): Json<CreateBlueprintReq>,
-) -> Result<Json<BlueprintInfo>, ApiError> {
-    written(&body.name, body.manifest, false).map_err(|e| super::core::error::as_api_error(&e))
+) -> Result<Json<BlueprintInfo>, ServeError> {
+    written(&body.name, body.manifest, false)
 }
 
 pub(super) async fn update_blueprint(
     AxumPath(name): AxumPath<String>,
     Json(body): Json<UpdateBlueprintReq>,
-) -> Result<Json<BlueprintInfo>, ApiError> {
-    written(&name, body.manifest, true).map_err(|e| super::core::error::as_api_error(&e))
+) -> Result<Json<BlueprintInfo>, ServeError> {
+    written(&name, body.manifest, true)
 }
 
 /// Install or replace a blueprint, and describe what was written.
@@ -484,10 +477,8 @@ fn written(
 
 pub(super) async fn delete_blueprint(
     AxumPath(name): AxumPath<String>,
-) -> Result<StatusCode, ApiError> {
-    super::core::blueprints::remove_blueprint(&name)
-        .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|e| super::core::error::as_api_error(&e))
+) -> Result<StatusCode, ServeError> {
+    super::core::blueprints::remove_blueprint(&name).map(|()| StatusCode::NO_CONTENT)
 }
 
 /// `POST /api/blueprints/validate`: parse, validate and lint a manifest.

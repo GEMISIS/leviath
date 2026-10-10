@@ -130,7 +130,7 @@ pub async fn execute(args: AuthArgs, env: AuthEnv) -> anyhow::Result<()> {
                 "{}",
                 crate::commands::providers::quota::section(
                     &usage,
-                    crate::commands::providers::quota::now()
+                    leviath_core::duration::now_secs() as u64
                 )
             );
             Ok(())
@@ -1549,7 +1549,15 @@ mod tests {
         let path = dir.path().join("config.toml");
         Config::default().save_to_path_public(&path).unwrap();
 
-        run_auth(&path, AuthArgs::migrate_for_test(false, false)).expect("nothing to do succeeds");
+        // Nor in the environment, which the loader reads keys from too.
+        let unset: Vec<&str> = crate::config::PROVIDER_KEYS
+            .iter()
+            .map(|key| key.env)
+            .collect();
+        temp_env::with_vars_unset(unset, || {
+            run_auth(&path, AuthArgs::migrate_for_test(false, false))
+                .expect("nothing to do succeeds")
+        });
     }
 
     // ── provider sign-ins ───────────────────────────────────────────────────

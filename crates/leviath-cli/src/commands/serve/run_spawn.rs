@@ -22,7 +22,7 @@ use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath
 use leviath_runtime::spec::names::MimePattern;
 use leviath_runtime::spec::request::{Attachment, Bytes, SpawnRequest};
 
-use super::core::error::as_api_error;
+use super::core::error::ServeError;
 use super::core::spawn::{self as spawn_core, Verdict};
 use super::types::*;
 
@@ -31,7 +31,7 @@ use super::types::*;
 pub(super) async fn spawn_run(
     State(state): State<AppState>,
     request: axum::extract::Request,
-) -> Result<Response, ApiError> {
+) -> Result<Response, ServeError> {
     let request = match read_request(&state, request).await? {
         Ok(request) => request,
         Err(issues) => return Ok(refusal(issues)),
@@ -46,7 +46,7 @@ pub(super) async fn spawn_run(
         )
             .into_response()),
         Ok(Verdict::Rejected(issues)) => Ok(refusal(issues)),
-        Err(e) => Err(as_api_error(&e)),
+        Err(e) => Err(e),
     }
 }
 
@@ -56,7 +56,7 @@ pub(super) async fn spawn_run(
 pub(super) async fn validate_run(
     State(state): State<AppState>,
     request: axum::extract::Request,
-) -> Result<Response, ApiError> {
+) -> Result<Response, ServeError> {
     let request = match read_request(&state, request).await? {
         Ok(request) => request,
         Err(issues) => return Ok(refusal(issues)),
@@ -64,7 +64,7 @@ pub(super) async fn validate_run(
     match spawn_core::validate(&state, request).await {
         Ok(Verdict::Accepted(summary)) => Ok((StatusCode::OK, Json(summary)).into_response()),
         Ok(Verdict::Rejected(issues)) => Ok(refusal(issues)),
-        Err(e) => Err(as_api_error(&e)),
+        Err(e) => Err(e),
     }
 }
 
@@ -88,7 +88,7 @@ pub(super) async fn spawn_request_schema() -> Json<serde_json::Value> {
 pub(super) async fn blueprint_inputs(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
-) -> Result<Json<Vec<leviath_runtime::spec::inputs::InputDecl>>, ApiError> {
+) -> Result<Json<Vec<leviath_runtime::spec::inputs::InputDecl>>, ServeError> {
     declared_inputs(&state, &name).await.map(Json)
 }
 
@@ -98,22 +98,17 @@ pub(super) async fn blueprint_inputs(
 pub(super) async fn declared_inputs(
     state: &AppState,
     name: &str,
-) -> Result<Vec<leviath_runtime::spec::inputs::InputDecl>, ApiError> {
+) -> Result<Vec<leviath_runtime::spec::inputs::InputDecl>, ServeError> {
     let roots = super::blueprints::blueprint_roots(&state.current_config());
     let listed = super::blocking::blocking(move || super::blueprints::discover_in(roots)).await;
     let found = listed
         .into_iter()
         .find(|blueprint| blueprint.name == name)
-        .ok_or_else(|| {
-            err(
-                StatusCode::NOT_FOUND,
-                format!("Blueprint '{name}' not found"),
-            )
-        })?;
+        .ok_or_else(|| ServeError::NotFound(format!("Blueprint '{name}' not found")))?;
     // Checked as a spawn would check it: inputs read off a graph that does
     // not hold together would offer a form for a run that cannot start.
     let loaded = leviath_blueprint::validate(std::path::Path::new(&found.path))
-        .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        .map_err(|e| ServeError::Unprocessable(e.to_string()))?;
     Ok(loaded.graph.inputs)
 }
 
@@ -123,7 +118,7 @@ pub(super) async fn declared_inputs(
 async fn read_request(
     state: &AppState,
     request: axum::extract::Request,
-) -> Result<Result<SpawnRequest, SpawnIssues>, ApiError> {
+) -> Result<Result<SpawnRequest, SpawnIssues>, ServeError> {
     let max_bytes = state.limits.request_limits.max_upload_bytes;
     let is_multipart = request
         .headers()
@@ -133,23 +128,28 @@ async fn read_request(
     if !is_multipart {
         let body = axum::body::Bytes::from_request(request, state)
             .await
-            .map_err(|e| err(e.status(), e.body_text()))?;
-        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
-            err(
-                StatusCode::BAD_REQUEST,
-                format!("the body is not JSON: {e}"),
-            )
-        })?;
+            .map_err(|e| unreadable(e.status(), e.body_text()))?;
+        let value: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|e| ServeError::BadRequest(format!("the body is not JSON: {e}")))?;
         return Ok(decode(value));
     }
     let multipart = Multipart::from_request(request, state)
         .await
-        .map_err(|e| err(e.status(), e.body_text()))?;
+        .map_err(|e| unreadable(e.status(), e.body_text()))?;
     let (value, attachments) = read_multipart(multipart, max_bytes).await?;
     Ok(decode(value).map(|mut request| {
         request.attachments.extend(attachments);
         request
     }))
+}
+
+/// A body the extractor could not read, as the failure it is: one over the
+/// size limit, or one that is not well formed.
+fn unreadable(status: StatusCode, message: String) -> ServeError {
+    match status {
+        StatusCode::PAYLOAD_TOO_LARGE => ServeError::PayloadTooLarge(message),
+        _ => ServeError::BadRequest(message),
+    }
 }
 
 /// A JSON value as a request, or the one issue that says why it is not one.
@@ -167,7 +167,7 @@ fn decode(value: serde_json::Value) -> Result<SpawnRequest, SpawnIssues> {
 async fn read_multipart(
     mut multipart: Multipart,
     max_bytes: u64,
-) -> Result<(serde_json::Value, Vec<Attachment>), ApiError> {
+) -> Result<(serde_json::Value, Vec<Attachment>), ServeError> {
     let mut request = None;
     let mut attachments = Vec::new();
     loop {
@@ -175,25 +175,18 @@ async fn read_multipart(
             Ok(Some(field)) => field,
             Ok(None) => break,
             Err(e) => {
-                return Err(err(
-                    StatusCode::BAD_REQUEST,
-                    format!("malformed multipart body: {e}"),
-                ));
+                return Err(ServeError::BadRequest(format!(
+                    "malformed multipart body: {e}"
+                )));
             }
         };
         let name = field.name().unwrap_or_default().to_string();
         if name == "request" {
             let text = field.text().await.map_err(|e| {
-                err(
-                    StatusCode::BAD_REQUEST,
-                    format!("the request field could not be read: {e}"),
-                )
+                ServeError::BadRequest(format!("the request field could not be read: {e}"))
             })?;
             request = Some(serde_json::from_str(&text).map_err(|e| {
-                err(
-                    StatusCode::BAD_REQUEST,
-                    format!("the request field is not JSON: {e}"),
-                )
+                ServeError::BadRequest(format!("the request field is not JSON: {e}"))
             })?);
             continue;
         }
@@ -206,15 +199,12 @@ async fn read_multipart(
         let data = field
             .bytes()
             .await
-            .map_err(|e| err(e.status(), format!("file '{name}' could not be read: {e}")))?;
+            .map_err(|e| unreadable(e.status(), format!("file '{name}' could not be read: {e}")))?;
         if data.len() as u64 > max_bytes {
-            return Err(err(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "file '{name}' is {} bytes, over the {max_bytes} byte ceiling",
-                    data.len()
-                ),
-            ));
+            return Err(ServeError::PayloadTooLarge(format!(
+                "file '{name}' is {} bytes, over the {max_bytes} byte ceiling",
+                data.len()
+            )));
         }
         attachments.push(Attachment {
             name,
@@ -226,8 +216,7 @@ async fn read_multipart(
         });
     }
     let request = request.ok_or_else(|| {
-        err(
-            StatusCode::BAD_REQUEST,
+        ServeError::BadRequest(
             "a multipart body needs a `request` field holding the JSON request".to_string(),
         )
     })?;
