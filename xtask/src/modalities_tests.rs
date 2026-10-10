@@ -2,6 +2,7 @@
 //! is touched.
 
 use super::*;
+use crate::prices::fetch::NetworkError;
 
 /// A minimal catalogue body with the fields the parser reads.
 fn catalogue() -> String {

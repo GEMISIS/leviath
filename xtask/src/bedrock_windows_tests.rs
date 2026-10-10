@@ -2,6 +2,7 @@
 //! network is touched.
 
 use super::*;
+use crate::prices::fetch::NetworkError;
 
 /// The index page: three cards, one of them linked twice and one an
 /// embedding model with no limits.
@@ -404,26 +405,10 @@ fn run_with_surfaces_the_network_read_and_scrape_failures() {
 }
 
 #[test]
-fn the_real_fetch_reports_an_unreachable_host_as_the_network() {
-    let err = fetch_http("http://127.0.0.1:1/model-cards.html").unwrap_err();
-    assert!(is_network_error(&err), "{err}");
-    let err = fetch_http("not a url").unwrap_err();
-    assert!(is_network_error(&err), "{err}");
-}
-
-#[test]
-fn the_workspace_root_holds_the_table_and_today_is_a_date() {
-    assert!(workspace_root().join(WINDOWS_FILE).exists());
-    let today = today();
-    assert_eq!(today.len(), 10);
-    assert_eq!(today.matches('-').count(), 2);
-}
-
-#[test]
 fn the_shipped_table_parses_and_names_the_current_claude() {
     // A Windows checkout with `core.autocrlf` hands us CRLF; the refresh
     // always writes LF, so compare the file as the repository stores it.
-    let text = std::fs::read_to_string(workspace_root().join(WINDOWS_FILE))
+    let text = std::fs::read_to_string(fetch::workspace_root().join(WINDOWS_FILE))
         .unwrap()
         .replace("\r\n", "\n");
     let table = parse_table(&text).unwrap();

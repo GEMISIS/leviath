@@ -32,21 +32,18 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::prices::{Fetch, NetworkError, is_network_error};
+use crate::prices::fetch::{self, Fetch, Outcome, is_network_error};
 
 /// The file this command owns, relative to the workspace root.
 pub const MODALITIES_FILE: &str = "crates/leviath-providers/mime/modalities.toml";
 
 /// OpenRouter's public catalogue: no key, each model carrying its architecture.
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/models";
-
-/// The wait a single fetch is allowed before it is called a network failure.
-const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The vendors whose direct APIs do not report modalities, and whose models
 /// the catalogue carries (xAI's under `x-ai/`). xAI's listing reports them,
@@ -327,15 +324,6 @@ pub fn merge(existing: &Table, fetched: &Rows, today: &str) -> Merged {
 
 // ── Running ──────────────────────────────────────────────────────────────────
 
-/// The upshot of a run, for the caller and the tests.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
-    /// Nothing moved; the file is untouched.
-    Unchanged,
-    /// This many rows were written (or, under `--check`, would be).
-    Changed(usize),
-}
-
 /// Fetch, merge, and write or check, reporting on stdout.
 pub fn run_with(mode: ModalitiesMode, fetch: Fetch, path: &Path, today: &str) -> Result<Outcome> {
     let text =
@@ -387,39 +375,14 @@ pub fn run_with(mode: ModalitiesMode, fetch: Fetch, path: &Path, today: &str) ->
     }
 }
 
-/// The real fetch: a GET with a bounded wait, any failure a [`NetworkError`].
-fn fetch_http(url: &str) -> Result<String> {
-    let body = reqwest::blocking::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .user_agent("leviath-xtask-modalities")
-        .build()
-        .and_then(|client| client.get(url).send())
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .and_then(reqwest::blocking::Response::text)
-        .map_err(|e| NetworkError(format!("{url}: {e}")))?;
-    Ok(body)
-}
-
-/// The workspace root, from this crate's manifest directory.
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// Today as `YYYY-MM-DD`, UTC, so two machines on one day agree.
-fn today() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
-}
-
 /// Entry point for `cargo xtask modalities [--check]`.
 ///
 /// A network failure exits 2, as `prices` does, so a workflow can tell "could
 /// not check" from "the table is wrong".
 pub fn run(mode: ModalitiesMode) -> Result<()> {
-    let path = workspace_root().join(MODALITIES_FILE);
-    match run_with(mode, fetch_http, &path, &today()) {
+    let path = fetch::workspace_root().join(MODALITIES_FILE);
+    let http: Fetch = |url| fetch::http(url, "leviath-xtask-modalities");
+    match run_with(mode, http, &path, &fetch::today()) {
         Ok(_) => Ok(()),
         Err(err) if is_network_error(&err) => {
             eprintln!("modalities: {err}");

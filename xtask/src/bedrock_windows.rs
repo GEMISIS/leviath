@@ -30,12 +30,12 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::prices::{Fetch, NetworkError, is_network_error};
+use crate::prices::fetch::{self, Fetch, Outcome, is_network_error};
 
 /// The file this command owns, relative to the workspace root.
 pub const WINDOWS_FILE: &str = "crates/leviath-providers/bedrock/windows.toml";
@@ -45,9 +45,6 @@ const INDEX_URL: &str = "https://docs.aws.amazon.com/bedrock/latest/userguide/mo
 
 /// Where each card lives; the index links them by file name.
 const CARD_BASE: &str = "https://docs.aws.amazon.com/bedrock/latest/userguide/";
-
-/// The wait a single fetch is allowed before it is called a network failure.
-const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The inference-profile prefixes AWS defines, so a bare id can be read off
 /// a profile id when the card names no bare id.
@@ -469,15 +466,6 @@ pub fn merge(existing: &Table, fetched: &Rows, today: &str) -> Result<Merged> {
 
 // ── Running ──────────────────────────────────────────────────────────────────
 
-/// The upshot of a run, for the caller and the tests.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
-    /// Nothing moved; the file is untouched.
-    Unchanged,
-    /// This many rows were written (or, under `--check`, would be).
-    Changed(usize),
-}
-
 /// Every card the index links, read and parsed.
 pub fn scrape(fetch: Fetch) -> Result<Rows> {
     let index = fetch(INDEX_URL)?;
@@ -542,39 +530,14 @@ pub fn run_with(mode: WindowsMode, fetch: Fetch, path: &Path, today: &str) -> Re
     }
 }
 
-/// The real fetch: a GET with a bounded wait, any failure a [`NetworkError`].
-fn fetch_http(url: &str) -> Result<String> {
-    let body = reqwest::blocking::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .user_agent("leviath-xtask-bedrock-windows")
-        .build()
-        .and_then(|client| client.get(url).send())
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .and_then(reqwest::blocking::Response::text)
-        .map_err(|e| NetworkError(format!("{url}: {e}")))?;
-    Ok(body)
-}
-
-/// The workspace root, from this crate's manifest directory.
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// Today as `YYYY-MM-DD`, UTC, so two machines on one day agree.
-fn today() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
-}
-
 /// Entry point for `cargo xtask bedrock-windows [--check]`.
 ///
 /// A network failure exits 2, as `prices` does, so a workflow can tell "could
 /// not check" from "the table is wrong".
 pub fn run(mode: WindowsMode) -> Result<()> {
-    let path = workspace_root().join(WINDOWS_FILE);
-    match run_with(mode, fetch_http, &path, &today()) {
+    let path = fetch::workspace_root().join(WINDOWS_FILE);
+    let http: Fetch = |url| fetch::http(url, "leviath-xtask-bedrock-windows");
+    match run_with(mode, http, &path, &fetch::today()) {
         Ok(_) => Ok(()),
         Err(err) if is_network_error(&err) => {
             eprintln!("bedrock-windows: {err}");
