@@ -129,8 +129,9 @@ impl ContextWindow {
             while let Some(entry) = self.regions[i].remove_oldest() {
                 let freed = entry.tokens;
                 self.current_tokens -= freed;
+                let region = &self.regions[i].name;
                 tracing::debug!(
-                    region = %self.regions[i].name,
+                    %region,
                     tokens_freed = freed,
                     "Evicted named region entry (oldest first)"
                 );

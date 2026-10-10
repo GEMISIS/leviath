@@ -124,9 +124,10 @@ fn warn_if_passed_over(used: &std::path::Path, platform: Option<&std::path::Path
     let Some(platform) = platform.filter(|p| p.exists() && !used.exists()) else {
         return false;
     };
+    let (used, passed_over) = (used.display(), platform.display());
     tracing::warn!(
-        used = %used.display(),
-        passed_over = %platform.display(),
+        %used,
+        %passed_over,
         "LEVIATH_HOME is set, so the taint policy is read from beside its config.toml, \
          not from the platform config directory; move it there to keep it"
     );
