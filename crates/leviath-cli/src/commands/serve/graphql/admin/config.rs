@@ -43,6 +43,7 @@ pub(crate) async fn update_config(
             &state.config.health(),
             // True by construction: this mutation is behind the guard.
             true,
+            super::super::query::machine::yolo_file().await,
         ),
     })
 }

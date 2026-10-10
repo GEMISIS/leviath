@@ -37,14 +37,19 @@ pub(crate) async fn state(
     run_id: &str,
     at: Option<u64>,
 ) -> Result<RunState, ServeError> {
-    if let Some(seq) = at {
-        return state_at(&run_file::require(run_id)?, run_id, seq);
-    }
-    if let Ok(ControlResponse::State { state }) = app.control.inspect(run_id).await {
+    if at.is_none()
+        && let Ok(ControlResponse::State { state }) = app.control.inspect(run_id).await
+    {
         return Ok(leviath_runtime::runfile::as_it_stands(*state));
     }
-    let reader = run_file::require(run_id)?;
-    state_at(&reader, run_id, reader.last_seq())
+    // The file is replayed up to the step, which is work for the blocking pool.
+    let id = run_id.to_string();
+    super::super::blocking::blocking(move || {
+        let reader = run_file::require(&id)?;
+        let seq = at.unwrap_or_else(|| reader.last_seq());
+        state_at(&reader, &id, seq)
+    })
+    .await
 }
 
 /// The state at step `seq` of the run in `reader`. A step past the run's last

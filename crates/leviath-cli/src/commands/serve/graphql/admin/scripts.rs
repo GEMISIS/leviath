@@ -3,6 +3,8 @@
 
 use async_graphql::{Context, ID, InputObject, SimpleObject};
 
+use super::super::super::blocking::blocking;
+use super::super::super::tools::AgentDirs;
 use super::super::super::types::AppState;
 use super::super::error::IntoGraphql;
 use super::super::script_ref::ScriptRef;
@@ -54,13 +56,17 @@ pub(crate) async fn upsert_script(
     let state = ctx.data_unchecked::<AppState>();
     let reference = request.script;
     let kind = reference.kind.wire();
-    let written = super::super::super::scripts::write_one(
-        &state.current_config(),
-        kind,
-        &reference.name,
-        reference.blueprint_name.as_deref(),
-        &request.content,
-    )
+    // Resolved on this task, written on the blocking pool.
+    let dirs = AgentDirs::of(&state.current_config());
+    let (name, owner, content) = (
+        reference.name.clone(),
+        reference.blueprint_name.clone(),
+        request.content,
+    );
+    let written = blocking(move || {
+        super::super::super::scripts::write_one(&dirs, kind, &name, owner.as_deref(), &content)
+    })
+    .await
     .gql()?;
     // Built by the constructor a listing builds its rows with, from the same
     // shape, so the script this answers with and the script `script(ref:)`
@@ -97,12 +103,13 @@ pub(crate) async fn delete_script(
     let state = ctx.data_unchecked::<AppState>();
     let reference = request.script;
     let kind = reference.kind.wire();
-    super::super::super::scripts::remove_one(
-        &state.current_config(),
-        kind,
-        &reference.name,
-        reference.blueprint_name.as_deref(),
-    )
+    // Resolved on this task, removed on the blocking pool.
+    let dirs = AgentDirs::of(&state.current_config());
+    let (name, owner) = (reference.name.clone(), reference.blueprint_name.clone());
+    blocking(move || {
+        super::super::super::scripts::remove_one(&dirs, kind, &name, owner.as_deref())
+    })
+    .await
     .gql()?;
     Ok(DeleteScriptResult {
         deleted_id: super::super::node::script_id(

@@ -90,11 +90,17 @@ pub(crate) struct CheckEndpointResult {
 ///
 /// Built from the catalog entry the caller resolved rather than searched for
 /// by name: every act here starts by asking the catalog what the caller's
-/// string means, so by the time this runs there is no name left to miss.
-fn provider_of(state: &AppState, name: &str, display: &str) -> Provider {
-    Provider::from(&super::super::super::providers::described(
-        state, name, display,
-    ))
+/// string means, so by the time this runs there is no name left to miss. The
+/// grant store is a file, so it is read on the blocking pool, from the path
+/// this task resolves.
+async fn provider_of(state: &AppState, name: &'static str, display: &'static str) -> Provider {
+    let state = state.clone();
+    let grants = super::super::super::mcp::admin_paths().grants;
+    let described = super::super::super::blocking::blocking(move || {
+        super::super::super::providers::described(&state, &grants, name, display)
+    })
+    .await;
+    Provider::from(&described)
 }
 
 /// Sign in to a subscription provider.
@@ -116,7 +122,7 @@ pub(crate) async fn sign_in_provider(
         .await
         .gql()?;
     Ok(SignInProviderResult {
-        provider: provider_of(state, name, display),
+        provider: provider_of(state, name, display).await,
         authorize_url: started.authorize_url,
         is_already_waiting: started.already_waiting,
     })
@@ -136,7 +142,7 @@ pub(crate) async fn sign_out_provider(
         .await
         .gql()?;
     Ok(SignOutProviderResult {
-        provider: provider_of(state, name, display),
+        provider: provider_of(state, name, display).await,
     })
 }
 
@@ -170,7 +176,7 @@ pub(crate) async fn check_provider(
         }
     }
     Ok(CheckProviderResult {
-        provider: provider_of(state, name, display),
+        provider: provider_of(state, name, display).await,
         models,
         unlisted_model_ids: unlisted,
     })

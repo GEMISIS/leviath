@@ -32,7 +32,11 @@ pub(crate) async fn validate_blueprint(
         Some(name) => blueprints::blueprint_dir(name).gql()?,
         None => std::path::PathBuf::new(),
     };
-    let report = super::super::super::blueprints::validate_manifest_text(&manifest, &dir);
+    // The lint walks the tool directories the manifest could name.
+    let report = super::super::super::blocking::blocking(move || {
+        super::super::super::blueprints::validate_manifest_text(&manifest, &dir)
+    })
+    .await;
     Ok(ValidationReport {
         valid: report.valid,
         errors: report.errors.unwrap_or_default(),

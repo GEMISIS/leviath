@@ -173,7 +173,7 @@ impl Sift for RunSift {
                 None => true,
                 Some(ref q) => {
                     matching::matches_query(meta, q, &self.cheap_sources)
-                        || matching::matches_query(meta, q, &self.deep_sources)
+                        || deep_match(item, q, &self.deep_sources).await
                 }
             }
         })
@@ -187,6 +187,14 @@ impl Sift for RunSift {
     fn descending(&self) -> &[bool] {
         self.order.descending()
     }
+}
+
+/// Whether a run matches `q` in the search sources that cost a file read,
+/// read on the blocking pool.
+async fn deep_match(item: &Arc<RunMeta>, q: &str, sources: &[Source]) -> bool {
+    let (meta, q, sources) = (Arc::clone(item), q.to_string(), sources.to_vec());
+    crate::commands::serve::blocking::blocking(move || matching::matches_query(&meta, &q, &sources))
+        .await
 }
 
 /// The cursor a page of runs ends on, absent when it is the last page.

@@ -239,13 +239,13 @@ pub(super) async fn list_providers(
 /// separately.
 ///
 /// Both surfaces build their rows here, so "which providers are there" cannot
-/// have two answers.
-pub(super) fn provider_infos(state: &AppState) -> Vec<ProviderInfo> {
+/// have two answers. `grants` is the store [`admin_paths`](super::mcp::admin_paths)
+/// names, resolved by the caller on its own task.
+pub(super) fn provider_infos(state: &AppState, grants: &std::path::Path) -> Vec<ProviderInfo> {
     let config = state.current_config();
     // Read once, not once per row: this is a file, and the answer is the same
     // for every provider in it.
-    let paths = super::mcp::admin_paths();
-    let store = leviath_providers::oauth::ProviderAuthStore::load(&paths.grants).ok();
+    let store = leviath_providers::oauth::ProviderAuthStore::load(grants).ok();
     let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
     signin_providers()
         .into_iter()
@@ -263,7 +263,10 @@ pub(super) async fn listing_with(
     query: &ListQuery,
 ) -> (HeaderMap, Json<serde_json::Value>) {
     let config = state.current_config();
-    let mut providers: Vec<ProviderInfo> = provider_infos(state);
+    // The grant store's location comes from `admin_paths` rather than from
+    // `state`; see `ProviderAdmin`.
+    let grants = super::mcp::admin_paths().grants;
+    let mut providers: Vec<ProviderInfo> = provider_infos(state, &grants);
     let mut headers = HeaderMap::new();
     if query.quota {
         // Built from the rows above rather than from a second look at the
@@ -277,9 +280,6 @@ pub(super) async fn listing_with(
                 account: p.account.clone(),
             })
             .collect();
-        // The grant store's location comes from `admin_paths` rather than from
-        // `state`; see `ProviderAdmin`.
-        let grants = super::mcp::admin_paths().grants;
         let (reading, _) = state
             .caches
             .provider_quota
@@ -352,10 +352,14 @@ pub(super) fn canonical(
 /// [`provider_infos`] for one provider rather than all of them, built from the
 /// catalog entry the caller is holding: there is nothing to search, and so no
 /// absent case to invent an answer for.
-pub(super) fn described(state: &AppState, id: &str, display: &str) -> ProviderInfo {
+pub(super) fn described(
+    state: &AppState,
+    grants: &std::path::Path,
+    id: &str,
+    display: &str,
+) -> ProviderInfo {
     let config = state.current_config();
-    let paths = super::mcp::admin_paths();
-    let store = leviath_providers::oauth::ProviderAuthStore::load(&paths.grants).ok();
+    let store = leviath_providers::oauth::ProviderAuthStore::load(grants).ok();
     let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
     describe(id, display, &config, store.as_ref(), &in_flight)
 }

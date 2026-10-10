@@ -231,9 +231,13 @@ async fn listing(
     let results: Vec<Arc<crate::runstate::RunMeta>> = std::mem::take(&mut walked.items);
     let cursor = run_core::lazy::next_cursor(&walked, &spec.digest).map(Cursor);
 
-    let highlights = match spec.q.as_deref() {
+    let highlights = match spec.q.clone() {
         None => Vec::new(),
-        Some(query) => highlights(&results, query, &spec.sources),
+        // A search inside runs reads their files for the snippet.
+        Some(query) => {
+            let (runs, sources) = (results.clone(), spec.sources.clone());
+            blocking(move || highlights(&runs, &query, &sources)).await
+        }
     };
     // One instant for the whole answer, so two runs on one page do not report
     // ages taken a moment apart.

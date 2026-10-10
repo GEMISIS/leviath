@@ -225,7 +225,7 @@ impl Query {
         &self,
         #[graphql(desc = "The profile's name in the file.")] name: String,
     ) -> Option<YoloProfile> {
-        machine::yolo_profile(&name)
+        machine::yolo_profile(&name).await
     }
 
     /// The operator's mime registry, before any blueprint's own rows.

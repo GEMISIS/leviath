@@ -578,7 +578,11 @@ async fn prepared(state: &AppState, spec: &RunSpec) -> (lazy::RunSift, Vec<Arc<R
     };
     let items = match spec.ids {
         None => indexed,
-        Some(ref ids) => read_by_id(ids).0,
+        // One record read off the disk per id, on the blocking pool.
+        Some(ref ids) => {
+            let ids = ids.clone();
+            super::super::blocking::blocking(move || read_by_id(&ids).0).await
+        }
     };
     (lazy::RunSift::new(spec, descendants, ctx), items)
 }

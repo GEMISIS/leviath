@@ -115,12 +115,17 @@ impl Script {
     #[filter(skip)]
     async fn content(&self, ctx: &Context<'_>) -> async_graphql::Result<String> {
         let state = ctx.data_unchecked::<super::super::super::super::types::AppState>();
-        let source = super::super::super::super::scripts::read_one(
-            &state.current_config(),
+        // Resolved on this task, read off the disk on the blocking pool.
+        let dirs = super::super::super::super::tools::AgentDirs::of(&state.current_config());
+        let (kind, name, owner) = (
             self.kind.wire(),
-            &self.name,
-            self.blueprint_name.as_deref(),
-        )
+            self.name.clone(),
+            self.blueprint_name.clone(),
+        );
+        let source = crate::commands::serve::blocking::blocking(move || {
+            super::super::super::super::scripts::read_one(&dirs, kind, &name, owner.as_deref())
+        })
+        .await
         .gql()?;
         Ok(source.content)
     }

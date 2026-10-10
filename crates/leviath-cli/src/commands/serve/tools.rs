@@ -72,17 +72,45 @@ pub(super) fn agent_dir(
     config: &crate::config::Config,
     name: &str,
 ) -> Result<PathBuf, super::core::error::ServeError> {
-    if !leviath_core::is_safe_path_component(name) {
-        return Err(super::core::error::ServeError::BadRequest(format!(
-            "Invalid agent name '{name}': names may contain only letters, digits, \
-             '.', '_' and '-'"
-        )));
+    AgentDirs::of(config).dir(name)
+}
+
+/// Where an agent's own directory is looked for: every root the catalog walks,
+/// and the installed directory a name it does not list falls back to.
+///
+/// Resolved apart from the walk, for the reason
+/// [`blueprint_roots`](super::blueprints::blueprint_roots) gives: a handler
+/// resolves these on its own task and walks them on the blocking pool.
+pub(super) struct AgentDirs {
+    /// The directories the catalog walks, the installed one first.
+    roots: Vec<PathBuf>,
+    /// Where a name the catalog does not list resolves.
+    installed: PathBuf,
+}
+
+impl AgentDirs {
+    /// The directories `config` names.
+    pub(super) fn of(config: &crate::config::Config) -> Self {
+        Self {
+            roots: super::blueprints::blueprint_roots(config),
+            installed: super::blueprints::agents_dir(),
+        }
     }
-    let known = super::blueprints::discover_blueprints(config)
-        .into_iter()
-        .find(|b| b.name == name)
-        .map(|b| PathBuf::from(b.path));
-    Ok(known.unwrap_or_else(|| super::blueprints::agents_dir().join(name)))
+
+    /// [`agent_dir`], over directories resolved already.
+    pub(super) fn dir(&self, name: &str) -> Result<PathBuf, super::core::error::ServeError> {
+        if !leviath_core::is_safe_path_component(name) {
+            return Err(super::core::error::ServeError::BadRequest(format!(
+                "Invalid agent name '{name}': names may contain only letters, digits, \
+                 '.', '_' and '-'"
+            )));
+        }
+        let known = super::blueprints::discover_in(self.roots.clone())
+            .into_iter()
+            .find(|b| b.name == name)
+            .map(|b| PathBuf::from(b.path));
+        Ok(known.unwrap_or_else(|| self.installed.join(name)))
+    }
 }
 
 /// Query parameters for `GET /api/tools`.
