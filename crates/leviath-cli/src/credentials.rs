@@ -8,21 +8,6 @@
 
 use leviath_core::{CredentialStore, CredentialStoreKind};
 
-/// The provider API keys Leviath knows how to move into a credential store.
-///
-/// Fixed, because the OS stores offer no portable "list everything under this
-/// service" operation - the accounts to look for have to come from somewhere,
-/// and for providers that is this list.
-pub const PROVIDER_KEYS: &[&str] = &[
-    "anthropic",
-    "openai",
-    "google",
-    "openrouter",
-    "bedrock",
-    "xai",
-    "meta",
-];
-
 /// A [`CredentialStore`] backed by the OS credential store.
 ///
 /// A thin adapter over `leviath_sys::keychain`: the platform work, the feature
@@ -206,15 +191,5 @@ mod tests {
             store_for(CredentialStoreKind::Keychain).unwrap().is_some(),
             "with a store available the keychain backend resolves"
         );
-    }
-
-    /// The provider list is what `lev auth migrate` and `lev auth status`
-    /// enumerate, so a provider missing from it is a secret that silently never
-    /// migrates.
-    #[test]
-    fn every_provider_with_a_config_key_is_listed() {
-        for p in ["anthropic", "openai", "google", "openrouter", "bedrock"] {
-            assert!(PROVIDER_KEYS.contains(&p), "{p} must be migratable");
-        }
     }
 }
