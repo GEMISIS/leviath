@@ -199,8 +199,6 @@ same list.
 
 ### Fixed
 
-- The dashboard's stage graph shows a stage that ran for two hours as
-  `2h0m`, not `120m0s`.
 - A run's context history credits each stage with what it wrote on its way
   out. A stage's last output is stored in the same step that moves the run
   on, so it was listed under the next stage, and when that stage cleared it,
@@ -381,6 +379,8 @@ same list.
 - The daemon shuts down cleanly on SIGTERM, which launchd, systemd and
   `kill` send, as it already did on Ctrl-C. SIGTERM used to end it on the
   spot.
+- The dashboard's stage graph shows a stage that ran for two hours as
+  `2h0m`, not `120m0s`.
 
 ### Added
 
@@ -445,12 +445,13 @@ same list.
   `persistence::region_kind_str` for `RegionKind::word`, and
   `interaction_points::restore_interaction_point` with its
   `InteractionPointState`: a resumed run reopens its point as it is placed.
-  Functions only tests called are built for tests alone:
-  `taint::resolve_security`, `Region::add_tainted_entry`,
-  `EntryContent::with_part`, `MimeRegistry::builtin_checked`,
-  `MemoryBlobStore::bytes_for`, `CredentialStoreKind::is_keychain`,
-  `interaction::make_interaction_id`, `interaction::request_id_prefix`,
-  `context_setup::apply_stage_layout` and `state::inspect::content_of`.
+  `taint::resolve_security`, `interaction::request_id_prefix` and
+  `CredentialStoreKind::is_keychain`, which only their own tests called, are
+  gone. Functions that only other tests call are built for tests alone:
+  `Region::add_tainted_entry`, `EntryContent::with_part`,
+  `MimeRegistry::builtin_checked`, `MemoryBlobStore::bytes_for`,
+  `interaction::make_interaction_id`, `context_setup::apply_stage_layout`
+  and `state::inspect::content_of`.
 
 ## 0.6.4 - 2026-09-26
 
