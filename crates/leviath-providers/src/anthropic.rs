@@ -1182,8 +1182,9 @@ mod tests {
         assert_eq!(configured.output_per_mtok, 2.0);
 
         // Not configured: the published rate.
-        let listed = provider.pricing("claude-sonnet-5").expect("in the table");
-        assert_eq!(listed.input_per_mtok, 2.0);
+        let listed = crate::pricing::published_rates("anthropic", "claude-sonnet-5");
+        assert!(listed.is_some(), "in the table");
+        assert_eq!(provider.pricing("claude-sonnet-5"), listed);
 
         // Neither: unpriced, so the run reports its cost unavailable.
         assert_eq!(provider.pricing("no-such-model-9"), None);

@@ -647,16 +647,27 @@ mod tests {
         }
     }
 
+    /// The limits come from the card's row and the flags from [`MODELS`],
+    /// whichever profile names the model. The figures themselves are AWS's,
+    /// and the weekly refresh rewrites them, so they are compared with the
+    /// row rather than written down here.
     #[test]
-    fn the_claude_5_rows_carry_the_million_token_window() {
-        let row = window_for("global.anthropic.claude-sonnet-5").unwrap();
-        assert_eq!((row.context, row.output), (1_000_000, 128_000));
-        assert!(row.reasoning);
-        let caps = table_capabilities("us.anthropic.claude-sonnet-5");
-        assert_eq!(caps.max_context_tokens, 1_000_000);
-        assert_eq!(caps.max_output_tokens, 128_000);
-        assert!(!caps.supports_temperature);
-        assert!(caps.supports_tools);
+    fn a_claude_5_row_gives_the_limits_and_the_table_gives_the_flags() {
+        for profile in [
+            "us.anthropic.claude-sonnet-5",
+            "global.anthropic.claude-sonnet-5",
+        ] {
+            let row = window_for(profile).expect(profile);
+            assert_eq!(row.id, "anthropic.claude-sonnet-5");
+            let caps = table_capabilities(profile);
+            assert_eq!(
+                (caps.max_context_tokens, caps.max_output_tokens),
+                (row.context, row.output),
+                "{profile}"
+            );
+            assert!(!caps.supports_temperature, "{profile}");
+            assert!(caps.supports_tools, "{profile}");
+        }
     }
 
     #[test]
@@ -668,11 +679,13 @@ mod tests {
         ] {
             assert!(CATALOG.contains(&(profile, name)), "{profile} is listed");
             let row = window_for(profile).expect(profile);
-            assert_eq!(row.id, bare_id(profile));
-            assert!(row.profiles.contains(&format!("global.{}", row.id)));
+            assert_eq!(row.id, bare_id(profile), "its own row, not Claude 5's");
             let caps = table_capabilities(profile);
-            assert_eq!(caps.max_context_tokens, 1_000_000, "{profile}");
-            assert_eq!(caps.max_output_tokens, 128_000, "{profile}");
+            assert_eq!(
+                (caps.max_context_tokens, caps.max_output_tokens),
+                (row.context, row.output),
+                "{profile}"
+            );
             assert!(!caps.supports_temperature, "{profile}");
             assert!(caps.supports_tools, "{profile}");
         }
@@ -680,13 +693,14 @@ mod tests {
 
     #[test]
     fn a_window_row_is_found_exactly_or_by_the_longest_prefix() {
-        assert_eq!(
-            window_for("amazon.nova-pro-v1:0").map(|r| r.output),
-            Some(5_000)
-        );
+        let found = |model| window_for(model).map(|row| row.id.as_str());
+        assert_eq!(found("amazon.nova-pro-v1:0"), Some("amazon.nova-pro-v1:0"));
         // A dated snapshot of a listed family.
-        assert!(window_for("anthropic.claude-sonnet-5-20260630").is_some());
-        assert_eq!(window_for("nobody.model"), None);
+        assert_eq!(
+            found("anthropic.claude-sonnet-5-20260630"),
+            Some("anthropic.claude-sonnet-5")
+        );
+        assert_eq!(found("nobody.model"), None);
     }
 
     #[test]

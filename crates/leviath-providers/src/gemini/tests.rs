@@ -62,13 +62,9 @@ fn pricing_prefers_config_then_the_published_table() {
         provider.pricing("gemini-3.5-flash").unwrap().input_per_mtok,
         1.0
     );
-    assert_eq!(
-        provider
-            .pricing("gemini-3.1-pro-preview")
-            .unwrap()
-            .input_per_mtok,
-        2.0
-    );
+    let listed = crate::pricing::published_rates("google", "gemini-3.1-pro-preview");
+    assert!(listed.is_some(), "in the table");
+    assert_eq!(provider.pricing("gemini-3.1-pro-preview"), listed);
     assert_eq!(provider.pricing("no-such-model-9"), None);
 }
 

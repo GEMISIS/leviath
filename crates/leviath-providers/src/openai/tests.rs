@@ -77,10 +77,9 @@ fn pricing_prefers_config_then_the_published_table() {
     let configured = provider.pricing("gpt-5.5").expect("configured");
     assert_eq!(configured.input_per_mtok, 1.0);
     assert_eq!(configured.output_per_mtok, 2.0);
-    assert_eq!(
-        provider.pricing("gpt-5.4").expect("listed").input_per_mtok,
-        2.5
-    );
+    let listed = crate::pricing::published_rates("openai", "gpt-5.4");
+    assert!(listed.is_some(), "in the table");
+    assert_eq!(provider.pricing("gpt-5.4"), listed);
     assert_eq!(provider.pricing("no-such-model-9"), None);
 }
 
