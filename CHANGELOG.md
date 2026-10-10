@@ -347,6 +347,17 @@ same list.
   no size, such as `/dev/urandom`, is read no further than that limit. The
   file tools no longer read and write on the daemon's async threads, where a
   large file stalled every other run.
+- A model call that carried stored images, audio or video read each one from
+  disk on one of the daemon's async threads, holding up other runs' work
+  while it read. Those reads now happen on the blocking pool, as uploads
+  already did.
+- `lev serve` read and wrote files on its async threads for most of what it
+  manages, over both GraphQL and REST: yolo profiles, scripts, mime rows,
+  provider sign-ins, tools, the folder picker, the offline doctor, the
+  update plan, installing, checking and removing blueprints, searches inside
+  runs, and the record a run mutation answers with. A slow disk or a
+  keychain prompt held up other requests meanwhile. That work now runs on
+  the blocking pool, as run reads, config and MCP servers already did.
 - An MCP server reached over HTTP that streamed its reply failed the request
   when the network split a character (an accented letter, CJK text, an
   emoji) across two reads. The halves are now joined, as the model providers
