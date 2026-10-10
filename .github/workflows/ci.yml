@@ -5,30 +5,30 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # Deliberately no `labeled`/`unlabeled`. Those used to be here so the guard
-    # jobs re-ran when a maintainer applied an override label, but a label event
-    # starts a whole second CI suite - the full three-OS matrix, ten minutes - to
-    # re-decide a five-second check. Worse, it does not even unblock the PR: the
+    # Deliberately no `labeled`/`unlabeled`. A label event starts a whole
+    # second CI suite - the full three-OS matrix, ten minutes - to re-decide a
+    # five-second guard check. Worse, it does not even unblock the PR: the
     # original suite's guard check run stays FAILURE on that commit forever, and
     # the merge rollup counts each suite's copy of a check separately, so one
     # stale failure keeps the PR red no matter how many later suites go green.
-    # The guards now read labels live (see `guard-main-rs`), so the fix is to
-    # rerun the failed job in its own suite - `gh run rerun <id> --failed`.
+    # The guards read labels live (see `guard-main-rs`), so after applying an
+    # override label, rerun the failed job in its own suite -
+    # `gh run rerun <id> --failed`.
     types: [opened, synchronize, reopened]
   # The merge queue runs required checks against a temporary `merge_group` ref.
   # Without this trigger those checks never run, so queued PRs block forever.
   merge_group:
   # The release workflows call this file instead of restating a gate of their
-  # own. alpha.yml used to hand-roll build + test + clippy, which drifted: its
-  # clippy ran on all three OSes while the `clippy` job below ran only on
-  # ubuntu, so a `#[cfg(windows)]` lint failure took down two nightly alphas
-  # while every PR stayed green. One definition, called from both places, is
-  # the only way that stays fixed.
+  # own. Two definitions of the gate drift apart: a release gate that lints a
+  # different set of OSes than the `clippy` job below fails a release on a
+  # `#[cfg(windows)]` lint that no PR ever saw. One definition, called from
+  # both places, means "green on main" and "green for a release" are the same
+  # statement.
   workflow_call:
 
-# A second push to a PR used to run a second full ~55-job suite next to the
-# first. Cancel the older one for pull requests only: a push to main and a
-# release calling this file must run to completion, and `github.workflow` is
+# A second push to a PR supersedes the first, whose run is a full ~55-job
+# suite, so the older run is cancelled. Pull requests only: a push to main and
+# a release calling this file must run to completion, and `github.workflow` is
 # the caller's name when this file is called, so a release run never shares a
 # group with the CI run for the same ref.
 concurrency:
@@ -45,16 +45,17 @@ permissions:
   contents: read
 
 jobs:
-  # Every job carries a `timeout-minutes`. The default is 360, and a hung
-  # `cargo test` (this suite spawns daemons, opens sockets, drives websockets)
-  # used to hold a runner for six hours - up to 39 of them in the coverage
-  # matrix. The numbers are roughly double the longest run seen, except this
-  # job's: 45 minutes, where its macOS leg takes about 30 to compile and run.
+  # Every job carries a `timeout-minutes`. The default is 360, so without one a
+  # hung `cargo test` (this suite spawns daemons, opens sockets, drives
+  # websockets) holds a runner for six hours, and the coverage matrix can hang
+  # dozens of them at once. The numbers are roughly double the longest run
+  # seen, except this job's: 45 minutes, where its macOS leg takes about 30 to
+  # compile and run.
   #
   # Four legs, not three. `ubuntu-24.04-arm` is here because the release builds
-  # ship `aarch64-unknown-linux-{gnu,musl}` and nothing had ever run them on an
-  # ARM machine: `macos-latest` is Apple Silicon, so macOS was covered by
-  # accident, while the Linux ARM binaries went out tested only on x64.
+  # ship `aarch64-unknown-linux-{gnu,musl}`, and nothing else runs them on an
+  # ARM machine: `macos-latest` is Apple Silicon, which covers macOS, but the
+  # Linux ARM binaries would ship tested only on x64.
   #
   # Deliberately *only* this job. Clippy and Coverage are per-OS because a
   # `#[cfg]` arm invisible to one platform is invisible to its lint and its
@@ -190,7 +191,9 @@ jobs:
   # Each provider is a feature too, and every other job builds all of them, so
   # this is also where a build with fewer is compiled. A provider's code is
   # gated where it lives, and a helper only some providers call goes dead in a
-  # build without them; clippy's `-D warnings` is what finds that.
+  # build without them; clippy's `-D warnings` is what finds that. `cargo xtask
+  # version --check` holds the `for provider in` loop below to the `providers`
+  # feature in crates/leviath-providers/Cargo.toml.
   default-features:
     name: Build with default features
     runs-on: ubuntu-latest
@@ -244,9 +247,9 @@ jobs:
   #   - `bans` catches wildcard requirements; duplicate versions only warn.
   #   - `sources` refuses anything not from crates.io.
   #
-  # None of this could run before: `cargo audit`/`cargo deny` need a lockfile,
-  # and Cargo.lock was gitignored, so every CI run re-resolved the whole graph
-  # and there was nothing pinned to audit.
+  # `cargo deny` audits a lockfile, which is why Cargo.lock is committed:
+  # without it every CI run re-resolves the whole graph and there is nothing
+  # pinned to audit.
   supply-chain:
     name: Supply chain
     runs-on: ubuntu-latest
@@ -268,7 +271,7 @@ jobs:
         run: cargo metadata --locked --format-version 1 > /dev/null
 
       # The same manifest, one level up: `[workspace.package] version` and the
-      # eleven `[workspace.dependencies]` pins that repeat it have to agree.
+      # `[workspace.dependencies]` pins that repeat it have to agree.
       # A bump that moved only some of them is quiet within a `0.1.x` line -
       # a stale `version = "0.1.2"` pin is a `^0.1.2` requirement that `0.1.3`
       # satisfies, so it builds and publishes, just naming the wrong version -
@@ -277,8 +280,9 @@ jobs:
       - name: Verify the version declarations agree
         run: cargo xtask version --check
 
-      # File length, as a ratchet: nothing new over the cap, and nothing already
-      # over it may grow. Pure file reading, so it costs about a second and
+      # File length, as a ratchet: one cap every file meets, which only ever
+      # goes down. The same command checks that every crate carries the
+      # workspace lints. Pure file reading, so it costs about a second and
       # needs no toolchain beyond the one already here.
       - name: Check structural limits
         run: cargo xtask structure
@@ -356,11 +360,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        # The workspace members `parse_workspace_packages` returns. Not
-        # listed: `xtask` (the coverage tool itself), `leviath-testkit`
-        # (dev-dependency-only scaffolding exercised inside these suites), and
-        # `leviath` (the re-export-only crates.io facade - zero executable
-        # regions, kept that way by the guard-facade job below).
+        # Every workspace member but those in `UNGATED`
+        # (xtask/src/coverage.rs): `xtask` (the coverage tool itself),
+        # `leviath-testkit` (dev-dependency-only scaffolding exercised inside
+        # these suites), and `leviath` (the re-export-only crates.io facade -
+        # zero executable regions, kept that way by the guard-facade job
+        # below). `cargo xtask version --check` fails on a member missing here.
         package:
           - leviath-core
           - leviath-net
@@ -398,7 +403,7 @@ jobs:
           path: coverage/html/
           retention-days: 14
 
-  # The per-package `coverage` jobs above ARE the gate now (each fails below
+  # The per-package `coverage` jobs above ARE the gate (each fails below
   # 100%). This job is the aggregate signal: `needs: [coverage]` means it only
   # runs once every package on every OS gated green, so its success == the whole
   # workspace is 100%. It keeps the stable `Coverage gate (<os>)` check name and

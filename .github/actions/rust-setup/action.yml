@@ -5,11 +5,10 @@ description: >-
 
 # `rustup toolchain install` with no arguments reads rust-toolchain.toml - the
 # channel and the components - which is the single source of truth for the
-# compiler this repo builds with. The jobs used to call a toolchain action with
-# `toolchain: stable`, which installed stable and then let rustup install the
-# pinned 1.97.1 on the first cargo call: two toolchains per job, the second
-# being the only one that mattered. alpha.yml's build job already did it this
-# way, for the same reason.
+# compiler this repo builds with. Don't swap it for a toolchain action with
+# `toolchain: stable`: that installs stable, and rustup then installs the
+# pinned toolchain on the first cargo call anyway - two toolchains per job,
+# with only the second one used.
 
 inputs:
   cache:

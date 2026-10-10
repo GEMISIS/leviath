@@ -6,8 +6,7 @@ description: >-
 # Homebrew and Scoop compare the installed version against the version
 # *declared* in the manifest; neither looks at what is behind the rolling
 # channel tag the manifests point at. So the tap has to be told what shipped.
-# Three workflows used to carry this block verbatim; a tap URL change was
-# three edits.
+# Alpha, beta and prod all call this, so a tap URL change is one edit.
 
 inputs:
   channel:

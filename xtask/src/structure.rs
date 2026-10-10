@@ -1,9 +1,9 @@
-//! Structural limits the workspace enforces mechanically.
-//!
-//! One rule today: a source file may hold at most [`MAX_PRODUCTION_LINES`] lines
-//! of production code. It is checked here rather than by clippy because clippy
-//! has no file-length lint, and here rather than by ast-grep because the answer
-//! is a line count rather than a syntax match.
+//! Structural limits the workspace enforces mechanically: every crate carries
+//! the workspace lints (see [`lint_gaps`]), and a source file may hold at most
+//! [`MAX_PRODUCTION_LINES`] lines of production code. The line limit is checked
+//! here rather than by clippy because clippy has no file-length lint, and here
+//! rather than by ast-grep because the answer is a line count rather than a
+//! syntax match.
 //!
 //! # Why production lines rather than total lines
 //!
@@ -35,9 +35,10 @@ use std::path::Path;
 
 /// The most production lines a file may hold.
 ///
-/// 1,200 is what the tree meets today, with the longest file at 1,184 and a
-/// median of 218. Lower it as files get split; it must never go up. Raising it
-/// to admit one long file is how a limit stops being one.
+/// 1,200 is what the tree meets today; `cargo xtask structure --list` prints
+/// every file's count, longest first. Lower it as files get split; it must
+/// never go up. Raising it to admit one long file is how a limit stops being
+/// one.
 pub const MAX_PRODUCTION_LINES: usize = 1_200;
 
 /// What `cargo xtask structure` was asked to do.
