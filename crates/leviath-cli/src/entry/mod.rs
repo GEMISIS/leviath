@@ -12,6 +12,7 @@
 //! wiring only.
 
 use std::io;
+use std::process::ExitCode;
 
 use clap::Parser;
 use leviath_runtime::control_socket::RESTART_GRACE;
@@ -55,7 +56,13 @@ struct Cli {
     command: Commands,
 }
 
-/// Run lev on this process's arguments, exactly as the `lev` binary does.
+/// Run lev on this process's arguments, exactly as the `lev` binary does, and
+/// hand back the code to exit with.
+///
+/// Everything lev has to say it prints itself: clap's help, version and usage
+/// errors, and a failed command's error. The code is 0 for success, 2 for a
+/// command line clap refused, and 1 for a command that failed. It never exits
+/// the process, so a wrapper's own cleanup still runs.
 ///
 /// Two things a wrapping binary has to know:
 ///
@@ -65,15 +72,29 @@ struct Cli {
 ///   mimalloc and calls `leviath_alloc::use_purge_at_free_unless_overridden`
 ///   first thing in `main` (see its `main.rs`); a wrapper that wants the same
 ///   memory behaviour from a long-running daemon does the same.
-pub fn run() -> anyhow::Result<()> {
+pub fn run() -> ExitCode {
     run_from(std::env::args())
 }
 
 /// [`run`] on the given argv instead of the process's, with the program name
 /// first, so a wrapper can add, drop or rewrite arguments before lev parses
 /// them.
-pub fn run_from(argv: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
-    let argv = argv.into_iter().collect::<Vec<_>>();
+pub fn run_from(argv: impl IntoIterator<Item = String>) -> ExitCode {
+    // Pre-scan argv for dynamic `--<region>` seed flags on `run` (region names
+    // are blueprint-defined, so clap can't declare them), then parse the rest
+    // and fold the extracted flags back in (both steps are tested lib seams).
+    let (argv, region_flags) = commands::run::extract_region_flags(argv.into_iter().collect());
+    let mut cli = match Cli::try_parse_from(&argv) {
+        Ok(cli) => cli,
+        Err(e) => {
+            let _ = e.print();
+            let hint = commands::run::show::parse_hint(&argv, e.use_stderr());
+            hint.into_iter().for_each(|line| eprintln!("{line}"));
+            return ExitCode::from(e.exit_code() as u8);
+        }
+    };
+    apply_region_flags(&mut cli.command, region_flags);
+
     // An explicit runtime instead of `#[tokio::main]` for one number: script
     // providers execute every in-flight inference call on a blocking-pool
     // thread, and tokio's default cap of 512 silently gated
@@ -81,26 +102,23 @@ pub fn run_from(argv: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
     // queued at the thread layer where nothing measured or reported it. 2048
     // covers the largest supported pool; threads are spawned on demand and
     // reaped when idle, so an idle daemon pays nothing for the headroom.
-    tokio::runtime::Builder::new_multi_thread()
+    let ran = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .max_blocking_threads(2048)
-        .build()?
-        .block_on(async_main(argv))
+        .build()
+        .map_err(anyhow::Error::from)
+        .and_then(|runtime| runtime.block_on(async_main(cli)));
+    match ran {
+        Ok(()) => ExitCode::SUCCESS,
+        // What `main` returning the error would print.
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
-async fn async_main(argv: Vec<String>) -> anyhow::Result<()> {
-    // Pre-scan argv for dynamic `--<region>` seed flags on `run` (region names
-    // are blueprint-defined, so clap can't declare them), then parse the rest
-    // and fold the extracted flags back in (both steps are tested lib seams).
-    let (argv, region_flags) = commands::run::extract_region_flags(argv);
-    let mut cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| {
-        let _ = e.print();
-        let hint = commands::run::show::parse_hint(&argv, e.use_stderr());
-        hint.into_iter().for_each(|line| eprintln!("{line}"));
-        std::process::exit(e.exit_code())
-    });
-    apply_region_flags(&mut cli.command, region_flags);
-
+async fn async_main(cli: Cli) -> anyhow::Result<()> {
     // Logs go to stderr, never stdout: `lev agent-client` speaks JSON-RPC on
     // stdout, and a stray log line there would corrupt the host's stream.
     crate::logging::init(cli.verbose);
@@ -340,7 +358,9 @@ impl RiskyExecutors for RealExecutors {
     }
 
     async fn update(&self, args: commands::update::UpdateArgs) -> anyhow::Result<()> {
-        real_update(args)
+        // On the blocking pool: the release lookup is a blocking HTTP call,
+        // which panics on an async worker in a debug build.
+        tokio::task::spawn_blocking(move || real_update(args)).await?
     }
 }
 

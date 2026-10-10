@@ -323,7 +323,7 @@ pub(crate) fn write_blueprint(
     }
     std::fs::create_dir_all(&dir)
         .map_err(|e| ServeError::Internal(format!("Failed to create directory: {e}")))?;
-    std::fs::write(&path, &manifest)
+    leviath_sys::write_atomic(&path, manifest.as_bytes(), None)
         .map_err(|e| ServeError::Internal(format!("Failed to write blueprint: {e}")))?;
     Ok(WrittenBlueprint {
         dir,

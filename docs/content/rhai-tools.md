@@ -255,7 +255,8 @@ so.
 `policy.toml` handles the simple cases with a static allowlist. For anything that needs a decision
 rather than a list, write a rule as a `.rhai` file in the `leviath/rules/` directory under your OS
 config dir. That is `~/.config/leviath/rules/` on Linux and
-`~/Library/Application Support/leviath/rules/` on macOS.
+`~/Library/Application Support/leviath/rules/` on macOS. With `LEVIATH_HOME` set, `rules/` sits
+beside `config.toml` instead.
 
 Rules are consulted after the static allowlist, and the first script that allows a call wins. The
 filename becomes the rule's name in any decision it makes.

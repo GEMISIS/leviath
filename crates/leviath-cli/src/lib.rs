@@ -5,10 +5,13 @@
 //! first) calls [`run`] or [`run_from`] from its `main` the same way:
 //!
 //! ```no_run
-//! fn main() -> anyhow::Result<()> {
+//! fn main() -> std::process::ExitCode {
 //!     leviath_cli::run()
 //! }
 //! ```
+//!
+//! lev prints its own help, usage errors and command errors, and hands back
+//! the exit code rather than exiting.
 //!
 //! `missing_docs` applies here like everywhere else in the workspace. The
 //! `pub` surface is what the integration tests drive, and a wire type like

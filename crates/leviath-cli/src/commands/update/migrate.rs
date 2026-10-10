@@ -161,16 +161,9 @@ pub(crate) struct LoadedConfig {
     pub(crate) raw: toml::Table,
 }
 
-/// Read the config file both ways.
+/// Read the config file once, as both views of it.
 pub(super) fn load_config(path: &Path) -> anyhow::Result<LoadedConfig> {
-    let config = Config::load_from_path_public(path)?;
-    let raw = match std::fs::read_to_string(path) {
-        // `expect`: `load_from_path_public` above parsed this same text as
-        // TOML, so a document that reaches here is a document that parses.
-        Ok(text) => toml::from_str::<toml::Table>(&text).expect("the config parsed a moment ago"),
-        // No file at all, which loads as the defaults and an empty document.
-        Err(_) => toml::Table::new(),
-    };
+    let (config, raw) = Config::load_with_document(path)?;
     Ok(LoadedConfig { config, raw })
 }
 

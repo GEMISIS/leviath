@@ -118,12 +118,13 @@ impl PolicyReload {
         }
     }
 
-    /// One over the paths the daemon really uses: `<config>/leviath/policy.toml`
-    /// and `<config>/leviath/rules`.
+    /// One over the paths the daemon really uses: `policy.toml` and `rules/`,
+    /// where `lev policy` keeps them. On a machine with nowhere to keep them
+    /// it watches nothing, and the policy stays empty.
     pub fn for_daemon() -> Arc<Self> {
         Arc::new(Self::new(
-            crate::commands::policy::policy_path(),
-            crate::commands::policy::rules_dir(),
+            crate::commands::policy::policy_path().unwrap_or_default(),
+            crate::commands::policy::rules_dir().unwrap_or_default(),
         ))
     }
 
@@ -563,9 +564,12 @@ mod tests {
         let reload = PolicyReload::for_daemon();
         assert_eq!(
             reload.policy_path,
-            crate::commands::policy::policy_path(),
+            crate::commands::policy::policy_path().unwrap(),
             "the daemon has to watch the file `lev policy add` writes"
         );
-        assert_eq!(reload.rules_dir, crate::commands::policy::rules_dir());
+        assert_eq!(
+            reload.rules_dir,
+            crate::commands::policy::rules_dir().unwrap()
+        );
     }
 }

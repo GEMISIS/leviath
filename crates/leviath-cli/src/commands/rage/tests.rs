@@ -1200,11 +1200,12 @@ fn the_real_helpers_answer_for_this_machine() {
     let (policy, log) = temp_env::with_vars(
         [
             ("LEVIATH_HOME", Some(dir.path().as_os_str().to_owned())),
+            ("LEVIATH_CONFIG_PATH", None),
             ("LEVIATH_DASHBOARD_LOG_PATH", None),
         ],
         || (real_policy_dir(), real_dashboard_log_path()),
     );
-    assert!(policy.ends_with("leviath"), "{}", policy.display());
+    assert_eq!(policy, dir.path().join(".leviath"));
     assert_eq!(log, dir.path().join(".leviath").join("dashboard.log"));
     assert!(!real_install_description().is_empty());
 }

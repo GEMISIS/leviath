@@ -217,7 +217,7 @@ fn write_doc(doc: &DocumentMut, path: &Path) -> Result<(), String> {
     let parent = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)
         .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-    std::fs::write(path, doc.to_string())
+    leviath_sys::write_atomic(path, doc.to_string().as_bytes(), None)
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 

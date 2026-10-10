@@ -1390,6 +1390,15 @@ fn load_config_reads_the_document_behind_the_parsed_value() {
 
     std::fs::write(&path, "nope = = nope").expect("write it");
     assert!(load_config(&path).is_err());
+
+    // A document that parses and a config that does not.
+    std::fs::write(&path, "default_provider = 3\n").expect("write it");
+    assert!(load_config(&path).is_err());
+
+    // A config that cannot be read at all.
+    let unreadable = dir.path().join("a-directory");
+    std::fs::create_dir(&unreadable).expect("make it");
+    assert!(load_config(&unreadable).is_err());
 }
 
 /// The two-arm helper behind every prompt in the command.

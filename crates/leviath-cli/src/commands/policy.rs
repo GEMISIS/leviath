@@ -64,7 +64,7 @@ pub(crate) async fn execute(args: PolicyArgs) -> anyhow::Result<()> {
 
 /// Load the policy config from the default path.
 pub(crate) fn load_policy() -> anyhow::Result<leviath_core::PolicyConfig> {
-    load_policy_from(&policy_path())
+    policy_path().and_then(|path| load_policy_from(&path))
 }
 
 /// Load the policy config from a specific path - split out from `load_policy`
@@ -86,28 +86,45 @@ fn load_policy_from(path: &std::path::Path) -> anyhow::Result<leviath_core::Poli
 fn leviath_config_dir(
     config_dir: Option<std::path::PathBuf>,
     home_dir: Option<std::path::PathBuf>,
-) -> std::path::PathBuf {
+) -> anyhow::Result<std::path::PathBuf> {
     config_dir
-        .unwrap_or_else(|| {
-            home_dir
-                .expect("no config or home directory")
-                .join(".config")
+        .or_else(|| home_dir.map(|home| home.join(".config")))
+        .map(|dir| dir.join("leviath"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "there is no config or home directory to keep the taint policy in; \
+                 set LEVIATH_HOME"
+            )
         })
-        .join("leviath")
+}
+
+/// `name` in the directory the taint policy lives in.
+///
+/// That is the platform's config directory (`<config>/leviath`), unless
+/// `LEVIATH_HOME` is set: a redirected home keeps `policy.toml` and `rules/`
+/// beside its `config.toml`, as it keeps `yolo.toml`, so a test, a sandbox or
+/// a second install reads its own policy rather than the user's.
+fn in_policy_dir(name: &str) -> anyhow::Result<std::path::PathBuf> {
+    if std::env::var_os("LEVIATH_HOME").is_some() {
+        let mut path = crate::config::Config::config_path();
+        path.set_file_name(name);
+        return Ok(path);
+    }
+    leviath_config_dir(dirs::config_dir(), dirs::home_dir()).map(|dir| dir.join(name))
 }
 
 /// Get the default policy file path.
-pub(crate) fn policy_path() -> std::path::PathBuf {
-    leviath_config_dir(dirs::config_dir(), dirs::home_dir()).join("policy.toml")
+pub(crate) fn policy_path() -> anyhow::Result<std::path::PathBuf> {
+    in_policy_dir("policy.toml")
 }
 
-/// The scripted rules directory (`<config>/leviath/rules`).
-pub(crate) fn rules_dir() -> std::path::PathBuf {
-    leviath_config_dir(dirs::config_dir(), dirs::home_dir()).join("rules")
+/// The scripted rules directory, beside `policy.toml`.
+pub(crate) fn rules_dir() -> anyhow::Result<std::path::PathBuf> {
+    in_policy_dir("rules")
 }
 
 async fn execute_list() -> anyhow::Result<()> {
-    execute_list_from(load_policy(), &rules_dir())
+    rules_dir().and_then(|rules| execute_list_from(load_policy(), &rules))
 }
 
 /// Core of [`execute_list`] with the loaded policy passed in as a `Result` so
@@ -203,7 +220,7 @@ fn execute_list_with(
 }
 
 async fn execute_add(args: PolicyAddArgs) -> anyhow::Result<()> {
-    execute_add_from(args, &policy_path(), load_policy())
+    policy_path().and_then(|path| execute_add_from(args, &path, load_policy()))
 }
 
 /// Core of [`execute_add`] with the loaded policy passed in as a `Result` so
@@ -255,7 +272,7 @@ fn execute_add_with(
     // so TOML serialization cannot fail.
     let toml_str = toml::to_string_pretty(&config)
         .expect("infallible: PolicyConfig always serializes to TOML");
-    std::fs::write(path, toml_str)?;
+    leviath_sys::write_atomic(path, toml_str.as_bytes(), None)?;
 
     println!("Added rule: {} [max: {}]", args.tool, args.max_sensitivity);
     if let Some(target) = &args.target {
@@ -274,7 +291,7 @@ async fn execute_test(args: PolicyTestArgs) -> anyhow::Result<()> {
         )
     })?;
 
-    execute_test_with(&args, taint, load_policy(), &rules_dir())
+    rules_dir().and_then(|rules| execute_test_with(&args, taint, load_policy(), &rules))
 }
 
 /// Build a one-region context window carrying `taint`, so the diagnostic runs
@@ -440,18 +457,29 @@ mod tests {
         }
     }
 
+    /// A redirected home keeps the taint policy beside its `config.toml`, so
+    /// a test or a second install never reads or writes the user's own.
     #[test]
-    fn policy_path_returns_valid_path() {
-        let path = policy_path();
-        assert!(path.to_str().unwrap().contains("leviath"));
-        assert!(path.to_str().unwrap().contains("policy.toml"));
-    }
-
-    #[test]
-    fn rules_dir_returns_valid_path() {
-        let path = rules_dir();
-        assert!(path.to_str().unwrap().contains("leviath"));
-        assert!(path.to_str().unwrap().contains("rules"));
+    fn a_redirected_home_keeps_the_policy_beside_its_config() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_vars(
+            [
+                ("LEVIATH_HOME", Some(dir.path().as_os_str())),
+                ("LEVIATH_CONFIG_PATH", None),
+            ],
+            || {
+                let data = dir.path().join(".leviath");
+                assert_eq!(policy_path().unwrap(), data.join("policy.toml"));
+                assert_eq!(rules_dir().unwrap(), data.join("rules"));
+            },
+        );
+        // Without one, the platform's config directory, where the docs say.
+        temp_env::with_var_unset("LEVIATH_HOME", || {
+            let path = policy_path().unwrap();
+            assert!(path.ends_with("leviath/policy.toml"), "{}", path.display());
+            let rules = rules_dir().unwrap();
+            assert!(rules.ends_with("leviath/rules"), "{}", rules.display());
+        });
     }
 
     #[test]
@@ -460,14 +488,25 @@ mod tests {
             Some(std::path::PathBuf::from("/cfg")),
             Some(std::path::PathBuf::from("/home/u")),
         );
-        assert_eq!(p, std::path::PathBuf::from("/cfg/leviath"));
+        assert_eq!(p.unwrap(), std::path::PathBuf::from("/cfg/leviath"));
     }
 
     #[test]
     fn leviath_config_dir_falls_back_to_home_config() {
         // No platform config dir → fall back to ~/.config/leviath
         let p = leviath_config_dir(None, Some(std::path::PathBuf::from("/home/u")));
-        assert_eq!(p, std::path::PathBuf::from("/home/u/.config/leviath"));
+        assert_eq!(
+            p.unwrap(),
+            std::path::PathBuf::from("/home/u/.config/leviath")
+        );
+    }
+
+    /// A machine with neither directory is told so, rather than the command
+    /// panicking.
+    #[test]
+    fn leviath_config_dir_with_neither_directory_is_an_error() {
+        let err = leviath_config_dir(None, None).unwrap_err();
+        assert!(err.to_string().contains("LEVIATH_HOME"), "{err}");
     }
 
     #[test]
@@ -549,7 +588,7 @@ mod tests {
     #[test]
     fn execute_add_with_write_error_and_no_parent() {
         // path == "/" has no parent (covers the `if let Some(parent)` None arm)
-        // and cannot be written as a file (covers `std::fs::write(path, ..)?`).
+        // and cannot be written as a file (covers the `write_atomic(path, ..)?`).
         let args = PolicyAddArgs {
             tool: "shell".to_string(),
             target: None,
@@ -890,14 +929,6 @@ mod tests {
     fn load_policy_returns_empty_mcp_overrides() {
         let config = load_policy().unwrap();
         assert!(config.mcp_overrides.is_empty());
-    }
-
-    #[test]
-    fn rules_dir_is_under_leviath_config() {
-        let path = rules_dir();
-        let path_str = path.to_str().unwrap();
-        assert!(path_str.contains("leviath"));
-        assert!(path_str.ends_with("rules"));
     }
 
     // ─── execute_list_with coverage ─────────────────────────────────────────
