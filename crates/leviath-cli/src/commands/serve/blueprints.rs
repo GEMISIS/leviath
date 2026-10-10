@@ -446,23 +446,23 @@ fn fan_out_infos(graph: &RunGraph) -> Vec<FanOutInfo> {
 pub(super) async fn create_blueprint(
     Json(body): Json<CreateBlueprintReq>,
 ) -> Result<Json<BlueprintInfo>, ServeError> {
-    written(&body.name, body.manifest, false)
+    written(&body.name, body.manifest, false).await
 }
 
 pub(super) async fn update_blueprint(
     AxumPath(name): AxumPath<String>,
     Json(body): Json<UpdateBlueprintReq>,
 ) -> Result<Json<BlueprintInfo>, ServeError> {
-    written(&name, body.manifest, true)
+    written(&name, body.manifest, true).await
 }
 
 /// Install or replace a blueprint, and describe what was written.
-fn written(
+async fn written(
     name: &str,
     manifest: String,
     replacing: bool,
 ) -> Result<Json<BlueprintInfo>, super::core::error::ServeError> {
-    let written = super::core::blueprints::write_blueprint(name, manifest, replacing)?;
+    let written = super::core::blueprints::write_blueprint(name, manifest, replacing).await?;
     Ok(Json(info_of(
         written.parsed,
         written.dir.to_string_lossy().to_string(),
@@ -473,7 +473,9 @@ fn written(
 pub(super) async fn delete_blueprint(
     AxumPath(name): AxumPath<String>,
 ) -> Result<StatusCode, ServeError> {
-    super::core::blueprints::remove_blueprint(&name).map(|()| StatusCode::NO_CONTENT)
+    super::core::blueprints::remove_blueprint(&name)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
 }
 
 /// `POST /api/blueprints/validate`: parse, validate and lint a manifest.
