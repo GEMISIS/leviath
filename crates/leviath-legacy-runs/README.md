@@ -24,6 +24,13 @@ environment fingerprint is always left empty: an old run never recorded what
 it relied on from the machine, so a resume treats it as unknown and does not
 compare it.
 
+Alpha builds wrote run files in an earlier binary layout, layout 2, which
+differs from this build's only in how the spec holds each stage's model and
+reply cap. `upgrade` rewrites such a file in place: the spec is read in the
+old shape and written in the new one, every other frame is copied byte for
+byte, and the file as it was is kept as `legacy/run.v2.lvr`.
+`needs_upgrade` tells one from its header alone.
+
 It also holds the only reader left for the old `agent.leviath` blueprint
 format. `migrate` turns one into an `agent.toml` describing the same run,
 which is what `lev blueprint migrate` writes. Nothing else reads an

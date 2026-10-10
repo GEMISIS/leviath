@@ -25,7 +25,7 @@ use leviath_runtime::runfile::record::{
 
 mod read;
 
-pub use read::{MAGIC, read};
+pub use read::{MAGIC, Records, read, read_counted};
 
 /// Who owned the run when its journal was started.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

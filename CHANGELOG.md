@@ -192,6 +192,17 @@ same list.
   images a stage drew were missing from it in the dashboard and the Lair.
   That step is now listed under the stage that wrote it, then under the
   stage it entered, for runs already on disk as well as new ones.
+- Run files written by alpha builds in the earlier run file layout read
+  again. The daemon upgrades each one in place when it starts, saving the
+  run in the home's backup first and keeping the file as it was in the
+  run's `legacy/` folder as `run.v2.lvr`. The run reads back exactly as it
+  did, and one that cannot be upgraded is left as it was and listed in
+  `runs.unconverted`.
+- A run converted from an older release keeps the files of each step. Every
+  step of its history lists the stored parts its context had held by then,
+  with their type, name and region, where only the last step listed any.
+  The conversion's report and the run's log also say how many old journal
+  records it could not read and what it left out of each step's context.
 - A completion webhook survives a restart of `lev serve`. A server records
   each delivery once it is over, and one that starts sends every finished
   run that still owes a webhook: a retry the last server was waiting on,
@@ -206,8 +217,8 @@ same list.
   engine is now made by one constructor, and a test holds every crate to it.
 - The run file's stage plan keeps the chosen model as one value, and names
   the stage's reply cap `reply_cap`, apart from the model's own maximum.
-  **Breaking** for run files written by alpha builds since the run file
-  arrived: they are refused by name. Spec paths for a stage's provider read
+  Run files written by alpha builds in the earlier layout are upgraded when
+  the daemon starts (see below). Spec paths for a stage's provider read
   `stages.<stage>.model.provider`.
 - A daemon event recorder that falls behind numbers the events it lost, so
   the gap shows in the sequence instead of the stream looking whole.

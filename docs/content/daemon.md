@@ -154,7 +154,9 @@ up to date:
 
 - each installed blueprint still written as an `agent.leviath` becomes an `agent.toml`, or is
   replaced by this release's copy when Leviath ships it;
-- each run directory in the old many-file layout becomes a run file.
+- each run directory in the old many-file layout becomes a run file;
+- each run file an alpha build wrote in an earlier binary layout is upgraded in place, and the file
+  as it was stays in the run's `legacy/` folder as `run.v2.lvr`.
 
 Before it changes any of them, the daemon saves it under `~/.leviath/backups/<version>-<time>/`:
 

@@ -162,20 +162,28 @@ fn an_unknown_record_is_skipped_and_a_torn_tail_ends_the_read() {
     bytes.extend(framed(&[done(1, "c1", "ok")])[6..].iter());
     let whole = bytes.clone();
     assert_eq!(read(&whole).unwrap().len(), 2);
+    let counted = read_counted(&whole).unwrap();
+    assert_eq!(
+        (counted.records.len(), counted.skipped, counted.torn),
+        (2, 1, 0)
+    );
 
     let mut torn_payload = whole.clone();
     torn_payload.extend(100u64.to_be_bytes());
     torn_payload.extend(b"{\"Head");
     assert_eq!(read(&torn_payload).unwrap().len(), 2);
+    assert_eq!(read_counted(&torn_payload).unwrap().torn, 14);
 
     let mut torn_length = whole.clone();
     torn_length.extend([0, 0, 1]);
     assert_eq!(read(&torn_length).unwrap().len(), 2);
+    assert_eq!(read_counted(&torn_length).unwrap().torn, 3);
 
     let mut absurd = whole;
     absurd.extend(u64::MAX.to_be_bytes());
     absurd.extend(b"{}");
     assert_eq!(read(&absurd).unwrap().len(), 2);
+    assert_eq!(read_counted(&absurd).unwrap().torn, 10);
 }
 
 #[test]

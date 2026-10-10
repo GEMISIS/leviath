@@ -23,12 +23,14 @@ pub(crate) fn n32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// What reading a snapshot could not carry over.
+/// What reading a run's snapshots could not carry over, gathered over every
+/// snapshot read.
 #[derive(Debug, Default)]
 pub(crate) struct Losses {
     /// Regions whose names are not valid region names, left out.
     regions: BTreeSet<String>,
-    /// Entries whose metadata was not a checklist item.
+    /// Entries whose metadata was not a checklist item: the most any one
+    /// snapshot held, since one entry is in every snapshot after it.
     metadata: usize,
     /// Stored parts whose digests are not valid, kept as their stand-in text.
     digests: BTreeSet<String>,
@@ -68,11 +70,13 @@ pub(crate) fn state(
     taint: bool,
     losses: &mut Losses,
 ) -> ContextState {
+    let before = std::mem::take(&mut losses.metadata);
     let regions = snapshot
         .regions
         .iter()
         .filter_map(|r| region(r, taint, losses))
         .collect();
+    losses.metadata = losses.metadata.max(before);
     ContextState {
         regions,
         hidden,

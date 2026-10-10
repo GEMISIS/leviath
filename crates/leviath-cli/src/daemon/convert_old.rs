@@ -22,6 +22,13 @@
 //! [`crate::daemon::upgrade`]), where each key a run's blueprint dropped is a
 //! warning; what each conversion filled in is in the run's own log. At start
 //! a pass says how far along it is on the daemon's start-up board.
+//!
+//! The same pass upgrades each run file an alpha build wrote in binary
+//! layout 2, which this build cannot read, to this build's layout in place
+//! (see [`leviath_legacy_runs::upgrade`]). It is taken in the same order and
+//! the same way: saved in the backup first, listed when it does not upgrade,
+//! and counted in the summary. The file as it was stays in the run's
+//! `legacy/` directory.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -218,6 +225,9 @@ enum Done {
     /// Converted into a run file.
     #[cfg(feature = "legacy-runs")]
     Converted,
+    /// A layout-2 run file, upgraded in place.
+    #[cfg(feature = "legacy-runs")]
+    Upgraded,
     /// Tried, and not converted.
     #[cfg(feature = "legacy-runs")]
     Failed,
@@ -230,6 +240,7 @@ enum Done {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Pass {
     converted: usize,
+    upgraded: usize,
     failed: usize,
     held: usize,
 }
@@ -240,6 +251,8 @@ impl Pass {
             Done::Nothing => {}
             #[cfg(feature = "legacy-runs")]
             Done::Converted => self.converted += 1,
+            #[cfg(feature = "legacy-runs")]
+            Done::Upgraded => self.upgraded += 1,
             #[cfg(feature = "legacy-runs")]
             Done::Failed => self.failed += 1,
             #[cfg(feature = "legacy-runs")]
@@ -256,13 +269,14 @@ impl Pass {
         let saved = backup.dir().display().to_string();
         tracing::info!(
             converted = self.converted,
+            upgraded = self.upgraded,
             failed = self.failed,
             left_as_they_were = self.held,
             backup = %saved,
             unconverted = %list,
-            "old run directories: each converted one was saved in the backup first; one that does \
-             not convert is left as it was and listed, and is tried again by the next release (or \
-             after the list is deleted)"
+            "old run directories and layout-2 run files: each converted or upgraded one was saved \
+             in the backup first; one that does not convert is left as it was and listed, and is \
+             tried again by the next release (or after the list is deleted)"
         );
     }
 }
@@ -373,12 +387,15 @@ fn to_convert(runs_dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// How many of `waiting` are run files now, whoever converted them.
+/// How many of `waiting` hold a run file in this build's layout now, whoever
+/// converted or upgraded them.
 #[cfg(feature = "legacy-runs")]
-fn converted_of(waiting: &[PathBuf]) -> usize {
+fn done_of(waiting: &[PathBuf]) -> usize {
     waiting
         .iter()
-        .filter(|dir| crate::runstate::run_file::is_run_file(dir))
+        .filter(|dir| {
+            crate::runstate::run_file::is_run_file(dir) && !leviath_legacy_runs::needs_upgrade(dir)
+        })
         .count()
 }
 
@@ -392,9 +409,9 @@ fn dir_name(dir: &Path) -> String {
         .into_owned()
 }
 
-/// Every directory under `runs_dir` that holds an old run, in name order. A
-/// conversion that was stopped part way is put back first, so the run is
-/// converted again.
+/// Every directory under `runs_dir` that holds an old run or a layout-2 run
+/// file, in name order. A conversion that was stopped part way is put back
+/// first, so the run is converted again.
 #[cfg(feature = "legacy-runs")]
 fn old_runs(runs_dir: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(runs_dir)
@@ -403,7 +420,9 @@ fn old_runs(runs_dir: &Path) -> Vec<PathBuf> {
         .flatten()
         .map(|e| e.path())
         .inspect(|dir| put_back(dir))
-        .filter(|dir| leviath_legacy_runs::is_legacy(dir))
+        .filter(|dir| {
+            leviath_legacy_runs::is_legacy(dir) || leviath_legacy_runs::needs_upgrade(dir)
+        })
         .collect();
     dirs.sort();
     dirs
@@ -438,12 +457,12 @@ fn old_runs(runs_dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Convert the run in `dir` when it is an old run that has not failed to
-/// convert before: saved in `backup` first (one that cannot be saved is not
-/// converted, and is tried again at the next start), and listed in
-/// `unconverted` when it does not convert. What each conversion filled in is
-/// in the run's own log, and at debug level in the daemon's; what it did is
-/// added to `upgrade`.
+/// Convert the run in `dir` when it is an old run, or upgrade its run file
+/// when it is in layout 2, unless it failed to before: saved in `backup`
+/// first (one that cannot be saved is left as it is, and is tried again at
+/// the next start), and listed in `unconverted` when it does not convert.
+/// What each conversion filled in is in the run's own log, and at debug
+/// level in the daemon's; what it did is added to `upgrade`.
 #[cfg(feature = "legacy-runs")]
 fn convert_in(
     dir: &Path,
@@ -452,7 +471,8 @@ fn convert_in(
     (backup, unconverted): (&Backup, &mut Unconverted),
     upgrade: &mut Upgrade,
 ) -> Done {
-    if !leviath_legacy_runs::is_legacy(dir) {
+    let layout2 = leviath_legacy_runs::needs_upgrade(dir);
+    if !layout2 && !leviath_legacy_runs::is_legacy(dir) {
         return Done::Nothing;
     }
     let name = dir_name(dir);
@@ -465,6 +485,9 @@ fn convert_in(
         tracing::warn!(dir = %shown, error = %why, "an old run directory could not be backed up, so it was not converted");
         upgrade.failed += 1;
         return Done::Failed;
+    }
+    if layout2 {
+        return upgrade_in(dir, (name, unconverted), upgrade);
     }
     let env = leviath_legacy_runs::ConvertEnv {
         agents_dir: agents_dir.map(Path::to_path_buf),
@@ -490,6 +513,35 @@ fn convert_in(
         Err(e) => {
             let why = e.to_string();
             tracing::warn!(dir = %shown, error = %why, "an old run directory could not be converted; it is left as it was");
+            unconverted.add(name, why);
+            upgrade.failed += 1;
+            Done::Failed
+        }
+    }
+}
+
+/// Upgrade the layout-2 run file in `dir`, the directory `name`, already
+/// saved in the backup, listing it in `unconverted` when it does not
+/// upgrade, and add what it did to `upgrade`.
+#[cfg(feature = "legacy-runs")]
+fn upgrade_in(
+    dir: &Path,
+    (name, unconverted): (String, &mut Unconverted),
+    upgrade: &mut Upgrade,
+) -> Done {
+    match leviath_legacy_runs::upgrade(dir) {
+        Ok(report) => {
+            let (id, kept) = (
+                report.run_id.to_string(),
+                report.original.display().to_string(),
+            );
+            tracing::debug!(run_id = %id, original = %kept, torn_bytes_left_out = report.cut, "upgraded a run file from layout 2");
+            upgrade.upgraded += 1;
+            Done::Upgraded
+        }
+        Err(e) => {
+            let (shown, why) = (dir.display().to_string(), e.to_string());
+            tracing::warn!(dir = %shown, error = %why, "a run file in layout 2 could not be upgraded; it is left as it was");
             unconverted.add(name, why);
             upgrade.failed += 1;
             Done::Failed
@@ -622,18 +674,22 @@ pub(crate) async fn convert_at_start(
     board: &StartupBoard,
 ) -> Upgrade {
     #[cfg(feature = "legacy-runs")]
-    let waiting = to_convert(runs_dir);
+    let (old, layout2): (Vec<PathBuf>, Vec<PathBuf>) = to_convert(runs_dir)
+        .into_iter()
+        .partition(|dir| leviath_legacy_runs::is_legacy(dir));
     #[cfg(feature = "legacy-runs")]
-    if let Some(cmd) = start.child.as_ref().filter(|_| !waiting.is_empty()) {
+    let waiting = old.len() + layout2.len();
+    #[cfg(feature = "legacy-runs")]
+    if let Some(cmd) = start.child.as_ref().filter(|_| waiting > 0) {
         match crate::daemon::convert_child::convert(cmd, runs_dir, &start, board).await {
             Ok(upgrade) => return upgrade,
             Err(so_far) => {
                 // A run the child converted and died before it reported is
                 // a run file now, and the daemon's pass skips it: what is on
-                // disk counts the runs converted, whoever converted them.
+                // disk counts the runs converted and upgraded, whoever did it.
                 let rest = in_daemon(runs_dir, &start, board).await;
-                let converted = converted_of(&waiting);
-                return crate::daemon::convert_child::then(so_far, rest, converted);
+                let done = (done_of(&old), done_of(&layout2));
+                return crate::daemon::convert_child::then(so_far, rest, done);
             }
         }
     }

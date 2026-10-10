@@ -15,12 +15,31 @@ const VERSION: u16 = 1;
 /// so a torn one is never taken at its word and allocated.
 const MAX_RECORD_BYTES: u64 = 256 * 1024 * 1024;
 
+/// An old journal as read: its records, and what the read stepped over.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Records {
+    /// Every record that read, in order.
+    pub records: Vec<JournalRecord>,
+    /// How many whole frames held JSON that is not a record this build
+    /// knows, each stepped over.
+    pub skipped: usize,
+    /// How many bytes follow the last whole frame: a record a crash cut short
+    /// while it was appended, left out.
+    pub torn: usize,
+}
+
 /// Every record in `bytes`, an old journal.
 ///
 /// The preamble is checked strictly. After it, a frame whose JSON is not a
 /// record this build knows is stepped over, and a torn frame (a crash
 /// mid-append) ends the read with the records before it.
 pub fn read(bytes: &[u8]) -> Result<Vec<JournalRecord>, String> {
+    read_counted(bytes).map(|read| read.records)
+}
+
+/// [`read`], counting the frames it stepped over and the torn bytes it left
+/// out.
+pub fn read_counted(bytes: &[u8]) -> Result<Records, String> {
     let Some((magic, rest)) = bytes.split_at_checked(MAGIC.len()) else {
         return Err("it is too short to be a journal".into());
     };
@@ -36,7 +55,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<JournalRecord>, String> {
             "it is journal version {version}, and this build reads up to {VERSION}"
         ));
     }
-    let mut records = Vec::new();
+    let mut read = Records::default();
     while let Some((len, after)) = rest.split_first_chunk::<8>() {
         let len = u64::from_be_bytes(*len);
         let Some(payload) = (len <= MAX_RECORD_BYTES)
@@ -45,8 +64,12 @@ pub fn read(bytes: &[u8]) -> Result<Vec<JournalRecord>, String> {
         else {
             break;
         };
-        records.extend(serde_json::from_slice::<JournalRecord>(payload).ok());
+        match serde_json::from_slice::<JournalRecord>(payload) {
+            Ok(record) => read.records.push(record),
+            Err(_) => read.skipped += 1,
+        }
         rest = &after[payload.len()..];
     }
-    Ok(records)
+    read.torn = rest.len();
+    Ok(read)
 }

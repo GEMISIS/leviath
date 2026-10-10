@@ -98,6 +98,7 @@ pub(crate) enum ToChild {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Tally {
     converted: usize,
+    upgraded: usize,
     failed: usize,
     /// Each key dropped from a converted run's blueprint: the blueprint, the
     /// line, and how many runs.
@@ -108,6 +109,7 @@ impl Tally {
     fn of(upgrade: &Upgrade) -> Self {
         Self {
             converted: upgrade.converted,
+            upgraded: upgrade.upgraded,
             failed: upgrade.failed,
             dropped: upgrade
                 .dropped_in_runs
@@ -121,6 +123,7 @@ impl Tally {
     fn upgrade(self, runs_dir: &Path) -> Upgrade {
         Upgrade {
             converted: self.converted,
+            upgraded: self.upgraded,
             failed: self.failed,
             dropped_in_runs: self
                 .dropped
@@ -134,19 +137,24 @@ impl Tally {
 }
 
 /// What a child that stopped part way had done, and the runs the daemon
-/// converted after it, as one upgrade of `converted` runs: the runs that
-/// were waiting and are run files now, which counts a run the child
-/// converted and stopped before it reported. The daemon tries again every
-/// run the child did not convert, so its count of the ones that failed is
-/// the one that stands. A key dropped from a run the child did not report
-/// is in that run's own log only.
-pub(crate) fn then(child: Upgrade, rest: Upgrade, converted: usize) -> Upgrade {
+/// converted after it, as one upgrade of `converted` old runs and `upgraded`
+/// run files: those that were waiting and are this build's run files now,
+/// which counts a run the child converted or upgraded and stopped before it
+/// reported. The daemon tries again every run the child did not convert, so
+/// its count of the ones that failed is the one that stands. A key dropped
+/// from a run the child did not report is in that run's own log only.
+pub(crate) fn then(
+    child: Upgrade,
+    rest: Upgrade,
+    (converted, upgraded): (usize, usize),
+) -> Upgrade {
     let mut dropped = child.dropped_in_runs;
     for (key, runs) in rest.dropped_in_runs {
         *dropped.entry(key).or_default() += runs;
     }
     Upgrade {
         converted,
+        upgraded,
         dropped_in_runs: dropped,
         ..rest
     }

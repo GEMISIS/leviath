@@ -288,6 +288,83 @@ fn a_run_that_does_not_convert_is_tried_once_per_release() {
     assert!(unconverted(&runs).is_none());
 }
 
+/// A run file an alpha build wrote in binary layout 2 is upgraded at start,
+/// beside the old run directories that are converted, and reads back: saved
+/// in the backup first, the file as it was kept beside it, and counted apart
+/// from the runs converted. A later start has nothing left to do.
+#[cfg(feature = "legacy-runs")]
+#[test]
+fn a_layout_2_run_file_is_upgraded_at_start() {
+    let home = tempfile::tempdir().unwrap();
+    let runs = home.path().join("runs");
+    let name = "probe-1790000000-0123456789ab";
+    let run = runs.join(name);
+    copy_dir(&fixture("layout-2"), &run);
+    copy_dir(&fixture("finished"), &runs.join("old"));
+    let file = run.join(leviath_core::files::RUN_FILE);
+    let before = std::fs::read(&file).unwrap();
+    assert!(leviath_runtime::runfile::RunFileReader::read(&file).is_err());
+    let board = StartupBoard::default();
+    let upgrade = crate::test_support::with_tracing(|| convert_all(&runs, None, None, &board));
+    assert_eq!(
+        (upgrade.converted, upgrade.upgraded, upgrade.failed),
+        (1, 1, 0)
+    );
+    let now = board.current();
+    assert_eq!((now.done, now.total), (2, 2));
+    let reader = leviath_runtime::runfile::RunFileReader::read(&file).unwrap();
+    assert_eq!(reader.spec().stage("main").unwrap().reply_cap, Some(200));
+    assert_eq!(
+        std::fs::read(run.join("legacy").join("run.v2.lvr")).unwrap(),
+        before
+    );
+    let saved = Backup::of_runs(&runs).dir().join("runs").join(name);
+    assert_eq!(
+        std::fs::read(saved.join(leviath_core::files::RUN_FILE)).unwrap(),
+        before
+    );
+
+    let again = convert_all(&runs, None, None, &StartupBoard::default());
+    assert_eq!(
+        again,
+        Upgrade {
+            unconverted: Some(Unconverted::path_for(&runs)),
+            ..Upgrade::default()
+        }
+    );
+    // A run brought in by itself is upgraded the same way.
+    let one = runs.join("one");
+    copy_dir(&fixture("layout-2"), &one);
+    convert_one(&one, None, None);
+    assert!(!leviath_legacy_runs::needs_upgrade(&one));
+}
+
+/// A layout-2 run file that does not upgrade is left as it was and listed,
+/// as an old run that does not convert is, and later starts leave it alone.
+#[cfg(feature = "legacy-runs")]
+#[test]
+fn a_layout_2_run_file_that_does_not_upgrade_is_listed() {
+    let home = tempfile::tempdir().unwrap();
+    let runs = home.path().join("runs");
+    let run = runs.join("alpha");
+    copy_dir(&fixture("layout-2"), &run);
+    let file = run.join(leviath_core::files::RUN_FILE);
+    let header =
+        std::fs::read(&file).unwrap()[..leviath_runtime::runfile::codec::HEADER_LEN].to_vec();
+    std::fs::write(&file, &header).unwrap();
+    let upgrade = crate::test_support::with_tracing(|| {
+        convert_all(&runs, None, None, &StartupBoard::default())
+    });
+    assert_eq!((upgrade.upgraded, upgrade.failed), (0, 1));
+    let listed = unconverted(&runs).expect("the run is listed");
+    let why = listed["runs"]["alpha"].as_str().unwrap();
+    assert!(why.contains("does not start with the run's spec"), "{why}");
+    assert_eq!(std::fs::read(&file).unwrap(), header);
+    let again = convert_all(&runs, None, None, &StartupBoard::default());
+    assert_eq!(again.failed, 0);
+    assert!(leviath_legacy_runs::needs_upgrade(&run));
+}
+
 /// A run that cannot be backed up first is not converted, and is not listed
 /// as one that does not convert: the next start tries again.
 #[cfg(feature = "legacy-runs")]
