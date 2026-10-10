@@ -198,7 +198,7 @@ impl SetupEnv {
 /// Kept working byte-for-byte because it is the documented headless path and an
 /// integration test spawns the real binary through it.
 pub fn run_non_interactive(args: &SetupArgs, env: &SetupEnv) -> anyhow::Result<()> {
-    let mut config = Config::load_from_path_public(&env.config_path).unwrap_or_default();
+    let mut config = Config::load_from_path(&env.config_path).unwrap_or_default();
     apply_flags(&mut config, args);
     // The wizard refuses to finish without a provider; this path is scripted
     // and writes what it was given, so it says so instead. A config with no
@@ -402,7 +402,7 @@ fn retarget_default_provider(config: &mut Config) {
 /// `~/.leviath/config.toml` a key the user had chosen to keep in their
 /// environment. Those are tracked separately and shown as such.
 pub fn build_wizard(env: &SetupEnv) -> Wizard {
-    let base = Config::load_from_path_public(&env.config_path).unwrap_or_default();
+    let base = Config::load_from_path(&env.config_path).unwrap_or_default();
     let (candidates, errors) = state::candidates_from_scans(import::scan(&env.roots));
     let remembered = env
         .ui_state_path
@@ -985,7 +985,7 @@ mod tests {
             plan::apply(&plan, &config_path, &dir.path().join("agents"), None)
                 .expect("the plan applies");
 
-            let saved = Config::load_from_path_public(&config_path).expect("it reads back");
+            let saved = Config::load_from_path(&config_path).expect("it reads back");
             assert!(
                 saved.providers.codex_enabled,
                 "the sign-in was switched off on the way to disk"
@@ -1038,7 +1038,7 @@ mod tests {
 
         run_non_interactive(&args, &env).unwrap();
 
-        let written = Config::load_from_path_public(&env.config_path).unwrap();
+        let written = Config::load_from_path(&env.config_path).unwrap();
         assert_eq!(
             written.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-x")
@@ -1126,7 +1126,7 @@ mod tests {
         )
         .unwrap();
 
-        let written = Config::load_from_path_public(&env.config_path).unwrap();
+        let written = Config::load_from_path(&env.config_path).unwrap();
         assert_eq!(
             written.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-first")
@@ -1628,7 +1628,7 @@ mod tests {
         .await
         .unwrap();
 
-        let written = Config::load_from_path_public(&env.config_path).unwrap();
+        let written = Config::load_from_path(&env.config_path).unwrap();
         assert_eq!(
             written.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-x")

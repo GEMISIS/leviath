@@ -315,7 +315,7 @@ async fn a_write_beside_a_login_file_that_will_not_load_says_so() {
                     let answer = schema(true).execute(Request::new(call)).await;
                     assert_eq!(refusal_code(&answer), "\"INTERNAL\"", "{call}");
                 }
-                let written = crate::config::Config::load_from_path_public(&config).unwrap();
+                let written = crate::config::Config::load_from_path(&config).unwrap();
                 assert_eq!(written.mcp_servers[0].command.as_deref(), Some("/bin/true"));
             })
             .await;

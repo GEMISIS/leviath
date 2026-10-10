@@ -422,8 +422,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         write(&path, &config_with_grant("cto", "~/good"));
         // Mirror boot: the reloader is seeded with the config already on disk.
-        let reloader =
-            ConfigReloader::new(path.clone(), Config::load_from_path_public(&path).unwrap());
+        let reloader = ConfigReloader::new(path.clone(), Config::load_from_path(&path).unwrap());
         assert_eq!(
             reloader.current().read_path_grants_for_agent("cto"),
             vec!["~/good".to_string()]
@@ -498,8 +497,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         write(&path, &config_with_grant("cto", "~/good"));
-        let reloader =
-            ConfigReloader::new(path.clone(), Config::load_from_path_public(&path).unwrap());
+        let reloader = ConfigReloader::new(path.clone(), Config::load_from_path(&path).unwrap());
         let good = reloader.current();
 
         write(&path, "broken : :");
@@ -533,8 +531,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         write(&path, &config_with_grant("cto", "~/good"));
-        let reloader =
-            ConfigReloader::new(path.clone(), Config::load_from_path_public(&path).unwrap());
+        let reloader = ConfigReloader::new(path.clone(), Config::load_from_path(&path).unwrap());
         let _ = reloader.current();
 
         write(&path, "broken : :");
@@ -552,10 +549,7 @@ mod tests {
 
     /// A reloader seeded from a file that already loads, as boot does.
     fn seeded(path: &std::path::Path) -> ConfigReloader {
-        ConfigReloader::new(
-            path.to_path_buf(),
-            Config::load_from_path_public(path).unwrap(),
-        )
+        ConfigReloader::new(path.to_path_buf(), Config::load_from_path(path).unwrap())
     }
 
     #[test]

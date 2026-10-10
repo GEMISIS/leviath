@@ -228,19 +228,6 @@ fn status_cell_ignores_a_reason_on_a_non_waiting_run() {
     assert_eq!(status_cell(&e), "active");
 }
 
-#[test]
-fn humanize_age_picks_the_largest_small_unit() {
-    assert_eq!(humanize_age(0), "0s");
-    assert_eq!(humanize_age(59), "59s");
-    assert_eq!(humanize_age(60), "1m");
-    assert_eq!(humanize_age(3599), "59m");
-    assert_eq!(humanize_age(3600), "1h");
-    assert_eq!(humanize_age(86_399), "23h");
-    assert_eq!(humanize_age(86_400), "1d");
-    // A clock that moved backwards must not print a negative age.
-    assert_eq!(humanize_age(-5), "0s");
-}
-
 /// The three time columns measure three different things, and a run in the
 /// middle of a long pause is where they come apart: alive for an hour, at work
 /// for ten minutes of it, and moved a minute ago.

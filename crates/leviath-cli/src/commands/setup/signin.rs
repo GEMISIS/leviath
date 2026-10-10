@@ -92,7 +92,7 @@ impl LiveAuthorizer {
     /// not wherever the default would have put it.
     #[must_use]
     pub fn real(opener: leviath_mcp::BrowserOpener, config_path: &std::path::Path) -> Self {
-        let kind = crate::config::Config::load_from_path_public(config_path)
+        let kind = crate::config::Config::load_from_path(config_path)
             .unwrap_or_default()
             .security
             .credential_store;

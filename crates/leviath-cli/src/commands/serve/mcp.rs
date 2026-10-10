@@ -196,7 +196,7 @@ pub(super) async fn list_servers(State(state): State<AppState>) -> impl IntoResp
 /// Read from the file rather than from `AppState`, because these routes write
 /// it and a stale copy would report a server that was just removed.
 async fn read_config(path: PathBuf) -> Result<Config, ServeError> {
-    blocking(move || Config::load_from_path_public(&path))
+    blocking(move || Config::load_from_path(&path))
         .await
         .map_err(|e| ServeError::Internal(e.to_string()))
 }
@@ -209,7 +209,7 @@ async fn read_config(path: PathBuf) -> Result<Config, ServeError> {
 /// every other server's grant.
 async fn read_admin(paths: AdminPaths) -> Result<(Config, McpGrants, AuthStore), ServeError> {
     blocking(move || {
-        let config = Config::load_from_path_public(&paths.config)?;
+        let config = Config::load_from_path(&paths.config)?;
         let grants = McpGrants::at(paths.store, config.security.credential_store);
         let held = grants.load()?;
         Ok((config, grants, held))
@@ -285,8 +285,8 @@ pub(super) async fn install_server(
     let path = admin_paths().config;
     let server = checked(name, command, url, args, env, headers)?;
     blocking(move || {
-        let mut config = Config::load_from_path_public(&path)
-            .map_err(|e| ServeError::Internal(e.to_string()))?;
+        let mut config =
+            Config::load_from_path(&path).map_err(|e| ServeError::Internal(e.to_string()))?;
         if config.mcp_servers.iter().any(|s| s.name == server.name) {
             return Err(ServeError::Conflict(format!(
                 "an MCP server named '{}' already exists",
@@ -295,7 +295,7 @@ pub(super) async fn install_server(
         }
         config.mcp_servers.push(server.clone());
         config
-            .save_to_path_public(&path)
+            .save_to_path(&path)
             .map_err(|e| ServeError::Internal(e.to_string()))?;
         Ok(server)
     })
@@ -336,8 +336,8 @@ pub(super) async fn update_server(
     let path = admin_paths().config;
     let server = checked(name, command, url, args, env, headers)?;
     blocking(move || {
-        let mut config = Config::load_from_path_public(&path)
-            .map_err(|e| ServeError::Internal(e.to_string()))?;
+        let mut config =
+            Config::load_from_path(&path).map_err(|e| ServeError::Internal(e.to_string()))?;
         let Some(at) = config
             .mcp_servers
             .iter()
@@ -350,7 +350,7 @@ pub(super) async fn update_server(
         };
         config.mcp_servers[at] = server.clone();
         config
-            .save_to_path_public(&path)
+            .save_to_path(&path)
             .map_err(|e| ServeError::Internal(e.to_string()))?;
         Ok(server)
     })
@@ -400,7 +400,7 @@ pub(super) async fn uninstall_server(name: &str) -> Result<(), ServeError> {
     let paths = admin_paths();
     let name = name.to_string();
     blocking(move || {
-        let mut config = Config::load_from_path_public(&paths.config)
+        let mut config = Config::load_from_path(&paths.config)
             .map_err(|e| ServeError::Internal(e.to_string()))?;
         let before = config.mcp_servers.len();
         config.mcp_servers.retain(|server| server.name != name);
@@ -410,7 +410,7 @@ pub(super) async fn uninstall_server(name: &str) -> Result<(), ServeError> {
             )));
         }
         config
-            .save_to_path_public(&paths.config)
+            .save_to_path(&paths.config)
             .map_err(|e| ServeError::Internal(e.to_string()))?;
         McpGrants::at(paths.store, config.security.credential_store)
             .forget(&name)
@@ -802,7 +802,7 @@ mod tests {
                 .await
                 .expect("the server is replaced");
 
-                let config = Config::load_from_path_public(&admin_paths().config).unwrap();
+                let config = Config::load_from_path(&admin_paths().config).unwrap();
                 assert_eq!(config.mcp_servers.len(), 1, "replaced, not added beside");
                 let server = &config.mcp_servers[0];
                 assert_eq!(server.url.as_deref(), Some("https://docs.example/mcp"));
@@ -1467,7 +1467,7 @@ for line in sys.stdin:
         let mut config = Config::default();
         config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
         config.mcp_servers.push(server);
-        config.save_to_path_public(&paths_in(dir).config).unwrap();
+        config.save_to_path(&paths_in(dir).config).unwrap();
     }
 
     /// Store `auth` for `server` in the keychain, as `lev mcp login` does.
@@ -1563,7 +1563,7 @@ for line in sys.stdin:
                 .is_some_and(|e| e.contains("could not be forgotten")),
             "{body}"
         );
-        let config = Config::load_from_path_public(&paths_in(dir.path()).config).unwrap();
+        let config = Config::load_from_path(&paths_in(dir.path()).config).unwrap();
         assert!(config.mcp_servers.is_empty());
     }
 

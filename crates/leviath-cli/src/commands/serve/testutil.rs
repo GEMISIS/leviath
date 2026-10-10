@@ -72,7 +72,7 @@ pub(super) fn state_with_config_at(path: &std::path::Path) -> super::types::AppS
         update_jobs: Default::default(),
         config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
             path.to_path_buf(),
-            crate::config::Config::load_from_path_public(path).expect("a config that loads"),
+            crate::config::Config::load_from_path(path).expect("a config that loads"),
         )),
         event_tx,
         control: no_daemon_client(),

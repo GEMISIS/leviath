@@ -11,7 +11,7 @@ use crate::blueprint_edit::ManifestDoc;
 /// the config's rows, `mime_types.toml`) with the blueprint's own rows on
 /// top, the way its runs read it.
 pub(super) fn mime_type_options(config_path: &std::path::Path, doc: &ManifestDoc) -> Vec<String> {
-    let mut registry = crate::config::Config::load_from_path_public(config_path)
+    let mut registry = crate::config::Config::load_from_path(config_path)
         .ok()
         .and_then(|c| c.mime_registry().ok())
         .unwrap_or_else(leviath_core::mime::MimeRegistry::builtin);

@@ -132,7 +132,7 @@ mod tests {
     fn reloader(path: &std::path::Path) -> Arc<ConfigReloader> {
         Arc::new(ConfigReloader::new(
             path.to_path_buf(),
-            Config::load_from_path_public(path).unwrap(),
+            Config::load_from_path(path).unwrap(),
         ))
     }
 

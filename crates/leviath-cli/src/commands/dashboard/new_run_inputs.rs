@@ -705,7 +705,7 @@ fn entry_stage_window(
     cache_path: Option<&Path>,
 ) -> usize {
     const DEFAULT_WINDOW: usize = 8192;
-    let config = crate::config::Config::load_from_path_public(config_path).ok();
+    let config = crate::config::Config::load_from_path(config_path).ok();
     let cache = cache_path.and_then(leviath_providers::CapabilityCache::load);
     // A missing entry stage and a stage that names no models both fold into an
     // empty iterator, so both take the `unwrap_or` default without a dead arm.

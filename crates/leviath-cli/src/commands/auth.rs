@@ -120,7 +120,7 @@ pub async fn execute(args: AuthArgs, env: AuthEnv) -> anyhow::Result<()> {
     let path = Config::config_path();
     match args.command {
         AuthCommand::Status => {
-            let config = Config::load_from_path_public(&path)?;
+            let config = Config::load_from_path(&path)?;
             print!("{}", render_status(&status(&config, &path)));
             // Read live, and only for a subscription that is switched on: a
             // signed-in account is the one place the usage lives.
@@ -136,11 +136,11 @@ pub async fn execute(args: AuthArgs, env: AuthEnv) -> anyhow::Result<()> {
             Ok(())
         }
         AuthCommand::Login { provider } => {
-            let config = Config::load_from_path_public(&path)?;
+            let config = Config::load_from_path(&path)?;
             login(&config, &provider, env).await
         }
         AuthCommand::Logout { provider } => {
-            let config = Config::load_from_path_public(&path)?;
+            let config = Config::load_from_path(&path)?;
             logout(&config, &provider, env).await
         }
         AuthCommand::Migrate { to_file, dry_run } => {
@@ -492,7 +492,7 @@ fn migrate(
     dry_run: bool,
     grant_path: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    let config = Config::load_from_path_public(path)?;
+    let config = Config::load_from_path(path)?;
     let plan = plan_migration(&config, to_file);
 
     if plan.moving.is_empty() {
@@ -602,7 +602,7 @@ fn apply_migration_with(
         // after that write has succeeded.
         let mut file_config = config.clone();
         file_config.security.credential_store = CredentialStoreKind::File;
-        file_config.save_to_path_public(path)?;
+        file_config.save_to_path(path)?;
 
         if let Ok(Some(store)) = resolved {
             for (account, _) in &secrets {
@@ -658,7 +658,7 @@ fn apply_migration_with(
     // Only now is it safe to drop the file copies.
     let mut stripped = config.clone();
     stripped.security.credential_store = CredentialStoreKind::Keychain;
-    stripped.save_to_path_public(path)?;
+    stripped.save_to_path(path)?;
 
     migrate_mcp_grants(mcp_path, None, Some(store.as_ref()))?;
     migrate_provider_grants(grant_path, None, Some(store.as_ref()))
@@ -828,7 +828,7 @@ mod tests {
         let path = dir.path().join("config.toml");
 
         let config = config_with_keys(CredentialStoreKind::File);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
         assert!(before.contains("sk-ant-secret"), "the file starts with it");
 
@@ -893,7 +893,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = config_with_keys(CredentialStoreKind::File);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
 
         assert!(
@@ -915,7 +915,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = config_with_keys(CredentialStoreKind::File);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
 
         // Accepts the write, then reports nothing back.
@@ -1069,7 +1069,7 @@ mod tests {
         std::fs::write(&mcp, "not json").unwrap();
 
         let config = config_with_keys(CredentialStoreKind::File);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
         let store = leviath_core::MemoryStore::new();
         assert!(
             apply_migration_with(
@@ -1108,7 +1108,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = config_with_keys(CredentialStoreKind::File);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
         set_readonly(&path, true);
 
         let err = apply_migration_with(&config, &path, false, keychain(), None, None)
@@ -1155,7 +1155,7 @@ mod tests {
 
         // Written with the file backend, so the key lands in the TOML...
         let config = config_with_keys(CredentialStoreKind::File);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
         // ...and also placed in the keychain.
         let store = crate::credentials::store_for(CredentialStoreKind::Keychain)
             .unwrap()
@@ -1183,7 +1183,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = config_with_keys(CredentialStoreKind::File);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
 
         let s = status_with(&config, &path, Ok(None));
         assert_eq!(s.kind, CredentialStoreKind::File);
@@ -1288,7 +1288,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         config_with_keys(CredentialStoreKind::File)
-            .save_to_path_public(&path)
+            .save_to_path(&path)
             .unwrap();
         // Readable, so the load succeeds; unwritable, so the rewrite does not.
         set_readonly(&path, true);
@@ -1421,7 +1421,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = config_with_keys(CredentialStoreKind::File);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
 
         let refuses = Stub {
             get: absent,
@@ -1500,7 +1500,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         config_with_keys(CredentialStoreKind::File)
-            .save_to_path_public(&path)
+            .save_to_path(&path)
             .unwrap();
 
         run_auth(&path, AuthArgs::status_for_test()).expect("status succeeds");
@@ -1513,7 +1513,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         config_with_keys(CredentialStoreKind::File)
-            .save_to_path_public(&path)
+            .save_to_path(&path)
             .unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
 
@@ -1532,7 +1532,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         config_with_keys(CredentialStoreKind::File)
-            .save_to_path_public(&path)
+            .save_to_path(&path)
             .unwrap();
 
         run_auth(&path, AuthArgs::migrate_for_test(false, false)).expect("migrate succeeds");
@@ -1547,7 +1547,7 @@ mod tests {
         let _guard = with_mock_store();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
 
         // Nor in the environment, which the loader reads keys from too.
         let unset: Vec<&str> = crate::config::PROVIDER_KEYS
@@ -1589,7 +1589,7 @@ mod tests {
         write_grant_store(&grants);
 
         let config = config_with_keys(CredentialStoreKind::File);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
         assert!(
             std::fs::read_to_string(&grants)
                 .unwrap()
@@ -1636,7 +1636,7 @@ mod tests {
         initial.save_with(&grants, Some(&store)).unwrap();
 
         let config = config_with_keys(CredentialStoreKind::Keychain);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
 
         apply_migration_with(
             &config,
@@ -1665,7 +1665,7 @@ mod tests {
         let grants = dir.path().join("provider-auth.json");
         std::fs::write(&grants, "{ not json").unwrap();
         let config = config_with_keys(CredentialStoreKind::Keychain);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
 
         for to_file in [true, false] {
             let store = leviath_core::MemoryStore::new();
@@ -1692,7 +1692,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let grants = dir.path().join("provider-auth.json");
         let config = config_with_keys(CredentialStoreKind::Keychain);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
 
         // Seeded through the very store the migration will read it back from,
         // so the cleanup has a sign-in to try to delete. A different store
@@ -1749,7 +1749,7 @@ mod tests {
         let grants = dir.path().join("provider-auth.json");
         write_grant_store(&grants);
         let config = config_with_keys(CredentialStoreKind::File);
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
 
         apply_migration_with(
             &config,
@@ -1877,7 +1877,7 @@ mod tests {
     async fn execute_login_signs_in_and_stores_the_grant() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
         let issuer = leviath_testkit::spawn_mock_server(
             200,
             "OK",
@@ -1920,7 +1920,7 @@ mod tests {
     fn execute_logout_forgets_the_grant() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
 
         // Beside the config rather than under a `$LEVIATH_HOME` override:
         // `temp_env` sets that for the whole process, so a wizard built on
@@ -1942,7 +1942,7 @@ mod tests {
     fn execute_refuses_a_key_based_provider() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
 
         for args in [
             AuthArgs::login_for_test("anthropic"),
@@ -1961,7 +1961,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut config = Config::default();
         config.providers.codex_enabled = true;
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
         let issuer = leviath_testkit::spawn_mock_server(
             200,
             "OK",
@@ -2245,7 +2245,7 @@ mod tests {
     fn a_grok_sign_out_revokes_and_forgets_even_when_the_issuer_is_away() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
         let grants = path.with_file_name("provider-auth.json");
         let mut store = leviath_providers::oauth::ProviderAuthStore::default();
         store.set(

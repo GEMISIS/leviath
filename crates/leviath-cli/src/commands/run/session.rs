@@ -806,7 +806,7 @@ mod tests {
     fn the_script_config_source_is_stable_until_the_config_changes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
         let reloader = std::sync::Arc::new(crate::daemon::config_reload::ConfigReloader::new(
             path.clone(),
             Config::default(),
@@ -828,7 +828,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        edited.save_to_path_public(&path).unwrap();
+        edited.save_to_path(&path).unwrap();
         // Strictly newer, so the reload is observable even in the same tick.
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
         std::fs::OpenOptions::new()
