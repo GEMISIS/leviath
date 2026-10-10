@@ -456,11 +456,21 @@ pub(crate) fn collect_inference(
                     error = %err,
                     "provider call failed"
                 );
-                let next = err.unavailable_reason().and_then(|_| {
-                    let si = inference.as_deref_mut()?;
-                    (!si.fallbacks.is_empty()).then(|| si.fallbacks.remove(0))
-                });
-                if let Some(next) = next {
+                // Why the provider is unusable, the stage's inference to move,
+                // and where to: a failover needs all three, so they are bound
+                // together. The inference is only borrowed for an unusable
+                // provider, so no other failure marks it changed.
+                let failover = match err.unavailable_reason() {
+                    Some(reason) => inference
+                        .as_deref_mut()
+                        .filter(|si| !si.fallbacks.is_empty())
+                        .map(|si| {
+                            let next = si.fallbacks.remove(0);
+                            (reason, si, next)
+                        }),
+                    None => None,
+                };
+                if let Some((reason, si, next)) = failover {
                     // Loud on purpose. Silently swapping providers is how a
                     // factory ends up running on a model nobody chose.
                     tracing::warn!(
@@ -500,11 +510,7 @@ pub(crate) fn collect_inference(
                             from_model: called_model.clone(),
                             to_provider: next.provider_or_empty().to_string(),
                             to_model: next.model.to_string(),
-                            reason: err
-                                .unavailable_reason()
-                                .map(leviath_providers::UnavailableReason::label)
-                                .expect("a failover only happens for an unusable provider")
-                                .to_string(),
+                            reason: reason.label().to_string(),
                             kind: crate::inference_bridge::failure_label(&err),
                             at: now,
                         };
@@ -513,9 +519,6 @@ pub(crate) fn collect_inference(
                             crate::runfile::record::RunRecord::InferenceFailover(record),
                         );
                     }
-                    let si = inference
-                        .as_deref_mut()
-                        .expect("the failover branch only runs with a StageInference");
                     si.provider_name = next.provider_or_empty().to_string();
                     si.model = next.model.to_string();
                     // Back to ready, not errored: the next tick dispatches it

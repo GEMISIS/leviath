@@ -320,12 +320,5 @@ pub(crate) struct InferenceStage {
     pub stream_inference: bool,
 }
 
-/// Truncate `text` to at most `max_chars` characters, never splitting a
-/// multi-byte UTF-8 char. `max_chars` is an approximate char budget the caller
-/// derives from a token estimate.
-fn truncate_on_char_boundary(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
-}
-
 #[cfg(test)]
 mod tests;

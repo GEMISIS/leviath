@@ -119,10 +119,9 @@ pub fn snippet_around(s: &str, at: usize, radius: usize) -> String {
 /// rounded up.
 ///
 /// Every context budget, eviction threshold, and truncation cap that has no
-/// exact tokenizer runs on this. It was open-coded across ~30 sites with
-/// three disagreeing formulas (`/4`, `/4 + 1`, `div_ceil(4)`), which meant
-/// the same text could count differently on the budgeting side and the
-/// truncation side of one decision. Rounding up (never 0 for non-empty text)
+/// exact tokenizer runs on this, so the same text counts the same on the
+/// budgeting side and the truncation side of one decision. Rounding up (never
+/// 0 for non-empty text)
 /// is the safe direction for a budget: overestimating spends a token of
 /// headroom, underestimating overflows a window.
 ///
@@ -135,10 +134,10 @@ pub fn estimate_tokens(s: &str) -> usize {
 
 /// The first `width` characters of `s`, whole characters only.
 ///
-/// For fixed-width table cells over author-supplied names: counts characters
-/// rather than bytes, so a name of accented letters is cut where the column
-/// ends and never inside a character. No ellipsis; a cell that wants one
-/// appends it. Two commands had this as a private helper each.
+/// Counts characters rather than bytes, so a cut never lands inside one: a
+/// table cell over a name of accented letters ends where the column does, and
+/// a tool result cut to a budget stays valid text. No ellipsis; a caller that
+/// wants one appends it.
 pub fn truncate_chars(s: &str, width: usize) -> String {
     match s.chars().count() > width {
         true => s.chars().take(width).collect(),

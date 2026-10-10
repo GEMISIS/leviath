@@ -134,12 +134,6 @@ pub(crate) struct StallClock(
     pub(crate) fn() -> i64,
 );
 
-/// Wall-clock seconds since the Unix epoch: what the watchdog reads when no
-/// [`StallClock`] pins it.
-fn now_secs() -> i64 {
-    chrono::Utc::now().timestamp()
-}
-
 /// Default grace period before an unresolvable stall fails its run.
 ///
 /// Long enough that a provider arriving late - a `.rhai` script dropped into the
@@ -273,7 +267,7 @@ pub(crate) fn fail_stalled_dispatch(
     if limit == 0 {
         return; // watchdog disabled
     }
-    let now = clock.map_or_else(now_secs, |c| (c.0)());
+    let now = clock.map_or_else(leviath_core::duration::now_secs, |c| (c.0)());
     for (entity, stall, si, mut state, buffer, md) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active || !stall.reason.needs_a_person() {

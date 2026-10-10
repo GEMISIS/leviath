@@ -134,10 +134,7 @@ impl PersistLaneStats {
     pub(crate) fn journal_append_failed(&self, run_id: &str, path: &Path, message: &str) {
         self.appends_failed.fetch_add(1, Ordering::Relaxed);
         let error = self.remember(run_id, path, message);
-        self.unwritable
-            .lock()
-            .expect("the failure table is never held across a panic")
-            .insert(run_id.to_string(), error);
+        leviath_core::sync::lock(&self.unwritable).insert(run_id.to_string(), error);
     }
 
     /// Record a snapshot write that lost one of its files.
@@ -158,10 +155,7 @@ impl PersistLaneStats {
             message: message.to_string(),
             at: chrono::Utc::now().timestamp(),
         };
-        *self
-            .last
-            .lock()
-            .expect("the last-error slot is never held across a panic") = Some(error.clone());
+        *leviath_core::sync::lock(&self.last) = Some(error.clone());
         error
     }
 
@@ -172,30 +166,20 @@ impl PersistLaneStats {
     /// drops the rest, and a run that has already gone must not be reported for
     /// ever.
     pub(crate) fn take_unwritable(&self) -> Vec<JournalError> {
-        std::mem::take(
-            &mut *self
-                .unwritable
-                .lock()
-                .expect("the failure table is never held across a panic"),
-        )
-        .into_values()
-        .collect()
+        std::mem::take(&mut *leviath_core::sync::lock(&self.unwritable))
+            .into_values()
+            .collect()
     }
 
     /// Note that `run_id`'s file now ends at step `seq`.
     pub(crate) fn stepped(&self, run_id: &str, seq: u64) {
-        self.steps
-            .lock()
-            .expect("the step table is never held across a panic")
-            .insert(run_id.to_string(), seq);
+        leviath_core::sync::lock(&self.steps).insert(run_id.to_string(), seq);
     }
 
     /// The last step `run_id`'s file holds, as far as this lane knows: 0 for
     /// a run it has written nothing for.
     pub(crate) fn step_of(&self, run_id: &str) -> u64 {
-        self.steps
-            .lock()
-            .expect("the step table is never held across a panic")
+        leviath_core::sync::lock(&self.steps)
             .get(run_id)
             .copied()
             .unwrap_or(0)
@@ -209,11 +193,7 @@ impl PersistLaneStats {
             appends_failed: self.appends_failed.load(Ordering::Relaxed),
             snapshots_failed: self.snapshots_failed.load(Ordering::Relaxed),
             queue_depth: self.queued.load(Ordering::Relaxed),
-            last_error: self
-                .last
-                .lock()
-                .expect("the last-error slot is never held across a panic")
-                .clone(),
+            last_error: leviath_core::sync::lock(&self.last).clone(),
         }
     }
 }

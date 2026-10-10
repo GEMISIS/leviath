@@ -294,7 +294,6 @@ impl WorldEvent {
 /// per-agent [`WorldEvent::Log`] lines - into the same stream the control
 /// transport serves. Absent in worlds that don't stream (test / `lev run`), where
 /// systems that depend on it become no-ops.
-// `Resource` moved from `bevy_ecs::system` to `bevy_ecs::resource` in 0.19.
 #[derive(bevy_ecs::resource::Resource, Clone)]
 pub(crate) struct WorldEventSink(pub broadcast::Sender<WorldEvent>);
 
