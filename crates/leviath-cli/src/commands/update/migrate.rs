@@ -207,7 +207,7 @@ pub(super) fn migrate_config(
         println!("  would write {path}");
         return Ok(());
     }
-    config.save_to_path_public(&env.config_path)?;
+    config.save_to_path(&env.config_path)?;
     println!("  wrote {path}");
     Ok(())
 }

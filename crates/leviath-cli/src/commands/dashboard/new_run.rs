@@ -128,7 +128,7 @@ impl Dashboard {
     /// bundled blueprints, which say so when they are not installed yet.
     pub(super) fn refresh_new_run_agents(&mut self) {
         let ctx = &self.new_run_ctx;
-        let config = Config::load_from_path_public(&ctx.config_path).unwrap_or_default();
+        let config = Config::load_from_path(&ctx.config_path).unwrap_or_default();
         let report = build_list_report(&ctx.agents_dir, &ctx.workdir, &config, ListFilter::All);
         let mut agents: Vec<NewRunAgent> = report
             .agents
@@ -1064,9 +1064,7 @@ binds = [{{ region = "task" }}]
         let mut dash = dash_at(dir.path());
         let mut config = Config::default();
         config.agent_paths.push(dir.path().join("extra"));
-        config
-            .save_to_path_public(&dash.new_run_ctx.config_path)
-            .unwrap();
+        config.save_to_path(&dash.new_run_ctx.config_path).unwrap();
         dash.refresh_new_run_agents();
         let scout = dash
             .new_run_agents

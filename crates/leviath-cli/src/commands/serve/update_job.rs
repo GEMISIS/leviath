@@ -629,7 +629,7 @@ impl UpdateJobs {
                 changed.push(format!("{}: {line}", migration.name));
             }
         }
-        match config.save_to_path_public(&env.config_path) {
+        match config.save_to_path(&env.config_path) {
             Ok(()) => self.step(id, step, StepStatus::Done, changed.join("; "), events),
             Err(e) => self.step(id, step, StepStatus::Failed, e.to_string(), events),
         }

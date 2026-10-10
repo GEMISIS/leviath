@@ -226,7 +226,7 @@ impl Dashboard {
 
     /// The config the catalog reads `agent_paths` from.
     pub(in crate::commands::dashboard) fn agents_config(&self) -> Config {
-        Config::load_from_path_public(&self.new_run_ctx.config_path).unwrap_or_default()
+        Config::load_from_path(&self.new_run_ctx.config_path).unwrap_or_default()
     }
 
     /// The open screen, for the modules that drive it.

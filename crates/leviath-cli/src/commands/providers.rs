@@ -230,7 +230,7 @@ async fn show_retention(
     env: &ProvidersEnv,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> anyhow::Result<()> {
-    let config = Config::load_from_path_public(&env.config_path)?;
+    let config = Config::load_from_path(&env.config_path)?;
     let settings = crate::commands::run::session::retention_settings(&config);
     let bedrock = bedrock_from(&config, env, build_client)?;
     let bedrock_mode = match &bedrock {
@@ -361,9 +361,9 @@ async fn set_retention(
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> anyhow::Result<()> {
     let zero = want == Retention::Zero;
-    let mut config = Config::load_from_path_public(&env.config_path)?;
+    let mut config = Config::load_from_path(&env.config_path)?;
     config.providers.zero_retention = zero;
-    config.save_to_path_public(&env.config_path)?;
+    config.save_to_path(&env.config_path)?;
     match zero {
         true => println!(
             "Zero retention is on: OpenAI is sent store=false, OpenRouter routes only to \
@@ -401,7 +401,7 @@ async fn set_bedrock_mode(
     env: &ProvidersEnv,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> anyhow::Result<()> {
-    let config = Config::load_from_path_public(&env.config_path)?;
+    let config = Config::load_from_path(&env.config_path)?;
     let Some(provider) = bedrock_from(&config, env, build_client)? else {
         let why = leviath_providers::compiled::missing(leviath_providers::bedrock::PROVIDER_NAME)
             .unwrap_or_else(|| {
@@ -438,7 +438,7 @@ fn known_names(config: &Config) -> Vec<String> {
 }
 
 fn set_order(order: OrderArgs, env: &ProvidersEnv) -> anyhow::Result<()> {
-    let mut config = Config::load_from_path_public(&env.config_path)?;
+    let mut config = Config::load_from_path(&env.config_path)?;
 
     let new_order = if order.clear {
         Vec::new()
@@ -471,7 +471,7 @@ fn set_order(order: OrderArgs, env: &ProvidersEnv) -> anyhow::Result<()> {
     };
 
     config.providers.provider_order = new_order.clone();
-    config.save_to_path_public(&env.config_path)?;
+    config.save_to_path(&env.config_path)?;
 
     if new_order.is_empty() {
         println!(
@@ -485,7 +485,7 @@ fn set_order(order: OrderArgs, env: &ProvidersEnv) -> anyhow::Result<()> {
 }
 
 fn list(json: bool, env: &ProvidersEnv) -> anyhow::Result<()> {
-    let config = Config::load_from_path_public(&env.config_path)?;
+    let config = Config::load_from_path(&env.config_path)?;
     let order = &config.providers.provider_order;
     let configured = catalog::configured(&config);
 
@@ -550,7 +550,7 @@ mod tests {
     fn env_with(config: Config) -> (tempfile::TempDir, ProvidersEnv) {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("config.toml");
-        config.save_to_path_public(&config_path).expect("save");
+        config.save_to_path(&config_path).expect("save");
         (
             dir,
             ProvidersEnv {
@@ -888,7 +888,7 @@ retention = "zero""#,
     }
 
     fn load(env: &ProvidersEnv) -> Config {
-        Config::load_from_path_public(&env.config_path).expect("load")
+        Config::load_from_path(&env.config_path).expect("load")
     }
 
     #[tokio::test]

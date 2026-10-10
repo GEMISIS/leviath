@@ -174,7 +174,7 @@ async fn add_server(add: AddArgs, env: &McpEnv) -> anyhow::Result<()> {
         leviath_mcp::ResolvedTransport::Http { .. }
     );
 
-    let mut config = Config::load_from_path_public(&env.config_path)?;
+    let mut config = Config::load_from_path(&env.config_path)?;
     if config.mcp_servers.iter().any(|s| s.name == server.name) {
         anyhow::bail!(
             "an MCP server named '{}' already exists; remove it first",
@@ -182,7 +182,7 @@ async fn add_server(add: AddArgs, env: &McpEnv) -> anyhow::Result<()> {
         );
     }
     config.mcp_servers.push(server.clone());
-    config.save_to_path_public(&env.config_path)?;
+    config.save_to_path(&env.config_path)?;
     println!("Added MCP server '{}'.", server.name);
 
     // Auto-login for an HTTP server that isn't opted out - this is what makes
@@ -202,7 +202,7 @@ async fn add_server(add: AddArgs, env: &McpEnv) -> anyhow::Result<()> {
 }
 
 async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
-    let config = Config::load_from_path_public(&env.config_path)?;
+    let config = Config::load_from_path(&env.config_path)?;
     let server = find_server(&config, name)?;
     // A loaded config's entries are validated at load, so this resolves.
     let url = match server
@@ -251,13 +251,13 @@ fn logout(name: &str, env: &McpEnv) -> anyhow::Result<()> {
 }
 
 fn remove_server(remove: RemoveArgs, env: &McpEnv) -> anyhow::Result<()> {
-    let mut config = Config::load_from_path_public(&env.config_path)?;
+    let mut config = Config::load_from_path(&env.config_path)?;
     let before = config.mcp_servers.len();
     config.mcp_servers.retain(|s| s.name != remove.name);
     if config.mcp_servers.len() == before {
         anyhow::bail!("no MCP server named '{}'", remove.name);
     }
-    config.save_to_path_public(&env.config_path)?;
+    config.save_to_path(&env.config_path)?;
     // Drop any stored credentials too, so a removed server leaves nothing behind.
     env.grants.forget(&remove.name)?;
     println!("Removed MCP server '{}'.", remove.name);
@@ -265,7 +265,7 @@ fn remove_server(remove: RemoveArgs, env: &McpEnv) -> anyhow::Result<()> {
 }
 
 async fn test(name: &str, env: &McpEnv) -> anyhow::Result<()> {
-    let config = Config::load_from_path_public(&env.config_path)?;
+    let config = Config::load_from_path(&env.config_path)?;
     let server = find_server(&config, name)?;
     let auth_header = env.grants.authorization_header(name, env.now).await?;
     let tools = connect_and_list(
@@ -308,7 +308,7 @@ pub(crate) async fn connect_and_list(
 }
 
 fn list_servers(list: ListArgs, env: &McpEnv) -> anyhow::Result<()> {
-    let config = Config::load_from_path_public(&env.config_path)?;
+    let config = Config::load_from_path(&env.config_path)?;
     let store = env.grants.load()?;
 
     let mut rows: Vec<ServerRow> = config
@@ -544,7 +544,7 @@ mod tests {
         .await
         .unwrap();
 
-        let config = Config::load_from_path_public(&env.config_path).unwrap();
+        let config = Config::load_from_path(&env.config_path).unwrap();
         assert_eq!(config.mcp_servers.len(), 1);
         assert_eq!(config.mcp_servers[0].command.as_deref(), Some("npx"));
 
@@ -599,7 +599,7 @@ mod tests {
         .await
         .unwrap();
 
-        let config = Config::load_from_path_public(&env.config_path).unwrap();
+        let config = Config::load_from_path(&env.config_path).unwrap();
         assert!(config.mcp_servers.is_empty());
         assert!(
             AuthStore::load(env.grants.path())
@@ -630,7 +630,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            Config::load_from_path_public(&env.config_path)
+            Config::load_from_path(&env.config_path)
                 .unwrap()
                 .mcp_servers
                 .is_empty()
@@ -922,7 +922,7 @@ mod tests {
         .await
         .expect("adding a header-authenticated server must succeed");
 
-        let config = Config::load_from_path_public(&env.config_path).unwrap();
+        let config = Config::load_from_path(&env.config_path).unwrap();
         assert_eq!(
             config.mcp_servers[0].headers.get("Authorization").unwrap(),
             "Bearer configured-token"
@@ -975,7 +975,7 @@ mod tests {
         .unwrap();
 
         // The server is in config and the token landed in the store.
-        let config = Config::load_from_path_public(&env.config_path).unwrap();
+        let config = Config::load_from_path(&env.config_path).unwrap();
         assert_eq!(config.mcp_servers[0].name, "navigator");
         let stored = AuthStore::load(env.grants.path()).unwrap();
         assert_eq!(stored.get("navigator").unwrap().access_token, "cli-access");
@@ -1010,7 +1010,7 @@ mod tests {
         )
         .await
         .expect("add should not fail just because login did");
-        let config = Config::load_from_path_public(&env.config_path).unwrap();
+        let config = Config::load_from_path(&env.config_path).unwrap();
         assert_eq!(config.mcp_servers.len(), 1, "the server is still saved");
     }
 
@@ -1167,7 +1167,7 @@ for line in sys.stdin:
     fn seed_config(env: &McpEnv, server: MCPServerConfig) {
         let mut config = Config::default();
         config.mcp_servers.push(server);
-        config.save_to_path_public(&env.config_path).unwrap();
+        config.save_to_path(&env.config_path).unwrap();
     }
 
     /// Seed a store file holding `name`, then make it read-only so a later

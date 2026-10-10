@@ -813,9 +813,10 @@ impl Config {
         Ok(c)
     }
 
-    /// Core of `load()`, parameterized by path so it can be exercised in
-    /// tests against a tempfile instead of the real `~/.leviath/config.toml`.
-    fn load_from_path(path: &std::path::Path) -> anyhow::Result<Self> {
+    /// Load the config at `path`: [`load`](Self::load) for a file other than
+    /// the default one, such as the one `lev mcp` is about to rewrite or a
+    /// test's tempfile.
+    pub(crate) fn load_from_path(path: &std::path::Path) -> anyhow::Result<Self> {
         Ok(Self::load_from_path_faulted(path)?)
     }
 
@@ -901,17 +902,6 @@ impl Config {
         // with plaintext keys on disk and no indication of it.
         let resolved = crate::credentials::store_for(self.security.credential_store);
         self.write_to(path, resolved)
-    }
-
-    /// Load a config from an explicit path (`lev mcp` uses this to read the
-    /// file it is about to rewrite). Public wrapper over the tested `load_from_path`.
-    pub(crate) fn load_from_path_public(path: &std::path::Path) -> anyhow::Result<Self> {
-        Self::load_from_path(path)
-    }
-
-    /// Save a config to an explicit path. Public wrapper over `save_to_path`, for `lev mcp` rewriting the config file.
-    pub(crate) fn save_to_path_public(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        self.save_to_path(path)
     }
 
     /// Get the path to the config file.

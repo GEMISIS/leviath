@@ -1126,7 +1126,7 @@ mod tests {
     async fn an_edit_through_put_is_visible_to_the_next_get() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
         let state = state_watching_config_path(path.clone());
 
         let before = get_config_request(state.clone()).await;
@@ -1151,7 +1151,7 @@ mod tests {
     async fn an_edit_made_outside_the_api_is_picked_up() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
         let state = state_watching_config_path(path.clone());
         let before = get_config_request(state.clone()).await;
         assert_eq!(before["gateways"].as_array().map(Vec::len), Some(0));
@@ -1164,7 +1164,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        edited.save_to_path_public(&path).unwrap();
+        edited.save_to_path(&path).unwrap();
         bump_mtime(&path);
 
         let after = get_config_request(state).await;
@@ -1203,7 +1203,7 @@ mod tests {
     async fn put_config_writes_the_ollama_switch() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
 
         let body = serde_json::json!({ "ollama_enabled": true }).to_string();
         let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
@@ -1215,7 +1215,7 @@ mod tests {
         let rc: RedactedConfig = serde_json::from_slice(&bytes).unwrap();
         assert!(rc.ollama_enabled);
         assert!(
-            Config::load_from_path_public(&path)
+            Config::load_from_path(&path)
                 .unwrap()
                 .providers
                 .ollama_enabled
@@ -1229,7 +1229,7 @@ mod tests {
     async fn put_config_writes_and_clears_the_provider_order() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
 
         let body =
             serde_json::json!({ "provider_order": ["codex", "openrouter", "openai"] }).to_string();
@@ -1241,7 +1241,7 @@ mod tests {
         let rc: RedactedConfig = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(rc.provider_order, ["codex", "openrouter", "openai"]);
         assert_eq!(
-            Config::load_from_path_public(&path)
+            Config::load_from_path(&path)
                 .unwrap()
                 .providers
                 .provider_order,
@@ -1254,7 +1254,7 @@ mod tests {
         let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         assert!(
-            Config::load_from_path_public(&path)
+            Config::load_from_path(&path)
                 .unwrap()
                 .providers
                 .provider_order
@@ -1269,7 +1269,7 @@ mod tests {
     async fn an_ollama_address_reads_as_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
 
         // The *watching* state, built first and then edited underneath it:
         // `state_with_config_path` serves a fixed config, and the reloader is
@@ -1280,7 +1280,7 @@ mod tests {
             ollama_base_url: Some("http://elsewhere:11434".to_string()),
             ..Config::default()
         }
-        .save_to_path_public(&path)
+        .save_to_path(&path)
         .unwrap();
         bump_mtime(&path);
 
@@ -1294,7 +1294,7 @@ mod tests {
     async fn put_config_writes_the_codex_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
 
         let body = serde_json::json!({
             "codex_enabled": true,
@@ -1315,7 +1315,7 @@ mod tests {
         assert_eq!(rc.codex_verbosity.as_deref(), Some("low"));
         assert!(!rc.codex_replay_reasoning);
 
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         assert!(saved.providers.codex_enabled);
         assert_eq!(
             saved.providers.codex_reasoning_effort.as_deref(),
@@ -1335,13 +1335,13 @@ mod tests {
         let mut config = Config::default();
         config.providers.codex_enabled = true;
         config.providers.codex_verbosity = Some("high".to_string());
-        config.save_to_path_public(&path).unwrap();
+        config.save_to_path(&path).unwrap();
 
         let body = serde_json::json!({ "default_provider": "codex" }).to_string();
         let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         assert!(saved.providers.codex_enabled, "the switch was turned off");
         assert_eq!(saved.providers.codex_verbosity.as_deref(), Some("high"));
     }
@@ -1357,7 +1357,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config.toml");
-            Config::default().save_to_path_public(&path).unwrap();
+            Config::default().save_to_path(&path).unwrap();
 
             let body = serde_json::json!({ field: value, "codex_enabled": true }).to_string();
             let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
@@ -1367,7 +1367,7 @@ mod tests {
                 "{field} = {value}"
             );
 
-            let saved = Config::load_from_path_public(&path).unwrap();
+            let saved = Config::load_from_path(&path).unwrap();
             assert!(
                 !saved.providers.codex_enabled,
                 "the check runs before anything is written, so {field} left the file alone"
@@ -1379,7 +1379,7 @@ mod tests {
     async fn put_config_writes_all_present_fields_and_redacts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
 
         let body = serde_json::json!({
             "default_provider": "openai",
@@ -1409,7 +1409,7 @@ mod tests {
         assert_eq!(rc.bedrock_region.as_deref(), Some("us-west-2"));
         assert_eq!(rc.default_provider, "openai");
 
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         assert_eq!(
             saved.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-x")
@@ -1440,11 +1440,11 @@ mod tests {
     async fn a_blank_bedrock_region_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
         let body = serde_json::json!({ "bedrock_region": "  " }).to_string();
         let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
         assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         assert!(saved.providers.bedrock_region.is_none());
     }
 
@@ -1458,7 +1458,7 @@ mod tests {
             override_model: Some("gpt-5".to_string()),
             ..Default::default()
         };
-        pinned.save_to_path_public(path).unwrap();
+        pinned.save_to_path(path).unwrap();
     }
 
     /// `GET /api/config` says which model is pinned, and says `null` out loud
@@ -1473,7 +1473,7 @@ mod tests {
     async fn get_config_reports_the_override_model_when_set_and_null_when_not() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
         let state = state_watching_config_path(path.clone());
 
         let unset = get_config_request(state.clone()).await;
@@ -1505,7 +1505,7 @@ mod tests {
         let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         assert_eq!(
             saved.override_model.as_deref(),
             Some("gpt-5"),
@@ -1548,7 +1548,7 @@ mod tests {
             !on_disk.contains("override_model"),
             "the key is gone from the file, not merely None in memory"
         );
-        let reread = Config::load_from_path_public(&path).unwrap();
+        let reread = Config::load_from_path(&path).unwrap();
         assert_eq!(reread.override_model, None, "and it stays gone on re-read");
     }
 
@@ -1564,7 +1564,7 @@ mod tests {
         let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         assert_eq!(
-            Config::load_from_path_public(&path)
+            Config::load_from_path(&path)
                 .unwrap()
                 .providers
                 .anthropic_api_key
@@ -1581,7 +1581,7 @@ mod tests {
         let answer: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(answer["has_anthropic_key"], false, "{answer}");
         assert_eq!(
-            Config::load_from_path_public(&path)
+            Config::load_from_path(&path)
                 .unwrap()
                 .providers
                 .anthropic_api_key,
@@ -1607,7 +1607,7 @@ mod tests {
     async fn put_config_sets_clears_and_refuses_the_fallback_model_like_the_override() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
         let state = state_with_config_path(path.clone());
 
         let resp = put_config_request(state.clone(), r#"{"fallback_model": "haiku"}"#).await;
@@ -1622,7 +1622,7 @@ mod tests {
             "the other setting is untouched"
         );
         assert_eq!(
-            Config::load_from_path_public(&path)
+            Config::load_from_path(&path)
                 .unwrap()
                 .fallback_model
                 .as_deref(),
@@ -1639,7 +1639,7 @@ mod tests {
             "the refusal names the key"
         );
         assert_eq!(
-            Config::load_from_path_public(&path)
+            Config::load_from_path(&path)
                 .unwrap()
                 .fallback_model
                 .as_deref(),
@@ -1669,7 +1669,7 @@ mod tests {
         for body in [r#"{"override_model": ""}"#, r#"{"override_model": "   "}"#] {
             let resp = put_config_request(state_with_config_path(path.clone()), body).await;
             assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
-            let saved = Config::load_from_path_public(&path).unwrap();
+            let saved = Config::load_from_path(&path).unwrap();
             assert_eq!(
                 saved.override_model.as_deref(),
                 Some("gpt-5"),
@@ -1697,11 +1697,11 @@ mod tests {
             },
             ..Default::default()
         };
-        base.save_to_path_public(&path).unwrap();
+        base.save_to_path(&path).unwrap();
 
         let resp = put_config_request(state_with_config_path(path.clone()), "{}").await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         assert_eq!(
             saved.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-keep")
@@ -1719,7 +1719,7 @@ mod tests {
     async fn put_config_edits_a_gateway_without_being_told_its_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
         let state = || state_with_config_path(path.clone());
 
         // Create.
@@ -1729,7 +1729,7 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         assert_eq!(
             saved.model_providers["groq"].script.as_deref(),
             Some("groq.rhai"),
@@ -1743,7 +1743,7 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         let gateway = &saved.model_providers["groq"];
         assert_eq!(gateway.base_url.as_deref(), Some("https://eu.groq.com"));
         assert_eq!(
@@ -1755,14 +1755,14 @@ mod tests {
         // A second gateway leaves the first alone.
         let resp = put_config_request(state(), r#"{"gateways":[{"name":"other"}]}"#).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         assert_eq!(saved.model_providers.len(), 2);
 
         // Remove takes a list of its own, because omitting a gateway above
         // means "leave it alone" and so can never mean "delete it".
         let resp = put_config_request(state(), r#"{"remove_gateways":["other"]}"#).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         assert!(saved.model_providers.contains_key("groq"));
         assert!(!saved.model_providers.contains_key("other"));
     }
@@ -1773,7 +1773,7 @@ mod tests {
     async fn put_config_writes_an_endpoint_gateway_and_refuses_a_broken_one() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
         let state = || state_with_config_path(path.clone());
 
         let resp = put_config_request(
@@ -1796,7 +1796,7 @@ mod tests {
             serde_json::json!(["llama-3"])
         );
         assert!(!String::from_utf8_lossy(&body).contains("\"r\""), "{json}");
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         let entry = &saved.model_providers["llama"];
         assert!(entry.is_endpoint());
         assert_eq!(
@@ -1811,7 +1811,7 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         let entry = &saved.model_providers["llama"];
         assert_eq!(entry.base_url.as_deref(), Some("http://localhost:8081/v1"));
         assert!(entry.headers.is_some());
@@ -1837,7 +1837,7 @@ mod tests {
             .await
             .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("[model_providers.bare]"));
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         assert!(!saved.model_providers.contains_key("bare"));
 
         // A script entry keeps reporting itself as one.
@@ -1847,7 +1847,7 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let saved = Config::load_from_path_public(&path).unwrap();
+        let saved = Config::load_from_path(&path).unwrap();
         assert!(!saved.model_providers["groq"].is_endpoint());
     }
 
@@ -1861,7 +1861,7 @@ mod tests {
     async fn a_refused_put_writes_nothing_at_all() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
         let before = std::fs::read(&path).unwrap();
 
         // One request that both edits something valid and asks for something
@@ -1952,7 +1952,7 @@ mod tests {
     async fn put_config_returns_the_gateway_redacted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path_public(&path).unwrap();
+        Config::default().save_to_path(&path).unwrap();
 
         let resp = put_config_request(
             state_with_config_path(path),

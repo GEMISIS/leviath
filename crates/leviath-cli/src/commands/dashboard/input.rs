@@ -4150,8 +4150,7 @@ mod tests {
         dash.handle_key(key(KeyCode::Enter));
         assert!(!dash.mcp_add_mode);
 
-        let config =
-            crate::config::Config::load_from_path_public(&dash.mcp_ctx.config_path).unwrap();
+        let config = crate::config::Config::load_from_path(&dash.mcp_ctx.config_path).unwrap();
         assert_eq!(config.mcp_servers.len(), 1);
         assert_eq!(config.mcp_servers[0].command.as_deref(), Some("npx")); // "np" + "x"
     }
@@ -4219,9 +4218,7 @@ mod tests {
         config
             .mcp_servers
             .push(leviath_mcp::MCPServerConfig::stdio("x", "npx", vec![]));
-        config
-            .save_to_path_public(&dash.mcp_ctx.config_path)
-            .unwrap();
+        config.save_to_path(&dash.mcp_ctx.config_path).unwrap();
         assert!(dash.mcp_rows.is_empty());
         dash.handle_key(key(KeyCode::Char('r')));
         assert_eq!(dash.mcp_rows.len(), 1);

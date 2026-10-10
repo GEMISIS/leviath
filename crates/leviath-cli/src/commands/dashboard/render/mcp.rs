@@ -186,9 +186,7 @@ mod tests {
         config
             .mcp_servers
             .push(MCPServerConfig::stdio("local", "npx", vec![]));
-        config
-            .save_to_path_public(&dash.mcp_ctx.config_path)
-            .unwrap();
+        config.save_to_path(&dash.mcp_ctx.config_path).unwrap();
         // Seed an authenticated token to exercise that style.
         let mut store = leviath_mcp::AuthStore::default();
         store.set(

@@ -5,6 +5,7 @@
 //! live in the binary behind [`crate::dispatch::RiskyExecutors`].
 
 use anyhow::bail;
+use leviath_core::duration::{between, compact};
 use leviath_core::run_meta::{RunMeta, RunStatus, WaitReason};
 use leviath_runtime::components::AgentStatus;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
@@ -275,9 +276,9 @@ pub(crate) fn format_offline(runs: &[OfflineRun], now: i64) -> Option<String> {
             [
                 r.run_id.clone(),
                 offline_status_cell(r),
-                leviath_core::duration::compact(r.age_secs),
-                leviath_core::duration::compact(r.working_secs),
-                humanize_age(now.saturating_sub(r.last_progress_at.unwrap_or(r.updated_at))),
+                compact(r.age_secs),
+                compact(r.working_secs),
+                compact(between(r.last_progress_at.unwrap_or(r.updated_at), now)),
             ]
         })
         .collect();
@@ -353,15 +354,6 @@ fn still_looping(entry: &RunListEntry) -> bool {
         && !leviath_runtime::pipeline::is_terminal_status(&entry.status)
 }
 
-/// A compact age, in the largest unit that keeps the number small: `12s`, `4m`,
-/// `3h`, `2d`. Negative deltas (a clock that moved backwards) read as `0s`.
-///
-/// Thin wrapper on the shared formatter, kept because this file measures spans
-/// as `i64` deltas between stamps and the shared one takes the span itself.
-fn humanize_age(seconds: i64) -> String {
-    leviath_core::duration::compact(seconds.max(0) as u64)
-}
-
 /// The AGE cell: how long since the run was launched. A daemon too old to report
 /// `started_at` leaves nothing to measure from, and reads `-`.
 ///
@@ -370,7 +362,7 @@ fn humanize_age(seconds: i64) -> String {
 /// of that it spent working, MOVED how long since it last got anywhere.
 fn age_cell(entry: &RunListEntry, now: i64) -> String {
     match entry.started_at {
-        Some(at) => humanize_age(now.saturating_sub(at)),
+        Some(at) => compact(between(at, now)),
         None => "-".to_string(),
     }
 }
@@ -380,7 +372,7 @@ fn age_cell(entry: &RunListEntry, now: i64) -> String {
 /// working clock.
 fn work_cell(entry: &RunListEntry, now: i64) -> String {
     match entry.active {
-        Some(clock) => leviath_core::duration::compact(clock.total_secs(now)),
+        Some(clock) => compact(clock.total_secs(now)),
         None => "-".to_string(),
     }
 }
@@ -389,7 +381,7 @@ fn work_cell(entry: &RunListEntry, now: i64) -> String {
 /// not persisted a snapshot yet has nothing to measure from and reads `-`.
 fn moved_cell(entry: &RunListEntry, now: i64) -> String {
     match entry.last_progress_at {
-        Some(at) => humanize_age(now.saturating_sub(at)),
+        Some(at) => compact(between(at, now)),
         None => "-".to_string(),
     }
 }
@@ -421,7 +413,7 @@ fn providers_footer(health: &DaemonHealth) -> Option<String> {
                 c.provider,
                 c.reason.label(),
                 c.consecutive_failures,
-                humanize_age(c.retry_in_secs as i64)
+                compact(c.retry_in_secs)
             )
         })
         .collect::<Vec<_>>()
@@ -487,11 +479,11 @@ fn health_footer(health: &DaemonHealth) -> Option<String> {
         line.push_str(&format!(", {} queued", health.tools_queued));
     }
     if health.dead_cycles > 0 {
-        let seconds = health.dead_cycles as i64 * health.redrive_secs as i64;
+        let seconds = u64::from(health.dead_cycles) * health.redrive_secs;
         line.push_str(&format!(
             "  ·  no progress for {} cycles ({})",
             health.dead_cycles,
-            humanize_age(seconds)
+            compact(seconds)
         ));
     }
     Some(line)

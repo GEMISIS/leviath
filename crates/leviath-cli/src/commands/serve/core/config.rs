@@ -52,7 +52,7 @@ pub(crate) async fn write(req: WriteConfigReq) -> Result<Config, ServeError> {
 /// [`write`] on the blocking pool's side: the edit applied to the file at
 /// `path`.
 fn written(path: &std::path::Path, req: WriteConfigReq) -> Result<Config, ServeError> {
-    let mut config = Config::load_from_path_public(path)
+    let mut config = Config::load_from_path(path)
         .map_err(|e| ServeError::Internal(format!("failed to read config: {e}")))?;
 
     if let Some(v) = req.default_provider {
@@ -222,7 +222,7 @@ fn written(path: &std::path::Path, req: WriteConfigReq) -> Result<Config, ServeE
     }
 
     config
-        .save_to_path_public(path)
+        .save_to_path(path)
         .map_err(|e| ServeError::Internal(format!("failed to write config: {e}")))?;
 
     Ok(config)

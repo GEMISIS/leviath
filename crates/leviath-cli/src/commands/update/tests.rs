@@ -716,7 +716,7 @@ fn the_renamed_keys_migration_rewrites_a_legacy_default_model() {
             on_disk.contains("fallback_model = \"qwen3.8:latest\""),
             "{on_disk}"
         );
-        let after = Config::load_from_path_public(&env.config_path).expect("parses");
+        let after = Config::load_from_path(&env.config_path).expect("parses");
         assert_eq!(after.fallback_model.as_deref(), Some("qwen3.8:latest"));
         assert_eq!(after.override_model, None);
         // Taken once: the rewritten file no longer needs it.
@@ -749,7 +749,7 @@ fn the_media_cap_migration_lowers_the_old_default_but_spares_a_custom_value() {
         assert!(names.contains(&"media-request-cap"), "{names:?}");
 
         execute_with(&args, &env, "0.6.0").expect("the flow succeeds");
-        let after = Config::load_from_path_public(&env.config_path).expect("parses");
+        let after = Config::load_from_path(&env.config_path).expect("parses");
         assert_eq!(
             after.mime.max_media_bytes_per_request,
             crate::config::DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST
@@ -1116,7 +1116,7 @@ fn a_binary_with_nothing_to_do_still_reaches_the_blueprints_and_the_config() {
                 agent.name
             );
         }
-        let after = Config::load_from_path_public(&env.config_path).expect("still parses");
+        let after = Config::load_from_path(&env.config_path).expect("still parses");
         assert_eq!(
             after.default_provider, "ollama",
             "the config migration ran too"
@@ -1244,7 +1244,7 @@ fn an_agreed_migration_is_described_and_then_written() {
 
         execute_with(&args, &env, "0.3.4").expect("the migration applies");
 
-        let after = Config::load_from_path_public(&config_path).expect("still parses");
+        let after = Config::load_from_path(&config_path).expect("still parses");
         assert_eq!(after.default_provider, "ollama");
     });
 }
@@ -1783,8 +1783,7 @@ fn the_stale_serves_migration_removes_the_line_and_leaves_the_rest() {
     )
     .expect("writes");
 
-    let mut config =
-        crate::config::Config::load_from_path_public(&path).expect("the fixture parses");
+    let mut config = crate::config::Config::load_from_path(&path).expect("the fixture parses");
     let raw: toml::Table =
         toml::from_str(&std::fs::read_to_string(&path).expect("reads")).expect("parses");
 
@@ -1798,7 +1797,7 @@ fn the_stale_serves_migration_removes_the_line_and_leaves_the_rest() {
     assert_eq!(done.len(), 1, "one provider changed, not both: {done:?}");
     assert!(done[0].contains("cerebras"), "{done:?}");
 
-    config.save_to_path_public(&path).expect("saves");
+    config.save_to_path(&path).expect("saves");
     let written = std::fs::read_to_string(&path).expect("reads back");
 
     assert!(
@@ -1816,7 +1815,7 @@ fn the_stale_serves_migration_removes_the_line_and_leaves_the_rest() {
 
     // Run again and it has nothing to do, which is what makes it safe to keep
     // shipping after everyone has taken it.
-    let after = crate::config::Config::load_from_path_public(&path).expect("still parses");
+    let after = crate::config::Config::load_from_path(&path).expect("still parses");
     let raw_after: toml::Table = toml::from_str(&written).expect("parses");
     assert!(!(migration.applies)(&after, &raw_after));
 }

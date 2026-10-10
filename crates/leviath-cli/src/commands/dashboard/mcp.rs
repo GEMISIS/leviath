@@ -46,7 +46,7 @@ impl Dashboard {
             }
         };
         let ctx = &self.mcp_ctx;
-        let mut config = match Config::load_from_path_public(&ctx.config_path) {
+        let mut config = match Config::load_from_path(&ctx.config_path) {
             Ok(config) => config,
             Err(e) => {
                 self.toast(format!("Could not read config: {e}"), ToastLevel::Error);
@@ -62,7 +62,7 @@ impl Dashboard {
         }
         let name = server.name.clone();
         config.mcp_servers.push(server);
-        if let Err(e) = config.save_to_path_public(&ctx.config_path) {
+        if let Err(e) = config.save_to_path(&ctx.config_path) {
             self.toast(format!("Could not save config: {e}"), ToastLevel::Error);
             return false;
         }
@@ -96,7 +96,7 @@ impl Dashboard {
     pub(super) fn mcp_remove_named(&mut self, name: &str) {
         let name = name.to_string();
         let ctx = &self.mcp_ctx;
-        let mut config = match Config::load_from_path_public(&ctx.config_path) {
+        let mut config = match Config::load_from_path(&ctx.config_path) {
             Ok(config) => config,
             Err(e) => {
                 self.toast(format!("Could not read config: {e}"), ToastLevel::Error);
@@ -104,7 +104,7 @@ impl Dashboard {
             }
         };
         config.mcp_servers.retain(|s| s.name != name);
-        if let Err(e) = config.save_to_path_public(&ctx.config_path) {
+        if let Err(e) = config.save_to_path(&ctx.config_path) {
             self.toast(format!("Could not save config: {e}"), ToastLevel::Error);
             return;
         }
@@ -162,7 +162,7 @@ impl Dashboard {
 
 /// Every configured server as a row, with the grant it is logged in with.
 fn listed(ctx: &McpContext) -> Result<Vec<McpRow>, String> {
-    let config = Config::load_from_path_public(&ctx.config_path)
+    let config = Config::load_from_path(&ctx.config_path)
         .map_err(|e| format!("Could not read config: {e}"))?;
     let store = grants_of(ctx, &config)
         .load()
@@ -270,7 +270,7 @@ pub(super) async fn mcp_background_loop(
 /// refused and a server that works for an agent fails here, and the
 /// credential store its grants are kept in.
 fn find_server(ctx: &McpContext, name: &str) -> Result<(MCPServerConfig, Config), McpOutcome> {
-    let config = Config::load_from_path_public(&ctx.config_path)
+    let config = Config::load_from_path(&ctx.config_path)
         .map_err(|e| fail(format!("Could not read config: {e}")))?;
     let server = config
         .mcp_servers
@@ -722,7 +722,7 @@ mod tests {
     fn write_config(ctx: &McpContext, server: MCPServerConfig) {
         let mut config = Config::default();
         config.mcp_servers.push(server);
-        config.save_to_path_public(&ctx.config_path).unwrap();
+        config.save_to_path(&ctx.config_path).unwrap();
     }
 
     use axum::extract::State as AxumState;
@@ -861,7 +861,7 @@ mod tests {
         assert!(store.get("hub").is_none());
 
         // The screen's own column agrees, so nobody presses login again.
-        let config = Config::load_from_path_public(&ctx.config_path).unwrap();
+        let config = Config::load_from_path(&ctx.config_path).unwrap();
         assert_eq!(auth_status(&config.mcp_servers[0], &store, 0), "header");
     }
 
@@ -1141,7 +1141,7 @@ for line in sys.stdin:
         let mut config = Config::default();
         config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
         config.mcp_servers.push(server);
-        config.save_to_path_public(&ctx.config_path).unwrap();
+        config.save_to_path(&ctx.config_path).unwrap();
     }
 
     /// Store `auth` for `server` in the keychain, as `lev mcp login` does.
@@ -1228,7 +1228,7 @@ for line in sys.stdin:
             toasts.iter().any(|m| m.contains("could not be forgotten")),
             "{toasts:?}"
         );
-        let config = Config::load_from_path_public(&dash.mcp_ctx.config_path).unwrap();
+        let config = Config::load_from_path(&dash.mcp_ctx.config_path).unwrap();
         assert!(config.mcp_servers.is_empty());
     }
 

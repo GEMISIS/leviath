@@ -52,7 +52,7 @@ pub(crate) fn apply(
     agents_dir: &Path,
     ui_state_path: Option<&Path>,
 ) -> anyhow::Result<Applied> {
-    plan.config.save_to_path_public(config_path)?;
+    plan.config.save_to_path(config_path)?;
 
     // Recorded here rather than as the user toggles, so a wizard abandoned
     // half-way remembers nothing: the decisions that count are the ones they
@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(applied.config_path, config_path);
         assert_eq!(applied.agents_installed, vec![BUNDLED_AGENTS[0].name]);
         assert!(applied.warnings.is_empty());
-        let written = Config::load_from_path_public(&config_path).unwrap();
+        let written = Config::load_from_path(&config_path).unwrap();
         assert_eq!(
             written.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-x")

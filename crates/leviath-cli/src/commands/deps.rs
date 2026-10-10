@@ -138,7 +138,7 @@ fn configured_servers(env: &DepsEnv) -> anyhow::Result<Vec<MCPServerConfig>> {
 /// Load the config at `path`, or the defaults when the file does not exist.
 fn load_config_or_default(path: &Path) -> anyhow::Result<crate::config::Config> {
     if path.is_file() {
-        crate::config::Config::load_from_path_public(path)
+        crate::config::Config::load_from_path(path)
     } else {
         Ok(crate::config::Config::default())
     }
@@ -423,7 +423,7 @@ fn add_server(
         }
     }
     if changed {
-        config.save_to_path_public(path)?;
+        config.save_to_path(path)?;
     }
     Ok(())
 }
@@ -719,7 +719,7 @@ mod tests {
         .unwrap_err(); // still blocking because the secret is not set
         // The server was written to config, and its secret was allowlisted so
         // the `${MESHY_API_KEY}` header will interpolate.
-        let config = crate::config::Config::load_from_path_public(&env.config_path).unwrap();
+        let config = crate::config::Config::load_from_path(&env.config_path).unwrap();
         assert!(config.mcp_servers.iter().any(|s| s.name == "meshy"));
         assert!(
             config

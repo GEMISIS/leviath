@@ -150,7 +150,7 @@ pub(crate) fn registry_for(config: &Config) -> leviath_runtime::ProviderRegistry
 
 /// Run `lev providers quota`.
 pub(super) async fn show(json_out: bool, config_path: &std::path::Path) -> anyhow::Result<()> {
-    let config = Config::load_from_path_public(config_path)?;
+    let config = Config::load_from_path(config_path)?;
     let usage = usage(&config, &registry_for(&config)).await;
     print!(
         "{}",
