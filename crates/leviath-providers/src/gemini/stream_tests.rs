@@ -29,6 +29,23 @@ fn run(events: &[Value]) -> Vec<crate::provider::Result<StreamChunk>> {
     out
 }
 
+/// CRLF line endings are SSE too, and a proxy in front of the API may
+/// rewrite them; the blank line that ends an event is the same blank line.
+#[test]
+fn a_crlf_framed_event_is_read() {
+    let mut buffer = format!(
+        "event: step.delta\r\ndata: {}\r\n\r\n",
+        json!({ "event_type": "step.delta", "index": 0, "delta": { "type": "text", "text": "Hi" } })
+    );
+    let mut turn = Turn::default();
+    let chunk = parse_event(&mut buffer, &mut turn)
+        .expect("an event was consumed")
+        .expect("the stream did not end")
+        .expect("not an error");
+    assert_eq!(chunk.delta, "Hi");
+    assert!(buffer.is_empty());
+}
+
 #[test]
 fn text_arrives_as_it_comes_and_the_turn_ends_with_usage() {
     let chunks = run(&[

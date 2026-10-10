@@ -353,11 +353,10 @@ fn ollama(
         );
         return Ok(None);
     }
-    Ok(Some(Arc::new(crate::OllamaProvider::with_overrides(
-        client()?,
-        url,
-        spec.caps,
-    ))))
+    Ok(Some(Arc::new(
+        crate::OllamaProvider::with_overrides(client()?, url, spec.caps)
+            .with_rate_limit(spec.rate_limit.as_ref()),
+    )))
 }
 
 /// Registered without probing for a grant. The alternative is a

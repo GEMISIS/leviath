@@ -96,6 +96,7 @@ impl ToolRegistry {
                                 leviath_mcp::StoredTokenRefresher::new(
                                     server_cfg.name.clone(),
                                     path,
+                                    credentials.clone(),
                                 ),
                             ));
                         }
@@ -194,9 +195,9 @@ pub(crate) fn unix_now_secs() -> u64 {
 /// falling back would put refresh tokens on disk.
 pub(crate) fn credential_store_or_warn(
     resolved: crate::credentials::Resolved,
-) -> Option<Box<dyn leviath_core::CredentialStore>> {
+) -> Option<Arc<dyn leviath_core::CredentialStore>> {
     match resolved {
-        Ok(store) => store,
+        Ok(store) => store.map(Arc::from),
         Err(e) => {
             tracing::warn!("{e}. MCP servers needing OAuth will appear logged out.");
             None

@@ -770,7 +770,7 @@ by the sandbox. Details in [Security and sandboxing](/docs/security#sandboxes).
 ## `[rate_limits.<provider>]`
 
 Client-side limits enforced before every call, for the built-in providers (`anthropic`, `openai`,
-`google`, `openrouter`, `bedrock`).
+`codex`, `xai`, `grok`, `google`, `openrouter`, `bedrock`, `meta`, `ollama`, `meshy`).
 
 ```toml
 [rate_limits.anthropic]
@@ -1316,7 +1316,7 @@ Export those yourself if you meant them.
 | `LEVIATH_API_TOKEN` | Bearer token for `lev serve`. The server refuses to start without one |
 | `LEVIATH_CONTROL_TIMEOUT_SECS` | Deadline for one control-socket request |
 | `LEVIATH_DASHBOARD_LOG_PATH` | Overrides the dashboard log file |
-| `LEVIATH_DUMP_REQUEST_DIR` | Writes each outgoing provider request to this directory, for debugging |
+| `LEVIATH_DUMP_REQUEST_DIR` | Writes each outgoing Anthropic request to this directory, for debugging |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY` | Provider key fallbacks for `[providers]` |
 | `OLLAMA_HOST` | Fallback for `ollama_base_url` |
 | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GOOGLE_BASE_URL`, `OPENROUTER_BASE_URL` | Gateway host fallbacks for `[providers]` |

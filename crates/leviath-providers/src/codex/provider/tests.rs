@@ -611,7 +611,7 @@ fn an_empty_originator_leaves_the_default_alone() {
 }
 
 #[test]
-fn the_user_agent_follows_the_originator_unless_set_outright() {
+fn the_user_agent_follows_the_originator() {
     let p =
         provider("http://x", Static::new("t")).with_originator(Some("Codex Leviath".to_string()));
     assert!(
@@ -619,16 +619,7 @@ fn the_user_agent_follows_the_originator_unless_set_outright() {
         "got {}",
         p.user_agent
     );
-
-    let p = provider("http://x", Static::new("t"))
-        .with_originator(Some("Codex Leviath".to_string()))
-        .with_user_agent(Some("custom/1.0".to_string()));
-    assert_eq!(p.user_agent, "custom/1.0");
-
-    // An empty override is not an override.
-    let p = provider("http://x", Static::new("t")).with_user_agent(Some(" ".to_string()));
-    assert!(p.user_agent.starts_with("leviath/"));
-    let p = provider("http://x", Static::new("t")).with_user_agent(None);
+    let p = provider("http://x", Static::new("t"));
     assert!(p.user_agent.starts_with("leviath/"));
 }
 

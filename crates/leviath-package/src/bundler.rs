@@ -72,12 +72,6 @@ impl AgentBundler {
         }
     }
 
-    /// Add an exclusion pattern.
-    pub fn with_exclude(mut self, pattern: String) -> Self {
-        self.exclude_patterns.push(pattern);
-        self
-    }
-
     /// Bundle an agent from a project directory into an in-memory tar.gz archive.
     ///
     /// Takes `project_path: &Path` (not `impl AsRef<Path>`) so every caller --
@@ -357,27 +351,6 @@ mod tests {
         // Default should have exclusion patterns
         assert!(bundler.should_exclude(".git"));
         assert!(bundler.should_exclude(".env"));
-    }
-
-    // ─── with_exclude ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_with_exclude_adds_pattern() {
-        let bundler = AgentBundler::new().with_exclude("*.log".to_string());
-        assert!(bundler.should_exclude("app.log"));
-        assert!(bundler.should_exclude("error.log"));
-        assert!(!bundler.should_exclude("readme.txt"));
-    }
-
-    #[test]
-    fn test_with_exclude_chaining() {
-        let bundler = AgentBundler::new()
-            .with_exclude("*.log".to_string())
-            .with_exclude("*.tmp".to_string())
-            .with_exclude("node_modules".to_string());
-        assert!(bundler.should_exclude("app.log"));
-        assert!(bundler.should_exclude("test.tmp"));
-        assert!(bundler.should_exclude("node_modules"));
     }
 
     // ─── should_exclude: edge cases ─────────────────────────────────────

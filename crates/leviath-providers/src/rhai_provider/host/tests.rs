@@ -5,10 +5,10 @@
 use super::*;
 use leviath_net::read_caps::STREAM_FRAME_CAP;
 
-fn ev(kind: &SseEvent) -> String {
+fn ev(kind: &Payload) -> String {
     match kind {
-        SseEvent::Data(s) => format!("data:{s}"),
-        SseEvent::Done => "done".to_string(),
+        Payload::Data(s) => format!("data:{s}"),
+        Payload::Done => "done".to_string(),
     }
 }
 
@@ -28,25 +28,24 @@ fn drain_splits_complete_events_only() {
 
 #[test]
 fn done_sentinel_recognized() {
-    assert!(matches!(
-        parse_sse_block("data: [DONE]\n\n"),
-        Some(SseEvent::Done)
-    ));
+    let events = drain_sse_events(&mut "data: [DONE]\n\n".to_string());
+    assert_eq!(events.iter().map(ev).collect::<Vec<_>>(), ["done"]);
 }
 
 #[test]
-fn blocks_without_data_are_none() {
-    assert!(parse_sse_block("event: ping\n\n").is_none());
-    assert!(parse_sse_block("data:\n\n").is_none());
+fn events_without_data_are_dropped() {
+    assert!(drain_sse_events(&mut "event: ping\n\ndata:\n\n".to_string()).is_empty());
 }
 
-#[test]
-fn final_event_flushes_untrimmed_tail() {
-    assert!(matches!(
-        final_sse_event("data: {\"x\":1}"),
-        Some(SseEvent::Data(_))
-    ));
-    assert!(final_sse_event("   \n  ").is_none());
+/// A tail that is only whitespace is not an event.
+#[tokio::test]
+async fn forward_sse_flushes_nothing_from_a_blank_tail() {
+    let chunks: Vec<Result<bytes::Bytes, String>> =
+        vec![Ok(bytes::Bytes::from("data: a\n\n   \n  "))];
+    let (tx, mut rx) = mpsc::channel(16);
+    forward_sse(tokio_stream::iter(chunks), tx, STREAM_FRAME_CAP, "test").await;
+    assert_eq!(rx.recv().await.unwrap().unwrap(), "a");
+    assert!(rx.recv().await.is_none());
 }
 
 #[tokio::test]
@@ -108,6 +107,21 @@ async fn forward_sse_stops_when_receiver_dropped() {
     forward_sse(tokio_stream::iter(chunks), tx, STREAM_FRAME_CAP, "test").await; // must return, not hang
 }
 
+/// CRLF-framed events are each their own event, and a multi-line `data`
+/// field arrives whole, joined with newlines as SSE specifies.
+#[tokio::test]
+async fn forward_sse_reads_crlf_events_and_multi_line_data() {
+    let chunks: Vec<Result<bytes::Bytes, String>> = vec![
+        Ok(bytes::Bytes::from("data: a\r\n\r\ndata:b1\r\n")),
+        Ok(bytes::Bytes::from("data: b2\r\n\r\ndata: [DONE]\r\n\r\n")),
+    ];
+    let (tx, mut rx) = mpsc::channel(16);
+    forward_sse(tokio_stream::iter(chunks), tx, STREAM_FRAME_CAP, "test").await;
+    assert_eq!(rx.recv().await.unwrap().unwrap(), "a");
+    assert_eq!(rx.recv().await.unwrap().unwrap(), "b1\nb2");
+    assert!(rx.recv().await.is_none(), "[DONE] ends the stream");
+}
+
 #[tokio::test]
 async fn forward_sse_flushes_trailing_event() {
     let chunks: Vec<Result<bytes::Bytes, String>> =
@@ -147,13 +161,6 @@ async fn forward_sse_keeps_a_split_character_and_marks_bad_bytes() {
     assert_eq!(rx.recv().await.unwrap().unwrap(), "a\u{FFFD}\u{1F389}");
     assert_eq!(rx.recv().await.unwrap().unwrap(), "b\u{FFFD}");
     assert!(rx.recv().await.is_none());
-}
-
-#[test]
-fn done_event_renders_in_helper() {
-    // Covers the `SseEvent::Done` arm of the test `ev` helper.
-    assert_eq!(ev(&SseEvent::Done), "done");
-    assert_eq!(ev(&SseEvent::Data("x".to_string())), "data:x");
 }
 
 // ── ReqwestExecutor against a loopback mock server ───────────────────────

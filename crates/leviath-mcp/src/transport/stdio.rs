@@ -159,7 +159,11 @@ impl StdioTransport {
         cmd.args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            // `close` stops the server; this stops it when the transport is
+            // dropped without one, so an abandoned connection leaves no
+            // process behind.
+            .kill_on_drop(true);
 
         cmd.spawn()
     }
@@ -1294,6 +1298,38 @@ sys.stdout.flush()
         let mut t = spawn_stub(&stub("")).await;
         t.close().await.expect("close should succeed");
         t.close().await.expect("close should stay successful");
+    }
+
+    /// A transport dropped without `close` - a connect that failed half way,
+    /// a task that was cancelled - still takes its server down with it,
+    /// rather than leaving a process behind for every abandoned connection.
+    #[tokio::test]
+    async fn dropping_the_transport_kills_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let beat = dir.path().join("beat");
+        // Ignores stdin, so its closing cannot be what stops it; bounded, so a
+        // failing run does not leave it beating forever.
+        let script = format!(
+            "import time\nfor i in range(400):\n    open({:?}, 'w').write(str(i))\n    time.sleep(0.025)\n",
+            beat.display().to_string()
+        );
+        let t = StdioTransport::spawn("python3", &["-c", &script], &HashMap::new())
+            .await
+            .expect("the server spawns");
+        while !beat.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        drop(t);
+
+        // Time for the kill to land, then time for a live server to beat again.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let before = std::fs::read_to_string(&beat).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let after = std::fs::read_to_string(&beat).unwrap();
+        assert_eq!(
+            before, after,
+            "the server kept running after its transport was dropped"
+        );
     }
 
     /// Kill and reap the child so the pipe's read end is provably gone, making

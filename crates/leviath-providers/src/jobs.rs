@@ -73,11 +73,7 @@ impl JobLog {
 
     /// Wake `wake` whenever it changes.
     pub fn wake_with(&self, wake: Arc<Notify>) {
-        *self
-            .0
-            .wake
-            .lock()
-            .expect("the job log is never held across a panic") = Some(wake);
+        *leviath_core::sync::lock(&self.0.wake) = Some(wake);
     }
 
     /// Forget every job: the call they belonged to is over.
@@ -108,22 +104,13 @@ impl JobLog {
     }
 
     fn held(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, String>> {
-        self.0
-            .jobs
-            .lock()
-            .expect("the job log is never held across a panic")
+        leviath_core::sync::lock(&self.0.jobs)
     }
 
     /// Say it changed: count it, and wake whoever records it.
     fn changed(&self) {
         self.0.version.fetch_add(1, Ordering::AcqRel);
-        if let Some(wake) = self
-            .0
-            .wake
-            .lock()
-            .expect("the job log is never held across a panic")
-            .as_ref()
-        {
+        if let Some(wake) = leviath_core::sync::lock(&self.0.wake).as_ref() {
             wake.notify_one();
         }
     }

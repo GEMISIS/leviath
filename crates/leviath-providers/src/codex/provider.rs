@@ -80,15 +80,6 @@ impl CodexProvider {
         self
     }
 
-    /// Override the `User-Agent` alone.
-    #[must_use]
-    pub fn with_user_agent(mut self, user_agent: Option<String>) -> Self {
-        if let Some(ua) = user_agent.filter(|u| !u.trim().is_empty()) {
-            self.user_agent = ua;
-        }
-        self
-    }
-
     /// Reasoning effort and text verbosity, as the operator set them.
     #[must_use]
     pub fn with_reasoning(mut self, effort: Option<String>, verbosity: Option<String>) -> Self {
@@ -160,9 +151,9 @@ impl CodexProvider {
     async fn send(&self, body: &serde_json::Value, model: &str) -> Result<reqwest::Response> {
         if let Some(limiter) = &self.rate_limiter {
             // Discarded, not propagated. `acquire` waits for capacity and has
-            // no failure to report; its `Result` predates the current
-            // implementation. Propagating it would add an error path nothing
-            // can drive. If it ever gains a real error, propagate it here.
+            // no failure to report, so propagating its `Result` would add an
+            // error path nothing can drive. If it ever gains a real error,
+            // propagate it here.
             let _ = limiter.acquire().await;
         }
         let creds = self.credentials().await?;

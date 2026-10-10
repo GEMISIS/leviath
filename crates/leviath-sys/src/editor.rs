@@ -22,7 +22,7 @@ use std::process::Command;
 /// seam of [`launch_via`] therefore yields this enum rather than an
 /// `ExitStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EditorRunOutcome {
+pub(crate) enum EditorRunOutcome {
     /// Process finished (success, or any explicit exit code) - treat as the
     /// user having closed the editor.
     Completed,
@@ -122,7 +122,7 @@ pub(crate) fn classify_exit(success: bool, code: Option<i32>) -> EditorRunOutcom
 /// each one its own coverage-mapping instantiation. `cargo llvm-cov` sometimes
 /// reports a region as uncovered for one instantiation even when the union of
 /// all of them covers every source position.
-pub fn launch_via(
+pub(crate) fn launch_via(
     path: &Path,
     candidates: &[String],
     run: &mut dyn FnMut(&mut Command) -> std::io::Result<EditorRunOutcome>,

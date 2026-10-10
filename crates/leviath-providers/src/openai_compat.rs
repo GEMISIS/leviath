@@ -1,7 +1,8 @@
-//! Shared request/response handling for OpenAI-compatible APIs.
+//! Shared request/response handling for the OpenAI Chat Completions format.
 //!
-//! Used by OpenAI, Gemini, and OpenRouter providers that speak the
-//! OpenAI Chat Completions format.
+//! The request body and the buffered and streamed answers OpenRouter and the
+//! OpenAI-compatible endpoints speak, and the send path most of the HTTP
+//! providers share.
 
 use crate::provider::{
     ContentBlock, InferenceRequest, InferenceResponse, MessageContent, ProviderError, Result,
@@ -36,9 +37,8 @@ pub async fn send_chat_request(
 ) -> Result<reqwest::Response> {
     // Nothing outside the feature-gated logging below reads `provider_name`, so
     // without `debug-http` it is genuinely unused. Discarding that one binding
-    // by name beats the function-wide `allow(unused_variables)` this replaced:
-    // that attribute would equally have hidden a parameter someone stopped using
-    // for real, and it covered a signature of seven.
+    // by name, rather than silencing the lint for the whole function, keeps
+    // the warning for a parameter someone stops using for real.
     #[cfg(not(feature = "debug-http"))]
     let _ = provider_name;
 
@@ -65,14 +65,14 @@ pub async fn send_chat_request(
         builder = builder.header(*name, value);
     }
 
-    // `ProviderError::transport` rather than the raw `e.to_string()` this used
-    // to be. Every provider's `infer` and `infer_stream` comes through here, so
-    // this one line is the whole inference path's classification: without it
-    // `failure_kind()` is `None` for every timeout, reset and refused
-    // connection a run ever hits, the message a paused run shows is `Display`
-    // on a `reqwest::Error` - the same sentence for all four - and the circuit
-    // breaker's patience for a provider that answered slowly (see
-    // `CircuitPolicy::threshold_for`) can never be reached.
+    // `ProviderError::transport`, not the raw `e.to_string()`. Anthropic,
+    // Gemini, Ollama, OpenRouter and the OpenAI-compatible endpoints send
+    // their inference through here, so this one line is their whole
+    // classification: without it `failure_kind()` is `None` for every
+    // timeout, reset and refused connection a run hits, the message a paused
+    // run shows is `Display` on a `reqwest::Error` - the same sentence for all
+    // four - and the circuit breaker's patience for a provider that answered
+    // slowly (see `CircuitPolicy::threshold_for`) can never be reached.
     let response = builder.json(body).send().await.map_err(|e| {
         #[cfg(feature = "debug-http")]
         crate::debug_http::log_error(provider_name, url, &e.to_string());
@@ -893,9 +893,9 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
 
 /// Wrap a byte stream in the OpenAI-compatible server-sent-events framer.
 ///
-/// The one framer shared by OpenAI, Gemini's OpenAI-compatible endpoint and
-/// OpenRouter, which is what makes a gateway's mid-stream error envelope
-/// (see [`parse_openai_sse_event`]) handled the same way on all three.
+/// The one framer shared by OpenRouter and the OpenAI-compatible endpoints,
+/// which is what makes a gateway's mid-stream error envelope (see
+/// [`parse_openai_sse_event`]) handled the same way on all of them.
 pub(crate) fn openai_sse_stream<S>(inner: S) -> crate::provider::stream::FramedStream
 where
     S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
@@ -917,168 +917,157 @@ where
 /// the usage-only shape, and falling through there ends the stream cleanly -
 /// a truncated answer with nothing anywhere saying why.
 pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<StreamChunk>>> {
-    // `None` until the double newline that terminates an event has arrived;
-    // the caller polls again with more bytes.
-    let (event_text, rest) = buffer.split_once("\n\n")?;
-    let event_text = event_text.to_string();
-    *buffer = rest.to_string();
+    // `None` until a whole event has arrived; the caller polls again with
+    // more bytes.
+    let event = leviath_net::sse::next_event(buffer)?;
+    let data = event.data.trim();
+    if data == "[DONE]" {
+        return Some(None); // Stream finished
+    }
 
-    for line in event_text.lines() {
-        if let Some(data) = line.strip_prefix("data: ") {
-            let data = data.trim();
-            if data == "[DONE]" {
-                return Some(None); // Stream finished
-            }
+    // An event that is not JSON - a keepalive, a comment - carries nothing.
+    let json: serde_json::Value = serde_json::from_str(data).ok()?;
 
-            let json: serde_json::Value = match serde_json::from_str(data) {
-                Ok(j) => j,
-                Err(_) => continue,
-            };
+    if let Some(err) = json.get("error").filter(|e| !e.is_null()) {
+        return Some(Some(Err(openai_error_envelope(err))));
+    }
 
-            if let Some(err) = json.get("error").filter(|e| !e.is_null()) {
-                return Some(Some(Err(openai_error_envelope(err))));
-            }
+    let choice = json
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first());
 
-            let choice = json
-                .get("choices")
-                .and_then(|c| c.as_array())
-                .and_then(|c| c.first());
-
-            // A usage-only chunk (no choices) carries the totals and nothing
-            // to render; anything else without a choice is skipped.
-            let Some(choice) = choice else {
-                if let Some(usage) = json.get("usage") {
-                    let prompt_tokens = usage
-                        .get("prompt_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
-                    let completion_tokens = usage
-                        .get("completion_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
-                    let cached_tokens = usage
-                        .get("prompt_tokens_details")
-                        .and_then(|d| d.get("cached_tokens"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
-                    let cache_write_tokens = usage
-                        .get("prompt_tokens_details")
-                        .and_then(|d| d.get("cache_write_tokens"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
-                    return Some(Some(Ok(StreamChunk {
-                        delta: String::new(),
-                        tool_calls: Vec::new(),
-                        // Same normalisation as the non-streaming path: the
-                        // details come back out of `prompt_tokens` so the three
-                        // input counts stay disjoint.
-                        tokens: Some(
-                            TokenUsage::new(
-                                prompt_tokens
-                                    .saturating_sub(cached_tokens)
-                                    .saturating_sub(cache_write_tokens),
-                                cached_tokens,
-                                cache_write_tokens,
-                                completion_tokens,
-                            )
-                            // And the same cost passthrough, which this arm was
-                            // missing. A choice-less usage chunk is exactly how
-                            // OpenRouter reports what it charged, so the one
-                            // shape that carries a real price was the one that
-                            // dropped it.
-                            .with_reported_cost(usage.get("cost").and_then(|v| v.as_f64())),
-                        ),
-                        finish_reason: None,
-                        reasoning: None,
-                        parts: Vec::new(),
-                    })));
-                }
-                continue;
-            };
-            let delta = choice.get("delta").unwrap_or(&serde_json::Value::Null);
-
-            let content = delta
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            let mut tool_call_deltas = Vec::new();
-            if let Some(tcs) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
-                for tc in tcs {
-                    let index = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    let id = tc.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let function = tc.get("function");
-                    let name = function
-                        .and_then(|f| f.get("name"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let args = function
-                        .and_then(|f| f.get("arguments"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    tool_call_deltas.push(ToolCallDelta {
-                        index,
-                        id,
-                        name,
-                        arguments_delta: args.to_string(),
-                        // Arrives on the delta that opens the call, beside the
-                        // id and the name, and read the same way the buffered
-                        // path reads it.
-                        thought_signature: thought_signature_of(tc),
-                    });
-                }
-            }
-
-            let finish_reason = choice
-                .get("finish_reason")
-                .and_then(|v| v.as_str())
-                .map(parse_openai_finish_reason);
-
-            // Check for usage in the chunk
-            let tokens = json.get("usage").map(|usage| {
-                let pt = usage
-                    .get("prompt_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
-                let ct = usage
-                    .get("completion_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
-                let cached = usage
-                    .get("prompt_tokens_details")
-                    .and_then(|d| d.get("cached_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
-                let written = usage
-                    .get("prompt_tokens_details")
-                    .and_then(|d| d.get("cache_write_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
-                // Same normalisation and the same cost passthrough as the
-                // buffered path, so streaming a request does not report it
-                // differently from buffering it.
-                TokenUsage::new(
-                    pt.saturating_sub(cached).saturating_sub(written),
-                    cached,
-                    written,
-                    ct,
-                )
-                .with_reported_cost(usage.get("cost").and_then(|v| v.as_f64()))
-            });
-
+    // A usage-only chunk (no choices) carries the totals and nothing
+    // to render; anything else without a choice is skipped.
+    let Some(choice) = choice else {
+        if let Some(usage) = json.get("usage") {
+            let prompt_tokens = usage
+                .get("prompt_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let completion_tokens = usage
+                .get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let cached_tokens = usage
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let cache_write_tokens = usage
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cache_write_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
             return Some(Some(Ok(StreamChunk {
-                delta: content,
-                tool_calls: tool_call_deltas,
-                tokens,
-                finish_reason,
+                delta: String::new(),
+                tool_calls: Vec::new(),
+                // Same normalisation as the non-streaming path: the
+                // details come back out of `prompt_tokens` so the three
+                // input counts stay disjoint.
+                tokens: Some(
+                    TokenUsage::new(
+                        prompt_tokens
+                            .saturating_sub(cached_tokens)
+                            .saturating_sub(cache_write_tokens),
+                        cached_tokens,
+                        cache_write_tokens,
+                        completion_tokens,
+                    )
+                    // And the same cost passthrough, which this arm was
+                    // missing. A choice-less usage chunk is exactly how
+                    // OpenRouter reports what it charged, so the one
+                    // shape that carries a real price was the one that
+                    // dropped it.
+                    .with_reported_cost(usage.get("cost").and_then(|v| v.as_f64())),
+                ),
+                finish_reason: None,
                 reasoning: None,
-                parts: crate::mime_output::message_blobs(delta),
+                parts: Vec::new(),
             })));
+        }
+        return None;
+    };
+    let delta = choice.get("delta").unwrap_or(&serde_json::Value::Null);
+
+    let content = delta
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mut tool_call_deltas = Vec::new();
+    if let Some(tcs) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
+        for tc in tcs {
+            let index = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let id = tc.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let function = tc.get("function");
+            let name = function
+                .and_then(|f| f.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let args = function
+                .and_then(|f| f.get("arguments"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            tool_call_deltas.push(ToolCallDelta {
+                index,
+                id,
+                name,
+                arguments_delta: args.to_string(),
+                // Arrives on the delta that opens the call, beside the
+                // id and the name, and read the same way the buffered
+                // path reads it.
+                thought_signature: thought_signature_of(tc),
+            });
         }
     }
 
-    None
+    let finish_reason = choice
+        .get("finish_reason")
+        .and_then(|v| v.as_str())
+        .map(parse_openai_finish_reason);
+
+    // Check for usage in the chunk
+    let tokens = json.get("usage").map(|usage| {
+        let pt = usage
+            .get("prompt_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let ct = usage
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let cached = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let written = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cache_write_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        // Same normalisation and the same cost passthrough as the
+        // buffered path, so streaming a request does not report it
+        // differently from buffering it.
+        TokenUsage::new(
+            pt.saturating_sub(cached).saturating_sub(written),
+            cached,
+            written,
+            ct,
+        )
+        .with_reported_cost(usage.get("cost").and_then(|v| v.as_f64()))
+    });
+
+    Some(Some(Ok(StreamChunk {
+        delta: content,
+        tool_calls: tool_call_deltas,
+        tokens,
+        finish_reason,
+        reasoning: None,
+        parts: crate::mime_output::message_blobs(delta),
+    })))
 }
 
 #[cfg(test)]
@@ -1089,13 +1078,13 @@ mod tests {
     /// The inference path classifies its own failures, driven *through*
     /// `send_chat_request` rather than around it.
     ///
-    /// Every provider's `infer` and `infer_stream` goes through this one
-    /// function, and until this test nothing checked it: the classification
-    /// tests all went in by `list_models`, which is a different door. So
-    /// `failure_kind()` was `None` for every timeout and every reset a run ever
-    /// hit, and both things that read it downstream ran on the unclassified
-    /// default - the sentence a parked run shows a person, and the circuit
-    /// breaker's extra patience for a provider that is slow rather than dead.
+    /// Most providers' `infer` and `infer_stream` go through this one
+    /// function, and the other classification tests go in by `list_models`,
+    /// which is a different door. Unclassified, `failure_kind()` is `None` for
+    /// every timeout and every reset a run hits, and both things that read it
+    /// downstream run on the default - the sentence a parked run shows a
+    /// person, and the circuit breaker's extra patience for a provider that is
+    /// slow rather than dead.
     ///
     /// A server that accepts the connection and then writes nothing, because
     /// that is the failure this has to get right: it is the one that means the
@@ -2456,16 +2445,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openai_sse_stream_flushes_trailing_buffered_event_when_stream_ends() {
+    async fn openai_sse_stream_reads_the_event_behind_a_comment() {
         use tokio_stream::StreamExt;
-        // A comment-only SSE event (no `data:` line) glued directly to a real
-        // data event in the SAME chunk. `parse_openai_sse_event` consumes the
-        // comment event from the buffer but returns plain `None` (its
-        // for-loop finds no `data:` line to act on) - indistinguishable to
-        // the caller from "incomplete". So `poll_next`'s top-of-loop check
-        // falls through and polls the inner stream again, which then reports
-        // end-of-stream; only *there* does poll_next's own end-of-stream
-        // re-check find the still-buffered, still-unconsumed data event.
+        // A comment-only SSE event glued to a real data event in the SAME
+        // chunk. `parse_openai_sse_event` consumes the comment and answers
+        // plain `None`, which on its own reads like "incomplete"; the stream
+        // asks again because the buffer shrank, and finds the data event
+        // behind it.
         let data = b": ping\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n".to_vec();
         let stream = StaticByteStream {
             data: vec![data],
@@ -2495,6 +2481,39 @@ mod tests {
         let mut sse = openai_sse_stream(stream);
         let chunk = sse.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "o\u{FFFD}\u{1F389}k");
+    }
+
+    /// SSE allows `\r\n` line endings, and a proxy in front of a gateway may
+    /// rewrite them; an event that ends in a CRLF blank line is still an
+    /// event, and so is `data:` written without the optional space.
+    #[test]
+    fn sse_event_crlf_framing_and_a_data_field_without_a_space() {
+        let mut buf = "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\n\r\n\
+                       data:{\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n"
+            .to_string();
+        let first = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
+        assert_eq!(first.delta, "a");
+        let second = parse_openai_sse_event(&mut buf).unwrap().unwrap().unwrap();
+        assert_eq!(second.delta, "b");
+        assert!(buf.is_empty());
+    }
+
+    /// The transport cuts wherever it likes, including between the two
+    /// halves of the blank line that ends an event.
+    #[tokio::test]
+    async fn openai_sse_stream_reads_an_event_split_inside_its_terminator() {
+        use tokio_stream::StreamExt;
+        let stream = StaticByteStream {
+            data: vec![
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\r\n".to_vec(),
+                b"\r\ndata: [DONE]\r\n\r\n".to_vec(),
+            ],
+            idx: 0,
+        };
+        let mut sse = openai_sse_stream(stream);
+        let chunk = sse.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "ok");
+        assert!(sse.next().await.is_none(), "[DONE] ends the stream");
     }
 
     // ─── MessageContent::Blocks code paths in build_openai_request_body ────

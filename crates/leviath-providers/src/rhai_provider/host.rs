@@ -196,15 +196,15 @@ impl ReqwestExecutor {
     /// Send `req`, retrying a transport failure that looks transient and
     /// falling back to HTTP/1.1 once on an HTTP/2 protocol fault.
     ///
-    /// Before this, one `send()` was the whole story: a single h2 stream error
-    /// permanently lost the source, and the tool script's diagnostic blamed
-    /// page size or blocking, neither of which was true.
+    /// One bare `send()` would lose the source to a single h2 stream error,
+    /// and the tool script's diagnostic would then blame page size or
+    /// blocking, neither of which is the cause.
     async fn send_with_retry(&self, req: &HostRequest) -> Result<reqwest::Response, HostHttpError> {
         let mut attempt = 0;
-        // Sticky for the rest of the loop, deliberately. An earlier cut kept
-        // this on the executor and recomputed it per attempt, so an h1 retry
-        // that failed for its own reason cleared the flag and the next attempt
-        // went straight back to the protocol already known to be broken here.
+        // Sticky for the rest of the loop, deliberately: recomputed per
+        // attempt, an h1 retry that failed for its own reason would clear it,
+        // and the next attempt would go straight back to the protocol already
+        // known to be broken here.
         let mut use_h1 = false;
         loop {
             let client = retry_client(&self.client, self.h1_client.as_ref(), use_h1);
@@ -479,12 +479,12 @@ pub(crate) async fn forward_sse<S, E>(
                 }
                 for ev in events_drained {
                     match ev {
-                        SseEvent::Data(payload) => {
+                        Payload::Data(payload) => {
                             if events.send(Ok(payload)).await.is_err() {
                                 return; // receiver gone
                             }
                         }
-                        SseEvent::Done => return,
+                        Payload::Done => return,
                     }
                 }
             }
@@ -496,55 +496,40 @@ pub(crate) async fn forward_sse<S, E>(
             }
         }
     }
-    // Flush a trailing event that had no final blank line.
+    // Flush a trailing event that had no final blank line: a script's
+    // endpoint may end its last event with the body instead.
     carry.finish(&mut buffer);
-    if let Some(SseEvent::Data(payload)) = final_sse_event(&buffer) {
+    if let Some(Payload::Data(payload)) =
+        leviath_net::sse::final_event(&mut buffer).and_then(payload_of)
+    {
         let _ = events.send(Ok(payload)).await;
     }
 }
 
-/// One parsed SSE event: a `data:` payload or the `[DONE]` sentinel.
-enum SseEvent {
+/// What one SSE event hands the script: its data, or the `[DONE]` sentinel.
+enum Payload {
     Data(String),
     Done,
 }
 
-/// Pull every complete (`\n\n`-terminated) event out of `buffer`.
-fn drain_sse_events(buffer: &mut String) -> Vec<SseEvent> {
+/// Pull every complete event out of `buffer`, keeping the ones that carry
+/// something.
+fn drain_sse_events(buffer: &mut String) -> Vec<Payload> {
     let mut out = Vec::new();
-    while let Some(idx) = buffer.find("\n\n") {
-        let block: String = buffer.drain(..idx + 2).collect();
-        if let Some(ev) = parse_sse_block(&block) {
-            out.push(ev);
-        }
+    while let Some(event) = leviath_net::sse::next_event(buffer) {
+        out.extend(payload_of(event));
     }
     out
 }
 
-/// Parse a leftover (non-`\n\n`-terminated) trailing block at stream end.
-fn final_sse_event(buffer: &str) -> Option<SseEvent> {
-    if buffer.trim().is_empty() {
-        return None;
+/// The payload of one event, or `None` when its data is blank (a keepalive,
+/// a bare `event:` line).
+fn payload_of(event: leviath_net::sse::SseEvent) -> Option<Payload> {
+    match event.data.trim() {
+        "" => None,
+        "[DONE]" => Some(Payload::Done),
+        data => Some(Payload::Data(data.to_string())),
     }
-    parse_sse_block(buffer)
-}
-
-/// Extract the `data:` payload from one SSE event block. Returns `Done` on the
-/// `[DONE]` sentinel and `None` when the block carries no data line.
-fn parse_sse_block(block: &str) -> Option<SseEvent> {
-    for line in block.lines() {
-        let line = line.trim_start();
-        if let Some(data) = line.strip_prefix("data:") {
-            let data = data.trim();
-            if data == "[DONE]" {
-                return Some(SseEvent::Done);
-            }
-            if !data.is_empty() {
-                return Some(SseEvent::Data(data.to_string()));
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]

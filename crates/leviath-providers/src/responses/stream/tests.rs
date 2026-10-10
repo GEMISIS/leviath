@@ -38,6 +38,22 @@ fn a_partial_event_is_left_in_the_buffer() {
     assert!(!buffer.is_empty(), "the partial frame was eaten");
 }
 
+/// CRLF line endings and `data:` without the optional space are both SSE,
+/// and a proxy in front of the route may send either.
+#[test]
+fn a_crlf_event_without_the_optional_space_is_read() {
+    let mut turn = Turn::new(crate::codex::DIALECT);
+    let mut buffer = "event:response.output_text.delta\r\n\
+                      data:{\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\r\n\r\n"
+        .to_string();
+    let c = parse_event(&mut buffer, &mut turn)
+        .expect("an event was consumed")
+        .expect("the stream did not end")
+        .expect("not an error");
+    assert_eq!(c.delta, "Hi");
+    assert!(buffer.is_empty());
+}
+
 #[test]
 fn text_deltas_become_content() {
     let c = chunk(serde_json::json!({

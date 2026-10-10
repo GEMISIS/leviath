@@ -163,7 +163,7 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
             ),
             model_capabilities: caps.clone(),
             request_timeout_secs: timeout,
-            rate_limit: None,
+            rate_limit: config.rate_limits.get("ollama").cloned(),
             options: std::collections::HashMap::new(),
         });
     }

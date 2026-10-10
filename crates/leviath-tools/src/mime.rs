@@ -39,18 +39,25 @@ impl ToolMime {
     /// it to the model in its own words.
     pub fn store(&self, blob: Blob) -> Result<Part, String> {
         let name = blob.name.clone().unwrap_or_else(|| "part".to_string());
-        if blob.bytes.len() as u64 > self.max_part_bytes {
-            return Err(format!(
-                "'{name}' is {} bytes, over the {} byte ceiling ([mime] max_part_bytes)",
-                blob.bytes.len(),
-                self.max_part_bytes
-            ));
-        }
+        self.fits(&name, blob.bytes.len() as u64)?;
         let reference = self
             .store
             .put(&self.run_id, &blob, &self.registry.load())
             .map_err(|e| format!("could not store '{name}': {e}"))?;
         Ok(Part::stored(reference).named(name))
+    }
+
+    /// Whether `len` bytes named `name` are within the size ceiling, refused
+    /// by name when they are not. A tool that knows a file's size asks before
+    /// reading the file.
+    pub(crate) fn fits(&self, name: &str, len: u64) -> Result<(), String> {
+        match len > self.max_part_bytes {
+            true => Err(format!(
+                "'{name}' is {len} bytes, over the {} byte ceiling ([mime] max_part_bytes)",
+                self.max_part_bytes
+            )),
+            false => Ok(()),
+        }
     }
 
     /// Type `bytes` that arrived as `declared` (an MCP `mimeType`, say) under

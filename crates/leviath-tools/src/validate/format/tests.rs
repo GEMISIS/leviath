@@ -6,30 +6,29 @@
 use super::*;
 
 #[test]
-fn only_the_listed_formats_have_a_builtin() {
-    for format in BUILTIN_FORMATS {
-        assert!(has_builtin(format), "{format} should have one");
-    }
+fn a_label_with_no_builtin_is_not_validated() {
     // A label this crate has never heard of is not validated, which is the
     // normal case: the label is opaque by design.
     for unknown in ["a2ui", "graphql", "markdown", "text/vnd.acme+xml", ""] {
-        assert!(!has_builtin(unknown), "{unknown} should not have one");
+        assert!(
+            check(Some(unknown), "{ not [ anything").is_ok(),
+            "{unknown}"
+        );
     }
 }
 
 /// A near-miss gets no validation rather than the wrong one.
 #[test]
 fn a_near_miss_label_is_not_validated() {
-    assert!(!has_builtin("json-lines"));
-    assert!(!has_builtin("xml-fragment"));
     assert!(check(Some("json-lines"), "not json at all").is_ok());
+    assert!(check(Some("xml-fragment"), "<unclosed").is_ok());
 }
 
 #[test]
 fn a_label_is_matched_case_and_whitespace_insensitively() {
-    assert!(has_builtin("JSON"));
-    assert!(has_builtin(" yaml "));
     assert!(check(Some("JSON"), "{\"a\":1}").is_ok());
+    assert!(check(Some("JSON"), "not json").is_err());
+    assert!(check(Some(" yaml "), "key: [unclosed").is_err());
 }
 
 #[test]

@@ -283,11 +283,10 @@ static MODALITY_TABLE: LazyLock<ModalityTable> = LazyLock::new(|| {
         .expect("mime/modalities.toml is well-formed; `cargo xtask modalities` writes it")
 });
 
-/// The shape of `mime/modalities.toml`.
+/// The shape of `mime/modalities.toml`. Its `read_on` date is for a person
+/// reading the file; nothing here reads it.
 #[derive(Debug, Deserialize)]
 struct ModalityTable {
-    /// The day the rows were last refreshed, `YYYY-MM-DD`.
-    read_on: String,
     /// Every row, in file order.
     #[serde(default)]
     modality: Vec<PublishedModality>,
@@ -309,14 +308,6 @@ pub struct PublishedModality {
     /// `manual` for a row a person wrote, which `cargo xtask modalities` never
     /// overwrites.
     pub source: String,
-}
-
-/// The day the modality rows in the shipped table were last refreshed.
-///
-/// Shipped with the lists so staleness is visible: a build months old may be
-/// naming an older model's modalities, and the honest thing is to say when.
-pub fn modalities_read_on() -> &'static str {
-    &MODALITY_TABLE.read_on
 }
 
 /// The published modalities for `model` at `provider`, or `None` when no row's
@@ -411,11 +402,10 @@ mod tests {
         assert!(!openai("babbage-002").accepts(&mt("image/png")));
         assert!(gemini("gemini-9.9-ultra-zzz").accepts(&mt("video/mp4")));
 
-        // The lookup is provider-scoped, and the shipped date reads back.
+        // The lookup is provider-scoped.
         assert!(published_modality("openai", "gpt-3.5-turbo").is_some());
         assert!(published_modality("openai", "totally-unknown-zzz").is_none());
         assert!(published_modality("nonprovider", "gpt-5.5").is_none());
-        assert_eq!(modalities_read_on().len(), "YYYY-MM-DD".len());
 
         // Every shipped row is well-formed: real patterns, and a source the
         // refresh wrote (a hand-added `manual` row would say so, but the

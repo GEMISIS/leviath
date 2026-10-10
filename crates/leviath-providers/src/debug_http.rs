@@ -4,10 +4,10 @@
 
 /// Redact credential-bearing headers in a header map for safe logging.
 ///
-/// Both halves come from `leviath_core::secrets` now. The local copies named
-/// exactly `authorization`, `x-api-key` and `api-key`, which meant Gemini's
-/// `x-goog-api-key` was logged **in full** whenever this feature was on - the
-/// one provider header that did not happen to be on the list.
+/// Both halves come from `leviath_core::secrets`, the workspace's one list of
+/// secret headers: a list kept here would drift from it, and the first header
+/// it missed (Gemini's `x-goog-api-key`, say) would be logged in full whenever
+/// this feature is on.
 fn redact_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()

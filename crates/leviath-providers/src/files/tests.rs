@@ -109,7 +109,7 @@ fn an_upload_answer_gives_the_id_and_an_expiry_in_either_spelling() {
     )
     .unwrap();
     assert_eq!(text.expires_at, Some(100));
-    let before = now_secs();
+    let before = leviath_core::duration::now_secs();
     let none = remote_from(&serde_json::json!({ "id": "c", "expires_at": null }), 3_600).unwrap();
     assert!(none.expires_at.unwrap() >= before + 3_600);
     let garbled = remote_from(&serde_json::json!({ "id": "d", "expires_at": "soon" }), 60).unwrap();

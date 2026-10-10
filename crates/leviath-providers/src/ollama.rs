@@ -11,8 +11,9 @@ use {
     crate::learned::{LearnedModel, LearnedModels},
     crate::provider::{
         FinishReason, InferenceRequest, InferenceResponse, ModelCapabilityOverride, ModelInfo,
-        Provider, ProviderError, Result, StreamChunk, TokenUsage,
+        Provider, ProviderError, RateLimitConfig, Result, StreamChunk, TokenUsage,
     },
+    crate::rate_limit::RateLimiter,
     async_trait::async_trait,
     futures_core::Stream,
     std::collections::HashMap,
@@ -39,6 +40,9 @@ pub struct OllamaProvider {
     /// Models already warned about, so a guessed window is announced once per
     /// model rather than once per inference.
     warned_guessed: crate::provider::ModelMemo,
+    /// `[rate_limits.ollama]`, when set: a shared server, or one machine's
+    /// GPU, has a rate it can take like any hosted API.
+    rate_limiter: Option<RateLimiter>,
 }
 
 /// A tool-call id for a reply that carries none.
@@ -230,6 +234,7 @@ impl OllamaProvider {
             capability_overrides: HashMap::new(),
             learned: Default::default(),
             warned_guessed: Default::default(),
+            rate_limiter: None,
         }
     }
 
@@ -244,6 +249,7 @@ impl OllamaProvider {
             capability_overrides: HashMap::new(),
             learned: Default::default(),
             warned_guessed: Default::default(),
+            rate_limiter: None,
         }
     }
 
@@ -262,7 +268,15 @@ impl OllamaProvider {
             capability_overrides: overrides,
             learned: Default::default(),
             warned_guessed: Default::default(),
+            rate_limiter: None,
         }
+    }
+
+    /// Hold every call to `config`, when one is set.
+    #[must_use]
+    pub fn with_rate_limit(mut self, config: Option<&RateLimitConfig>) -> Self {
+        self.rate_limiter = config.map(RateLimiter::new);
+        self
     }
 
     /// Say so, once per model, when the window did not come from the server.
@@ -658,6 +672,10 @@ impl Provider for OllamaProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         tracing::debug!(model = %request.model, "Calling Ollama API");
 
+        if let Some(limiter) = &self.rate_limiter {
+            limiter.acquire().await?;
+        }
+
         let mut body = self.build_request_body(request);
         body["stream"] = serde_json::Value::Bool(false);
         let url = format!("{}/api/chat", self.base_url);
@@ -668,7 +686,7 @@ impl Provider for OllamaProvider {
             &url,
             &[("Content-Type", "application/json".to_string())],
             &body,
-            None,
+            self.rate_limiter.as_ref(),
             request.request_timeout_secs,
         )
         .await
@@ -676,7 +694,11 @@ impl Provider for OllamaProvider {
 
         let response_body: serde_json::Value = crate::provider::decode_json(response).await?;
 
-        self.parse_response(&response_body)
+        let result = self.parse_response(&response_body)?;
+        if let Some(limiter) = &self.rate_limiter {
+            limiter.record_tokens(result.tokens_used.total_tokens);
+        }
+        Ok(result)
     }
 
     async fn infer_stream(
@@ -684,6 +706,10 @@ impl Provider for OllamaProvider {
         request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         tracing::debug!(model = %request.model, "Calling Ollama API (streaming)");
+
+        if let Some(limiter) = &self.rate_limiter {
+            limiter.acquire().await?;
+        }
 
         let mut body = self.build_request_body(request);
         body["stream"] = serde_json::Value::Bool(true);
@@ -695,7 +721,7 @@ impl Provider for OllamaProvider {
             &url,
             &[("Content-Type", "application/json".to_string())],
             &body,
-            None,
+            self.rate_limiter.as_ref(),
             request.request_timeout_secs,
         )
         .await
@@ -703,9 +729,10 @@ impl Provider for OllamaProvider {
 
         let peer = leviath_net::read_caps::peer_of(&response);
         let byte_stream = response.bytes_stream();
-        let stream = ollama_ndjson_stream(byte_stream).sent_by(peer);
-
-        Ok(Box::pin(stream))
+        Ok(crate::rate_limit::meter_stream(
+            self.rate_limiter.as_ref(),
+            Box::pin(ollama_ndjson_stream(byte_stream).sent_by(peer)),
+        ))
     }
 
     /// The byte heuristic. Ollama's documented HTTP API has no tokenize
@@ -2739,6 +2766,34 @@ mod tests {
             .err()
             .expect("a truncated error body is still an error");
         assert!(err.to_string().contains("503"), "{err}");
+    }
+
+    /// A streamed call is held and metered like a buffered one: the usage
+    /// its last line reports fills the token window.
+    #[tokio::test]
+    async fn a_streamed_call_fills_the_token_window() {
+        let ndjson_body = b"{\"message\":{\"content\":\"hi\"},\"done\":true,\"eval_count\":50,\"prompt_eval_count\":100}\n";
+        let url = spawn_mock_server(200, "OK", ndjson_body).await;
+        let provider = OllamaProvider::with_base_url(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            url,
+        )
+        .with_rate_limit(Some(&crate::provider::RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100,
+        }));
+        let stream = provider
+            .infer_stream(&mock_request())
+            .await
+            .expect("streaming");
+        let response = crate::collect_stream(stream).await.expect("a whole turn");
+        assert_eq!(response.tokens_used.total_tokens, 150);
+        // 150 tokens against a window of 100: the next call waits for the
+        // window to turn over, which a bounded acquire reports as elapsed.
+        let limiter = provider.rate_limiter.as_ref().expect("a limiter");
+        let held =
+            tokio::time::timeout(std::time::Duration::from_millis(300), limiter.acquire()).await;
+        assert!(held.is_err(), "the streamed tokens were not counted");
     }
 
     #[tokio::test]

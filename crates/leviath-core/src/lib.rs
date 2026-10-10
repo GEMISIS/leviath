@@ -38,6 +38,7 @@ pub mod sync;
 pub mod taint;
 pub mod telemetry;
 pub mod text;
+pub mod tool;
 pub mod unattended;
 pub mod write_limits;
 
@@ -76,6 +77,7 @@ pub use taint::{
     ToolClassification, ToolDirection,
 };
 pub use text::{estimate_tokens, floor_char_boundary, truncate_at_boundary, truncate_chars};
+pub use tool::Tool;
 pub use unattended::Unattended;
 
 /// Serde default for a flag that is on unless a file turns it off.

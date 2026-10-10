@@ -20,23 +20,15 @@
 //! the label is opaque by design, and most labels are not formats this crate has
 //! ever heard of.
 
-/// Whether a built-in check exists for `format`.
-///
-/// Matched case-insensitively on the whole label, so `"JSON"` and `"json"` are
-/// the same check and `"json-lines"` is neither. A near-miss deliberately gets
-/// no validation rather than the wrong one.
-pub fn has_builtin(format: &str) -> bool {
-    checker_for(format).is_some()
-}
-
-/// Every format this crate can check, for documentation and diagnostics.
-pub const BUILTIN_FORMATS: &[&str] = &["json", "xml", "yaml", "csv", "toml"];
-
 /// A well-formedness check: `Ok` when the content parses, `Err` with a reason
 /// the agent can act on when it does not.
 type Checker = fn(&str) -> Result<(), String>;
 
 /// The checker for `format`, if there is one.
+///
+/// Matched case-insensitively on the whole label, so `"JSON"` and `"json"` are
+/// the same check and `"json-lines"` is neither. A near-miss deliberately gets
+/// no validation rather than the wrong one.
 fn checker_for(format: &str) -> Option<Checker> {
     // Trimmed and lowercased, because a label is written by a person and
     // `"JSON "` means JSON. Nothing cleverer: a label this does not recognize is

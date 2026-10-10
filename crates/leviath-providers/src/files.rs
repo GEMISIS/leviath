@@ -300,14 +300,6 @@ impl AsRef<[u8]> for ArcBytes {
     }
 }
 
-/// Unix seconds now.
-pub fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// The file a vendor's upload answer describes: its `id`, and its expiry as
 /// Unix seconds or an RFC 3339 time, else `ttl_secs` from now.
 #[cfg(any(
@@ -330,7 +322,7 @@ pub(crate) fn remote_from(body: &serde_json::Value, ttl_secs: u64) -> Result<Rem
             .map(|t| t.timestamp()),
         _ => None,
     }
-    .or(Some(now_secs() + ttl_secs as i64));
+    .or(Some(leviath_core::duration::now_secs() + ttl_secs as i64));
     Ok(RemoteFile {
         id: id.to_string(),
         uri: None,

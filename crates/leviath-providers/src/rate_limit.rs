@@ -7,7 +7,7 @@ use crate::provider::{ProviderError, RateLimitConfig, StreamChunk};
 use futures_core::Stream;
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -45,9 +45,8 @@ enum Admission {
         tokens: usize,
         /// The token window is (part of) why this call is waiting, and it is
         /// the first time this limiter has throttled on it. Surfaced once at
-        /// `warn` so a `tokens_per_minute` that was inert before it was
-        /// enforced does not slow a run invisibly; later waits stay at
-        /// `debug`.
+        /// `warn` so a stale or placeholder `tokens_per_minute` does not slow
+        /// a run invisibly; later waits stay at `debug`.
         first_tpm_wait: bool,
     },
 }
@@ -85,7 +84,7 @@ impl RateLimiter {
     /// The window state, recovered from a poisoned lock: a panic while the
     /// state was held cannot have left a count that is worse than stale.
     fn state(&self) -> MutexGuard<'_, RateLimiterState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        leviath_core::sync::lock(&self.state)
     }
 
     /// Wait until we are allowed to make a request, then record it.
@@ -109,8 +108,7 @@ impl RateLimiter {
                 }
             };
             // The first time a run waits on the token window, say so at `warn`.
-            // The limit was documented as inert before it was enforced, so a
-            // stale or placeholder `tokens_per_minute` throttles silently
+            // A stale or placeholder `tokens_per_minute` throttles silently
             // otherwise, indistinguishable from a slow model. Once per limiter;
             // the debug line still carries every wait.
             if first_tpm_wait {

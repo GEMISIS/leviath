@@ -31,8 +31,7 @@ pub struct ProviderCreds {
     /// HTTP request timeout in seconds (`None` uses the provider default).
     pub request_timeout_secs: Option<u64>,
     /// Client-side rate limit (requests/tokens per minute) enforced before
-    /// each call. `None` sends requests unthrottled. Ignored by `ollama`
-    /// (a local server).
+    /// each call. `None` sends requests unthrottled.
     pub rate_limit: Option<leviath_providers::RateLimitConfig>,
     /// Provider-specific settings that don't fit the api-key / base-URL shape.
     ///

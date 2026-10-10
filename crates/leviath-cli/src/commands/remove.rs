@@ -12,8 +12,8 @@ pub struct RemoveArgs {
 
 /// Run `lev remove`: uninstall an agent.
 pub(crate) async fn execute(args: RemoveArgs) -> anyhow::Result<()> {
-    let installer = leviath_package::AgentInstaller::new();
-    remove_agent(&installer, &args.name)
+    leviath_package::AgentInstaller::try_new()
+        .and_then(|installer| remove_agent(&installer, &args.name))
 }
 
 /// Core removal logic, parameterized by installer so it can be tested
@@ -116,7 +116,7 @@ mod tests {
 
     // ─── execute() ───────────────────────────────────────────────────────
     //
-    // `execute()` always constructs a real `AgentInstaller::new()` pointed at
+    // `execute()` always constructs a real `AgentInstaller::try_new()` pointed at
     // the developer's real `~/.leviath/agents` - there's no env-var seam for
     // it (unlike `Config`'s `LEVIATH_CONFIG_PATH`), so this can't be driven
     // through a real install/uninstall round trip without touching that real

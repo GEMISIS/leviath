@@ -15,7 +15,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use leviath_providers::files::{FileUpload, RemoteFile, now_secs};
+use leviath_core::duration::now_secs;
+use leviath_providers::files::{FileUpload, RemoteFile};
 use leviath_providers::{ContentBlock, InferenceRequest, MessageContent, ModelMime, Provider};
 
 /// The ledger's file name inside a run's directory.

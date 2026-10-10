@@ -1,5 +1,6 @@
 //! Agent installation from bundle archives.
 
+use anyhow::Context as _;
 use flate2::read::GzDecoder;
 use std::fs;
 use std::io::Read;
@@ -136,15 +137,19 @@ impl AgentInstaller {
     ///
     /// The install root comes from the shared `LEVIATH_HOME`-aware resolver
     /// in [`leviath_core::paths`], so this crate installs into exactly the
-    /// tree every other component reads.
+    /// tree every other component reads. An error, rather than a fallback to
+    /// `.`, when no home directory resolves and `LEVIATH_HOME` is unset: a
+    /// system with no home is misconfigured, and installing into an
+    /// unexpected relative path would hide that.
+    pub fn try_new() -> anyhow::Result<Self> {
+        leviath_core::paths::agents_dir()
+            .map(Self::with_install_dir)
+            .context("could not determine a home directory to install agents under")
+    }
+
+    /// [`try_new`](Self::try_new), panicking when no home directory resolves.
     pub fn new() -> Self {
-        // Panic (rather than silently falling back to ".") when no home
-        // resolves: a system with no home directory is a misconfigured
-        // environment, and failing loudly is better than installing into an
-        // unexpected relative path.
-        let install_dir =
-            leviath_core::paths::agents_dir().expect("could not determine home directory");
-        Self { install_dir }
+        Self::try_new().expect("could not determine home directory")
     }
 
     /// Create an installer with a custom installation directory.
@@ -364,42 +369,6 @@ impl AgentInstaller {
         Ok(())
     }
 
-    /// List all installed agents.
-    pub fn list_installed(&self) -> anyhow::Result<Vec<InstalledAgent>> {
-        if !self.install_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut agents = Vec::new();
-
-        for entry in
-            fs::read_dir(&self.install_dir).expect("install_dir exists - read_dir should not fail")
-        {
-            let entry = entry.expect("read_dir entry should not fail");
-            let path = entry.path();
-
-            // A plain file holds no blueprint, so this also skips files.
-            if has_blueprint(&path) {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-
-                let meta = blueprint_meta(&path);
-
-                agents.push(InstalledAgent {
-                    name,
-                    version: meta.version,
-                    path,
-                    description: meta.description,
-                });
-            }
-        }
-
-        Ok(agents)
-    }
-
     /// Get information about a specific installed agent, or `None` if it is not
     /// installed.
     ///
@@ -509,9 +478,11 @@ stages = []
             )
             .unwrap();
         assert_eq!(installer.get_installed("planner").unwrap().version, "2.0.0");
-        let listed = installer.list_installed().unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].name, "planner");
+        let installs: Vec<_> = fs::read_dir(other.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(installs, ["planner"]);
     }
 
     /// An `agent.toml` whose `[blueprint]` table does not read gives no name,
@@ -907,60 +878,6 @@ stages = []
     }
 
     #[test]
-    fn list_installed_empty_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
-        let agents = installer.list_installed().unwrap();
-        assert!(agents.is_empty());
-    }
-
-    #[test]
-    fn list_installed_nonexistent_dir() {
-        let installer =
-            AgentInstaller::with_install_dir(PathBuf::from("/tmp/nonexistent-leviath-test-dir"));
-        let agents = installer.list_installed().unwrap();
-        assert!(agents.is_empty());
-    }
-
-    #[test]
-    fn list_installed_returns_installed_agents() {
-        let dir = tempfile::tempdir().unwrap();
-        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
-
-        let bundle1 = make_bundle("agent-a", "1.0.0", "Agent A");
-        let bundle2 = make_bundle("agent-b", "2.0.0", "Agent B");
-        installer.install_from_bytes("agent-a", &bundle1).unwrap();
-        installer.install_from_bytes("agent-b", &bundle2).unwrap();
-
-        let agents = installer.list_installed().unwrap();
-        assert_eq!(agents.len(), 2);
-        let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
-        assert!(names.contains(&"agent-a"));
-        assert!(names.contains(&"agent-b"));
-    }
-
-    #[test]
-    fn list_installed_skips_non_directory_entries() {
-        let dir = tempfile::tempdir().unwrap();
-        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
-
-        // Install one real agent
-        let bundle = make_bundle("good-agent", "1.0.0", "Good");
-        installer.install_from_bytes("good-agent", &bundle).unwrap();
-
-        // A regular file (not a dir) - covers the `if path.is_dir()` false branch
-        fs::write(dir.path().join("not-an-agent.txt"), "hello").unwrap();
-
-        // A dir without an agent.toml - covers the `has_blueprint` false branch
-        fs::create_dir_all(dir.path().join("no-manifest-dir")).unwrap();
-
-        let agents = installer.list_installed().unwrap();
-        // Only the properly-installed agent is returned; file and bare dir are skipped
-        assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].name, "good-agent");
-    }
-
-    #[test]
     fn get_installed_found() {
         let dir = tempfile::tempdir().unwrap();
         let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
@@ -997,6 +914,8 @@ stages = []
     fn new_derives_install_dir_from_home() {
         let installer = AgentInstaller::new();
         assert!(installer.install_dir.ends_with(".leviath/agents"));
+        let tried = AgentInstaller::try_new().expect("a home directory resolves here");
+        assert_eq!(tried.install_dir, installer.install_dir);
     }
 
     #[test]

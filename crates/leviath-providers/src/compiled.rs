@@ -5,8 +5,6 @@
 //! provider left out of the build is one answer in one place: the config
 //! layer, `lev doctor` and a run that routes to it all say the same thing.
 
-use crate::ProviderError;
-
 /// Every provider kind this crate knows, with the cargo feature that builds
 /// it. A kind is what a config's `[providers.<kind>]` table is named.
 pub const KNOWN: &[(&str, &str)] = &[
@@ -110,11 +108,6 @@ pub(crate) fn version_note_in(compiled: &[&str], scripted: bool) -> String {
     }
 }
 
-/// The error for a provider this build left out.
-pub fn not_built(kind: &str) -> ProviderError {
-    ProviderError::Other(remedy(kind))
-}
-
 /// Why script providers cannot be used here, when this build left them out.
 pub fn scripts_missing() -> Option<String> {
     scripts_missing_in(SCRIPTED)
@@ -193,7 +186,6 @@ mod tests {
             assert_eq!(missing(kind), None);
             assert_eq!(remedy(kind), "add it to config.toml (or run `lev setup`)");
         }
-        assert!(not_built("anthropic").to_string().contains("lev setup"));
         assert_eq!(version_note(), "");
     }
 }

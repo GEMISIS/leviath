@@ -103,7 +103,7 @@ fn write_backoff(attempt: u32) {
 /// [`write_atomic`] with the rename injected, so the arm where the old file
 /// has to survive a failed replacement is provable without a filesystem
 /// that refuses renames.
-pub fn write_atomic_with(
+pub(crate) fn write_atomic_with(
     path: &Path,
     contents: &[u8],
     mode: Option<u32>,
