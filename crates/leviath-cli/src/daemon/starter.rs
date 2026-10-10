@@ -23,13 +23,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use leviath_mcp::MCPServerConfig;
+use leviath_mcp::{MCPServerConfig, MCPTransport};
 use leviath_runtime::host::{PreparedRun, RunStarter, SubAgentOp};
 use leviath_runtime::interaction_hub::InteractionHub;
 use leviath_runtime::resolve::{ResolveMode, Resolved, resolve};
 use leviath_runtime::secret_store::SecretStore;
 use leviath_runtime::spec::env::Caller;
-use leviath_runtime::spec::graph::{RunGraph, StageMode, WorkerSource};
+use leviath_runtime::spec::graph::{McpServerDef, McpTransport, RunGraph, StageMode, WorkerSource};
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use leviath_runtime::spec::request::{SpawnRequest, SpawnSource};
 use leviath_runtime::spec::summary::SpawnSummary;
@@ -82,18 +82,42 @@ fn refusal(code: IssueCode, message: impl Into<String>) -> SpawnIssues {
     SpawnIssue::new(SpecPath::root(), code, message).into()
 }
 
-/// The MCP servers a graph declares, as the pool connects them. A graph's
-/// server is read from the same `[[mcp_servers]]` table the pool's config
-/// is, so it always reads as one.
+/// The MCP servers a graph declares, as the pool connects them.
 pub(crate) fn mcp_configs(graph: &RunGraph) -> Vec<MCPServerConfig> {
     graph
         .mcp_servers
         .iter()
-        .map(|def| {
-            let value = serde_json::to_value(def).expect("a server definition is plain data");
-            serde_json::from_value(value).expect("a graph's server reads as the pool's")
-        })
+        .cloned()
+        .map(server_config)
         .collect()
+}
+
+/// One server a graph declares, as the pool's `[[mcp_servers]]` entry for it.
+///
+/// Every field is named on both sides, so a field added to either struct does
+/// not compile until it has somewhere to go.
+fn server_config(def: McpServerDef) -> MCPServerConfig {
+    let McpServerDef {
+        name,
+        transport,
+        command,
+        url,
+        args,
+        env,
+        headers,
+    } = def;
+    MCPServerConfig {
+        name: name.into(),
+        transport: transport.map(|transport| match transport {
+            McpTransport::Stdio => MCPTransport::Stdio,
+            McpTransport::Http => MCPTransport::Http,
+        }),
+        command,
+        url,
+        args,
+        env: env.into_iter().collect(),
+        headers: headers.into_iter().collect(),
+    }
 }
 
 /// An error as the text a refusal carries.

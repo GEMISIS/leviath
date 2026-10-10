@@ -111,7 +111,7 @@ async fn refused(
     if local.is_none() {
         installed_elsewhere(state, request).await;
     }
-    let mut issues = server_issues(state, request);
+    let mut issues = server_issues(state, request).await;
     if issues.is_empty() && local.is_none() {
         return Ok(None);
     }
@@ -133,7 +133,7 @@ async fn refused(
 /// The refusals only this server can make, for `request` as it arrived, with
 /// its workdir filled in and its seed commands turned off where this server
 /// turns them off.
-fn server_issues(state: &AppState, request: &mut Request) -> SpawnIssues {
+async fn server_issues(state: &AppState, request: &mut Request) -> SpawnIssues {
     let limits = &state.limits;
     let mut issues = SpawnIssues::new();
     let named = request.workdir.is_some();
@@ -190,8 +190,19 @@ fn server_issues(state: &AppState, request: &mut Request) -> SpawnIssues {
     if limits.no_remote_seed_commands {
         launch.seed_commands = false;
     }
-    let callback = request.delivery.callback.as_ref();
-    if let Some(Err(message)) = callback.map(|c| limits.check_callback_url(c.url.as_str())) {
+    // On the blocking pool: the check resolves the callback's host, and a
+    // resolver can take seconds to answer.
+    let callback = request
+        .delivery
+        .callback
+        .as_ref()
+        .map(|c| c.url.to_string());
+    let limits = std::sync::Arc::clone(limits);
+    let checked = super::super::blocking::blocking(move || {
+        callback.map(|url| limits.check_callback_url(&url))
+    })
+    .await;
+    if let Some(Err(message)) = checked {
         issues.push(SpawnIssue::new(
             SpecPath::root()
                 .field("delivery")

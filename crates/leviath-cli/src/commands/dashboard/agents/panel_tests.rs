@@ -939,11 +939,11 @@ fn the_inputs_and_outputs_tab_picks_types_and_opens_files_in_a_window() {
     assert!(stage(&mut dash).artifacts.is_empty());
     assert!(dash.agents().editor.as_ref().unwrap().modal.is_none());
     // x on a row drops a declaration too; a taken name is refused.
-    dash.editor_add_artifact("a");
+    dash.editor_add_artifact("work", "a");
     dash.handle_key(key(KeyCode::Esc));
-    dash.editor_add_artifact("b");
+    dash.editor_add_artifact("work", "b");
     dash.handle_key(key(KeyCode::Esc));
-    dash.editor_add_artifact("a");
+    dash.editor_add_artifact("work", "a");
     assert!(
         dash.agents()
             .editor
@@ -1737,7 +1737,7 @@ fn the_prompts_overlay_edits_applies_and_discards() {
         name: "ghost".into(),
         tab: StageTab::Behaviour,
     };
-    dash.editor_open_prompts();
+    dash.editor_open_prompts("ghost");
     assert!(dash.agents().editor.as_ref().unwrap().overlay.is_none());
     // The prompt keys do nothing with no overlay open.
     dash.editor_prompts_key(&ctrl('s'));

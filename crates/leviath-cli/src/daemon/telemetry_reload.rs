@@ -79,7 +79,9 @@ impl TelemetryReload {
     /// service. Returns whether anything was swapped.
     ///
     /// The outgoing sink is flushed before it is dropped, so spans and metrics
-    /// already recorded reach the old collector rather than dying with it.
+    /// already recorded reach the old collector rather than dying with it. The
+    /// flush runs on a thread of its own, so the world loop never waits on
+    /// that collector.
     ///
     /// A pipeline that cannot be built (an OTLP exporter that will not
     /// construct) leaves the no-op sink in place and warns, which is what boot
@@ -102,12 +104,6 @@ impl TelemetryReload {
         drop(applied);
 
         let ecs = world.world_mut();
-        // Whatever is buffered belongs to the exporter on its way out. Read
-        // rather than tested for: every world carries a sink from the moment
-        // it is built, the no-op one until something replaces it.
-        ecs.resource::<leviath_runtime::telemetry::Telemetry>()
-            .0
-            .force_flush();
         // Built before the swap: on OTLP this constructs an exporter, and a
         // failure has to leave the caller with a working (if silent) sink
         // rather than a half-installed one.
@@ -125,7 +121,19 @@ impl TelemetryReload {
                 Arc::new(NoopSink)
             }
         };
-        ecs.insert_resource(leviath_runtime::telemetry::Telemetry(sink));
+        // Read rather than tested for: every world carries a sink from the
+        // moment it is built, the no-op one until something replaces it.
+        let outgoing = std::mem::replace(
+            &mut ecs
+                .resource_mut::<leviath_runtime::telemetry::Telemetry>()
+                .0,
+            sink,
+        );
+        // Whatever is buffered belongs to the exporter on its way out. Flushed
+        // on a thread of its own: an export to a collector that has gone away
+        // holds the flush for its whole timeout, and this runs on the world
+        // loop every run waits on.
+        std::thread::spawn(move || outgoing.force_flush());
         true
     }
 
@@ -280,6 +288,54 @@ mod tests {
             2,
             "the daemon's own log lines must stop reaching a collector that was turned off"
         );
+    }
+
+    /// A sink whose flush waits for `release`, as an export to a collector
+    /// that has gone away waits out its timeout.
+    struct StuckSink {
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        flushed: std::sync::mpsc::Sender<()>,
+    }
+
+    impl leviath_core::telemetry::TelemetrySink for StuckSink {
+        fn emit(&self, _event: leviath_core::telemetry::TelemetryEvent) {}
+
+        fn force_flush(&self) {
+            let _ = self.release.lock().unwrap().recv();
+            let _ = self.flushed.send(());
+        }
+    }
+
+    /// The outgoing sink is flushed off the world loop: a collector that has
+    /// gone away holds the flush for its whole timeout, and every run waits
+    /// on that loop. It is still flushed.
+    #[test]
+    fn the_outgoing_sink_is_flushed_without_holding_the_world_loop() {
+        let (reload, _installs) = reload();
+        let (_rt, mut world) = world();
+        let (release, stuck) = std::sync::mpsc::channel();
+        let (flushed, done) = std::sync::mpsc::channel();
+        world
+            .world_mut()
+            .insert_resource(leviath_runtime::telemetry::Telemetry(Arc::new(StuckSink {
+                release: Mutex::new(stuck),
+                flushed,
+            })));
+
+        let (returned, refreshed) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            reload.refresh_into(&mut world, &cfg(false, TelemetryExporterKind::Stdout));
+            let _ = returned.send(());
+        });
+        assert!(
+            refreshed
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "the reload waited on the outgoing sink's flush"
+        );
+        release.send(()).unwrap();
+        done.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the outgoing sink is flushed");
     }
 
     #[test]

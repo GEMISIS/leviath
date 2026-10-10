@@ -2963,3 +2963,31 @@ binds = [{ region = "task" }]
     })
     .await;
 }
+
+/// A graph's server becomes the pool's entry field for field, whichever way
+/// its transport is spelled.
+#[test]
+fn a_graph_server_is_the_pool_entry_it_describes() {
+    let def = |transport| McpServerDef {
+        name: leviath_core::names::McpServerName::new("tracker").unwrap(),
+        transport,
+        command: Some("tracker-mcp".to_string()),
+        url: Some("https://tracker.example/mcp".to_string()),
+        args: vec!["--quiet".to_string()],
+        env: std::collections::BTreeMap::from([("TOKEN".to_string(), "t".to_string())]),
+        headers: std::collections::BTreeMap::from([("X-Team".to_string(), "a".to_string())]),
+    };
+    let stdio = server_config(def(Some(McpTransport::Stdio)));
+    assert_eq!(stdio.name, "tracker");
+    assert_eq!(stdio.transport, Some(MCPTransport::Stdio));
+    assert_eq!(stdio.command.as_deref(), Some("tracker-mcp"));
+    assert_eq!(stdio.url.as_deref(), Some("https://tracker.example/mcp"));
+    assert_eq!(stdio.args, vec!["--quiet"]);
+    assert_eq!(stdio.env.get("TOKEN").map(String::as_str), Some("t"));
+    assert_eq!(stdio.headers.get("X-Team").map(String::as_str), Some("a"));
+    assert_eq!(
+        server_config(def(Some(McpTransport::Http))).transport,
+        Some(MCPTransport::Http)
+    );
+    assert_eq!(server_config(def(None)).transport, None);
+}

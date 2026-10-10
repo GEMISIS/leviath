@@ -680,8 +680,10 @@ impl Dashboard {
             }
             FieldValue::Segment { .. } => self.editor_cycle_segment(&field.id, delta),
             FieldValue::Row(_) => {
-                if let FieldId::ModelEntry(i) = field.id {
-                    self.editor_move_model(i, delta);
+                if let (FieldId::ModelEntry(i), Some(stage)) =
+                    (field.id, self.editor().panel_stage())
+                {
+                    self.editor_move_model(&stage, i, delta);
                 }
             }
             FieldValue::Text(_) | FieldValue::Button => {}
@@ -689,12 +691,11 @@ impl Dashboard {
     }
 
     pub(in crate::commands::dashboard) fn editor_set_toggle(&mut self, id: &FieldId, on: bool) {
-        match id {
-            FieldId::AllowComplete => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+        match (id, self.editor().panel_stage()) {
+            (FieldId::AllowComplete, Some(stage)) => {
                 self.editor_mutate(|d| d.set_allow_complete(&stage, on.then_some(true)));
             }
-            FieldId::EdgeGate => {
+            (FieldId::EdgeGate, _) => {
                 let (from, to) = self.editor().panel_edge().expect("a path field");
                 self.editor_mutate(|d| d.set_edge_gate(&from, &to, on));
             }
@@ -710,25 +711,28 @@ impl Dashboard {
         if self.editor_set_number_more(id, value) {
             return;
         }
-        let stage = self.editor().panel_stage().expect("a stage field");
+        if let Some(stage) = self.editor().panel_stage() {
+            self.editor_set_stage_number(&stage, id, value);
+        }
+    }
+
+    /// A number on the stage panel showing `stage`.
+    fn editor_set_stage_number(&mut self, stage: &str, id: &FieldId, value: Option<u64>) {
         match id {
             FieldId::MaxIterations => {
-                self.editor_mutate(|d| d.set_max_iterations(&stage, value));
+                self.editor_mutate(|d| d.set_max_iterations(stage, value));
             }
             FieldId::MaxRevisits => {
-                self.editor_mutate(|d| d.set_max_revisits(&stage, value));
+                self.editor_mutate(|d| d.set_max_revisits(stage, value));
             }
             FieldId::MaxWorkers => {
                 self.editor_mutate(|d| {
-                    d.set_fan_out(
-                        &stage,
-                        crate::blueprint_edit::FanOutField::MaxWorkers(value),
-                    )
+                    d.set_fan_out(stage, crate::blueprint_edit::FanOutField::MaxWorkers(value))
                 });
             }
             FieldId::MaxItems => {
                 self.editor_mutate(|d| {
-                    d.set_fan_out(&stage, crate::blueprint_edit::FanOutField::MaxItems(value))
+                    d.set_fan_out(stage, crate::blueprint_edit::FanOutField::MaxItems(value))
                 });
             }
             _ => {}
@@ -741,8 +745,8 @@ impl Dashboard {
         id: &FieldId,
     ) -> (Vec<String>, Option<usize>) {
         let editor = self.editor();
-        match id {
-            FieldId::EntryStage => {
+        match (id, editor.panel_stage()) {
+            (FieldId::EntryStage, _) => {
                 let names = editor.doc.stage_names();
                 let current = editor
                     .doc
@@ -751,7 +755,7 @@ impl Dashboard {
                     .and_then(|e| names.iter().position(|n| *n == e));
                 (names, current)
             }
-            FieldId::DefaultModel => {
+            (FieldId::DefaultModel, _) => {
                 let current = editor
                     .doc
                     .agent()
@@ -759,8 +763,7 @@ impl Dashboard {
                     .and_then(|m| editor.models.iter().position(|n| *n == m));
                 (editor.models.clone(), current)
             }
-            FieldId::StageMode => {
-                let stage = editor.panel_stage().expect("a stage field");
+            (FieldId::StageMode, Some(stage)) => {
                 let mode = editor.doc.stage(&stage).map(|s| s.mode);
                 let options: Vec<String> = StageModeView::CHOICES
                     .iter()
@@ -769,8 +772,7 @@ impl Dashboard {
                 let current = mode.and_then(|m| options.iter().position(|o| *o == m.as_str()));
                 (options, current)
             }
-            FieldId::WorkerKind => {
-                let stage = editor.panel_stage().expect("a stage field");
+            (FieldId::WorkerKind, Some(stage)) => {
                 let kind = editor
                     .doc
                     .stage(&stage)
@@ -783,8 +785,7 @@ impl Dashboard {
                 let current = kind.and_then(|k| options.iter().position(|o| *o == k.key()));
                 (options, current)
             }
-            FieldId::MergeStage => {
-                let stage = editor.panel_stage().expect("a stage field");
+            (FieldId::MergeStage, Some(stage)) => {
                 let mut names = vec!["(none)".to_string()];
                 names.extend(editor.doc.stage_names().into_iter().filter(|n| *n != stage));
                 let merge = editor.doc.stage(&stage).and_then(|s| s.fan_out.merge_stage);
@@ -793,8 +794,7 @@ impl Dashboard {
                     .or(Some(0));
                 (names, current)
             }
-            FieldId::OnWorkerFailure => {
-                let stage = editor.panel_stage().expect("a stage field");
+            (FieldId::OnWorkerFailure, Some(stage)) => {
                 let options = vec!["continue".to_string(), "fail_all".to_string()];
                 let policy = editor
                     .doc
@@ -805,7 +805,7 @@ impl Dashboard {
                     .or(Some(0));
                 (options, current)
             }
-            FieldId::EdgeKind => {
+            (FieldId::EdgeKind, _) => {
                 let (from, to) = editor.panel_edge().expect("a path field");
                 let options: Vec<String> = EdgeKind::CHOICES
                     .iter()
@@ -905,23 +905,21 @@ impl Dashboard {
     /// Write a chosen value into a choice field.
     pub(in crate::commands::dashboard) fn editor_pick(&mut self, id: &FieldId, value: &str) {
         let value = value.to_string();
-        match id {
-            FieldId::EntryStage => {
+        match (id, self.editor().panel_stage()) {
+            (FieldId::EntryStage, _) => {
                 self.editor_mutate(|d| d.set_entry_stage(&value));
             }
-            FieldId::DefaultModel => {
+            (FieldId::DefaultModel, _) => {
                 self.editor_mutate(|d| {
                     d.set_default_model(&value);
                     Ok(())
                 });
             }
-            FieldId::StageMode => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::StageMode, Some(stage)) => {
                 let mode = StageModeView::parse(&value);
                 self.editor_mutate(|d| d.set_stage_mode(&stage, &mode));
             }
-            FieldId::WorkerKind => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::WorkerKind, Some(stage)) => {
                 let kind = [WorkerKind::Stage, WorkerKind::Agent, WorkerKind::Query]
                     .into_iter()
                     .find(|k| k.key() == value)
@@ -939,8 +937,7 @@ impl Dashboard {
                     )
                 });
             }
-            FieldId::MergeStage => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::MergeStage, Some(stage)) => {
                 let merge = (value != "(none)").then_some(value);
                 self.editor_mutate(|d| {
                     d.set_fan_out(
@@ -949,8 +946,7 @@ impl Dashboard {
                     )
                 });
             }
-            FieldId::OnWorkerFailure => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::OnWorkerFailure, Some(stage)) => {
                 self.editor_mutate(|d| {
                     d.set_fan_out(
                         &stage,
@@ -958,7 +954,7 @@ impl Dashboard {
                     )
                 });
             }
-            FieldId::EdgeKind => {
+            (FieldId::EdgeKind, _) => {
                 let (from, to) = self.editor().panel_edge().expect("a path field");
                 let kind = EdgeKind::CHOICES
                     .into_iter()
@@ -972,12 +968,9 @@ impl Dashboard {
 
     /// Enter on a button row.
     pub(in crate::commands::dashboard) fn editor_button(&mut self, id: &FieldId) {
-        match id {
-            FieldId::DeleteStage => {
-                let stage = self.editor().panel_stage().expect("a stage field");
-                self.editor_request_delete_stage(&stage);
-            }
-            FieldId::DeletePath => {
+        match (id, self.editor().panel_stage()) {
+            (FieldId::DeleteStage, Some(stage)) => self.editor_request_delete_stage(&stage),
+            (FieldId::DeletePath, _) => {
                 let (from, to) = self.editor().panel_edge().expect("a path field");
                 self.editor_delete_edge(&from, &to);
             }
@@ -1031,15 +1024,14 @@ impl Dashboard {
     /// The text of a line editor, committed to its field.
     pub(in crate::commands::dashboard) fn editor_commit_line(&mut self, id: &FieldId, text: &str) {
         let text = text.trim().to_string();
-        match id {
-            FieldId::AgentDescription => {
+        match (id, self.editor().panel_stage()) {
+            (FieldId::AgentDescription, _) => {
                 self.editor_mutate(|d| {
                     d.set_description(&text);
                     Ok(())
                 });
             }
-            FieldId::StageName => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::StageName, Some(stage)) => {
                 // The box keeps its place under the new name.
                 let positions = self
                     .editor()
@@ -1056,21 +1048,23 @@ impl Dashboard {
                     editor.sync_panel();
                 }
             }
-            FieldId::StageDescription => {
-                let stage = self.editor().panel_stage().expect("a stage field");
+            (FieldId::StageDescription, Some(stage)) => {
                 self.editor_mutate(|d| {
                     d.set_stage_text(&stage, crate::blueprint_edit::StageText::Description, &text)
                 });
             }
-            FieldId::MaxIterations
-            | FieldId::MaxRevisits
-            | FieldId::MaxWorkers
-            | FieldId::MaxItems
-            | FieldId::RegionBudget
-            | FieldId::RegionMaxTokens
-            | FieldId::RegionMinTokens
-            | FieldId::RegionMaxItems
-            | FieldId::RegionOverflow => {
+            (
+                FieldId::MaxIterations
+                | FieldId::MaxRevisits
+                | FieldId::MaxWorkers
+                | FieldId::MaxItems
+                | FieldId::RegionBudget
+                | FieldId::RegionMaxTokens
+                | FieldId::RegionMinTokens
+                | FieldId::RegionMaxItems
+                | FieldId::RegionOverflow,
+                _,
+            ) => {
                 let value = match text.parse::<u64>() {
                     Ok(n) => Some(n),
                     Err(_) if text.is_empty() => None,
@@ -1081,8 +1075,8 @@ impl Dashboard {
                 };
                 self.editor_set_number(id, value);
             }
-            FieldId::WorkerRef => self.editor_set_worker(&text),
-            FieldId::EdgeHint => {
+            (FieldId::WorkerRef, Some(stage)) => self.editor_set_worker(&stage, &text),
+            (FieldId::EdgeHint, _) => {
                 let (from, to) = self.editor().panel_edge().expect("a path field");
                 self.editor_mutate(|d| d.set_edge_hint(&from, &to, &text));
             }

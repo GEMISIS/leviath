@@ -246,8 +246,10 @@ impl Dashboard {
             EditOutcome::Cancel => {}
             EditOutcome::Commit => {
                 let name = line.value().trim().to_string();
-                if !name.is_empty() {
-                    self.editor_add_artifact(&name);
+                if !name.is_empty()
+                    && let Some(stage) = self.editor().panel_stage()
+                {
+                    self.editor_add_artifact(&stage, &name);
                 }
             }
         }
@@ -334,7 +336,9 @@ impl Dashboard {
                     editor.model_drag = None;
                     // A no-op when it landed where it started, undo stack
                     // included.
-                    self.editor_reorder_model(drag.from, drag.to);
+                    if let Some(stage) = self.editor().panel_stage() {
+                        self.editor_reorder_model(&stage, drag.from, drag.to);
+                    }
                     return true;
                 }
                 _ => {}
@@ -399,7 +403,11 @@ impl Dashboard {
                         .collect();
                     self.editor_settle_types(&id, values);
                 }
-                _ => self.editor_settle_tools(&chosen),
+                _ => {
+                    if let Some(stage) = self.editor().panel_stage() {
+                        self.editor_settle_tools(&stage, &chosen);
+                    }
+                }
             },
             PickerOutcome::Chosen(index) => {
                 let value = picker.options[index].value.clone();
