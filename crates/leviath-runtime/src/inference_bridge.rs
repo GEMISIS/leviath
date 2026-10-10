@@ -192,7 +192,7 @@ impl JobHydration {
     /// Fill `request`'s mime blocks, logging what happened when anything
     /// was left out: parts the provider already holds, or can be given, are
     /// named by id; the rest carry their bytes.
-    async fn apply(&self, request: &mut InferenceRequest) {
+    async fn apply(&self, mut request: InferenceRequest) -> InferenceRequest {
         // The stage's own bypass: a part of a type it named reaches the
         // model as text unless the part itself said otherwise.
         if !self.as_text.is_empty() {
@@ -212,7 +212,7 @@ impl JobHydration {
         }
         if let Some(route) = &self.files {
             crate::provider_files::attach(
-                request,
+                &mut request,
                 route,
                 &self.mime,
                 &self.registry,
@@ -222,24 +222,21 @@ impl JobHydration {
             )
             .await;
         }
-        self.hydrate(request);
+        self.hydrate(request).await
     }
 
     /// Put bytes (or stand-ins) in every mime block not already named by id.
-    fn hydrate(&self, request: &mut InferenceRequest) {
-        let fetch =
-            |blob: &leviath_core::mime::BlobRef| self.store.read(&self.run_id, &blob.sha256).ok();
-        let report = leviath_providers::mime::hydrate_request(
-            request,
-            &leviath_providers::mime::Hydration {
-                mime: &self.mime,
-                registry: &self.registry,
-                max_media_bytes: self.max_media_bytes,
-                fetch: &fetch,
-                limits: self.limits,
-                why_inline: self.why_inline,
-            },
-        );
+    ///
+    /// The bytes are read on tokio's blocking pool: every part sent is a
+    /// whole blob read from the run's store, and a read on an async worker
+    /// stalls every task queued behind it.
+    async fn hydrate(&self, request: InferenceRequest) -> InferenceRequest {
+        let job = self.clone();
+        // Nothing on the blocking side panics: a blob that cannot be read is
+        // reported as missing.
+        let (request, report) = tokio::task::spawn_blocking(move || job.fill(request))
+            .await
+            .expect("filling a request's parts does not panic");
         if report.stand_ins > 0
             || report.capped > 0
             || report.too_large > 0
@@ -272,17 +269,41 @@ impl JobHydration {
                  (https://github.com/meta-models/meta-model-cookbook/issues/59)"
             );
         }
+        request
+    }
+
+    /// `request` with its mime blocks filled from the store, and what the
+    /// filling left out.
+    fn fill(
+        &self,
+        mut request: InferenceRequest,
+    ) -> (InferenceRequest, leviath_providers::mime::HydrationReport) {
+        let fetch =
+            |blob: &leviath_core::mime::BlobRef| self.store.read(&self.run_id, &blob.sha256).ok();
+        let report = leviath_providers::mime::hydrate_request(
+            &mut request,
+            &leviath_providers::mime::Hydration {
+                mime: &self.mime,
+                registry: &self.registry,
+                max_media_bytes: self.max_media_bytes,
+                fetch: &fetch,
+                limits: self.limits,
+                why_inline: self.why_inline,
+            },
+        );
+        (request, report)
     }
 
     /// Upload again every part `request` names by id, for a request the
     /// vendor refused because a file it named is gone, then fill any part
-    /// whose upload failed with its bytes. Whether anything was uploaded.
-    async fn renew_files(&self, request: &mut InferenceRequest) -> bool {
+    /// whose upload failed with its bytes. The request, and whether anything
+    /// was uploaded.
+    async fn renew_files(&self, mut request: InferenceRequest) -> (InferenceRequest, bool) {
         let Some(route) = &self.files else {
-            return false;
+            return (request, false);
         };
         let renewed = crate::provider_files::attach(
-            request,
+            &mut request,
             route,
             &self.mime,
             &self.registry,
@@ -291,8 +312,7 @@ impl JobHydration {
             true,
         )
         .await;
-        self.hydrate(request);
-        renewed > 0
+        (self.hydrate(request).await, renewed > 0)
     }
 }
 
@@ -795,9 +815,10 @@ pub(crate) async fn run_attempt(
         // the request, so the trip sends this one copy.
         let mut request = InferenceRequest::clone(&request);
         if let Some(hydration) = &hydration {
-            hydration.apply(&mut request).await;
+            request = hydration.apply(request).await;
             if renew_files {
-                let renewed = hydration.renew_files(&mut request).await;
+                let (renewed_request, renewed) = hydration.renew_files(request).await;
+                request = renewed_request;
                 tracing::info!(
                     renewed,
                     "a named file was gone; uploaded again for the retry"
@@ -2220,9 +2241,9 @@ mod tests {
             files: None,
             why_inline: "",
         };
-        hydration.apply(&mut request).await;
+        let request = hydration.apply(request).await;
         assert!(
-            !hydration.renew_files(&mut request.clone()).await,
+            !hydration.renew_files(request.clone()).await.1,
             "with nowhere to upload, nothing is renewed"
         );
         // The stage's `as_text` sends a type the registry calls binary as
@@ -2264,7 +2285,7 @@ mod tests {
             as_text: vec!["application/*".to_string(), "image/*".to_string()],
             ..hydration.clone()
         };
-        forced.apply(&mut as_text).await;
+        let as_text = forced.apply(as_text).await;
         let blocks_of = |content: &MessageContent| match content {
             MessageContent::Blocks(blocks) => blocks.clone(),
             MessageContent::Text(_) => Vec::new(),
@@ -2290,6 +2311,48 @@ mod tests {
             }
         );
         assert_eq!(leviath_providers::mime::mime_tokens(&request), 1600);
+    }
+
+    /// A part's bytes are read on the blocking pool, not on the async worker
+    /// running the job, where a whole-file read would hold up every task
+    /// queued behind it.
+    #[tokio::test]
+    async fn hydration_reads_the_store_off_the_async_worker() {
+        use leviath_core::mime::{Blob, BlobStore, MimeRegistry, MimeType, Part};
+        use leviath_providers::{ContentBlock, Message, MessageContent, ModelMime};
+        let registry = Arc::new(MimeRegistry::builtin());
+        let store = Arc::new(crate::test_support::WatchedStore::new(false));
+        let blob = Blob::new(
+            MimeType::parse("image/png").unwrap(),
+            b"\x89PNG\r\n\x1a\nbody".to_vec(),
+        );
+        let part = Part::stored(store.put("run-1", &blob, &registry).unwrap());
+        let mut request = test_request();
+        request.messages.push(Message {
+            role: "user".to_string(),
+            content: MessageContent::Blocks(vec![ContentBlock::mime(&part).unwrap()]),
+            cache_breakpoint: false,
+            reasoning: None,
+        });
+        let hydration = JobHydration {
+            store: store.clone(),
+            run_id: "run-1".to_string(),
+            registry,
+            mime: ModelMime::new(&["text/*", "image/*"], &["text/*"]),
+            max_media_bytes: 64 * 1024 * 1024,
+            as_text: Vec::new(),
+            limits: leviath_providers::files::MediaLimits::NONE,
+            files: None,
+            why_inline: "",
+        };
+        let request = hydration.apply(request).await;
+        assert!(matches!(
+            &request.messages[0].content,
+            MessageContent::Blocks(blocks) if blocks[0].is_hydrated_mime()
+        ));
+        let read_on = store.on.lock().unwrap().clone();
+        assert_eq!(read_on.len(), 1);
+        assert_ne!(read_on[0], std::thread::current().id(), "not on the worker");
     }
 }
 
