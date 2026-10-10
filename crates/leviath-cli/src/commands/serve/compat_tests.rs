@@ -508,3 +508,24 @@ async fn the_old_listing_is_every_run_in_one_array() {
     })
     .await;
 }
+
+/// Every answer from an `/api/agents` route says the route is deprecated, a
+/// miss included, and the `/api/runs` twin does not.
+#[tokio::test]
+async fn the_old_routes_answer_with_a_deprecation_header() {
+    let deprecation = |uri: &str| {
+        let app = super::super::api_router().with_state(state_with_agent_paths(Vec::new()));
+        let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        async move {
+            app.oneshot(request)
+                .await
+                .unwrap()
+                .headers()
+                .get("deprecation")
+                .cloned()
+        }
+    };
+    let since = Some(axum::http::HeaderValue::from_static("@1791504000"));
+    assert_eq!(deprecation("/api/agents/ghost/result").await, since);
+    assert_eq!(deprecation("/api/runs/ghost/result").await, None);
+}

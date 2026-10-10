@@ -92,7 +92,7 @@ pub(in crate::commands::dashboard) enum FieldId {
     AgentDescription,
     EntryStage,
     DefaultModel,
-    /// A shared region, by name (opens it; a later change).
+    /// A shared region, by name; Enter opens its window.
     RegionRow(String),
     StageName,
     StageMode,

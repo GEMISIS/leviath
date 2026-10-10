@@ -19,10 +19,10 @@
 //! that do fill it. `POST /api/runs` takes inputs by name and refuses one the
 //! blueprint does not declare.
 //!
-//! These routes are kept for older clients and will be removed.
+//! These routes are kept for older clients until 0.7.0, which removes them.
+//! Every answer from one carries a `Deprecation` header.
 
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::StatusCode;
 use axum::response::Json;
 use leviath_runtime::spec::inputs::{InputDecl, InputSlot, InputType};
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssues};
@@ -31,7 +31,7 @@ use leviath_runtime::spec::request::SpawnSource;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::core::error::as_api_error;
+use super::core::error::ServeError;
 use super::core::inspect;
 use super::core::spawn::{self as spawn_core, Verdict};
 use super::runs::run_json;
@@ -108,18 +108,18 @@ pub(super) struct SpawnAgentResp {
 pub(super) async fn spawn_agent(
     State(state): State<AppState>,
     request: axum::extract::Request,
-) -> Result<Json<SpawnAgentResp>, ApiError> {
+) -> Result<Json<SpawnAgentResp>, ServeError> {
     let max_upload = state.limits.request_limits.max_upload_bytes;
     let (mut body, mut parts): (SpawnAgentReq, _) =
         super::upload::json_or_multipart(&state, request, max_upload).await?;
     let source = BlueprintRef::parse(&body.blueprint)
         .map(SpawnSource::Blueprint)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("blueprint: {e}")))?;
+        .map_err(|e| ServeError::BadRequest(format!("blueprint: {e}")))?;
     let declared = super::run_spawn::declared_inputs(&state, &body.blueprint)
         .await
-        .map_err(|(status, message)| match status {
-            StatusCode::NOT_FOUND => (status, message),
-            _ => (StatusCode::BAD_REQUEST, message),
+        .map_err(|e| match e {
+            ServeError::NotFound(_) => e,
+            other => ServeError::BadRequest(other.to_string()),
         })?;
     // Files named inside the workdir, and the ones a text names with `@path`,
     // read where the run will work.
@@ -167,7 +167,7 @@ pub(super) async fn spawn_agent(
     left_out.sort();
     let request = launch_of(body, regions, parts)
         .and_then(|launch| launch.into_request_for(source))
-        .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
+        .map_err(ServeError::BadRequest)?;
     match spawn_core::start(&state, request).await {
         Ok(Verdict::Accepted(started)) => Ok(Json(SpawnAgentResp {
             agent_id: started.run_id.clone(),
@@ -178,7 +178,7 @@ pub(super) async fn spawn_agent(
                 .collect(),
         })),
         Ok(Verdict::Rejected(issues)) => Err(refusal(&issues)),
-        Err(e) => Err(as_api_error(&e)),
+        Err(e) => Err(e),
     }
 }
 
@@ -262,12 +262,22 @@ fn input_for_region(declared: &[InputDecl], region: &str) -> Result<String, Stri
 /// A refused spawn the way the old route answered one: one message naming
 /// every problem, under a 403 when any of them is something this server does
 /// not allow and a 400 otherwise.
-fn refusal(issues: &SpawnIssues) -> ApiError {
-    let status = match issues.iter().any(|i| i.code == IssueCode::NotAllowed) {
-        true => StatusCode::FORBIDDEN,
-        false => StatusCode::BAD_REQUEST,
-    };
-    err(status, issues.to_string())
+fn refusal(issues: &SpawnIssues) -> ServeError {
+    match issues.iter().any(|i| i.code == IssueCode::NotAllowed) {
+        true => ServeError::Forbidden(issues.to_string()),
+        false => ServeError::BadRequest(issues.to_string()),
+    }
+}
+
+/// Mark an answer from one of these routes deprecated (RFC 9745), so a client
+/// learns it from the response as well as from the spec. The date is when
+/// they were deprecated.
+pub(super) async fn deprecated(mut response: axum::response::Response) -> axum::response::Response {
+    response.headers_mut().insert(
+        "deprecation",
+        axum::http::HeaderValue::from_static("@1791504000"),
+    );
+    response
 }
 
 /// Query for `GET /api/agents`.
@@ -299,11 +309,9 @@ pub(super) async fn list_agents(
 /// error.
 pub(super) async fn agent_stages(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<RunStagesResp>, ApiError> {
+) -> Result<Json<RunStagesResp>, ServeError> {
     let read = id.clone();
-    let mut stages = super::blocking::blocking(move || inspect::stages(&read))
-        .await
-        .map_err(|e| as_api_error(&e))?;
+    let mut stages = super::blocking::blocking(move || inspect::stages(&read)).await?;
     for stage in &mut stages {
         stage.status = as_older_clients_know(&stage.status);
     }
@@ -315,10 +323,8 @@ pub(super) async fn agent_stages(
 /// `hashmap`.
 pub(super) async fn agent_context(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<ContextSnapshot>, ApiError> {
-    let mut snapshot = super::blocking::blocking(move || inspect::context(&id))
-        .await
-        .map_err(|e| as_api_error(&e))?;
+) -> Result<Json<ContextSnapshot>, ServeError> {
+    let mut snapshot = super::blocking::blocking(move || inspect::context(&id)).await?;
     in_older_words(&mut snapshot);
     Ok(Json(snapshot))
 }
@@ -329,7 +335,7 @@ pub(super) async fn agent_context(
 pub(super) async fn agent_context_history(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<HistoryQuery>,
-) -> Result<Json<Page<RunPoint>>, ApiError> {
+) -> Result<Json<Page<RunPoint>>, ServeError> {
     let mut page = super::run_reads::context_history(id, query).await?;
     for point in &mut page.items {
         in_older_words(&mut point.context);

@@ -211,38 +211,43 @@ fn api_router() -> Router<AppState> {
             get(interactions::get_interaction).post(interactions::submit_interaction),
         )
         // The `/api/agents` routes older clients call, kept for them and
-        // deprecated in the spec. Each is its `/api/runs` twin, apart from
-        // starting and listing runs, which take and give the old shapes.
-        .route(
-            "/api/agents",
-            get(compat::list_agents).post(compat::spawn_agent),
-        )
-        .route("/api/agents/tree", get(tree::runs_tree))
-        .route(
-            "/api/agents/{id}",
-            get(run_reads::get_run).delete(run_reads::cancel_run),
-        )
-        .route("/api/agents/{id}/children", get(run_reads::run_children))
-        .route("/api/agents/{id}/context", get(compat::agent_context))
-        .route(
-            "/api/agents/{id}/context/history",
-            get(compat::agent_context_history),
-        )
-        .route("/api/agents/{id}/files", get(run_reads::run_file))
-        .route("/api/agents/{id}/files/raw", get(blobs::raw_file))
-        .route("/api/agents/{id}/blobs", get(blobs::list_blobs))
-        .route("/api/agents/{id}/blobs/{sha256}", get(blobs::get_blob))
-        .route("/api/agents/{id}/artifacts/{name}", get(blobs::artifact))
-        .route("/api/agents/{id}/logs", get(run_reads::run_logs))
-        .route("/api/agents/{id}/result", get(run_reads::run_result))
-        .route("/api/agents/{id}/stages", get(compat::agent_stages))
-        .route("/api/agents/{id}/tree-status", get(tree::run_tree_status))
-        .route("/api/agents/{id}/pause", post(run_reads::pause_run))
-        .route("/api/agents/{id}/resume", post(run_reads::resume_run))
-        .route("/api/agents/{id}/message", post(interactions::send_message))
-        .route(
-            "/api/agents/{id}/interaction",
-            get(interactions::get_interaction).post(interactions::submit_interaction),
+        // deprecated, in the spec and in a `Deprecation` header on every
+        // answer. Each is its `/api/runs` twin, apart from starting and
+        // listing runs, which take and give the old shapes.
+        .merge(
+            Router::new()
+                .route(
+                    "/api/agents",
+                    get(compat::list_agents).post(compat::spawn_agent),
+                )
+                .route("/api/agents/tree", get(tree::runs_tree))
+                .route(
+                    "/api/agents/{id}",
+                    get(run_reads::get_run).delete(run_reads::cancel_run),
+                )
+                .route("/api/agents/{id}/children", get(run_reads::run_children))
+                .route("/api/agents/{id}/context", get(compat::agent_context))
+                .route(
+                    "/api/agents/{id}/context/history",
+                    get(compat::agent_context_history),
+                )
+                .route("/api/agents/{id}/files", get(run_reads::run_file))
+                .route("/api/agents/{id}/files/raw", get(blobs::raw_file))
+                .route("/api/agents/{id}/blobs", get(blobs::list_blobs))
+                .route("/api/agents/{id}/blobs/{sha256}", get(blobs::get_blob))
+                .route("/api/agents/{id}/artifacts/{name}", get(blobs::artifact))
+                .route("/api/agents/{id}/logs", get(run_reads::run_logs))
+                .route("/api/agents/{id}/result", get(run_reads::run_result))
+                .route("/api/agents/{id}/stages", get(compat::agent_stages))
+                .route("/api/agents/{id}/tree-status", get(tree::run_tree_status))
+                .route("/api/agents/{id}/pause", post(run_reads::pause_run))
+                .route("/api/agents/{id}/resume", post(run_reads::resume_run))
+                .route("/api/agents/{id}/message", post(interactions::send_message))
+                .route(
+                    "/api/agents/{id}/interaction",
+                    get(interactions::get_interaction).post(interactions::submit_interaction),
+                )
+                .layer(axum::middleware::map_response(compat::deprecated)),
         )
         // MCP servers - read-only surface. Everything that connects to one or
         // opens a browser is mounted by `execute_with_shutdown`, behind
@@ -1101,6 +1106,46 @@ mod tests {
         ("run_core", include_str!("core/runs.rs")),
     ];
 
+    /// Every `ServeError::<name>` in `body`: a variant, or a constructor.
+    fn serve_errors_named(body: &str) -> Vec<String> {
+        body.split("ServeError::")
+            .skip(1)
+            .map(|rest| {
+                rest.chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The status of the `ServeError` variant `name`, when it is one.
+    fn variant_code(name: &str) -> Option<u16> {
+        SERVE_ERROR_STATUSES
+            .iter()
+            .find(|(variant, _)| *variant == name)
+            .map(|(_, code)| *code)
+    }
+
+    /// The statuses a handler answers with through `ServeError`: each variant
+    /// it names, and each variant a constructor it calls (`run_not_found`)
+    /// builds.
+    fn handler_error_codes(body: &str) -> Vec<u16> {
+        let constructors = include_str!("core/error.rs").replace("\r\n", "\n");
+        serve_errors_named(body)
+            .into_iter()
+            .flat_map(|name| match variant_code(&name) {
+                Some(code) => vec![code],
+                None => constructors
+                    .split_once(&format!("fn {name}("))
+                    .map(|(_, rest)| rest.split("\n    }\n").next().unwrap_or(rest))
+                    .into_iter()
+                    .flat_map(|built| serve_errors_named(&built.replace("Self::", "ServeError::")))
+                    .filter_map(|variant| variant_code(&variant))
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// The statuses a service-layer function can answer with, from the
     /// `ServeError` variants its body names.
     fn core_status_codes(module: &str, function: &str) -> Vec<u16> {
@@ -1118,20 +1163,9 @@ mod tests {
             return Vec::new();
         };
         let body = rest.split("\n}\n").next().unwrap_or(rest);
-        let mut codes: Vec<u16> = body
-            .split("ServeError::")
-            .skip(1)
-            .map(|rest| {
-                rest.chars()
-                    .take_while(|c| c.is_ascii_alphabetic())
-                    .collect::<String>()
-            })
-            .filter_map(|variant| {
-                SERVE_ERROR_STATUSES
-                    .iter()
-                    .find(|(known, _)| *known == variant)
-                    .map(|(_, code)| *code)
-            })
+        let mut codes: Vec<u16> = serve_errors_named(body)
+            .iter()
+            .filter_map(|name| variant_code(name))
             .collect();
         codes.sort_unstable();
         codes.dedup();
@@ -1158,9 +1192,10 @@ mod tests {
         ("Internal", 500),
     ];
 
-    /// Every `StatusCode::` constant named in the body of `function` in
-    /// `module`, plus the statuses of any service-layer call it makes: the
-    /// text from `async fn <function>(` to the first column-zero `}`.
+    /// Every `StatusCode::` constant and `ServeError` named in the body of
+    /// `function` in `module`, plus the statuses of any service-layer call it
+    /// makes: the text from `async fn <function>(` to the first column-zero
+    /// `}`.
     fn handler_status_codes(module: &str, function: &str) -> Vec<u16> {
         let (_, source) = HANDLER_SOURCES
             .iter()
@@ -1232,6 +1267,7 @@ mod tests {
                     .expect("a StatusCode constant the table knows")
             })
             .collect();
+        codes.extend(handler_error_codes(body));
         codes.sort_unstable();
         codes.dedup();
         codes
@@ -1372,6 +1408,15 @@ mod tests {
                 .expect("the variant is in the table");
             assert_eq!(*code, error.status().as_u16(), "{name}");
         }
+    }
+
+    /// A handler that answers with a `ServeError` has its status read, whether
+    /// it names the variant or a constructor that builds one.
+    #[test]
+    fn the_scan_reads_the_failures_a_handler_answers_with() {
+        assert!(handler_status_codes("run_reads", "get_run").contains(&404));
+        let logs = handler_status_codes("run_reads", "run_logs");
+        assert!(logs.contains(&400) && logs.contains(&404), "{logs:?}");
     }
 
     /// A handler that hands its work to the service layer still has its

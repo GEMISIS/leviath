@@ -1,11 +1,10 @@
 //! The one failure type the service layer returns.
 //!
-//! Before this existed, every handler built its own `(StatusCode, Json)`
-//! pair, so the same failure could answer 404 on one route and 500 on
-//! another, and GraphQL would have had to re-derive all of it from status
-//! codes. A failure is now described once, by what went wrong, and each
-//! surface renders it: REST as a status and `{"error": ...}` body, GraphQL
-//! as an `errors` entry carrying a machine-readable `code`.
+//! A failure is described once, by what went wrong, and each surface renders
+//! it: REST as a status and `{"error": ...}` body, GraphQL as an `errors`
+//! entry carrying a machine-readable `code`. One type is what keeps the same
+//! failure answering the same status on every route, rather than each handler
+//! choosing its own and GraphQL re-deriving them from status codes.
 
 use axum::http::StatusCode;
 
@@ -184,17 +183,29 @@ impl ServeError {
     ) -> Self {
         Self::Internal(format!("Unexpected daemon response: {other:?}"))
     }
+
+    /// The miss for a run id nothing is recorded under.
+    pub(crate) fn run_not_found(id: &str) -> Self {
+        Self::NotFound(format!("Run '{id}' not found"))
+    }
 }
 
 /// Render a service failure as the REST surface's `(status, JSON)` pair.
 ///
 /// A free function rather than a `From` impl because [`ApiError`] is a tuple
-/// alias, and a tuple of foreign types cannot carry one. The body shape is
-/// unchanged from before this module existed: `{"error": "..."}`.
+/// alias, and a tuple of foreign types cannot carry one. The body is
+/// `{"error": "..."}`.
 ///
 /// [`ApiError`]: super::super::types::ApiError
 pub(crate) fn as_api_error(e: &ServeError) -> super::super::types::ApiError {
     super::super::types::err(e.status(), e.to_string())
+}
+
+/// A failure as a REST answer, so a handler can return one as it is.
+impl axum::response::IntoResponse for ServeError {
+    fn into_response(self) -> axum::response::Response {
+        as_api_error(&self).into_response()
+    }
 }
 
 #[cfg(test)]

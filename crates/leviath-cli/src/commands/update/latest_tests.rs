@@ -145,18 +145,6 @@ fn an_unchecked_cache_is_stale_and_a_fresh_one_is_not() {
     );
 }
 
-/// The stamp is a real time, not a placeholder, so a console can say how fresh
-/// the answer is.
-#[test]
-fn now_secs_is_a_plausible_wall_clock() {
-    // Any clock later than the day this was written. Asserting a range rather
-    // than a value keeps the test from depending on when it runs.
-    assert!(
-        now_secs() > 1_700_000_000,
-        "unix seconds, not milliseconds or zero"
-    );
-}
-
 /// The real fetcher, against a server that answers, so the client it builds and
 /// the body it reads are exercised rather than only described.
 ///

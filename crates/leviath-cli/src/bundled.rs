@@ -151,10 +151,9 @@ pub(crate) fn plan_agent_actions(agents_dir: &Path) -> Vec<(&'static BundledAgen
 /// A note for a run about to start on an installed bundled blueprint that this
 /// binary ships a different version of.
 ///
-/// `lev setup` is the only thing that has ever said this, and only when asked.
-/// Nothing said it at the moment it mattered, so an install could sit versions
-/// behind indefinitely - which is exactly how a run kept using an old
-/// checkpoint policy while the fix had shipped.
+/// Said as the run starts, the moment it matters. `lev setup` says it only
+/// when asked, so without this an install can sit versions behind
+/// indefinitely, running an old checkpoint policy after the fix has shipped.
 ///
 /// Deliberately narrow. It fires only for a blueprint at `path` that *is* the
 /// installed copy, under `agents_dir/<name>/`, so a blueprint of the user's

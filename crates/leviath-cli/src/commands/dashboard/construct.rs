@@ -16,16 +16,8 @@ use super::state::Dashboard;
 use super::types::*;
 use crate::runstate;
 
-/// Production clock for staleness checks: wall-clock Unix seconds.
-fn system_now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// Production clock for double-click detection: milliseconds since the epoch.
-/// Separate from [`system_now_secs`] because a second is far too coarse to
+/// Separate from the staleness clock because a second is far too coarse to
 /// tell one click from two, and injected for the same reason - a test that
 /// has to sleep to prove a double click is a test that fails on a busy CI box.
 fn system_now_millis() -> u64 {
@@ -217,7 +209,7 @@ impl Dashboard {
             daemon_poll_tx: Some(daemon_poll_tx),
             daemon_run_ids: None,
             daemon_link: Default::default(),
-            clock: system_now_secs,
+            clock: leviath_core::duration::now_secs,
         }
     }
 
@@ -302,21 +294,13 @@ impl Dashboard {
 mod tests {
     use super::*;
 
-    /// The production clock answers with a plausible wall-clock time (the tests
-    /// above inject a fixed one, so this is the only place it runs).
-    #[test]
-    fn system_clock_reports_a_wall_clock_time() {
-        // Well after 2020 and before 2100 - i.e. a real epoch second.
-        let now = system_now_secs();
-        assert!(now > 1_577_836_800 && now < 4_102_444_800, "got {now}");
-    }
-
-    /// The double-click clock reports the same instant in milliseconds (tests
-    /// inject a frozen one, so this is the only place it runs).
+    /// The double-click clock reports the instant the seconds clock does, in
+    /// milliseconds (tests inject a frozen one, so this is the only place it
+    /// runs).
     #[test]
     fn the_millisecond_clock_agrees_with_the_second_one() {
         let millis = system_now_millis();
-        let secs = system_now_secs() as u64;
+        let secs = leviath_core::duration::now_secs() as u64;
         assert!(millis / 1000 >= secs.saturating_sub(2), "got {millis}");
         assert!(millis / 1000 <= secs + 2, "got {millis}");
     }

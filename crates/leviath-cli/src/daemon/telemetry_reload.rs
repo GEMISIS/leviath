@@ -315,12 +315,23 @@ mod tests {
         let (_rt, mut world) = world();
         let (release, stuck) = std::sync::mpsc::channel();
         let (flushed, done) = std::sync::mpsc::channel();
+        let sink = StuckSink {
+            release: Mutex::new(stuck),
+            flushed,
+        };
+        // Recording goes on as ever; only the flush is stuck.
+        leviath_core::telemetry::TelemetrySink::emit(
+            &sink,
+            leviath_core::telemetry::TelemetryEvent::StageEntered {
+                run_id: "r".to_string(),
+                stage_index: 0,
+                stage_name: "s".to_string(),
+                at_ms: 0,
+            },
+        );
         world
             .world_mut()
-            .insert_resource(leviath_runtime::telemetry::Telemetry(Arc::new(StuckSink {
-                release: Mutex::new(stuck),
-                flushed,
-            })));
+            .insert_resource(leviath_runtime::telemetry::Telemetry(Arc::new(sink)));
 
         let (returned, refreshed) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

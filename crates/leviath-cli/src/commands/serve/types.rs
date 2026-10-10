@@ -533,9 +533,9 @@ pub(super) fn status_matches(status: &crate::runstate::RunStatus, filter: &str) 
 pub(super) struct RunResultResp {
     pub(super) run_id: String,
     pub(super) status: String,
-    /// The tail of the last stage's log. Kept as-is: it predates
-    /// `final_output`, callers depend on it, and it answers a different
-    /// question - what the run *did*, rather than what it concluded.
+    /// The tail of the last stage's log. Callers depend on it, and it answers
+    /// a different question from `final_output`: what the run *did*, rather
+    /// than what it concluded.
     pub(super) output: String,
     /// What the agent handed back, when it submitted anything. This is the
     /// run's answer; prefer it over `output` when present.
@@ -695,9 +695,9 @@ pub(super) struct RunFileListing {
     /// is a prefix and the remaining names were never stored anywhere.
     ///
     /// Exposed because the alternative - a client subtracting
-    /// `modifying_tool_calls` from `entries.len()` - is wrong, and was the
-    /// original "+N more" bug. Use `source=workdir` for ground truth about what
-    /// is actually on disk.
+    /// `modifying_tool_calls` from `entries.len()` - is wrong: one counts
+    /// calls, the other files. Use `source=workdir` for ground truth about
+    /// what is actually on disk.
     pub(super) modified_files_truncated: bool,
     /// Successful **modifying tool calls**, which is not a file count: a run
     /// that edits one file three times records three. Named for what it counts.

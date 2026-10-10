@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use leviath_core::mime::MimeType;
 
-use super::types::*;
+use super::core::error::ServeError;
 use crate::commands::mime_rows::{Added, RowEdit, TokenSpec, add_row, remove_row};
 
 /// A token rule as JSON: exactly one of the five rates, `max` only beside
@@ -127,9 +127,9 @@ fn mime_types_path() -> std::path::PathBuf {
 /// and nothing is written.
 pub(super) async fn put_mime_row(
     Json(req): Json<MimeRowReq>,
-) -> Result<Json<MimeRowWritten>, ApiError> {
+) -> Result<Json<MimeRowWritten>, ServeError> {
     let tokens = match req.tokens {
-        Some(t) => Some(t.into_spec().map_err(|e| err(StatusCode::BAD_REQUEST, e))?),
+        Some(t) => Some(t.into_spec().map_err(ServeError::BadRequest)?),
         None => None,
     };
     let edit = RowEdit {
@@ -141,18 +141,11 @@ pub(super) async fn put_mime_row(
         stand_in: req.stand_in,
         check: req.check,
     };
-    write_edit(&req.mime_type, edit)
-        .map(Json)
-        .map_err(|e| super::core::error::as_api_error(&e))
+    write_edit(&req.mime_type, edit).map(Json)
 }
 
 /// Write one registry row, for whichever surface asked.
-pub(super) fn write_edit(
-    mime_type: &str,
-    edit: RowEdit,
-) -> Result<MimeRowWritten, super::core::error::ServeError> {
-    use super::core::error::ServeError;
-
+pub(super) fn write_edit(mime_type: &str, edit: RowEdit) -> Result<MimeRowWritten, ServeError> {
     let key = MimeType::parse(mime_type)
         .map_err(|e| ServeError::BadRequest(format!("{mime_type}: {e}")))?;
     let added = add_row(&mime_types_path(), key.as_str(), &edit).map_err(ServeError::BadRequest)?;
@@ -166,21 +159,20 @@ pub(super) fn write_edit(
 /// `mime_types.toml`. A type that has no row there is a 404.
 pub(super) async fn delete_mime_row(
     Query(q): Query<DeleteMimeQuery>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<StatusCode, ServeError> {
     match remove_row_named(&q.mime_type) {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
-        Ok(false) => Err(super::core::error::as_api_error(
-            &super::core::error::ServeError::NotFound(format!("no row for '{}'", q.mime_type)),
-        )),
-        Err(e) => Err(super::core::error::as_api_error(&e)),
+        Ok(false) => Err(ServeError::NotFound(format!(
+            "no row for '{}'",
+            q.mime_type
+        ))),
+        Err(e) => Err(e),
     }
 }
 
 /// Remove one registry row. False when there was none to remove, which is a
 /// fact about the registry rather than a failed request.
-pub(super) fn remove_row_named(mime_type: &str) -> Result<bool, super::core::error::ServeError> {
-    use super::core::error::ServeError;
-
+pub(super) fn remove_row_named(mime_type: &str) -> Result<bool, ServeError> {
     let key = MimeType::parse(mime_type)
         .map_err(|e| ServeError::BadRequest(format!("{mime_type}: {e}")))?;
     Ok(remove_row(&mime_types_path(), key.as_str()).is_ok())

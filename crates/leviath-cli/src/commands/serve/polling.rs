@@ -23,16 +23,12 @@ pub(super) const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
 /// reconnecting (after `backoff`) whenever the stream ends or the daemon is
 /// briefly unreachable. Never returns; tests pass a zero backoff.
 pub(super) async fn event_loop(state: AppState, backoff: Duration) {
-    // Was a bare `Client::new()`, which has no timeouts at all: a webhook
-    // endpoint that accepts a connection and never answers hung this delivery
-    // forever. The shared factory supplies a connect+total timeout floor and
-    // caps redirects.
-    // `checked_client`, not `client`: the webhook URL comes from a request body,
-    // and it was checked once at `POST /api/runs` and then never again. A
-    // caller registered a public endpoint that answered `307 Location:
-    // http://169.254.169.254/…`, and since 307 preserves the method *and* the
-    // body, that was a repeatable POST primitive against the internal network -
-    // re-followed on every retry.
+    // The shared factory's client, with a connect and a total timeout, so a
+    // webhook endpoint that accepts a connection and never answers cannot
+    // hang a delivery. `checked_client`, not `client`: the webhook URL comes
+    // from a request body, and a public endpoint answering `307 Location:
+    // http://169.254.169.254/…` keeps the method *and* the body, so a redirect
+    // followed unchecked is a POST into the internal network on every retry.
     let client = leviath_net::checked_client(
         leviath_net::ClientTimeouts::default(),
         state.limits.allow_local_network,

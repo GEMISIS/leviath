@@ -37,7 +37,8 @@ same list.
 - **Breaking, REST.** Per-run routes move to `/api/runs/{id}/...`, and
   `POST /api/runs` takes a `SpawnRequest`. The 0.6.4 `/api/agents` routes
   stay, marked deprecated, for older Lair builds; their stages route keeps
-  0.6.4's status words. New: `POST /api/runs/validate`,
+  0.6.4's status words. Every answer from one carries a `Deprecation`
+  header (RFC 9745), and 0.7.0 removes them. New: `POST /api/runs/validate`,
   `GET /api/schema/spawn-request`, `GET /api/blueprints/{name}/inputs`, and
   `/api/runs/{id}/spec`, `/state`, `/deltas` and `/graph`.
 - **Breaking, GraphQL.** `spawnRun(request: SpawnRunRequest!)` takes a
@@ -192,9 +193,14 @@ same list.
   panicking.
 - `read_files` answers a directory with its listing, as `read_file` does,
   and a file that is not text with an error naming it.
+- `lev providers retention set` and `lev providers retention bedrock` take
+  their words in any case and list them in `--help`. `lev pack` and `lev
+  rage` print sizes the way the rest of lev does (`240 KB`, `18.2 MB`).
 
 ### Fixed
 
+- The dashboard's stage graph shows a stage that ran for two hours as
+  `2h0m`, not `120m0s`.
 - A run's context history credits each stage with what it wrote on its way
   out. A stage's last output is stored in the same step that moves the run
   on, so it was listed under the next stage, and when that stage cleared it,

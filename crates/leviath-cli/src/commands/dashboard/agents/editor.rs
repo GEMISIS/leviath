@@ -711,28 +711,24 @@ impl Dashboard {
         if self.editor_set_number_more(id, value) {
             return;
         }
-        if let Some(stage) = self.editor().panel_stage() {
-            self.editor_set_stage_number(&stage, id, value);
-        }
-    }
-
-    /// A number on the stage panel showing `stage`.
-    fn editor_set_stage_number(&mut self, stage: &str, id: &FieldId, value: Option<u64>) {
-        match id {
-            FieldId::MaxIterations => {
-                self.editor_mutate(|d| d.set_max_iterations(stage, value));
+        match (id, self.editor().panel_stage()) {
+            (FieldId::MaxIterations, Some(stage)) => {
+                self.editor_mutate(|d| d.set_max_iterations(&stage, value));
             }
-            FieldId::MaxRevisits => {
-                self.editor_mutate(|d| d.set_max_revisits(stage, value));
+            (FieldId::MaxRevisits, Some(stage)) => {
+                self.editor_mutate(|d| d.set_max_revisits(&stage, value));
             }
-            FieldId::MaxWorkers => {
+            (FieldId::MaxWorkers, Some(stage)) => {
                 self.editor_mutate(|d| {
-                    d.set_fan_out(stage, crate::blueprint_edit::FanOutField::MaxWorkers(value))
+                    d.set_fan_out(
+                        &stage,
+                        crate::blueprint_edit::FanOutField::MaxWorkers(value),
+                    )
                 });
             }
-            FieldId::MaxItems => {
+            (FieldId::MaxItems, Some(stage)) => {
                 self.editor_mutate(|d| {
-                    d.set_fan_out(stage, crate::blueprint_edit::FanOutField::MaxItems(value))
+                    d.set_fan_out(&stage, crate::blueprint_edit::FanOutField::MaxItems(value))
                 });
             }
             _ => {}

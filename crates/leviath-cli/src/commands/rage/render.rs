@@ -9,11 +9,12 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
 
+use super::Outcome;
 use super::report::PRIVACY_WARNING;
 use super::state::{Rage, Step};
-use super::{Outcome, human_bytes};
 use crate::tui::theme::*;
 use crate::tui::widgets::footer::{Hint, draw_hint_bar, hint};
+use leviath_core::mime::human_size;
 
 /// How many left-out files the summary lists before saying "and N more".
 const SKIPPED_SHOWN: usize = 4;
@@ -151,7 +152,7 @@ fn draw_outcome(frame: &mut Frame, area: Rect, outcome: &Outcome) {
             Span::styled(
                 format!(
                     "  {}  {} secrets removed",
-                    human_bytes(outcome.zip_bytes),
+                    human_size(outcome.zip_bytes),
                     outcome.redactions
                 ),
                 Style::default().fg(C_MUTED),
@@ -175,7 +176,7 @@ fn draw_outcome(frame: &mut Frame, area: Rect, outcome: &Outcome) {
             Span::raw(format!(
                 "{:>6}{:>12}{:>12}",
                 section.files,
-                human_bytes(section.bytes),
+                human_size(section.bytes),
                 section.redactions
             )),
         ]));

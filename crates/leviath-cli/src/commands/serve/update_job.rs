@@ -240,7 +240,7 @@ pub(super) struct UpdateJobs {
     /// against a temp directory and a runner that spawns nothing.
     env: Arc<dyn Fn() -> UpdateEnv + Send + Sync>,
     /// Current unix time; a fn so a long-lived server stays current.
-    clock: fn() -> u64,
+    clock: fn() -> i64,
     /// Distinguishes two jobs started in the same second.
     seq: Arc<AtomicU64>,
 }
@@ -272,14 +272,6 @@ fn no_runner(_argv: &[String]) -> anyhow::Result<()> {
     anyhow::bail!("this server was built without a way to run an upgrade command")
 }
 
-/// Real unix time in seconds.
-fn system_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 impl UpdateJobs {
     /// The real machine, running upgrade commands the given way.
     pub(super) fn with_runner(runner: CommandRunner) -> Self {
@@ -294,7 +286,7 @@ impl UpdateJobs {
         Self {
             jobs: Arc::new(Mutex::new(Vec::new())),
             env,
-            clock: system_now,
+            clock: leviath_core::duration::now_secs,
             seq: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -327,7 +319,7 @@ impl UpdateJobs {
         if let Some(running) = jobs.iter().find(|job| job.status == JobStatus::Running) {
             return Err(running.id.clone());
         }
-        let now = (self.clock)();
+        let now = (self.clock)() as u64;
         let id = format!(
             "update-{now}-{}",
             self.seq.fetch_add(1, Ordering::SeqCst) + 1
@@ -405,7 +397,7 @@ impl UpdateJobs {
             };
             job.restart_required = restart_required;
             job.restart_hint = restart_required.then(|| RESTART_HINT.to_string());
-            job.finished_at = Some((self.clock)());
+            job.finished_at = Some((self.clock)() as u64);
             job.clone()
         };
         super::events::send(

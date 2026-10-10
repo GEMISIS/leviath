@@ -925,8 +925,7 @@ impl Config {
     /// tests, sandboxed runs and scratch environments rely on - so a config
     /// path that quietly ignored it would let a run that believes it is
     /// isolated read *and write* the developer's real `~/.leviath/config.toml`,
-    /// the file holding every provider API key. Found by doing exactly that
-    /// during live testing.
+    /// the file holding every provider API key.
     pub fn config_path() -> PathBuf {
         if let Ok(override_path) = std::env::var("LEVIATH_CONFIG_PATH") {
             return PathBuf::from(override_path);

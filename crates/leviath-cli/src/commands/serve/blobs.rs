@@ -16,13 +16,14 @@ use axum::response::{IntoResponse, Json, Response};
 use leviath_core::mime::{MimeRegistry, MimeType, TokenRule, is_sha256_hex};
 use serde::{Deserialize, Serialize};
 
+use super::core::error::ServeError;
 use super::types::*;
 use crate::blobs::BlobEntry;
 use crate::runstate;
 
 /// The stored parts a run's context holds, or 404 when it has no run file.
-fn stored_parts(run_id: &str) -> Result<Vec<BlobEntry>, ApiError> {
-    super::core::inspect::blobs(run_id).map_err(|e| super::core::error::as_api_error(&e))
+fn stored_parts(run_id: &str) -> Result<Vec<BlobEntry>, ServeError> {
+    super::core::inspect::blobs(run_id)
 }
 
 /// Every stored part a run holds.
@@ -40,40 +41,38 @@ pub(super) async fn export_file(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    use super::core::error::ServeError;
+) -> Result<Response, ServeError> {
     use super::core::export::ExportStatus;
 
     let job = state.caches.exports.get(&id).ok_or_else(|| {
-        super::core::error::as_api_error(&ServeError::NotFound(format!(
+        ServeError::NotFound(format!(
             "no export '{id}': it was never started, or it has expired"
-        )))
+        ))
     })?;
     match job.status {
         ExportStatus::Complete => {}
         // Not a failure of this request: the export is simply not ready, and
         // the client polls the job rather than the file.
         ExportStatus::Queued | ExportStatus::Running => {
-            return Err(super::core::error::as_api_error(&ServeError::Conflict(
-                format!("export '{id}' is still {}", job.status.wire()),
+            return Err(ServeError::Conflict(format!(
+                "export '{id}' is still {}",
+                job.status.wire()
             )));
         }
         ExportStatus::Failed => {
-            return Err(super::core::error::as_api_error(&ServeError::Conflict(
-                format!(
-                    "export '{id}' failed: {}",
-                    job.error
-                        .unwrap_or_else(|| "no reason recorded".to_string())
-                ),
+            return Err(ServeError::Conflict(format!(
+                "export '{id}' failed: {}",
+                job.error
+                    .unwrap_or_else(|| "no reason recorded".to_string())
             )));
         }
     }
     let bytes = tokio::fs::read(super::core::export::export_path(&id))
         .await
         .map_err(|e| {
-            super::core::error::as_api_error(&ServeError::Internal(format!(
+            ServeError::Internal(format!(
                 "export '{id}' is complete, but its file cannot be read: {e}"
-            )))
+            ))
         })?;
     // A literal this crate writes, so there is no failure to report: parsing it
     // is how the response's own type is built rather than a claim about input.
@@ -92,7 +91,7 @@ pub(super) async fn export_file(
 /// `GET /api/runs/{id}/blobs`: every stored part the run holds.
 pub(super) async fn list_blobs(
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<BlobListing>, ApiError> {
+) -> Result<Json<BlobListing>, ServeError> {
     Ok(Json(BlobListing {
         items: stored_parts(&id)?,
     }))
@@ -185,7 +184,7 @@ fn bytes_response(
     name: &str,
     download: bool,
     range: Option<&str>,
-) -> Result<Response, ApiError> {
+) -> Result<Response, ServeError> {
     let total = bytes.len() as u64;
     let (status, body, content_range) = match resolve_range(range, total) {
         RangeResult::Full => (StatusCode::OK, bytes, None),
@@ -241,23 +240,18 @@ pub(super) async fn get_blob(
     AxumPath((id, sha256)): AxumPath<(String, String)>,
     Query(query): Query<BytesQuery>,
     headers: HeaderMap,
-) -> Result<Response, ApiError> {
+) -> Result<Response, ServeError> {
     if !is_sha256_hex(&sha256) {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
+        return Err(ServeError::BadRequest(
             "a blob is named by its 64-character lowercase hex sha256".to_string(),
         ));
     }
-    runstate::read_meta(&id)
-        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Run '{id}' not found")))?;
-    let bytes = super::core::inspect::blob(&id, &sha256)
-        .map_err(|e| super::core::error::as_api_error(&e))?
-        .ok_or_else(|| {
-            err(
-                StatusCode::NOT_FOUND,
-                format!("run '{id}' has no stored part {sha256} in its blob directory"),
-            )
-        })?;
+    runstate::read_meta(&id).map_err(|_| ServeError::run_not_found(&id))?;
+    let bytes = super::core::inspect::blob(&id, &sha256)?.ok_or_else(|| {
+        ServeError::NotFound(format!(
+            "run '{id}' has no stored part {sha256} in its blob directory"
+        ))
+    })?;
     // What the context says about it, when it says anything: the type it
     // was stored as and the name it carries. A blob the context no longer
     // references is typed by sniffing, and named by its hash.
@@ -301,9 +295,8 @@ pub(super) async fn raw_file(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<RawFileQuery>,
     headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    let meta = runstate::read_meta(&id)
-        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Run '{id}' not found")))?;
+) -> Result<Response, ServeError> {
+    let meta = runstate::read_meta(&id).map_err(|_| ServeError::run_not_found(&id))?;
     let workdir = PathBuf::from(&meta.workdir);
     let requested = PathBuf::from(&query.path);
     let resolved = match requested.is_absolute() {
@@ -311,22 +304,16 @@ pub(super) async fn raw_file(
         false => workdir.join(&requested),
     };
     if !leviath_core::resolves_within(&resolved, &workdir) {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            format!(
-                "path '{}' is outside the run's working directory",
-                query.path
-            ),
-        ));
+        return Err(ServeError::Forbidden(format!(
+            "path '{}' is outside the run's working directory",
+            query.path
+        )));
     }
     if resolved.is_dir() {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "'{}' is a directory; the raw route serves files",
-                query.path
-            ),
-        ));
+        return Err(ServeError::BadRequest(format!(
+            "'{}' is a directory; the raw route serves files",
+            query.path
+        )));
     }
     let name = resolved
         .file_name()
@@ -338,13 +325,10 @@ pub(super) async fn raw_file(
         // made lives in the blob store and was never written to the workdir,
         // and the result route names it by exactly this path.
         Err(_) => artifact_by_path(&id, &meta.workdir, &query.path).ok_or_else(|| {
-            err(
-                StatusCode::NOT_FOUND,
-                format!(
-                    "file '{}' not found in the run's working directory",
-                    query.path
-                ),
-            )
+            ServeError::NotFound(format!(
+                "file '{}' not found in the run's working directory",
+                query.path
+            ))
         })?,
     };
     let registry = state.current_config().mime_registry_or_defaults();
@@ -376,27 +360,19 @@ pub(super) async fn artifact(
     AxumPath((id, name)): AxumPath<(String, String)>,
     Query(query): Query<BytesQuery>,
     headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    let meta = runstate::read_meta(&id)
-        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Run '{id}' not found")))?;
-    let output = runstate::read_final_output(&id).ok_or_else(|| {
-        err(
-            StatusCode::NOT_FOUND,
-            format!("run '{id}' has not handed back a result"),
-        )
-    })?;
+) -> Result<Response, ServeError> {
+    let meta = runstate::read_meta(&id).map_err(|_| ServeError::run_not_found(&id))?;
+    let output = runstate::read_final_output(&id)
+        .ok_or_else(|| ServeError::NotFound(format!("run '{id}' has not handed back a result")))?;
     let artifact = output
         .artifacts
         .iter()
         .find(|a| a.name == name)
         .ok_or_else(|| {
-            err(
-                StatusCode::NOT_FOUND,
-                format!("run '{id}' handed back no artifact named '{name}'"),
-            )
+            ServeError::NotFound(format!("run '{id}' handed back no artifact named '{name}'"))
         })?;
     let bytes = crate::commands::result::export::artifact_bytes(&id, &meta.workdir, artifact)
-        .map_err(|e| err(StatusCode::NOT_FOUND, e.to_string()))?;
+        .map_err(|e| ServeError::NotFound(e.to_string()))?;
     let file_name = artifact
         .path
         .rsplit(['/', '\\'])

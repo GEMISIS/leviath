@@ -226,7 +226,7 @@ impl BuiltinTools {
                         "at": {
                             "type": "integer",
                             "minimum": 0,
-                            "description": "The step to read the state at, with view \"state\". Leave out for now."
+                            "description": "The step to read the state at, with view \"state\". Leave it out for the state as it is now."
                         }
                     },
                     "required": ["run_id"],

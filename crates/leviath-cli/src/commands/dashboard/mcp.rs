@@ -167,7 +167,7 @@ fn listed(ctx: &McpContext) -> Result<Vec<McpRow>, String> {
     let store = grants_of(ctx, &config)
         .load()
         .map_err(|e| format!("Could not read MCP logins: {e}"))?;
-    let now = (ctx.clock)();
+    let now = (ctx.clock)() as u64;
     Ok(config
         .mcp_servers
         .iter()
@@ -303,7 +303,7 @@ async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
             &server.headers,
             &config.security.allow_env_vars,
             ctx.opener.clone(),
-            (ctx.clock)(),
+            (ctx.clock)() as u64,
             reuse.as_deref(),
         )
         .await
@@ -329,7 +329,7 @@ async fn run_test(ctx: &McpContext, name: &str) -> McpOutcome {
         Err(outcome) => return outcome,
     };
     let auth_header = match grants_of(ctx, &config)
-        .authorization_header(name, (ctx.clock)())
+        .authorization_header(name, (ctx.clock)() as u64)
         .await
     {
         Ok(header) => header,
@@ -1188,12 +1188,12 @@ for line in sys.stdin:
         assert!(dash.mcp_add_from_line("remote https://e.com/mcp"));
         std::fs::write(&dash.mcp_ctx.store_path, "not json").unwrap();
         dash.refresh_mcp_rows();
+        let toasts = dash.toast_messages_for_test();
         assert!(
-            dash.toast_messages_for_test()
+            toasts
                 .iter()
                 .any(|m| m.contains("MCP auth store is corrupt")),
-            "{:?}",
-            dash.toast_messages_for_test()
+            "{toasts:?}"
         );
     }
 
@@ -1207,12 +1207,10 @@ for line in sys.stdin:
         std::fs::write(&dash.mcp_ctx.config_path, "not = = toml").unwrap();
         dash.refresh_mcp_rows();
         assert_eq!(dash.mcp_rows.len(), 1);
+        let toasts = dash.toast_messages_for_test();
         assert!(
-            dash.toast_messages_for_test()
-                .iter()
-                .any(|m| m.contains("Could not read config")),
-            "{:?}",
-            dash.toast_messages_for_test()
+            toasts.iter().any(|m| m.contains("Could not read config")),
+            "{toasts:?}"
         );
     }
 
@@ -1225,12 +1223,10 @@ for line in sys.stdin:
         assert!(dash.mcp_add_from_line("remote https://e.com/mcp"));
         std::fs::write(&dash.mcp_ctx.store_path, "not json").unwrap();
         dash.mcp_remove_named("remote");
+        let toasts = dash.toast_messages_for_test();
         assert!(
-            dash.toast_messages_for_test()
-                .iter()
-                .any(|m| m.contains("could not be forgotten")),
-            "{:?}",
-            dash.toast_messages_for_test()
+            toasts.iter().any(|m| m.contains("could not be forgotten")),
+            "{toasts:?}"
         );
         let config = Config::load_from_path_public(&dash.mcp_ctx.config_path).unwrap();
         assert!(config.mcp_servers.is_empty());

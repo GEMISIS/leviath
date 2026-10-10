@@ -1170,11 +1170,11 @@ fn outcome_lines_say_what_was_written_and_what_was_not() {
     };
     let lines = outcome_lines(&outcome);
     assert!(
-        lines[0].contains("/tmp/x.zip") && lines[0].contains("2 KiB"),
+        lines[0].contains("/tmp/x.zip") && lines[0].contains("2 KB"),
         "{lines:?}"
     );
     assert!(
-        lines[1].contains("runs/") && lines[1].contains("1.4 MiB"),
+        lines[1].contains("runs/") && lines[1].contains("1.4 MB"),
         "{lines:?}"
     );
     assert!(
@@ -1191,7 +1191,6 @@ fn outcome_lines_say_what_was_written_and_what_was_not() {
         lines.last().unwrap().contains("reporting-issues"),
         "{lines:?}"
     );
-    assert_eq!(human_bytes(12), "12 B");
 }
 
 #[test]

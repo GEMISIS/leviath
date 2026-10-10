@@ -80,23 +80,14 @@ pub(crate) struct McpAdmin {
     /// How to open the browser during a login.
     pub opener: leviath_mcp::BrowserOpener,
     /// Current Unix time; a fn so a long-lived server stays current per request.
-    pub clock: fn() -> u64,
-}
-
-/// Real Unix time in seconds. Shared with the provider routes, which
-/// track sign-in timestamps the same way.
-pub(super) fn system_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    pub clock: fn() -> i64,
 }
 
 impl Default for McpAdmin {
     fn default() -> Self {
         Self {
             opener: std::sync::Arc::new(leviath_sys::open_url),
-            clock: system_now,
+            clock: leviath_core::duration::now_secs,
         }
     }
 }
@@ -210,17 +201,18 @@ async fn read_config(path: PathBuf) -> Result<Config, ServeError> {
         .map_err(|e| ServeError::Internal(e.to_string()))
 }
 
-/// The grants `config` keeps in `path`, and what they hold, loaded on the
-/// blocking pool: under the keychain that is a round trip to the OS store.
+/// The config, the grants it keeps, and what they hold, read on the blocking
+/// pool: under the keychain the grants are a round trip to the OS store.
 ///
 /// A grant file that will not load is an error here, not an empty set: a
 /// listing would show every server logged out, and a login would save over
 /// every other server's grant.
-async fn read_grants(path: PathBuf, config: &Config) -> Result<(McpGrants, AuthStore), ServeError> {
-    let grants = McpGrants::at(path, config.security.credential_store);
+async fn read_admin(paths: AdminPaths) -> Result<(Config, McpGrants, AuthStore), ServeError> {
     blocking(move || {
+        let config = Config::load_from_path_public(&paths.config)?;
+        let grants = McpGrants::at(paths.store, config.security.credential_store);
         let held = grants.load()?;
-        Ok((grants, held))
+        Ok((config, grants, held))
     })
     .await
     .map_err(|e: anyhow::Error| ServeError::Internal(e.to_string()))
@@ -228,10 +220,8 @@ async fn read_grants(path: PathBuf, config: &Config) -> Result<(McpGrants, AuthS
 
 /// Every MCP server the config declares, with its auth state.
 pub(super) async fn server_infos(state: &AppState) -> Result<Vec<McpServerInfo>, ServeError> {
-    let paths = admin_paths();
-    let config = read_config(paths.config).await?;
-    let (_, held) = read_grants(paths.store, &config).await?;
-    let now = (state.mcp.clock)();
+    let (config, _, held) = read_admin(admin_paths()).await?;
+    let now = (state.mcp.clock)() as u64;
     Ok(config
         .mcp_servers
         .iter()
@@ -321,10 +311,12 @@ pub(super) async fn described(
     state: &AppState,
     server: &MCPServerConfig,
 ) -> Result<McpServerInfo, ServeError> {
-    let paths = admin_paths();
-    let config = read_config(paths.config).await?;
-    let (_, held) = read_grants(paths.store, &config).await?;
-    Ok(McpServerInfo::describe(server, &held, (state.mcp.clock)()))
+    let (_, _, held) = read_admin(admin_paths()).await?;
+    Ok(McpServerInfo::describe(
+        server,
+        &held,
+        (state.mcp.clock)() as u64,
+    ))
 }
 
 /// Replace an MCP server's entry, whole, and hand back what now stands there.
@@ -491,8 +483,7 @@ pub(super) async fn signed_in(
     name: &str,
 ) -> Result<(LoginStatus, MCPServerConfig), ServeError> {
     let admin = &state.mcp;
-    let paths = admin_paths();
-    let config = read_config(paths.config).await?;
+    let (config, grants, mut held) = read_admin(admin_paths()).await?;
     let server = named(&config, name)?;
     let url = match server.resolve() {
         Ok(leviath_mcp::ResolvedTransport::Http { url, .. }) => url.to_string(),
@@ -503,7 +494,6 @@ pub(super) async fn signed_in(
         }
     };
 
-    let (grants, mut held) = read_grants(paths.store, &config).await?;
     let reuse = held.get(name).map(|a| a.client_id.clone());
     let outcome = OAuthClient::new()
         .login(
@@ -511,7 +501,7 @@ pub(super) async fn signed_in(
             &server.headers,
             &config.security.allow_env_vars,
             admin.opener.clone(),
-            (admin.clock)(),
+            (admin.clock)() as u64,
             reuse.as_deref(),
         )
         .await
@@ -570,7 +560,7 @@ pub(super) async fn tools_of(
     let paths = admin_paths();
     let config = read_config(paths.config).await?;
     let server = named(&config, name)?;
-    let tools = listed(&server, &config, paths.store, (state.mcp.clock)())
+    let tools = listed(&server, &config, paths.store, (state.mcp.clock)() as u64)
         .await
         .map_err(|e| ServeError::Upstream(e.to_string()))?;
     Ok((tools, server))
@@ -583,9 +573,14 @@ pub(crate) async fn list_mcp_tools(
     config: Config,
     server: MCPServerConfig,
 ) -> Result<Vec<String>, String> {
-    listed(&server, &config, admin_paths().store, system_now())
-        .await
-        .map_err(|e| e.to_string())
+    listed(
+        &server,
+        &config,
+        admin_paths().store,
+        leviath_core::duration::now_secs() as u64,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Connect to `server`, signed in with the grant `config` keeps for it in
@@ -623,7 +618,7 @@ mod tests {
         false
     }
 
-    fn fixed_clock() -> u64 {
+    fn fixed_clock() -> i64 {
         1_000
     }
 
@@ -1117,14 +1112,29 @@ for line in sys.stdin:
             args: vec!["-c".to_string(), stub.to_string()],
             ..Default::default()
         };
-        let tools = list_mcp_tools(Config::default(), server).await.unwrap();
+        // A home of its own, so the grant file read is never the user's, nor
+        // one another test is writing.
+        let home = tempfile::tempdir().unwrap();
+        let tools = TEST_PATHS
+            .scope(
+                paths_in(home.path()),
+                list_mcp_tools(Config::default(), server),
+            )
+            .await
+            .unwrap();
         assert_eq!(tools, vec!["ping"]);
         let dead = MCPServerConfig {
             name: "dead".to_string(),
             command: Some("/nonexistent/mcp-server-binary".to_string()),
             ..Default::default()
         };
-        let err = list_mcp_tools(Config::default(), dead).await.unwrap_err();
+        let err = TEST_PATHS
+            .scope(
+                paths_in(home.path()),
+                list_mcp_tools(Config::default(), dead),
+            )
+            .await
+            .unwrap_err();
         assert!(!err.is_empty());
         // A token store that will not load is the answer too, before any
         // server is spoken to.
@@ -1636,11 +1646,6 @@ for line in sys.stdin:
                 .to_string_lossy()
                 .contains("config.toml")
         );
-    }
-
-    #[test]
-    fn system_now_advances_past_the_epoch() {
-        assert!(system_now() > 1_600_000_000);
     }
 
     #[test]

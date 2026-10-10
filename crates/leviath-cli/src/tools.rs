@@ -182,9 +182,9 @@ pub(crate) fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPoli
     match leviath_tools::canonical_tool_name(tool_name) {
         "read_file" | "read_files" | "list_dir" => ToolPolicy::Allow,
         // The context tools write the agent's own context regions, not the
-        // filesystem. They fell through to `Ask` below, so a run that used them
-        // to keep notes paid a prompt per note: 25 of them on the run that
-        // prompted this work, none of which a person could act on.
+        // filesystem. Left to fall through to `Ask` below, a run that keeps
+        // notes with them would pay a prompt per note, none of which a person
+        // can act on.
         "context_write" | "context_append" | "context_read" | "context_delete" | "context_list"
         | "context_attach" | "context_export"
         // The same reasoning for the checklist tools: they write to the agent's

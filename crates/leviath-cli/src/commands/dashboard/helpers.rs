@@ -5,17 +5,13 @@ use unicode_width::UnicodeWidthStr;
 
 use super::theme::{C_BORDER, C_BORDER_FOCUS};
 
-/// Format a Unix timestamp as a relative time string ("just now", "2m ago", "1h ago").
-pub(super) fn relative_time(ts: i64) -> String {
+/// Format a Unix timestamp as a relative time string ("just now", "2m ago",
+/// "1h ago"), as of `now`.
+pub(super) fn relative_time(ts: i64, now: i64) -> String {
     if ts == 0 {
         return "-".to_string();
     }
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let secs = (now - ts).max(0) as u64;
+    let secs = leviath_core::duration::between(ts, now);
     if secs < 10 {
         "just now".to_string()
     } else if secs < 60 {
@@ -226,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_relative_time_zero() {
-        assert_eq!(relative_time(0), "-");
+        assert_eq!(relative_time(0, NOW), "-");
     }
 
     // ── Additional coverage tests ──────────────────────────────────────────
@@ -380,76 +376,43 @@ mod tests {
 
     // ── relative_time branches ────────────────────────────────────────────────
 
+    /// The clock the relative times are read against.
+    const NOW: i64 = 1_700_000_000;
+
     #[test]
     fn test_relative_time_just_now() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // 3 seconds ago → "just now"
-        let result = relative_time(now - 3);
-        assert_eq!(result, "just now");
+        assert_eq!(relative_time(NOW - 3, NOW), "just now");
     }
 
     #[test]
     fn test_relative_time_seconds_ago() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // 30 seconds ago → "30s ago"
-        let result = relative_time(now - 30);
-        assert!(result.ends_with("s ago"));
+        assert_eq!(relative_time(NOW - 30, NOW), "30s ago");
     }
 
     #[test]
     fn test_relative_time_minutes_ago() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // 5 minutes ago → "5m ago"
-        let result = relative_time(now - 300);
-        assert!(result.ends_with("m ago"));
+        assert_eq!(relative_time(NOW - 300, NOW), "5m ago");
     }
 
     #[test]
     fn test_relative_time_hours_ago_no_minutes() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // Exactly 2 hours → "2h ago"
-        let result = relative_time(now - 7200);
-        assert_eq!(result, "2h ago");
+        assert_eq!(relative_time(NOW - 7200, NOW), "2h ago");
     }
 
     #[test]
     fn test_relative_time_hours_ago_with_minutes() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // 1 hour 30 minutes → "1h30m ago"
-        let result = relative_time(now - 5400);
-        assert_eq!(result, "1h30m ago");
+        assert_eq!(relative_time(NOW - 5400, NOW), "1h30m ago");
     }
 
     #[test]
     fn test_relative_time_days_ago() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // 3 days ago → "3d ago"
-        let result = relative_time(now - 3 * 86400);
-        assert_eq!(result, "3d ago");
+        assert_eq!(relative_time(NOW - 3 * 86400, NOW), "3d ago");
+    }
+
+    /// A stamp ahead of the clock reads as brand new, not as an age.
+    #[test]
+    fn test_relative_time_in_the_future_is_just_now() {
+        assert_eq!(relative_time(NOW + 60, NOW), "just now");
     }
 
     // ── yank_to_clipboard: at least exercises the code path ──────────────────

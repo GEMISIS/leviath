@@ -19,7 +19,6 @@
 //! platform, for every install method.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::Channel;
 
@@ -166,18 +165,6 @@ fn is_newer(latest: &str, running: &str) -> bool {
         // Same numbers: a plain version beats a pre-release of itself.
         std::cmp::Ordering::Equal => running.contains('-') && !latest.contains('-'),
     }
-}
-
-/// Unix seconds now, or 0 on a clock before the epoch.
-///
-/// 0 rather than an error because the only thing this stamps is "how fresh is
-/// this answer", and a machine whose clock is that wrong has a bigger problem
-/// than a stale update prompt.
-pub(crate) fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// The real network path: one GET, short timeout, body back as text.

@@ -21,6 +21,7 @@ use crossterm::event::{Event, KeyEventKind};
 use ratatui::Terminal;
 
 use crate::tui::{EventSource, TerminalSetup};
+use leviath_core::mime::human_size;
 
 mod archive;
 mod collect;
@@ -353,7 +354,7 @@ pub(crate) fn outcome_lines(outcome: &Outcome) -> Vec<String> {
     let mut lines = vec![format!(
         "Wrote {} ({}, {} secrets removed)",
         outcome.zip_path.display(),
-        human_bytes(outcome.zip_bytes),
+        human_size(outcome.zip_bytes),
         outcome.redactions
     )];
     for section in &outcome.sections {
@@ -361,7 +362,7 @@ pub(crate) fn outcome_lines(outcome: &Outcome) -> Vec<String> {
             "  {:<22} {:>4} file(s)  {:>10}",
             section.name,
             section.files,
-            human_bytes(section.bytes)
+            human_size(section.bytes)
         ));
     }
     for skipped in &outcome.skipped {
@@ -396,17 +397,4 @@ pub fn real_install_description() -> String {
     let exe = std::env::current_exe().unwrap_or_default();
     let home = leviath_core::paths::home_dir();
     detect(&exe, home.as_deref(), brew_prefix().as_deref(), None).describe()
-}
-
-/// `1.2 MiB`, `340 KiB`, `12 B`.
-pub(crate) fn human_bytes(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    let b = bytes as f64;
-    if b >= KIB * KIB {
-        format!("{:.1} MiB", b / (KIB * KIB))
-    } else if b >= KIB {
-        format!("{:.0} KiB", b / KIB)
-    } else {
-        format!("{bytes} B")
-    }
 }

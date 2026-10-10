@@ -292,6 +292,37 @@ async fn an_mcp_server_can_be_written_replaced_and_removed() {
     .await;
 }
 
+/// A server written while the login file will not load is written, and the
+/// answer says the file will not load rather than describing the server as
+/// logged out.
+#[tokio::test]
+async fn a_write_beside_a_login_file_that_will_not_load_says_so() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        let paths = paths_in(&home);
+        std::fs::write(&paths.config, "").expect("a config file");
+        std::fs::write(&paths.store, "not json").expect("a broken login file");
+        let config = paths.config.clone();
+        crate::commands::serve::mcp::TEST_PATHS
+            .scope(paths, async {
+                for call in [
+                    r#"mutation { createMcpServer(request: { server: { name: "docs",
+                         transport: { stdio: { command: "/bin/echo" } } } })
+                         { mcpServer { name } } }"#,
+                    r#"mutation { updateMcpServer(request: { server: { name: "docs",
+                         transport: { stdio: { command: "/bin/true" } } } })
+                         { mcpServer { name } } }"#,
+                ] {
+                    let answer = schema(true).execute(Request::new(call)).await;
+                    assert_eq!(refusal_code(&answer), "\"INTERNAL\"", "{call}");
+                }
+                let written = crate::config::Config::load_from_path_public(&config).unwrap();
+                assert_eq!(written.mcp_servers[0].command.as_deref(), Some("/bin/true"));
+            })
+            .await;
+    })
+    .await;
+}
+
 /// A server that names nothing reachable is refused before anything is
 /// written.
 #[tokio::test]

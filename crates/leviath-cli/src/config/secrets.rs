@@ -15,7 +15,7 @@ pub(crate) struct ProviderKey {
     /// The provider, as the credential store's account names it.
     provider: &'static str,
     /// The environment variable read when the file leaves the key unset.
-    env: &'static str,
+    pub(crate) env: &'static str,
     /// The key, as the config holds it.
     get: fn(&Config) -> Option<&str>,
     /// The key's field, to fill or clear.

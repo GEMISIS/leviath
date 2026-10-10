@@ -12,7 +12,8 @@
 
 pub(crate) mod quota;
 
-use clap::{Args, Subcommand};
+use clap::builder::{PossibleValuesParser, TypedValueParser};
+use clap::{Args, Subcommand, ValueEnum};
 
 use crate::commands::setup::catalog;
 use crate::config::Config;
@@ -60,21 +61,38 @@ enum RetentionCommand {
     /// `zero` asks every provider for zero retention and refuses a model that
     /// cannot give it; `off` stops asking
     Set(RetentionSetArgs),
-    /// Set the Bedrock account's data retention mode directly (`none`,
-    /// `default`, `aws_review`, `inherit`)
+    /// Set the Bedrock account's data retention mode directly
     Bedrock(BedrockModeArgs),
 }
 
 #[derive(Args)]
 struct RetentionSetArgs {
-    /// `zero` or `off`
-    want: String,
+    /// Whether to ask providers for zero retention
+    #[arg(value_enum, ignore_case = true)]
+    want: Retention,
+}
+
+/// What `lev providers retention set` asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Retention {
+    /// Ask every provider for zero retention, and refuse a model that cannot
+    /// give it
+    #[value(alias = "on", alias = "none")]
+    Zero,
+    /// Stop asking
+    #[value(alias = "default")]
+    Off,
 }
 
 #[derive(Args)]
 struct BedrockModeArgs {
     /// The mode: `none` is zero retention, `aws_review` is what Claude Fable 5
     /// and Mythos 5 need
+    #[arg(
+        ignore_case = true,
+        value_parser = PossibleValuesParser::new(leviath_providers::bedrock::RETENTION_MODES)
+            .map(|mode| mode.to_ascii_lowercase()),
+    )]
     mode: String,
 }
 
@@ -128,7 +146,7 @@ pub async fn execute_with(args: ProvidersArgs, env: &ProvidersEnv) -> anyhow::Re
             ..
         })) => {
             set_retention(
-                &set.want,
+                set.want,
                 env,
                 &leviath_providers::provider::build_http_client,
             )
@@ -338,17 +356,11 @@ async fn show_retention(
 /// `lev providers retention set zero|off`: the config switch, and on
 /// Bedrock the account mode that goes with it.
 async fn set_retention(
-    want: &str,
+    want: Retention,
     env: &ProvidersEnv,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> anyhow::Result<()> {
-    let zero = match want.trim().to_ascii_lowercase().as_str() {
-        "zero" | "on" | "none" => true,
-        "off" | "default" => false,
-        other => anyhow::bail!(
-            "'{other}' is not a setting: `zero` asks every provider for zero retention, `off` stops asking"
-        ),
-    };
+    let zero = want == Retention::Zero;
     let mut config = Config::load_from_path_public(&env.config_path)?;
     config.providers.zero_retention = zero;
     config.save_to_path_public(&env.config_path)?;
@@ -397,7 +409,6 @@ async fn set_bedrock_mode(
             });
         anyhow::bail!("{why}");
     };
-    let mode = mode.trim();
     provider.set_account_retention(mode).await?;
     println!("Bedrock account data retention mode: {mode}");
     Ok(())
@@ -556,9 +567,49 @@ mod tests {
         }
     }
 
+    /// The words `retention set` and `retention bedrock` take, in any case,
+    /// with the aliases a person reaches for. Anything else is refused by the
+    /// parser, which lists what is taken.
+    #[test]
+    fn retention_words_parse_in_any_case_and_by_alias() {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: ProvidersArgs,
+        }
+        let parse = |words: &[&str]| {
+            <Cli as clap::Parser>::try_parse_from(
+                std::iter::once("lev").chain(words.iter().copied()),
+            )
+            .ok()
+            .and_then(|cli| match cli.args.command {
+                Some(ProvidersCommand::Retention(RetentionArgs {
+                    command: Some(command),
+                    ..
+                })) => Some(command),
+                _ => None,
+            })
+        };
+        let want = |word: &str| match parse(&["retention", "set", word]) {
+            Some(RetentionCommand::Set(set)) => Some(set.want),
+            _ => None,
+        };
+        assert_eq!(want("ZERO"), Some(Retention::Zero));
+        assert_eq!(want("on"), Some(Retention::Zero));
+        assert_eq!(want("none"), Some(Retention::Zero));
+        assert_eq!(want("Off"), Some(Retention::Off));
+        assert_eq!(want("default"), Some(Retention::Off));
+        assert_eq!(want("maybe"), None);
+        let mode = |word: &str| match parse(&["retention", "bedrock", word]) {
+            Some(RetentionCommand::Bedrock(args)) => Some(args.mode),
+            _ => None,
+        };
+        assert_eq!(mode("AWS_Review").as_deref(), Some("aws_review"));
+        assert_eq!(mode("weekly"), None);
+    }
+
     /// The listing describes every configured built-in and every custom
-    /// entry, the switch is written and read back, and a word that is not a
-    /// setting is refused.
+    /// entry, and the switch is written and read back.
     #[tokio::test]
     async fn retention_is_shown_and_the_switch_is_written() {
         let mut config = Config::default();
@@ -584,7 +635,7 @@ retention = "zero""#,
         execute_with(
             retention_args(
                 Some(RetentionCommand::Set(RetentionSetArgs {
-                    want: "zero".into(),
+                    want: Retention::Zero,
                 })),
                 false,
             ),
@@ -599,7 +650,7 @@ retention = "zero""#,
         execute_with(
             retention_args(
                 Some(RetentionCommand::Set(RetentionSetArgs {
-                    want: "off".into(),
+                    want: Retention::Off,
                 })),
                 false,
             ),
@@ -608,19 +659,6 @@ retention = "zero""#,
         .await
         .unwrap();
         assert!(!load(&env).providers.zero_retention);
-
-        let err = execute_with(
-            retention_args(
-                Some(RetentionCommand::Set(RetentionSetArgs {
-                    want: "maybe".into(),
-                })),
-                false,
-            ),
-            &env,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("not a setting"), "{err}");
 
         // No Bedrock key: the direct mode command says so.
         let err = execute_with(
@@ -680,7 +718,7 @@ retention = "zero""#,
         execute_with(
             retention_args(
                 Some(RetentionCommand::Set(RetentionSetArgs {
-                    want: "zero".into(),
+                    want: Retention::Zero,
                 })),
                 false,
             ),
@@ -710,7 +748,7 @@ retention = "zero""#,
         execute_with(
             retention_args(
                 Some(RetentionCommand::Set(RetentionSetArgs {
-                    want: "off".into(),
+                    want: Retention::Off,
                 })),
                 false,
             ),
@@ -723,7 +761,7 @@ retention = "zero""#,
         execute_with(
             retention_args(
                 Some(RetentionCommand::Set(RetentionSetArgs {
-                    want: "zero".into(),
+                    want: Retention::Zero,
                 })),
                 false,
             ),
@@ -786,7 +824,7 @@ retention = "zero""#,
         execute_with(
             retention_args(
                 Some(RetentionCommand::Set(RetentionSetArgs {
-                    want: "zero".into(),
+                    want: Retention::Zero,
                 })),
                 false,
             ),
@@ -809,7 +847,7 @@ retention = "zero""#,
             &|_t| Err(leviath_providers::provider::malformed_url_error());
         assert!(bedrock_from(&config, &env, failing).is_err());
         assert!(show_retention(false, &env, failing).await.is_err());
-        assert!(set_retention("zero", &env, failing).await.is_err());
+        assert!(set_retention(Retention::Zero, &env, failing).await.is_err());
         assert!(set_bedrock_mode("none", &env, failing).await.is_err());
 
         // A config that cannot be read stops every command the same way.
@@ -823,7 +861,7 @@ retention = "zero""#,
         };
         let real = &leviath_providers::provider::build_http_client;
         assert!(show_retention(false, &env, real).await.is_err());
-        assert!(set_retention("zero", &env, real).await.is_err());
+        assert!(set_retention(Retention::Zero, &env, real).await.is_err());
         assert!(set_bedrock_mode("none", &env, real).await.is_err());
 
         // And one that loads (as the default) but cannot be written back.
@@ -834,7 +872,9 @@ retention = "zero""#,
             bedrock_control_url: None,
             bedrock_mantle_url: None,
         };
-        let err = set_retention("zero", &env, real).await.unwrap_err();
+        let err = set_retention(Retention::Zero, &env, real)
+            .await
+            .unwrap_err();
         assert!(!err.to_string().is_empty());
     }
 

@@ -64,7 +64,10 @@ async fn execute_with_bundle(
 
     // Print summary
     println!("Bundle written to: {}", output_path.display());
-    println!("Bundle size: {}", format_size(bundle_size));
+    println!(
+        "Bundle size: {}",
+        leviath_core::mime::human_size(bundle_size)
+    );
 
     // List contents summary
     println!("\nContents:");
@@ -126,16 +129,6 @@ fn find_manifest_with_cwd(project_path: &Path, cwd: &Path) -> anyhow::Result<Pat
         "Could not find {FILE_NAME} in {} or current directory",
         project_path.display()
     )
-}
-
-fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    }
 }
 
 /// The real directory reader used in production. A named function (rather than
@@ -200,28 +193,6 @@ mod tests {
     // once as a bare statement (rather than wrapping the whole test body) to
     // install the shared `AlwaysOnSubscriber` (see `crate::test_support`) as
     // the process-wide default before the rest of the test runs.
-
-    // ─── format_size ───────────────────────────────────────────────────────
-
-    #[test]
-    fn format_size_bytes() {
-        assert_eq!(format_size(0), "0 B");
-        assert_eq!(format_size(512), "512 B");
-        assert_eq!(format_size(1023), "1023 B");
-    }
-
-    #[test]
-    fn format_size_kilobytes() {
-        assert_eq!(format_size(1024), "1.0 KB");
-        assert_eq!(format_size(2048), "2.0 KB");
-        assert_eq!(format_size(1536), "1.5 KB");
-    }
-
-    #[test]
-    fn format_size_megabytes() {
-        assert_eq!(format_size(1024 * 1024), "1.0 MB");
-        assert_eq!(format_size(5 * 1024 * 1024), "5.0 MB");
-    }
 
     // ─── count_files ───────────────────────────────────────────────────────
 
@@ -361,26 +332,6 @@ mod tests {
     fn output_path_default() {
         let output_path = determine_output_path(None, "my-agent", "1.0.0");
         assert_eq!(output_path, PathBuf::from("my-agent-1.0.0.leviath-bundle"));
-    }
-
-    // ─── format_size edge cases ───────────────────────────────────────────
-
-    #[test]
-    fn format_size_boundary_kb() {
-        assert_eq!(format_size(1023), "1023 B");
-        assert_eq!(format_size(1024), "1.0 KB");
-    }
-
-    #[test]
-    fn format_size_boundary_mb() {
-        assert_eq!(format_size(1024 * 1024 - 1), "1024.0 KB");
-        assert_eq!(format_size(1024 * 1024), "1.0 MB");
-    }
-
-    #[test]
-    fn format_size_fractional_kb() {
-        assert_eq!(format_size(1536), "1.5 KB");
-        assert_eq!(format_size(2560), "2.5 KB");
     }
 
     // ─── count_files edge cases ───────────────────────────────────────────
