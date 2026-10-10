@@ -380,8 +380,8 @@ pub(crate) fn outcome_lines(outcome: &Outcome) -> Vec<String> {
 /// binary's real environment; the library reaches no real path on its own.
 pub fn real_policy_dir() -> PathBuf {
     crate::commands::policy::policy_path()
-        .parent()
-        .map(Path::to_path_buf)
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
         .unwrap_or_default()
 }
 

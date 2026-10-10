@@ -445,15 +445,23 @@ pub(crate) fn permission_files(config: &Config) -> Vec<ProtectedPath> {
             path: crate::config::mime_types_path(),
             label: "mime_types.toml",
         },
-        ProtectedPath {
-            path: crate::commands::policy::policy_path(),
-            label: "the taint policy",
-        },
-        ProtectedPath {
-            path: crate::commands::policy::rules_dir(),
-            label: "the taint-gate rules",
-        },
     ];
+    out.extend(
+        crate::commands::policy::policy_path()
+            .ok()
+            .map(|path| ProtectedPath {
+                path,
+                label: "the taint policy",
+            }),
+    );
+    out.extend(
+        crate::commands::policy::rules_dir()
+            .ok()
+            .map(|path| ProtectedPath {
+                path,
+                label: "the taint-gate rules",
+            }),
+    );
     out.extend(leviath_core::providers_dir().map(|path| ProtectedPath {
         path,
         label: "the provider scripts",

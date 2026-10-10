@@ -710,19 +710,52 @@ impl Config {
     /// the environment fallbacks or the keychain lookup that follow it.
     /// [`ConfigFault::check`] is the no-config-wanted form.
     pub(crate) fn read_file(path: &std::path::Path) -> Result<Self, Box<ConfigFault>> {
+        match Self::read_text(path)? {
+            Some(content) => Self::parse_file(path, &content),
+            None => Ok(Self::default()),
+        }
+    }
+
+    /// [`load_from_path`](Self::load_from_path) and the document behind it,
+    /// from one read of the file.
+    ///
+    /// `lev update` needs both: the config to migrate, and the keys the file
+    /// spells out, including any that changed name and so never reach the
+    /// parsed value. No file is the defaults and an empty document.
+    pub(crate) fn load_with_document(
+        path: &std::path::Path,
+    ) -> anyhow::Result<(Self, toml::Table)> {
+        let Some(content) = Self::read_text(path)? else {
+            return Ok((Self::default().with_env_fallbacks(), toml::Table::new()));
+        };
+        let document = toml::from_str(&content)
+            .map_err(|e| Box::new(ConfigFault::parse(path, &content, &e)))?;
+        Ok((
+            Self::parse_file(path, &content)?.with_env_fallbacks(),
+            document,
+        ))
+    }
+
+    /// The file's text, or `None` when there is no file, which loads as the
+    /// defaults.
+    fn read_text(path: &std::path::Path) -> Result<Option<String>, Box<ConfigFault>> {
         if !path.exists() {
             let path_display = path.display();
             tracing::debug!("No config file found at {}, using defaults", path_display);
-            return Ok(Self::default());
+            return Ok(None);
         }
-        let content =
-            std::fs::read_to_string(path).map_err(|e| Box::new(ConfigFault::read(path, &e)))?;
+        std::fs::read_to_string(path)
+            .map(Some)
+            .map_err(|e| Box::new(ConfigFault::read(path, &e)))
+    }
 
+    /// Parse and validate `content`, the text of the file at `path`.
+    fn parse_file(path: &std::path::Path, content: &str) -> Result<Self, Box<ConfigFault>> {
         // A key that changed name is respelled in the text before serde looks,
         // so an install that never runs `lev update` keeps working and is told
         // what its file now means. Done on the text so a parse error still
         // points at its line.
-        let (content, renamed) = renamed::rename_in_text(&content);
+        let (content, renamed) = renamed::rename_in_text(content);
         let c: Self = toml::from_str(&content)
             .map_err(|e| Box::new(ConfigFault::parse(path, &content, &e)))?;
 

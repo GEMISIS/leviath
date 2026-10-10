@@ -183,9 +183,11 @@ pub(crate) fn now_secs() -> u64 {
 /// The real network path: one GET, short timeout, body back as text.
 ///
 /// A short timeout because nothing waits on this - the CLI prints its plan
-/// either way and the daemon answers from a cache - so a slow answer is worth
-/// less than a quick "can't tell". Blocking rather than async because the CLI
-/// has no runtime and the daemon calls it off the request path.
+/// either way and `lev serve` answers from a cache - so a slow answer is worth
+/// less than a quick "can't tell". Blocking rather than async because both
+/// callers run it on tokio's blocking pool: `lev update` runs the whole
+/// command there, and the server refreshes its cache there, off the request
+/// path. On an async worker thread a debug build panics on it.
 ///
 /// GitHub refuses a request with no `User-Agent`, so it carries one naming the
 /// program doing the asking, which is what their guidance asks for.

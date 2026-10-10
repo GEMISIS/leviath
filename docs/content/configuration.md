@@ -1321,7 +1321,7 @@ Export those yourself if you meant them.
 | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GOOGLE_BASE_URL`, `OPENROUTER_BASE_URL` | Gateway host fallbacks for `[providers]` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` | Fallbacks for `[observability]` |
 | `EDITOR`, `VISUAL` | Editor used when a prompt opens one |
-| `XDG_CONFIG_HOME` | Where `policy.toml` and scripted rules are looked up. Linux only |
+| `XDG_CONFIG_HOME` | Where `policy.toml` and scripted rules are looked up when `LEVIATH_HOME` is unset. Linux only |
 
 > [!WARNING]
 > A variable whose name looks like a credential is not readable by Rhai scripts through `env_var()`
@@ -1437,6 +1437,9 @@ directory, managed with [`lev policy`](/docs/cli):
 | macOS | `~/Library/Application Support/leviath/policy.toml` |
 | Linux | `~/.config/leviath/policy.toml`, or `$XDG_CONFIG_HOME/leviath/policy.toml` when set |
 | Windows | `%APPDATA%\leviath\policy.toml` |
+
+With `LEVIATH_HOME` set, `policy.toml` and `rules/` sit beside `config.toml` instead, like
+`yolo.toml`, so a redirected home has a policy of its own.
 
 ```toml
 [[allowlist]]

@@ -216,7 +216,7 @@ pub(super) fn write_profiles(text: &str) -> Result<(), super::core::error::Serve
     let path = yolo_path();
     let parent = path.parent().unwrap_or(std::path::Path::new("."));
     std::fs::create_dir_all(parent)
-        .and_then(|()| std::fs::write(&path, text))
+        .and_then(|()| leviath_sys::write_atomic(&path, text.as_bytes(), None))
         .map_err(|e| ServeError::Internal(format!("failed to write {}: {e}", path.display())))
 }
 

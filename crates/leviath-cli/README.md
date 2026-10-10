@@ -57,11 +57,14 @@ The whole of `lev` is `leviath_cli::run()`. A binary of your own that wraps
 it, under another name or with setup of its own, can be this small:
 
 ```rust
-fn main() -> anyhow::Result<()> {
+fn main() -> std::process::ExitCode {
     leviath_cli::run()
 }
 ```
 
+`run` prints everything lev has to say, help and errors included, and returns
+the exit code instead of exiting: 0, 2 for a command line lev refused, or 1
+for a command that failed. Anything your `main` does after it still runs.
 `leviath_cli::run_from(argv)` takes the arguments from you instead of the
 process, so you can add or rewrite them before lev parses them.
 

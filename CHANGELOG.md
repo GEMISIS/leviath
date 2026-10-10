@@ -366,6 +366,15 @@ same list.
   reported (a toast, or a 500) instead of every server shown logged out, and
   a login refuses rather than replace it with a file holding only the new
   login, which lost every other server's.
+- With `LEVIATH_HOME` set, `lev policy` and the daemon still used the
+  `policy.toml` and `rules/` in your own config directory, so a redirected
+  home (a test, a sandbox, a second install) shared your taint policy. They
+  now sit beside that home's `config.toml`; without `LEVIATH_HOME` nothing
+  moves. A machine with no config or home directory gets an error from `lev
+  policy` instead of a panic.
+- The daemon shuts down cleanly on SIGTERM, which launchd, systemd and
+  `kill` send, as it already did on Ctrl-C. SIGTERM used to end it on the
+  spot.
 
 ### Added
 
@@ -388,9 +397,11 @@ same list.
   some are missing, and the Docker image takes them as `LEV_FEATURES`.
   Released binaries still carry every provider.
 - `leviath_cli::run()` runs the whole of `lev`, so a fork can wrap it in a
-  binary of its own: `fn main() -> anyhow::Result<()> { leviath_cli::run() }`.
-  `leviath_cli::run_from(argv)` does the same on arguments the wrapper has
-  rewritten first.
+  binary of its own: `fn main() -> ExitCode { leviath_cli::run() }`. It
+  prints its own help and errors and returns the exit code (0, 2 for a
+  refused command line, 1 for a failed command) instead of exiting the
+  process. `leviath_cli::run_from(argv)` does the same on arguments the
+  wrapper has rewritten first.
 - `/ws` and `/ws/agents/{id}` send an `events_dropped` frame, with a
   `count`, when a socket falls behind and the oldest events are dropped
   before it reads them. Announced as the `events.dropped` capability.

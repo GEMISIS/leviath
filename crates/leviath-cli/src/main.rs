@@ -16,7 +16,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn main() -> anyhow::Result<()> {
+fn main() -> std::process::ExitCode {
     // Purge freed memory at free time (leviath-alloc has the full why): an
     // idle daemon otherwise parks its burst memory as unflagged freed pages
     // the OS keeps charging to it. Applied in-binary so every lev process
