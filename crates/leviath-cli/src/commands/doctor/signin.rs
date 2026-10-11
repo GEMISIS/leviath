@@ -13,7 +13,7 @@ pub(super) fn signin_checks(config: &Config) -> Vec<Check> {
     crate::commands::setup::catalog::providers()
         .into_iter()
         .filter(|p| crate::commands::setup::catalog::signin_enabled(config, p.id))
-        .map(|p| signin_check(p.id))
+        .map(|p| signin_check(p.id, config.security.credential_store))
         .collect()
 }
 
@@ -44,10 +44,18 @@ pub(super) async fn quota_checks(
         .collect()
 }
 
-/// The check for one enabled sign-in provider.
-pub(super) fn signin_check(id: &'static str) -> Check {
+/// The check for one enabled sign-in provider, whose grant is kept where
+/// `kind` says.
+///
+/// Read through that backend: under the keychain the grant file only names
+/// the signed-in providers, and the file alone would report every one of them
+/// signed out. A keychain that cannot be reached leaves the file alone to read.
+pub(super) fn signin_check(id: &'static str, kind: leviath_core::CredentialStoreKind) -> Check {
+    let backend = crate::credentials::store_for(kind).ok().flatten();
     let grant = leviath_providers::oauth::ProviderAuthStore::default_path()
-        .and_then(|path| leviath_providers::oauth::ProviderAuthStore::load(&path).ok())
+        .and_then(|path| {
+            leviath_providers::oauth::ProviderAuthStore::load_with(&path, backend.as_deref()).ok()
+        })
         .and_then(|store| store.get(id).cloned());
     let account = leviath_providers::oauth::profile(id).map_or(id, |p| p.brand);
     match grant {

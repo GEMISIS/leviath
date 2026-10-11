@@ -245,7 +245,7 @@ pub(super) fn provider_infos(state: &AppState, grants: &std::path::Path) -> Vec<
     let config = state.config.check().config;
     // Read once, not once per row: this is a file, and the answer is the same
     // for every provider in it.
-    let store = leviath_providers::oauth::ProviderAuthStore::load(grants).ok();
+    let store = grants_in(&config, grants);
     let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
     signin_providers()
         .into_iter()
@@ -362,9 +362,26 @@ pub(super) fn described(
     display: &str,
 ) -> ProviderInfo {
     let config = state.config.check().config;
-    let store = leviath_providers::oauth::ProviderAuthStore::load(grants).ok();
+    let store = grants_in(&config, grants);
     let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
     describe(id, display, &config, store.as_ref(), &in_flight)
+}
+
+/// Every grant in the store at `grants`, read through the backend `config`
+/// keeps them in.
+///
+/// Under the keychain the file only names the signed-in providers, and the
+/// file alone would show each of them signed out. A keychain that cannot be
+/// reached leaves the file alone to read, and a file that will not load is no
+/// grants at all: a row reports what it can rather than failing the listing.
+fn grants_in(
+    config: &crate::config::Config,
+    grants: &std::path::Path,
+) -> Option<leviath_providers::oauth::ProviderAuthStore> {
+    let backend = crate::credentials::store_for(config.security.credential_store)
+        .ok()
+        .flatten();
+    leviath_providers::oauth::ProviderAuthStore::load_with(grants, backend.as_deref()).ok()
 }
 
 /// `POST /api/providers/{name}/login` - start the browser sign-in.
