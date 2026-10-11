@@ -564,6 +564,25 @@ async fn the_grant_is_read_from_disk_once_and_then_cached() {
 }
 
 #[tokio::test]
+async fn the_credentials_are_read_from_disk_once_and_then_cached() {
+    // The same promise on the async path every request takes: the first call
+    // reads the store, and none after it goes back to the file.
+    let (_dir, path) = store_with(grant("cached", "rt-0"));
+    let src = source(&path, Counting::new());
+    assert_eq!(
+        src.credentials().await.expect("credentials").access_token,
+        "cached"
+    );
+    std::fs::remove_file(&path).expect("remove");
+    assert_eq!(
+        src.credentials().await.expect("still cached").access_token,
+        "cached",
+        "the second read went back to disk"
+    );
+    assert_eq!(src.grant().expect("the same grant").access_token, "cached");
+}
+
+#[tokio::test]
 async fn an_account_id_missing_from_the_grant_comes_from_the_id_token() {
     // A grant written before the field existed still has the token to read.
     let (_dir, path) = store_with(ProviderGrant {
