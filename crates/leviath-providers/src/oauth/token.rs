@@ -119,6 +119,13 @@ pub trait TokenSource: Send + Sync {
     /// The grant's account facts, for display and for gating the catalog.
     /// `None` when nobody has signed in.
     fn grant(&self) -> Option<ProviderGrant>;
+
+    /// [`grant`](Self::grant) for an async caller. A source that reads its
+    /// grant from a file does that read off the async workers; the default
+    /// answers from [`grant`](Self::grant).
+    async fn grant_off_worker(&self) -> Option<ProviderGrant> {
+        self.grant()
+    }
 }
 
 /// Reads the wall clock. Injected so expiry is testable without waiting.
@@ -470,6 +477,10 @@ impl TokenSource for OAuthTokenSource {
 
     fn grant(&self) -> Option<ProviderGrant> {
         self.current()
+    }
+
+    async fn grant_off_worker(&self) -> Option<ProviderGrant> {
+        self.current_off_worker().await
     }
 }
 

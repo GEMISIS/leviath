@@ -583,6 +583,22 @@ async fn the_credentials_are_read_from_disk_once_and_then_cached() {
 }
 
 #[tokio::test]
+async fn an_async_grant_read_fills_the_cache_the_sync_one_answers_from() {
+    let (_dir, path) = store_with(grant("first", "rt-0"));
+    let src = source(&path, Counting::new());
+    assert_eq!(
+        src.grant_off_worker().await.expect("a grant").access_token,
+        "first"
+    );
+    std::fs::remove_file(&path).expect("remove");
+    assert_eq!(
+        src.grant().expect("cached").access_token,
+        "first",
+        "the sync read went back to disk"
+    );
+}
+
+#[tokio::test]
 async fn an_account_id_missing_from_the_grant_comes_from_the_id_token() {
     // A grant written before the field existed still has the token to read.
     let (_dir, path) = store_with(ProviderGrant {
