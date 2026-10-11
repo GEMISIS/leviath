@@ -548,9 +548,11 @@ async fn execute_with_shutdown(
     // not something the daemon pushes, and this server holds its own reloader
     // over the same file.
     let health_state = state.clone();
+    let baseline = health_state.config_health().await.fault;
     let _config_health_guard = AbortOnDrop(tokio::spawn(config_health::watch_loop(
         health_state,
         config_health::WATCH_INTERVAL,
+        baseline,
     )));
 
     // No `--cors` at all: no CORS layer. Programmatic clients are not subject to
