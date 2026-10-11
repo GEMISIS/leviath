@@ -386,6 +386,17 @@ same list.
 - In the agent editor, a path between two stages could only be opened with
   the mouse. `{` and `}` now step through the paths. In the inspector,
   Backspace removes a row, as the help always said.
+- With a container sandbox, a run with a command seed was refused: the
+  seed's container took the run's name and was never removed. A run that
+  was live when the daemon restarted came back held for the same reason.
+  `lev daemon stop` also left every live run's container running. Now a
+  seed removes its container, a run removes any container left under its
+  name before starting its own, and shutdown removes every container a run
+  still holds.
+- Removing a finished run's containers held up every other run while
+  Docker worked. Starting a sandbox, running a seed command and reading an
+  unloaded run's file each held one of the daemon's threads. All of these
+  now run in the background.
 - An MCP server reached over HTTP that streamed its reply failed the request
   when the network split a character (an accented letter, CJK text, an
   emoji) across two reads. The halves are now joined, as the model providers
