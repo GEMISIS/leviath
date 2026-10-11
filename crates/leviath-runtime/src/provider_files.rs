@@ -26,6 +26,15 @@ pub const LEDGER_FILE: &str = "provider-files.json";
 /// long request could outlive it.
 const REUSE_MARGIN_SECS: i64 = 600;
 
+/// How long a provider whose upload failed gets its parts inline before it
+/// is asked again.
+///
+/// A gateway without file storage refuses every upload, and asking it on
+/// every call costs each call a round trip, or half its time when the
+/// gateway never answers. A failure that was only passing is asked again
+/// once this is up.
+const RETRY_UPLOADS_AFTER_SECS: i64 = 600;
+
 /// One uploaded part.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -42,6 +51,40 @@ pub struct Entry {
 struct Ledger {
     #[serde(default)]
     files: Vec<Entry>,
+    /// The providers whose last upload failed, while their parts go inline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    refused: Vec<Refusal>,
+}
+
+/// A provider whose upload failed, and when to ask it again.
+#[derive(Debug, Serialize, Deserialize)]
+struct Refusal {
+    /// The registry name of the provider.
+    provider: String,
+    /// Unix seconds, after which its parts are offered for upload again.
+    until: i64,
+}
+
+impl Ledger {
+    /// Whether an upload to `provider` failed less than
+    /// [`RETRY_UPLOADS_AFTER_SECS`] before `now`.
+    fn refusing(&self, provider: &str, now: i64) -> bool {
+        self.refused
+            .iter()
+            .any(|r| r.provider == provider && r.until > now)
+    }
+
+    /// Note how an upload to `provider` went at `now`: a failure pauses its
+    /// uploads, a success ends any pause.
+    fn note_upload(&mut self, provider: &str, now: i64, failed: bool) {
+        self.refused.retain(|r| r.provider != provider);
+        if failed {
+            self.refused.push(Refusal {
+                provider: provider.to_string(),
+                until: now + RETRY_UPLOADS_AFTER_SECS,
+            });
+        }
+    }
 }
 
 /// The ledger at `path`; empty when there is none or it does not parse.
@@ -119,13 +162,18 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
     tokio::task::spawn_blocking(work).await.ok()
 }
 
-/// Where a job's uploads go and how long they live.
+/// Where a job's uploads go, where their bytes come from, and how long they
+/// live.
 #[derive(Clone)]
 pub(crate) struct FileRoute {
     /// The provider the request goes to.
     pub provider: Arc<dyn Provider>,
     /// Its registry name, which the ledger keys by.
     pub provider_name: String,
+    /// The run's blob store, which holds the bytes of every part.
+    pub store: Arc<dyn leviath_core::mime::BlobStore>,
+    /// The run whose parts these are.
+    pub run_id: String,
     /// The run's ledger file.
     pub ledger: PathBuf,
     /// The lifetime to ask for, before the vendor's clamp.
@@ -141,7 +189,7 @@ pub(crate) fn route_for(
     provider_name: &str,
     limits: &leviath_providers::files::MediaLimits,
     settings: &leviath_providers::retention::RetentionSettings,
-    store: &dyn leviath_core::mime::BlobStore,
+    store: &Arc<dyn leviath_core::mime::BlobStore>,
     run_id: &str,
     ttl_secs: u64,
 ) -> (Option<FileRoute>, &'static str) {
@@ -152,6 +200,8 @@ pub(crate) fn route_for(
         true => store.run_dir(run_id).map(|dir| FileRoute {
             provider: provider.clone(),
             provider_name: provider_name.to_string(),
+            store: store.clone(),
+            run_id: run_id.to_string(),
             ledger: dir.join(LEDGER_FILE),
             ttl_secs,
         }),
@@ -196,14 +246,22 @@ fn file_name(name: Option<&str>, sha256: &str, extensions: &[String]) -> String 
 /// no longer has. A part whose bytes cannot be read, or whose upload fails,
 /// stays as it was and goes inline. `registry` names each upload's
 /// extension. Returns how many parts were uploaded.
+///
+/// A failed upload pauses this provider's uploads for
+/// [`RETRY_UPLOADS_AFTER_SECS`], recorded in the ledger so every later call
+/// of the run sends its parts inline without asking again; parts it already
+/// holds are still named. An upload gets at most half the time left before
+/// `deadline`, the call's own, so one that never answers costs the call
+/// half its time rather than all of it. A renewal (`again`) is not paused:
+/// the request names a file the vendor has lost, and only an upload mends
+/// that.
 pub(crate) async fn attach(
     request: &mut InferenceRequest,
     route: &FileRoute,
     mime: &ModelMime,
     registry: &leviath_core::mime::MimeRegistry,
-    store: &Arc<dyn leviath_core::mime::BlobStore>,
-    run_id: &str,
     again: bool,
+    deadline: tokio::time::Instant,
 ) -> usize {
     let limits = route.provider.media_limits(&request.model);
     if limits.file_bytes.is_none() {
@@ -214,6 +272,8 @@ pub(crate) async fn attach(
     let path = route.ledger.clone();
     let mut ledger = off_thread(move || load(&path)).await.unwrap_or_default();
     let now = now_secs();
+    let mut paused = !again && ledger.refusing(&route.provider_name, now);
+    let mut failed = false;
     let mut uploaded = 0;
     let mut renewed: Vec<String> = Vec::new();
     for message in &mut request.messages {
@@ -247,7 +307,17 @@ pub(crate) async fn attach(
                 *remote = Some(entry.file.clone());
                 continue;
             }
-            let (store, run, sha256) = (store.clone(), run_id.to_string(), part.sha256.clone());
+            // Inline while uploads are paused, a renewal's part included: the
+            // file it names is gone.
+            if paused {
+                *remote = None;
+                continue;
+            }
+            let (store, run, sha256) = (
+                route.store.clone(),
+                route.run_id.clone(),
+                part.sha256.clone(),
+            );
             let Some(Ok(bytes)) = off_thread(move || store.read(&run, &sha256)).await else {
                 continue;
             };
@@ -261,7 +331,17 @@ pub(crate) async fn attach(
                 ),
                 ttl_secs: route.ttl_secs,
             };
-            match route.provider.upload_file(&upload).await {
+            let allowed = deadline.saturating_duration_since(tokio::time::Instant::now()) / 2;
+            let sent =
+                match tokio::time::timeout(allowed, route.provider.upload_file(&upload)).await {
+                    Ok(sent) => sent.map_err(|e| e.to_string()),
+                    Err(_) => Err(format!(
+                        "no answer in {}s, half the time the call had left",
+                        allowed.as_secs()
+                    )),
+                };
+            ledger.note_upload(&route.provider_name, now, sent.is_err());
+            match sent {
                 Ok(file) => {
                     ledger.files.retain(|e| {
                         !(e.provider == route.provider_name && e.sha256 == part.sha256)
@@ -275,21 +355,26 @@ pub(crate) async fn attach(
                     *remote = Some(file);
                     uploaded += 1;
                 }
-                Err(e) => {
+                Err(error) => {
                     tracing::warn!(
                         provider = %route.provider_name,
                         part = %part.sha256,
-                        error = %e,
-                        "a part could not be uploaded; it goes inline only where the provider takes its type inline"
+                        error = %error,
+                        retry_after_secs = RETRY_UPLOADS_AFTER_SECS,
+                        "a part could not be uploaded; this provider's parts go inline, where it takes their type inline, until it is asked again"
                     );
                     *remote = None;
+                    paused = true;
+                    failed = true;
                 }
             }
         }
     }
-    if uploaded > 0 {
+    if uploaded > 0 || failed {
         let path = route.ledger.clone();
         off_thread(move || save(&path, &ledger)).await;
+    }
+    if uploaded > 0 {
         tracing::info!(provider = %route.provider_name, uploaded, "[mime] parts uploaded to provider file storage");
     }
     uploaded

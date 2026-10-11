@@ -97,6 +97,8 @@ fn setup(lost: usize, with_route: bool) -> Setup {
     let files = with_route.then(|| crate::provider_files::FileRoute {
         provider: vendor.clone(),
         provider_name: "anthropic".into(),
+        store: store.clone(),
+        run_id: "run-1".into(),
         ledger: store
             .run_dir("run-1")
             .unwrap()

@@ -191,8 +191,13 @@ pub(crate) struct JobHydration {
 impl JobHydration {
     /// Fill `request`'s mime blocks, logging what happened when anything
     /// was left out: parts the provider already holds, or can be given, are
-    /// named by id; the rest carry their bytes.
-    async fn apply(&self, mut request: InferenceRequest) -> InferenceRequest {
+    /// named by id; the rest carry their bytes. `deadline` is the call's, and
+    /// bounds how long an upload may take.
+    async fn apply(
+        &self,
+        mut request: InferenceRequest,
+        deadline: tokio::time::Instant,
+    ) -> InferenceRequest {
         // The stage's own bypass: a part of a type it named reaches the
         // model as text unless the part itself said otherwise.
         if !self.as_text.is_empty() {
@@ -216,9 +221,8 @@ impl JobHydration {
                 route,
                 &self.mime,
                 &self.registry,
-                &self.store,
-                &self.run_id,
                 false,
+                deadline,
             )
             .await;
         }
@@ -298,7 +302,11 @@ impl JobHydration {
     /// vendor refused because a file it named is gone, then fill any part
     /// whose upload failed with its bytes. The request, and whether anything
     /// was uploaded.
-    async fn renew_files(&self, mut request: InferenceRequest) -> (InferenceRequest, bool) {
+    async fn renew_files(
+        &self,
+        mut request: InferenceRequest,
+        deadline: tokio::time::Instant,
+    ) -> (InferenceRequest, bool) {
         let Some(route) = &self.files else {
             return (request, false);
         };
@@ -307,9 +315,8 @@ impl JobHydration {
             route,
             &self.mime,
             &self.registry,
-            &self.store,
-            &self.run_id,
             true,
+            deadline,
         )
         .await;
         (self.hydrate(request).await, renewed > 0)
@@ -815,9 +822,9 @@ pub(crate) async fn run_attempt(
         // the request, so the trip sends this one copy.
         let mut request = InferenceRequest::clone(&request);
         if let Some(hydration) = &hydration {
-            request = hydration.apply(request).await;
+            request = hydration.apply(request, deadline).await;
             if renew_files {
-                let (renewed_request, renewed) = hydration.renew_files(request).await;
+                let (renewed_request, renewed) = hydration.renew_files(request, deadline).await;
                 request = renewed_request;
                 tracing::info!(
                     renewed,
@@ -2241,9 +2248,20 @@ mod tests {
             files: None,
             why_inline: "",
         };
-        let request = hydration.apply(request).await;
+        let request = hydration
+            .apply(
+                request,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .await;
         assert!(
-            !hydration.renew_files(request.clone()).await.1,
+            !hydration
+                .renew_files(
+                    request.clone(),
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(60)
+                )
+                .await
+                .1,
             "with nowhere to upload, nothing is renewed"
         );
         // The stage's `as_text` sends a type the registry calls binary as
@@ -2285,7 +2303,12 @@ mod tests {
             as_text: vec!["application/*".to_string(), "image/*".to_string()],
             ..hydration.clone()
         };
-        let as_text = forced.apply(as_text).await;
+        let as_text = forced
+            .apply(
+                as_text,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .await;
         let blocks_of = |content: &MessageContent| match content {
             MessageContent::Blocks(blocks) => blocks.clone(),
             MessageContent::Text(_) => Vec::new(),
@@ -2345,7 +2368,12 @@ mod tests {
             files: None,
             why_inline: "",
         };
-        let request = hydration.apply(request).await;
+        let request = hydration
+            .apply(
+                request,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .await;
         assert!(matches!(
             &request.messages[0].content,
             MessageContent::Blocks(blocks) if blocks[0].is_hydrated_mime()
