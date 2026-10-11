@@ -88,7 +88,8 @@ impl BindEnv for DaemonEnv {
         let registry = issues.take(leviath_runtime::bind::scripts::mime_registry(
             spec, code, &self.mime,
         ));
-        let state = issues.take(self.tool_state(spec, code, registry.as_ref()));
+        let sandbox = self.sandbox_for(spec).await;
+        let state = issues.take(self.tool_state(spec, code, registry.as_ref(), sandbox));
         let (Some(compiled), Some(registry), Some(state)) = (compiled, registry, state) else {
             return Err(issues);
         };
@@ -256,14 +257,36 @@ impl DaemonEnv {
         })
     }
 
+    /// The run's sandbox. Starting a container is a `docker run`, and an
+    /// image pull the first time, so a run whose stages start one builds it
+    /// on the blocking pool; anything else is built where it is.
+    async fn sandbox_for(
+        &self,
+        spec: &RunSpec,
+    ) -> Result<Option<crate::daemon::sandbox_manager::SandboxManager>, String> {
+        let config = self.config.clone();
+        let graph = spec.graph.clone();
+        let run_id = spec.run_id.to_string();
+        let workdir = spec.placement.workdir.clone();
+        let entry = layers::entry_index(&graph);
+        let containers = layers::starts_a_container(&config, &graph);
+        let build = move || layers::sandbox(&config, &graph, &run_id, &workdir, entry);
+        match containers {
+            true => crate::blocking::blocking(build).await,
+            false => build(),
+        }
+    }
+
     /// The tool lane's state for a run, over `registry` (or, when the run's
     /// registry could not be built, over this machine's alone, so the
-    /// tool state's own problems are reported beside it).
+    /// tool state's own problems are reported beside it), with the sandbox
+    /// [`Self::sandbox_for`] built.
     fn tool_state(
         &self,
         spec: &RunSpec,
         code: &CodeFiles,
         registry: Option<&RunMimeRegistry>,
+        sandbox: Result<Option<crate::daemon::sandbox_manager::SandboxManager>, String>,
     ) -> Result<ToolState, SpawnIssues> {
         let config = &*self.config;
         let graph = &spec.graph;
@@ -277,10 +300,7 @@ impl DaemonEnv {
                 .map_err(|e| at("launch", IssueCode::Unresolvable, e.to_string())),
         );
         let layers = Layers::new(config, graph, &spec.launch, &agent);
-        let sandbox = issues.take(
-            layers::sandbox(config, graph, run_id, &workdir, layers.entry_index)
-                .map_err(|e| at("sandbox", IssueCode::Unavailable, e)),
-        );
+        let sandbox = issues.take(sandbox.map_err(|e| at("sandbox", IssueCode::Unavailable, e)));
         let reads = issues.take(
             crate::daemon::spawn::compile_read_path_policy(
                 &agent,

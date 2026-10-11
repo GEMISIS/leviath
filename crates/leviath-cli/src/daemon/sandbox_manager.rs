@@ -174,6 +174,13 @@ impl SandboxManager {
                         continue;
                     };
                     let name = format!("leviath-{}-{:016x}", sanitize(run_id), sig);
+                    // The name is this run's own, so a container already
+                    // holding it is one this run left behind: a seed's, or one
+                    // from a daemon that stopped or died while the run was
+                    // live. Docker refuses a second container under the name,
+                    // so it goes first. Usually there is none, and the removal
+                    // failing says only that.
+                    let _ = run(&leviath_sys::container_rm_argv(&engine, &name));
                     let spec = ContainerRunSpec {
                         engine: &engine,
                         image,
@@ -224,6 +231,110 @@ impl SandboxManager {
     fn destroy_with(&self, run: &CmdRunner) {
         for c in self.containers.values() {
             let _ = run(&leviath_sys::container_rm_argv(&c.engine, &c.name));
+        }
+    }
+
+    /// Force-remove every container `sandboxes` started, with one command per
+    /// engine. For shutdown, which waits for the removal: the engine removes a
+    /// list at once, where one command per container would wait for each in
+    /// turn, and `lev daemon stop` gives a daemon five seconds to exit.
+    pub(crate) fn destroy_together(sandboxes: &[std::sync::Arc<Self>]) {
+        Self::destroy_together_with(sandboxes, &real_run);
+    }
+
+    /// Testable core of [`Self::destroy_together`].
+    fn destroy_together_with(sandboxes: &[std::sync::Arc<Self>], run: &CmdRunner) {
+        let mut by_engine: std::collections::BTreeMap<&str, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for c in sandboxes.iter().flat_map(|s| s.containers.values()) {
+            by_engine.entry(&c.engine).or_default().push(&c.name);
+        }
+        for (engine, names) in by_engine {
+            let mut argv = leviath_sys::container_rm_argv(engine, names[0]);
+            argv.extend(names[1..].iter().map(|name| name.to_string()));
+            let _ = run(&argv);
+        }
+    }
+}
+
+/// How a queued sandbox is torn down. Injected so a test can watch the queue
+/// without a container engine.
+type Destroy = std::sync::Arc<dyn Fn(&SandboxManager) + Send + Sync>;
+
+/// Removes finished runs' containers on a thread of its own.
+///
+/// `docker rm -f` waits while the engine stops and deletes the container, and
+/// a run is reaped on the world loop every run's tick waits on. Queued here,
+/// the removal waits on this thread instead, one sandbox after another. The
+/// thread starts with the first removal, so a daemon that never sandboxes
+/// anything never has one.
+///
+/// [`finish`](Self::finish) is what shutdown calls: it lets the queue run dry
+/// and waits for it, so a daemon that exits leaves no container behind.
+pub(crate) struct Teardown {
+    lane: StdMutex<Lane>,
+    destroy: Destroy,
+}
+
+/// The queue and the thread draining it, once there is one.
+#[derive(Default)]
+struct Lane {
+    queue: Option<std::sync::mpsc::Sender<std::sync::Arc<SandboxManager>>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    /// Set by [`Teardown::finish`]: later removals run where they are asked
+    /// for, since nothing is left to wait for a queue.
+    finished: bool,
+}
+
+impl Default for Teardown {
+    fn default() -> Self {
+        Self::with_destroy(std::sync::Arc::new(SandboxManager::destroy_all))
+    }
+}
+
+impl Teardown {
+    fn with_destroy(destroy: Destroy) -> Self {
+        Self {
+            lane: StdMutex::new(Lane::default()),
+            destroy,
+        }
+    }
+
+    /// Remove `sandbox`'s containers, without waiting for it.
+    pub(crate) fn remove(&self, sandbox: std::sync::Arc<SandboxManager>) {
+        let mut lane = self.lane.lock().unwrap_or_else(PoisonError::into_inner);
+        if lane.finished {
+            drop(lane);
+            (self.destroy)(&sandbox);
+            return;
+        }
+        if lane.queue.is_none() {
+            let (queue, removals) = std::sync::mpsc::channel::<std::sync::Arc<SandboxManager>>();
+            let destroy = self.destroy.clone();
+            lane.worker = Some(std::thread::spawn(move || {
+                for sandbox in removals {
+                    destroy(&sandbox);
+                }
+            }));
+            lane.queue = Some(queue);
+        }
+        // The thread drains the queue until `finish` drops its sender, so
+        // while the lane holds one the send lands.
+        if let Some(queue) = &lane.queue {
+            let _ = queue.send(sandbox);
+        }
+    }
+
+    /// Wait for every queued removal, and run any later one in place.
+    pub(crate) fn finish(&self) {
+        let worker = {
+            let mut lane = self.lane.lock().unwrap_or_else(PoisonError::into_inner);
+            lane.finished = true;
+            lane.queue = None;
+            lane.worker.take()
+        };
+        if let Some(worker) = worker {
+            let _ = worker.join();
         }
     }
 }
@@ -418,12 +529,38 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        // Three identical stages → one container created.
-        assert_eq!(log.lock().unwrap().len(), 1);
+        // Three identical stages → one container created (one removal of a
+        // leftover under its name, then one run).
+        assert_eq!(log.lock().unwrap().len(), 2);
         assert_eq!(m.containers.len(), 1);
-        let argv = &log.lock().unwrap()[0];
+        let argv = &log.lock().unwrap()[1];
         assert_eq!(argv[0], "docker");
         assert!(argv.contains(&"ubuntu:24.04".to_string()));
+    }
+
+    /// A container left holding the run's name (by a seed, or by a daemon
+    /// that stopped while the run was live) would make Docker refuse the
+    /// run's own: "the container name is already in use". It is removed
+    /// first, under exactly the name the run then takes.
+    #[test]
+    fn a_container_left_under_the_name_is_removed_before_the_run_starts() {
+        let log = std::sync::Mutex::new(Vec::new());
+        let m = SandboxManager::build_with(
+            "run-1",
+            vec![container_cfg("alpine:3", true, OnUnavailable::Error)],
+            "/work",
+            0,
+            Some("docker".to_string()),
+            true,
+            &recording_runner(&log),
+        )
+        .unwrap()
+        .unwrap();
+        let name = m.containers.values().next().unwrap().name.clone();
+        let calls = log.lock().unwrap();
+        assert_eq!(calls[0], leviath_sys::container_rm_argv("docker", &name));
+        assert_eq!(calls[1][1], "run");
+        assert!(calls[1].contains(&name), "{:?}", calls[1]);
     }
 
     #[test]
@@ -575,11 +712,20 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("failed to start container"));
         let calls = log.lock().unwrap();
-        assert!(
-            calls
-                .iter()
-                .any(|c| c.first().map(String::as_str) == Some("docker")
-                    && c.contains(&"rm".to_string()))
+        // The container the first `run` started is the one torn down, after
+        // the second failed.
+        let started = calls
+            .iter()
+            .find(|c| c[1] == "run")
+            .and_then(|c| {
+                c.iter()
+                    .position(|a| a == "--name")
+                    .map(|i| c[i + 1].clone())
+            })
+            .expect("the first container was started by name");
+        assert_eq!(
+            calls.last().unwrap(),
+            &leviath_sys::container_rm_argv("docker", &started)
         );
     }
 
@@ -679,6 +825,73 @@ mod tests {
         let calls = rm_log.lock().unwrap();
         assert_eq!(calls.len(), 2);
         assert!(calls.iter().all(|c| c.contains(&"rm".to_string())));
+    }
+
+    /// A manager holding one container of `image`, started by a runner that
+    /// always succeeds.
+    fn holding(run_id: &str, image: &str, engine: &str) -> std::sync::Arc<SandboxManager> {
+        let cfg = ToolSandboxConfig {
+            engine: Some(engine.to_string()),
+            ..container_cfg(image, true, OnUnavailable::Error)
+        };
+        std::sync::Arc::new(
+            SandboxManager::build_with(run_id, vec![cfg], "/w", 0, None, true, &ok_runner)
+                .unwrap()
+                .unwrap(),
+        )
+    }
+
+    /// A reap hands its sandbox to the teardown thread and returns: the world
+    /// loop never waits on `docker rm`. Shutdown's `finish` waits for every
+    /// queued removal, and a removal after it runs where it is asked for.
+    #[test]
+    fn a_queued_removal_does_not_wait_and_finish_waits_for_it() {
+        let removed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = removed.clone();
+        let teardown = Teardown::with_destroy(std::sync::Arc::new(move |m: &SandboxManager| {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            for c in m.containers.values() {
+                seen.lock().unwrap().push(c.name.clone());
+            }
+        }));
+        let started = std::time::Instant::now();
+        teardown.remove(holding("first", "alpine:3", "docker"));
+        teardown.remove(holding("second", "alpine:3", "docker"));
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
+        assert!(removed.lock().unwrap().is_empty(), "nothing waited for");
+        teardown.finish();
+        assert_eq!(removed.lock().unwrap().len(), 2, "finish waited for both");
+
+        teardown.remove(holding("third", "alpine:3", "docker"));
+        assert_eq!(removed.lock().unwrap().len(), 3, "after finish, in place");
+        // A teardown that never removed anything finishes at once.
+        Teardown::default().finish();
+    }
+
+    /// Shutdown removes every container in one command per engine, rather
+    /// than one after another inside `lev daemon stop`'s five seconds.
+    #[test]
+    fn shutdown_removes_every_container_with_one_command_per_engine() {
+        let log = std::sync::Mutex::new(Vec::new());
+        let sandboxes = [
+            holding("a", "alpine:3", "docker"),
+            holding("b", "alpine:3", "docker"),
+            holding("c", "alpine:3", "podman"),
+        ];
+        SandboxManager::destroy_together_with(&sandboxes, &recording_runner(&log));
+        let calls = log.lock().unwrap();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(&calls[0][..3], ["docker", "rm", "-f"]);
+        assert_eq!(
+            calls[0].len(),
+            5,
+            "both docker containers in one: {:?}",
+            calls[0]
+        );
+        assert_eq!(&calls[1][..3], ["podman", "rm", "-f"]);
+        assert_eq!(calls[1].len(), 4);
+        // Nothing to remove runs nothing.
+        SandboxManager::destroy_together(&[]);
     }
 
     #[test]
