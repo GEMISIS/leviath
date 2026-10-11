@@ -80,9 +80,17 @@ fn unix_secs(t: SystemTime) -> i64 {
 /// connected. `GET /api/config` is what a client that connected mid-outage
 /// asks.
 ///
+/// `reported` is the fault the caller saw when it looked before starting the
+/// loop, the edge every later check is measured from. Taken by the caller so
+/// the loop starts from a known place: a save that lands after that look is
+/// an edge, whenever the loop first wakes.
+///
 /// Never returns; held behind the same abort-on-drop guard as the event loop.
-pub(super) async fn watch_loop(state: AppState, interval: Duration) {
-    let mut reported = state.config_health().await.fault;
+pub(super) async fn watch_loop(
+    state: AppState,
+    interval: Duration,
+    mut reported: Option<ConfigFault>,
+) {
     loop {
         tokio::time::sleep(interval).await;
         reported = broadcast_change(&state, &reported).await;
@@ -285,11 +293,10 @@ mod tests {
         let state = super::super::testutil::state_with_config_at(&path);
         let mut rx = state.event_tx.subscribe();
 
-        let watcher = tokio::spawn(watch_loop(state, Duration::from_millis(5)));
-        // Let the task reach its first `sleep`, which is past the baseline
-        // read: break the file before that and there is no edge to see. The
-        // test runtime is single-threaded, so one yield is enough.
-        tokio::task::yield_now().await;
+        let baseline = state.config_health().await.fault;
+        let watcher = tokio::spawn(watch_loop(state, Duration::from_millis(5), baseline));
+        // The baseline was taken above, so this save is an edge whenever the
+        // loop first looks.
         save(&path, "broken : :");
 
         let frame = tokio::time::timeout(Duration::from_secs(10), rx.recv())
