@@ -23,9 +23,12 @@ use crate::runstate::{self, ContextSnapshot};
 pub(super) async fn get_run(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, ServeError> {
-    runstate::read_meta(&id)
-        .map(|m| Json(run_json(&m, leviath_core::duration::now_secs())))
-        .map_err(|_| ServeError::run_not_found(&id))
+    super::blocking::blocking(move || {
+        runstate::read_meta(&id)
+            .map(|m| Json(run_json(&m, leviath_core::duration::now_secs())))
+            .map_err(|_| ServeError::run_not_found(&id))
+    })
+    .await
 }
 
 /// `GET /api/runs/{id}/spec`: the spec the run was resolved to.
@@ -147,16 +150,23 @@ pub(super) async fn run_logs(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<LogsQuery>,
 ) -> Result<String, ServeError> {
-    if !runstate::run_dir(&id).exists() {
-        return Err(ServeError::run_not_found(&id));
-    }
-    let selector = query.selector().map_err(ServeError::BadRequest)?;
-    let stream = query.log_stream().map_err(ServeError::BadRequest)?;
+    let selector = query.selector();
+    let stream = query.log_stream();
     // Clamped like every other limit in this API: `tail` is client-controlled
     // and `stage=all` multiplies it by the stage count, so an unclamped value
-    // was an arbitrary-size allocation on request.
+    // would be an arbitrary-size allocation on request.
     let max_bytes = query.tail.unwrap_or(32_768).min(LOGS_MAX_TAIL_BYTES);
-    Ok(runstate::tail_run_logs(&id, selector, stream, max_bytes))
+    // The run's directory and its logs are read on the blocking pool. A run
+    // that is not there is the answer before a selector that does not parse.
+    super::blocking::blocking(move || {
+        if !runstate::run_dir(&id).exists() {
+            return Err(ServeError::run_not_found(&id));
+        }
+        let selector = selector.map_err(ServeError::BadRequest)?;
+        let stream = stream.map_err(ServeError::BadRequest)?;
+        Ok(runstate::tail_run_logs(&id, selector, stream, max_bytes))
+    })
+    .await
 }
 
 /// Largest per-stage byte window `GET /api/runs/{id}/logs?tail=` honors:
@@ -180,24 +190,29 @@ pub(super) async fn run_file(
 ) -> Result<Json<FileOrListing>, ServeError> {
     use super::core::files;
 
-    let meta = runstate::read_meta(&id).map_err(|_| ServeError::run_not_found(&id))?;
-    let source = files::FileSource::parse(query.source.as_deref())?;
-    // A listing types each row by name with the same registry `/files/raw`
-    // types the bytes with, so a console gets the run's answer, not its own.
-    let registry = state.current_config().await.mime_registry_or_defaults();
+    // The record, the registry and the workdir are read on the blocking pool.
+    let config = std::sync::Arc::clone(&state.config);
+    let read = super::blocking::blocking(move || {
+        let meta = runstate::read_meta(&id).map_err(|_| ServeError::run_not_found(&id))?;
+        let source = files::FileSource::parse(query.source.as_deref())?;
+        // A listing types each row by name with the same registry `/files/raw`
+        // types the bytes with, so a console gets the run's answer, not its own.
+        let registry = config.check().config.mime_registry_or_defaults();
+        match query.path {
+            None => files::listing(&meta, source, None, query.hidden, &registry)
+                .map(|listed| files::FileRead::Listing(Box::new(listed))),
+            Some(ref requested_path) => files::read(
+                &meta,
+                requested_path,
+                query.offset.unwrap_or(0),
+                query.hidden,
+                &registry,
+            ),
+        }
+    })
+    .await?;
 
-    let Some(ref requested_path) = query.path else {
-        let listed = files::listing(&meta, source, None, query.hidden, &registry)?;
-        return Ok(Json(FileOrListing::Listing(Box::new(listing_resp(listed)))));
-    };
-
-    match files::read(
-        &meta,
-        requested_path,
-        query.offset.unwrap_or(0),
-        query.hidden,
-        &registry,
-    )? {
+    match read {
         files::FileRead::Listing(listed) => Ok(Json(FileOrListing::Listing(Box::new(
             listing_resp(*listed),
         )))),
@@ -245,22 +260,26 @@ fn listing_resp(listed: super::core::files::FileListing) -> RunFileListing {
 pub(super) async fn run_result(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<RunResultResp>, ServeError> {
-    let meta = runstate::read_meta(&id).map_err(|_| ServeError::run_not_found(&id))?;
-    let output = runstate::tail_run_logs(
-        &id,
-        runstate::StageSelector::Current,
-        runstate::LogStream::Output,
-        65_536,
-    );
-    Ok(Json(RunResultResp {
-        run_id: meta.run_id,
-        status: meta.status.wire().to_string(),
-        output,
-        final_output: runstate::read_final_output(&id).map(Into::into),
-        error: meta.error,
-        prompt_tokens: meta.prompt_tokens,
-        completion_tokens: meta.completion_tokens,
-    }))
+    // The record, the log's tail and the answer are read on the blocking pool.
+    super::blocking::blocking(move || {
+        let meta = runstate::read_meta(&id).map_err(|_| ServeError::run_not_found(&id))?;
+        let output = runstate::tail_run_logs(
+            &id,
+            runstate::StageSelector::Current,
+            runstate::LogStream::Output,
+            65_536,
+        );
+        Ok(Json(RunResultResp {
+            run_id: meta.run_id,
+            status: meta.status.wire().to_string(),
+            output,
+            final_output: runstate::read_final_output(&id).map(Into::into),
+            error: meta.error,
+            prompt_tokens: meta.prompt_tokens,
+            completion_tokens: meta.completion_tokens,
+        }))
+    })
+    .await
 }
 
 /// `GET /api/runs/{id}/stages`: the run's per-stage ledger as of its last

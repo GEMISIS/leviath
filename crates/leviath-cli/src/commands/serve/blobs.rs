@@ -9,6 +9,7 @@
 //! the effective registry: every row and where it came from.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -19,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use super::core::error::ServeError;
 use super::types::*;
 use crate::blobs::BlobEntry;
+use crate::daemon::config_reload::ConfigReloader;
 use crate::runstate;
 
 /// The stored parts a run's context holds, or 404 when it has no run file.
@@ -92,9 +94,9 @@ pub(super) async fn export_file(
 pub(super) async fn list_blobs(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<BlobListing>, ServeError> {
-    Ok(Json(BlobListing {
-        items: stored_parts(&id)?,
-    }))
+    // The run file is replayed to its last step on the blocking pool.
+    let items = super::blocking::blocking(move || stored_parts(&id)).await?;
+    Ok(Json(BlobListing { items }))
 }
 
 /// A query flag as browsers and shells spell it: `1`, `true`, `yes` and `on`
@@ -234,6 +236,26 @@ fn bytes_response(
     Ok(response)
 }
 
+/// Bytes a byte route serves, with the type and the name they go out under.
+struct Typed {
+    bytes: Vec<u8>,
+    mime_type: MimeType,
+    name: String,
+}
+
+impl Typed {
+    /// The response for these bytes, as [`bytes_response`] shapes it.
+    fn respond(self, download: bool, headers: &HeaderMap) -> Result<Response, ServeError> {
+        bytes_response(
+            self.bytes,
+            &self.mime_type,
+            &self.name,
+            download,
+            range_header(headers),
+        )
+    }
+}
+
 /// `GET /api/runs/{id}/blobs/{sha256}`: the bytes of one stored part.
 pub(super) async fn get_blob(
     State(state): State<AppState>,
@@ -246,8 +268,18 @@ pub(super) async fn get_blob(
             "a blob is named by its 64-character lowercase hex sha256".to_string(),
         ));
     }
-    runstate::read_meta(&id).map_err(|_| ServeError::run_not_found(&id))?;
-    let bytes = super::core::inspect::blob(&id, &sha256)?.ok_or_else(|| {
+    // The record, the part's file, the run file and the registry are all read
+    // on the blocking pool.
+    let config = Arc::clone(&state.config);
+    super::blocking::blocking(move || blob_bytes(&config, &id, &sha256))
+        .await?
+        .respond(query.download, &headers)
+}
+
+/// The bytes of run `id`'s stored part `sha256`, typed and named.
+fn blob_bytes(config: &ConfigReloader, id: &str, sha256: &str) -> Result<Typed, ServeError> {
+    runstate::read_meta(id).map_err(|_| ServeError::run_not_found(id))?;
+    let bytes = super::core::inspect::blob(id, sha256)?.ok_or_else(|| {
         ServeError::NotFound(format!(
             "run '{id}' has no stored part {sha256} in its blob directory"
         ))
@@ -255,28 +287,26 @@ pub(super) async fn get_blob(
     // What the context says about it, when it says anything: the type it
     // was stored as and the name it carries. A blob the context no longer
     // references is typed by sniffing, and named by its hash.
-    let known = stored_parts(&id)
+    let known = stored_parts(id)
         .unwrap_or_default()
         .into_iter()
         .find(|b| b.sha256 == sha256);
-    let registry = state.current_config().await.mime_registry_or_defaults();
+    let registry = config.check().config.mime_registry_or_defaults();
     let mime_type = known
         .as_ref()
         .and_then(|b| MimeType::parse(&b.mime_type).ok())
         .unwrap_or_else(|| registry.resolve(None, None, &bytes));
     let name = crate::blobs::export_name(
         known.as_ref().and_then(|b| b.name.as_deref()),
-        &sha256,
+        sha256,
         mime_type.as_str(),
         &registry,
     );
-    bytes_response(
+    Ok(Typed {
         bytes,
-        &mime_type,
-        &name,
-        query.download,
-        range_header(&headers),
-    )
+        mime_type,
+        name,
+    })
 }
 
 /// `?path=` and `?download=` on the raw file route.
@@ -296,50 +326,57 @@ pub(super) async fn raw_file(
     Query(query): Query<RawFileQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ServeError> {
-    let meta = runstate::read_meta(&id).map_err(|_| ServeError::run_not_found(&id))?;
+    // The record, the fence, the file and the registry are all read on the
+    // blocking pool.
+    let config = Arc::clone(&state.config);
+    let path = query.path.clone();
+    super::blocking::blocking(move || raw_bytes(&config, &id, &path))
+        .await?
+        .respond(query.download, &headers)
+}
+
+/// The bytes of the file at `path` in run `id`'s workdir, typed by the
+/// registry and named by the file.
+fn raw_bytes(config: &ConfigReloader, id: &str, path: &str) -> Result<Typed, ServeError> {
+    let meta = runstate::read_meta(id).map_err(|_| ServeError::run_not_found(id))?;
     let workdir = PathBuf::from(&meta.workdir);
-    let requested = PathBuf::from(&query.path);
+    let requested = PathBuf::from(path);
     let resolved = match requested.is_absolute() {
         true => requested,
         false => workdir.join(&requested),
     };
     if !leviath_core::resolves_within(&resolved, &workdir) {
         return Err(ServeError::Forbidden(format!(
-            "path '{}' is outside the run's working directory",
-            query.path
+            "path '{path}' is outside the run's working directory"
         )));
     }
     if resolved.is_dir() {
         return Err(ServeError::BadRequest(format!(
-            "'{}' is a directory; the raw route serves files",
-            query.path
+            "'{path}' is a directory; the raw route serves files"
         )));
     }
     let name = resolved
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let bytes = match tokio::fs::read(&resolved).await {
+    let bytes = match std::fs::read(&resolved) {
         Ok(bytes) => bytes,
         // Not on disk, but perhaps one of the run's artifacts: a file a model
         // made lives in the blob store and was never written to the workdir,
         // and the result route names it by exactly this path.
-        Err(_) => artifact_by_path(&id, &meta.workdir, &query.path).ok_or_else(|| {
+        Err(_) => artifact_by_path(id, &meta.workdir, path).ok_or_else(|| {
             ServeError::NotFound(format!(
-                "file '{}' not found in the run's working directory",
-                query.path
+                "file '{path}' not found in the run's working directory"
             ))
         })?,
     };
-    let registry = state.current_config().await.mime_registry_or_defaults();
+    let registry = config.check().config.mime_registry_or_defaults();
     let mime_type = registry.resolve(None, Some(&name), &bytes);
-    bytes_response(
+    Ok(Typed {
         bytes,
-        &mime_type,
-        &name,
-        query.download,
-        range_header(&headers),
-    )
+        mime_type,
+        name,
+    })
 }
 
 /// The bytes of the run's artifact recorded at `path`, when it has one and
@@ -361,8 +398,18 @@ pub(super) async fn artifact(
     Query(query): Query<BytesQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ServeError> {
-    let meta = runstate::read_meta(&id).map_err(|_| ServeError::run_not_found(&id))?;
-    let output = runstate::read_final_output(&id)
+    // The record, the answer and the artifact's bytes are read on the
+    // blocking pool.
+    super::blocking::blocking(move || artifact_named(&id, &name))
+        .await?
+        .respond(query.download, &headers)
+}
+
+/// The bytes of the artifact run `id` handed back as `name`, under the type
+/// the answer records and the file name its path ends in.
+fn artifact_named(id: &str, name: &str) -> Result<Typed, ServeError> {
+    let meta = runstate::read_meta(id).map_err(|_| ServeError::run_not_found(id))?;
+    let output = runstate::read_final_output(id)
         .ok_or_else(|| ServeError::NotFound(format!("run '{id}' has not handed back a result")))?;
     let artifact = output
         .artifacts
@@ -371,7 +418,7 @@ pub(super) async fn artifact(
         .ok_or_else(|| {
             ServeError::NotFound(format!("run '{id}' handed back no artifact named '{name}'"))
         })?;
-    let bytes = crate::commands::result::export::artifact_bytes(&id, &meta.workdir, artifact)
+    let bytes = crate::commands::result::export::artifact_bytes(id, &meta.workdir, artifact)
         .map_err(|e| ServeError::NotFound(e.to_string()))?;
     let file_name = artifact
         .path
@@ -379,13 +426,11 @@ pub(super) async fn artifact(
         .find(|s| !s.is_empty())
         .unwrap_or(&artifact.name)
         .to_string();
-    bytes_response(
+    Ok(Typed {
         bytes,
-        &artifact.mime_type,
-        &file_name,
-        query.download,
-        range_header(&headers),
-    )
+        mime_type: artifact.mime_type.clone(),
+        name: file_name,
+    })
 }
 
 /// One row of the effective mime registry, resolved: what `image/png`
