@@ -272,43 +272,66 @@ impl OAuthTokenSource {
     /// has to put the others back untouched. Reading once and handing the store
     /// to [`Self::persist`] is also what closes the window a second read would
     /// open between them.
-    fn load_store(&self) -> Option<ProviderAuthStore> {
-        let store = self.credential_store.as_deref();
-        match ProviderAuthStore::load_with(&self.store_path, store) {
-            Ok(all) => Some(all),
-            Err(e) => {
-                tracing::warn!("could not read the provider auth store: {e}");
-                None
-            }
-        }
-    }
-
-    /// Load this provider's grant from wherever it lives.
-    fn load(&self) -> Option<ProviderGrant> {
-        self.load_store()?.get(&self.provider).cloned()
+    ///
+    /// Read on the blocking pool: the store is a file, and under the keychain
+    /// one OS round trip per signed-in provider, either of which would hold a
+    /// runtime worker and every task queued on it.
+    async fn load_store(&self) -> Option<ProviderAuthStore> {
+        let (path, store) = (self.store_path.clone(), self.credential_store.clone());
+        off_worker(move || read_store(&path, store.as_deref())).await
     }
 
     /// Write `grant` into `all` and save it, preserving every other provider's.
-    fn persist(
+    ///
+    /// On the blocking pool, for the reason [`Self::load_store`] gives.
+    async fn persist(
         &self,
-        all: &mut ProviderAuthStore,
+        mut all: ProviderAuthStore,
         grant: &ProviderGrant,
     ) -> Result<(), RefreshError> {
         all.set(&self.provider, grant.clone());
-        all.save_with(&self.store_path, self.credential_store.as_deref())
+        let (path, store) = (self.store_path.clone(), self.credential_store.clone());
+        off_worker(move || all.save_with(&path, store.as_deref()))
+            .await
             .map_err(|e| {
                 RefreshError::Transient(format!("could not write the provider auth store: {e}"))
             })
     }
 
-    /// The cached grant, loading it from disk on first use.
-    fn current(&self) -> Option<ProviderGrant> {
-        if let Some(grant) = leviath_core::sync::lock(&self.cached).clone() {
-            return Some(grant);
-        }
-        let loaded = self.load()?;
+    /// The cached grant, if this process has read it.
+    fn cached(&self) -> Option<ProviderGrant> {
+        leviath_core::sync::lock(&self.cached).clone()
+    }
+
+    /// Keep this provider's grant out of `all`, and hand it back.
+    fn remember(&self, all: Option<ProviderAuthStore>) -> Option<ProviderGrant> {
+        let loaded = all?.get(&self.provider).cloned()?;
         *leviath_core::sync::lock(&self.cached) = Some(loaded.clone());
         Some(loaded)
+    }
+
+    /// The cached grant, read from where it lives on first use.
+    ///
+    /// For the synchronous [`TokenSource::grant`], which has no runtime to hop
+    /// off; the async paths go through [`Self::current_off_worker`].
+    fn current(&self) -> Option<ProviderGrant> {
+        let cached = self.cached();
+        if cached.is_some() {
+            return cached;
+        }
+        self.remember(read_store(
+            &self.store_path,
+            self.credential_store.as_deref(),
+        ))
+    }
+
+    /// [`Self::current`], reading the store on the blocking pool.
+    async fn current_off_worker(&self) -> Option<ProviderGrant> {
+        let cached = self.cached();
+        if cached.is_some() {
+            return cached;
+        }
+        self.remember(self.load_store().await)
     }
 
     /// The error a caller sees when nobody has signed in.
@@ -318,6 +341,33 @@ impl OAuthTokenSource {
             self.provider, self.provider
         ))
     }
+}
+
+/// Every provider's grant in the store at `path`, or `None` when it cannot be
+/// read.
+fn read_store(
+    path: &Path,
+    store: Option<&dyn leviath_core::CredentialStore>,
+) -> Option<ProviderAuthStore> {
+    match ProviderAuthStore::load_with(path, store) {
+        Ok(all) => Some(all),
+        Err(e) => {
+            tracing::warn!("could not read the provider auth store: {e}");
+            None
+        }
+    }
+}
+
+/// Run `work` on tokio's blocking pool and hand back what it returns.
+///
+/// For the grant store's file and keychain work, which would otherwise hold
+/// whichever runtime worker the request happened to be on. Nothing cancels a
+/// blocking task, so the join fails only if `work` panicked, and that is a
+/// panic here too.
+async fn off_worker<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::task::spawn_blocking(work)
+        .await
+        .expect("the grant store's file and keychain work does not panic")
 }
 
 /// Turn a grant into the credentials a request carries.
@@ -334,7 +384,10 @@ fn credentials_of(grant: &ProviderGrant) -> Credentials {
 #[async_trait]
 impl TokenSource for OAuthTokenSource {
     async fn credentials(&self) -> Result<Credentials, RefreshError> {
-        let grant = self.current().ok_or_else(|| self.not_signed_in())?;
+        let grant = self
+            .current_off_worker()
+            .await
+            .ok_or_else(|| self.not_signed_in())?;
         if grant.is_expired_at((self.clock)()) {
             // Proactive and reactive refresh share one path, so the two can
             // never both decide to rotate the same token.
@@ -362,9 +415,14 @@ impl TokenSource for OAuthTokenSource {
         }
 
         // Another process may have rotated it. The lock narrows the window;
-        // this re-read is what actually decides.
-        let _lock = LockFile::acquire(self.lock_path());
-        let mut all = self.load_store().ok_or_else(|| self.not_signed_in())?;
+        // this re-read is what actually decides. Taking the lock is file work
+        // too, so it goes to the blocking pool beside the read.
+        let lock_path = self.lock_path();
+        let _lock = off_worker(move || LockFile::acquire(lock_path)).await;
+        let all = self
+            .load_store()
+            .await
+            .ok_or_else(|| self.not_signed_in())?;
         let on_disk = all
             .get(&self.provider)
             .cloned()
@@ -405,7 +463,7 @@ impl TokenSource for OAuthTokenSource {
         // Persist before publishing. If the process dies in between, the
         // rotated refresh token is already on disk; the other order would leave
         // a token the issuer has invalidated as the only one we still know.
-        self.persist(&mut all, &next)?;
+        self.persist(all, &next).await?;
         *leviath_core::sync::lock(&self.cached) = Some(next.clone());
         Ok(credentials_of(&next))
     }
