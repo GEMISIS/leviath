@@ -405,6 +405,7 @@ impl Dashboard {
                     hint("?", "help"),
                     hint("tab", "inspector"),
                     hint("←→↑↓", "select"),
+                    hint("{ }", "path"),
                     hint("enter", "edit"),
                     hint("right-click", "menu"),
                     hint("a", "add stage"),

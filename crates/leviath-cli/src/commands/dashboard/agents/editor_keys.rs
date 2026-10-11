@@ -116,6 +116,12 @@ impl Dashboard {
                 self.editor().add_stage = Some(LineEdit::new(String::new(), false));
             }
             KeyCode::Char('c') => self.editor_open_connect(),
+            KeyCode::Char(step @ ('{' | '}')) => {
+                let editor = self.editor();
+                if editor.view.step_path(step == '}') {
+                    editor.sync_panel();
+                }
+            }
             KeyCode::Char('x') | KeyCode::Delete => self.editor_delete_selected(),
             KeyCode::Char('r') => {
                 self.editor().view.rotate();
@@ -142,7 +148,7 @@ impl Dashboard {
                     self.editor().focus = Focus::Canvas;
                 }
             }
-            KeyCode::Char('x') | KeyCode::Delete => self.editor_remove_row(),
+            KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace => self.editor_remove_row(),
             KeyCode::Up | KeyCode::Char('k') => {
                 let editor = self.editor();
                 editor.cursor = editor.cursor.saturating_sub(1);

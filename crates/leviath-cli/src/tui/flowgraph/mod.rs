@@ -12,6 +12,8 @@
 //! - [`layout`] places it on layers, deterministically, or snakes a path
 //!   across rows.
 //! - [`content`] draws a node and picks an edge stroke.
+//! - [`layered`] is the layered layout's geometry: where an edge attaches and
+//!   which handles a box needs.
 //! - [`snake`] is the snaking layout's geometry: row width, box spacing,
 //!   where an edge attaches.
 //! - [`view`] wraps the rataflow canvas: keys, mouse, and the live overlay
@@ -19,6 +21,7 @@
 //! - [`text`] renders the same canvas once into plain text.
 
 pub(crate) mod content;
+pub(crate) mod layered;
 pub(crate) mod layout;
 pub(crate) mod model;
 pub(crate) mod path;

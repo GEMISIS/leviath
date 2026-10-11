@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
 use rataflow::{
-    Background, BackgroundVariant, Edge, FitViewOptions, Flow, FlowAction, Handle, HandlePosition,
-    MiniMap, MiniMapPosition, Node, StepEdge, Theme, Viewport,
+    Background, BackgroundVariant, Edge, FitViewOptions, Flow, FlowAction, MiniMap,
+    MiniMapPosition, Node, StepEdge, Theme, Viewport,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -26,6 +26,7 @@ use crate::tui::theme::C_ACCENT;
 use super::content::{
     NodeStatus, RunPhase, StageNodeContent, WorkerCounts, edge_style, node_width, palette,
 };
+use super::layered::{handles, route};
 use super::layout::{self, Direction, GraphLayout};
 use super::model::{EdgeClass, StageEdge, StageGraph};
 use super::snake::{LayoutMode, handles_snake, metrics, route_snake, snake_per_row};
@@ -247,49 +248,6 @@ fn apply_positions(
     }
 }
 
-/// Which sides an edge leaves and enters on, and how far it travels before
-/// turning, for a graph flowing in `direction`.
-///
-/// The main flow runs along the layer axis. Edges that go against it (a
-/// loop back to an earlier layer, or out of a stage that only escapes reach)
-/// leave and re-enter on the same side and run along a lane beside the
-/// nodes: below them (right of them, top-to-bottom) for the flow's own
-/// loops, above (left) for the escapes. A lane per layer of distance keeps a
-/// long loop from overwriting a short one's label.
-fn route(
-    direction: Direction,
-    class: EdgeClass,
-    from_layer: usize,
-    to_layer: usize,
-) -> (HandlePosition, HandlePosition, bool, f64) {
-    let loops_back = to_layer <= from_layer;
-    let (forward_out, forward_in, loop_side, escape_side) = match direction {
-        Direction::LeftToRight => (
-            HandlePosition::Right,
-            HandlePosition::Left,
-            HandlePosition::Bottom,
-            HandlePosition::Top,
-        ),
-        Direction::TopToBottom => (
-            HandlePosition::Bottom,
-            HandlePosition::Top,
-            HandlePosition::Right,
-            HandlePosition::Left,
-        ),
-    };
-    let (src, tgt) = match class {
-        EdgeClass::Escape => (escape_side, escape_side),
-        _ if loops_back => (loop_side, loop_side),
-        _ => (forward_out, forward_in),
-    };
-    let stem = if src == tgt {
-        1.0 + from_layer.abs_diff(to_layer) as f64
-    } else {
-        1.0
-    };
-    (src, tgt, loops_back, stem)
-}
-
 impl std::fmt::Debug for FlowView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FlowView")
@@ -300,58 +258,6 @@ impl std::fmt::Debug for FlowView {
             .field("show_all", &self.show_all)
             .finish()
     }
-}
-
-/// Handles on every side, named by side so an edge can pick where it
-/// attaches. The forward sides (out along the flow, in against it) sit at
-/// the middle of their edge; the lane sides carry the source a little past
-/// the middle and the target a little before it, so a loop leaves and
-/// re-enters at different cells. Hidden on a viewer, where handle glyphs
-/// would read as ports; on an editor the flow-side pair shows and connects,
-/// and the lanes stay hidden (routing, not ports).
-fn handles(direction: Direction, edit: bool) -> Vec<Handle> {
-    let (out, back, lane_a, lane_b) = match direction {
-        Direction::LeftToRight => (
-            HandlePosition::Right,
-            HandlePosition::Left,
-            HandlePosition::Bottom,
-            HandlePosition::Top,
-        ),
-        Direction::TopToBottom => (
-            HandlePosition::Bottom,
-            HandlePosition::Top,
-            HandlePosition::Right,
-            HandlePosition::Left,
-        ),
-    };
-    vec![
-        Handle::source(out)
-            .with_id(out.side_name())
-            .with_hidden(!edit),
-        Handle::source(lane_a)
-            .with_id(lane_a.side_name())
-            .with_offset(0.7)
-            .with_connectable(false)
-            .with_hidden(true),
-        Handle::source(lane_b)
-            .with_id(lane_b.side_name())
-            .with_offset(0.7)
-            .with_connectable(false)
-            .with_hidden(true),
-        Handle::target(back)
-            .with_id(back.side_name())
-            .with_hidden(!edit),
-        Handle::target(lane_a)
-            .with_id(lane_a.side_name())
-            .with_offset(0.3)
-            .with_connectable(false)
-            .with_hidden(true),
-        Handle::target(lane_b)
-            .with_id(lane_b.side_name())
-            .with_offset(0.3)
-            .with_connectable(false)
-            .with_hidden(true),
-    ]
 }
 
 /// Place `graph`'s boxes the way `mode` asks for.
@@ -650,6 +556,38 @@ impl FlowView {
             self.flow.clear_selection();
             self.flow.select_edge(&id);
         }
+    }
+
+    /// Select the path after the selected one, or the one before it, in the
+    /// order the graph lists them, wrapping at either end. With no path
+    /// selected, the first or the last. A path hidden on this canvas is
+    /// skipped. Whether there was a path to select.
+    ///
+    /// The canvas's own keys only ever select a stage, so this is the
+    /// keyboard's way to a path.
+    pub(crate) fn step_path(&mut self, forward: bool) -> bool {
+        let shown: Vec<String> = self
+            .edges
+            .iter()
+            .filter(|meta| self.flow.edge(&meta.id).is_some_and(|edge| !edge.hidden))
+            .map(|meta| meta.id.clone())
+            .collect();
+        let Some(last) = shown.len().checked_sub(1) else {
+            return false;
+        };
+        let at = self
+            .flow
+            .first_selected_edge_id()
+            .and_then(|id| shown.iter().position(|shown| *shown == id));
+        let next = match (at, forward) {
+            (Some(i), true) if i < last => i + 1,
+            (_, true) => 0,
+            (Some(i), false) if i > 0 => i - 1,
+            (_, false) => last,
+        };
+        self.flow.clear_selection();
+        self.flow.select_edge(&shown[next]);
+        true
     }
 
     /// Which way the layers run.
@@ -1391,6 +1329,48 @@ to = "plan"
         assert!(!v.handle_key(KeyCode::Enter));
         let (_, text) = draw(&mut v, 220, 50);
         assert!(text.contains("[error]"), "escape edges revealed: {text}");
+    }
+
+    /// The canvas's keys only ever select a stage, so the editor steps
+    /// through the paths with this: in the graph's order, wrapping at both
+    /// ends, past one this canvas hides, and from no path to the first or
+    /// the last.
+    #[test]
+    fn stepping_walks_the_shown_paths_and_wraps_at_both_ends() {
+        let mut v = view();
+        let edge = |v: &FlowView, from: &str, to: &str| {
+            let edge = v
+                .graph()
+                .edges
+                .iter()
+                .find(|e| e.from == from && e.to == to)
+                .cloned()
+                .expect("in the graph");
+            Selection::Edge(edge)
+        };
+        assert!(v.step_path(true));
+        assert_eq!(v.selection(), edge(&v, "plan", "implement"));
+        assert!(v.step_path(true));
+        assert_eq!(v.selection(), edge(&v, "implement", "review"));
+        // The escape out of implement is listed next, and hidden here.
+        assert!(v.step_path(true));
+        assert_eq!(v.selection(), edge(&v, "review", "implement"));
+        assert!(v.step_path(false));
+        assert_eq!(v.selection(), edge(&v, "implement", "review"));
+        // The last wraps round to the first, and the first back to the last.
+        v.select_edge("recover", "plan");
+        assert!(v.step_path(true));
+        assert_eq!(v.selection(), edge(&v, "plan", "implement"));
+        assert!(v.step_path(false));
+        assert_eq!(v.selection(), edge(&v, "recover", "plan"));
+        // From a stage, going back starts at the last.
+        assert!(v.handle_key(KeyCode::Char(']')));
+        assert!(v.step_path(false));
+        assert_eq!(v.selection(), edge(&v, "recover", "plan"));
+        // A graph without paths has nothing to step to.
+        let mut single = path_view(1, 1);
+        assert!(!single.step_path(true));
+        assert_eq!(single.selection(), Selection::Nothing);
     }
 
     #[test]

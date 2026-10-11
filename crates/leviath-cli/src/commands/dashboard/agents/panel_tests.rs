@@ -117,13 +117,14 @@ fn the_model_tab_builds_a_chain_and_picks_tools() {
     assert_eq!(models_of(&mut dash, "work"), chain);
     dash.editor_settle_more(super::editor::PickerFor::ReplaceModel(9), "x/y");
     assert_eq!(models_of(&mut dash, "work").len(), 3);
-    // x drops entries until the row reads "not set" again.
+    // x, Delete and Backspace drop entries until the row reads "not set"
+    // again.
     goto(&mut dash, FieldId::ModelEntry(2));
     dash.handle_key(key(KeyCode::Char('x')));
     goto(&mut dash, FieldId::ModelEntry(1));
     dash.handle_key(key(KeyCode::Delete));
     goto(&mut dash, FieldId::ModelEntry(0));
-    dash.handle_key(key(KeyCode::Char('x')));
+    dash.handle_key(key(KeyCode::Backspace));
     assert!(models_of(&mut dash, "work").is_empty());
     // x on a row that is not removable does nothing.
     goto(&mut dash, FieldId::ToolSet);

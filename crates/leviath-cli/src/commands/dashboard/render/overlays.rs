@@ -190,6 +190,7 @@ fn agent_editor_sections() -> Vec<HelpSection> {
             entries: vec![
                 ("↑ ↓ ← → / h j k l", "select a stage in that direction"),
                 ("[ / ]", "previous / next stage in file order"),
+                ("{ / }", "previous / next path"),
                 ("enter", "edit the selected stage or path in the inspector"),
                 ("a", "add a stage after the selected one (asks its name)"),
                 ("c", "connect the selected stage to another (or to itself)"),

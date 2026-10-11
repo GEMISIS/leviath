@@ -2244,3 +2244,27 @@ fn r_renames_an_installed_agent_directory_manifest_and_arrangement() {
     assert!(dash.agents().catalog.visible().is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A path is reached from the keyboard: `}` and `{` step through the paths
+/// and open the one they land on, and with none left they do nothing.
+#[test]
+fn braces_step_through_the_paths_from_the_keyboard() {
+    let (mut dash, root) = dashboard("paths-by-key");
+    open_editor_on(&mut dash, "own");
+    let work_finish = Panel::Edge {
+        from: "work".into(),
+        to: "finish".into(),
+    };
+    dash.handle_key(key(KeyCode::Char('}')));
+    assert_eq!(dash.agents().editor.as_ref().unwrap().panel, work_finish);
+    assert!(text(&mut dash).contains("Path · work → finish"));
+    // The only path is both the next one and the one before.
+    dash.handle_key(key(KeyCode::Char('{')));
+    assert_eq!(dash.agents().editor.as_ref().unwrap().panel, work_finish);
+    // With the path deleted there is nothing to step to, and the panel stays.
+    dash.handle_key(key(KeyCode::Char('x')));
+    let panel = dash.agents().editor.as_ref().unwrap().panel.clone();
+    dash.handle_key(key(KeyCode::Char('}')));
+    assert_eq!(dash.agents().editor.as_ref().unwrap().panel, panel);
+    let _ = std::fs::remove_dir_all(&root);
+}
