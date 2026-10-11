@@ -85,23 +85,28 @@ impl WorldHost {
         });
     }
 
-    /// A run's state: live when the world holds it, else the last one its
-    /// run file recorded.
-    pub(super) fn inspect(&self, run_id: &str) -> Option<RunState> {
+    /// Answer `reply` with a run's state: live when the world holds it, else
+    /// the last one its run file recorded. The file is read on the blocking
+    /// pool, so the world loop does not wait on it: a run file is a run's
+    /// whole history.
+    pub(super) fn inspect(&self, run_id: &str, reply: oneshot::Sender<Option<Box<RunState>>>) {
         let live = self
             .live_entity(run_id)
             .and_then(|agent| crate::state::inspect::inspect(self.world.world(), agent.entity()));
-        if live.is_some() {
-            return live;
-        }
         let path = self
             .world
-            .runs_dir()?
-            .join(run_id)
-            .join(leviath_core::files::RUN_FILE);
-        crate::runfile::RunFileReader::open(&path)
-            .and_then(|reader| reader.latest_state())
-            .ok()
+            .runs_dir()
+            .map(|dir| dir.join(run_id).join(leviath_core::files::RUN_FILE));
+        let (Some(path), None) = (path, &live) else {
+            let _ = reply.send(live.map(Box::new));
+            return;
+        };
+        tokio::task::spawn_blocking(move || {
+            let recorded = crate::runfile::RunFileReader::open(&path)
+                .and_then(|reader| reader.latest_state())
+                .ok();
+            let _ = reply.send(recorded.map(Box::new));
+        });
     }
 
     /// Place a finished start in the world and answer whoever asked for it.

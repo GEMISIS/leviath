@@ -56,6 +56,7 @@ pub struct WorldHost {
     reaper: Option<Reaper>,
     resumer: Option<Resumer>,
     housekeeper: Option<Housekeeper>,
+    on_shutdown: Option<ShutdownHook>,
     events: broadcast::Sender<WorldEvent>,
     emitted: HashMap<String, Emitted>,
     /// The `[limits]` settings the host itself runs on: relief threshold,
@@ -194,6 +195,7 @@ impl WorldHost {
             reaper: None,
             resumer: None,
             housekeeper: None,
+            on_shutdown: None,
             events,
             emitted: HashMap::new(),
             settings: HostSettings::default(),
@@ -404,6 +406,12 @@ impl WorldHost {
         self.reaper = Some(reaper);
     }
 
+    /// Install the hook [`Self::serve`] runs once, as it returns (see
+    /// `ShutdownHook`).
+    pub fn set_on_shutdown(&mut self, hook: ShutdownHook) {
+        self.on_shutdown = Some(hook);
+    }
+
     /// Install the hook run when a run starts moving again, so the daemon can
     /// re-read the config layers a person edits to unblock it. Without one,
     /// resuming is only un-pausing (the prior behavior).
@@ -556,9 +564,7 @@ impl WorldHost {
             ControlOp::ValidateSpawn { request, reply } => {
                 self.validate(*request, crate::spec::env::Caller::TopLevel, reply);
             }
-            ControlOp::Inspect { run_id, reply } => {
-                let _ = reply.send(self.inspect(&run_id).map(Box::new));
-            }
+            ControlOp::Inspect { run_id, reply } => self.inspect(&run_id, reply),
             ControlOp::Result { run_id, reply } => {
                 // Live entities only. An unloaded run's answer is on disk in
                 // its `final_output` sidecar, which is what `lev result`
@@ -780,6 +786,9 @@ impl WorldHost {
         }
         // Shutting down: drain the persistence lane before the world is dropped.
         self.flush_and_stop().await;
+        if let Some(hook) = self.on_shutdown.take() {
+            hook();
+        }
     }
 }
 

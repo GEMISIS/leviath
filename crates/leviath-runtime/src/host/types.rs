@@ -309,6 +309,14 @@ pub(crate) type ForceTerminator = Box<dyn FnMut(&str) -> bool + Send>;
 /// Installed with [`super::WorldHost::set_reaper`]; a no-op when none is set.
 pub type Reaper = Box<dyn FnMut(&mut PipelineWorld, Entity) + Send>;
 
+/// The daemon-installed hook [`super::WorldHost::serve`] runs once as it
+/// returns, after the world has stopped and every queued write has reached
+/// disk. It is for what outlives the world and has to be cleaned up before
+/// the process exits: the daemon removes the containers its runs still hold
+/// there. Installed with [`super::WorldHost::set_on_shutdown`]; nothing runs
+/// when none is set.
+pub type ShutdownHook = Box<dyn FnOnce() + Send>;
+
 /// The daemon-installed hook run when a run starts moving again: a `Resume`
 /// control op, an answered approval prompt, or a run paged back in from disk.
 /// It receives the world and the agent's entity.
