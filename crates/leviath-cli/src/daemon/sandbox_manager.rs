@@ -308,21 +308,24 @@ impl Teardown {
             (self.destroy)(&sandbox);
             return;
         }
-        if lane.queue.is_none() {
-            let (queue, removals) = std::sync::mpsc::channel::<std::sync::Arc<SandboxManager>>();
-            let destroy = self.destroy.clone();
-            lane.worker = Some(std::thread::spawn(move || {
-                for sandbox in removals {
-                    destroy(&sandbox);
-                }
-            }));
-            lane.queue = Some(queue);
-        }
+        let queue = match lane.queue.take() {
+            Some(queue) => queue,
+            None => {
+                let (queue, removals) =
+                    std::sync::mpsc::channel::<std::sync::Arc<SandboxManager>>();
+                let destroy = self.destroy.clone();
+                lane.worker = Some(std::thread::spawn(move || {
+                    for sandbox in removals {
+                        destroy(&sandbox);
+                    }
+                }));
+                queue
+            }
+        };
         // The thread drains the queue until `finish` drops its sender, so
         // while the lane holds one the send lands.
-        if let Some(queue) = &lane.queue {
-            let _ = queue.send(sandbox);
-        }
+        let _ = queue.send(sandbox);
+        lane.queue = Some(queue);
     }
 
     /// Wait for every queued removal, and run any later one in place.
@@ -560,7 +563,7 @@ mod tests {
         let calls = log.lock().unwrap();
         assert_eq!(calls[0], leviath_sys::container_rm_argv("docker", &name));
         assert_eq!(calls[1][1], "run");
-        assert!(calls[1].contains(&name), "{:?}", calls[1]);
+        assert!(calls[1].contains(&name));
     }
 
     #[test]
@@ -882,12 +885,7 @@ mod tests {
         let calls = log.lock().unwrap();
         assert_eq!(calls.len(), 2, "{calls:?}");
         assert_eq!(&calls[0][..3], ["docker", "rm", "-f"]);
-        assert_eq!(
-            calls[0].len(),
-            5,
-            "both docker containers in one: {:?}",
-            calls[0]
-        );
+        assert_eq!(calls[0].len(), 5, "both docker containers in one command");
         assert_eq!(&calls[1][..3], ["podman", "rm", "-f"]);
         assert_eq!(calls[1].len(), 4);
         // Nothing to remove runs nothing.
