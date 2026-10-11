@@ -714,16 +714,19 @@ impl Run {
         #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
     ) -> async_graphql::Result<Connection<FileEntry, FileListingExtras>> {
         let state = ctx.data_unchecked::<AppState>();
-        let registry = state.current_config().await.mime_registry_or_defaults();
+        let config = Arc::clone(&state.config);
         let meta = Arc::clone(&self.meta);
         let dir = path.map(std::path::PathBuf::from);
-        // Dot-prefixed entries are always included now: a filter on `name` is
-        // how a client leaves them out, rather than a second argument saying
-        // the same thing a second way.
-        let listed =
-            blocking(move || files::listing(&meta, source.into(), dir.as_deref(), true, &registry))
-                .await
-                .gql()?;
+        // Dot-prefixed entries are always included: a filter on `name` is how
+        // a client leaves them out, rather than a second argument saying the
+        // same thing a second way. The registry is built on the blocking pool
+        // too, since it reads files and compiles checks.
+        let listed = blocking(move || {
+            let registry = config.check().config.mime_registry_or_defaults();
+            files::listing(&meta, source.into(), dir.as_deref(), true, &registry)
+        })
+        .await
+        .gql()?;
         let (items, extras) = super::run_files::split(listed);
         let limit = page(first, files::MAX_LISTING_ENTRIES, "the files page cap").gql()?;
         let filter = filter.unwrap_or_default();
@@ -763,14 +766,17 @@ impl Run {
         #[graphql(desc = "Byte offset to start at.", default = 0)] offset: i32,
     ) -> async_graphql::Result<FileWindow> {
         let state = ctx.data_unchecked::<AppState>();
-        let registry = state.current_config().await.mime_registry_or_defaults();
         let offset = u64::try_from(offset)
             .map_err(|_| ServeError::BadRequest("`offset` cannot be negative".to_string()))
             .gql()?;
+        let config = Arc::clone(&state.config);
         let meta = Arc::clone(&self.meta);
-        let read = blocking(move || files::read(&meta, &path, offset, false, &registry))
-            .await
-            .gql()?;
+        let read = blocking(move || {
+            let registry = config.check().config.mime_registry_or_defaults();
+            files::read(&meta, &path, offset, false, &registry)
+        })
+        .await
+        .gql()?;
         match read {
             files::FileRead::Window(window) => Ok(FileWindow::from(window)),
             // A directory has no text to return, and this field promises text.
