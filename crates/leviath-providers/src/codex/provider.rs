@@ -135,11 +135,7 @@ impl CodexProvider {
 
     /// The plan tier behind the grant, when it is known.
     fn plan(&self) -> Option<String> {
-        let grant = self.tokens.grant()?;
-        // The stored tier first, then the id token's: a refresh re-reads the
-        // claims, so the two agree, and a grant written before the field
-        // existed still has the token to read.
-        grant.plan_type.clone().or_else(|| grant.claims().plan_type)
+        plan_of(self.tokens.grant())
     }
 
     /// Send one request, refreshing once if the token has lapsed.
@@ -310,6 +306,14 @@ const VERBOSITIES: [&str; 3] = ["low", "medium", "high"];
 ///
 /// Matched on the model name as well as the phrase, so a body that happens to
 /// quote the sentence about a different model is not mistaken for this one.
+/// The plan tier `grant` carries: the stored tier first, then the id
+/// token's. A refresh re-reads the claims, so the two agree, and a grant
+/// written before the field existed still has the token to read.
+fn plan_of(grant: Option<crate::oauth::ProviderGrant>) -> Option<String> {
+    let grant = grant?;
+    grant.plan_type.clone().or_else(|| grant.claims().plan_type)
+}
+
 fn plan_gated(body: &str, model: &str) -> bool {
     body.contains("is not supported when using Codex with a ChatGPT account")
         && body.contains(model)
@@ -396,8 +400,9 @@ impl Provider for CodexProvider {
         // network at all in the common case. Only an unreadable token sends us
         // to the usage route, and a failure there is a warning: a provider that
         // cannot reach its own API degrades to its table rather than stopping
-        // the daemon.
-        let plan = match self.plan() {
+        // the daemon. The grant is read off the async workers, and that read
+        // fills the cache the synchronous model lookups answer from.
+        let plan = match plan_of(self.tokens.grant_off_worker().await) {
             Some(plan) => Some(plan),
             None => self.quota().await.ok().and_then(|q| q.plan_type),
         };
