@@ -317,6 +317,12 @@ Nothing is uploaded when:
   `lev setup` ("Upload media to provider file storage") and is `--file-uploads false` headlessly.
 - **the run's store keeps nothing on disk**, as an embedder's in-memory store does, since there
   would be no record to delete the uploads from.
+- **an upload to that provider failed in the last ten minutes.** A gateway without file storage
+  refuses every upload, so after one failure the run sends that provider's parts inline without
+  asking, and asks again once the ten minutes are up. Parts it already holds are still named by id.
+
+An upload gets at most half the time the model call has left. One that gets no answer in that time
+fails like any other, and the call goes out with the part inline.
 
 A part sent inline is held to the provider's inline limits. One over a limit reaches the model
 as its stand-in with the reason, and when the provider could have stored it, why it was not

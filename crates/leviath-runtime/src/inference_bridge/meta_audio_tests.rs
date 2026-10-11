@@ -87,6 +87,8 @@ fn setup(fail: bool, route: bool, why_inline: &'static str) -> Setup {
     let files = route.then(|| crate::provider_files::FileRoute {
         provider: meta.clone(),
         provider_name: "meta".into(),
+        store: store.clone(),
+        run_id: "run-1".into(),
         ledger: store
             .run_dir("run-1")
             .unwrap()
@@ -151,7 +153,12 @@ async fn every_muse_spark_audio_part_goes_by_file_id_however_small() {
         request,
         _dir,
     } = setup(false, true, "");
-    let request = hydration.apply(request).await;
+    let request = hydration
+        .apply(
+            request,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+        )
+        .await;
     let parts = wire(&request);
     let audio: Vec<_> = parts
         .iter()
@@ -179,7 +186,12 @@ async fn audio_that_cannot_be_uploaded_is_refused_and_never_sent_inline() {
         request,
         _dir,
     } = setup(false, false, "[providers] file_uploads is off");
-    let request = hydration.apply(request).await;
+    let request = hydration
+        .apply(
+            request,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+        )
+        .await;
     assert!(meta.uploads.lock().unwrap().is_empty());
     let parts = wire(&request);
     assert!(
@@ -218,7 +230,12 @@ async fn audio_that_cannot_be_uploaded_is_refused_and_never_sent_inline() {
         request,
         _dir,
     } = setup(true, true, "");
-    let request = hydration.apply(request).await;
+    let request = hydration
+        .apply(
+            request,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+        )
+        .await;
     assert!(meta.uploads.lock().unwrap().is_empty());
     let parts = wire(&request);
     assert!(

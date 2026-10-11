@@ -13,9 +13,14 @@ use leviath_providers::{
 /// A provider that keeps what it is sent, and can be told to refuse.
 #[derive(Default)]
 struct Storage {
+    /// Every upload asked for, answered or not.
+    attempts: AtomicUsize,
     uploads: AtomicUsize,
     deletes: AtomicUsize,
     refuse_uploads: bool,
+    /// Uploads never answer, like a host that takes the connection and
+    /// says nothing.
+    silent_uploads: bool,
     refuse_deletes: bool,
     no_files: bool,
     names: Mutex<Vec<String>>,
@@ -45,6 +50,10 @@ impl Provider for Storage {
         }
     }
     async fn upload_file(&self, upload: &FileUpload) -> leviath_providers::Result<RemoteFile> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        if self.silent_uploads {
+            std::future::pending::<()>().await;
+        }
         if self.refuse_uploads {
             return Err(ProviderError::ApiError("HTTP 500".into()));
         }
@@ -126,9 +135,16 @@ fn route(run: &Run, provider: Arc<dyn Provider>) -> FileRoute {
     FileRoute {
         provider,
         provider_name: "anthropic".into(),
+        store: run.store.clone(),
+        run_id: "run-1".into(),
         ledger: run.run_dir.join(LEDGER_FILE),
         ttl_secs: 3_600,
     }
+}
+
+/// A call deadline a test's uploads never come near.
+fn far() -> tokio::time::Instant {
+    tokio::time::Instant::now() + std::time::Duration::from_secs(60)
 }
 
 fn remote_ids(request: &InferenceRequest) -> Vec<Option<String>> {
@@ -162,16 +178,7 @@ async fn a_part_uploads_once_and_every_later_request_names_it() {
         pdf.clone(),
         obj,
     ]);
-    let uploaded = attach(
-        &mut first,
-        &route,
-        &vision(),
-        &run.registry,
-        &run.store,
-        "run-1",
-        false,
-    )
-    .await;
+    let uploaded = attach(&mut first, &route, &vision(), &run.registry, false, far()).await;
     assert_eq!(uploaded, 1, "the same part twice is one upload");
     assert_eq!(
         remote_ids(&first),
@@ -182,16 +189,7 @@ async fn a_part_uploads_once_and_every_later_request_names_it() {
 
     let mut second = request(vec![pdf.clone()]);
     assert_eq!(
-        attach(
-            &mut second,
-            &route,
-            &vision(),
-            &run.registry,
-            &run.store,
-            "run-1",
-            false
-        )
-        .await,
+        attach(&mut second, &route, &vision(), &run.registry, false, far()).await,
         0
     );
     assert_eq!(remote_ids(&second), [Some("file-0".into())]);
@@ -215,16 +213,7 @@ async fn a_part_uploads_once_and_every_later_request_names_it() {
         reasoning: None,
     };
     assert_eq!(
-        attach(
-            &mut refused,
-            &route,
-            &vision(),
-            &run.registry,
-            &run.store,
-            "run-1",
-            true
-        )
-        .await,
+        attach(&mut refused, &route, &vision(), &run.registry, true, far()).await,
         1
     );
     assert_eq!(
@@ -278,9 +267,8 @@ async fn a_failed_upload_goes_inline_and_a_provider_without_files_is_skipped() {
             &route(&run, refusing),
             &vision(),
             &run.registry,
-            &run.store,
-            "run-1",
-            false
+            false,
+            far()
         )
         .await,
         0
@@ -299,9 +287,8 @@ async fn a_failed_upload_goes_inline_and_a_provider_without_files_is_skipped() {
             &route(&run, without),
             &vision(),
             &run.registry,
-            &run.store,
-            "run-1",
-            false
+            false,
+            far()
         )
         .await,
         0
@@ -317,13 +304,130 @@ async fn a_failed_upload_goes_inline_and_a_provider_without_files_is_skipped() {
             &route(&run, Arc::new(gone)),
             &vision(),
             &run.registry,
-            &run.store,
-            "run-1",
-            false
+            false,
+            far()
         )
         .await,
         0
     );
+}
+
+/// A part whose bytes are already named by a file id the vendor lost.
+fn named_gone(block: &ContentBlock) -> ContentBlock {
+    let mut block = block.clone();
+    if let ContentBlock::Mime { remote, .. } = &mut block {
+        *remote = Some(RemoteFile {
+            id: "gone".into(),
+            uri: None,
+            expires_at: None,
+        });
+    }
+    block
+}
+
+/// A provider whose upload failed is not asked again for a while: the rest
+/// of the request and every later call of the run send their parts inline
+/// without a round trip each. A renewal still asks, since only an upload
+/// mends a file the vendor lost, and once the pause is up a success ends it.
+#[tokio::test]
+async fn a_failed_upload_pauses_the_providers_uploads_for_the_run() {
+    let run = run();
+    std::fs::create_dir_all(&run.run_dir).unwrap();
+    let pdf = |text: &str| {
+        stored(
+            &run,
+            "application/pdf",
+            format!("%PDF-1.7 {text}").as_bytes(),
+            None,
+        )
+    };
+    let refusing = Arc::new(Storage {
+        refuse_uploads: true,
+        ..Storage::default()
+    });
+    let paused = route(&run, refusing.clone());
+    let mut first = request(vec![pdf("a"), pdf("b")]);
+    let uploaded = attach(&mut first, &paused, &vision(), &run.registry, false, far()).await;
+    assert_eq!(uploaded, 0);
+    assert_eq!(remote_ids(&first), [None, None]);
+    assert_eq!(
+        refusing.attempts.load(Ordering::SeqCst),
+        1,
+        "the part after a failure is not tried"
+    );
+    let ledger = run.run_dir.join(LEDGER_FILE);
+    assert!(load(&ledger).refusing("anthropic", now_secs()));
+
+    let mut later = request(vec![pdf("c")]);
+    attach(&mut later, &paused, &vision(), &run.registry, false, far()).await;
+    assert_eq!(
+        refusing.attempts.load(Ordering::SeqCst),
+        1,
+        "a later call asks nobody"
+    );
+    assert_eq!(remote_ids(&later), [None]);
+
+    let mut renewal = request(vec![named_gone(&pdf("d")), named_gone(&pdf("e"))]);
+    attach(&mut renewal, &paused, &vision(), &run.registry, true, far()).await;
+    assert_eq!(refusing.attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        remote_ids(&renewal),
+        [None, None],
+        "both go inline, the second without asking"
+    );
+
+    // The pause is up: the provider is asked, and its answer ends the pause.
+    let mut held = load(&ledger);
+    held.refused[0].until = now_secs();
+    save(&ledger, &held);
+    let working = Arc::new(Storage::default());
+    let mut next = request(vec![pdf("f")]);
+    let uploaded = attach(
+        &mut next,
+        &route(&run, working.clone()),
+        &vision(),
+        &run.registry,
+        false,
+        far(),
+    )
+    .await;
+    assert_eq!(uploaded, 1);
+    assert_eq!(remote_ids(&next), [Some("file-0".into())]);
+    assert!(load(&ledger).refused.is_empty());
+    let written = std::fs::read_to_string(&ledger).unwrap();
+    assert!(!written.contains("refused"), "{written}");
+}
+
+/// A host that takes an upload and never answers gets half the time the
+/// call has left, not all of it: the call still goes out, its part inline,
+/// and the provider is paused like any other failure.
+#[tokio::test]
+async fn an_upload_that_never_answers_gives_up_at_half_the_call_time() {
+    let run = run();
+    std::fs::create_dir_all(&run.run_dir).unwrap();
+    let silent = Arc::new(Storage {
+        silent_uploads: true,
+        ..Storage::default()
+    });
+    let mut req = request(vec![stored(&run, "application/pdf", b"%PDF-1.7 s", None)]);
+    let started = tokio::time::Instant::now();
+    let deadline = started + std::time::Duration::from_millis(600);
+    let uploaded = attach(
+        &mut req,
+        &route(&run, silent),
+        &vision(),
+        &run.registry,
+        false,
+        deadline,
+    )
+    .await;
+    assert_eq!(uploaded, 0);
+    assert!(
+        tokio::time::Instant::now() < deadline,
+        "the upload gave up before the call's deadline"
+    );
+    assert_eq!(remote_ids(&req), [None]);
+    assert!(load(&run.run_dir.join(LEDGER_FILE)).refusing("anthropic", now_secs()));
 }
 
 #[tokio::test]
@@ -350,9 +454,8 @@ async fn an_expiring_entry_is_uploaded_again_and_a_bad_ledger_starts_afresh() {
         &route(&run, storage.clone()),
         &vision(),
         &run.registry,
-        &run.store,
-        "run-1",
         false,
+        far(),
     )
     .await;
     assert_eq!(remote_ids(&req), [Some("file-0".into())]);
@@ -369,9 +472,8 @@ async fn an_expiring_entry_is_uploaded_again_and_a_bad_ledger_starts_afresh() {
         &route(&run, storage),
         &vision(),
         &run.registry,
-        &run.store,
-        "run-1",
         false,
+        far(),
     )
     .await;
     assert_eq!(remote_ids(&again), [Some("file-1".into())]);
@@ -523,7 +625,7 @@ fn a_route_needs_file_storage_the_switch_no_zero_retention_and_a_run_dir() {
         "anthropic",
         &files,
         &allowed,
-        run.store.as_ref(),
+        &run.store,
         "run-1",
         60,
     );
@@ -542,14 +644,14 @@ fn a_route_needs_file_storage_the_switch_no_zero_retention_and_a_run_dir() {
         "anthropic",
         &files,
         &zero,
-        run.store.as_ref(),
+        &run.store,
         "run-1",
         60,
     );
     assert!(route.is_none());
     assert!(why.contains("zero data retention"));
 
-    let memory = leviath_core::mime::MemoryBlobStore::new();
+    let memory: Arc<dyn BlobStore> = Arc::new(leviath_core::mime::MemoryBlobStore::new());
     assert!(
         route_for(
             &storage,
@@ -566,7 +668,7 @@ fn a_route_needs_file_storage_the_switch_no_zero_retention_and_a_run_dir() {
 
     let none = MediaLimits::NONE;
     assert_eq!(
-        route_for(&storage, "x", &none, &zero, run.store.as_ref(), "run-1", 60).1,
+        route_for(&storage, "x", &none, &zero, &run.store, "run-1", 60).1,
         ""
     );
 }
@@ -581,16 +683,7 @@ async fn a_ledger_that_cannot_be_written_leaves_the_upload_in_place() {
     };
     let mut req = request(vec![pdf]);
     assert_eq!(
-        attach(
-            &mut req,
-            &route,
-            &vision(),
-            &run.registry,
-            &run.store,
-            "run-1",
-            false
-        )
-        .await,
+        attach(&mut req, &route, &vision(), &run.registry, false, far()).await,
         1
     );
     assert_eq!(remote_ids(&req), [Some("file-0".into())]);
@@ -613,16 +706,7 @@ async fn an_upload_is_named_with_its_types_extension() {
         stored(&run, "image/png", b"\x89PNG\r\n\x1a\n4", Some("shot.jpg")),
     ]);
     assert_eq!(
-        attach(
-            &mut req,
-            &route,
-            &vision(),
-            &run.registry,
-            &run.store,
-            "run-1",
-            false
-        )
-        .await,
+        attach(&mut req, &route, &vision(), &run.registry, false, far()).await,
         4
     );
     let names = storage.names.lock().unwrap().clone();

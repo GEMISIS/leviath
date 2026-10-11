@@ -804,7 +804,7 @@ pub(crate) fn dispatch_inference(
                         &si.provider_name,
                         &limits,
                         settings,
-                        store.as_ref(),
+                        &store,
                         &state.agent_id,
                         ttl_secs,
                     );
