@@ -8,6 +8,15 @@
 //! config if a reload fails so an edit saved mid-keystroke never breaks a
 //! spawn.
 //!
+//! Looking at the file and reading the config are two different calls. A
+//! [`check`](ConfigReloader::check) is a `stat`, and after a save a read, a
+//! parse and, with keys in the OS keychain, a keychain read that can wait on
+//! a prompt; it runs on tokio's blocking pool, before each spawn and each
+//! `lev serve` request ([`checked`](ConfigReloader::checked)) and every
+//! couple of seconds from the daemon's own watcher. Reading what is in force
+//! ([`in_force`](ConfigReloader::in_force)) never touches the disk, which is
+//! what the world loop every run's tick waits on can afford.
+//!
 //! Provider credentials are rebuilt from the same reloaded config by the
 //! `provider_reload` module beside this one, and `[observability]` by the
 //! `telemetry_reload` module next to that. Settings that live somewhere other
@@ -152,27 +161,49 @@ impl ConfigReloader {
         }
     }
 
-    /// The current spawn-time config: the cached copy when `config.toml` is
-    /// unchanged, or a freshly loaded one when its mtime moved.
+    /// The config in force as of the last [`check`](Self::check), without
+    /// looking at the file.
     ///
-    /// A reload that fails to parse (an edit saved half-written, a syntax
-    /// error) does not fail the caller - it records the fault and returns the
-    /// last good config, so a broken file degrades to "your last saved config"
-    /// rather than a broken spawn. [`health`](Self::health) is how anyone
-    /// finds out that happened. The broken file's mtime is recorded either
-    /// way, so the warning fires once per bad save rather than on every spawn,
-    /// and the next save moves the mtime again and is read.
-    pub(crate) fn current(&self) -> Arc<Config> {
-        self.refresh().config.clone()
+    /// Memory only, so it is what code that must not wait on a disk reads:
+    /// the world loop every run's tick goes through, and anything else that
+    /// cannot await. How fresh it is depends on who checks: the daemon and
+    /// `lev serve` each check on a timer, and a caller that has to see a save
+    /// made a moment ago asks [`checked`](Self::checked) instead.
+    pub(crate) fn in_force(&self) -> Arc<Config> {
+        self.lock().config.clone()
     }
 
-    /// Whether the file on disk loads, and what is running while it does not.
+    /// Look at the file now, reload it if it was saved since the last look,
+    /// and say what is in force.
     ///
-    /// Re-checks the file first, exactly as [`current`](Self::current) does,
-    /// so a caller polling only this still notices a save. Costs one `stat`
-    /// when nothing changed.
-    pub(crate) fn health(&self) -> ConfigHealth {
+    /// A reload that fails to parse (an edit saved half-written, a syntax
+    /// error) does not fail the caller: it records the fault and keeps the
+    /// last good config, so a broken file degrades to "your last saved
+    /// config" rather than a broken spawn, and the health says so. The broken
+    /// file's mtime is recorded either way, so the warning fires once per bad
+    /// save rather than on every check, and the next save moves the mtime
+    /// again and is read.
+    ///
+    /// Blocking: one `stat` when nothing changed, and a read, a parse and,
+    /// with keys in the OS keychain, a keychain read when something did. An
+    /// async caller goes through [`checked`](Self::checked).
+    pub(crate) fn check(&self) -> ConfigHealth {
         let cached = self.refresh();
+        self.health_of(&cached)
+    }
+
+    /// [`check`](Self::check) on tokio's blocking pool, for an async caller
+    /// that has to see a save made a moment ago: a spawn, or a `lev serve`
+    /// request.
+    pub(crate) async fn checked(self: Arc<Self>) -> ConfigHealth {
+        crate::blocking::blocking(move || self.check()).await
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Cached> {
+        self.cache.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn health_of(&self, cached: &Cached) -> ConfigHealth {
         ConfigHealth {
             // A fixed reloader watches no file and can never be unhealthy; the
             // empty path says "there is nothing being watched here".
@@ -186,10 +217,10 @@ impl ConfigReloader {
 
     /// Re-read the file if its mtime moved, and hand back the cache to read.
     ///
-    /// The whole state machine lives here so `current` and `health` cannot
-    /// disagree about whether a save has been seen.
+    /// The whole state machine lives here so a check and a health report
+    /// cannot disagree about whether a save has been seen.
     fn refresh(&self) -> std::sync::MutexGuard<'_, Cached> {
-        let mut cached = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut cached = self.lock();
         let Some(path) = &self.path else {
             // A fixed reloader: nothing to watch.
             return cached;
@@ -363,8 +394,8 @@ mod tests {
         write(&path, &empty_config());
         let reloader = ConfigReloader::new(path.clone(), Config::default());
 
-        let a = reloader.current();
-        let b = reloader.current();
+        let a = reloader.check().config;
+        let b = reloader.check().config;
         // Same Arc: no reload happened.
         assert!(Arc::ptr_eq(&a, &b));
     }
@@ -377,7 +408,8 @@ mod tests {
         let reloader = ConfigReloader::new(path.clone(), Config::default());
         assert!(
             reloader
-                .current()
+                .check()
+                .config
                 .read_path_grants_for_agent("cto")
                 .is_empty()
         );
@@ -387,7 +419,7 @@ mod tests {
         bump_mtime(&path);
 
         // Subscriber active so the "reloaded config" info-log field evaluates.
-        let reloaded = reloader.current();
+        let reloaded = reloader.check().config;
         assert_eq!(
             reloaded.read_path_grants_for_agent("cto"),
             vec!["~/.leviath/runs".to_string()],
@@ -403,13 +435,14 @@ mod tests {
         let reloader = ConfigReloader::new(path.clone(), Config::default());
         assert!(
             reloader
-                .current()
+                .check()
+                .config
                 .read_path_grants_for_agent("cto")
                 .is_empty()
         );
 
         write(&path, &config_with_grant("cto", "~/docs"));
-        let reloaded = reloader.current();
+        let reloaded = reloader.check().config;
         assert_eq!(
             reloaded.read_path_grants_for_agent("cto"),
             vec!["~/docs".to_string()]
@@ -424,7 +457,7 @@ mod tests {
         // Mirror boot: the reloader is seeded with the config already on disk.
         let reloader = ConfigReloader::new(path.clone(), Config::load_from_path(&path).unwrap());
         assert_eq!(
-            reloader.current().read_path_grants_for_agent("cto"),
+            reloader.check().config.read_path_grants_for_agent("cto"),
             vec!["~/good".to_string()]
         );
 
@@ -433,7 +466,7 @@ mod tests {
         bump_mtime(&path);
 
         // Subscriber active so the "failed to reload" warn-log field evaluates.
-        let after = reloader.current();
+        let after = reloader.check().config;
         assert_eq!(
             after.read_path_grants_for_agent("cto"),
             vec!["~/good".to_string()],
@@ -465,16 +498,16 @@ mod tests {
         let recorded = || seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
 
         // The config it was built with is the caller's own; no hook for it.
-        let _ = reloader.current();
+        let _ = reloader.check().config;
         assert!(recorded().is_empty());
 
         let mut tightened = Config::default();
         tightened.security.allow_local_network = true;
         write(&path, &toml::to_string(&tightened).unwrap());
         bump_mtime(&path);
-        let _ = reloader.current();
+        let _ = reloader.check().config;
         // Read again with the file unchanged: still one call.
-        let _ = reloader.current();
+        let _ = reloader.check().config;
         assert_eq!(
             recorded(),
             vec![true],
@@ -485,7 +518,7 @@ mod tests {
         // good side effects too.
         write(&path, "not : : toml");
         bump_mtime(&path);
-        let _ = reloader.current();
+        let _ = reloader.check().config;
         assert_eq!(recorded(), vec![true], "a broken save applies nothing");
     }
 
@@ -498,11 +531,11 @@ mod tests {
         let path = dir.path().join("config.toml");
         write(&path, &config_with_grant("cto", "~/good"));
         let reloader = ConfigReloader::new(path.clone(), Config::load_from_path(&path).unwrap());
-        let good = reloader.current();
+        let good = reloader.check().config;
 
         write(&path, "broken : :");
         bump_mtime(&path);
-        let first = reloader.current();
+        let first = reloader.check().config;
         assert!(
             Arc::ptr_eq(&first, &good),
             "the broken save keeps the config already in force"
@@ -521,7 +554,7 @@ mod tests {
             "the broken file's mtime is recorded, which is what stops the re-read"
         );
         assert!(
-            Arc::ptr_eq(&reloader.current(), &good),
+            Arc::ptr_eq(&reloader.check().config, &good),
             "and the config in force is still the last good one"
         );
     }
@@ -532,17 +565,17 @@ mod tests {
         let path = dir.path().join("config.toml");
         write(&path, &config_with_grant("cto", "~/good"));
         let reloader = ConfigReloader::new(path.clone(), Config::load_from_path(&path).unwrap());
-        let _ = reloader.current();
+        let _ = reloader.check().config;
 
         write(&path, "broken : :");
         bump_mtime(&path);
-        let _ = reloader.current(); // keeps last-good
+        let _ = reloader.check().config; // keeps last-good
 
         // The user fixes it.
         write(&path, &config_with_grant("cto", "~/fixed"));
         bump_mtime(&path);
         assert_eq!(
-            reloader.current().read_path_grants_for_agent("cto"),
+            reloader.check().config.read_path_grants_for_agent("cto"),
             vec!["~/fixed".to_string()]
         );
     }
@@ -560,7 +593,7 @@ mod tests {
         let reloader = seeded(&path);
         let good_mtime = file_mtime(&path);
 
-        let health = reloader.health();
+        let health = reloader.check();
         assert!(health.is_healthy(), "{health:?}");
         assert_eq!(health.path, path);
         assert!(health.since.is_none());
@@ -568,7 +601,7 @@ mod tests {
         write(&path, "broken : :");
         bump_mtime(&path);
 
-        let health = reloader.health();
+        let health = reloader.check();
         assert!(
             !health.is_healthy(),
             "a file that will not parse is not healthy"
@@ -583,7 +616,7 @@ mod tests {
         write(&path, &config_with_grant("cto", "~/fixed"));
         bump_mtime(&path);
 
-        let health = reloader.health();
+        let health = reloader.check();
         assert!(health.is_healthy(), "{health:?}");
         assert!(health.since.is_none(), "recovery clears when it broke");
         assert_ne!(
@@ -601,7 +634,7 @@ mod tests {
 
         write(&path, "default_provider = \"anthropic\"\nbroken : :\n");
         bump_mtime(&path);
-        let fault = reloader.health().fault.expect("a syntax error is a fault");
+        let fault = reloader.check().fault.expect("a syntax error is a fault");
         assert_eq!(fault.line, Some(2), "{fault:?}");
         assert_eq!(fault.column, Some(8), "{fault:?}");
 
@@ -611,7 +644,7 @@ mod tests {
         );
         bump_mtime(&path);
         let fault = reloader
-            .health()
+            .check()
             .fault
             .expect("an endpoint with no address is a fault");
         assert_eq!(fault.key.as_deref(), Some("model_providers.local"));
@@ -634,26 +667,26 @@ mod tests {
         write(&path, "broken : :");
         bump_mtime(&path);
         let broken_mtime = file_mtime(&path).expect("the file is there");
-        assert!(!reloader.health().is_healthy());
+        assert!(!reloader.check().is_healthy());
 
         // Same mtime, different bytes: nothing has "saved", so nothing is read.
         write(&path, &config_with_grant("cto", "~/sneaked"));
         set_mtime(&path, broken_mtime);
         assert!(
-            !reloader.health().is_healthy(),
+            !reloader.check().is_healthy(),
             "a file already judged at this mtime must not be read again"
         );
         assert_eq!(
-            reloader.current().read_path_grants_for_agent("cto"),
+            reloader.check().config.read_path_grants_for_agent("cto"),
             vec!["~/good".to_string()],
             "and the config in force is still the last good one"
         );
 
         // A real save is a new mtime, and is picked up.
         bump_mtime(&path);
-        assert!(reloader.health().is_healthy());
+        assert!(reloader.check().is_healthy());
         assert_eq!(
-            reloader.current().read_path_grants_for_agent("cto"),
+            reloader.check().config.read_path_grants_for_agent("cto"),
             vec!["~/sneaked".to_string()]
         );
     }
@@ -667,12 +700,12 @@ mod tests {
 
         write(&path, "broken : :");
         bump_mtime(&path);
-        let first = reloader.health().since.expect("it broke");
+        let first = reloader.check().since.expect("it broke");
 
         write(&path, "still broken : :");
         bump_mtime(&path);
         assert_eq!(
-            reloader.health().since,
+            reloader.check().since,
             Some(first),
             "a second failed save does not restart the clock"
         );
@@ -715,9 +748,62 @@ mod tests {
     #[test]
     fn a_reloader_with_no_file_to_watch_is_always_healthy() {
         let reloader = ConfigReloader::fixed(Config::default());
-        let health = reloader.health();
+        let health = reloader.check();
         assert!(health.is_healthy());
         assert_eq!(health.path, std::path::PathBuf::new());
         assert!(health.loaded_mtime.is_none());
+    }
+
+    /// Reading what is in force never looks at the file: a save, even a
+    /// broken one, is seen by the next check, and only then by a read. That
+    /// is what lets the world loop read the config without waiting on a disk.
+    #[test]
+    fn a_read_shows_the_last_check_and_a_save_waits_for_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write(&path, &config_with_grant("cto", "~/good"));
+        let reloader = seeded(&path);
+
+        write(&path, "broken : :");
+        bump_mtime(&path);
+        assert_eq!(
+            reloader.in_force().read_path_grants_for_agent("cto"),
+            vec!["~/good".to_string()]
+        );
+
+        write(&path, &config_with_grant("cto", "~/new"));
+        bump_mtime(&path);
+        reloader.check();
+        assert_eq!(
+            reloader.in_force().read_path_grants_for_agent("cto"),
+            vec!["~/new".to_string()]
+        );
+    }
+
+    /// The async check reads and parses on the blocking pool, so a `lev
+    /// serve` request or a spawn that finds a save never parses it (or waits
+    /// on a keychain prompt) on an async worker.
+    #[tokio::test]
+    async fn an_async_check_reloads_off_the_calling_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write(&path, &config_with_grant("cto", "~/good"));
+        let seen = Arc::new(Mutex::new(None));
+        let recorder = seen.clone();
+        let reloader = Arc::new(seeded(&path).with_reload_hook(Box::new(move |_| {
+            *recorder.lock().unwrap_or_else(PoisonError::into_inner) =
+                Some(std::thread::current().id());
+        })));
+
+        write(&path, &config_with_grant("cto", "~/new"));
+        bump_mtime(&path);
+        let health = reloader.clone().checked().await;
+        assert_eq!(
+            health.config.read_path_grants_for_agent("cto"),
+            vec!["~/new".to_string()]
+        );
+        let reloaded_on = *seen.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(reloaded_on.is_some(), "the save was reloaded");
+        assert_ne!(reloaded_on, Some(std::thread::current().id()));
     }
 }

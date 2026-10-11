@@ -246,7 +246,7 @@ pub(super) async fn list_blueprints(
         ),
     };
 
-    let roots = blueprint_roots(&state.current_config());
+    let roots = blueprint_roots(&*state.current_config().await);
     let mut found = super::blocking::blocking(move || discover_in(roots)).await;
 
     // `q` shares the search primitive but not the framework: three in-memory
@@ -328,7 +328,7 @@ pub(super) async fn get_blueprint(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<BlueprintDetail>, StatusCode> {
-    let roots = blueprint_roots(&state.current_config());
+    let roots = blueprint_roots(&*state.current_config().await);
     let blueprints = super::blocking::blocking(move || discover_in(roots)).await;
     let mut info = blueprints
         .into_iter()

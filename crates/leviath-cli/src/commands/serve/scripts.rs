@@ -926,7 +926,7 @@ pub(super) async fn list_scripts(
 ) -> Result<Json<ScriptsResp>, ApiError> {
     let candidates =
         wants_candidates(q.include.as_deref()).map_err(|e| super::core::error::as_api_error(&e))?;
-    let config = state.current_config();
+    let config = state.current_config().await;
     // Resolved on this task, walked on the blocking pool.
     let dirs = AgentDirs::of(&config);
     let scripts = super::blocking::blocking(move || {
@@ -975,7 +975,7 @@ pub(super) async fn get_script(
     AxumPath((kind, name)): AxumPath<(String, String)>,
     Query(q): Query<ScriptQuery>,
 ) -> Result<Json<ScriptSource>, ApiError> {
-    let dirs = AgentDirs::of(&state.current_config());
+    let dirs = AgentDirs::of(&*state.current_config().await);
     super::blocking::blocking(move || read_one(&dirs, &kind, &name, q.agent.as_deref()))
         .await
         .map(Json)
@@ -1041,7 +1041,7 @@ pub(super) async fn put_script(
     Query(q): Query<ScriptQuery>,
     Json(body): Json<WriteScriptReq>,
 ) -> Result<Json<ScriptWritten>, ApiError> {
-    let dirs = AgentDirs::of(&state.current_config());
+    let dirs = AgentDirs::of(&*state.current_config().await);
     super::blocking::blocking(move || {
         write_one(&dirs, &kind, &name, q.agent.as_deref(), &body.content)
     })
@@ -1099,7 +1099,7 @@ pub(super) async fn delete_script(
     AxumPath((kind, name)): AxumPath<(String, String)>,
     Query(q): Query<ScriptQuery>,
 ) -> Result<StatusCode, ApiError> {
-    let dirs = AgentDirs::of(&state.current_config());
+    let dirs = AgentDirs::of(&*state.current_config().await);
     super::blocking::blocking(move || remove_one(&dirs, &kind, &name, q.agent.as_deref()))
         .await
         .map(|()| StatusCode::NO_CONTENT)

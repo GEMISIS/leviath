@@ -310,7 +310,7 @@ pub(crate) fn run_on_disk(
 ) -> String {
     let starter = starter(config, registry, runs);
     let request = task_request(manifest, "carry on");
-    let env = starter.env_for(&request, starter.config.current());
+    let env = starter.env_for(&request, starter.config.check().config);
     let prepared =
         crate::daemon::block_on::block_on(starter.start_with(env, request, Caller::TopLevel))
             .expect("the run starts");

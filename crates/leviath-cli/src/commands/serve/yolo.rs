@@ -177,7 +177,7 @@ pub(super) fn decided(
         allowed: req.allowed,
         json: true,
     };
-    let config = state.config.current();
+    let config = state.config.check().config;
     let configured = crate::commands::yolo::configured_policy(&args, Some(&config))
         .map_err(|e| ServeError::BadRequest(e.to_string()))?;
     crate::commands::yolo::decision_json(&profile, &args, configured)

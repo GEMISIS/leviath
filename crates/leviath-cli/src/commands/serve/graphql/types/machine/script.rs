@@ -116,13 +116,13 @@ impl Script {
     async fn content(&self, ctx: &Context<'_>) -> async_graphql::Result<String> {
         let state = ctx.data_unchecked::<super::super::super::super::types::AppState>();
         // Resolved on this task, read off the disk on the blocking pool.
-        let dirs = super::super::super::super::tools::AgentDirs::of(&state.current_config());
+        let dirs = super::super::super::super::tools::AgentDirs::of(&*state.current_config().await);
         let (kind, name, owner) = (
             self.kind.wire(),
             self.name.clone(),
             self.blueprint_name.clone(),
         );
-        let source = crate::commands::serve::blocking::blocking(move || {
+        let source = crate::blocking::blocking(move || {
             super::super::super::super::scripts::read_one(&dirs, kind, &name, owner.as_deref())
         })
         .await

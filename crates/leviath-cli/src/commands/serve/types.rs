@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use super::artifact_types::ArtifactResp;
 use super::events::Stamped;
 use crate::config::Config;
-use crate::daemon::config_reload::ConfigReloader;
+use crate::daemon::config_reload::{ConfigHealth, ConfigReloader};
 
 /// A query parameter that is on when it is there and says so: `?flag=1`,
 /// `?flag=true`, `?flag=yes` or `?flag=on`, and off otherwise.
@@ -84,10 +84,22 @@ pub(crate) struct AppState {
 impl AppState {
     /// The config as it is on disk right now.
     ///
-    /// Every handler reads it through here rather than holding one, so an edit
-    /// - through this API or from outside - is visible to the next request.
-    pub(super) fn current_config(&self) -> Arc<Config> {
-        self.config.current()
+    /// Every handler reads it through here rather than holding one, so an edit,
+    /// through this API or from outside, is visible to the next request.
+    ///
+    /// The file is looked at on the blocking pool: one `stat` when it has not
+    /// changed, and a read and a parse (with keys in the OS keychain, a
+    /// keychain read too) when it has. Code already on the blocking pool asks
+    /// the reloader's own `check`.
+    pub(super) async fn current_config(&self) -> Arc<Config> {
+        self.config_health().await.config
+    }
+
+    /// [`current_config`](Self::current_config) together with whether the
+    /// file loads, from one look at it, so the two halves of an answer that
+    /// carries both cannot disagree about whether a save has been seen.
+    pub(super) async fn config_health(&self) -> ConfigHealth {
+        self.config.clone().checked().await
     }
 }
 

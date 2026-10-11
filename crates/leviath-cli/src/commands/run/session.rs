@@ -576,6 +576,10 @@ pub(crate) fn script_provider_config(
 /// `[model_providers.<name>]` reaches the next provider load without a daemon
 /// restart - the same way an edit to the `.rhai` file beside it does.
 ///
+/// It reads the config in force rather than looking at the file: the layer
+/// asks from the world loop's systems, which must not wait on a disk. The
+/// daemon's spawns and its config watcher do the looking.
+///
 /// Memoised on the identity of the config the reloader hands back, which is a
 /// requirement rather than an optimisation: the layer's cache compares its
 /// stored config by pointer, so deriving a fresh one per call would recompile
@@ -596,7 +600,7 @@ pub(crate) fn script_provider_config_source(
     >;
     let memo: Memo = Mutex::new(None);
     Box::new(move || {
-        let current = reloader.current();
+        let current = reloader.in_force();
         let mut memo = memo.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some((from, derived)) = memo.as_ref()
             && Arc::ptr_eq(from, &current)
@@ -811,7 +815,7 @@ mod tests {
             path.clone(),
             Config::default(),
         ));
-        let source = script_provider_config_source(reloader);
+        let source = script_provider_config_source(reloader.clone());
 
         let first = source();
         assert!(
@@ -837,7 +841,12 @@ mod tests {
             .unwrap()
             .set_modified(later)
             .unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &source()),
+            "the source reads what is in force, and nothing has looked yet"
+        );
 
+        reloader.check();
         let after = source();
         assert!(
             !std::sync::Arc::ptr_eq(&first, &after),

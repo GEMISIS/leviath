@@ -24,6 +24,7 @@
 
 pub(crate) mod approvals;
 pub(crate) mod blobs;
+pub(crate) mod blocking;
 pub(crate) mod blueprint_edit;
 pub(crate) mod blueprint_upgrade;
 pub(crate) mod bundled;

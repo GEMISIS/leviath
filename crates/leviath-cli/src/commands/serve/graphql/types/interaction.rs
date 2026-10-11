@@ -20,7 +20,7 @@ use super::super::error::IntoGraphql;
 use super::super::filter::MatchCx;
 use super::super::paging::page::page;
 use super::super::scalars::{Cursor, Timestamp};
-use crate::commands::serve::blocking::blocking;
+use crate::blocking::blocking;
 use crate::commands::serve::core::error::ServeError;
 use crate::commands::serve::core::interactions;
 use crate::commands::serve::cursor;

@@ -242,7 +242,7 @@ pub(super) async fn list_providers(
 /// have two answers. `grants` is the store [`admin_paths`](super::mcp::admin_paths)
 /// names, resolved by the caller on its own task.
 pub(super) fn provider_infos(state: &AppState, grants: &std::path::Path) -> Vec<ProviderInfo> {
-    let config = state.current_config();
+    let config = state.config.check().config;
     // Read once, not once per row: this is a file, and the answer is the same
     // for every provider in it.
     let store = leviath_providers::oauth::ProviderAuthStore::load(grants).ok();
@@ -262,7 +262,7 @@ pub(super) async fn listing_with(
     state: &AppState,
     query: &ListQuery,
 ) -> (HeaderMap, Json<serde_json::Value>) {
-    let config = state.current_config();
+    let config = state.current_config().await;
     // The grant store's location comes from `admin_paths` rather than from
     // `state`; see `ProviderAdmin`.
     let grants = super::mcp::admin_paths().grants;
@@ -361,7 +361,7 @@ pub(super) fn described(
     id: &str,
     display: &str,
 ) -> ProviderInfo {
-    let config = state.current_config();
+    let config = state.config.check().config;
     let store = leviath_providers::oauth::ProviderAuthStore::load(grants).ok();
     let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
     describe(id, display, &config, store.as_ref(), &in_flight)
@@ -593,7 +593,7 @@ pub(super) async fn checked(
     state: &AppState,
     name: &str,
 ) -> Result<Vec<String>, super::core::error::ServeError> {
-    let config = state.current_config();
+    let config = state.current_config().await;
     let mut options = crate::commands::run::session::signin_options(&config, name);
     // The authorizer's path, not the default one it usually resolves to: the
     // sign-in wrote there, and a check that read somewhere else would report

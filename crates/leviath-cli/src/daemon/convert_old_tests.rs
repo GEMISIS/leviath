@@ -177,7 +177,7 @@ async fn an_old_run_found_on_resume_converts_against_the_daemon() {
     // It recorded no child-run limit, so it has the operator's default.
     use leviath_runtime::spec::env::ResolveEnv;
     let default = starter
-        .env_for_graph(&run.spec().graph, starter.config.current())
+        .env_for_graph(&run.spec().graph, starter.config.check().config)
         .limits()
         .default_max_depth;
     assert!(default > 0);

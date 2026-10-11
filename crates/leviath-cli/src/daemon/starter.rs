@@ -247,7 +247,6 @@ impl DaemonStarter {
             mcp_defs.extend(self.mcp_pool.cached_defs_for(&servers));
             mcp_owners.extend(self.mcp_pool.cached_owners_for(&servers));
         }
-        self.policy.refresh();
         DaemonEnv {
             mime: Arc::new(config.mime_registry_or_defaults()),
             config,
@@ -363,7 +362,7 @@ impl DaemonStarter {
         request: SpawnRequest,
         caller: Caller,
     ) -> Result<PreparedRun, SpawnIssues> {
-        let config = self.config.current();
+        let config = self.checked_config().await;
         self.warm(&request, &config).await;
         let env = self.env_for(&request, config);
         self.start_with(env, request, caller).await
@@ -375,22 +374,44 @@ impl DaemonStarter {
         request: SpawnRequest,
         caller: Caller,
     ) -> Result<SpawnSummary, SpawnIssues> {
-        let config = self.config.current();
+        let config = self.checked_config().await;
         self.warm(&request, &config).await;
         let env = self.env_for(&request, config);
         let resolved = resolve(&request, &caller, &env, ResolveMode::Check).await?;
         Ok(SpawnSummary::of(&resolved.spec))
     }
 
-    /// Bring the settings that live on the world up to date with the config
-    /// before a run is placed: the provider set its stages resolved against,
-    /// the taint policy, the telemetry exporter and the limits.
+    /// `config.toml` as it is on disk now, and everything the world takes
+    /// from it and from the taint policy's files prepared for
+    /// [`refresh_world`](Self::refresh_world): all of it read on the blocking
+    /// pool, so neither this async worker nor the world loop waits on a disk.
+    pub(crate) async fn checked_config(&self) -> Arc<crate::config::Config> {
+        let config = self.config.clone().checked().await.config;
+        let (limits, policy, telemetry, prepared) = (
+            self.limits.clone(),
+            self.policy.clone(),
+            self.telemetry.clone(),
+            config.clone(),
+        );
+        crate::blocking::blocking(move || {
+            limits.prepare(&prepared);
+            policy.refresh();
+            telemetry.prepare(&prepared.observability);
+        })
+        .await;
+        config
+    }
+
+    /// Bring the settings that live on the world up to date before a run is
+    /// placed: the provider set its stages resolved against, the taint policy,
+    /// the telemetry exporter and the limits, as the last
+    /// [`checked_config`](Self::checked_config) (or the daemon's config
+    /// watcher) prepared them. On the world loop, so memory only.
     pub(crate) fn refresh_world(&self, world: &mut leviath_runtime::PipelineWorld) {
-        let config = self.config.current();
         self.providers.install(world);
-        self.policy.refresh_into(world);
-        self.telemetry.refresh_into(world, &config.observability);
-        self.limits.apply(&config, world);
+        self.policy.install(world);
+        self.telemetry.install(world);
+        self.limits.install(world);
     }
 }
 

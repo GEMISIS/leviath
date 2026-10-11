@@ -328,7 +328,7 @@ async fn the_tree_of_runs_is_linked_back_together() {
     let recorder = starter(Config::default(), registry(), runs.path());
     let child_of = |parent: &str| {
         let request = task_request(&manifest, "a child");
-        let env = recorder.env_for(&request, recorder.config.current());
+        let env = recorder.env_for(&request, recorder.config.check().config);
         let caller = Caller::Child {
             parent: leviath_runtime::spec::names::RunId::new(parent).unwrap(),
             policy: leviath_runtime::spec::launch::LaunchPolicy {

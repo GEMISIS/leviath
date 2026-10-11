@@ -201,7 +201,7 @@ pub(super) async fn list_tools(
     Query(q): Query<ToolsQuery>,
 ) -> Result<Json<ToolsResp>, ApiError> {
     // Resolved on this task, walked on the blocking pool.
-    let dirs = AgentDirs::of(&state.current_config());
+    let dirs = AgentDirs::of(&*state.current_config().await);
     let inventory = super::blocking::blocking(move || inventory(&dirs, q.agent.as_deref()))
         .await
         .map_err(|e| super::core::error::as_api_error(&e))?;

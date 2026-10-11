@@ -35,12 +35,12 @@ pub(crate) async fn update_config(
     state
         .caches
         .model_catalog
-        .request_refresh(state.current_config(), true);
+        .request_refresh(state.current_config().await, true);
     Ok(UpdateConfigResult {
         config: super::super::query::config_of(
             &written,
             &state.limits.request_limits,
-            &state.config.health(),
+            &state.config_health().await,
             // True by construction: this mutation is behind the guard.
             true,
             super::super::query::machine::yolo_file().await,

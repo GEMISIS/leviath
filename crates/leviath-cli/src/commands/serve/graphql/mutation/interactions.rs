@@ -179,7 +179,7 @@ pub(crate) async fn answer_interaction(
         // failures, a held run's question among them, stay failures.
         Err(ServeError::NotFound(_)) => {
             let id = interaction_id.to_string();
-            match crate::commands::serve::blocking::blocking(move || asked_here(&id)).await {
+            match crate::blocking::blocking(move || asked_here(&id)).await {
                 true => Ok(AnswerInteractionResult {
                     interaction_id,
                     outcome: AnswerOutcome::AlreadySettled,

@@ -47,7 +47,7 @@ pub(super) async fn get_update(State(state): State<AppState>) -> Json<serde_json
     // The config is read per request rather than at startup, so turning the
     // check off takes effect on the next page load instead of on the next
     // restart - the same way every other setting this server reads behaves.
-    if state.current_config().update_check {
+    if state.current_config().await.update_check {
         state
             .update_check
             .read_and_maybe_refresh(plan.method.channel(), API_VERSION);

@@ -99,7 +99,7 @@ pub(super) async fn declared_inputs(
     state: &AppState,
     name: &str,
 ) -> Result<Vec<leviath_runtime::spec::inputs::InputDecl>, ServeError> {
-    let roots = super::blueprints::blueprint_roots(&state.current_config());
+    let roots = super::blueprints::blueprint_roots(&*state.current_config().await);
     let listed = super::blocking::blocking(move || super::blueprints::discover_in(roots)).await;
     let found = listed
         .into_iter()

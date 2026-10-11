@@ -259,7 +259,7 @@ pub(super) async fn get_blob(
         .unwrap_or_default()
         .into_iter()
         .find(|b| b.sha256 == sha256);
-    let registry = state.current_config().mime_registry_or_defaults();
+    let registry = state.current_config().await.mime_registry_or_defaults();
     let mime_type = known
         .as_ref()
         .and_then(|b| MimeType::parse(&b.mime_type).ok())
@@ -331,7 +331,7 @@ pub(super) async fn raw_file(
             ))
         })?,
     };
-    let registry = state.current_config().mime_registry_or_defaults();
+    let registry = state.current_config().await.mime_registry_or_defaults();
     let mime_type = registry.resolve(None, Some(&name), &bytes);
     bytes_response(
         bytes,
@@ -472,7 +472,7 @@ pub(super) async fn list_mime(State(state): State<AppState>) -> Json<MimeListing
 /// The operator's registry rows, before any blueprint's own. Both surfaces
 /// read them here.
 pub(super) fn mime_rows(state: &AppState) -> Vec<MimeTypeEntry> {
-    registry_rows(&state.current_config().mime_registry_or_defaults())
+    registry_rows(&state.config.check().config.mime_registry_or_defaults())
 }
 
 /// One row of the effective registry, by its key.

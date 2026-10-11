@@ -9,7 +9,7 @@
 use async_graphql::{Enum, OneofObject, SimpleObject};
 use leviath_graphql_derive::mirror;
 
-use crate::commands::serve::blocking::blocking;
+use crate::blocking::blocking;
 use crate::commands::serve::core::error::ServeError;
 use crate::commands::serve::core::history;
 use crate::commands::serve::cursor;
@@ -155,7 +155,7 @@ pub(crate) async fn tail_logs(
             .min(MAX_LOG_TAIL_BYTES),
     };
     let run_id = run_id.to_string();
-    Ok(crate::commands::serve::blocking::blocking(move || {
+    Ok(crate::blocking::blocking(move || {
         crate::runstate::tail_run_logs(&run_id, selector, stream, bytes)
     })
     .await)
