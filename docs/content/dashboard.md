@@ -505,6 +505,7 @@ On the graph:
 | Key | Action |
 |---|---|
 | `←` `→` `↑` `↓` (or `h` `j` `k` `l`) | Select a stage in that direction; `[` / `]` the previous / next in file order |
+| `{` / `}` | Select the previous / next path |
 | `Enter` | Edit the selected stage or path in the inspector |
 | `a` | Add a stage after the selected one (asks its name) |
 | `c` | Connect the selected stage to another, picked from a list (or to itself: a loop) |
