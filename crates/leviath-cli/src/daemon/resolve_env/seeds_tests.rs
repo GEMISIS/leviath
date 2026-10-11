@@ -78,7 +78,7 @@ fn seed_in(
     seed: &Seed,
     commands: bool,
 ) -> Result<String, String> {
-    run_seed(env, seed, run.cx(workdir, commands))
+    run_seed(&SeedEnv::of(env), seed, run.cx(workdir, commands))
 }
 
 #[tokio::test]
@@ -146,7 +146,7 @@ fn a_blueprint_path_reads_the_files_the_blueprint_ships() {
             blueprint_dir: from,
             ..run.cx(&work, false)
         };
-        run_seed(&env, &seed, cx)
+        run_seed(&SeedEnv::of(&env), &seed, cx)
     };
     let style = Seed::Files(vec![WorkdirPath::new("blueprint:style.md").unwrap()]);
     let read = go(style.clone(), Some(&shipped)).unwrap();
@@ -388,4 +388,21 @@ async fn a_tool_seed_can_call_the_runs_own_script_tools() {
     )
     .unwrap();
     assert!(out.contains("hi from a script"), "{out}");
+}
+
+/// A seed's sandbox is removed once the seed has run, whatever it built: the
+/// run makes its own at bind, under the same name.
+#[test]
+fn a_seeds_sandbox_is_torn_down_once_it_has_run() {
+    tear_down(None);
+    let namespace = leviath_core::sandbox::ToolSandboxConfig {
+        kind: leviath_core::sandbox::SandboxKind::Namespace,
+        on_unavailable: leviath_core::sandbox::OnUnavailable::Warn,
+        ..Default::default()
+    };
+    let built =
+        crate::daemon::sandbox_manager::SandboxManager::build("run-1", vec![namespace], "/w", 0)
+            .unwrap();
+    assert!(built.is_some(), "a namespace sandbox has a manager");
+    tear_down(built.map(Arc::new));
 }

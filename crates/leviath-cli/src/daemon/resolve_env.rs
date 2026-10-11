@@ -438,10 +438,21 @@ impl ResolveEnv for DaemonEnv {
     }
 
     async fn seed(&self, seed: &Seed, cx: SeedCx<'_>) -> Result<SeededContent, String> {
-        seeds::run(self, seed, cx).map(|text| SeededContent {
-            text,
-            parts: Vec::new(),
-        })
+        // A seed reads files, runs a shell command for as long as the script
+        // timeout allows, or calls tools, and a command or tool seed may start
+        // a container first: it runs on the blocking pool, with its own copy
+        // of what it reads.
+        let (env, seed, owned) = (
+            seeds::SeedEnv::of(self),
+            seed.clone(),
+            seeds::OwnedSeedCx::of(&cx),
+        );
+        crate::blocking::blocking(move || seeds::run(&env, &seed, owned.cx()))
+            .await
+            .map(|text| SeededContent {
+                text,
+                parts: Vec::new(),
+            })
     }
 
     fn mime_registry(&self, rows: &MimeRows) -> Result<leviath_core::mime::MimeRegistry, String> {

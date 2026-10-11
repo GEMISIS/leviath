@@ -19,8 +19,72 @@ use super::layers::{self, Layers};
 use super::*;
 use crate::daemon::seed_tool;
 
+/// What a seed reads from the machine: the config, and the MCP servers a
+/// tool seed may call. Owned, so a seed can run on the blocking pool.
+#[derive(Clone)]
+pub(super) struct SeedEnv {
+    config: Arc<Config>,
+    shared_mcp: Arc<tokio::sync::Mutex<leviath_mcp::ToolExecutor>>,
+}
+
+impl SeedEnv {
+    pub(super) fn of(env: &DaemonEnv) -> Self {
+        Self {
+            config: env.config.clone(),
+            shared_mcp: env.shared_mcp.clone(),
+        }
+    }
+}
+
+/// A [`SeedCx`] that owns what it borrows, so a seed can run on the blocking
+/// pool.
+pub(super) struct OwnedSeedCx {
+    run_id: RunId,
+    agent: String,
+    graph: RunGraph,
+    launch: leviath_runtime::spec::launch::LaunchPolicy,
+    workdir: PathBuf,
+    blueprint_dir: Option<PathBuf>,
+    commands_allowed: bool,
+    code: CodeFiles,
+    code_refs: Vec<(CodeRef, Digest)>,
+    inputs: leviath_runtime::spec::inputs::InputValues,
+}
+
+impl OwnedSeedCx {
+    pub(super) fn of(cx: &SeedCx<'_>) -> Self {
+        Self {
+            run_id: cx.run_id.clone(),
+            agent: cx.agent.to_string(),
+            graph: cx.graph.clone(),
+            launch: cx.launch.clone(),
+            workdir: cx.workdir.to_path_buf(),
+            blueprint_dir: cx.blueprint_dir.map(Path::to_path_buf),
+            commands_allowed: cx.commands_allowed,
+            code: cx.code.clone(),
+            code_refs: cx.code_refs.to_vec(),
+            inputs: cx.inputs.clone(),
+        }
+    }
+
+    pub(super) fn cx(&self) -> SeedCx<'_> {
+        SeedCx {
+            run_id: &self.run_id,
+            agent: &self.agent,
+            graph: &self.graph,
+            launch: &self.launch,
+            workdir: &self.workdir,
+            blueprint_dir: self.blueprint_dir.as_deref(),
+            commands_allowed: self.commands_allowed,
+            code: &self.code,
+            code_refs: &self.code_refs,
+            inputs: &self.inputs,
+        }
+    }
+}
+
 /// Run one seed and return the text it produced.
-pub(super) fn run(env: &DaemonEnv, seed: &Seed, cx: SeedCx<'_>) -> Result<String, String> {
+pub(super) fn run(env: &SeedEnv, seed: &Seed, cx: SeedCx<'_>) -> Result<String, String> {
     match seed {
         Seed::Literal(text) => Ok(text.clone()),
         Seed::Files(paths) => {
@@ -68,7 +132,7 @@ struct Places<'a> {
 impl<'a> Places<'a> {
     /// The places for the run `cx` describes. A `[read_paths]` entry that
     /// will not compile is the seed's failure, as it is the run's.
-    fn of(env: &DaemonEnv, cx: &SeedCx<'a>) -> Result<Self, String> {
+    fn of(env: &SeedEnv, cx: &SeedCx<'a>) -> Result<Self, String> {
         let (read_paths, _warning) = crate::daemon::spawn::compile_read_path_policy(
             cx.agent,
             &cx.graph.read_paths,
@@ -158,7 +222,7 @@ fn run_code(code: &CodeRef, cx: SeedCx<'_>) -> Result<String, String> {
 
 /// The sandbox the entry stage's shell runs in, for a seed.
 fn sandbox(
-    env: &DaemonEnv,
+    env: &SeedEnv,
     cx: &SeedCx<'_>,
     layers: &Layers,
 ) -> Result<Option<Arc<crate::daemon::sandbox_manager::SandboxManager>>, String> {
@@ -172,10 +236,21 @@ fn sandbox(
     Ok(built.map(Arc::new))
 }
 
+/// Remove a seed's containers once the seed has run.
+///
+/// A seed's sandbox is its own: the run builds a fresh one when it is bound,
+/// under the same container name, and nothing else would ever remove this
+/// one. A run refused after its seeds ran would otherwise leave it running.
+fn tear_down(sandbox: Option<Arc<crate::daemon::sandbox_manager::SandboxManager>>) {
+    if let Some(sandbox) = sandbox {
+        sandbox.destroy_all();
+    }
+}
+
 /// Run a shell-command seed, when seed commands may run at all: pre-approved
 /// only by the operator's and the graph's safe-command lists (a seed runs
 /// before any prompt exists), inside the entry stage's sandbox.
-fn run_command(env: &DaemonEnv, command: &str, cx: SeedCx<'_>) -> Result<String, String> {
+fn run_command(env: &SeedEnv, command: &str, cx: SeedCx<'_>) -> Result<String, String> {
     if !cx.commands_allowed {
         return Err(
             "command seeds are disabled (`[security] allow_seed_commands = false` or \
@@ -186,6 +261,7 @@ fn run_command(env: &DaemonEnv, command: &str, cx: SeedCx<'_>) -> Result<String,
     let config = &env.config;
     let layers = Layers::new(config, cx.graph, cx.launch, cx.agent);
     let safe = layers::blueprint_safe(cx.graph);
+    let sandbox = sandbox(env, &cx, &layers)?;
     let policy = crate::daemon::seed_command::SeedCommandPolicy::new(
         true,
         Duration::from_secs(config.limits.script_shell_timeout_secs),
@@ -195,17 +271,19 @@ fn run_command(env: &DaemonEnv, command: &str, cx: SeedCx<'_>) -> Result<String,
                 .into_keys()
                 .collect(),
         ),
-        sandbox(env, &cx, &layers)?,
+        sandbox.clone(),
         crate::daemon::spawn::shell_env_policy(config),
     );
-    policy.run(command, cx.workdir)
+    let ran = policy.run(command, cx.workdir);
+    tear_down(sandbox);
+    ran
 }
 
 /// Run a tool seed's calls under the run's permission layers and yolo
 /// profile, one block per call that produced something. A call that fails is
 /// left out; the seed fails only when nothing produced anything and something
 /// failed.
-fn run_tools(env: &DaemonEnv, calls: &[SeedToolCall], cx: SeedCx<'_>) -> Result<String, String> {
+fn run_tools(env: &SeedEnv, calls: &[SeedToolCall], cx: SeedCx<'_>) -> Result<String, String> {
     let config = &env.config;
     let workdir = cx.workdir.to_path_buf();
     let layers = Layers::new(config, cx.graph, cx.launch, cx.agent);
@@ -264,6 +342,7 @@ fn run_tools(env: &DaemonEnv, calls: &[SeedToolCall], cx: SeedCx<'_>) -> Result<
             Err(e) => failures.push(format!("{}: {e}", call.tool)),
         }
     }
+    tear_down(sandbox);
     match (seed_tool::join_blocks(blocks), failures.is_empty()) {
         (Some(text), _) => Ok(text),
         (None, true) => Ok(String::new()),

@@ -62,11 +62,7 @@ impl Layers {
         launch: &LaunchPolicy,
         agent: &str,
     ) -> Self {
-        let entry_index = graph
-            .entry
-            .as_ref()
-            .and_then(|e| graph.stages.iter().position(|s| &s.name == e))
-            .unwrap_or(0);
+        let entry_index = entry_index(graph);
         Self {
             entry_index,
             entry_stage: graph
@@ -168,6 +164,23 @@ pub(super) fn stage_sandbox(
         graph.sandbox.as_ref().map(sandbox_config).as_ref(),
         stage.sandbox.as_ref().map(sandbox_config).as_ref(),
     )
+}
+
+/// The position of the stage `graph` enters at: its `entry`, else the first.
+pub(super) fn entry_index(graph: &RunGraph) -> usize {
+    graph
+        .entry
+        .as_ref()
+        .and_then(|e| graph.stages.iter().position(|s| &s.name == e))
+        .unwrap_or(0)
+}
+
+/// Whether any stage's shell runs in a container, which building the run's
+/// sandbox has to start with a `docker run`.
+pub(super) fn starts_a_container(config: &Config, graph: &RunGraph) -> bool {
+    graph.stages.iter().any(|s| {
+        stage_sandbox(config, graph, s).kind == leviath_core::sandbox::SandboxKind::Container
+    })
 }
 
 /// The sandbox each stage's shell runs in (see [`stage_sandbox`]), starting

@@ -611,6 +611,13 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // drives it from `serve()`.
     host.set_reaper(make_reaper(tool_service.clone(), parts.mcp_pool.clone()));
 
+    // On the way out: every container a run still holds is removed, and the
+    // removals reaps queued are waited for, so a stopped daemon leaves none
+    // behind. The control socket is still up while this runs, so `lev daemon
+    // stop` and `restart` see the daemon until the removal is done.
+    let stopping = tool_service.clone();
+    host.set_on_shutdown(Box::new(move || stopping.shut_down()));
+
     // Resume hook: a run that starts moving again re-reads the config layers a
     // person edits to unblock it. Without it a run parked on a denied tool has
     // no way out but a cancel, since its permissions were resolved at spawn and

@@ -845,6 +845,8 @@ fn refuse_all(ids: Vec<String>, text: &'static str, progress: ToolProgress) -> B
 #[derive(Default)]
 pub(crate) struct CliToolService {
     states: StdMutex<HashMap<Entity, Arc<AgentToolState>>>,
+    /// Where a reaped agent's containers are removed, off the world loop.
+    teardown: crate::daemon::sandbox_manager::Teardown,
 }
 
 impl CliToolService {
@@ -890,15 +892,33 @@ impl CliToolService {
             .remove(&entity)
     }
 
-    /// Reap an agent: drop its tool state (fixing the prior leak) and tear down
-    /// its sandbox (destroying any containers it started). Called from the
-    /// daemon's reap hook just before the entity is despawned.
+    /// Reap an agent: drop its tool state and queue its sandbox's containers
+    /// for removal. Called from the daemon's reap hook, on the world loop,
+    /// just before the entity is despawned, so the removal itself waits on
+    /// the teardown thread rather than on the loop.
     pub(crate) fn reap(&self, entity: Entity) {
         if let Some(state) = self.take(entity)
             && let Some(sandbox) = &state.sandbox
         {
-            sandbox.destroy_all();
+            self.teardown.remove(sandbox.clone());
         }
+    }
+
+    /// Remove every container an agent still holds, and wait until each one
+    /// is gone, including those queued by earlier reaps. For the daemon's
+    /// shutdown: a container is never reused across a restart (a resumed run
+    /// builds its own under the same name), so one left behind would only run
+    /// on with nothing to remove it.
+    pub(crate) fn shut_down(&self) {
+        let sandboxes: Vec<_> = self
+            .states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain()
+            .filter_map(|(_, state)| state.sandbox.clone())
+            .collect();
+        crate::daemon::sandbox_manager::SandboxManager::destroy_together(&sandboxes);
+        self.teardown.finish();
     }
 }
 
@@ -3286,6 +3306,36 @@ pub(crate) mod tests {
         );
         service.reap(e2);
         assert!(service.take(e2).is_none());
+        // Shutdown waits for the removal the first reap queued.
+        service.shut_down();
+    }
+
+    /// Shutdown takes every agent's state, sandboxed or not, and removes what
+    /// their sandboxes hold: nothing is left for a stopped daemon to leak.
+    #[test]
+    fn shut_down_takes_every_agent_and_its_sandbox() {
+        use leviath_core::sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig};
+        let hub = InteractionHub::new();
+        let service = CliToolService::new();
+        let ns = ToolSandboxConfig {
+            kind: SandboxKind::Namespace,
+            on_unavailable: OnUnavailable::Warn,
+            ..Default::default()
+        };
+        let mgr = crate::daemon::sandbox_manager::SandboxManager::build("r", vec![ns], "/w", 0)
+            .unwrap()
+            .unwrap();
+        let mut sandboxed = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        Arc::get_mut(&mut sandboxed).unwrap().sandbox = Some(Arc::new(mgr));
+        let one = Entity::from_raw_u32(31).expect("a small literal index is a valid entity id");
+        let two = Entity::from_raw_u32(32).expect("a small literal index is a valid entity id");
+        service.register(one, sandboxed);
+        service.register(
+            two,
+            state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new()),
+        );
+        service.shut_down();
+        assert!(service.state_for(one).is_none() && service.state_for(two).is_none());
     }
 
     #[tokio::test]
