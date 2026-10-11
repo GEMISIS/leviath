@@ -90,19 +90,30 @@ pub(super) async fn run_doctor_live(
 ///
 /// One at a time: each check costs a request to a provider and a round trip to
 /// the daemon, and two runs at once would double that for no better answer.
+///
+/// The checks read the config, the keychain, the grants and the mime scripts,
+/// build HTTPS clients and probe for a local Ollama with a blocking connect,
+/// between their network calls, so the whole run is driven on the blocking
+/// pool, as [`offline_report`] is. The lock goes with it: a caller that gives
+/// up does not stop the run, and a second one must not start beside it.
 pub(super) async fn live_checks(
     state: &AppState,
 ) -> Result<Vec<super::types::DoctorCheck>, super::core::error::ServeError> {
-    let Ok(_running) = LIVE.try_lock() else {
+    let Ok(running) = LIVE.try_lock() else {
         return Err(super::core::error::ServeError::Conflict(
             "a live doctor run is already in progress".to_string(),
         ));
     };
-    let checks = run_checks(
-        &DoctorArgs::default(),
-        &build_provider_registry_from_config,
-        DaemonTarget::Client(&state.control),
-    )
+    let control = state.control.clone();
+    let checks = super::blocking::blocking(move || {
+        let checks = tokio::runtime::Handle::current().block_on(run_checks(
+            &DoctorArgs::default(),
+            &build_provider_registry_from_config,
+            DaemonTarget::Client(&control),
+        ));
+        drop(running);
+        checks
+    })
     .await;
     Ok(report(checks).checks)
 }

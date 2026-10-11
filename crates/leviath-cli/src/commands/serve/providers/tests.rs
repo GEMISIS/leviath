@@ -551,22 +551,24 @@ async fn checking_an_unknown_provider_is_a_404() {
 /// The default admin points at the real issuer and the two registered ports,
 /// and its authorizer takes its store from `admin_paths` rather than from a
 /// field somebody could set.
-#[test]
-fn the_default_admin_points_at_this_machine() {
+#[tokio::test]
+async fn the_default_admin_points_at_this_machine() {
     // Both paths below come from `LEVIATH_HOME` at the moment they are read.
     // Held under `temp_env`, which serializes every env-changing test in the
     // process, so a neighbour moving the home between the two reads cannot
     // make them disagree.
     let dir = tempfile::tempdir().expect("a temp dir");
-    let admin = temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+    let home = Some(dir.path().as_os_str().to_owned());
+    let admin = temp_env::async_with_vars([("LEVIATH_HOME", home)], async {
         let admin = ProviderAdmin::default();
-        let authorizer = admin.authorizer();
+        let authorizer = admin.authorizer().await;
         assert_eq!(
             authorizer.store_path,
             Some(crate::commands::serve::mcp::admin_paths().grants)
         );
         admin
-    });
+    })
+    .await;
     assert_eq!(admin.issuer, None);
     assert_eq!(admin.ports, None);
     assert!(

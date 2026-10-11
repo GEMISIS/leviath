@@ -100,6 +100,7 @@ async fn past_the_window_the_reading_in_hand_is_served_and_taken_again_behind_it
         .await;
     tokio::time::advance(FRESH_FOR + Duration::from_secs(1)).await;
 
+    let mut readings = cache.subscribe();
     let (served, how) = cache
         .report(asking(Arc::clone(&config), &["codex"]), false)
         .await;
@@ -110,7 +111,7 @@ async fn past_the_window_the_reading_in_hand_is_served_and_taken_again_behind_it
     );
     assert_eq!(served.age_secs(), FRESH_FOR.as_secs() + 1);
 
-    tokio::task::yield_now().await;
+    readings.changed().await.unwrap();
     let (fresh, how) = cache.report(asking(config, &["codex"]), false).await;
     assert_eq!(how, Freshness::Fresh);
     assert_eq!(fresh.age_secs(), 0);
