@@ -139,13 +139,17 @@ async fn server_issues(state: &AppState, request: &mut Request) -> SpawnIssues {
     let named = request.workdir.is_some();
     let workdir = request
         .workdir
-        .get_or_insert_with(|| std::env::current_dir().unwrap_or_default());
+        .get_or_insert_with(|| std::env::current_dir().unwrap_or_default())
+        .clone();
     // `--workdir-root` is the operator's answer to "where is this API allowed
     // to work": without it, a caller-supplied `"/"` would point a
     // tool-executing run at the whole filesystem. A request that names no
     // workdir works where the server started, which is held to the same
-    // root, and the refusal says that is where the directory came from.
-    if let Err(message) = limits.check_workdir(workdir) {
+    // root, and the refusal says that is where the directory came from. The
+    // check resolves symlinks, so it runs on the blocking pool.
+    let checking = std::sync::Arc::clone(limits);
+    let checked = super::super::blocking::blocking(move || checking.check_workdir(&workdir)).await;
+    if let Err(message) = checked {
         let message = match named {
             true => message,
             false => format!(
@@ -221,23 +225,28 @@ async fn installed_elsewhere(state: &AppState, request: &mut Request) {
     let SpawnSource::Blueprint(reference) = &request.source else {
         return;
     };
-    let name = reference.name.to_string();
-    let installed = super::super::blueprints::agents_dir()
-        .join(&name)
-        .join(leviath_blueprint::FILE_NAME)
-        .is_file();
-    if installed || reference.digest.is_some() {
+    if reference.digest.is_some() {
         return;
     }
-    let roots = state.current_config().await.agent_paths.clone();
-    let listed =
-        super::super::blocking::blocking(move || super::super::blueprints::discover_in(roots))
-            .await;
-    let path = listed
-        .into_iter()
-        .find(|blueprint| blueprint.name == name)
-        .and_then(|found| std::fs::canonicalize(found.path).ok())
-        .and_then(|dir| BlueprintPath::new(dir.to_string_lossy()).ok());
+    let name = reference.name.to_string();
+    // The agents directory is found here, on the request's own task, where a
+    // test's directory is visible; the looking happens on the blocking pool.
+    let manifest = super::super::blueprints::agents_dir()
+        .join(&name)
+        .join(leviath_blueprint::FILE_NAME);
+    let config = std::sync::Arc::clone(&state.config);
+    let path = super::super::blocking::blocking(move || {
+        if manifest.is_file() {
+            return None;
+        }
+        let roots = config.check().config.agent_paths.clone();
+        super::super::blueprints::discover_in(roots)
+            .into_iter()
+            .find(|blueprint| blueprint.name == name)
+            .and_then(|found| std::fs::canonicalize(found.path).ok())
+            .and_then(|dir| BlueprintPath::new(dir.to_string_lossy()).ok())
+    })
+    .await;
     if let Some(path) = path {
         request.source = SpawnSource::BlueprintFile(path);
     }
@@ -279,11 +288,16 @@ pub(crate) async fn send_message(
         // cancelled) is there and refuses it, and no record is a miss. The
         // daemon's words, which say what to do, are kept as they are.
         Ok(ControlResponse::Error { message }) => {
-            Err(match held::is_held(&state.control, run_id).await {
-                true => ServeError::Held(message),
-                false if crate::runstate::read_meta(run_id).is_ok() => {
-                    ServeError::Conflict(message)
-                }
+            if held::is_held(&state.control, run_id).await {
+                return Err(ServeError::Held(message));
+            }
+            // The record is looked for on the blocking pool.
+            let id = run_id.to_string();
+            let recorded =
+                super::super::blocking::blocking(move || crate::runstate::read_meta(&id).is_ok())
+                    .await;
+            Err(match recorded {
+                true => ServeError::Conflict(message),
                 false => ServeError::NotFound(message),
             })
         }

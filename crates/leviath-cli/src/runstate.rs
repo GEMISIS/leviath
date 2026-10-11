@@ -290,11 +290,16 @@ pub(crate) fn forget_provider_files(run_id: &str) {
     }
     // Built where the deletes run: a provider's client wants a runtime to
     // stand in. One that cannot be built is one whose files are left to
-    // expire, which the delete says per file.
+    // expire, which the delete says per file. Loading the config and building
+    // the registry read files and can probe a local server, so that half runs
+    // on the blocking pool and only the deletes run on the async workers.
     let work = async move {
-        let config = crate::config::Config::load().unwrap_or_default();
-        let registry = crate::commands::run::session::build_provider_registry_from_config(&config)
-            .unwrap_or_default();
+        let registry = crate::blocking::blocking(|| {
+            let config = crate::config::Config::load().unwrap_or_default();
+            crate::commands::run::session::build_provider_registry_from_config(&config)
+                .unwrap_or_default()
+        })
+        .await;
         leviath_runtime::provider_files::delete_entries(&entries, &registry).await
     };
     match tokio::runtime::Handle::try_current() {

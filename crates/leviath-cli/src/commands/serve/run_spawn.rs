@@ -100,16 +100,21 @@ pub(super) async fn declared_inputs(
     name: &str,
 ) -> Result<Vec<leviath_runtime::spec::inputs::InputDecl>, ServeError> {
     let roots = super::blueprints::blueprint_roots(&*state.current_config().await);
-    let listed = super::blocking::blocking(move || super::blueprints::discover_in(roots)).await;
-    let found = listed
-        .into_iter()
-        .find(|blueprint| blueprint.name == name)
-        .ok_or_else(|| ServeError::NotFound(format!("Blueprint '{name}' not found")))?;
-    // Checked as a spawn would check it: inputs read off a graph that does
-    // not hold together would offer a form for a run that cannot start.
-    let loaded = leviath_blueprint::validate(std::path::Path::new(&found.path))
-        .map_err(|e| ServeError::Unprocessable(e.to_string()))?;
-    Ok(loaded.graph.inputs)
+    let name = name.to_string();
+    // The blueprints are found and the one named is checked on the blocking
+    // pool.
+    super::blocking::blocking(move || {
+        let found = super::blueprints::discover_in(roots)
+            .into_iter()
+            .find(|blueprint| blueprint.name == name)
+            .ok_or_else(|| ServeError::NotFound(format!("Blueprint '{name}' not found")))?;
+        // Checked as a spawn would check it: inputs read off a graph that does
+        // not hold together would offer a form for a run that cannot start.
+        let loaded = leviath_blueprint::validate(std::path::Path::new(&found.path))
+            .map_err(|e| ServeError::Unprocessable(e.to_string()))?;
+        Ok(loaded.graph.inputs)
+    })
+    .await
 }
 
 /// The request a body carries: `Ok(Ok)` for a request, `Ok(Err)` for a body

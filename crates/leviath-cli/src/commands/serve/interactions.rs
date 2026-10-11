@@ -79,7 +79,7 @@ pub(super) async fn submit_interaction(
         ));
     }
     if let Some(value) = body.value.as_deref() {
-        let (kept, named) = workdir_parts(&id, value, &body.parts, max_upload)?;
+        let (kept, named) = workdir_parts(&id, value, &body.parts, max_upload).await?;
         body.value = Some(kept);
         parts.extend(named);
     }
@@ -134,25 +134,29 @@ async fn option_response(
 /// it cannot, `@path` tokens stay text and the request still goes through
 /// with its uploads, but a `parts` list naming files there is a 404: those
 /// files were asked for by path and cannot be read.
-fn workdir_parts(
+///
+/// The record and the files are read on the blocking pool.
+async fn workdir_parts(
     id: &str,
     text: &str,
     listed: &[super::upload::PartRef],
     max_upload: u64,
 ) -> Result<(String, Vec<leviath_core::mime::InboundPart>), ServeError> {
-    match crate::runstate::read_meta(id) {
+    let (id, text, listed) = (id.to_string(), text.to_string(), listed.to_vec());
+    super::blocking::blocking(move || match crate::runstate::read_meta(&id) {
         Ok(meta) => {
             let workdir = std::path::Path::new(&meta.workdir);
-            let mut parts = super::upload::json_parts(listed, workdir, max_upload)?;
-            let (kept, named) = super::upload::inline_parts(text, None, workdir, max_upload)?;
+            let mut parts = super::upload::json_parts(&listed, workdir, max_upload)?;
+            let (kept, named) = super::upload::inline_parts(&text, None, workdir, max_upload)?;
             parts.extend(named);
             Ok((kept, parts))
         }
         Err(_) if !listed.is_empty() => Err(ServeError::NotFound(format!(
             "Agent run '{id}' has no working directory this server can read parts from"
         ))),
-        Err(_) => Ok((text.to_string(), Vec::new())),
-    }
+        Err(_) => Ok((text, Vec::new())),
+    })
+    .await
 }
 
 /// `POST /api/runs/{id}/message`: deliver a message to a running agent.
@@ -164,7 +168,7 @@ pub(super) async fn send_message(
     let max_upload = state.limits.request_limits.max_upload_bytes;
     let (mut body, mut parts): (SendMessageReq, _) =
         super::upload::json_or_multipart(&state, request, max_upload).await?;
-    let (kept, named) = workdir_parts(&id, &body.message, &body.parts, max_upload)?;
+    let (kept, named) = workdir_parts(&id, &body.message, &body.parts, max_upload).await?;
     body.message = kept;
     parts.extend(named);
     super::core::spawn::send_message(&state, &id, body.message, body.target_region, parts)

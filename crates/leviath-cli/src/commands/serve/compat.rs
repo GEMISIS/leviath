@@ -110,7 +110,7 @@ pub(super) async fn spawn_agent(
     request: axum::extract::Request,
 ) -> Result<Json<SpawnAgentResp>, ServeError> {
     let max_upload = state.limits.request_limits.max_upload_bytes;
-    let (mut body, mut parts): (SpawnAgentReq, _) =
+    let (body, parts): (SpawnAgentReq, _) =
         super::upload::json_or_multipart(&state, request, max_upload).await?;
     let source = BlueprintRef::parse(&body.blueprint)
         .map(SpawnSource::Blueprint)
@@ -121,8 +121,45 @@ pub(super) async fn spawn_agent(
             ServeError::NotFound(_) => e,
             other => ServeError::BadRequest(other.to_string()),
         })?;
-    // Files named inside the workdir, and the ones a text names with `@path`,
-    // read where the run will work.
+    // The files the body names are read on the blocking pool.
+    let (body, regions, parts, left_out) =
+        super::blocking::blocking(move || with_files(body, &declared, parts, max_upload)).await?;
+    let request = launch_of(body, regions, parts)
+        .and_then(|launch| launch.into_request_for(source))
+        .map_err(ServeError::BadRequest)?;
+    match spawn_core::start(&state, request).await {
+        Ok(Verdict::Accepted(started)) => Ok(Json(SpawnAgentResp {
+            agent_id: started.run_id.clone(),
+            run_id: started.run_id,
+            warnings: left_out
+                .into_iter()
+                .chain(started.warnings.iter().map(ToString::to_string))
+                .collect(),
+        })),
+        Ok(Verdict::Rejected(issues)) => Err(refusal(&issues)),
+        Err(e) => Err(e),
+    }
+}
+
+/// The old body with the files it names read: the body with its task's
+/// `@path` tokens resolved, its regions as the inputs they fill, the parts
+/// it carries, and a warning for each region whose text was left out.
+type WithFiles = (
+    SpawnAgentReq,
+    HashMap<String, String>,
+    Vec<leviath_core::mime::InboundPart>,
+    Vec<String>,
+);
+
+/// Read the files `body` names inside the workdir, and the ones its task and
+/// regions name with `@path`, where the run will work, and fill each region's
+/// input from its text. Blocking: every file is read here.
+fn with_files(
+    mut body: SpawnAgentReq,
+    declared: &[InputDecl],
+    mut parts: Vec<leviath_core::mime::InboundPart>,
+    max_upload: u64,
+) -> Result<WithFiles, ServeError> {
     let workdir = body.workdir.clone().map_or_else(
         || std::env::current_dir().unwrap_or_default(),
         std::path::PathBuf::from,
@@ -138,7 +175,7 @@ pub(super) async fn spawn_agent(
     let mut filling = Vec::new();
     let mut left_out = Vec::new();
     for (region, text) in std::mem::take(&mut body.regions) {
-        match input_for_region(&declared, &region) {
+        match input_for_region(declared, &region) {
             Ok(input) => filling.push((input, region, text)),
             Err(why) => left_out.push(format!(
                 "regions.{region}: {why} in blueprint '{}', so its text was left out",
@@ -165,21 +202,7 @@ pub(super) async fn spawn_agent(
         from.insert(input, region);
     }
     left_out.sort();
-    let request = launch_of(body, regions, parts)
-        .and_then(|launch| launch.into_request_for(source))
-        .map_err(ServeError::BadRequest)?;
-    match spawn_core::start(&state, request).await {
-        Ok(Verdict::Accepted(started)) => Ok(Json(SpawnAgentResp {
-            agent_id: started.run_id.clone(),
-            run_id: started.run_id,
-            warnings: left_out
-                .into_iter()
-                .chain(started.warnings.iter().map(ToString::to_string))
-                .collect(),
-        })),
-        Ok(Verdict::Rejected(issues)) => Err(refusal(&issues)),
-        Err(e) => Err(e),
-    }
+    Ok((body, regions, parts, left_out))
 }
 
 /// The old body as a task launch, with its regions already named as inputs.

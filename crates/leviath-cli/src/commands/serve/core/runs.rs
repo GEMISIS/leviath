@@ -822,11 +822,26 @@ pub(crate) fn deletable_family(
 }
 
 /// Remove every run in `ids`, stopping at the first failure.
-pub(crate) fn remove_family(ids: &[String]) -> Result<(), super::error::ServeError> {
+fn remove_family(ids: &[String]) -> Result<(), super::error::ServeError> {
     for id in ids {
         remove_run(id)?;
     }
     Ok(())
+}
+
+/// Remove run `id` and its sub-agent tree once every member is shown to be
+/// deletable: the ids removed, or the reason the tree stayed.
+///
+/// Blocking: finding the tree reads every run's record, and the removal is
+/// file work. Both surfaces call this on the blocking pool.
+pub(crate) fn delete_family(
+    id: &str,
+    force: bool,
+) -> Result<Vec<String>, super::error::ServeError> {
+    let family = runstate::family_of(id);
+    deletable_family(id, &family, force)?;
+    remove_family(&family)?;
+    Ok(family)
 }
 
 /// One id a bulk delete passed over, and why.
@@ -892,24 +907,28 @@ pub(crate) async fn delete(
             .collect(),
     };
 
-    let mut deleted: Vec<String> = Vec::new();
-    let mut skipped = Vec::new();
-    for id in ids {
-        // A sweep selects a parent and its children independently, and naming a
-        // parent already took its children; either way the second mention is of
-        // a run this request just removed, which is a deletion rather than the
-        // "no such run" the check would report.
-        if deleted.contains(&id) {
-            continue;
+    // Every tree is found, checked and removed on the blocking pool.
+    let outcome = super::super::blocking::blocking(move || {
+        let mut deleted: Vec<String> = Vec::new();
+        let mut skipped = Vec::new();
+        for id in ids {
+            // A sweep selects a parent and its children independently, and naming
+            // a parent already took its children; either way the second mention
+            // is of a run this request just removed, which is a deletion rather
+            // than the "no such run" the check would report.
+            if deleted.contains(&id) {
+                continue;
+            }
+            match delete_family(&id, force) {
+                Ok(family) => deleted.extend(family),
+                Err(reason) => skipped.push(SkippedDelete {
+                    id,
+                    reason: reason.to_string(),
+                }),
+            }
         }
-        let family = runstate::family_of(&id);
-        match deletable_family(&id, &family, force).and_then(|()| remove_family(&family)) {
-            Ok(()) => deleted.extend(family),
-            Err(reason) => skipped.push(SkippedDelete {
-                id,
-                reason: reason.to_string(),
-            }),
-        }
-    }
-    Ok(DeleteOutcome { deleted, skipped })
+        DeleteOutcome { deleted, skipped }
+    })
+    .await;
+    Ok(outcome)
 }
