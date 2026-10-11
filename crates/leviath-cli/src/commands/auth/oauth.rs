@@ -243,10 +243,19 @@ pub async fn login(env: &LoginEnv) -> anyhow::Result<ProviderGrant> {
 
     let grant = exchange(env, &code, &redirect_uri, &pkce.verifier, nonce.as_deref()).await?;
 
-    let store = env.credential_store.as_deref();
-    let mut all = ProviderAuthStore::load_with(&env.store_path, store)?;
-    all.set(profile.provider, grant.clone());
-    all.save_with(&env.store_path, store)?;
+    // The store is a file and, under the keychain, an OS round trip per grant,
+    // so it is read and written on the blocking pool.
+    let (path, store, stored) = (
+        env.store_path.clone(),
+        env.credential_store.clone(),
+        grant.clone(),
+    );
+    crate::blocking::blocking(move || {
+        let mut all = ProviderAuthStore::load_with(&path, store.as_deref())?;
+        all.set(profile.provider, stored);
+        all.save_with(&path, store.as_deref())
+    })
+    .await?;
 
     Ok(grant)
 }

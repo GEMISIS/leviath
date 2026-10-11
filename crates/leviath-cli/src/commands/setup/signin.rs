@@ -161,15 +161,27 @@ impl ProviderAuthorizer for LiveAuthorizer {
         let profile = profile_for(provider_id)?;
         let path = self.store_path()?;
         let store = self.credential_store()?;
-        let issuer = self.issuer.as_deref().unwrap_or(profile.issuer);
-        // Best effort, before forgetting: a revocation that fails leaves a
-        // token that expires on its own, and is no reason to keep the grant.
-        if let Err(e) =
-            oauth_login::revoke(profile, &self.client, issuer, &path, store.as_deref()).await
-        {
-            tracing::warn!("{e}");
-        }
-        oauth_login::logout(profile, &path, store.as_deref())?;
+        let issuer = self.issuer.as_deref().unwrap_or(profile.issuer).to_string();
+        let client = self.client.clone();
+        // The grant is read and forgotten through a file and, under the
+        // keychain, the OS store, so the sign-out runs on the blocking pool and
+        // the revocation's one request is driven from there.
+        crate::blocking::blocking(move || {
+            let revoked = tokio::runtime::Handle::current().block_on(oauth_login::revoke(
+                profile,
+                &client,
+                &issuer,
+                &path,
+                store.as_deref(),
+            ));
+            // Best effort, before forgetting: a revocation that fails leaves a
+            // token that expires on its own, and is no reason to keep the grant.
+            if let Err(e) = revoked {
+                tracing::warn!("{e}");
+            }
+            oauth_login::logout(profile, &path, store.as_deref())
+        })
+        .await?;
         Ok(())
     }
 }

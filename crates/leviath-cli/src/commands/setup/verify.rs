@@ -112,7 +112,7 @@ pub(crate) async fn verify_via_registry(creds: &ProviderCreds) -> Outcome {
 /// "no usable HTTPS client" outcome is reachable from a test.
 pub(crate) async fn verify_via_registry_with(
     creds: &ProviderCreds,
-    build_client: leviath_providers::provider::HttpClientFactory<'_>,
+    build_client: leviath_providers::provider::HttpClientFactory<'static>,
 ) -> Outcome {
     // A registry that cannot be built is exactly the failure this command
     // exists to report, so it is an outcome rather than a panic.
@@ -123,11 +123,20 @@ pub(crate) async fn verify_via_registry_with(
     // "nothing is listening" into "no such provider", which is the one message
     // that does not help. It also keeps verification to a single connection,
     // which is what the caller is measuring.
-    let registry = match leviath_runtime::provider_creds::build_provider_registry_probing(
-        std::slice::from_ref(creds),
-        build_client,
-        &|_| true,
-    ) {
+    //
+    // Built on the blocking pool: building an HTTPS client sets up TLS, which
+    // on some platforms reads the certificate store from disk, and a runtime
+    // worker should not wait on that.
+    let owned = creds.clone();
+    let built = crate::blocking::blocking(move || {
+        leviath_runtime::provider_creds::build_provider_registry_probing(
+            std::slice::from_ref(&owned),
+            build_client,
+            &|_| true,
+        )
+    })
+    .await;
+    let registry = match built {
         Ok(registry) => registry,
         Err(e) => {
             return Outcome::Failed {
@@ -372,10 +381,12 @@ mod tests {
         // is built, which would test the wrong branch.
         let mut creds = leviath_runtime::provider_creds::ProviderCreds::simple("anthropic");
         creds.api_key = Some("k".to_string());
-        let outcome = super::verify_via_registry_with(&creds, &|_t| {
+        fn refuses(
+            _timeout: Option<u64>,
+        ) -> Result<reqwest::Client, leviath_providers::provider::HttpError> {
             Err(leviath_providers::provider::malformed_url_error())
-        })
-        .await;
+        }
+        let outcome = super::verify_via_registry_with(&creds, &refuses).await;
         // Asserted through `Debug` rather than a `let ... else`: the else arm
         // is unreachable, and an unreachable arm is an uncovered region under
         // the 100% gate.

@@ -164,7 +164,12 @@ impl QuotaCache {
         let build: Build<Accounts, Vec<Usage>> = Arc::new(move |accounts, _force| {
             let build_registry = Arc::clone(&build_registry);
             Box::pin(async move {
-                let Some(registry) = build_registry(&accounts) else {
+                // Built on the blocking pool, as the model catalogue's registry
+                // is: every client in it is an HTTPS client, and setting up
+                // TLS is no work for a runtime worker.
+                let asked = accounts.clone();
+                let built = super::blocking::blocking(move || build_registry(&asked)).await;
+                let Some(registry) = built else {
                     // No clients means no reading, which is not the same as
                     // every account having nothing to say - hence `false`.
                     return (Vec::new(), false);

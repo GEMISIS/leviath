@@ -151,19 +151,25 @@ async fn registry_for(
     }
     let build = Arc::clone(build_registry);
     let for_config = Arc::clone(config);
-    let built = super::blocking::blocking(move || build(&for_config)).await;
-    let registry = match built {
-        Ok(registry) => registry,
+    // The capability cache is a file too, so it is read in the same hop.
+    let built = super::blocking::blocking(move || {
+        build(&for_config).map(|registry| {
+            // `is_some_and` rather than `if let`: a home that does not resolve
+            // is `false` flowing through, not an else arm no test can reach.
+            let seeded = leviath_core::paths::capability_cache_path()
+                .is_some_and(|path| registry.load_capability_cache(&path));
+            (registry, seeded)
+        })
+    })
+    .await;
+    let (registry, seeded) = match built {
+        Ok(built) => built,
         Err(e) => {
             tracing::warn!(error = %e, "could not build the provider registry to list models");
             *leviath_core::sync::lock(memo) = None;
             return None;
         }
     };
-    // `is_some_and` rather than `if let`: a home that does not resolve is
-    // `false` flowing through, not an else arm no test can reach.
-    let seeded = leviath_core::paths::capability_cache_path()
-        .is_some_and(|path| registry.load_capability_cache(&path));
     tracing::debug!(
         seeded,
         "built the provider registry for the model catalogue"

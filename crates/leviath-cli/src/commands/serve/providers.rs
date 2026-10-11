@@ -96,13 +96,20 @@ impl ProviderAdmin {
     /// Built per call rather than held, so the grant store and the credential
     /// backend are both read from where they are *now*, and a `[security]
     /// credential_store` change takes effect without restarting `lev serve`.
-    fn authorizer(&self) -> LiveAuthorizer {
-        let paths = super::mcp::admin_paths();
-        let mut authorizer = LiveAuthorizer::real(self.opener.clone(), &paths.config);
-        authorizer.store_path = Some(paths.grants);
-        authorizer.issuer = self.issuer.clone();
-        authorizer.ports = self.ports.clone();
-        authorizer
+    ///
+    /// Building it reads the config file, probes the keychain and builds an
+    /// HTTPS client, so it is built on the blocking pool, from the paths this
+    /// task resolves.
+    async fn authorizer(&self) -> LiveAuthorizer {
+        let (admin, paths) = (self.clone(), super::mcp::admin_paths());
+        super::blocking::blocking(move || {
+            let mut authorizer = LiveAuthorizer::real(admin.opener, &paths.config);
+            authorizer.store_path = Some(paths.grants);
+            authorizer.issuer = admin.issuer;
+            authorizer.ports = admin.ports;
+            authorizer
+        })
+        .await
     }
 }
 
@@ -476,7 +483,7 @@ pub(super) async fn sign_in_started(
     // Resolved here, in the request, and moved into the task below: a
     // `tokio::spawn` does not inherit the task-local the tests scope, so
     // resolving it in there would reach the real home.
-    let authorizer = state.providers.authorizer();
+    let authorizer = state.providers.authorizer().await;
     let tracker = Arc::clone(&state.providers.in_flight);
     let now = state.providers.now;
     tokio::spawn(async move {
@@ -569,6 +576,7 @@ pub(super) async fn signed_out(
     state
         .providers
         .authorizer()
+        .await
         .sign_out(name)
         .await
         .map_err(|e| super::core::error::ServeError::Internal(e.to_string()))?;
