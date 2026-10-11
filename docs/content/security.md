@@ -89,7 +89,8 @@ looser than the file reads.
 
 **Containers**, using Docker or Podman, give you the real thing. The daemon keeps a warm container
 per sandbox configuration, so stages with identical settings share one, and tears them down when
-the agent finishes. Inside it, every Linux capability is dropped and the process cannot regain
+the agent finishes or the daemon stops. A run picked back up after a restart starts fresh
+containers; its workdir is a mount, so its files are where it left them. Inside it, every Linux capability is dropped and the process cannot regain
 privileges, and both process count and memory are capped.
 
 **Namespaces** (Linux only) are lighter and need no container runtime. They isolate process IDs,
