@@ -10,6 +10,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use leviath_runtime::host::WorldEvent;
 use sha2::Sha256;
 
+use super::blocking::blocking;
 use super::events::ServerEvent;
 use super::types::*;
 use super::webhook_outbox::Outbox;
@@ -34,10 +35,12 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
         state.limits.allow_local_network,
     );
     let runs = runstate::runs_dir();
-    let outbox = Arc::new(Outbox::open(
+    let (dir, now) = (
         runs.with_file_name("webhooks"),
         leviath_core::duration::now_secs(),
-    ));
+    );
+    // Opening the outbox reads, and may make, its directory.
+    let outbox = Arc::new(blocking(move || Outbox::open(dir, now)).await);
     send_owed(&state, &client, &outbox, &runs).await;
     let mut link = LinkWatch::new(&state);
     // Where the stream had got to when it last dropped, so the next one
@@ -132,17 +135,22 @@ async fn send_owed(
     runs: &std::path::Path,
 ) {
     let cfg = state.current_config().await.webhook.clone();
-    let metas = crate::run_index::list(runs);
-    for meta in outbox.owed(&metas, |run_id| delivery_id("agent_completed", run_id)) {
-        let final_output = runstate::read_final_output(&meta.run_id);
-        fire_completion_webhook(
-            client,
-            &cfg,
-            outbox,
-            &meta.run_id,
-            meta.status.wire(),
-            final_output.as_ref(),
-        );
+    // Every run's record, and the answer of each one owed, are read on the
+    // blocking pool.
+    let (held, runs) = (Arc::clone(outbox), runs.to_path_buf());
+    let owed = blocking(move || {
+        let metas = crate::run_index::list(&runs);
+        held.owed(&metas, |run_id| delivery_id("agent_completed", run_id))
+            .into_iter()
+            .map(|meta| {
+                let final_output = runstate::read_final_output(&meta.run_id);
+                (meta.run_id.clone(), meta.status.wire(), final_output)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await;
+    for (run_id, status, final_output) in owed {
+        fire_completion_webhook(client, &cfg, outbox, &run_id, status, final_output.as_ref()).await;
     }
 }
 
@@ -192,9 +200,16 @@ async fn handle_event(
             run_id,
             &wire_status(status),
             final_output.as_ref(),
-        );
+        )
+        .await;
     }
-    super::events::send(&state.event_tx, to_server_event(event));
+    let mut frame = to_server_event(event);
+    if let ServerEvent::AgentCompleted { run_id, result, .. } = &mut frame {
+        // The run's error, from its record, read on the blocking pool.
+        let id = run_id.clone();
+        *result = blocking(move || runstate::read_meta(&id).ok().and_then(|m| m.error)).await;
+    }
+    super::events::send(&state.event_tx, frame);
 }
 
 /// One status, in the vocabulary every route on this server speaks.
@@ -326,10 +341,12 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
         } => ServerEvent::AgentCompleted {
             agent_id,
             status: wire_status(&status),
-            run_id: run_id.clone(),
+            run_id,
             // Named `result` since before there was one; it carries the run's
-            // *error*. The answer is `final_output`, beside it.
-            result: runstate::read_meta(&run_id).ok().and_then(|m| m.error),
+            // *error*. The answer is `final_output`, beside it. The error is
+            // the run's record's, which `handle_event` reads on the blocking
+            // pool and fills in.
+            result: None,
             // Taken from the event rather than re-read from disk: the event
             // fires the moment the run goes terminal, and the persist tick that
             // writes the run file has not necessarily run yet.
@@ -417,7 +434,10 @@ fn delivery_id(event: &str, run_id: &str) -> String {
 /// sends it again.
 ///
 /// Returns whether a delivery was started.
-fn fire_completion_webhook(
+///
+/// The run file, the claim, the secret and the settled marker are file work,
+/// done on the blocking pool.
+async fn fire_completion_webhook(
     client: &reqwest::Client,
     cfg: &WebhookConfig,
     outbox: &Arc<Outbox>,
@@ -425,39 +445,71 @@ fn fire_completion_webhook(
     status: &str,
     final_output: Option<&leviath_core::output::FinalOutput>,
 ) -> bool {
-    let dir = runstate::run_dir(run_id);
-    let Ok(tail) = runstate::run_file::tail_in(&dir) else {
-        return false; // metadata not yet persisted
+    let (held, id) = (Arc::clone(outbox), run_id.to_string());
+    let Some(ready) = blocking(move || outgoing(&held, &id)).await else {
+        return false;
     };
-    let meta = leviath_runtime::runfile::summary_of(&tail.spec, &tail.state, tail.updated_at);
-    let Some(url) = meta.callback_url.clone() else {
-        return false; // no webhook configured
-    };
-    let delivery = delivery_id("agent_completed", &meta.run_id);
-    if !outbox.claim(&delivery) {
-        return false; // sent already, or being sent
-    }
-    let payload = completion_payload(&meta, status, final_output, &delivery);
+    let payload = completion_payload(&ready.meta, status, final_output, &ready.delivery);
     // Serialize once so the signature covers the exact bytes we send. `Value`'s
     // `Display` is infallible and byte-identical to `to_vec`.
     let body = payload.to_string().into_bytes();
+    let signature = ready.secret.map(|secret| sign(secret.expose(), &body));
+    let (client, cfg, outbox) = (client.clone(), cfg.clone(), Arc::clone(outbox));
+    let (url, delivery) = (ready.url, ready.delivery);
+    tokio::spawn(async move {
+        fire_webhook(client, url, body, signature, &delivery, cfg).await;
+        blocking(move || outbox.settle(&delivery)).await;
+    });
+    true
+}
+
+/// A completion webhook this server has claimed to send.
+struct Outgoing {
+    /// The run, as its file's last step has it.
+    meta: leviath_core::run_meta::RunMeta,
+    /// Where the webhook goes.
+    url: String,
+    /// Its delivery id.
+    delivery: String,
+    /// What it is signed with, when it is signed.
+    secret: Option<leviath_runtime::spec::launch::Secret>,
+}
+
+/// The webhook run `run_id` owes, claimed in `outbox`, or `None` when it owes
+/// none or it is not this call's to send.
+///
+/// Blocking: the run file and the secret store are read, and a webhook whose
+/// secret is lost is settled here, unsent.
+fn outgoing(outbox: &Outbox, run_id: &str) -> Option<Outgoing> {
+    let dir = runstate::run_dir(run_id);
+    let Ok(tail) = runstate::run_file::tail_in(&dir) else {
+        return None; // metadata not yet persisted
+    };
+    let meta = leviath_runtime::runfile::summary_of(&tail.spec, &tail.state, tail.updated_at);
+    let Some(url) = meta.callback_url.clone() else {
+        return None; // no webhook configured
+    };
+    let delivery = delivery_id("agent_completed", &meta.run_id);
+    if !outbox.claim(&delivery) {
+        return None; // sent already, or being sent
+    }
     // Read on its own, so nothing sent but the signature comes from it.
-    let signature = match runstate::run_file::callback_secret(&dir, &tail.spec) {
+    let secret = match runstate::run_file::callback_secret(&dir, &tail.spec) {
         None => None,
-        Some(Ok(secret)) => Some(sign(secret.expose(), &body)),
+        Some(Ok(secret)) => Some(secret),
         Some(Err(reference)) => {
             let reference = reference.to_string();
             tracing::warn!(run_id = %run_id, secret = %reference, "the run's webhook was not posted: its signing secret is not in the secret store");
             outbox.settle(&delivery);
-            return false;
+            return None;
         }
     };
-    let (client, cfg, outbox) = (client.clone(), cfg.clone(), Arc::clone(outbox));
-    tokio::spawn(async move {
-        fire_webhook(client, url, body, signature, &delivery, cfg).await;
-        outbox.settle(&delivery);
-    });
-    true
+    Some(Outgoing {
+        meta,
+        url,
+        delivery,
+        secret,
+    })
 }
 
 /// The completion webhook's body.
@@ -1095,7 +1147,7 @@ mod tests {
                 let client = reqwest::Client::new();
                 let cfg = fast_cfg();
                 // No meta on disk → no-op.
-                fire_completion_webhook(&client, &cfg, &outbox(), "ghost", "complete", None);
+                fire_completion_webhook(&client, &cfg, &outbox(), "ghost", "complete", None).await;
                 // Meta without a callback_url → no-op.
                 let meta = RunMeta::new(
                     "no-cb".into(),
@@ -1107,7 +1159,7 @@ mod tests {
                     1,
                 );
                 create_run(&meta).unwrap();
-                fire_completion_webhook(&client, &cfg, &outbox(), "no-cb", "complete", None);
+                fire_completion_webhook(&client, &cfg, &outbox(), "no-cb", "complete", None).await;
             },
         )
         .await;
@@ -1328,21 +1380,19 @@ mod tests {
             meta.status = leviath_core::run_meta::RunStatus::Complete;
             create_run(&meta).unwrap();
             let client = reqwest::Client::new();
-            let fire = |outbox: &Arc<Outbox>| {
-                fire_completion_webhook(
-                    &client,
-                    &fast_cfg(),
-                    outbox,
-                    "done-before",
-                    "complete",
-                    None,
-                )
+            let cfg = fast_cfg();
+            let fire = |outbox: Arc<Outbox>| {
+                let (client, cfg) = (&client, &cfg);
+                async move {
+                    fire_completion_webhook(client, cfg, &outbox, "done-before", "complete", None)
+                        .await
+                }
             };
 
             let settled = outbox();
             settled.settle(&delivery_id("agent_completed", "done-before"));
-            assert!(!fire(&settled), "settled: nothing is sent");
-            assert!(fire(&outbox()), "owed: a delivery starts");
+            assert!(!fire(settled).await, "settled: nothing is sent");
+            assert!(fire(outbox()).await, "owed: a delivery starts");
         })
         .await;
     }
@@ -1376,7 +1426,8 @@ mod tests {
                     "signed",
                     "complete",
                     None,
-                );
+                )
+                .await;
                 let requests = server.await.unwrap();
                 // Signed with the secret the store holds for the run: the
                 // run file only names it.
@@ -1440,8 +1491,10 @@ mod tests {
             leviath_runtime::secret_store::SecretStore::of_runs(&runstate::runs_dir())
                 .forget_run("lost");
             let client = reqwest::Client::new();
-            fire_completion_webhook(&client, &fast_cfg(), &outbox(), "lost", "complete", None);
-            fire_completion_webhook(&client, &fast_cfg(), &outbox(), "kept", "complete", None);
+            fire_completion_webhook(&client, &fast_cfg(), &outbox(), "lost", "complete", None)
+                .await;
+            fire_completion_webhook(&client, &fast_cfg(), &outbox(), "kept", "complete", None)
+                .await;
             // The one request the receiver took is the run whose secret is
             // still there.
             let requests = server.await.unwrap();
