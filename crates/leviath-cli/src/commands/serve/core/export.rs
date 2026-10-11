@@ -181,9 +181,14 @@ pub(crate) async fn start(
 
     let now = leviath_core::duration::now_secs();
     let dir = exports_dir();
-    state.caches.exports.sweep(&dir, now);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| ServeError::Internal(format!("Could not make the exports directory: {e}")))?;
+    // The sweep removes files and the directory is made on the blocking pool.
+    let exports = state.caches.exports.clone();
+    super::super::blocking::blocking(move || {
+        exports.sweep(&dir, now);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| ServeError::Internal(format!("Could not make the exports directory: {e}")))
+    })
+    .await?;
     let job = state.caches.exports.enqueue(now);
 
     // The listing runs here, on the caller's task, so a filter that cannot be

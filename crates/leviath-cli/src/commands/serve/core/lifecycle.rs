@@ -95,12 +95,17 @@ enum Counts {
 /// Only when the record reads. A run the daemon just accepted may not have been
 /// persisted yet, and the daemon is the authority on what is live, so an
 /// unreadable record is not an answer here, it is a reason to go and ask.
-fn finish_showing(
+///
+/// The record is read on the blocking pool.
+async fn finish_showing(
     id: &str,
     action: Action,
     counts: Counts,
 ) -> Option<leviath_core::run_meta::RunStatus> {
-    let meta = runstate::read_meta(id).ok()?;
+    let owned = id.to_string();
+    let meta = super::super::blocking::blocking(move || runstate::read_meta(&owned))
+        .await
+        .ok()?;
     if !is_terminal(&meta.status) {
         return None;
     }
@@ -136,13 +141,13 @@ fn already_over(id: &str, status: &leviath_core::run_meta::RunStatus, action: Ac
 /// conflict it is, for both surfaces and for every act, and what a sweep then
 /// reports as `ALREADY_FINISHED` instead of as a run it moved.
 pub(crate) async fn act(state: &AppState, id: &str, action: Action) -> Result<(), ServeError> {
-    if let Some(status) = finish_showing(id, action, Counts::AnyFinish) {
+    if let Some(status) = finish_showing(id, action, Counts::AnyFinish).await {
         return Err(ServeError::Conflict(already_over(id, &status, action)));
     }
 
     match state.control.request(&action.request(id.to_string())).await {
         Ok(ControlResponse::Ok { ok: true }) => {
-            match finish_showing(id, action, Counts::NotThisActs) {
+            match finish_showing(id, action, Counts::NotThisActs).await {
                 Some(status) => Err(ServeError::Conflict(already_over(id, &status, action))),
                 None => Ok(()),
             }

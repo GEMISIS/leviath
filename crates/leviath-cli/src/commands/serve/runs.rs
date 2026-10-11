@@ -11,7 +11,7 @@
 //! [`MAX_SEARCH_SCAN`].
 //!
 //! Pruning is [`delete_run`] and [`delete_runs`], which is the other half of
-//! that story: the listing can now be made smaller, not only paged over.
+//! that story: the listing can be made smaller, not only paged over.
 
 use std::collections::HashSet;
 
@@ -25,7 +25,7 @@ use super::core::runs::{
     self as run_core, MAX_IDS, MAX_LIMIT, ParentFilter, RunSpec, SortKey, Source,
 };
 use super::types::*;
-use crate::runstate::{self, RunMeta};
+use crate::runstate::RunMeta;
 
 /// Page size when the client does not ask.
 const DEFAULT_LIMIT: usize = 50;
@@ -393,11 +393,11 @@ pub(super) struct DeleteRunsQuery {
 /// "Delete" which only hid the run locally would tell somebody clearing a
 /// sensitive transcript that it was gone when it was not.
 ///
-/// It is also the whole sub-agent tree - see [`runstate::family_of`]. Deleting a parent and
-/// leaving its children behind left them on disk with nothing above them, and
-/// a client that nests runs under their parent (the dashboard does) has
-/// nowhere to draw them but the top level, so a delete read as a promotion.
-/// Deleting a child never touches its parent or its siblings.
+/// It is also the whole sub-agent tree - see [`crate::runstate::family_of`].
+/// Children left behind would sit on disk with nothing above them, and a
+/// client that nests runs under their parent (the dashboard does) would have
+/// nowhere to draw them but the top level, so a delete would read as a
+/// promotion. Deleting a child never touches its parent or its siblings.
 ///
 /// **409** on a live run - removing a directory out from under a running agent
 /// is a different and much larger feature, and refusing is the honest answer.
@@ -411,10 +411,10 @@ pub(super) async fn delete_run(
 ) -> Result<StatusCode, ApiError> {
     // `run_dir` maps an unsafe id to a path that cannot exist, so a traversal
     // attempt arrives here as an ordinary miss rather than a removed directory.
-    let ids = runstate::family_of(&id);
-    run_core::deletable_family(&id, &ids, query.force.unwrap_or(false))
+    let force = query.force.unwrap_or(false);
+    super::blocking::blocking(move || run_core::delete_family(&id, force))
+        .await
         .map_err(|e| as_api_error(&e))?;
-    run_core::remove_family(&ids).map_err(|e| as_api_error(&e))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -277,7 +277,10 @@ async fn read(
     state: &AppState,
     request: SpawnRunRequest,
 ) -> Result<leviath_runtime::spec::request::SpawnRequest, SpawnIssues> {
-    let (request, mut issues) = request.read(&policy(state))?;
+    // An attachment named by path is a file read, so the request is read on
+    // the blocking pool.
+    let policy = policy(state);
+    let (request, mut issues) = crate::blocking::blocking(move || request.read(&policy)).await?;
     if issues.is_empty() {
         return Ok(request);
     }
