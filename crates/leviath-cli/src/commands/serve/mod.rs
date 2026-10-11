@@ -7,7 +7,7 @@ mod args;
 mod artifact_types;
 mod auth;
 mod blobs;
-mod blocking;
+use crate::blocking;
 mod blueprint_types;
 mod blueprints;
 mod caches;
@@ -526,7 +526,7 @@ async fn execute_with_shutdown(
     state
         .caches
         .model_catalog
-        .request_refresh(state.current_config(), false);
+        .request_refresh(state.current_config().await, false);
 
     // Background world-event consumer: subscribes to the daemon's pushed
     // `WorldEvent` stream and forwards each event to WebSocket subscribers.
@@ -2488,7 +2488,7 @@ mod tests {
         let state = test_state();
         let cloned = state.clone();
         // Both should work (no panic)
-        let _ = cloned.current_config().default_provider.clone();
+        let _ = cloned.config.in_force().default_provider.clone();
     }
 
     #[test]

@@ -120,7 +120,7 @@ pub(crate) fn spawn(
         loop {
             let awaiting = !reload.awaiting_live().is_empty();
             tokio::time::sleep(pacing.next_wait(awaiting, backoff, since_full.elapsed())).await;
-            let config = reloader.current();
+            let config = reloader.clone().checked().await.config;
             let read = match awaiting {
                 true => reload.read_awaiting(&config).await,
                 false => {

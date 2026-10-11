@@ -17,7 +17,7 @@ use super::super::filter::MatchCx;
 use super::super::paging::page::page;
 use super::super::scalars::{BigInt, Cursor, Timestamp};
 use super::tool_calls::{ToolCall, tool_call};
-use crate::commands::serve::blocking::blocking;
+use crate::blocking::blocking;
 use crate::commands::serve::core::{context_changes, executions, inferences};
 use crate::commands::serve::cursor;
 

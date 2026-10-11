@@ -49,7 +49,7 @@ fn by_name() -> Vec<Term<BlueprintOrderField>> {
 /// roots are resolved first so a test's agents-dir override is visible from
 /// the task that resolves them.
 async fn installed(state: &AppState) -> Vec<Blueprint> {
-    let config = state.current_config();
+    let config = state.current_config().await;
     let roots = super::super::super::blueprints::blueprint_roots(&config);
     let found = blocking(move || super::super::super::blueprints::discover_in(roots)).await;
     found

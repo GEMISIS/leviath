@@ -229,7 +229,7 @@ async fn installed_elsewhere(state: &AppState, request: &mut Request) {
     if installed || reference.digest.is_some() {
         return;
     }
-    let roots = state.current_config().agent_paths.clone();
+    let roots = state.current_config().await.agent_paths.clone();
     let listed =
         super::super::blocking::blocking(move || super::super::blueprints::discover_in(roots))
             .await;

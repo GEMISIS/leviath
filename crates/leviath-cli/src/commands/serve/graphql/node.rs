@@ -179,7 +179,7 @@ async fn script(ctx: &Context<'_>, rest: &str) -> async_graphql::Result<Option<N
     };
     // Resolved on this task and walked on the blocking pool, as the listing
     // does.
-    let config = state.current_config();
+    let config = state.current_config().await;
     let dirs = super::super::tools::AgentDirs::of(&config);
     let owner = blueprint.map(str::to_string);
     let listed =
@@ -202,7 +202,7 @@ async fn script(ctx: &Context<'_>, rest: &str) -> async_graphql::Result<Option<N
 /// the installed revision's answers with nothing.
 async fn blueprint(ctx: &Context<'_>, id: &str, name: &str) -> async_graphql::Result<Option<Node>> {
     let state = ctx.data_unchecked::<AppState>();
-    let config = state.current_config();
+    let config = state.current_config().await;
     let roots = super::super::blueprints::blueprint_roots(&config);
     let installed = blocking(move || super::super::blueprints::discover_in(roots)).await;
     let Some(info) = installed.iter().find(|info| info.name == name) else {

@@ -53,7 +53,7 @@ pub(crate) struct Recovered {
 /// what it did the way an upgrade at start does.
 fn convert_old(starter: &DaemonStarter, dir: &Path, all: bool) {
     let envs = |graph: &leviath_runtime::spec::graph::RunGraph| {
-        starter.env_for_graph(graph, starter.config.current())
+        starter.env_for_graph(graph, starter.config.in_force())
     };
     let agents = starter.agents_dir.as_deref();
     match all {
@@ -100,7 +100,7 @@ async fn bind_one(
     revive: bool,
 ) -> Result<Bound, Option<Box<RunListEntry>>> {
     let run_id = run.spec.run_id.to_string();
-    let env = starter.env_for_graph(&run.spec.graph, starter.config.current());
+    let env = starter.env_for_graph(&run.spec.graph, starter.config.in_force());
     let bound = leviath_runtime::bind::bind(&run.spec, &run.code, &env).await;
     let bindings = match (bound, revive) {
         (Ok(bindings), _) => bindings,
@@ -240,6 +240,9 @@ pub(crate) async fn bind_paged(
     purpose: PageIn,
 ) -> Result<Bound, NotPlaced> {
     use leviath_runtime::components::AgentStatus;
+    // The machine as it stands now, which the conversion, the binding and
+    // the placement below all read.
+    let config = starter.checked_config().await;
     let dir = starter.runs_dir.join(run_id);
     convert_old(starter, &dir, false);
     let run = read_run(&dir).ok_or(NotPlaced::Missing)?;
@@ -256,7 +259,7 @@ pub(crate) async fn bind_paged(
         (RunStatus::Cancelled, PageIn::Resume) => true,
         _ => false,
     };
-    starter.providers.refresh(&starter.config.current());
+    starter.providers.refresh(&config);
     bind_one(starter, run, revive)
         .await
         .map_err(|held| match held {

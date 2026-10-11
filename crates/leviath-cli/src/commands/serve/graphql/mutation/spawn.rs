@@ -232,7 +232,7 @@ impl Spawned {
     /// for the run again.
     async fn run(&self) -> Option<Run> {
         let run_id = self.run_id.clone();
-        crate::commands::serve::blocking::blocking(move || crate::runstate::read_meta(&run_id).ok())
+        crate::blocking::blocking(move || crate::runstate::read_meta(&run_id).ok())
             .await
             .map(|meta| Run {
                 meta: std::sync::Arc::new(meta),

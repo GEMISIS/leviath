@@ -193,8 +193,7 @@ impl Sift for RunSift {
 /// read on the blocking pool.
 async fn deep_match(item: &Arc<RunMeta>, q: &str, sources: &[Source]) -> bool {
     let (meta, q, sources) = (Arc::clone(item), q.to_string(), sources.to_vec());
-    crate::commands::serve::blocking::blocking(move || matching::matches_query(&meta, &q, &sources))
-        .await
+    crate::blocking::blocking(move || matching::matches_query(&meta, &q, &sources)).await
 }
 
 /// The cursor a page of runs ends on, absent when it is the last page.

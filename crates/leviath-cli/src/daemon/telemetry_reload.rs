@@ -46,11 +46,18 @@ type InstallLayer = Box<dyn Fn(Option<leviath_telemetry::LogLayer>) -> bool + Se
 type SetCap = Box<dyn Fn(u64) -> bool + Send + Sync>;
 
 /// Keeps the telemetry pipeline in step with `[observability]`.
+///
+/// Two steps on two threads, like the other reloads the world loop installs:
+/// [`prepare`](Self::prepare) builds the pipeline off the world (an OTLP
+/// exporter is built on a thread of its own and waited for), and
+/// [`install`](Self::install) swaps the sink in on the world loop.
 pub struct TelemetryReload {
-    /// The config the installed pipeline was built from. `None` before the
+    /// The config the newest pipeline was built from. `None` before the
     /// first refresh, which is what makes the boot install go through the same
     /// path as every later change.
     applied: Mutex<Option<ObservabilityConfig>>,
+    /// Built and not yet swapped into the world.
+    pending: Mutex<Option<Arc<dyn leviath_core::telemetry::TelemetrySink>>>,
     install_layer: InstallLayer,
     set_cap: SetCap,
 }
@@ -70,29 +77,34 @@ impl TelemetryReload {
     fn with_installers(install_layer: InstallLayer, set_cap: SetCap) -> Self {
         Self {
             applied: Mutex::new(None),
+            pending: Mutex::new(None),
             install_layer,
             set_cap,
         }
     }
 
-    /// Rebuild and install the pipeline when `cfg` differs from the one in
-    /// service. Returns whether anything was swapped.
-    ///
-    /// The outgoing sink is flushed before it is dropped, so spans and metrics
-    /// already recorded reach the old collector rather than dying with it. The
-    /// flush runs on a thread of its own, so the world loop never waits on
-    /// that collector.
-    ///
-    /// A pipeline that cannot be built (an OTLP exporter that will not
-    /// construct) leaves the no-op sink in place and warns, which is what boot
-    /// did too: observability must never stop the work it observes. The config
-    /// is recorded as applied either way, so a setting that cannot work is not
-    /// retried on every spawn.
+    /// [`prepare`](Self::prepare), then [`install`](Self::install): for boot,
+    /// which has the world in hand before anything else runs on it.
     pub fn refresh_into(
         &self,
         world: &mut leviath_runtime::PipelineWorld,
         cfg: &ObservabilityConfig,
     ) -> bool {
+        self.prepare(cfg);
+        self.install(world)
+    }
+
+    /// Build the pipeline `cfg` names, when it differs from the newest one,
+    /// for [`install`](Self::install) to swap in. Returns whether it did.
+    ///
+    /// A pipeline that cannot be built (an OTLP exporter that will not
+    /// construct) leaves the no-op sink to be installed and warns, which is
+    /// what boot did too: observability must never stop the work it observes.
+    /// The config is recorded as built either way, so a setting that cannot
+    /// work is not retried on every spawn.
+    ///
+    /// Blocking: building an OTLP exporter waits on a thread of its own.
+    pub fn prepare(&self, cfg: &ObservabilityConfig) -> bool {
         // Cheap, and applied before the equality check so the cap the file
         // writer holds is the file's on every refresh, including the first.
         (self.set_cap)(cfg.log_file_max_bytes);
@@ -103,10 +115,9 @@ impl TelemetryReload {
         *applied = Some(cfg.clone());
         drop(applied);
 
-        let ecs = world.world_mut();
-        // Built before the swap: on OTLP this constructs an exporter, and a
-        // failure has to leave the caller with a working (if silent) sink
-        // rather than a half-installed one.
+        // Built whole before anything is swapped: on OTLP this constructs an
+        // exporter, and a failure has to leave the world with a working (if
+        // silent) sink rather than a half-installed one.
         let built = leviath_telemetry::build_sink(cfg);
         let sink: Arc<dyn leviath_core::telemetry::TelemetrySink> = match built {
             Some(built) => {
@@ -121,6 +132,28 @@ impl TelemetryReload {
                 Arc::new(NoopSink)
             }
         };
+        *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(sink);
+        true
+    }
+
+    /// Swap the sink [`prepare`](Self::prepare) built into `world`. Returns
+    /// whether there was one; with nothing prepared it does nothing, so it is
+    /// safe before every placement.
+    ///
+    /// The outgoing sink is flushed before it is dropped, so spans and metrics
+    /// already recorded reach the old collector rather than dying with it. The
+    /// flush runs on a thread of its own, so the world loop never waits on
+    /// that collector.
+    pub fn install(&self, world: &mut leviath_runtime::PipelineWorld) -> bool {
+        let Some(sink) = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return false;
+        };
+        let ecs = world.world_mut();
         // Read rather than tested for: every world carries a sink from the
         // moment it is built, the no-op one until something replaces it.
         let outgoing = std::mem::replace(

@@ -43,7 +43,7 @@ pub(crate) async fn highlights_of(
     q: String,
     sources: Vec<Source>,
 ) -> Vec<Vec<Highlight>> {
-    crate::commands::serve::blocking::blocking(move || {
+    crate::blocking::blocking(move || {
         runs.iter()
             .map(|meta| highlights_for(meta, &q, &sources))
             .collect()

@@ -191,7 +191,7 @@ pub(crate) async fn discover(
     let state = ctx.data_unchecked::<AppState>();
     // Resolved on this task; finding the blueprint's directory and walking the
     // tool directories belong on the blocking pool.
-    let dirs = super::super::super::tools::AgentDirs::of(&state.current_config());
+    let dirs = super::super::super::tools::AgentDirs::of(&*state.current_config().await);
     let named = blueprint.map(str::to_string);
     let found = blocking(move || super::super::super::tools::inventory(&dirs, named.as_deref()))
         .await

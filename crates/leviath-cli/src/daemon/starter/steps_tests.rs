@@ -294,7 +294,7 @@ async fn a_run_whose_file_cannot_be_written_is_refused() {
     std::fs::write(&blocker, "a file, not a directory").unwrap();
     let starter = starter(Config::default(), registry(), &blocker);
     let request = task_request(&coder(dir.path()), "t");
-    let env = starter.env_for(&request, starter.config.current());
+    let env = starter.env_for(&request, starter.config.check().config);
 
     let issues = starter
         .start_with(env, request, Caller::TopLevel)
@@ -352,7 +352,7 @@ async fn a_refusal_after_the_file_is_written_is_recorded_on_it() {
     crate::test_support::with_tracing(|| {
         let starter = starter(Config::default(), registry(), runs.path());
         let request = task_request(&coder(dir.path()), "t");
-        let env = starter.env_for(&request, starter.config.current());
+        let env = starter.env_for(&request, starter.config.check().config);
         let resolved = crate::daemon::block_on::block_on(resolve(
             &request,
             &Caller::TopLevel,
@@ -404,7 +404,7 @@ async fn a_runs_files_are_stored_beside_its_run_file_never_in_it() {
         )];
         request
     };
-    let env = starter.env_for(&request(), starter.config.current());
+    let env = starter.env_for(&request(), starter.config.check().config);
     let prepared = starter
         .start_with(env, request(), Caller::TopLevel)
         .await
@@ -427,7 +427,7 @@ async fn a_runs_files_are_stored_beside_its_run_file_never_in_it() {
     );
 
     starter.blob_store = Arc::new(Refusing);
-    let env = starter.env_for(&request(), starter.config.current());
+    let env = starter.env_for(&request(), starter.config.check().config);
     let Err(refused) = starter.start_with(env, request(), Caller::TopLevel).await else {
         panic!("a file that cannot be stored refuses the run");
     };
@@ -471,7 +471,7 @@ binds = [{ region = "task" }]
     config.security.read_paths = vec!["glob:[".to_string()];
     let starter = starter(config, registry(), runs.path());
     let request = task_request(&manifest, "t");
-    let env = starter.env_for(&request, starter.config.current());
+    let env = starter.env_for(&request, starter.config.check().config);
     let issues = starter
         .start_with(env, request, Caller::TopLevel)
         .await

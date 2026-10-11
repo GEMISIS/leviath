@@ -119,7 +119,7 @@ impl YoloProfile {
         };
         // Deciding loads the profiles file, as the REST route does on the
         // blocking pool.
-        let decided = crate::commands::serve::blocking::blocking(move || {
+        let decided = crate::blocking::blocking(move || {
             super::super::super::super::yolo::decided(&state, asked)
         })
         .await

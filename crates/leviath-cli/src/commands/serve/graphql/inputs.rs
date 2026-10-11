@@ -61,7 +61,7 @@ impl BlueprintRef {
 /// that sent a digest is saying which revision it means, and answering for a
 /// different one, or for nothing, is the drift the pin exists to catch.
 async fn verify_digest(state: &AppState, name: &str, pinned: &str) -> Result<(), ServeError> {
-    let config = state.current_config();
+    let config = state.current_config().await;
     // Resolved before the walk so a test's blueprint-directory override is
     // visible from the task that reads them, as the blueprint listing does.
     let roots = super::super::blueprints::blueprint_roots(&config);

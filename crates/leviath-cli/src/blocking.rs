@@ -1,18 +1,18 @@
 //! Filesystem work off the async runtime.
 //!
-//! Every handler here is `async`, and tokio runs them on a small pool of
-//! worker threads. A `read_dir` over a thousand runs, or a TOML parse of every
-//! installed blueprint, holds one of those threads for its whole duration, and
-//! a burst of requests that all do it holds all of them: the requests then
-//! wait on each other though nothing they touch is shared. The blocking pool
-//! exists for exactly this work.
+//! `lev serve`'s handlers and the daemon's spawn path are `async`, and tokio
+//! runs them on a small pool of worker threads. A `read_dir` over a thousand
+//! runs, or a TOML parse of every installed blueprint, holds one of those
+//! threads for its whole duration, and a burst of requests that all do it
+//! holds all of them: the requests then wait on each other though nothing they
+//! touch is shared. The blocking pool exists for exactly this work.
 
 /// Run `f` on tokio's blocking pool and hand back what it returns.
 ///
 /// A panic inside `f` is re-raised here rather than turned into an error:
 /// nothing cancels a blocking task, so a `JoinError` can only be a panic, and
 /// swallowing one would turn a bug into an empty listing.
-pub(super) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     match tokio::task::spawn_blocking(f).await {
         Ok(value) => value,
         Err(joined) => std::panic::resume_unwind(joined.into_panic()),

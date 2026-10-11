@@ -14,6 +14,12 @@
 //! word, leaving the run marked for a title nobody will ever make. Applying
 //! here is what makes both halves answer from one document.
 //!
+//! Applying is two steps on two threads. [`LiveLimits::prepare`] reads
+//! `mime_types.toml` and builds the mime registry, on the blocking pool;
+//! [`LiveLimits::install`] puts what it prepared into the world, on the world
+//! loop, and touches nothing but memory, because every run's tick waits on
+//! that loop.
+//!
 //! The comparison is on the settings themselves rather than the file's mtime,
 //! so a save that only changed a tool permission does not touch the pools. Each
 //! setting says for itself whether it reaches a run already under way: a world
@@ -61,10 +67,19 @@ impl Applied {
     }
 }
 
+/// What [`LiveLimits::prepare`] built and [`LiveLimits::install`] has yet to
+/// put into the world.
+struct Pending {
+    config: Config,
+    registry: std::sync::Arc<leviath_core::mime::MimeRegistry>,
+}
+
 /// Applies `[limits]` and `[title]` to a live world.
 ///
-/// One per daemon, consulted wherever there is a freshly reloaded config and
-/// the world in hand: the spawner, and the reloader that pages a run back in.
+/// One per daemon. It is prepared wherever there is a freshly checked config
+/// off the world (before a spawn, a page-in, and on the daemon's config
+/// watcher), and installed where the world is in hand: the spawn and page-in
+/// placement, and the housekeeper.
 pub struct LiveLimits {
     /// The prompt hub, which holds its own timeout rather than living in the
     /// world.
@@ -73,9 +88,11 @@ pub struct LiveLimits {
     ///
     /// [`WorldHost::settings`]: leviath_runtime::host::WorldHost::settings
     host: HostSettings,
-    /// What was applied last, or `None` before the first application, which is
-    /// why boot applies everything.
+    /// What was prepared last, or `None` before the first preparation, which
+    /// is why boot applies everything.
     applied: Mutex<Option<Applied>>,
+    /// Prepared and not yet installed.
+    pending: Mutex<Option<Pending>>,
 }
 
 impl LiveLimits {
@@ -85,22 +102,54 @@ impl LiveLimits {
             hub,
             host,
             applied: Mutex::new(None),
+            pending: Mutex::new(None),
         }
     }
 
-    /// Put `config`'s limits and title settings into `world`, if they are not
-    /// the ones already in it. Reports whether anything was applied.
-    ///
-    /// Cheap enough to call before every spawn: an unchanged config costs one
-    /// comparison. The lock is held across the whole application so two spawns
-    /// arriving together cannot interleave halves of two different configs.
+    /// [`prepare`](Self::prepare), then [`install`](Self::install): for boot,
+    /// which has the world in hand before anything else runs on it.
     pub fn apply(&self, config: &Config, world: &mut PipelineWorld) -> bool {
+        self.prepare(config);
+        self.install(world)
+    }
+
+    /// Get `config`'s limits and title settings ready for
+    /// [`install`](Self::install), if they are not the ones already prepared.
+    /// Reports whether they were.
+    ///
+    /// Blocking: it reads `mime_types.toml` every time, and when anything
+    /// changed builds the mime registry, which reads every script provider's
+    /// `.rhai` and compiles the checks the rows name. Cheap enough to call
+    /// before every spawn: an unchanged config costs that one read and a
+    /// comparison.
+    pub fn prepare(&self, config: &Config) -> bool {
         let next = Applied::of(config);
         let mut applied = leviath_core::sync::lock(&self.applied);
         if applied.as_ref() == Some(&next) {
             return false;
         }
         *applied = Some(next);
+        let registry = std::sync::Arc::new(config.mime_registry_or_defaults());
+        *leviath_core::sync::lock(&self.pending) = Some(Pending {
+            config: config.clone(),
+            registry,
+        });
+        true
+    }
+
+    /// Put what [`prepare`](Self::prepare) built into `world`. Reports whether
+    /// there was anything; with nothing prepared it does nothing, so it is
+    /// safe on every re-drive and before every placement.
+    ///
+    /// Memory only. One whole preparation goes in at once, so two
+    /// preparations racing each other cannot leave the world with halves of
+    /// two different configs.
+    pub fn install(&self, world: &mut PipelineWorld) -> bool {
+        let Some(Pending { config, registry }) = leviath_core::sync::lock(&self.pending).take()
+        else {
+            return false;
+        };
+        let config = &config;
 
         // Concurrency. A raised limit is usable at once; a lowered one narrows
         // as the requests and batches in flight finish, so nothing running is
@@ -149,7 +198,6 @@ impl LiveLimits {
         // and every run already under way is rebuilt over it here, so a row
         // added while the daemon runs types the next file rather than the
         // next run.
-        let registry = std::sync::Arc::new(config.mime_registry_or_defaults());
         let refreshed = leviath_runtime::blob_store::refresh_run_registries(ecs, &registry);
         if refreshed > 0 {
             tracing::info!(runs = refreshed, "[mime] live runs re-read the mime types");

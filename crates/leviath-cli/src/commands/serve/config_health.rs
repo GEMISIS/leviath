@@ -82,10 +82,10 @@ fn unix_secs(t: SystemTime) -> i64 {
 ///
 /// Never returns; held behind the same abort-on-drop guard as the event loop.
 pub(super) async fn watch_loop(state: AppState, interval: Duration) {
-    let mut reported = state.config.health().fault;
+    let mut reported = state.config_health().await.fault;
     loop {
         tokio::time::sleep(interval).await;
-        reported = broadcast_change(&state, &reported);
+        reported = broadcast_change(&state, &reported).await;
     }
 }
 
@@ -100,8 +100,8 @@ pub(super) async fn watch_loop(state: AppState, interval: Duration) {
 /// Separate from the loop so the rule can be tested without a clock. Driving it
 /// through the loop means racing the spawn against the first edit, and a test
 /// that has to sleep to be right is a test that eventually is not.
-fn broadcast_change(state: &AppState, reported: &Option<ConfigFault>) -> Option<ConfigFault> {
-    let health = state.config.health();
+async fn broadcast_change(state: &AppState, reported: &Option<ConfigFault>) -> Option<ConfigFault> {
+    let health = state.config_health().await;
     if &health.fault != reported {
         super::events::send(&state.event_tx, event(&health));
     }
@@ -141,7 +141,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         save(&path, &empty_config());
-        let health = reloader(&path).health();
+        let health = reloader(&path).check();
 
         let (error, mtime) = report(&health);
         assert!(error.is_none());
@@ -154,10 +154,10 @@ mod tests {
         let path = dir.path().join("config.toml");
         save(&path, &empty_config());
         let reloader = reloader(&path);
-        let (_, good_mtime) = report(&reloader.health());
+        let (_, good_mtime) = report(&reloader.check());
 
         save(&path, "default_provider = \"anthropic\"\nbroken : :\n");
-        let (error, mtime) = report(&reloader.health());
+        let (error, mtime) = report(&reloader.check());
 
         let error = error.expect("a file that will not parse is an error");
         assert_eq!(error.kind, "parse");
@@ -184,7 +184,7 @@ mod tests {
             &path,
             "[model_providers.local]\nkind = \"openai-compatible\"\n",
         );
-        let (error, _) = report(&reloader.health());
+        let (error, _) = report(&reloader.check());
 
         let error = error.expect("an endpoint with no address is an error");
         assert_eq!(error.kind, "validation");
@@ -199,7 +199,7 @@ mod tests {
         save(&path, &empty_config());
         let reloader = reloader(&path);
 
-        let frame = event(&reloader.health());
+        let frame = event(&reloader.check());
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["type"], "config_health");
         assert_eq!(json["healthy"], true);
@@ -211,7 +211,7 @@ mod tests {
         );
 
         save(&path, "broken : :");
-        let frame = event(&reloader.health());
+        let frame = event(&reloader.check());
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["healthy"], false);
         assert_eq!(json["error"]["kind"], "parse");
@@ -226,8 +226,8 @@ mod tests {
         assert_eq!(unix_secs(UNIX_EPOCH + Duration::from_secs(7)), 7);
     }
 
-    #[test]
-    fn a_frame_goes_out_on_each_edge_and_on_neither_steady_state() {
+    #[tokio::test]
+    async fn a_frame_goes_out_on_each_edge_and_on_neither_steady_state() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         save(&path, &empty_config());
@@ -235,12 +235,12 @@ mod tests {
         let mut rx = state.event_tx.subscribe();
 
         // Steady and loading: nothing to say.
-        let reported = broadcast_change(&state, &None);
+        let reported = broadcast_change(&state, &None).await;
         assert!(reported.is_none());
         assert!(rx.try_recv().is_err(), "no frame while nothing changed");
 
         save(&path, "broken : :");
-        let reported = broadcast_change(&state, &reported);
+        let reported = broadcast_change(&state, &reported).await;
         assert!(reported.is_some(), "the file stopped loading");
         let frame =
             serde_json::to_value(rx.try_recv().expect("a frame on the edge").event).unwrap();
@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(frame["error"]["kind"], "parse");
 
         // Still broken, in the same way, and already announced.
-        let reported = broadcast_change(&state, &reported);
+        let reported = broadcast_change(&state, &reported).await;
         assert!(rx.try_recv().is_err(), "a held state repeats no frame");
 
         // Still broken, for a different reason: a client holding a banner has
@@ -258,7 +258,7 @@ mod tests {
             &path,
             "[model_providers.local]\nkind = \"openai-compatible\"\n",
         );
-        let reported = broadcast_change(&state, &reported);
+        let reported = broadcast_change(&state, &reported).await;
         let frame =
             serde_json::to_value(rx.try_recv().expect("a new reason is an edge").event).unwrap();
         assert_eq!(frame["healthy"], false);
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(frame["error"]["key"], "model_providers.local");
 
         save(&path, &empty_config());
-        let reported = broadcast_change(&state, &reported);
+        let reported = broadcast_change(&state, &reported).await;
         assert!(reported.is_none(), "it loads again");
         let frame =
             serde_json::to_value(rx.try_recv().expect("recovery is an edge too").event).unwrap();

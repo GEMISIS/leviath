@@ -83,6 +83,7 @@ pub struct PolicyChange {
 
 impl PolicyChange {
     /// Whether anything at all changed.
+    #[cfg(test)]
     pub fn any(&self) -> bool {
         self.policy || self.rules
     }
@@ -192,15 +193,6 @@ impl PolicyReload {
     /// gate built off the world.
     pub fn current(&self) -> leviath_core::PolicyConfig {
         self.lock().policy.clone()
-    }
-
-    /// [`refresh`](Self::refresh), then [`install`](Self::install) whatever it
-    /// built. What the daemon's spawn and reload hooks call: one statement, and
-    /// two stats when nothing moved.
-    pub fn refresh_into(&self, world: &mut leviath_runtime::PipelineWorld) {
-        if self.refresh().any() {
-            self.install(world);
-        }
     }
 
     /// Put whatever [`refresh`](Self::refresh) built into `world`. Does nothing
@@ -543,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_into_installs_a_change_and_leaves_an_unchanged_world_alone() {
+    fn a_refresh_installs_a_change_and_leaves_an_unchanged_world_alone() {
         let dir = tempfile::tempdir().unwrap();
         let (policy_path, rules_dir) = paths(dir.path());
         let reload = PolicyReload::new(policy_path.clone(), rules_dir);
@@ -551,11 +543,13 @@ mod tests {
         reload.install(&mut world);
 
         // Nothing moved: the world keeps what it has and no rebuild happens.
-        reload.refresh_into(&mut world);
+        assert!(!reload.refresh().any());
+        reload.install(&mut world);
         assert!(installed_rule_names(&mut world).is_empty());
 
         write(&policy_path, "[[allowlist]]\ntool = \"shell\"\n");
-        reload.refresh_into(&mut world);
+        assert!(reload.refresh().any());
+        reload.install(&mut world);
         assert_eq!(installed_rule_names(&mut world), vec!["shell"]);
     }
 

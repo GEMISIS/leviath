@@ -326,7 +326,10 @@ fn make_reaper(
 }
 
 /// The resume hook installed on the host: re-reads the config layers an agent
-/// resolved at spawn, against `config.toml` as it stands now.
+/// resolved at spawn, against `config.toml` as the daemon last read it. On
+/// the world loop, so it reads what is in force rather than the file; the
+/// config watcher ([`watch_config`]) has looked at the file within the last
+/// couple of seconds.
 ///
 /// Which is the whole point of the hook. A run parked on a tool it is not
 /// permitted to call, on a path it may not read, or against a write ceiling it
@@ -350,20 +353,52 @@ fn make_resumer(
             // has been paged back in registers its workers as it goes.
             return;
         };
-        state.reread_config(&reloader.current());
+        state.reread_config(&reloader.in_force());
     })
 }
 
-/// The hook the host runs on every safety re-drive: the config as it stands
-/// on disk now, applied to the world where it differs from what is in it.
-/// One stat of `config.toml` and one read of `mime_types.toml` when nothing
-/// changed. Factored out so the closure body is unit-testable.
+/// The hook the host runs on every safety re-drive: whatever the config
+/// watcher ([`watch_config`]) prepared from `config.toml` and
+/// `mime_types.toml`, put into the world. On the world loop, so memory only.
+/// Factored out so the closure body is unit-testable.
 fn make_housekeeper(
-    reloader: Arc<crate::daemon::config_reload::ConfigReloader>,
     live_limits: Arc<crate::daemon::live_limits::LiveLimits>,
 ) -> leviath_runtime::host::Housekeeper {
     Box::new(move |world| {
-        live_limits.apply(&reloader.current(), world);
+        live_limits.install(world);
+    })
+}
+
+/// How often the daemon looks at its config files while nothing else does.
+const CONFIG_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Look at `config.toml`, `mime_types.toml` and the taint policy's files
+/// every `every`, on the blocking pool, and prepare whatever changed, for as
+/// long as the returned task runs.
+///
+/// The world loop's hooks (the housekeeper, the resume hook) read only what
+/// is in force, because every run's tick waits on that loop; this is what
+/// keeps it current while no spawn comes along to check. One `stat` of each
+/// file per tick while nothing changes.
+fn watch_config(
+    runtime: &tokio::runtime::Handle,
+    reloader: Arc<crate::daemon::config_reload::ConfigReloader>,
+    live_limits: Arc<crate::daemon::live_limits::LiveLimits>,
+    policy: Arc<crate::daemon::policy_reload::PolicyReload>,
+    every: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
+        loop {
+            tokio::time::sleep(every).await;
+            let (reloader, live_limits, policy) =
+                (reloader.clone(), live_limits.clone(), policy.clone());
+            crate::blocking::blocking(move || {
+                let config = reloader.check().config;
+                live_limits.prepare(&config);
+                policy.refresh();
+            })
+            .await;
+        }
     })
 }
 
@@ -418,6 +453,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // models through the same registry the world will infer on, so both see
     // one set of learned windows rather than two.
     let pp_providers = parts.providers.clone();
+    let runtime = parts.runtime.clone();
     let mut world = PipelineWorld::new(
         parts.providers,
         tool_service.clone(),
@@ -586,7 +622,21 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // This is what makes an edit to `mime_types.toml` (or a `[limits]` key)
     // land in a live run within one re-drive interval rather than waiting
     // for the next `lev run` to walk the spawn path.
-    host.set_housekeeper(make_housekeeper(reloader.clone(), live_limits.clone()));
+    host.set_housekeeper(make_housekeeper(live_limits.clone()));
+
+    // What keeps the world loop's view of the config files current between
+    // spawns. Only for a caller that handed in the reloader it boots from,
+    // which is the daemon: one that did not is a test host over a fixed
+    // config, with nothing on disk to follow.
+    if parts.reloader.is_some() {
+        watch_config(
+            &runtime,
+            reloader.clone(),
+            live_limits.clone(),
+            policy_reload.clone(),
+            CONFIG_WATCH_INTERVAL,
+        );
+    }
 
     host.set_starter(starter);
     host
@@ -632,11 +682,12 @@ mod tests {
     /// it. Both arms in one test: an entity with no tool state (a fan-out
     /// parent paged back in before its workers register) is a no-op, and one
     /// with state has its config layers re-read.
-    /// The housekeeper applies the config as it stands on disk, so an edit
-    /// to `mime_types.toml` reaches the world on the next pass with no
-    /// spawn to carry it.
+    /// The config watcher looks at the files off the world and prepares what
+    /// changed, and the housekeeper puts that into the world, so an edit to
+    /// `mime_types.toml` reaches the world with no spawn to carry it and
+    /// without the world loop ever reading a file.
     #[tokio::test]
-    async fn make_housekeeper_applies_the_files_on_disk() {
+    async fn the_watcher_prepares_an_edit_and_the_housekeeper_installs_it() {
         crate::config::with_isolated_config_path_async("housekeeper", |dir| async move {
             let world_config = Config::default();
             let mut world = PipelineWorld::new(
@@ -657,31 +708,46 @@ mod tests {
                 InteractionHub::new(),
                 leviath_runtime::host::HostSettings::default(),
             );
-            let mut housekeeper = make_housekeeper(reloader, live);
+            let policy = Arc::new(crate::daemon::policy_reload::PolicyReload::new(
+                dir.join("policy.toml"),
+                dir.join("rules"),
+            ));
+            let mut housekeeper = make_housekeeper(live.clone());
+            let watcher = watch_config(
+                &Handle::current(),
+                reloader,
+                live,
+                policy,
+                std::time::Duration::from_millis(5),
+            );
             let obj: leviath_core::mime::MimeType = "model/obj".parse().unwrap();
             let family = |world: &PipelineWorld| {
                 world
                     .world()
                     .get_resource::<leviath_runtime::blob_store::MimeRegistryHandle>()
-                    .expect("the first pass installs the registry")
-                    .0
-                    .info(&obj)
-                    .family
-                    .clone()
+                    .map(|handle| handle.0.info(&obj).family.clone())
             };
+            // Nothing is prepared until the watcher has looked, and it has not
+            // run yet: nothing here has given it a turn.
+            let before = family(&world);
             housekeeper(&mut world);
-            assert_eq!(family(&world), "model");
+            assert_eq!(family(&world), before);
+            leviath_testkit::wait_until("the first look prepares the files", || {
+                housekeeper(&mut world);
+                family(&world).as_deref() == Some("model")
+            })
+            .await;
             std::fs::write(
                 dir.join("mime_types.toml"),
                 "[\"model/obj\"]\nfamily = \"scene\"\n",
             )
             .unwrap();
-            housekeeper(&mut world);
-            assert_eq!(
-                family(&world),
-                "scene",
-                "the file edit landed with no spawn"
-            );
+            leviath_testkit::wait_until("the file edit lands with no spawn", || {
+                housekeeper(&mut world);
+                family(&world).as_deref() == Some("scene")
+            })
+            .await;
+            watcher.abort();
         })
         .await;
     }
@@ -704,7 +770,7 @@ mod tests {
             config_path.clone(),
             Config::default(),
         ));
-        let mut resumer = make_resumer(tool_service.clone(), reloader);
+        let mut resumer = make_resumer(tool_service.clone(), reloader.clone());
 
         let entity = bevy_ecs::entity::Entity::from_raw_u32(1)
             .expect("a small literal index is always a valid entity id");
@@ -727,10 +793,15 @@ mod tests {
             .set_modified(later)
             .unwrap();
 
+        // On the world loop the resume reads what is in force, which the
+        // next look at the file brings up to date.
+        resumer(&mut world, entity);
+        assert!(!state.blueprint_may_loosen(), "nothing has looked yet");
+        reloader.check();
         resumer(&mut world, entity);
         assert!(
             state.blueprint_may_loosen(),
-            "the resume reads config.toml as it stands now, not as the spawn read it"
+            "the resume reads config.toml as last looked at, not as the spawn read it"
         );
     }
 

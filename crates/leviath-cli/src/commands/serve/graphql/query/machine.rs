@@ -40,7 +40,7 @@ pub(crate) async fn config(ctx: &Context<'_>) -> Config {
     // One health read rather than a config read beside it: health re-checks
     // the file and hands back the config in force with its verdict, so the
     // two halves of one answer cannot disagree.
-    let health = state.config.health();
+    let health = state.config_health().await;
     config_of(
         &health.config.clone(),
         &state.limits.request_limits,
@@ -179,7 +179,7 @@ pub(crate) async fn registered_scripts(
     blueprint: Option<&str>,
 ) -> async_graphql::Result<Vec<Script>> {
     let state = ctx.data_unchecked::<AppState>();
-    let config = state.current_config();
+    let config = state.current_config().await;
     // Resolved on this task and walked on the blocking pool.
     let dirs = AgentDirs::of(&config);
     let blueprint = blueprint.map(str::to_string);
@@ -303,7 +303,7 @@ pub(crate) async fn update(ctx: &Context<'_>) -> UpdatePlan {
     // Planning reads the disk: where the binary is, the installed blueprints,
     // and the config.
     let plan = blocking(super::super::super::update::planned).await;
-    if state.current_config().update_check {
+    if state.current_config().await.update_check {
         state.update_check.read_and_maybe_refresh(
             plan.method.channel(),
             super::super::super::config_types::API_VERSION,

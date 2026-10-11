@@ -94,7 +94,7 @@ pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedCo
     // re-checks the file itself and hands back the config in force with its
     // verdict, so the two halves of one answer cannot disagree about whether a
     // save has been seen.
-    let health = state.config.health();
+    let health = state.config_health().await;
     let config = health.config.clone();
     Json(redact(&config, &state.limits.request_limits, &health))
 }
@@ -112,13 +112,13 @@ pub(super) async fn put_config(
     // serializes a `Config` and the refusals inside ran first - so this is
     // normally healthy; it is not assumed, because the file could equally have
     // been broken by hand a moment ago and rewritten by something else.
-    let health = state.config.health();
+    let health = state.config_health().await;
     // The models a settings page asks for next are the new config's, so the
     // catalogue starts on them now rather than when that request arrives.
     state
         .caches
         .model_catalog
-        .request_refresh(state.current_config(), true);
+        .request_refresh(state.current_config().await, true);
     Ok(Json(redact(&config, &state.limits.request_limits, &health)))
 }
 
@@ -306,7 +306,7 @@ pub(super) async fn models_with(
     let (listing, _) = state
         .caches
         .model_catalog
-        .models(state.current_config(), query.refresh)
+        .models(state.current_config().await, query.refresh)
         .await;
     // Filtered here rather than left to the caller because the interesting
     // case is two providers serving the *same* model ids: `openai` and
@@ -406,7 +406,7 @@ mod tests {
     /// is nothing that could fail to. For the tests about the *other* fields
     /// `redact` fills in.
     fn healthy() -> crate::daemon::config_reload::ConfigHealth {
-        crate::daemon::config_reload::ConfigReloader::fixed(Config::default()).health()
+        crate::daemon::config_reload::ConfigReloader::fixed(Config::default()).check()
     }
 
     /// A config with a registered provider whose `list_models` cannot succeed,
@@ -948,7 +948,7 @@ mod tests {
     async fn list_model_ids_flattens_to_provider_slash_id() {
         let state = test_state_listing_models();
         let ids = super::list_model_ids(
-            &state.current_config(),
+            &*state.current_config().await,
             &leviath_providers::provider::build_http_client,
         )
         .await;

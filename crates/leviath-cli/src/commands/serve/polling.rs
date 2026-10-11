@@ -38,7 +38,7 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
         runs.with_file_name("webhooks"),
         leviath_core::duration::now_secs(),
     ));
-    send_owed(&state, &client, &outbox, &runs);
+    send_owed(&state, &client, &outbox, &runs).await;
     let mut link = LinkWatch::new(&state);
     // Where the stream had got to when it last dropped, so the next one
     // starts with what was missed: above all a run that a restarted daemon
@@ -125,13 +125,13 @@ impl LinkWatch {
 /// Send the webhook of every finished run that still owes one: those a
 /// previous server was still retrying when it stopped, and those that
 /// finished while no server was running to see them.
-fn send_owed(
+async fn send_owed(
     state: &AppState,
     client: &reqwest::Client,
     outbox: &Arc<Outbox>,
     runs: &std::path::Path,
 ) {
-    let cfg = state.current_config().webhook.clone();
+    let cfg = state.current_config().await.webhook.clone();
     let metas = crate::run_index::list(runs);
     for meta in outbox.owed(&metas, |run_id| delivery_id("agent_completed", run_id)) {
         let final_output = runstate::read_final_output(&meta.run_id);
@@ -162,7 +162,7 @@ async fn consume_once(
     };
     link.up(state);
     while let Some(event) = stream.next().await {
-        handle_event(state, client, outbox, event);
+        handle_event(state, client, outbox, event).await;
     }
     // A stream that dropped before the daemon said where it starts leaves
     // the cursor where it was.
@@ -172,7 +172,7 @@ async fn consume_once(
 
 /// Broadcast one world event to WebSocket subscribers, firing a completion
 /// webhook when a run reaches a terminal status.
-fn handle_event(
+async fn handle_event(
     state: &AppState,
     client: &reqwest::Client,
     outbox: &Arc<Outbox>,
@@ -187,7 +187,7 @@ fn handle_event(
     {
         fire_completion_webhook(
             client,
-            &state.current_config().webhook,
+            &state.current_config().await.webhook,
             outbox,
             run_id,
             &wire_status(status),
@@ -1000,7 +1000,8 @@ mod tests {
                 wait_reason: None,
                 title: None,
             },
-        );
+        )
+        .await;
         assert_eq!(tag(&rx.try_recv().unwrap()), "agent_status");
     }
 
@@ -1027,7 +1028,8 @@ mod tests {
                 wait_reason: Some(WaitReason::FanOutWorkers { outstanding: 3 }),
                 title: None,
             },
-        );
+        )
+        .await;
         // Asserted on the serialized form rather than by destructuring, because
         // the JSON is what a subscriber actually receives: this pins the field
         // name and the tagging a client parses, not just that the value made it
@@ -1071,7 +1073,8 @@ mod tests {
                         status: "error".into(),
                         final_output: None,
                     },
-                );
+                )
+                .await;
                 // The completion is broadcast with the run's error as the result.
                 let ev = rx.try_recv().unwrap();
                 assert_eq!(tag(&ev), "agent_completed");
@@ -1288,7 +1291,7 @@ mod tests {
             let runs = runstate::runs_dir();
             let outbox = outbox();
 
-            send_owed(&state, &client, &outbox, &runs);
+            send_owed(&state, &client, &outbox, &runs).await;
             let requests = server.await.unwrap();
             assert!(requests[0].contains("agent_completed:missed"));
             let settled = || {
@@ -1300,7 +1303,7 @@ mod tests {
             leviath_testkit::wait_until("the delivery is settled once it is over", settled).await;
             // Nothing is listening any more, so a second send would fail
             // loudly; the sweep finds nothing to send.
-            send_owed(&state, &client, &outbox, &runs);
+            send_owed(&state, &client, &outbox, &runs).await;
         })
         .await;
     }

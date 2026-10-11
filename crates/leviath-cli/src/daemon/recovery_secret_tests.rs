@@ -75,7 +75,7 @@ async fn signed_run(home: &Home) -> String {
         url: HttpUrl::new("https://example.com/hook").unwrap(),
         secret: Some(Secret::new(SECRET)),
     });
-    let env = starter.env_for(&request, starter.config.current());
+    let env = starter.env_for(&request, starter.config.check().config);
     let prepared = starter
         .start_with(env, request, leviath_runtime::spec::env::Caller::TopLevel)
         .await

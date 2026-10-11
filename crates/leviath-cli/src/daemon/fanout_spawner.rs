@@ -37,7 +37,7 @@ impl FanOutSpawner for DaemonFanOutSpawner {
     fn prepare_worker(&self, request: SpawnRequest, caller: Caller) -> WorkerPrep {
         let starter = self.starter.clone();
         Box::pin(async move {
-            let config = starter.config.current();
+            let config = starter.checked_config().await;
             let env = starter.env_for(&request, config);
             // A server the worker's graph declares that is not connected yet is
             // connected for the next worker of the same kind.

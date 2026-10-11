@@ -509,7 +509,7 @@ impl Stage {
     #[filter(skip)]
     async fn effective(&self, ctx: &async_graphql::Context<'_>) -> EffectiveStageSettings {
         let state = ctx.data_unchecked::<crate::commands::serve::types::AppState>();
-        let config = state.current_config();
+        let config = state.current_config().await;
         let stage = self.stage();
         let reviewed = matches!(
             &stage.mode,

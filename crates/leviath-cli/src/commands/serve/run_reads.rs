@@ -184,7 +184,7 @@ pub(super) async fn run_file(
     let source = files::FileSource::parse(query.source.as_deref())?;
     // A listing types each row by name with the same registry `/files/raw`
     // types the bytes with, so a console gets the run's answer, not its own.
-    let registry = state.current_config().mime_registry_or_defaults();
+    let registry = state.current_config().await.mime_registry_or_defaults();
 
     let Some(ref requested_path) = query.path else {
         let listed = files::listing(&meta, source, None, query.hidden, &registry)?;

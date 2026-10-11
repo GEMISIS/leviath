@@ -714,7 +714,7 @@ impl Run {
         #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
     ) -> async_graphql::Result<Connection<FileEntry, FileListingExtras>> {
         let state = ctx.data_unchecked::<AppState>();
-        let registry = state.current_config().mime_registry_or_defaults();
+        let registry = state.current_config().await.mime_registry_or_defaults();
         let meta = Arc::clone(&self.meta);
         let dir = path.map(std::path::PathBuf::from);
         // Dot-prefixed entries are always included now: a filter on `name` is
@@ -763,7 +763,7 @@ impl Run {
         #[graphql(desc = "Byte offset to start at.", default = 0)] offset: i32,
     ) -> async_graphql::Result<FileWindow> {
         let state = ctx.data_unchecked::<AppState>();
-        let registry = state.current_config().mime_registry_or_defaults();
+        let registry = state.current_config().await.mime_registry_or_defaults();
         let offset = u64::try_from(offset)
             .map_err(|_| ServeError::BadRequest("`offset` cannot be negative".to_string()))
             .gql()?;

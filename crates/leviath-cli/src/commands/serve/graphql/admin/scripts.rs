@@ -57,7 +57,7 @@ pub(crate) async fn upsert_script(
     let reference = request.script;
     let kind = reference.kind.wire();
     // Resolved on this task, written on the blocking pool.
-    let dirs = AgentDirs::of(&state.current_config());
+    let dirs = AgentDirs::of(&*state.current_config().await);
     let (name, owner, content) = (
         reference.name.clone(),
         reference.blueprint_name.clone(),
@@ -104,7 +104,7 @@ pub(crate) async fn delete_script(
     let reference = request.script;
     let kind = reference.kind.wire();
     // Resolved on this task, removed on the blocking pool.
-    let dirs = AgentDirs::of(&state.current_config());
+    let dirs = AgentDirs::of(&*state.current_config().await);
     let (name, owner) = (reference.name.clone(), reference.blueprint_name.clone());
     blocking(move || {
         super::super::super::scripts::remove_one(&dirs, kind, &name, owner.as_deref())

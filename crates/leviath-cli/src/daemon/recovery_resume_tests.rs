@@ -625,7 +625,7 @@ async fn a_profiled_run_and_its_narrowed_child_keep_their_settings_across_a_rest
             .expect("the request reads")
         };
         let asked = request(careful.clone());
-        let env = starter.env_for(&asked, starter.config.current());
+        let env = starter.env_for(&asked, starter.config.check().config);
         let parent = starter
             .start_with(env, asked, Caller::TopLevel)
             .await
@@ -633,7 +633,7 @@ async fn a_profiled_run_and_its_narrowed_child_keep_their_settings_across_a_rest
             .spec;
         // Everything, asked for under a `careful` parent, is `careful`.
         let asked = request(Unattended::All);
-        let env = starter.env_for(&asked, starter.config.current());
+        let env = starter.env_for(&asked, starter.config.check().config);
         let caller = Caller::Child {
             parent: parent.run_id.clone(),
             policy: parent.launch.clone(),
@@ -691,7 +691,7 @@ async fn worker_on_disk(starter: &DaemonStarter, parent: &str, item: &str) -> St
         stage: Some(leviath_runtime::spec::names::StageName::new("work").unwrap()),
         item: item.to_string(),
     };
-    let env = starter.env_for(&request, starter.config.current());
+    let env = starter.env_for(&request, starter.config.check().config);
     let prepared = starter
         .start_with(env, request, caller)
         .await
@@ -822,7 +822,7 @@ async fn a_call_running_at_a_clean_stop_is_not_started_again() {
     }
     .into_request()
     .expect("the request reads");
-    let env = starter.env_for(&request, starter.config.current());
+    let env = starter.env_for(&request, starter.config.check().config);
     let run = starter
         .start_with(env, request, Caller::TopLevel)
         .await
@@ -935,7 +935,7 @@ async fn held_on_person(
     }
     .into_request()
     .expect("the request reads");
-    let env = first.env_for(&request, first.config.current());
+    let env = first.env_for(&request, first.config.check().config);
     let run = first
         .start_with(env, request, Caller::TopLevel)
         .await
