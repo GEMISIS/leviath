@@ -464,6 +464,46 @@ async fn the_account_falls_back_to_the_id_token() {
     assert_eq!(body["providers"][0]["plan"], "plus");
 }
 
+/// Under `[security] credential_store = "keychain"` the grant file only names
+/// the signed-in providers, and the tokens are in the OS store. The listing
+/// and the one-provider row both read them from there, so a provider signed in
+/// through the keychain is not shown as signed out.
+#[test]
+fn a_grant_held_in_the_keychain_is_signed_in() {
+    let _keychain = crate::credentials::test_store::with_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let grants = dir.path().join("provider-auth.json");
+    let keychain = crate::credentials::store_for(leviath_core::CredentialStoreKind::Keychain)
+        .expect("the mock store answers")
+        .expect("a keychain store");
+    let mut store = ProviderAuthStore::default();
+    store.set(
+        "codex",
+        ProviderGrant {
+            access_token: "at".to_string(),
+            refresh_token: "rt".to_string(),
+            email: Some("someone@example.com".to_string()),
+            ..Default::default()
+        },
+    );
+    store.save_with(&grants, Some(keychain.as_ref())).unwrap();
+    let mut config = Config::default();
+    config.providers.codex_enabled = true;
+    config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
+    let state = state_with(quiet_admin(), config);
+
+    let row = described(&state, &grants, "codex", "Codex");
+    assert!(row.signed_in, "{row:?}");
+    assert_eq!(row.account.as_deref(), Some("someone@example.com"));
+
+    let app = app_at(dir.path(), state);
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let (_, body) = send(&app, "GET", "/api/providers").await;
+        assert_eq!(body["providers"][0]["signed_in"], true, "{body}");
+        assert_eq!(body["providers"][0]["account"], "someone@example.com");
+    });
+}
+
 /// The check reaches the network. A store with no grant in it cannot answer,
 /// and that is a 502 carrying the reason rather than a cheerful model list.
 #[tokio::test]

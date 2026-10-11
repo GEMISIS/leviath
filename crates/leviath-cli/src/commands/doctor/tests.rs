@@ -2142,6 +2142,49 @@ fn the_codex_check_reports_the_account_once_signed_in() {
     });
 }
 
+/// Under `[security] credential_store = "keychain"` the grant file only names
+/// the signed-in providers and the tokens are in the OS store, so the check
+/// reads them from there. Through the file alone a keychain user would be told
+/// to sign in again on every run of the doctor.
+#[test]
+fn the_codex_check_reads_a_grant_held_in_the_keychain() {
+    let _keychain = crate::credentials::test_store::with_mock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+        let path =
+            leviath_providers::oauth::ProviderAuthStore::default_path().expect("a home is set");
+        let keychain = crate::credentials::store_for(leviath_core::CredentialStoreKind::Keychain)
+            .expect("the mock store answers")
+            .expect("a keychain store");
+        let mut store = leviath_providers::oauth::ProviderAuthStore::default();
+        store.set(
+            "codex",
+            leviath_providers::ProviderGrant {
+                access_token: "at".to_string(),
+                refresh_token: "rt".to_string(),
+                email: Some("someone@example.com".to_string()),
+                ..Default::default()
+            },
+        );
+        store
+            .save_with(&path, Some(keychain.as_ref()))
+            .expect("save");
+        assert!(
+            !std::fs::read_to_string(&path)
+                .expect("the name index")
+                .contains("someone@example.com"),
+            "the grant went to the keychain, not the file"
+        );
+
+        let mut config = Config::default();
+        config.providers.codex_enabled = true;
+        config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
+        let check = signin_checks(&config).pop().expect("a check");
+        assert_eq!(check.status, CheckStatus::Ok, "{}", check.detail);
+        assert_eq!(check.detail, "someone@example.com");
+    });
+}
+
 #[test]
 fn the_codex_check_falls_back_when_the_grant_names_no_account() {
     // A grant written before those fields existed still reports as signed in;
@@ -2187,7 +2230,7 @@ fn every_enabled_sign_in_provider_gets_its_own_check() {
     });
     // A provider with no sign-in profile names itself as the account.
     assert!(
-        signin_check("not-a-provider")
+        signin_check("not-a-provider", leviath_core::CredentialStoreKind::File)
             .detail
             .contains("not-a-provider")
     );
