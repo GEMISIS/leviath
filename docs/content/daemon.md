@@ -332,12 +332,9 @@ If a save leaves the file briefly unparseable, which happens while you are halfw
 edit, the daemon keeps serving the last version that worked. It reloads on your next clean save, so
 an in-progress edit never breaks a spawn.
 
-That is the right behaviour and it used to be invisible, which made it the wrong experience. A typo
-you did not spot meant every edit after it silently did nothing, and the only record was one line in
-`daemon.log`.
-
-So a config that will not load is now a state Leviath reports rather than a fact it keeps to
-itself:
+On its own that would be invisible: a typo you did not spot would make every edit after it silently
+do nothing, with one line in `daemon.log` as the only record. So a config that will not load is a
+state Leviath reports rather than a fact it keeps to itself:
 
 - `lev run` prints one line before the run starts, naming the file, where in it the problem is, and
   that this run is on the last config that loaded.
@@ -352,6 +349,10 @@ itself:
 The file is re-read once per save, not once per run. A broken file that nobody has touched since
 costs one `stat` and produces one log line, rather than a re-read and a fresh warning on every
 spawn. Fix the file and everything above clears on its own, with nothing restarted.
+
+The daemon looks at the file before each run starts and every two seconds besides, always off the
+threads your runs work on. A slow disk, or a keychain prompt after a save when your keys are in the
+OS keychain, never holds up a run that is already going.
 
 `[model_providers.<name>]` reloads too, as of this release. A script provider's own `.rhai` file
 has always been re-read on each use, so a table beside it that needed a restart made two halves of

@@ -352,12 +352,40 @@ same list.
   while it read. Those reads now happen on the blocking pool, as uploads
   already did.
 - `lev serve` read and wrote files on its async threads for most of what it
-  manages, over both GraphQL and REST: yolo profiles, scripts, mime rows,
-  provider sign-ins, tools, the folder picker, the offline doctor, the
-  update plan, installing, checking and removing blueprints, searches inside
-  runs, and the record a run mutation answers with. A slow disk or a
-  keychain prompt held up other requests meanwhile. That work now runs on
-  the blocking pool, as run reads, config and MCP servers already did.
+  manages, over both GraphQL and REST. A slow disk or a keychain prompt held
+  up other requests meanwhile. That work now runs on the blocking pool, as
+  MCP servers already did. It covers:
+  - yolo profiles, scripts, mime rows, tools and the folder picker;
+  - the offline and live doctor, and the update plan;
+  - installing, checking and removing blueprints;
+  - a run's record, logs, files, stored parts, artifacts and result;
+  - pausing, resuming, cancelling and deleting runs, and messages;
+  - starting runs with attached files, exports and searches inside runs;
+  - provider sign-in, sign-out, checks and quota readings;
+  - completion webhooks.
+- With `[security] credential_store = "keychain"`, `lev doctor`, `GET
+  /api/providers` and the GraphQL provider fields showed a Codex or Grok
+  sign-in as signed out: they read the grant file, which under the keychain
+  only names the providers. They now read the keychain, as `lev auth status`
+  does.
+- After `config.toml` was saved, the next `lev serve` request re-read and
+  parsed it on an async thread. In the daemon this happened on the loop
+  every run waits on: on each 30-second re-drive, on each resume and before
+  placing each run. Each of those also re-read `mime_types.toml`, rebuilt
+  the mime registry and re-checked the taint policy's files. With keys in
+  the OS keychain, a save could leave every run waiting on a keychain
+  prompt. The file is now checked off those threads: before each spawn and
+  each `lev serve` request, and every two seconds by a daemon watcher. The
+  loop only installs what was already read.
+- A provider upload that failed was tried again on every model call and
+  every retry, so a gateway without file storage cost each call a refused
+  upload. One that never answered used up the call's whole timeout, so the
+  request was never sent. After a failure, that provider's parts now go
+  inline for ten minutes without asking. An upload also gets at most half
+  the time left for the call.
+- In the agent editor, a path between two stages could only be opened with
+  the mouse. `{` and `}` now step through the paths. In the inspector,
+  Backspace removes a row, as the help always said.
 - An MCP server reached over HTTP that streamed its reply failed the request
   when the network split a character (an accented letter, CJK text, an
   emoji) across two reads. The halves are now joined, as the model providers
