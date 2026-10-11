@@ -703,6 +703,28 @@ async fn serve_runs_the_housekeeper_on_every_redrive() {
     assert!(runs >= 2, "the hook ran on the timer: {runs}");
 }
 
+/// The shutdown hook runs once, as `serve` returns, and never while it runs.
+#[tokio::test]
+async fn serve_runs_the_shutdown_hook_once_as_it_returns() {
+    let mut host = host_with(vec![]);
+    let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = ran.clone();
+    host.set_on_shutdown(Box::new(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let shutdown = host.world_mut().shutdown_handle();
+    let (op_tx, op_rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(async move {
+        host.serve(op_rx).await;
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 0);
+    shutdown.notify_one();
+    drop(op_tx);
+    handle.await.unwrap();
+    assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stage_boundary_is_crossed_without_waiting_for_the_redrive() {
     let mut host = host_with(vec![tool_call("c1"), tool_call("c2")]);
