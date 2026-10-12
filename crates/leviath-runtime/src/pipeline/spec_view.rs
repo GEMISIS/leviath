@@ -15,6 +15,7 @@ use crate::components::InferenceConfig;
 use crate::spec::graph::{
     Budget, CodeRef, EdgeDef, Eviction, NudgeDef, OutputDef, RegionDef, RegionKind,
     RegionLayoutDef, ResolvedNudge, RunGraph, StageDef, StageMode, ToolGroup, ToolSelector,
+    WorkerSource,
 };
 use crate::spec::run_spec::{RunSpec, StagePlan, ToolDef};
 
@@ -314,20 +315,49 @@ pub(crate) fn tool(def: &ToolDef) -> Tool {
     }
 }
 
+/// What a fan-out stage is told about its workers' budget: the replies each one
+/// has, when the worker is a stage of this graph with an iteration cap.
+///
+/// The split decides how much each worker is handed, and a worker handed more
+/// than it can read in its replies runs out before it submits, so its share
+/// comes back with nothing. Read off the worker stage itself, so it is right for
+/// every blueprint and cannot drift from the cap it describes. The stage is not
+/// named: a model shown its name passed it back as the `fan_out` call's `agent`.
+fn worker_budget(graph: &RunGraph, stage: &StageDef) -> Option<String> {
+    let StageMode::FanOut(f) = &stage.mode else {
+        return None;
+    };
+    let WorkerSource::Stage(name) = &f.worker else {
+        return None;
+    };
+    let replies = graph
+        .stages
+        .iter()
+        .find(|s| &s.name == name)?
+        .max_iterations?;
+    Some(format!(
+        "Each work item goes to one worker, which has at most {replies} replies to do its \
+         share and hand back its result. Give each item only what one worker can get through \
+         in that many replies."
+    ))
+}
+
 /// The instructions a stage is entered with: its own prompt, a fan-out's split
-/// prompt, and the demand for a final output when it owes one.
+/// prompt and its workers' budget, and the demand for a final output when it
+/// owes one.
 fn system_prompt(
     stage: &StageDef,
     output: Option<&leviath_core::output::OutputSpec>,
+    worker_budget: Option<String>,
 ) -> Option<String> {
-    let base = stage.system_prompt.clone();
-    let prompt = match &stage.mode {
-        StageMode::FanOut(f) if !f.split_prompt.trim().is_empty() => Some(match base {
-            Some(base) => format!("{base}\n\n{}", f.split_prompt),
-            None => f.split_prompt.clone(),
-        }),
-        _ => base,
-    };
+    let mut parts: Vec<String> = stage.system_prompt.iter().cloned().collect();
+    if let StageMode::FanOut(f) = &stage.mode
+        && !f.split_prompt.trim().is_empty()
+    {
+        parts.push(f.split_prompt.clone());
+    }
+    parts.extend(worker_budget);
+    let prompt = (!parts.is_empty()).then(|| parts.join("\n\n"));
     let (Some(spec), true) = (output, stage.require_output) else {
         return prompt;
     };
@@ -393,7 +423,7 @@ pub(crate) fn stage_setup(spec: &RunSpec, idx: usize) -> StageSetup {
         eviction_order: eviction_order(graph, Some(stage)),
         context_hide: stage.hide.iter().map(ToString::to_string).collect(),
         context_reset: stage.reset.iter().map(ToString::to_string).collect(),
-        system_prompt: system_prompt(stage, output.as_ref()),
+        system_prompt: system_prompt(stage, output.as_ref(), worker_budget(graph, stage)),
     }
 }
 

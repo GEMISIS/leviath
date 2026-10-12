@@ -318,10 +318,26 @@ pub(crate) fn all_covered(
     safe: &dyn Fn(&str) -> bool,
     granted: &dyn Fn(&str) -> bool,
 ) -> bool {
-    !keys.is_empty()
-        && keys
-            .iter()
-            .all(|k| safe(k) || safe(program_of(k)) || granted(k))
+    !keys.is_empty() && uncovered_keys(keys, safe, granted).is_empty()
+}
+
+/// The keys in `keys` that nothing covers yet, in order: what a prompt for the
+/// call asks a person to approve, and so what their approval records.
+///
+/// Covered means what it means in [`all_covered`], which is this list being
+/// empty. A prompt that listed the covered keys too would lead with whatever
+/// sorts first, `cat` and `cd`, and push the one program actually being
+/// approved out of sight behind "+N more"; a grant recording them would hand
+/// over again what the safe list already gives.
+pub(crate) fn uncovered_keys(
+    keys: &[String],
+    safe: &dyn Fn(&str) -> bool,
+    granted: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    keys.iter()
+        .filter(|k| !(safe(k) || safe(program_of(k)) || granted(k)))
+        .cloned()
+        .collect()
 }
 
 /// Whether `command` writes a file through a shell redirect.

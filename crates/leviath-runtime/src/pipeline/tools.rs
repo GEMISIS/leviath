@@ -632,16 +632,21 @@ pub(crate) fn dispatch_tools(
                 context_results.push((c.tool_id.clone(), refusal));
                 continue;
             }
-            // A call whose arguments arrived as text rather than JSON was cut
-            // off mid-argument by the output cap (the provider layer keeps
-            // the text for exactly this reading). Refused with the cause, so
-            // the model shrinks or splits the call instead of repeating it.
+            // A call whose arguments arrived as text rather than JSON (the
+            // provider layer keeps the text) is refused with the cause. When
+            // the output cap stopped the reply, that is the cause, and the
+            // model shrinks or splits the call instead of repeating it. A
+            // reply that ended on its own sent broken JSON, and is shown
+            // where, since nothing about it is too large.
             if let serde_json::Value::String(raw) = &c.arguments {
-                let in_a_row = stage_progress.map_or(0, |p| p.cut_off_nudges);
-                context_results.push((
-                    c.tool_id.clone(),
-                    cut_off_arguments_refusal(&c.name, raw, in_a_row),
-                ));
+                let refusal = match result.cut_off_at {
+                    Some(_) => {
+                        let in_a_row = stage_progress.map_or(0, |p| p.cut_off_nudges);
+                        cut_off_arguments_refusal(&c.name, raw, in_a_row)
+                    }
+                    None => malformed_arguments_refusal(&c.name, raw),
+                };
+                context_results.push((c.tool_id.clone(), refusal));
                 continue;
             }
             // Layer 2: the call must satisfy the schema the model was shown.

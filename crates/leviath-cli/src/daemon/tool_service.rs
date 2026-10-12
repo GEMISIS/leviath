@@ -682,13 +682,14 @@ pub(crate) fn decide_call(
     // All of them, not any: one uncovered program is enough to ask, and that is
     // what stops a safe `ls` or a granted `ls` covering `ls && curl evil`.
     let safe = state.safe_keys.get();
-    let covered = || {
-        crate::shell_keys::all_covered(&approval_keys, &|k| safe.contains(k), &|k| {
-            ctx.grants.granted(k)
-        })
-    };
+    let is_safe = |k: &str| safe.contains(k);
+    let is_granted = |k: &str| ctx.grants.granted(k);
     let policy = match policy {
-        ToolPolicy::Ask if covered() => ToolPolicy::Allow,
+        ToolPolicy::Ask
+            if crate::shell_keys::all_covered(&approval_keys, &is_safe, &is_granted) =>
+        {
+            ToolPolicy::Allow
+        }
         other => other,
     };
     // Charged when the call is allowed, not after it runs: every call in a
@@ -716,8 +717,10 @@ pub(crate) fn decide_call(
              (`lev resume`); the run re-reads them and does not need restarting.",
             tc.name
         )),
+        // Only what is still uncovered: that is what the prompt names and
+        // what a scoped approval records.
         ToolPolicy::Ask => ToolVerdict::Ask {
-            keys: approval_keys,
+            keys: crate::shell_keys::uncovered_keys(&approval_keys, &is_safe, &is_granted),
             charge,
         },
         ToolPolicy::Allow => ToolVerdict::Run { charge },
@@ -3436,6 +3439,58 @@ pub(crate) mod tests {
             !plain.contains("[denied]"),
             "the approved command itself must still run, got: {plain}"
         );
+    }
+
+    /// The prompt for a line that is mostly safe programs names only the ones
+    /// that are not, and a grant from it records only those.
+    ///
+    /// Listing every key put the safe programs first, alphabetically, so the
+    /// one being approved hid behind "+4 more": `Allow cat x, cd, echo +4 more`
+    /// for a line whose only unsafe program was `sed`.
+    #[tokio::test]
+    async fn an_approval_names_only_what_still_needs_approving() {
+        let hub = InteractionHub::new();
+        let state = asking_shell_state(&hub);
+        state.safe_keys.set(
+            ["cat", "cd", "echo", "head", "ls", "pwd"]
+                .map(|p| format!("shell:{p}"))
+                .into_iter()
+                .collect(),
+        );
+        let line = "cd /tmp 2>/dev/null; pwd; ls target 2>/dev/null | head; echo '---'; \
+                    cat rust-toolchain.toml; sed -n '1,50p' lib.rs 2>/dev/null";
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let seen_in = seen.clone();
+        dispatch_answering(
+            state.clone(),
+            vec![call("c1", "shell", serde_json::json!({ "command": line }))],
+            move |req| {
+                seen_in.lock().unwrap().clone_from(&req.options);
+                InteractionResponse::approval(&req.id, true, ApprovalScope::Stage)
+            },
+            hub.clone(),
+        )
+        .await;
+        let options = seen.lock().unwrap().clone();
+        assert_eq!(options[1], "Allow sed for this stage");
+        assert_eq!(options[2], "Allow sed for this run");
+
+        let grants = grants_of(&state);
+        assert!(grants.granted("shell:sed"));
+        assert!(
+            !grants.granted("shell:cd"),
+            "a program the safe list already covers is not handed over again"
+        );
+
+        // The grant is enough: the same line now runs with no prompt at all.
+        let out = dispatch_tools(
+            state,
+            vec![call("c2", "shell", serde_json::json!({ "command": line }))],
+            noop_progress(),
+        )
+        .await;
+        let ran = out[0].1.clone();
+        assert!(!ran.contains("[denied]"), "got: {ran}");
     }
 
     /// A line with no reusable key can never match a grant, however much is in

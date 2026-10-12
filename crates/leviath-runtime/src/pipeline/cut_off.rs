@@ -1,9 +1,12 @@
-//! What a stage does with a reply the output cap cut off.
+//! What a stage does with a reply the output cap cut off, and with tool
+//! arguments that are not JSON for any other reason.
 //!
 //! A cut-off text reply is sent back with a nudge, and a cut-off tool call is
 //! refused with advice on splitting it. Both draw on one budget of cut-offs in
 //! a row. Kept together so the counting, the words the model reads and the
-//! stage error that ends it cannot drift apart.
+//! stage error that ends it cannot drift apart. Arguments that fail to parse
+//! in a reply that ended on its own are a different fault, a broken JSON
+//! document rather than a cap, and get their own refusal.
 
 /// How many cut-off replies in a row a stage sends back before it stops. The
 /// first retry goes out with the cap raised to the model's maximum, so a
@@ -41,7 +44,8 @@ pub(crate) fn cut_off_nudge(cut_off_at: usize) -> String {
     )
 }
 
-/// The refusal for a tool call whose arguments were not JSON.
+/// The refusal for a tool call whose arguments were not JSON because the
+/// output cap stopped the reply partway through them.
 ///
 /// Names the size and the tail of what arrived, because that is what tells
 /// the model (and a person reading the log) that the call was cut off rather
@@ -88,4 +92,48 @@ pub(crate) fn cut_off_arguments_refusal(name: &str, raw: &str, in_a_row: usize) 
          through its arguments ({} characters arrived, ending `{tail}`). {next}",
         chars.len()
     )
+}
+
+/// The refusal for a tool call whose arguments are not a JSON object, in a
+/// reply that was not cut off.
+///
+/// The reply ended on its own, so nothing is too large and nothing needs
+/// splitting: the document itself is wrong. Saying "cut off" here sent a
+/// model off to split a call that had fitted. Broken syntax is shown where
+/// the parser stopped, with the usual cause, an unescaped quote inside a
+/// string; JSON that simply ends is said to end, without blaming the cap.
+pub(crate) fn malformed_arguments_refusal(name: &str, raw: &str) -> String {
+    let what = match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(_) => "its arguments are JSON but not a JSON object".to_string(),
+        Err(e) if e.is_eof() => {
+            let chars: Vec<char> = raw.chars().collect();
+            let tail: String = chars[chars.len().saturating_sub(40)..].iter().collect();
+            format!(
+                "its arguments end before the JSON does ({} characters arrived, ending \
+                 `{tail}`)",
+                chars.len()
+            )
+        }
+        Err(e) => {
+            let near = leviath_core::text::snippet_around(raw, error_offset(raw, &e), 40);
+            format!(
+                "its arguments are not valid JSON ({e}, near `{near}`). The usual cause is a \
+                 `\"` or `\\` inside a string value that is not escaped"
+            )
+        }
+    };
+    format!("[error] '{name}' was not run: {what}. Send the same call again with that fixed.")
+}
+
+/// The byte offset in `raw` that a parse error points at.
+///
+/// `serde_json` reports a line and a column, the column counted in bytes from
+/// the start of that line.
+fn error_offset(raw: &str, e: &serde_json::Error) -> usize {
+    let line_start = raw
+        .match_indices('\n')
+        .nth(e.line().saturating_sub(2))
+        .filter(|_| e.line() > 1)
+        .map_or(0, |(at, _)| at + 1);
+    line_start + e.column()
 }

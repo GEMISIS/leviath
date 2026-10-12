@@ -79,18 +79,95 @@ type MaxIterationQuery = (
     &'static StageCursor,
     &'static StageProgress,
     Option<&'static mut crate::persistence::RunOutcomeFlags>,
+    OwedOutput,
 );
+
+/// What a stage that still owes something needs near its cap: whether it
+/// submitted, what it offers, the window it writes into and a note goes into,
+/// and the markers that keep the warning and the last reply to once a visit.
+type OwedOutput = (
+    Option<&'static crate::persistence::FinalOutput>,
+    Option<&'static mut StageInference>,
+    Option<&'static mut ContextWindow>,
+    Option<&'static CapWarned>,
+    Option<&'static FinalSubmitTurn>,
+);
+
+/// The stage has been told its replies are running out. Cleared on stage
+/// entry, so each visit is told once.
+#[derive(bevy_ecs::component::Component, Debug, Clone, Copy)]
+pub(crate) struct CapWarned;
+
+/// The stage reached its cap owing its output and has been given one last
+/// reply that can only submit it. Cleared on stage entry.
+#[derive(bevy_ecs::component::Component, Debug, Clone, Copy)]
+pub(crate) struct FinalSubmitTurn;
+
+/// How many replies before the cap a stage that still owes something is warned.
+const CAP_WARNING_REPLIES: usize = 2;
+
+/// The warning sent when [`CAP_WARNING_REPLIES`] replies are left, naming what
+/// the stage still owes: its final output, the required regions it has not
+/// written, or both. `None` when it owes nothing.
+pub(crate) fn cap_warning(owes_output: bool, unwritten: &[String]) -> Option<String> {
+    let mut owed = Vec::new();
+    if owes_output {
+        owed.push("call `submit_output` with what you have".to_string());
+    }
+    if !unwritten.is_empty() {
+        let names: Vec<String> = unwritten.iter().map(|n| format!("`{n}`")).collect();
+        owed.push(format!(
+            "write the required regions {} (still empty)",
+            names.join(", ")
+        ));
+    }
+    (!owed.is_empty()).then(|| {
+        format!(
+            "You have {CAP_WARNING_REPLIES} replies left in this stage. Use them to {}: \
+             anything not done when the stage ends is lost.",
+            owed.join(", and ")
+        )
+    })
+}
+
+/// The note that comes with the last, submit-only reply.
+const FINAL_SUBMIT_NOTE: &str = "You are out of replies in this stage, and this is the last \
+     one: call `submit_output` now with what you have. No other tool is available.";
+
+/// Whether this stage still owes a final output it can give: it requires one,
+/// it offers `submit_output`, and nothing it submitted is held. An output from
+/// an earlier stage does not count, as in `require_final_output`.
+fn owes_output(
+    stage: &crate::spec::graph::StageDef,
+    state: &AgentState,
+    submitted: Option<&crate::persistence::FinalOutput>,
+    offered: Option<&StageInference>,
+) -> bool {
+    stage.require_output
+        && !submitted.is_some_and(|o| o.0.stage == state.current_stage)
+        && offered.is_some_and(|si| {
+            super::tools::offered_tool_names(si).contains(&leviath_tools::SUBMIT_OUTPUT_TOOL)
+        })
+}
 
 /// Max-iterations guard: for each `ReadyToInfer` agent whose per-stage inference
 /// count has reached the stage's `max_iterations`, end the stage (routing to a
 /// `max_iterations` edge if one exists, else a normal transition) instead of
 /// running another inference.
+///
+/// A stage that still owes something, its output (`require_output`) or a
+/// required region it has not written, is warned [`CAP_WARNING_REPLIES`] replies
+/// ahead. One that still owes its output at the cap gets one more reply offering
+/// only `submit_output` before the cap ends it. Nothing else tells a model how
+/// many replies it has, and without these a stage that spent them working ended
+/// its run with the work thrown away.
 pub(crate) fn enforce_max_iterations(
     mut agents: Query<MaxIterationQuery, With<ReadyToInfer>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, spec, cursor, progress, flags) in agents.iter_mut() {
+    for (entity, state, spec, cursor, progress, flags, owed) in agents.iter_mut() {
+        let (submitted, mut stage_inf, mut window, warned, final_turn) = owed;
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue;
@@ -113,6 +190,37 @@ pub(crate) fn enforce_max_iterations(
             continue;
         }
         let max = stage.max_iterations.unwrap_or(0) as usize;
+        let owes = || owes_output(stage, state, submitted, stage_inf.as_deref());
+        if max > CAP_WARNING_REPLIES
+            && progress.iterations + CAP_WARNING_REPLIES == max
+            && warned.is_none()
+            && let Some(window) = window.as_mut()
+        {
+            let unwritten: Vec<String> = unmet_required_regions(&spec.0.graph, stage, window)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            if let Some(warning) = cap_warning(owes(), &unwritten) {
+                inject_system_nudge(window, &warning);
+                commands.entity(entity).insert(CapWarned);
+            }
+            continue;
+        }
+        if max > 0
+            && progress.iterations >= max
+            && final_turn.is_none()
+            && owes()
+            && let (Some(stage_inf), Some(window)) = (stage_inf.as_mut(), window.as_mut())
+        {
+            // One more reply, and the only thing it can do is submit. The
+            // filter narrows what the request offers and what dispatch accepts
+            // alike (`offered_tool_names`), and the next stage's inference
+            // replaces it on the way out.
+            stage_inf.tool_filter = Some(vec![leviath_tools::SUBMIT_OUTPUT_TOOL.to_string()]);
+            inject_system_nudge(window, FINAL_SUBMIT_NOTE);
+            commands.entity(entity).insert(FinalSubmitTurn);
+            continue;
+        }
         if max > 0 && progress.iterations >= max {
             // Record it on the run: a stage that ran out of iterations is one of
             // the ways a run ends up with nothing to show.
@@ -289,13 +397,33 @@ pub(crate) fn note_unusable_split(window: &mut ContextWindow, stage: &str, messa
 /// Write an iteration-cap note into context when a stage runs out of
 /// iterations, so whatever stage runs next - a `max_iterations` edge target or
 /// the normal successor - knows the work was cut off rather than finished.
-pub(crate) fn note_max_iterations(window: &mut ContextWindow, stage: &str, cap: usize) {
+///
+/// `unwritten` names the required regions the stage left empty. A later stage
+/// told to build on them would otherwise read an empty region as if it were
+/// the finding.
+pub(crate) fn note_max_iterations(
+    window: &mut ContextWindow,
+    stage: &str,
+    cap: usize,
+    unwritten: &[String],
+) {
+    let empty = match unwritten {
+        [] => String::new(),
+        names => format!(
+            " It never wrote its required regions {}; they are empty.",
+            names
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
     note_abnormal_ending(
         window,
         format!(
             "[Stage '{stage}' hit its iteration cap ({cap})] The stage was cut off before \
              it declared completion - treat its output as possibly incomplete and verify \
-             it before building on it."
+             it before building on it.{empty}"
         ),
     );
 }

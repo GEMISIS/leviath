@@ -405,11 +405,17 @@ pub(crate) fn resolve_transition(
             Some(StageOutcome::MaxIterations) => {
                 // Whatever runs next - a max_iterations edge target, the normal
                 // successor, or the transition-choice model - should know the
-                // stage was cut off, not finished.
+                // stage was cut off, not finished, and which of its required
+                // regions it never wrote.
+                let unwritten: Vec<String> = unmet_required_regions(graph, stage, &window)
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect();
                 note_max_iterations(
                     &mut window,
                     stage.name.as_str(),
                     stage.max_iterations.unwrap_or(0) as usize,
+                    &unwritten,
                 );
                 find_conditioned_edge(graph, stage, &visits.0, EdgeCondition::MaxIterations)
                     .map(|next| StageResolution::Next(Box::new(next)))
@@ -888,6 +894,9 @@ pub(crate) fn attach_stage_components(
         .remove::<crate::interaction_points::InteractionPointRounds>()
         .remove::<RequiredReentries>()
         .remove::<OutputReentries>()
+        // And its own warning before the iteration cap, and its own last reply.
+        .remove::<super::watchdog::CapWarned>()
+        .remove::<super::watchdog::FinalSubmitTurn>()
         // A fan-out stage owes its own workers on every entry. Only the
         // "already did it" marker is cleared: `PreviousWorkItems` deliberately
         // survives, because it is what tells the second round what the first

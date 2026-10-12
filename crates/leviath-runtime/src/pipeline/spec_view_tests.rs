@@ -413,6 +413,48 @@ fn fan_out(split: &str) -> StageMode {
     })
 }
 
+/// A split stage is told how many replies each of its workers has, read off the
+/// worker stage's own cap, so it can size the work items to fit. A worker it
+/// cannot see the cap of (none set, or another blueprint) adds nothing.
+#[test]
+fn a_split_stage_is_told_its_workers_reply_budget() {
+    let mut spec = two_stage_spec();
+    spec.graph.stages[0].mode = fan_out("split it");
+    spec.graph.stages[1].max_iterations = Some(20);
+    let prompt = stage_setup(&spec, 0).system_prompt.unwrap();
+    assert!(
+        prompt.ends_with(
+            "split it\n\nEach work item goes to one worker, which has at most 20 replies to \
+             do its share and hand back its result. Give each item only what one worker can \
+             get through in that many replies."
+        ),
+        "{prompt}"
+    );
+    // Not named: a model shown the stage's name passed it back as the call's
+    // `agent`, which reads as a blueprint.
+    assert!(!prompt.contains("build"), "{prompt}");
+
+    spec.graph.stages[1].max_iterations = None;
+    assert!(
+        !stage_setup(&spec, 0)
+            .system_prompt
+            .unwrap()
+            .contains("replies")
+    );
+
+    spec.graph.stages[1].max_iterations = Some(20);
+    if let StageMode::FanOut(f) = &mut spec.graph.stages[0].mode {
+        f.worker =
+            WorkerSource::Blueprint(crate::spec::names::BlueprintRef::parse("elsewhere").unwrap());
+    }
+    assert!(
+        !stage_setup(&spec, 0)
+            .system_prompt
+            .unwrap()
+            .contains("replies")
+    );
+}
+
 #[test]
 fn a_stage_prompt_folds_in_its_split_and_its_output_demand() {
     let mut spec = two_stage_spec();

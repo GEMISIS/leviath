@@ -80,7 +80,7 @@ run on Sonnet; `implement`, `review`, and `reassess` step up to Opus, so it is a
 ## reviewer
 
 Review only: a fast scan pass, then a deeper look at correctness, security, and architecture,
-ending in a ranked report. Reach for it to vet a diff or PR.
+ending in a ranked report. Reach for it to vet a diff or PR, or the whole project.
 
 ```mermaid
 flowchart LR
@@ -97,9 +97,11 @@ git diff main...feature/auth > change.patch
 lev run reviewer --task "Review the changes on the feature/auth branch" --diff @change.patch
 lev run reviewer --diff @change.patch --criteria "does the code produce what after.png shows?" \
   --attach before.png:screenshots --attach after.png:screenshots
+lev run reviewer --task "Look for dead code and duplicated logic"
 ```
 
-`diff` is a required input, and `@change.patch` reads it from the file. `criteria` is optional.
+`diff` is optional, and `@change.patch` reads it from the file. Left out, the review covers the
+code in the working directory. `criteria` is optional too.
 
 Screenshots are attachments: the `screenshots` region accepts `image/*` and holds six, so a
 mockup or a before-and-after reaches the model. A model that can see gets it as pixels, and any
