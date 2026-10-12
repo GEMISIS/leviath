@@ -240,6 +240,9 @@ same list.
 - A `fan_out` call whose `agent` names the stage its fan-out already runs gets
   that stage. It was read as an installed blueprint of the same name, which
   does not exist, so every worker failed to spawn.
+- `leviath_core::text::snippet_around` takes any radius. A radius near
+  `usize::MAX` overflowed the window's end, and release builds keep overflow
+  checks, so it panicked where it should stop at the end of the text.
 - A run's context history credits each stage with what it wrote on its way
   out. A stage's last output is stored in the same step that moves the run
   on, so it was listed under the next stage, and when that stage cleared it,

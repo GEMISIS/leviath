@@ -99,11 +99,12 @@ pub fn ceil_char_boundary(s: &str, min: usize) -> usize {
 /// Both ends are moved outward to char boundaries rather than inward, so the
 /// window never loses a character that was inside the requested radius, and the
 /// match itself cannot be clipped by a boundary walk. `at` past the end clamps,
-/// so a stale offset yields a short window instead of a panic.
+/// so a stale offset yields a short window instead of a panic, and any radius
+/// up to `usize::MAX` stops at the ends of `s`.
 pub fn snippet_around(s: &str, at: usize, radius: usize) -> String {
     let at = at.min(s.len());
     let start = floor_char_boundary(s, at.saturating_sub(radius));
-    let end = ceil_char_boundary(s, (at + radius).min(s.len()));
+    let end = ceil_char_boundary(s, at.saturating_add(radius));
     let mut out = String::new();
     if start > 0 {
         out.push('…');
@@ -208,6 +209,15 @@ mod snippet_tests {
         let out = snippet_around(HAY, HAY.len() + 500, 4);
         assert!(out.starts_with('…'));
         assert!(!out.ends_with('…'));
+    }
+
+    /// The release profile keeps overflow checks, so an overflowing window end
+    /// would panic in the daemon, not only in tests.
+    #[test]
+    fn a_radius_near_usize_max_saturates_instead_of_overflowing() {
+        assert_eq!(snippet_around(HAY, 10, usize::MAX), HAY);
+        assert_eq!(snippet_around(HAY, usize::MAX, usize::MAX), HAY);
+        assert_eq!(snippet_around(HAY, HAY.len(), usize::MAX - 1), HAY);
     }
 
     #[test]
