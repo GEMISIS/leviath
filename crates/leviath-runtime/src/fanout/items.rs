@@ -130,9 +130,12 @@ pub(crate) fn config_for(
 ) -> Result<FanOutDef, String> {
     // A named agent wins over the graph's worker: an ordinary stage has no
     // worker to inherit, and a fan-out stage that names one in the call meant it.
-    let named = match &request.agent {
-        Some(agent) => Some(named_worker(agent, workdir)?),
-        None => None,
+    // Naming the stage the fan-out already runs is restating that worker, not
+    // asking for a blueprint of the same name, which would not be installed.
+    let named = match (&request.agent, stage.map(|s| &s.worker)) {
+        (Some(agent), Some(WorkerSource::Stage(own))) if agent.trim() == own.as_str() => None,
+        (Some(agent), _) => Some(named_worker(agent, workdir)?),
+        (None, _) => None,
     };
     let mut config = match (stage, named) {
         (Some(stage), named) => FanOutDef {
@@ -512,6 +515,10 @@ mod tests {
         );
         assert_eq!(config.max_workers, Some(9));
         assert_eq!(config.max_items, Some(5));
+        // Naming the stage the fan-out already runs is restating it. Read as a
+        // blueprint of that name, every worker failed to spawn.
+        let config = config_for(&request(Some("w"), None), Some(&stage), None).unwrap();
+        assert_eq!(config.worker, stage.worker);
         assert_eq!(clamp(usize::MAX), u32::MAX);
         assert_eq!(worker_cap(&stage_def(0)), None);
         assert_eq!(worker_cap(&stage), Some(3));

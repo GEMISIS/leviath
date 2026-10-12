@@ -1,6 +1,6 @@
 [blueprint]
 name = "reviewer"
-version = "0.4.0"
+version = "0.4.1"
 description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 
 # discover -> scan -> split_review (review_worker x N) -> deep_review -> report -> summary
@@ -25,13 +25,14 @@ name = "task"
 type = { kind = "text", multiline = true }
 binds = [{ region = "task" }]
 
-# The code/diff to review - required. Supply via `--diff <text|@file>` (CLI),
-# or as the `diff` input of a spawn request (`"inputs": {"diff": ...}` over the
-# API, or `_leviath/spawn` over the Agent Client Protocol).
+# The code/diff to review. Supply via `--diff <text|@file>` (CLI), or as the
+# `diff` input of a spawn request (`"inputs": {"diff": ...}` over the API, or
+# `_leviath/spawn` over the Agent Client Protocol). Left out, the review covers
+# the code in the working directory.
 [[graph.inputs]]
 name = "diff"
 type = { kind = "text", multiline = true }
-required = true
+default = { text = "No diff was given: review the code in the working directory." }
 binds = [{ region = "diff" }]
 
 # Optional caller focus, e.g. --criteria "focus on security / backwards-compat".
@@ -72,7 +73,7 @@ regions = [
     # The `task` input: the caller's request, or, for a fan-out worker, the area
     # it reviews.
     { name = "task", kind = "pinned", budget = "2%", volatility = "stable" },
-    { name = "diff", kind = "pinned", budget = "20%", required = true, required_message = "Provide the code or diff to review via --diff <text|@file>.", volatility = "stable" },
+    { name = "diff", kind = "pinned", budget = "20%", volatility = "stable" },
     { name = "review_criteria", kind = "pinned", budget = "2%", volatility = "stable" },
     # An area reviewer's copy of this project's conventions, from its work item.
     { name = "conventions", kind = "pinned", budget = "3%", volatility = "stable" },
@@ -295,10 +296,14 @@ when = "error"
 name = "review_worker"
 description = "Review one area of the change in depth"
 model = { models = [{ model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
-tools = ["read_file", "list_dir", "submit_output"]
+tools = ["read_file", "list_dir", "context_read", "submit_output"]
 max_iterations = 20
 allow_as_worker = true
 require_output = true
+# Reads go to `findings`, as in scan and the deep review. Left in the
+# conversation they are evicted ten at a time as the window fills, and the
+# worker spends its replies reading the same files again.
+tool_routing = { default_region = "conversation", tool_regions = { read_file = "findings", list_dir = "findings" }, keep_results = true }
 system_prompt = """
 Review ONE area. `task` names it, `diff` holds its hunks, `review_criteria`
 says what to look hardest at, and `conventions` holds what this project calls

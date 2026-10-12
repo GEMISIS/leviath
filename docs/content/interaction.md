@@ -173,11 +173,14 @@ command for `bash`/`shell`, the path for the file tools). The prompt offers five
   result, so its next turn starts from your redirect rather than from a guess. The text is in the
   run's record with the rest of the tool result.
 
-The two scoped options name what they grant, because a grant is not keyed on the tool. Approving
-`ls && git status` for the run grants `ls` and `git status`, not "the shell": a later
-`ls && curl evil` still asks, because `curl` was never approved. Approving `git diff` does not
-approve `git push`. A line the parser cannot read as a list of commands (a backtick, a heredoc, an
-`eval`, a program named by a variable) has nothing reusable to grant, and the prompt says so.
+The two scoped options name what they grant, because a grant is not keyed on the tool. They name
+only the commands in the line that still need approving: the ones the safe list already runs are
+left out, so `cat notes.md && sed -n 1,5p notes.md` offers `Allow sed for this run`. Approving
+`make && cargo build` for the run grants `make` and `cargo build`, not "the shell": a later
+`make && curl evil` still asks, because `curl` was never approved. Approving `cargo build` does
+not approve `cargo publish`. A line the parser cannot read as a list of commands (a backtick, a
+heredoc, an `eval`, a program named by a variable) has nothing reusable to grant, and the prompt
+says so.
 
 A grant is kept in the run's own [run file](/docs/run-file), beside what the run has written
 against its write ceilings, so a run the daemon brings back after a restart keeps both. Nothing

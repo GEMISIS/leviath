@@ -39,9 +39,10 @@ pub(crate) fn parse_openai_finish_reason(reason: &str) -> FinishReason {
 /// rather than replaced by `{}`: the usual reason it is not JSON is that the
 /// reply hit its output cap mid-argument, and executing the tool with nothing
 /// hid that from the model. It re-sent the same oversized call and was cut
-/// off the same way, five times in a row, before the stage gave up. A string
-/// where an object should be fails schema validation, and the runtime reads
-/// the string shape as "this call was cut off" and says so back to the model.
+/// off the same way, five times in a row, before the stage gave up. The
+/// runtime refuses a call whose arguments are a string, and the reply's
+/// finish reason says which fault it was: a cut-off when the cap stopped it,
+/// broken JSON (an unescaped quote, say) when it ended on its own.
 pub(crate) fn parse_tool_arguments(raw: &str) -> serde_json::Value {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -83,7 +84,7 @@ pub(crate) fn tool_call_name(name: Option<&str>, provider: &str) -> Result<Strin
 /// An object goes out as it is. Anything else becomes `{"_raw": <value>}`.
 /// The usual case is a call the output cap cut off: `parse_tool_arguments`
 /// keeps its partial text as a string, and the conversation stores it that
-/// way, because the string is how the runtime knows the call was cut off.
+/// way, because the string is how the runtime knows the call did not parse.
 /// Anthropic, Bedrock and Ollama all refuse a string where tool input goes,
 /// and the refusal is not transient: every later request of the run, resumed
 /// or not, carried the same text and got the same answer. Wrapping it here,

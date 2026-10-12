@@ -24,6 +24,36 @@ use {
     std::pin::Pin,
 };
 
+/// Put an ephemeral `cache_control` on the last text in `messages`, the chat
+/// messages one turn converted to, and say whether there was any.
+///
+/// A string `content` becomes a single text part carrying the marker, which a
+/// `tool` message takes on this route as well as a user or assistant one. A
+/// turn that only calls tools has no text at all, and is left as it is.
+#[cfg(feature = "openrouter")]
+fn mark_last_text(messages: &mut [serde_json::Value]) -> bool {
+    let marker = serde_json::json!({ "type": "ephemeral" });
+    for message in messages.iter_mut().rev() {
+        match message.get_mut("content") {
+            Some(serde_json::Value::String(text)) if !text.is_empty() => {
+                let text = std::mem::take(text);
+                message["content"] = serde_json::json!([
+                    { "type": "text", "text": text, "cache_control": marker }
+                ]);
+                return true;
+            }
+            Some(serde_json::Value::Array(parts)) => {
+                if let Some(part) = parts.iter_mut().rev().find(|p| p["type"] == "text") {
+                    part["cache_control"] = marker;
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// OpenRouter provider.
 #[cfg(feature = "openrouter")]
 pub struct OpenRouterProvider {
@@ -219,16 +249,18 @@ impl OpenRouterProvider {
                 }
             }
         }
+        // A breakpoint that landed on a turn with no text to carry it (a turn
+        // that only calls tools) is owed to the next turn that has some.
+        let mut owed = false;
         for msg in &request.messages {
+            let mark =
+                is_anthropic && (msg.cache_breakpoint || owed) && breakpoint_count < message_budget;
             match &msg.content {
                 // A cache-breakpointed text turn (Anthropic-via-OpenRouter) keeps
                 // its ephemeral cache_control wrapper.
-                crate::provider::MessageContent::Text(text)
-                    if is_anthropic
-                        && msg.cache_breakpoint
-                        && breakpoint_count < message_budget =>
-                {
+                crate::provider::MessageContent::Text(text) if mark => {
                     breakpoint_count += 1;
+                    owed = false;
                     messages.push(serde_json::json!({
                         "role": msg.role,
                         "content": [{
@@ -241,10 +273,17 @@ impl OpenRouterProvider {
                 // Everything else - including tool_use/tool_result block history -
                 // goes through the OpenAI-format conversion so it round-trips on
                 // non-Anthropic models instead of being sent as raw block JSON.
-                _ => messages.extend(crate::openai_compat::message_to_openai(
-                    &msg.role,
-                    &msg.content,
-                )),
+                // A breakpoint on a tool turn goes on the last text it became,
+                // which is where an agent's breakpoint almost always lands.
+                _ => {
+                    let mut converted =
+                        crate::openai_compat::message_to_openai(&msg.role, &msg.content);
+                    if mark {
+                        owed = !mark_last_text(&mut converted);
+                        breakpoint_count += usize::from(!owed);
+                    }
+                    messages.extend(converted);
+                }
             }
         }
 
@@ -1567,6 +1606,134 @@ mod tests {
         assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
         // Second message should be simple string content
         assert!(msgs[1]["content"].is_string());
+    }
+
+    /// A turn of tool calls, then the turn answering them, as an agent's
+    /// history holds them, each carrying a breakpoint when asked.
+    fn tool_history(mark_call: bool, mark_result: bool) -> Vec<crate::provider::Message> {
+        use crate::provider::{ContentBlock, Message, MessageContent};
+        vec![
+            Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "a.rs"}),
+                    thought_signature: None,
+                }]),
+                cache_breakpoint: mark_call,
+                reasoning: None,
+            },
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "c1".to_string(),
+                    content: "fn main() {}".to_string(),
+                    is_error: false,
+                }]),
+                cache_breakpoint: mark_result,
+                reasoning: None,
+            },
+        ]
+    }
+
+    fn body_for(model: &str, messages: Vec<crate::provider::Message>) -> serde_json::Value {
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
+        provider.build_request_body(&InferenceRequest {
+            system: vec![],
+            messages,
+            model: model.to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        })
+    }
+
+    fn markers(body: &serde_json::Value) -> usize {
+        body.to_string().matches("\"cache_control\"").count()
+    }
+
+    /// A breakpoint on a tool turn reaches the wire. An agent's history is
+    /// almost all tool turns, and assembly puts its breakpoint on one; dropping
+    /// it there left a run's whole conversation uncached, every request paying
+    /// full price for a prefix it had already sent.
+    #[test]
+    fn a_breakpoint_on_a_tool_result_turn_is_marked() {
+        let body = body_for("anthropic/claude-sonnet-5", tool_history(false, true));
+        let msgs = body["messages"].as_array().unwrap();
+        let result = &msgs[1];
+        assert_eq!(result["role"], "tool");
+        assert_eq!(result["tool_call_id"], "c1");
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(result["content"][0]["text"], "fn main() {}");
+        assert_eq!(result["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(markers(&body), 1);
+    }
+
+    /// A turn that only calls tools has no text to hold a marker, so its
+    /// breakpoint moves to the next turn that has some: the results answering
+    /// those calls. Dropping it instead would leave every other request with
+    /// nothing cached.
+    #[test]
+    fn a_breakpoint_on_a_bare_tool_call_turn_moves_to_its_results() {
+        let body = body_for("anthropic/claude-sonnet-5", tool_history(true, false));
+        let msgs = body["messages"].as_array().unwrap();
+        assert!(
+            msgs[0].get("content").is_none(),
+            "the call turn is unchanged"
+        );
+        assert_eq!(msgs[1]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(markers(&body), 1);
+    }
+
+    /// A turn that became content parts (text beside an attachment) is marked on
+    /// its last text part; one with no text anywhere, or only empty text, is
+    /// left unmarked so the breakpoint moves on.
+    #[test]
+    fn mark_last_text_finds_the_last_text_a_turn_carries() {
+        let mut parts = vec![serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "look" },
+                { "type": "image_url", "image_url": { "url": "data:," } },
+            ],
+        })];
+        assert!(mark_last_text(&mut parts));
+        assert_eq!(parts[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert!(parts[0]["content"][1].get("cache_control").is_none());
+
+        let mut nothing = vec![
+            serde_json::json!({ "role": "user", "content": [{ "type": "image_url" }] }),
+            serde_json::json!({ "role": "assistant", "content": "" }),
+            serde_json::json!({ "role": "assistant", "tool_calls": [] }),
+        ];
+        assert!(!mark_last_text(&mut nothing));
+        assert_eq!(nothing[1]["content"], "");
+    }
+
+    /// A model that takes no markers gets none on its tool turns either.
+    #[test]
+    fn a_tool_turn_breakpoint_is_not_marked_for_a_model_without_markers() {
+        let body = body_for("openai/gpt-5.5", tool_history(true, true));
+        assert_eq!(markers(&body), 0);
+        assert!(body["messages"][1]["content"].is_string());
+    }
+
+    /// Marking tool turns spends from the same budget of four as everything
+    /// else: a request never carries more markers than the API allows.
+    #[test]
+    fn tool_turn_breakpoints_stay_within_the_marker_budget() {
+        let mut messages = Vec::new();
+        for _ in 0..4 {
+            messages.extend(tool_history(true, true));
+        }
+        let body = body_for("anthropic/claude-sonnet-5", messages);
+        assert_eq!(markers(&body), 4);
     }
 
     /// A stable system block carries a marker, so an Anthropic model reached

@@ -203,9 +203,43 @@ same list.
 - `lev providers retention set` and `lev providers retention bedrock` take
   their words in any case and list them in `--help`. `lev pack` and `lev
   rage` print sizes the way the rest of lev does (`240 KB`, `18.2 MB`).
+- A stage whose conversation holds calls to tools it does not have is told
+  which tools it has and which earlier ones it does not. A model read its
+  own earlier calls as proof the tool existed, and one run in six had a call
+  refused for it.
+- A stage that still owes its final output, or a required region it has not
+  written, is warned two replies before its iteration cap. One that reaches
+  the cap still owing its output gets one more reply that can only call
+  `submit_output`, then the cap ends it as before.
+- A fan-out stage whose worker is a stage of its own graph is told how many
+  replies each worker has, from the worker's `max_iterations`, so it can
+  size the work items to fit.
+- `reviewer` 0.4.1: `diff` is optional, and left out, the review covers the
+  code in the working directory. A worker keeps the files it reads in
+  `findings`, so the conversation window no longer evicts them and it does
+  not read them twice.
 
 ### Fixed
 
+- A tool approval prompt names only the commands that still need approving.
+  A line that ran `cd`, `cat`, `ls` and one `sed` read `Allow cat x, cd, echo
+  +4 more`, with `sed` hidden in the count, and a stage or run grant also
+  recorded the commands the safe list already runs.
+- A tool call whose arguments are complete but not valid JSON, an unescaped
+  quote say, is refused with the parse error and where it is. It was refused
+  as cut off by the output limit and the model was told to split it, so it
+  split work that had fitted.
+- An Anthropic model reached through OpenRouter caches its conversation.
+  Assembly puts its cache breakpoint on a tool turn, and OpenRouter requests
+  dropped it there, so a stage whose prompt is mostly tool calls and results
+  cached nothing: five review workers sent 8M prompt tokens with no cache
+  reads at all.
+- A stage that hits its iteration cap with a required region still empty
+  records it in `required_regions_abandoned`, and the cap note names the
+  regions, so the next stage knows they hold nothing.
+- A `fan_out` call whose `agent` names the stage its fan-out already runs gets
+  that stage. It was read as an installed blueprint of the same name, which
+  does not exist, so every worker failed to spawn.
 - A run's context history credits each stage with what it wrote on its way
   out. A stage's last output is stored in the same step that moves the run
   on, so it was listed under the next stage, and when that stage cleared it,

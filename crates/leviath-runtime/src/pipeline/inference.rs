@@ -91,6 +91,56 @@ pub(crate) fn hint_blocks(
     blocks
 }
 
+/// The note a request carries when its history holds calls to tools the request
+/// does not offer: the tools this stage has, and the ones earlier turns called
+/// that it does not. `None` when every tool the history calls is still offered.
+///
+/// A model reads its own earlier calls as proof that a tool exists. A stage
+/// entered after one with other tools inherits those calls in its conversation,
+/// and without a word about it the model calls them again and is refused, a
+/// reply each time. Built from the request itself, so it names exactly what
+/// this request offers and only the calls still in its window; a model that
+/// takes no tools has its history flattened to prose and gets no note.
+pub(crate) fn unoffered_history_note(
+    messages: &[leviath_providers::Message],
+    tools: &[Tool],
+) -> Option<String> {
+    let offered: std::collections::BTreeSet<&str> = tools
+        .iter()
+        .map(|t| leviath_tools::canonical_tool_name(&t.name))
+        .collect();
+    let missing: std::collections::BTreeSet<&str> = messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            leviath_providers::MessageContent::Blocks(blocks) => Some(blocks),
+            leviath_providers::MessageContent::Text(_) => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            leviath_providers::ContentBlock::ToolUse { name, .. } => {
+                Some(leviath_tools::canonical_tool_name(name))
+            }
+            _ => None,
+        })
+        .filter(|name| !offered.contains(name))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let have = match offered.is_empty() {
+        true => "This stage has no tools.".to_string(),
+        false => format!(
+            "This stage's tools are {}.",
+            offered.into_iter().collect::<Vec<_>>().join(", ")
+        ),
+    };
+    Some(format!(
+        "{have} Earlier turns called {}, which this stage does not have: a call to one is \
+         refused and runs nothing.",
+        missing.into_iter().collect::<Vec<_>>().join(", ")
+    ))
+}
+
 /// The smallest completion budget a request may carry.
 ///
 /// Providers reject a request whose completion budget is below one - OpenAI
@@ -422,6 +472,17 @@ pub(crate) fn build_request(
 
     let mut system = hint_blocks(config, &filtered_tools, std::env::consts::OS);
     system.extend(assembled.system_blocks);
+    // Last, so the hint prefix every request shares stays where it is. It holds
+    // still for the whole stage and changes only at a stage edge, where the
+    // tool list in front of it changes anyway.
+    if let Some(note) = unoffered_history_note(&messages, &filtered_tools) {
+        system.push(leviath_providers::SystemBlock {
+            text: note,
+            cache_hint: leviath_core::CacheHint::UntilChanged,
+            volatility: leviath_core::Volatility::Stable,
+            region: String::new(),
+        });
+    }
 
     // A model that does not read a system prompt has the stage's instruction
     // folded into the user turn instead, or it is lost. It lands in the system

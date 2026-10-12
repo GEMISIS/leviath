@@ -157,6 +157,30 @@ pub(crate) fn inject_required_region_nudges(
 ///
 /// `&'static` is bevy's `WorldQuery` convention, not a claim about
 /// lifetimes: the borrow is bound when the query is fetched.
+/// Add `names` to the run's abandoned required regions, each once.
+///
+/// Recorded as well as logged. A log line is not readable after the fact, so
+/// without this "the agent wrote its plan" and "we asked twice and moved on"
+/// both finish `complete` and nothing downstream can tell them apart.
+fn record_abandoned(
+    flags: Option<bevy_ecs::prelude::Mut<'_, crate::persistence::RunOutcomeFlags>>,
+    names: &[&str],
+) {
+    let Some(mut flags) = flags else {
+        return;
+    };
+    for name in names {
+        if !flags
+            .0
+            .required_regions_abandoned
+            .iter()
+            .any(|seen| seen == name)
+        {
+            flags.0.required_regions_abandoned.push((*name).to_string());
+        }
+    }
+}
+
 type ContextRegionQuery = (
     Entity,
     &'static RunSpecC,
@@ -171,8 +195,9 @@ type ContextRegionQuery = (
 /// write context and a `required` region is still empty, inject a nudge and re-run
 /// the stage (loop back to `ReadyToInfer`) instead of transitioning - bounded by
 /// the stage's `max_revisits` (or a default cap), after which
-/// it proceeds with a warning. Skipped when the stage ended on an error / max-iter
-/// outcome (those transitions take precedence).
+/// it proceeds with a warning. A stage that ended on an error or max-iterations
+/// outcome is never held (those transitions take precedence); one that hit its
+/// iteration cap still has its empty required regions recorded as abandoned.
 pub(crate) fn require_context_regions(
     mut agents: Query<ContextRegionQuery, With<ResolveTransition>>,
     mut commands: Commands,
@@ -186,12 +211,6 @@ pub(crate) fn require_context_regions(
         // finished with a fifty-citation bibliography while warning that the
         // region had never been written. The moment stays in the log; this list
         // is what is actually missing, checked at every stage boundary.
-        // A stage that gave up is not the last word: `sources_index` abandoned in
-        // `gather` can be written by `analyze`, and then the artifact exists.
-        // Reported as still missing, it tells a reader something false - one run
-        // finished with a fifty-citation bibliography while warning that the
-        // region had never been written. The moment stays in the log; this list
-        // is what is actually missing, checked at every stage boundary.
         if let Some(flags) = flags.as_mut() {
             flags.0.required_regions_abandoned.retain(|name| {
                 window
@@ -199,10 +218,26 @@ pub(crate) fn require_context_regions(
                     .is_none_or(|region| region.content.is_empty())
             });
         }
-        if outcome.is_some() {
-            continue; // error / max-iterations transition takes precedence
-        }
         let stage = &spec.0.graph.stages[cursor.index];
+        match outcome {
+            // The cap ends the stage and is not argued with, but the regions it
+            // left empty were abandoned all the same, and the run says so.
+            Some(StageOutcome::MaxIterations) => {
+                let unmet = unmet_required_regions(&spec.0.graph, stage, &window);
+                let names: Vec<&str> = unmet.iter().map(|(n, _)| n.as_str()).collect();
+                if !names.is_empty() {
+                    tracing::warn!(
+                        stage = %stage.name,
+                        regions = ?names,
+                        "required context regions still empty at the iteration cap"
+                    );
+                }
+                record_abandoned(flags, &names);
+                continue;
+            }
+            Some(_) => continue, // an error transition takes precedence
+            None => {}
+        }
         let unmet = unmet_required_regions(&spec.0.graph, stage, &window);
         if unmet.is_empty() {
             continue;
@@ -219,22 +254,7 @@ pub(crate) fn require_context_regions(
                 attempts = cap,
                 "required context regions still empty after re-run attempts; proceeding"
             );
-            // Recorded as well as logged. A log line is not readable after the
-            // fact, so without this "the agent wrote its plan" and "we asked
-            // twice and moved on" both finish `complete` and nothing
-            // downstream can tell them apart.
-            if let Some(mut flags) = flags {
-                for name in &names {
-                    if !flags
-                        .0
-                        .required_regions_abandoned
-                        .iter()
-                        .any(|seen| seen == name)
-                    {
-                        flags.0.required_regions_abandoned.push((*name).to_string());
-                    }
-                }
-            }
+            record_abandoned(flags, &names);
             continue; // proceed with the transition despite the unmet regions
         }
         inject_required_region_nudges(&mut window, &unmet);

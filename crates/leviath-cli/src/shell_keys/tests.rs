@@ -549,6 +549,44 @@ fn runs_unprompted_by_default(command: &str) -> bool {
     })
 }
 
+/// What a prompt for `command` would ask for under the shipped defaults, with
+/// `granted` already approved.
+fn still_to_approve(command: &str, granted: &[&str]) -> Vec<String> {
+    let safe = crate::approvals::resolve_safe_keys(&Default::default(), None, None, false);
+    uncovered_keys(&command_keys(command), &|k| safe.contains_key(k), &|k| {
+        granted.contains(&k)
+    })
+}
+
+/// A prompt names the programs that need approving and leaves out the ones the
+/// safe list already runs, so the program being approved is never the one
+/// hidden behind "+N more".
+#[test]
+fn a_prompt_names_only_the_programs_still_to_approve() {
+    assert_eq!(
+        still_to_approve("cat a.txt; curl https://example.com", &[]),
+        ["shell:curl https://example.com"]
+    );
+    assert_eq!(
+        still_to_approve("cd x; pwd; ls y | head; echo z; sed -n '1,5p' f", &[]),
+        ["shell:sed"]
+    );
+    // A grant takes its key off the list exactly, with no widening.
+    assert_eq!(
+        still_to_approve("sed -n 1p f; curl https://example.com", &["shell:sed"]),
+        ["shell:curl https://example.com"]
+    );
+    // Nothing covered keeps every key, in order.
+    assert_eq!(
+        still_to_approve("curl https://a.test; wget https://b.test", &[]),
+        ["shell:curl https://a.test", "shell:wget https://b.test"]
+    );
+    // A line that is all covered leaves nothing to ask, which is what makes
+    // `all_covered` true for it.
+    assert!(still_to_approve("ls; cat a.txt", &[]).is_empty());
+    assert!(runs_unprompted_by_default("ls; cat a.txt"));
+}
+
 /// The predicate above has to agree with the shipped defaults, or every test
 /// using it would pass vacuously.
 #[test]

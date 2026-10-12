@@ -981,6 +981,107 @@ fn build_request_puts_the_hints_ahead_of_the_stage_context() {
     );
 }
 
+/// A window whose conversation holds one earlier call to `name` and its result.
+fn history_calling(name: &str) -> ContextWindow {
+    let mut w = ContextWindow::new(10_000);
+    w.add_region(Region::new(
+        "conversation".to_string(),
+        RegionKind::SlidingWindow {
+            max_items: 20,
+            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+        },
+        5000,
+    ));
+    w.add_typed_entry(
+        "conversation",
+        leviath_core::EntryKind::AssistantTurn {
+            tool_calls: vec![leviath_core::SerializedToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                arguments: serde_json::json!({"command": "ls"}),
+                thought_signature: None,
+            }],
+        },
+        String::new(),
+        1,
+    )
+    .unwrap();
+    w.add_typed_entry(
+        "conversation",
+        leviath_core::EntryKind::ToolResult {
+            tool_call_id: "c1".into(),
+            tool_name: name.into(),
+            is_error: false,
+        },
+        "done".to_string(),
+        1,
+    )
+    .unwrap();
+    w
+}
+
+/// The system text of the request a stage offering `tools` would send over
+/// `window`, on a provider that does or does not take tools.
+fn system_text(window: &ContextWindow, tools: &[&str], supports_tools: bool) -> String {
+    let si = stage("m", tools.iter().map(|t| tool(t)).collect(), None);
+    let provider: Arc<dyn Provider> = Arc::new(Cfg {
+        supports_temperature: true,
+        max_output: 500,
+        supports_tools,
+    });
+    let req = build_request(
+        window,
+        None,
+        &si,
+        &provider,
+        "test-stage",
+        0,
+        crate::pipeline::inference::PriorCalls::default(),
+    )
+    .0;
+    req.system
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A stage whose history holds calls to tools it does not offer is told so on
+/// every request. Without it the model reads its own earlier calls as proof
+/// the tool exists and calls it again, and each refusal costs a reply.
+#[test]
+fn build_request_names_the_earlier_tools_a_stage_does_not_have() {
+    let text = system_text(&history_calling("shell"), &["read_file", "list_dir"], true);
+    assert!(
+        text.contains("This stage's tools are list_dir, read_file."),
+        "{text}"
+    );
+    assert!(text.contains("Earlier turns called shell"), "{text}");
+    assert!(text.contains("refused"), "{text}");
+
+    let none = system_text(&history_calling("shell"), &[], true);
+    assert!(none.contains("This stage has no tools."), "{none}");
+    assert!(none.contains("Earlier turns called shell"), "{none}");
+}
+
+/// No note when there is nothing to warn about: the earlier tool is still
+/// offered (under either spelling of an alias), the history has no calls, or
+/// the model takes no tools and sees its history as prose.
+#[test]
+fn build_request_adds_no_tool_note_when_nothing_is_missing() {
+    let still_offered = system_text(&history_calling("shell"), &["shell"], true);
+    assert!(
+        !still_offered.contains("Earlier turns called"),
+        "{still_offered}"
+    );
+    let alias = system_text(&history_calling("shell"), &["bash"], true);
+    assert!(!alias.contains("Earlier turns called"), "{alias}");
+    let no_history = system_text(&window(), &["read_file"], true);
+    assert!(!no_history.contains("Earlier turns called"), "{no_history}");
+    let no_tools = system_text(&history_calling("shell"), &["read_file"], false);
+    assert!(!no_tools.contains("Earlier turns called"), "{no_tools}");
+}
+
 #[test]
 fn build_request_all_tools_default_temperature_no_config() {
     let si = stage("m", vec![tool("a"), tool("b")], None); // None filter = all
@@ -11628,6 +11729,203 @@ fn enforce_max_iterations_below_limit_or_unlimited_or_paused_is_noop() {
     }
 }
 
+/// An agent at `iterations` of `max` in a stage that owes `submit_output`
+/// (`require_output`) and offers it, with nothing submitted yet.
+fn spawn_owing_agent(world: &mut World, max: u32, iterations: usize) -> Entity {
+    let mut s = stage_named("a", None, false, None);
+    s.max_iterations = Some(max);
+    s.require_output = true;
+    let bp = blueprint(vec![s]);
+    world
+        .spawn((
+            spec_of(bp),
+            StageCursor { index: 0 },
+            agent_state(),
+            StageProgress {
+                iterations,
+                ..Default::default()
+            },
+            stage("m", vec![tool("read_file"), tool("submit_output")], None),
+            conv_window(),
+            crate::persistence::RunOutcomeFlags::default(),
+            ReadyToInfer,
+        ))
+        .id()
+}
+
+/// How many times `needle` appears in `e`'s conversation.
+fn conversation_count(world: &World, e: Entity, needle: &str) -> usize {
+    conversation_text(world, e).matches(needle).count()
+}
+
+/// A stage that owes its output is told, two replies before its cap, that the
+/// replies are running out. Nothing else tells a model how many it has, and a
+/// worker that read files until the cap ended its run with nothing.
+#[test]
+fn a_stage_owing_output_is_warned_two_replies_before_its_cap() {
+    let mut world = World::new();
+    let e = spawn_owing_agent(&mut world, 5, 3);
+    run_enforce(&mut world);
+    assert_eq!(
+        conversation_count(&world, e, "You have 2 replies left in this stage"),
+        1
+    );
+    assert!(world.get::<ReadyToInfer>(e).is_some(), "the stage goes on");
+    assert!(world.get::<StageOutcome>(e).is_none());
+    // Once per visit, however often the stage comes back to infer at that count.
+    run_enforce(&mut world);
+    assert_eq!(
+        conversation_count(&world, e, "You have 2 replies left in this stage"),
+        1
+    );
+    // Earlier than two left, nothing yet.
+    let early = spawn_owing_agent(&mut world, 5, 2);
+    run_enforce(&mut world);
+    assert_eq!(conversation_count(&world, early, "replies left"), 0);
+}
+
+/// A stage that has not written a required region is warned the same way, and
+/// the warning names the region. It gets no extra reply at the cap: that is
+/// only for a final output, which is otherwise lost with the run.
+#[test]
+fn a_stage_with_an_empty_required_region_is_warned_before_its_cap() {
+    let mut world = World::new();
+    let mut spec = required_bp(&["context_write"], None);
+    graph_mut(&mut spec).stages[0].max_iterations = Some(6);
+    let spawn = |world: &mut World, iterations: usize, filled: bool| {
+        world
+            .spawn((
+                spec.clone(),
+                StageCursor { index: 0 },
+                agent_state(),
+                StageProgress {
+                    iterations,
+                    ..Default::default()
+                },
+                window_with_plan(filled),
+                ReadyToInfer,
+            ))
+            .id()
+    };
+    let empty = spawn(&mut world, 4, false);
+    let written = spawn(&mut world, 4, true);
+    let capped = spawn(&mut world, 6, false);
+    run_enforce(&mut world);
+
+    let text = conversation_text(&world, empty);
+    assert!(
+        text.contains(
+            "You have 2 replies left in this stage. Use them to write the required regions \
+             `plan` (still empty)"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("submit_output"), "{text}");
+    assert!(world.get::<super::watchdog::CapWarned>(empty).is_some());
+    assert!(!conversation_text(&world, written).contains("replies left"));
+    assert!(
+        world.get::<super::watchdog::CapWarned>(written).is_none(),
+        "nothing owed, no mark"
+    );
+    assert_eq!(
+        world.get::<StageOutcome>(capped).unwrap(),
+        &StageOutcome::MaxIterations,
+        "the cap itself is unchanged"
+    );
+}
+
+/// What a stage owes is named together when it owes both.
+#[test]
+fn a_cap_warning_names_everything_a_stage_still_owes() {
+    let both =
+        super::watchdog::cap_warning(true, &["plan".to_string(), "notes".to_string()]).unwrap();
+    assert!(
+        both.contains(
+            "call `submit_output` with what you have, and write the required regions \
+             `plan`, `notes` (still empty)"
+        ),
+        "{both}"
+    );
+    assert!(super::watchdog::cap_warning(false, &[]).is_none());
+}
+
+/// At its cap, a stage that still owes its output gets one more reply that can
+/// only submit it, then the cap ends the stage exactly as it would have.
+#[test]
+fn a_stage_owing_output_gets_one_submit_only_reply_at_its_cap() {
+    let mut world = World::new();
+    let e = spawn_owing_agent(&mut world, 5, 5);
+    run_enforce(&mut world);
+    assert!(world.get::<ReadyToInfer>(e).is_some(), "one more reply");
+    assert!(world.get::<StageOutcome>(e).is_none());
+    assert_eq!(
+        world.get::<StageInference>(e).unwrap().tool_filter,
+        Some(vec!["submit_output".to_string()]),
+        "offering only submit_output"
+    );
+    assert!(
+        super::tools::offered_tool_names(world.get::<StageInference>(e).unwrap())
+            == ["submit_output"],
+        "and refusing anything else"
+    );
+    assert_eq!(
+        conversation_count(&world, e, "You are out of replies in this stage"),
+        1
+    );
+
+    // That reply spent, the cap ends the stage.
+    world.get_mut::<StageProgress>(e).unwrap().iterations = 6;
+    run_enforce(&mut world);
+    assert_eq!(
+        world.get::<StageOutcome>(e).unwrap(),
+        &StageOutcome::MaxIterations
+    );
+    assert!(world.get::<ReadyToInfer>(e).is_none());
+    assert_eq!(
+        world
+            .get::<crate::persistence::RunOutcomeFlags>(e)
+            .unwrap()
+            .0
+            .max_iterations_hit,
+        1,
+        "the cap is counted once"
+    );
+}
+
+/// A stage that owes nothing, or already submitted, is capped as it always was:
+/// no warning and no extra reply.
+#[test]
+fn a_stage_that_owes_no_output_is_capped_as_before() {
+    let mut world = World::new();
+    let owes_nothing = spawn_owing_agent(&mut world, 5, 5);
+    let mut spec = world.get::<RunSpecC>(owes_nothing).unwrap().clone();
+    graph_mut(&mut spec).stages[0].require_output = false;
+    world.entity_mut(owes_nothing).insert(spec);
+
+    let submitted = spawn_owing_agent(&mut world, 5, 5);
+    let warned_not = spawn_owing_agent(&mut world, 5, 3);
+    for e in [submitted, warned_not] {
+        world.entity_mut(e).insert(crate::persistence::FinalOutput(
+            leviath_core::output::FinalOutput::new("done", None, "s".to_string(), 1),
+        ));
+    }
+    // Owing output but unable to submit it: no point in a submit-only reply.
+    let cannot_submit = spawn_owing_agent(&mut world, 5, 5);
+    world
+        .entity_mut(cannot_submit)
+        .insert(stage("m", vec![tool("read_file")], None));
+
+    run_enforce(&mut world);
+    for e in [owes_nothing, submitted, cannot_submit] {
+        assert_eq!(
+            world.get::<StageOutcome>(e).unwrap(),
+            &StageOutcome::MaxIterations
+        );
+        assert_eq!(conversation_count(&world, e, "replies"), 0);
+    }
+    assert_eq!(conversation_count(&world, warned_not, "replies left"), 0);
+}
+
 // ── stuck detection ─────────────────────────────────────────────────────
 
 fn stuck_cfg(
@@ -11835,7 +12133,7 @@ fn note_error_prefers_the_error_report_region_then_conversation() {
 #[test]
 fn note_max_iterations_prefers_the_error_report_region_then_conversation() {
     let mut with_report = ctx(&[("conversation", 10_000), ("error_report", 10_000)]);
-    note_max_iterations(&mut with_report, "implement", 12);
+    note_max_iterations(&mut with_report, "implement", 12, &[]);
     assert!(
         with_report
             .get_region("error_report")
@@ -11852,7 +12150,7 @@ fn note_max_iterations_prefers_the_error_report_region_then_conversation() {
     );
 
     let mut fallback = ctx(&[("conversation", 10_000)]);
-    note_max_iterations(&mut fallback, "implement", 12);
+    note_max_iterations(&mut fallback, "implement", 12, &[]);
     let conv = fallback.get_region("conversation").unwrap();
     let text: String = conv.content.iter().map(|e| e.content.as_str()).collect();
     assert!(
@@ -11860,6 +12158,23 @@ fn note_max_iterations_prefers_the_error_report_region_then_conversation() {
         "{text}"
     );
     assert!(text.contains("possibly incomplete"), "{text}");
+    assert!(!text.contains("never wrote"), "{text}");
+}
+
+/// The cap note names the required regions the stage left empty, so the stage
+/// that runs next knows they hold nothing rather than reading an empty region
+/// as a finding.
+#[test]
+fn note_max_iterations_names_the_required_regions_left_empty() {
+    let mut window = ctx(&[("conversation", 10_000)]);
+    let empty = ["discovery".to_string(), "workflow".to_string()];
+    note_max_iterations(&mut window, "discover", 6, &empty);
+    let conv = window.get_region("conversation").unwrap();
+    let text: String = conv.content.iter().map(|e| e.content.as_str()).collect();
+    assert!(
+        text.contains("It never wrote its required regions `discovery`, `workflow`"),
+        "{text}"
+    );
 }
 
 /// Build a world holding one `ReadyToInfer` agent whose stage `a` carries a
@@ -19734,6 +20049,40 @@ fn abandoning_a_required_region_is_recorded_in_the_run() {
     assert!(world.get::<ResolveTransition>(capped).is_some());
 }
 
+/// A stage that runs out of iterations with a required region still empty
+/// has abandoned it as surely as one that was asked and gave up, and the run
+/// says so. The cap still ends the stage: nothing is nudged or re-run.
+#[test]
+fn a_required_region_left_empty_at_the_iteration_cap_is_recorded() {
+    let mut world = World::new();
+    let capped = world
+        .spawn((
+            required_bp(&["context_write"], None),
+            StageCursor { index: 0 },
+            window_with_plan(false),
+            StageOutcome::MaxIterations,
+            crate::persistence::RunOutcomeFlags::default(),
+            ResolveTransition,
+        ))
+        .id();
+    run_require(&mut world);
+
+    assert_eq!(
+        world
+            .get::<crate::persistence::RunOutcomeFlags>(capped)
+            .expect("flags")
+            .0
+            .required_regions_abandoned,
+        vec!["plan".to_string()]
+    );
+    assert!(world.get::<ResolveTransition>(capped).is_some());
+    assert!(world.get::<ReadyToInfer>(capped).is_none(), "not re-run");
+    assert!(
+        world.get::<RequiredReentries>(capped).is_none(),
+        "not nudged"
+    );
+}
+
 /// A region an earlier stage gave up on and a later stage filled is no longer
 /// missing, so it stops being reported as missing.
 ///
@@ -20462,6 +20811,78 @@ fn cut_off_arguments_refusal_escalates_and_says_how_to_split() {
         last.contains("ends with an error if your next reply is cut off too"),
         "{last}"
     );
+}
+
+/// Arguments that are complete but not JSON, in a reply that ended on its own,
+/// are refused for what is wrong with them, not as a cut-off.
+///
+/// A split stage once sent 99,258 characters of `fan_out` items with one
+/// unescaped `"` in a string. The reply finished well under its cap, and the
+/// refusal still said the output limit cut it off and to split the call, so
+/// the model split work that had fitted the first time.
+#[tokio::test]
+async fn dispatch_tools_names_the_json_error_when_the_reply_was_not_cut_off() {
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let broken = r#"{"path": "notes.md", "content": "uses #[serde(alias = "old")] here"}"#;
+    let e = world
+        .spawn((
+            agent_state(),
+            offering(&["write_file"]),
+            cut_off_batch(serde_json::json!(broken), None),
+            conv_window(),
+            StageProgress::default(),
+            ReadyForTools,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
+    s.run(&mut world);
+
+    let text = conversation_text(&world, e);
+    assert!(text.contains("[error] 'write_file' was not run"), "{text}");
+    assert!(text.contains("not valid JSON"), "{text}");
+    assert!(
+        text.contains("alias = \"old"),
+        "the error is shown in place: {text}"
+    );
+    assert!(!text.contains("cut off"), "{text}");
+    assert!(!text.contains("split"), "{text}");
+    assert!(jrx.try_recv().is_err(), "nothing reached the tool lane");
+    assert!(call_had_no_effect(&malformed_arguments_refusal(
+        "write_file",
+        broken
+    )));
+}
+
+/// Each way arguments can fail to be a JSON object gets its own words: broken
+/// syntax shows where and the usual cause, JSON that simply ends says so
+/// without blaming the output cap, and JSON that is not an object says that.
+#[test]
+fn malformed_arguments_refusal_says_what_is_wrong() {
+    let syntax = malformed_arguments_refusal("t", "{\"a\": \"say \"hi\"\"}");
+    assert!(syntax.contains("not valid JSON (expected"), "{syntax}");
+    assert!(syntax.contains("near `{\"a\": \"say \"hi"), "{syntax}");
+    assert!(syntax.contains("not escaped"), "{syntax}");
+    assert!(syntax.contains("Send the same call again"), "{syntax}");
+
+    // The position is found on the line the parser names, not the first: a
+    // long first line puts the start of the text outside the quoted window.
+    let raw = format!("{{\n\"pad\": \"{}\",\n\"b\": x\n}}", "p".repeat(200));
+    let later_line = malformed_arguments_refusal("t", &raw);
+    assert!(later_line.contains("line 3 column"), "{later_line}");
+    assert!(later_line.contains("\"b\": x"), "{later_line}");
+    assert!(!later_line.contains("\"pad\""), "{later_line}");
+
+    let ends = malformed_arguments_refusal("t", "{\"a\": \"unfinish");
+    assert!(ends.contains("end before the JSON does"), "{ends}");
+    assert!(ends.contains("15 characters arrived, ending `"), "{ends}");
+    assert!(!ends.contains("output limit"), "{ends}");
+
+    let not_object = malformed_arguments_refusal("t", "\"just a string\"");
+    assert!(not_object.contains("not a JSON object"), "{not_object}");
 }
 
 /// A refused cut-off call stays in the conversation beside its refusal, and
