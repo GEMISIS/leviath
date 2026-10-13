@@ -55,16 +55,16 @@ pub(crate) fn read_within(
         )));
     }
     let left = budget.left.get();
-    // Opened, looked at and read in one chain, so a failure anywhere is the
-    // one refusal; anything but a regular file is not read at all.
-    let (meta, data) = std::fs::File::open(&full)
-        .and_then(|file| file.metadata().map(|meta| (file, meta)))
-        .and_then(|(file, meta)| {
+    // Looked at, opened and read in one chain, so a failure anywhere is the
+    // one refusal. Anything but a regular file is not opened at all: Windows
+    // refuses to open a directory as a file, so opening first would make a
+    // directory a different refusal there than everywhere else.
+    let (meta, data) = std::fs::metadata(&full)
+        .and_then(|meta| {
             let mut data = Vec::new();
             match meta.is_file() {
-                true => file
-                    .take(left.saturating_add(1))
-                    .read_to_end(&mut data)
+                true => std::fs::File::open(&full)
+                    .and_then(|file| file.take(left.saturating_add(1)).read_to_end(&mut data))
                     .map(|_| (meta, data)),
                 false => Ok((meta, data)),
             }
