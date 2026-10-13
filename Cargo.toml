@@ -222,6 +222,8 @@ schemars = "1"
 rand = "0.10"
 futures-core = "0.3"
 tokio-stream = "0.1"
+# A file read a block at a time as a response body (`ReaderStream`).
+tokio-util = { version = "0.7", features = ["io"] }
 # The chunks a streamed response arrives in, as `reqwest` hands them over.
 bytes = "1"
 flate2 = "1.0"

@@ -11,7 +11,6 @@ use leviath_core::run_meta::{ContextSnapshot, StageRecord};
 use leviath_runtime::control_socket::ControlResponse;
 use leviath_runtime::runfile::{RunFileErrorKind, RunFileReader};
 use leviath_runtime::spec::graph::EdgeCondition;
-use leviath_runtime::spec::names::Digest;
 use leviath_runtime::spec::run_spec::RunSpec;
 use leviath_runtime::state::{RunState, StateDelta, TransitionReason, TransitionRecord};
 use serde::Serialize;
@@ -253,20 +252,13 @@ pub(crate) fn blobs(run_id: &str) -> Result<Vec<crate::blobs::BlobEntry>, ServeE
     Ok(crate::blobs::list_from(run_id, &snapshot))
 }
 
-/// The bytes of the part hashed `sha256`, from the run's blob directory.
-/// `None` when the hash is not one, or its file is not there; a file that is
-/// there and does not read is an error.
-pub(crate) fn blob(run_id: &str, sha256: &str) -> Result<Option<Vec<u8>>, ServeError> {
-    let Ok(digest) = Digest::new(sha256) else {
-        return Ok(None);
-    };
-    match leviath_runtime::runfile::read_blob(&crate::runstate::run_dir(run_id), &digest) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(leviath_runtime::runfile::RunFileErrorKind::MissingBlob(_)) => Ok(None),
-        Err(why) => Err(ServeError::Internal(format!(
-            "the stored part {sha256} of run '{run_id}' does not read: {why}"
-        ))),
-    }
+/// Where the part hashed `sha256` is kept, in the run's blob directory.
+/// `sha256` is one the caller has checked is 64 lowercase hex digits, so it
+/// is a file name and nothing else.
+pub(crate) fn blob_path(run_id: &str, sha256: &str) -> std::path::PathBuf {
+    crate::runstate::run_dir(run_id)
+        .join(leviath_core::files::BLOBS_DIR)
+        .join(sha256)
 }
 
 #[cfg(test)]

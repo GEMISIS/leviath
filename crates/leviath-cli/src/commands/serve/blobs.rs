@@ -69,18 +69,23 @@ pub(super) async fn export_file(
             )));
         }
     }
-    let bytes = tokio::fs::read(super::core::export::export_path(&id))
-        .await
-        .map_err(|e| {
-            ServeError::Internal(format!(
-                "export '{id}' is complete, but its file cannot be read: {e}"
-            ))
-        })?;
+    // Opened, not read: the file goes out a block at a time, only the range
+    // asked for.
+    let path = super::core::export::export_path(&id);
+    let opened = super::blocking::blocking(move || {
+        std::fs::File::open(&path).and_then(|file| file.metadata().map(|meta| (file, meta.len())))
+    })
+    .await
+    .map_err(|e| {
+        ServeError::Internal(format!(
+            "export '{id}' is complete, but its file cannot be read: {e}"
+        ))
+    })?;
     // A literal this crate writes, so there is no failure to report: parsing it
     // is how the response's own type is built rather than a claim about input.
     let jsonl = MimeType::parse("application/jsonl").expect("jsonl is a mime type");
     bytes_response(
-        bytes,
+        Payload::File(opened.0, opened.1),
         &jsonl,
         &format!("{id}.jsonl"),
         true,
@@ -177,30 +182,133 @@ fn resolve_range(header: Option<&str>, total: u64) -> RangeResult {
     RangeResult::Partial(start, end)
 }
 
-/// Bytes with their type, a download hint when asked for, and single-range
+/// A file at most this big is read whole and typed from all of its bytes; a
+/// bigger one is sent from disk, only the range asked for, a block at a time.
+const LOADED_BYTES: u64 = 1 << 20;
+
+/// How much of a bigger file is read to sniff its type.
+const SNIFF_BYTES: u64 = 8 << 10;
+
+/// How much of a file a streamed body reads at a time.
+const BLOCK: usize = 64 << 10;
+
+/// What a byte route sends.
+#[derive(Debug)]
+enum Payload {
+    /// Bytes in memory.
+    Loaded(Vec<u8>),
+    /// An open file of this many bytes, read for the range sent and no more.
+    File(std::fs::File, u64),
+}
+
+impl Payload {
+    /// How many bytes the whole body is.
+    fn len(&self) -> u64 {
+        match self {
+            Self::Loaded(bytes) => bytes.len() as u64,
+            Self::File(_, len) => *len,
+        }
+    }
+
+    /// The `len` bytes from `start`, as a response body.
+    fn window(self, start: u64, len: u64) -> axum::body::Body {
+        match self {
+            Self::Loaded(mut bytes) => {
+                bytes.truncate((start + len) as usize);
+                bytes.drain(..start as usize);
+                axum::body::Body::from(bytes)
+            }
+            Self::File(mut file, _) => {
+                use std::io::Seek as _;
+                use tokio::io::AsyncReadExt as _;
+                // `start` is inside the file, where a regular file always
+                // seeks.
+                let _ = file.seek(std::io::SeekFrom::Start(start));
+                let reader = tokio::fs::File::from_std(file).take(len);
+                axum::body::Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+                    reader, BLOCK,
+                ))
+            }
+        }
+    }
+}
+
+/// The file at `path` as a body, typed the way
+/// [`MimeRegistry::resolve`] types bytes, with `known` taking precedence: a
+/// file of at most [`LOADED_BYTES`] is read whole, and a bigger one is
+/// sniffed from its head and read through for UTF-8 only when neither that
+/// nor `name` settles its type. `None` when it does not open and read as a
+/// file.
+fn file_body(
+    path: &std::path::Path,
+    name: Option<&str>,
+    registry: &MimeRegistry,
+    known: Option<MimeType>,
+) -> Option<(Payload, MimeType)> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len <= LOADED_BYTES {
+        let mut bytes = Vec::with_capacity(len as usize);
+        (&file).read_to_end(&mut bytes).ok()?;
+        let mime_type = known.unwrap_or_else(|| registry.resolve(None, name, &bytes));
+        return Some((Payload::Loaded(bytes), mime_type));
+    }
+    let mut head = Vec::new();
+    // A head cut short by a failed read is sniffed as far as it goes.
+    let _ = (&file).take(SNIFF_BYTES).read_to_end(&mut head);
+    let mime_type =
+        known.unwrap_or_else(|| registry.resolve_with(None, name, &head, || is_utf8(&file)));
+    Some((Payload::File(file, len), mime_type))
+}
+
+/// Whether `file` is valid UTF-8 from its start to its end, read a block at
+/// a time. A character split across two blocks is carried over to the next.
+fn is_utf8(mut file: &std::fs::File) -> bool {
+    use std::io::{Read as _, Seek as _};
+    let _ = file.seek(std::io::SeekFrom::Start(0));
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        let read = file
+            .take(BLOCK as u64)
+            .read_to_end(&mut pending)
+            .unwrap_or(0);
+        match std::str::from_utf8(&pending) {
+            Ok(_) => pending.clear(),
+            // Cut off mid-character: keep the start of it for the next block.
+            Err(e) if e.error_len().is_none() => {
+                pending.drain(..e.valid_up_to());
+            }
+            Err(_) => return false,
+        }
+        // At the end, a character still cut off is not valid UTF-8.
+        if read == 0 {
+            return pending.is_empty();
+        }
+    }
+}
+
+/// A body with its type, a download hint when asked for, and single-range
 /// support so a client can seek (video scrubbing, resuming a download). Every
 /// response advertises `Accept-Ranges: bytes`.
 fn bytes_response(
-    bytes: Vec<u8>,
+    body: Payload,
     mime_type: &MimeType,
     name: &str,
     download: bool,
     range: Option<&str>,
 ) -> Result<Response, ServeError> {
-    let total = bytes.len() as u64;
+    let total = body.len();
     let (status, body, content_range) = match resolve_range(range, total) {
-        RangeResult::Full => (StatusCode::OK, bytes, None),
-        RangeResult::Partial(start, end) => {
-            let slice = bytes[start as usize..=end as usize].to_vec();
-            (
-                StatusCode::PARTIAL_CONTENT,
-                slice,
-                Some(format!("bytes {start}-{end}/{total}")),
-            )
-        }
+        RangeResult::Full => (StatusCode::OK, body.window(0, total), None),
+        RangeResult::Partial(start, end) => (
+            StatusCode::PARTIAL_CONTENT,
+            body.window(start, end - start + 1),
+            Some(format!("bytes {start}-{end}/{total}")),
+        ),
         RangeResult::Unsatisfiable => (
             StatusCode::RANGE_NOT_SATISFIABLE,
-            Vec::new(),
+            axum::body::Body::empty(),
             Some(format!("bytes */{total}")),
         ),
     };
@@ -236,18 +344,18 @@ fn bytes_response(
     Ok(response)
 }
 
-/// Bytes a byte route serves, with the type and the name they go out under.
+/// What a byte route serves, with the type and the name it goes out under.
 struct Typed {
-    bytes: Vec<u8>,
+    body: Payload,
     mime_type: MimeType,
     name: String,
 }
 
 impl Typed {
-    /// The response for these bytes, as [`bytes_response`] shapes it.
+    /// The response for this body, as [`bytes_response`] shapes it.
     fn respond(self, download: bool, headers: &HeaderMap) -> Result<Response, ServeError> {
         bytes_response(
-            self.bytes,
+            self.body,
             &self.mime_type,
             &self.name,
             download,
@@ -279,11 +387,6 @@ pub(super) async fn get_blob(
 /// The bytes of run `id`'s stored part `sha256`, typed and named.
 fn blob_bytes(config: &ConfigReloader, id: &str, sha256: &str) -> Result<Typed, ServeError> {
     runstate::read_meta(id).map_err(|_| ServeError::run_not_found(id))?;
-    let bytes = super::core::inspect::blob(id, sha256)?.ok_or_else(|| {
-        ServeError::NotFound(format!(
-            "run '{id}' has no stored part {sha256} in its blob directory"
-        ))
-    })?;
     // What the context says about it, when it says anything: the type it
     // was stored as and the name it carries. A blob the context no longer
     // references is typed by sniffing, and named by its hash.
@@ -292,10 +395,21 @@ fn blob_bytes(config: &ConfigReloader, id: &str, sha256: &str) -> Result<Typed, 
         .into_iter()
         .find(|b| b.sha256 == sha256);
     let registry = config.check().config.mime_registry_or_defaults();
-    let mime_type = known
+    let declared = known
         .as_ref()
-        .and_then(|b| MimeType::parse(&b.mime_type).ok())
-        .unwrap_or_else(|| registry.resolve(None, None, &bytes));
+        .and_then(|b| MimeType::parse(&b.mime_type).ok());
+    let path = super::core::inspect::blob_path(id, sha256);
+    // A part whose path is there but does not read as a file is an error,
+    // not a miss.
+    let (body, mime_type) =
+        file_body(&path, None, &registry, declared).ok_or_else(|| match path.exists() {
+            true => ServeError::Internal(format!(
+                "the stored part {sha256} of run '{id}' does not read as a file"
+            )),
+            false => ServeError::NotFound(format!(
+                "run '{id}' has no stored part {sha256} in its blob directory"
+            )),
+        })?;
     let name = crate::blobs::export_name(
         known.as_ref().and_then(|b| b.name.as_deref()),
         sha256,
@@ -303,7 +417,7 @@ fn blob_bytes(config: &ConfigReloader, id: &str, sha256: &str) -> Result<Typed, 
         &registry,
     );
     Ok(Typed {
-        bytes,
+        body,
         mime_type,
         name,
     })
@@ -359,21 +473,24 @@ fn raw_bytes(config: &ConfigReloader, id: &str, path: &str) -> Result<Typed, Ser
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let bytes = match std::fs::read(&resolved) {
-        Ok(bytes) => bytes,
+    let registry = config.check().config.mime_registry_or_defaults();
+    let (body, mime_type) = match file_body(&resolved, Some(&name), &registry, None) {
+        Some(typed) => typed,
         // Not on disk, but perhaps one of the run's artifacts: a file a model
         // made lives in the blob store and was never written to the workdir,
         // and the result route names it by exactly this path.
-        Err(_) => artifact_by_path(id, &meta.workdir, path).ok_or_else(|| {
-            ServeError::NotFound(format!(
-                "file '{path}' not found in the run's working directory"
-            ))
-        })?,
+        None => {
+            let bytes = artifact_by_path(id, &meta.workdir, path).ok_or_else(|| {
+                ServeError::NotFound(format!(
+                    "file '{path}' not found in the run's working directory"
+                ))
+            })?;
+            let mime_type = registry.resolve(None, Some(&name), &bytes);
+            (Payload::Loaded(bytes), mime_type)
+        }
     };
-    let registry = config.check().config.mime_registry_or_defaults();
-    let mime_type = registry.resolve(None, Some(&name), &bytes);
     Ok(Typed {
-        bytes,
+        body,
         mime_type,
         name,
     })
@@ -427,7 +544,7 @@ fn artifact_named(id: &str, name: &str) -> Result<Typed, ServeError> {
         .unwrap_or(&artifact.name)
         .to_string();
     Ok(Typed {
-        bytes,
+        body: Payload::Loaded(bytes),
         mime_type: artifact.mime_type.clone(),
         name: file_name,
     })
@@ -1099,22 +1216,118 @@ mod tests {
     fn a_partial_and_an_unsatisfiable_range_shape_the_response() {
         let png = MimeType::parse("image/png").unwrap();
         // 206 with the slice, its Content-Range, and Accept-Ranges.
-        let r =
-            bytes_response(b"abcdef".to_vec(), &png, "x.png", false, Some("bytes=1-3")).unwrap();
+        let r = bytes_response(
+            Payload::Loaded(b"abcdef".to_vec()),
+            &png,
+            "x.png",
+            false,
+            Some("bytes=1-3"),
+        )
+        .unwrap();
         assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(r.headers()[header::CONTENT_RANGE], "bytes 1-3/6");
         assert_eq!(r.headers()[header::ACCEPT_RANGES], "bytes");
         // 416 for a range past the end, with `*/total`.
-        let r =
-            bytes_response(b"abcdef".to_vec(), &png, "x.png", false, Some("bytes=9-10")).unwrap();
+        let r = bytes_response(
+            Payload::Loaded(b"abcdef".to_vec()),
+            &png,
+            "x.png",
+            false,
+            Some("bytes=9-10"),
+        )
+        .unwrap();
         assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(r.headers()[header::CONTENT_RANGE], "bytes */6");
+    }
+
+    /// A file checked for UTF-8 a block at a time reads as it would whole: a
+    /// character split across a block boundary is still one character, a
+    /// bad byte past the first block is still found, and a character cut
+    /// off at the end is not valid.
+    #[test]
+    fn a_file_is_checked_for_utf8_across_its_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = |bytes: &[u8]| {
+            let path = dir.path().join("f");
+            std::fs::write(&path, bytes).unwrap();
+            is_utf8(&std::fs::File::open(&path).unwrap())
+        };
+        let mut split = vec![b'a'; BLOCK - 1];
+        split.extend("é and more".as_bytes());
+        assert!(check(&split));
+        let mut bad = vec![b'a'; BLOCK + 10];
+        bad.push(0xff);
+        assert!(!check(&bad));
+        let mut cut = vec![b'a'; 10];
+        cut.push(0xc3);
+        assert!(!check(&cut));
+        assert!(check(b""));
+    }
+
+    /// A small file is read whole and typed from all of it; a bigger one is
+    /// left on disk and typed from its head, then its name, then by reading
+    /// it through for UTF-8.
+    #[test]
+    fn a_file_is_read_whole_only_when_small() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = MimeRegistry::builtin();
+        let typed = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let (body, mime_type) = file_body(&path, Some(name), &registry, None).unwrap();
+            let loaded = matches!(body, Payload::Loaded(_));
+            (loaded, mime_type.as_str().to_string())
+        };
+        assert_eq!(typed("small.txt", b"hello"), (true, "text/plain".into()));
+        let big_text = vec![b'a'; (LOADED_BYTES + 1) as usize];
+        assert_eq!(typed("big", &big_text), (false, "text/plain".into()));
+        let mut big_binary = big_text.clone();
+        big_binary.push(0xff);
+        assert_eq!(
+            typed("big-binary", &big_binary),
+            (false, "application/octet-stream".into())
+        );
+        let mut big_png = b"\x89PNG\r\n\x1a\n".to_vec();
+        big_png.extend(&big_binary);
+        assert_eq!(typed("art", &big_png), (false, "image/png".into()));
+        let known = MimeType::parse("video/mp4").unwrap();
+        let path = dir.path().join("big");
+        let (_, kept) = file_body(&path, None, &registry, Some(known.clone())).unwrap();
+        assert_eq!(kept, known);
+        assert!(file_body(&dir.path().join("gone"), None, &registry, None).is_none());
+    }
+
+    /// A range of a big file on disk is read for the window asked for: one
+    /// byte from deep inside a sparse file comes back as that byte.
+    #[tokio::test]
+    async fn a_range_of_a_file_on_disk_reads_only_its_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sparse.bin");
+        let file = std::fs::File::create(&path).unwrap();
+        let len: u64 = 256 << 20;
+        file.set_len(len).unwrap();
+        {
+            use std::io::{Seek as _, Write as _};
+            let mut file = &file;
+            file.seek(std::io::SeekFrom::Start(len - 10)).unwrap();
+            file.write_all(b"Z").unwrap();
+        }
+        let octets = MimeType::parse("application/octet-stream").unwrap();
+        let open = || Payload::File(std::fs::File::open(&path).unwrap(), len);
+        let range = format!("bytes={}-{}", len - 10, len - 10);
+        let r = bytes_response(open(), &octets, "s.bin", false, Some(&range)).unwrap();
+        assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
+        let body = axum::body::to_bytes(r.into_body(), 16).await.unwrap();
+        assert_eq!(&body[..], b"Z");
+        let whole = bytes_response(open(), &octets, "s.bin", false, Some("bytes=0-3")).unwrap();
+        let body = axum::body::to_bytes(whole.into_body(), 16).await.unwrap();
+        assert_eq!(&body[..], &[0, 0, 0, 0]);
     }
 
     #[test]
     fn a_name_the_header_cannot_carry_is_made_safe() {
         let response = bytes_response(
-            vec![1],
+            Payload::Loaded(vec![1]),
             &MimeType::parse("image/png").unwrap(),
             "we ird/na\"me.png",
             true,
