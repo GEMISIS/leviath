@@ -221,6 +221,11 @@ jobs:
           cargo clippy -p leviath-cli --no-default-features --lib --bins -- -D warnings
       - name: Build lev with a chosen few
         run: cargo clippy -p leviath-cli --no-default-features --features anthropic,openai --lib --bins -- -D warnings
+      # Compiling says a build without some providers builds; this says what
+      # it tells a user who asks for one it left out. The crate's unit tests
+      # assume every provider, so these live in a test file of their own.
+      - name: Test what a build without some providers says
+        run: cargo test -p leviath-providers --no-default-features --features anthropic --test reduced_build
       # A doc link to a provider's code breaks in a build without it.
       - name: Document the providers with none of them built in
         env:
