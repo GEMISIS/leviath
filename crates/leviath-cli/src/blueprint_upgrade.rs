@@ -42,7 +42,6 @@ const OLD_MANIFEST: &str = "agent.leviath";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
     /// Migrated to an `agent.toml` beside its files.
-    #[cfg(feature = "legacy-runs")]
     Migrated {
         /// A line for each setting the new file spells differently.
         notes: Vec<String>,
@@ -268,7 +267,6 @@ pub(crate) fn upgrade_at_start(
 
 /// Migrate an old blueprint to an `agent.toml` beside it, its manifest moved
 /// under `legacy/`.
-#[cfg(feature = "legacy-runs")]
 fn migrate(dir: &Path) -> Result<Outcome, Vec<String>> {
     let old = dir.join(OLD_MANIFEST);
     let manifest =
@@ -298,7 +296,6 @@ fn migrate(dir: &Path) -> Result<Outcome, Vec<String>> {
 /// Keep the warnings of the blueprint just upgraded in `dir` beside it, for
 /// `lev list` and `lev validate` to show. A note that cannot be written is
 /// said in the log: the warnings are still in the upgrade's summary.
-#[cfg(feature = "legacy-runs")]
 fn keep_warnings(dir: &Path, dropped: &[String]) {
     if dropped.is_empty() {
         return;
@@ -311,28 +308,11 @@ fn keep_warnings(dir: &Path, dropped: &[String]) {
 
 /// Why the old blueprint in `dir` cannot be migrated, read without changing
 /// anything; `None` when it can be.
-#[cfg(feature = "legacy-runs")]
 fn problems(dir: &Path) -> Option<String> {
     let manifest = std::fs::read_to_string(dir.join(OLD_MANIFEST)).unwrap_or_default();
     leviath_legacy_runs::migrate_noted(&manifest)
         .err()
         .map(|problems| problems.join("; "))
-}
-
-/// Without the old-format reader no old blueprint can be migrated.
-#[cfg(not(feature = "legacy-runs"))]
-fn problems(_dir: &Path) -> Option<String> {
-    Some("this build of lev cannot read agent.leviath files".to_string())
-}
-
-/// Without the old-format reader an old blueprint cannot be migrated.
-#[cfg(not(feature = "legacy-runs"))]
-fn migrate(_dir: &Path) -> Result<Outcome, Vec<String>> {
-    Err(vec![
-        "this build of lev cannot read agent.leviath files (it was built without the \
-         legacy-runs feature)"
-            .to_string(),
-    ])
 }
 
 /// Upgrade at daemon start, each outcome in the daemon's log and added to
@@ -350,7 +330,6 @@ pub(crate) fn upgrade_logged(
     for done in upgrade_all(agents_dir, others, backup, board) {
         let (name, dir) = (done.name(), done.dir.display().to_string());
         match &done.outcome {
-            #[cfg(feature = "legacy-runs")]
             Outcome::Migrated { notes, dropped } => {
                 upgrade.blueprints += 1;
                 let notes = notes.join("; ");

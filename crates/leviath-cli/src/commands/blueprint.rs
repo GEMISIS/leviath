@@ -3,26 +3,14 @@
 //! `lev blueprint migrate` converts an `agent.leviath` manifest into an
 //! `agent.toml` describing exactly the same run. Validate the result with
 //! `lev validate agent.toml`. An `agent.leviath` is read by the
-//! `leviath-legacy-runs` crate, so a build without its `legacy-runs` feature
-//! refuses the command.
+//! `leviath-legacy-runs` crate.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 
-#[cfg(feature = "legacy-runs")]
 use leviath_legacy_runs::Migrated;
-
-/// What a build without the old-format reader would have converted to; it
-/// never converts, so none is ever made.
-#[cfg(not(feature = "legacy-runs"))]
-pub(crate) struct Migrated {
-    pub(crate) name: String,
-    pub(crate) text: String,
-    pub(crate) notes: Vec<String>,
-    pub(crate) dropped: Vec<String>,
-}
 
 /// Arguments for `lev blueprint`.
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
@@ -135,19 +123,8 @@ fn manifest_path(path: &Path) -> PathBuf {
 
 /// The text of an `agent.leviath` as an `agent.toml`, or every problem with
 /// it.
-#[cfg(feature = "legacy-runs")]
 pub(crate) fn convert(manifest: &str) -> Result<Migrated, Vec<String>> {
     leviath_legacy_runs::migrate_noted(manifest)
-}
-
-/// Without the old-format reader there is nothing to convert with.
-#[cfg(not(feature = "legacy-runs"))]
-pub(crate) fn convert(_manifest: &str) -> Result<Migrated, Vec<String>> {
-    Err(vec![
-        "this build of lev cannot read agent.leviath files (it was built without the \
-         legacy-runs feature)"
-            .to_string(),
-    ])
 }
 
 #[cfg(test)]

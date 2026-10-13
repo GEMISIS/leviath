@@ -46,7 +46,6 @@ fn digest_of(dir: &Path) -> Option<String> {
 
 /// Keep `warnings` beside the blueprint in `dir`, against the `agent.toml`
 /// it holds now.
-#[cfg(feature = "legacy-runs")]
 pub(crate) fn record(dir: &Path, warnings: &[String]) -> std::io::Result<()> {
     let note = Note {
         blueprint: digest_of(dir).unwrap_or_default(),
