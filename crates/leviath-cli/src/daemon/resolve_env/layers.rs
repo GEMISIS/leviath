@@ -60,7 +60,7 @@ impl Layers {
         config: &Config,
         graph: &RunGraph,
         launch: &LaunchPolicy,
-        agent: &str,
+        agent: Option<&str>,
     ) -> Self {
         let entry_index = entry_index(graph);
         Self {

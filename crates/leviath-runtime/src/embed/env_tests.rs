@@ -213,7 +213,7 @@ async fn only_literal_seeds_run_in_an_embedded_world() {
     let spec = crate::spec::run_spec::tests::spec();
     let cx = SeedCx {
         run_id: &spec.run_id,
-        agent: "coder",
+        agent: Some("coder"),
         graph: &spec.graph,
         launch: &spec.launch,
         workdir: dir.path(),

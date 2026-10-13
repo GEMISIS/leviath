@@ -26,7 +26,7 @@ use crate::spec::run_spec::SeededContent;
 /// Everything the seeds of one run see.
 pub(super) struct SeedRun<'a> {
     pub(super) run_id: &'a RunId,
-    pub(super) agent: &'a str,
+    pub(super) agent: Option<&'a str>,
     pub(super) graph: &'a RunGraph,
     pub(super) at: &'a SpecPath,
     pub(super) workdir: &'a Path,

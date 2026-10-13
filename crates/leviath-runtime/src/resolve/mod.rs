@@ -188,16 +188,15 @@ pub async fn resolve(
         str::to_string,
     );
     let run_id = env.new_run_id(&title);
-    let agent = src.origin.blueprint_name().map_or_else(
-        || graph.title.clone().unwrap_or_else(|| "raw".to_string()),
-        str::to_string,
-    );
+    // Per-agent grants are the operator's, for blueprints they installed: a
+    // graph's own title never names them.
+    let agent = src.origin.blueprint_name();
     let placed = regions::place(&graph, &checked, &files, request, &mut issues);
     let seeded = match &workdir {
         Some(dir) => {
             let cx = seeds::SeedRun {
                 run_id: &run_id,
-                agent: &agent,
+                agent,
                 graph: &graph,
                 at: &src.at,
                 workdir: dir,

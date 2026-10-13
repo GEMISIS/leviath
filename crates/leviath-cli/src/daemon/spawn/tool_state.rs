@@ -9,10 +9,10 @@ use super::*;
 /// Everything [`build_tool_state`] assembles an agent's tool state from.
 ///
 /// A struct rather than twenty-one positional parameters, and the reason is
-/// narrower than the lint: three of them - `run_id`, `entry_stage` and
-/// `agent_name` - are all `&str`. Transposing any two of those compiles
-/// silently and produces a run whose approvals are keyed to the wrong name.
-/// Nothing else in this file would catch that.
+/// narrower than the lint: two of them, `run_id` and `entry_stage`, are both
+/// `&str`. Transposing them compiles silently and produces a run whose
+/// approvals are keyed to the wrong name. Nothing else in this file would
+/// catch that.
 pub(crate) struct ToolStateParts<'a> {
     /// The run's write budget, already spent on by the seeds.
     pub(crate) writes: Arc<crate::daemon::tool_service::WriteBudget>,
@@ -40,8 +40,9 @@ pub(crate) struct ToolStateParts<'a> {
     pub(crate) stage_tool_accepts_by_index: Vec<HashMap<String, Vec<String>>>,
     /// Agent-wide tool policies from the blueprint.
     pub(crate) agent_perms: HashMap<String, String>,
-    /// The blueprint's name, for policy lookup and messages.
-    pub(crate) agent_name: &'a str,
+    /// The blueprint the per-agent grants are looked up under; `None` for a
+    /// graph its caller wrote.
+    pub(crate) agent_name: Option<&'a str>,
     /// `--allow` / `--yolo` overrides for this launch.
     pub(crate) launch_overrides: HashMap<String, crate::config::ToolPolicy>,
     /// Handle for the sub-agent tools, when this agent may spawn.
@@ -136,7 +137,7 @@ pub(crate) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         // Everything a resume needs to redo this resolution against the config
         // as it stands then, rather than the copy this spawn read.
         config_source: Arc::new(crate::daemon::tool_service::ConfigSource {
-            agent_name: parts.agent_name.to_string(),
+            agent_name: parts.agent_name.map(str::to_string),
             blueprint_safe: parts.blueprint_safe.cloned(),
             blueprint_read_paths: parts.blueprint_read_paths.to_vec(),
             workdir: parts.workdir,

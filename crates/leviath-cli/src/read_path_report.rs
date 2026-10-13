@@ -83,12 +83,14 @@ pub(crate) fn build(
     config: &Config,
     workdir: &Path,
 ) -> Option<Result<GrantReport, String>> {
-    build_declared(agent, &graph.read_paths, config, workdir)
+    build_declared(Some(agent), &graph.read_paths, config, workdir)
 }
 
-/// [`build`] over an agent's name and its declared entries.
+/// [`build`] over the blueprint the grants are looked up under (`None` for a
+/// graph its caller wrote, which only the machine-wide grants apply to) and
+/// its declared entries.
 pub(crate) fn build_declared(
-    agent: &str,
+    agent: Option<&str>,
     declared: &[String],
     config: &Config,
     workdir: &Path,
@@ -108,7 +110,7 @@ pub(crate) fn build_declared(
 /// The report proper, with the platform inputs injected so every branch is
 /// testable on every OS.
 fn report_entries(
-    agent: &str,
+    agent: Option<&str>,
     declared: &[String],
     config: &Config,
     workdir: &Path,
@@ -127,7 +129,7 @@ fn report_entries(
         })
         .collect();
     Ok(GrantReport {
-        agent: agent.to_string(),
+        agent: agent.unwrap_or("raw").to_string(),
         allow_blueprint,
         entries,
     })

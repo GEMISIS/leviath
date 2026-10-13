@@ -434,7 +434,8 @@ regions = [{ name = "brain", kind = { kind = "custom", code = { file = "hooks/br
     #[test]
     fn read_path_policy_is_inactive_without_declarations() {
         let (policy, warning) =
-            compile_read_path_policy("cto", &[], &Config::default(), Path::new("/w")).unwrap();
+            compile_read_path_policy(Some("cto"), &[], &Config::default(), Path::new("/w"))
+                .unwrap();
         assert!(!policy.is_active());
         assert!(warning.is_none());
     }
@@ -448,7 +449,7 @@ regions = [{ name = "brain", kind = { kind = "custom", code = { file = "hooks/br
     #[test]
     fn read_path_policy_warns_when_nothing_grants() {
         let (policy, warning) = compile_read_path_policy(
-            "cto",
+            Some("cto"),
             &declared(&["/data/runs", "glob:/data/docs/**"]),
             &Config::default(),
             Path::new("/w"),
@@ -473,9 +474,13 @@ regions = [{ name = "brain", kind = { kind = "custom", code = { file = "hooks/br
                 allow: vec!["/data/runs".to_string()],
             },
         );
-        let (policy, warning) =
-            compile_read_path_policy("cto", &declared(&["/data/runs"]), &config, Path::new("/w"))
-                .unwrap();
+        let (policy, warning) = compile_read_path_policy(
+            Some("cto"),
+            &declared(&["/data/runs"]),
+            &config,
+            Path::new("/w"),
+        )
+        .unwrap();
         assert!(policy.is_active());
         assert!(!policy.grants.is_empty());
         assert!(warning.is_none());
@@ -485,9 +490,13 @@ regions = [{ name = "brain", kind = { kind = "custom", code = { file = "hooks/br
     fn read_path_policy_is_quiet_under_the_override() {
         let mut config = Config::default();
         config.security.allow_blueprint_read_paths = true;
-        let (policy, warning) =
-            compile_read_path_policy("cto", &declared(&["/data/runs"]), &config, Path::new("/w"))
-                .unwrap();
+        let (policy, warning) = compile_read_path_policy(
+            Some("cto"),
+            &declared(&["/data/runs"]),
+            &config,
+            Path::new("/w"),
+        )
+        .unwrap();
         assert!(policy.allow_blueprint);
         assert!(warning.is_none());
     }
@@ -497,7 +506,7 @@ regions = [{ name = "brain", kind = { kind = "custom", code = { file = "hooks/br
     #[test]
     fn read_path_policy_rejects_bad_entries_loudly() {
         let err = compile_read_path_policy(
-            "cto",
+            Some("cto"),
             &declared(&["glob:["]),
             &Config::default(),
             Path::new("/w"),
@@ -507,9 +516,13 @@ regions = [{ name = "brain", kind = { kind = "custom", code = { file = "hooks/br
 
         let mut config = Config::default();
         config.security.read_paths = vec!["regex:(".to_string()];
-        let err =
-            compile_read_path_policy("cto", &declared(&["/data/runs"]), &config, Path::new("/w"))
-                .unwrap_err();
+        let err = compile_read_path_policy(
+            Some("cto"),
+            &declared(&["/data/runs"]),
+            &config,
+            Path::new("/w"),
+        )
+        .unwrap_err();
         assert!(err.contains("config.toml"), "{err}");
     }
 

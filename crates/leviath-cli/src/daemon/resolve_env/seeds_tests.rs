@@ -57,7 +57,7 @@ impl Run {
     fn cx<'a>(&'a self, workdir: &'a Path, commands: bool) -> SeedCx<'a> {
         SeedCx {
             run_id: &self.run_id,
-            agent: "helper",
+            agent: Some("helper"),
             graph: &self.graph,
             launch: &self.launch,
             workdir,

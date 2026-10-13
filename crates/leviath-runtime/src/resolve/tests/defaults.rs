@@ -373,6 +373,8 @@ async fn a_blueprints_tools_are_looked_up_beside_it() {
     );
 }
 
+/// A seed sees the run it seeds. A raw graph names no blueprint whose grants
+/// it would be judged by, titled or not: its title is only a label.
 #[tokio::test]
 async fn a_seed_sees_the_run_it_seeds() {
     let mut g = graph();
@@ -383,12 +385,12 @@ async fn a_seed_sees_the_run_it_seeds() {
     let resolved = spawn(&request, &env).await.unwrap();
     assert_eq!(
         *env.seed_sights.lock().unwrap(),
-        [format!("{} t All 2", resolved.spec.run_id)]
+        [format!("{} (raw) All 2", resolved.spec.run_id)]
     );
     g.title = None;
     let env = Fake::default();
     spawn(&raw(g), &env).await.unwrap();
-    assert_eq!(*env.seed_sights.lock().unwrap(), ["run-1 raw Off 2"]);
+    assert_eq!(*env.seed_sights.lock().unwrap(), ["run-1 (raw) Off 2"]);
 }
 
 /// A stage's mode grants what the mode cannot work without, whoever wrote the

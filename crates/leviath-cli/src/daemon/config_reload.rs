@@ -410,7 +410,7 @@ mod tests {
             reloader
                 .check()
                 .config
-                .read_path_grants_for_agent("cto")
+                .read_path_grants_for_agent(Some("cto"))
                 .is_empty()
         );
 
@@ -421,7 +421,7 @@ mod tests {
         // Subscriber active so the "reloaded config" info-log field evaluates.
         let reloaded = reloader.check().config;
         assert_eq!(
-            reloaded.read_path_grants_for_agent("cto"),
+            reloaded.read_path_grants_for_agent(Some("cto")),
             vec!["~/.leviath/runs".to_string()],
             "the new grant must be visible without a restart"
         );
@@ -437,14 +437,14 @@ mod tests {
             reloader
                 .check()
                 .config
-                .read_path_grants_for_agent("cto")
+                .read_path_grants_for_agent(Some("cto"))
                 .is_empty()
         );
 
         write(&path, &config_with_grant("cto", "~/docs"));
         let reloaded = reloader.check().config;
         assert_eq!(
-            reloaded.read_path_grants_for_agent("cto"),
+            reloaded.read_path_grants_for_agent(Some("cto")),
             vec!["~/docs".to_string()]
         );
     }
@@ -457,7 +457,10 @@ mod tests {
         // Mirror boot: the reloader is seeded with the config already on disk.
         let reloader = ConfigReloader::new(path.clone(), Config::load_from_path(&path).unwrap());
         assert_eq!(
-            reloader.check().config.read_path_grants_for_agent("cto"),
+            reloader
+                .check()
+                .config
+                .read_path_grants_for_agent(Some("cto")),
             vec!["~/good".to_string()]
         );
 
@@ -468,7 +471,7 @@ mod tests {
         // Subscriber active so the "failed to reload" warn-log field evaluates.
         let after = reloader.check().config;
         assert_eq!(
-            after.read_path_grants_for_agent("cto"),
+            after.read_path_grants_for_agent(Some("cto")),
             vec!["~/good".to_string()],
             "a broken file must not break the spawn - keep the last good config"
         );
@@ -575,7 +578,10 @@ mod tests {
         write(&path, &config_with_grant("cto", "~/fixed"));
         bump_mtime(&path);
         assert_eq!(
-            reloader.check().config.read_path_grants_for_agent("cto"),
+            reloader
+                .check()
+                .config
+                .read_path_grants_for_agent(Some("cto")),
             vec!["~/fixed".to_string()]
         );
     }
@@ -677,7 +683,10 @@ mod tests {
             "a file already judged at this mtime must not be read again"
         );
         assert_eq!(
-            reloader.check().config.read_path_grants_for_agent("cto"),
+            reloader
+                .check()
+                .config
+                .read_path_grants_for_agent(Some("cto")),
             vec!["~/good".to_string()],
             "and the config in force is still the last good one"
         );
@@ -686,7 +695,10 @@ mod tests {
         bump_mtime(&path);
         assert!(reloader.check().is_healthy());
         assert_eq!(
-            reloader.check().config.read_path_grants_for_agent("cto"),
+            reloader
+                .check()
+                .config
+                .read_path_grants_for_agent(Some("cto")),
             vec!["~/sneaked".to_string()]
         );
     }
@@ -767,7 +779,7 @@ mod tests {
         write(&path, "broken : :");
         bump_mtime(&path);
         assert_eq!(
-            reloader.in_force().read_path_grants_for_agent("cto"),
+            reloader.in_force().read_path_grants_for_agent(Some("cto")),
             vec!["~/good".to_string()]
         );
 
@@ -775,7 +787,7 @@ mod tests {
         bump_mtime(&path);
         reloader.check();
         assert_eq!(
-            reloader.in_force().read_path_grants_for_agent("cto"),
+            reloader.in_force().read_path_grants_for_agent(Some("cto")),
             vec!["~/new".to_string()]
         );
     }
@@ -799,7 +811,7 @@ mod tests {
         bump_mtime(&path);
         let health = reloader.clone().checked().await;
         assert_eq!(
-            health.config.read_path_grants_for_agent("cto"),
+            health.config.read_path_grants_for_agent(Some("cto")),
             vec!["~/new".to_string()]
         );
         let reloaded_on = *seen.lock().unwrap_or_else(PoisonError::into_inner);

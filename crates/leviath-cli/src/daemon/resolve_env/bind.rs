@@ -140,14 +140,12 @@ fn lint_lines(dir: Option<&Path>) -> Vec<String> {
         .collect()
 }
 
-/// The name a run's permissions and grants are looked up under: its
-/// blueprint's, or a raw graph's title.
-pub(super) fn agent_name(spec: &RunSpec) -> String {
-    match (spec.origin.blueprint_name(), &spec.graph.title) {
-        (Some(name), _) => name.to_string(),
-        (None, Some(title)) => title.clone(),
-        (None, None) => "raw".to_string(),
-    }
+/// The blueprint a run's per-agent permissions and grants are looked up
+/// under. A graph its caller wrote has none, whatever it is titled: the
+/// per-agent tables are the operator's trust in blueprints they installed,
+/// and a title is only a label its caller chose.
+pub(super) fn agent_name(spec: &RunSpec) -> Option<&str> {
+    spec.origin.blueprint_name()
 }
 
 /// An issue at a top-level field of the spec.
@@ -299,11 +297,11 @@ impl DaemonEnv {
             layers::profile(&spec.launch.unattended)
                 .map_err(|e| at("launch", IssueCode::Unresolvable, e.to_string())),
         );
-        let layers = Layers::new(config, graph, &spec.launch, &agent);
+        let layers = Layers::new(config, graph, &spec.launch, agent);
         let sandbox = issues.take(sandbox.map_err(|e| at("sandbox", IssueCode::Unavailable, e)));
         let reads = issues.take(
             crate::daemon::spawn::compile_read_path_policy(
-                &agent,
+                agent,
                 &graph.read_paths,
                 config,
                 &workdir,
@@ -321,7 +319,7 @@ impl DaemonEnv {
             return Err(issues);
         };
         if let Some(line) = warning {
-            tracing::warn!(agent_name = %agent, "{line}");
+            tracing::warn!(run_id = %run_id, "{line}");
         }
         let reads_granted =
             reads.is_active() && (reads.allow_blueprint || !reads.grants.is_empty());
@@ -442,7 +440,7 @@ impl DaemonEnv {
             stage_required_by_index,
             stage_tool_accepts_by_index,
             agent_perms,
-            agent_name: &agent,
+            agent_name: agent,
             launch_overrides,
             subagent: Some(subagent),
             sandbox,
@@ -542,7 +540,7 @@ impl DaemonEnv {
     /// `read_paths` the operator grants, and where its blueprint is installed.
     fn record(&self, spec: &RunSpec) -> Bindings {
         let counts = crate::read_path_report::build_declared(
-            &agent_name(spec),
+            agent_name(spec),
             &spec.graph.read_paths,
             &self.config,
             &spec.placement.workdir,

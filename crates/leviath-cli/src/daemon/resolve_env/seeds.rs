@@ -40,7 +40,7 @@ impl SeedEnv {
 /// pool.
 pub(super) struct OwnedSeedCx {
     run_id: RunId,
-    agent: String,
+    agent: Option<String>,
     graph: RunGraph,
     launch: leviath_runtime::spec::launch::LaunchPolicy,
     workdir: PathBuf,
@@ -55,7 +55,7 @@ impl OwnedSeedCx {
     pub(super) fn of(cx: &SeedCx<'_>) -> Self {
         Self {
             run_id: cx.run_id.clone(),
-            agent: cx.agent.to_string(),
+            agent: cx.agent.map(str::to_string),
             graph: cx.graph.clone(),
             launch: cx.launch.clone(),
             workdir: cx.workdir.to_path_buf(),
@@ -70,7 +70,7 @@ impl OwnedSeedCx {
     pub(super) fn cx(&self) -> SeedCx<'_> {
         SeedCx {
             run_id: &self.run_id,
-            agent: &self.agent,
+            agent: self.agent.as_deref(),
             graph: &self.graph,
             launch: &self.launch,
             workdir: &self.workdir,

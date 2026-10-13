@@ -93,10 +93,9 @@ fn render(keys: &std::collections::BTreeMap<String, SafeSource>, json: bool) -> 
 }
 
 /// The agent whose per-agent entries to include. No `--agent` reports only what
-/// every agent gets, and no agent is named `""`, so the empty name matches
-/// nothing in `[agent_safe_commands]`.
-fn agent_name(args: &SafeArgs) -> &str {
-    args.agent.as_deref().unwrap_or("")
+/// every agent gets.
+fn agent_name(args: &SafeArgs) -> Option<&str> {
+    args.agent.as_deref()
 }
 
 /// Run `lev approvals`.
@@ -151,8 +150,8 @@ mod tests {
             agent: agent.map(str::to_string),
             json: false,
         };
-        assert_eq!(agent_name(&args(Some("coder"))), "coder");
-        assert_eq!(agent_name(&args(None)), "");
+        assert_eq!(agent_name(&args(Some("coder"))), Some("coder"));
+        assert_eq!(agent_name(&args(None)), None);
     }
 
     /// An empty report says why it is empty rather than printing a bare header.

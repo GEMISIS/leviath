@@ -291,16 +291,67 @@ async fn a_resume_whose_sandbox_changed_is_held() {
     );
 }
 
+/// A run's grants are looked up under its blueprint, and a raw graph has
+/// none, titled or not.
 #[test]
-fn a_run_is_named_by_its_blueprint_or_its_title() {
+fn grants_are_looked_up_by_blueprint_never_by_title() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = spec(dir.path());
-    assert_eq!(bind::agent_name(&s), "helper");
+    assert_eq!(bind::agent_name(&s), Some("helper"));
     s.origin = SpecOrigin::Raw;
-    s.graph.title = Some("my run".into());
-    assert_eq!(bind::agent_name(&s), "my run");
+    s.graph.title = Some("helper".into());
+    assert_eq!(bind::agent_name(&s), None);
     s.graph.title = None;
-    assert_eq!(bind::agent_name(&s), "raw");
+    assert_eq!(bind::agent_name(&s), None);
+}
+
+/// A raw graph's title is a label, not an identity: titled like an installed
+/// blueprint, it gets none of the tool permissions, safe commands or read
+/// paths the operator granted that blueprint, which its own run keeps.
+#[tokio::test]
+async fn a_raw_graph_titled_like_a_blueprint_gets_none_of_its_grants() {
+    let mut config = Config::default();
+    config.title.enabled = false;
+    config.agent_tool_permissions.insert(
+        "helper".into(),
+        [("bash".to_string(), ToolPolicy::Allow)].into(),
+    );
+    config.agent_safe_commands = toml::from_str("[helper]\nshell = [\"make deploy\"]").unwrap();
+    config.agent_read_paths = toml::from_str("[helper]\nallow = [\"~/secrets\"]").unwrap();
+    let (env, _agents) = crate::daemon::resolve_env::tests::env_with(config);
+    let dir = tempfile::tempdir().unwrap();
+    let mut blueprint = spec(dir.path());
+    blueprint.graph.read_paths = vec!["~/secrets".into()];
+    let mut raw = blueprint.clone();
+    raw.run_id = RunId::new("bind-test-raw").unwrap();
+    raw.origin = SpecOrigin::Raw;
+    raw.graph.title = Some("helper".into());
+
+    let mut granted = Vec::new();
+    for s in [blueprint, raw] {
+        let bindings = env.bind(&s, &CodeFiles::new()).await.unwrap();
+        let (world, entity) = place(s, bindings);
+        let state = env.tool_service.state_for(entity).unwrap();
+        let reads = world
+            .get::<leviath_runtime::persistence::RunMetadata>(entity)
+            .unwrap()
+            .read_paths
+            .expect("the graph declares read paths");
+        granted.push((
+            state.global_perms.get().get("bash").copied(),
+            state
+                .safe_keys
+                .get()
+                .iter()
+                .any(|k| k.contains("make deploy")),
+            reads.granted,
+        ));
+    }
+    assert_eq!(
+        granted,
+        [(Some(ToolPolicy::Allow), true, 1), (None, false, 0)],
+        "the blueprint's run, then the raw graph titled like it"
+    );
 }
 
 #[tokio::test]

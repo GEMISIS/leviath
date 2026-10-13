@@ -238,6 +238,11 @@ same list.
   writing to it.
 - No frame of a run file decompresses past 1 GiB, whatever its header
   claims. One whose header gave no size was decompressed with no limit.
+- A raw graph gets only the global tool permissions, safe commands and read
+  paths. Its title was the name `[agent_tool_permissions.<name>]`,
+  `[agent_safe_commands.<name>]` and `[agent_read_paths.<name>]` were looked
+  up under, at spawn, in its seeds and on resume, so a caller who titled a
+  graph after an installed blueprint ran it with that blueprint's grants.
 - A tool approval prompt names only the commands that still need approving.
   A line that ran `cd`, `cat`, `ls` and one `sed` read `Allow cat x, cd, echo
   +4 more`, with `sed` hidden in the count, and a stage or run grant also

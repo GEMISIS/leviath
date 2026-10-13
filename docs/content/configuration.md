@@ -592,7 +592,9 @@ read_file  = "allow"
 ```
 
 `[agent_tool_permissions.<agent>]` is the escape hatch. Naming an agent replaces the global value
-for it, and that becomes the ceiling its blueprint is clamped against.
+for it, and that becomes the ceiling its blueprint is clamped against. The name is an installed
+blueprint's. A raw graph never matches one, whatever its title, and runs under the global tables
+only. The same goes for `[agent_safe_commands.<agent>]` and `[agent_read_paths.<agent>]`.
 
 ```toml
 [agent_tool_permissions.coder]
