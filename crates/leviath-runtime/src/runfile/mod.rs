@@ -38,8 +38,9 @@ pub use writer::{CheckpointPolicy, RunFileWriter};
 /// The JSON Schemas of every type a run file stores, as one document.
 ///
 /// `cargo xtask schema` writes it to `docs/schema/run-file.schema.json` (a
-/// test holds the file to it), and its hash is the fingerprint every run
-/// file's header carries.
+/// test holds the file to it). Another test holds the shape it describes
+/// still, leaving out what only documents it, so a frame type cannot change
+/// shape without the layout's [`FINGERPRINT`] being looked at.
 pub fn frame_schemas() -> serde_json::Value {
     serde_json::json!({
         "spec": schemars::schema_for!(crate::spec::run_spec::RunSpec),
@@ -54,19 +55,20 @@ pub fn frame_schemas() -> serde_json::Value {
 ///
 /// [`frame_schemas`] describes the readable form of every frame type, and a
 /// few graph types read and write a short form there that hides their
-/// binary shape. So the fingerprint also carries this number, and a test
-/// encodes a fully populated sample of every frame and compares its bytes
-/// with a recorded hash: a change to the binary layout fails that test until
-/// this number is bumped.
+/// binary shape. So a test also encodes a fully populated sample of every
+/// frame and compares its bytes with a recorded hash: a change to the binary
+/// layout fails that test until this number is bumped and
+/// [`FINGERPRINT`] given a new value.
 pub const LAYOUT_VERSION: u32 = 3;
 
-/// The hash of [`frame_schemas`] and [`LAYOUT_VERSION`]: two builds share it
-/// exactly when their run files have the same shape.
+/// The name of [`LAYOUT_VERSION`]'s binary layout, in every run file's
+/// header: two builds share it exactly when their run files have the same
+/// shape.
 ///
-/// Written out rather than worked out: building every frame type's JSON
-/// Schema takes milliseconds, which every `lev` command that reads a run file
-/// would pay before reading a byte of it. A test works it out and holds this
-/// to it, and names the value to write here when a frame type changes.
+/// It changes only with the layout. Rewording a frame type's documentation
+/// changes neither; a test holds each frame type's structure, and its
+/// failure says when this needs a new value and an upgrade for the files
+/// carrying the old one.
 pub const FINGERPRINT: [u8; 32] = [
     0xfd, 0x1f, 0x98, 0x95, 0x06, 0x39, 0x2d, 0xf3, 0x90, 0xe4, 0x2a, 0xa6, 0x0c, 0xca, 0xa7, 0x90,
     0x37, 0xe9, 0x4b, 0xe2, 0x3c, 0xe4, 0xc3, 0x5a, 0x8e, 0xc9, 0xf7, 0x42, 0x5c, 0x65, 0x7c, 0xb6,
