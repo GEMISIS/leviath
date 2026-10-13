@@ -255,6 +255,10 @@ same list.
   A path that is not a regular file is refused, and the `--workdir-root`
   check comes before any file is read, on the compatibility spawn route and
   on GraphQL `spawnRun`.
+- A multipart body with a second `request` field is refused rather than
+  read as the last one, a file field named like `partition` or `parts` is
+  refused rather than taken as a `part`, and a body cut off mid-file is a
+  400 (it was a 413, as if it were too large).
 - A raw graph gets only the global tool permissions, safe commands and read
   paths. Its title was the name `[agent_tool_permissions.<name>]`,
   `[agent_safe_commands.<name>]` and `[agent_read_paths.<name>]` were looked

@@ -133,28 +133,19 @@ async fn read_request(
     if !is_multipart {
         let body = axum::body::Bytes::from_request(request, state)
             .await
-            .map_err(|e| unreadable(e.status(), e.body_text()))?;
+            .map_err(|e| super::upload::unreadable(e.status(), e.body_text()))?;
         let value: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|e| ServeError::BadRequest(format!("the body is not JSON: {e}")))?;
         return Ok(decode(value));
     }
     let multipart = Multipart::from_request(request, state)
         .await
-        .map_err(|e| unreadable(e.status(), e.body_text()))?;
+        .map_err(|e| super::upload::unreadable(e.status(), e.body_text()))?;
     let (value, attachments) = read_multipart(multipart, max_bytes).await?;
     Ok(decode(value).map(|mut request| {
         request.attachments.extend(attachments);
         request
     }))
-}
-
-/// A body the extractor could not read, as the failure it is: one over the
-/// size limit, or one that is not well formed.
-fn unreadable(status: StatusCode, message: String) -> ServeError {
-    match status {
-        StatusCode::PAYLOAD_TOO_LARGE => ServeError::PayloadTooLarge(message),
-        _ => ServeError::BadRequest(message),
-    }
 }
 
 /// A JSON value as a request, or the one issue that says why it is not one.
@@ -170,61 +161,24 @@ fn decode(value: serde_json::Value) -> Result<SpawnRequest, SpawnIssues> {
 /// A multipart body: the `request` field's JSON, and every other field as an
 /// attachment named after it.
 async fn read_multipart(
-    mut multipart: Multipart,
+    multipart: Multipart,
     max_bytes: u64,
 ) -> Result<(serde_json::Value, Vec<Attachment>), ServeError> {
-    let mut request = None;
-    let mut attachments = Vec::new();
-    loop {
-        let field = match multipart.next_field().await {
-            Ok(Some(field)) => field,
-            Ok(None) => break,
-            Err(e) => {
-                return Err(ServeError::BadRequest(format!(
-                    "malformed multipart body: {e}"
-                )));
-            }
-        };
-        let name = field.name().unwrap_or_default().to_string();
-        if name == "request" {
-            let text = field.text().await.map_err(|e| {
-                ServeError::BadRequest(format!("the request field could not be read: {e}"))
-            })?;
-            request = Some(serde_json::from_str(&text).map_err(|e| {
-                ServeError::BadRequest(format!("the request field is not JSON: {e}"))
-            })?);
-            continue;
-        }
-        let mime_type = field
-            .content_type()
-            .filter(|t| *t != "application/octet-stream")
-            .and_then(|t| MimePattern::new(t).ok());
-        // A body over the server's limit, or one that ends mid-file: the
-        // error says which.
-        let data = field
-            .bytes()
-            .await
-            .map_err(|e| unreadable(e.status(), format!("file '{name}' could not be read: {e}")))?;
-        if data.len() as u64 > max_bytes {
-            return Err(ServeError::PayloadTooLarge(format!(
-                "file '{name}' is {} bytes, over the {max_bytes} byte ceiling",
-                data.len()
-            )));
-        }
-        attachments.push(Attachment {
-            name,
-            mime_type,
+    let (request, files) = super::upload::read_envelope(multipart, max_bytes).await?;
+    let attachments = files
+        .into_iter()
+        .map(|file| Attachment {
+            mime_type: file
+                .content_type
+                .as_deref()
+                .and_then(|t| MimePattern::new(t).ok()),
+            name: file.name,
             region: None,
             deliver: None,
             caption: None,
-            data: Bytes(data.to_vec()),
-        });
-    }
-    let request = request.ok_or_else(|| {
-        ServeError::BadRequest(
-            "a multipart body needs a `request` field holding the JSON request".to_string(),
-        )
-    })?;
+            data: Bytes(file.data),
+        })
+        .collect();
     Ok((request, attachments))
 }
 
