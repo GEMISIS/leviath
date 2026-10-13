@@ -121,77 +121,145 @@ pub(super) struct MultipartBody {
     pub(super) parts: Vec<InboundPart>,
 }
 
-/// Read a multipart body: one `request` field of JSON, and files named
-/// `part` (bound for the task region) or `part:<region>`.
-pub(super) async fn read_multipart(
+/// One field of a multipart body other than `request`: a file.
+#[derive(Debug)]
+pub(super) struct FileField {
+    /// The field's name, which each route reads its own way.
+    pub(super) name: String,
+    /// The file name it was sent with, when it was sent with one.
+    pub(super) file_name: Option<String>,
+    /// The type it was sent as, other than the catch-all
+    /// `application/octet-stream`, which says nothing.
+    pub(super) content_type: Option<String>,
+    /// Its bytes.
+    pub(super) data: Vec<u8>,
+}
+
+/// A body the extractor could not read, as the failure it is: one over the
+/// size limit, or one that is not well formed.
+pub(super) fn unreadable(status: axum::http::StatusCode, message: String) -> ServeError {
+    match status {
+        axum::http::StatusCode::PAYLOAD_TOO_LARGE => ServeError::PayloadTooLarge(message),
+        _ => ServeError::BadRequest(message),
+    }
+}
+
+/// Read a multipart body's envelope: exactly one `request` field of JSON,
+/// and every other field as a file of at most `max_bytes`. What the file
+/// fields may be named is the route's to judge.
+pub(super) async fn read_envelope(
     mut multipart: Multipart,
     max_bytes: u64,
-) -> Result<MultipartBody, ServeError> {
+) -> Result<(serde_json::Value, Vec<FileField>), ServeError> {
     let mut request = None;
-    let mut parts = Vec::new();
+    let mut files = Vec::new();
     loop {
-        let field = match multipart.next_field().await {
-            Ok(Some(field)) => field,
-            Ok(None) => break,
-            Err(e) => {
-                return Err(ServeError::BadRequest(format!(
-                    "malformed multipart body: {e}"
-                )));
-            }
-        };
+        let field = multipart
+            .next_field()
+            .await
+            .map_err(|e| unreadable(e.status(), format!("malformed multipart body: {e}")))?;
+        let Some(field) = field else { break };
         let name = field.name().unwrap_or_default().to_string();
         if name == "request" {
+            if request.is_some() {
+                return Err(ServeError::BadRequest(
+                    "a multipart body carries one `request` field, and this one carries more"
+                        .to_string(),
+                ));
+            }
             let text = field.text().await.map_err(|e| {
-                ServeError::BadRequest(format!("the request field could not be read: {e}"))
+                unreadable(
+                    e.status(),
+                    format!("the request field could not be read: {e}"),
+                )
             })?;
             request = Some(serde_json::from_str(&text).map_err(|e| {
                 ServeError::BadRequest(format!("the request field is not JSON: {e}"))
             })?);
             continue;
         }
-        let Some(region) = name
-            .strip_prefix("part")
-            .map(|rest| rest.strip_prefix(':').filter(|r| !r.is_empty()))
-        else {
-            return Err(ServeError::BadRequest(format!(
-                "unexpected multipart field '{name}'; send `request` and files named `part` \
-                     or `part:<region>`"
-            )));
-        };
-        let region = region.map(str::to_string);
         let file_name = field
             .file_name()
             .map(str::to_string)
             .filter(|f| !f.is_empty());
-        let declared = field
+        let content_type = field
             .content_type()
-            .and_then(|t| MimeType::parse(t).ok())
-            .filter(|t| t.as_str() != "application/octet-stream");
+            .filter(|t| *t != "application/octet-stream")
+            .map(str::to_string);
+        // A body over the server's limit, or one that ends mid-file: the
+        // error says which.
         let data = field.bytes().await.map_err(|e| {
-            ServeError::PayloadTooLarge(format!("a file part could not be read: {e}"))
+            unreadable(
+                e.status(),
+                format!("file field '{name}' could not be read: {e}"),
+            )
         })?;
-        if data.is_empty() {
-            return Err(ServeError::BadRequest("a file part is empty".to_string()));
-        }
         if data.len() as u64 > max_bytes {
             return Err(ServeError::PayloadTooLarge(format!(
-                "file part '{}' is {} bytes, over the {max_bytes} byte ceiling",
-                file_name.clone().unwrap_or_default(),
+                "file field '{name}' is {} bytes, over the {max_bytes} byte ceiling",
                 data.len()
             )));
         }
-        let name = file_name.unwrap_or_else(|| format!("part-{}", parts.len() + 1));
-        let mut part = InboundPart::from_bytes(name, data.to_vec());
+        files.push(FileField {
+            name,
+            file_name,
+            content_type,
+            data: data.to_vec(),
+        });
+    }
+    let request = request.ok_or_else(|| {
+        ServeError::BadRequest(
+            "a multipart body needs a `request` field holding the JSON request".to_string(),
+        )
+    })?;
+    Ok((request, files))
+}
+
+/// Read a multipart body: one `request` field of JSON, and files named
+/// `part` (bound for the task region) or `part:<region>`.
+pub(super) async fn read_multipart(
+    multipart: Multipart,
+    max_bytes: u64,
+) -> Result<MultipartBody, ServeError> {
+    let (request, files) = read_envelope(multipart, max_bytes).await?;
+    let mut parts = Vec::with_capacity(files.len());
+    for file in files {
+        let region = part_region(&file.name)?;
+        if file.data.is_empty() {
+            return Err(ServeError::BadRequest(format!(
+                "file field '{}' is empty",
+                file.name
+            )));
+        }
+        let name = file
+            .file_name
+            .unwrap_or_else(|| format!("part-{}", parts.len() + 1));
+        let mut part = InboundPart::from_bytes(name, file.data);
         part.region = region;
-        part.mime_type = declared;
+        part.mime_type = file
+            .content_type
+            .as_deref()
+            .and_then(|t| MimeType::parse(t).ok());
         parts.push(part);
     }
-    let Some(request) = request else {
-        return Err(ServeError::BadRequest(
-            "a multipart body needs a `request` field holding the JSON request".to_string(),
-        ));
-    };
     Ok(MultipartBody { request, parts })
+}
+
+/// The region a file field named `part` or `part:<region>` is for: `None`,
+/// the task region, for a bare `part` (or `part:` with no region after it).
+/// Any other name is refused, a near miss such as `parts` or `partition`
+/// included.
+fn part_region(name: &str) -> Result<Option<String>, ServeError> {
+    if name == "part" {
+        return Ok(None);
+    }
+    let region = name.strip_prefix("part:").ok_or_else(|| {
+        ServeError::BadRequest(format!(
+            "unexpected multipart field '{name}'; send `request` and files named `part` or \
+             `part:<region>`"
+        ))
+    })?;
+    Ok((!region.is_empty()).then(|| region.to_string()))
 }
 
 /// The route's body, whichever way it came: a JSON body as the route's
@@ -389,7 +457,7 @@ mod tests {
         let garbage = form(b"garbage".to_vec(), 1024).await.unwrap_err();
         assert_eq!(garbage.status(), StatusCode::BAD_REQUEST);
         // A stream that ends inside the request field, and one that ends
-        // inside a file.
+        // inside a file: malformed, not too large.
         let cut_request =
             b"--b\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{}".to_vec();
         assert_eq!(
@@ -401,7 +469,7 @@ mod tests {
             .to_vec();
         assert_eq!(
             form(cut_file, 1024).await.unwrap_err().status(),
-            StatusCode::PAYLOAD_TOO_LARGE
+            StatusCode::BAD_REQUEST
         );
         // A request that is not JSON, a field that is neither the request nor
         // a part, an empty part, a named part over the ceiling, and no request
@@ -441,6 +509,30 @@ mod tests {
         for (body, max, status) in refused {
             assert_eq!(form(body, max).await.unwrap_err().status(), status);
         }
+    }
+
+    /// Only `part` and `part:<region>` name a file: a near miss is refused
+    /// rather than taken as a part for the task. A second `request` field is
+    /// refused rather than quietly replacing the first.
+    #[tokio::test]
+    async fn near_miss_field_names_and_a_second_request_are_refused() {
+        let request = "--b\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{}\r\n";
+        for name in ["partition", "parts", "partX", "part-a"] {
+            let body = format!(
+                "{request}--b\r\nContent-Disposition: form-data; name=\"{name}\"; \
+                 filename=\"a\"\r\n\r\nxyz\r\n--b--\r\n"
+            );
+            let refused = form(body.into_bytes(), 1024).await.unwrap_err();
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{name}");
+            assert!(refused.to_string().contains(name), "{refused}");
+        }
+        let twice = format!("{request}{request}--b--\r\n");
+        let refused = form(twice.into_bytes(), 1024).await.unwrap_err();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            refused.to_string().contains("one `request` field"),
+            "{refused}"
+        );
     }
 
     #[tokio::test]
