@@ -145,6 +145,11 @@ its digest, and a run that names one is not resumed until it is put back. The er
 On a run given a 2 MB image that handed back a 59 KB answer, `run.lvr` came to 12 KB. With the
 image copied in, it came to 2.1 MB.
 
+Each step reaches the operating system before the run takes its next action, so it survives the
+daemon crashing or being killed. Only checkpoints are flushed to the disk itself, so a power loss
+or an operating system crash can lose the steps after the last checkpoint. The run then resumes
+from that checkpoint, and an action it had taken since may be taken again.
+
 A crash can cut a frame short. Every frame carries a checksum, so a torn frame at the end is found
 and left out of what is read. Only the daemon cuts it off, when it next writes to the run, which
 then resumes from its last complete step. `lev run show` leaves the torn step out too, and says so.

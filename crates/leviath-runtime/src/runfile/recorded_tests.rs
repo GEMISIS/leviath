@@ -131,6 +131,7 @@ fn every_word_crosses_over() {
         (ContextCause::Framework, CauseState::Framework),
     ] {
         assert_eq!(CauseState::from(c), state);
+        assert_eq!(ContextCause::from(state), c, "and back");
     }
 }
 

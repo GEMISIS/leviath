@@ -78,8 +78,9 @@ pub enum HookOutcome {
     /// Do not proceed. The reason is shown to the operator and, where the
     /// caller can, written into the agent's context so the model learns why.
     Cancel(Option<String>),
-    /// Do the thing again. Not every caller can honour this; one that cannot
-    /// says so rather than silently treating it as `Allow`.
+    /// Do the thing again. Reserved: no caller honours it yet, and each one
+    /// that gets it says so, ending the run in an error, rather than
+    /// treating it as `Allow`.
     Retry,
 }
 

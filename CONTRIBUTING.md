@@ -78,7 +78,7 @@ npm install -g @ast-grep/cli     # via npm
 
 ## Testing policy
 
-The workspace is gated at a hard **100%** on lines, regions, and functions, with no way to opt out. Coverage-suppression markers (`#[cfg(not(test))]`, `coverage(off)`, tarpaulin/lcov/grcov annotations) are banned by the ast-grep lint above, so code can't be hidden from measurement; it has to be refactored until it's testable. The *only* un-unit-tested code is the thin `lev` binary entrypoint (`crates/leviath-cli/src/main.rs`): the composition root that wires real terminal, stdin, network, and subprocess I/O into the library's tested cores. It's excluded from coverage measurement and guarded by a CI check that requires maintainer sign-off to change.
+The workspace is gated at a hard **100%** on lines, regions, and functions, with no way to opt out. Coverage-suppression markers (`#[cfg(not(test))]`, `coverage(off)`, tarpaulin/lcov/grcov annotations) are banned by the ast-grep lint above, so code can't be hidden from measurement; it has to be refactored until it's testable. The *only* un-unit-tested code is the `lev` binary's composition root: `crates/leviath-cli/src/main.rs` and `crates/leviath-cli/src/entry/`, which wire real terminal, stdin, network, and subprocess I/O into the library's tested cores. Both are excluded from coverage measurement (`UNMEASURED` in `xtask/src/coverage.rs`) and guarded by a CI check that requires maintainer sign-off to change.
 
 ### Suppressing a lint
 
@@ -101,16 +101,10 @@ case the change was better than the suppression it replaced:
 | `new_without_default` | A constructor named for what it does (`open`, not `new`) |
 | `dead_code` | Deleting the field, or wiring it up — `lev test` had two keys that parsed and did nothing |
 
-`clippy::string_slice` is the one exception, and only as `#[expect(..., reason =
-"...")]` naming the construct that guarantees the index is a char boundary. The
-root `Cargo.toml` explains why that one has a hatch: it exists because slicing a
-`&str` aborted the daemon twice.
-
-`#[expect]` rather than `#[allow]` for that exception, and the difference
-matters: `expect` fails the build the moment the lint stops firing, so a
-suppression cannot outlive the problem it was written for. Converting the tree
-from `allow` to `expect` found **six** that were already dead, including a
-`dead_code` on a field that was being read.
+There is no exception, `clippy::string_slice` included: the root `Cargo.toml`
+denies it workspace-wide with no hatch, because slicing a `&str` at a byte that
+is not a character boundary aborted the daemon twice. Slice through the char
+boundary helpers in `leviath_core::text` instead.
 
 If a new suppression looks unavoidable, it is worth an hour before it is worth an
 attribute. If it genuinely is unavoidable, change `.sgrules/no-lint-suppression.yml`
@@ -120,9 +114,9 @@ in the same PR and say why.
 
 `cargo xtask structure` holds every source file to **1,200 lines of production code**, and the pre-commit hook and CI both run it. It costs about a tenth of a second: it reads files and counts, nothing more.
 
-It counts **production** lines, stopping at the first column-zero `#[cfg(test)]` and skipping sibling test files entirely. This workspace keeps most tests inline and gates a hard 100%, so about two thirds of the tree is test code; a total-lines rule would fire hardest on the best-tested files, which is exactly backwards.
+It counts **production** lines: it skips each column-zero `#[cfg(test)]` item and counts on after it, and skips sibling test files entirely. This workspace keeps most tests inline and gates a hard 100%, so about two thirds of the tree is test code; a total-lines rule would fire hardest on the best-tested files, which is exactly backwards.
 
-**The cap is a ratchet and only ever goes down.** 1,200 is where the tree sits today, not where it should end up — the longest file is 1,152 against a median of 218, and the next rungs are 1,000 and 800. Each is earned by splitting the files above it, not by editing the number.
+**The cap is a ratchet and only ever goes down.** 1,200 is where the tree sits today, not where it should end up; `cargo xtask structure --list` prints every file's count, longest first, and the next rungs are 1,000 and 800. Each is earned by splitting the files above it, not by editing the number.
 
 Raising the cap to admit one long file is how a limit stops being one. If a file wants to be longer, split it by concern: `config/`, `blueprint/`, `host/`, `components/`, `lint/` and `daemon/spawn/` are all worked examples, and the glob re-export they use means the split touches no call site. Split on what the code *is about*, not on where the line count lands — `lint/checks.rs` asks "will this agent work" and `lint/security.rs` asks "should this agent be allowed to", which is a real boundary; cutting the same file at "lint_a.rs" and "lint_b.rs" would have satisfied the same number and taught a reader nothing.
 
@@ -134,7 +128,7 @@ Two tests in `crates/leviath-runtime/src/runfile/schema_tests.rs` hold a run fil
 
 ### Where a test module lives
 
-Inline `#[cfg(test)] mod tests` in the file under test is the default; 205 files use it. A sibling `foo_tests.rs` (or `foo/tests.rs`) is the sanctioned alternative, used by 24 — but only for one reason.
+Inline `#[cfg(test)] mod tests` in the file under test is the default. A sibling `foo_tests.rs` (or `foo/tests.rs`) is the sanctioned alternative, but only for one reason.
 
 The difference is what gets measured. An inline test module is part of the file, so the gate counts its *scaffolding* too: a helper written to build fixtures has to itself be exercised on every branch, or it fails the gate. llvm-cov excludes the sibling layout by default, so a test module whose helpers would otherwise need tests of their own belongs there. Reach for it when the scaffolding is the problem, not because a file is getting long.
 
