@@ -439,10 +439,12 @@ mod tests {
             --b\r\nContent-Disposition: form-data; name=\"part\"\r\n\
             Content-Type: application/octet-stream\r\n\r\nxyz\r\n\
             --b\r\nContent-Disposition: form-data; name=\"part:\"; filename=\"a.bin\"\r\n\r\nqq\r\n\
+            --b\r\nContent-Disposition: form-data; name=\"part:art\"; filename=\"b.bin\"\r\n\r\nzz\r\n\
             --b--\r\n";
         let body = form(ok.to_vec(), 1024).await.unwrap();
         assert_eq!(body.request["k"], 1);
-        assert_eq!(body.parts.len(), 2);
+        assert_eq!(body.parts.len(), 3);
+        assert_eq!(body.parts[2].region.as_deref(), Some("art"));
         // No file name: numbered. An octet-stream type: no type at all, so
         // the daemon sniffs one.
         assert_eq!(body.parts[0].name, "part-1");
@@ -488,7 +490,8 @@ mod tests {
                 StatusCode::BAD_REQUEST,
             ),
             (
-                b"--b\r\nContent-Disposition: form-data; name=\"part\"; filename=\"e\"\r\n\r\n\r\n--b--\r\n"
+                b"--b\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{}\r\n\
+                  --b\r\nContent-Disposition: form-data; name=\"part\"; filename=\"e\"\r\n\r\n\r\n--b--\r\n"
                     .to_vec(),
                 1024,
                 StatusCode::BAD_REQUEST,

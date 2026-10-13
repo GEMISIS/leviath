@@ -2804,7 +2804,7 @@ mod tests {
             std::fs::write(run_file::path_in(&dir), "not a run file").unwrap();
 
             let outcome = force_cancel_in(&dir, 99);
-            assert!(matches!(outcome, ForceCancelOutcome::WriteFailed(_)));
+            assert!(format!("{outcome:?}").starts_with("WriteFailed"));
             assert!(outcome.found_run());
         });
     }

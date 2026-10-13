@@ -115,6 +115,15 @@ fn a_damaged_start_is_written_again_and_an_unreadable_one_left_alone() {
     std::fs::create_dir_all(other.join(SINCE)).unwrap();
     assert_eq!(Outbox::open(other.clone(), 60).since, 60);
     assert!(other.join(SINCE).is_dir(), "left as it was");
+
+    // A start that does not read as a second, in an outbox whose `settled`
+    // is a file: it cannot be written again, and the outbox counts from now.
+    let stuck = dir.path().join("stuck");
+    std::fs::create_dir_all(&stuck).unwrap();
+    std::fs::write(stuck.join(SINCE), b"not a second").unwrap();
+    std::fs::write(stuck.join(SETTLED), b"a file where the directory goes").unwrap();
+    assert_eq!(Outbox::open(stuck.clone(), 70).since, 70);
+    assert_eq!(std::fs::read(stuck.join(SINCE)).unwrap(), b"not a second");
 }
 
 /// A delivery given up unsent, because something it needs did not read just

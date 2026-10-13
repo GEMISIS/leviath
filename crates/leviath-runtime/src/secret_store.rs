@@ -177,7 +177,7 @@ mod tests {
     fn a_missing_secret_is_told_from_one_that_does_not_read() {
         let (_home, store, _runs) = store();
         let reference = minted("r-1");
-        assert!(matches!(store.read_checked(&reference), Ok(None)));
+        assert_eq!(store.read_checked(&reference).unwrap(), None);
         std::fs::create_dir_all(store.dir().join(reference.as_str())).unwrap();
         assert!(store.read_checked(&reference).is_err());
         assert_eq!(store.read(&reference), None);

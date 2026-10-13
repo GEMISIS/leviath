@@ -280,6 +280,32 @@ async fn the_link_frame_is_never_filtered_out() {
     assert_eq!(field(&out[1], "runEvents", "connected"), false);
 }
 
+/// Events the server's stream from the daemon skipped reach every
+/// subscription, whatever types it asked for, as the frame a subscriber that
+/// fell behind gets: either way, what it shows needs reading again.
+#[tokio::test]
+async fn events_the_daemon_stream_skipped_reach_every_subscription() {
+    for document in [
+        "subscription { runEvents(types: [LOG_LINE_WRITTEN]) { __typename
+             ... on EventsDroppedEvent { count } } }",
+        "subscription { machineEvents(types: [CONFIG_HEALTH_CHANGED]) { __typename
+             ... on EventsDroppedEvent { count } } }",
+    ] {
+        let root = match document.contains("runEvents") {
+            true => "runEvents",
+            false => "machineEvents",
+        };
+        let out = frames(
+            document,
+            vec![status("run-a"), ServerEvent::EventsDropped { count: 7 }],
+            2,
+        )
+        .await;
+        assert_eq!(field(&out[1], root, "__typename"), "EventsDroppedEvent");
+        assert_eq!(field(&out[1], root, "count"), 7);
+    }
+}
+
 /// The machine's own frames are not a run subscription's business.
 #[tokio::test]
 async fn a_run_subscription_does_not_see_the_installs_frames() {
