@@ -162,8 +162,10 @@ pub enum CodeUse {
 pub struct SeedCx<'a> {
     /// The run's id.
     pub run_id: &'a RunId,
-    /// The name the run's permissions and grants are looked up under.
-    pub agent: &'a str,
+    /// The blueprint the operator's per-agent permissions and grants are
+    /// looked up under; `None` for a graph its caller wrote, which has the
+    /// operator's global ones only, whatever it is titled.
+    pub agent: Option<&'a str>,
     /// The run's graph, with its permissions, safe commands and sandbox.
     pub graph: &'a RunGraph,
     /// What the run is trusted with: its `allow` list and unattended setting.

@@ -122,7 +122,8 @@ spawn is refused.
 A raw graph is the same structure a blueprint's `[graph]` table holds, sent whole. Use it when a
 program or an agent writes the run itself. Its stages can seed regions from shell commands and
 connect MCP servers, so the `spawn_agent` tool needs the `spawn_raw_graph` permission to send one.
-That permission asks a person by default.
+That permission asks a person by default. A raw graph's title is only a label: the per-agent
+grants in your config name installed blueprints, so a raw graph gets the global ones only.
 
 `lev run ./path/to/dir` sends a `blueprint_file` source. The HTTP API, GraphQL and the Agent Client
 Protocol refuse that form, because a remote caller should not choose files on the daemon's disk.

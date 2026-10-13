@@ -45,9 +45,14 @@ pub(crate) fn read_and_concat(
 /// already started can redo it: [`AgentToolState::reread_config`] keeps only
 /// the declared half on the run.
 ///
+/// `agent` is the installed blueprint the operator's
+/// `[agent_read_paths.<name>]` grants are looked up under. `None`, a graph
+/// its caller wrote, is granted only what `[security] read_paths` grants
+/// every run.
+///
 /// [`AgentToolState::reread_config`]: crate::daemon::tool_service::AgentToolState::reread_config
 pub(crate) fn compile_read_path_policy(
-    agent_name: &str,
+    agent: Option<&str>,
     declared: &[String],
     config: &crate::config::Config,
     workdir: &std::path::Path,
@@ -55,12 +60,16 @@ pub(crate) fn compile_read_path_policy(
     if declared.is_empty() {
         return Ok((leviath_core::ReadPathPolicy::inactive(), None));
     }
+    let shown = agent.map_or_else(
+        || "this graph".to_string(),
+        |name| format!("agent '{name}'"),
+    );
     let allow = declared;
     let home = leviath_core::home_dir();
     let declared =
         leviath_core::ReadPathSet::compile(allow, workdir, home.as_deref(), cfg!(windows))
-            .map_err(|e| format!("agent '{agent_name}' [read_paths]: {e}"))?;
-    let grant_entries = config.read_path_grants_for_agent(agent_name);
+            .map_err(|e| format!("{shown} [read_paths]: {e}"))?;
+    let grant_entries = config.read_path_grants_for_agent(agent);
     let grants =
         leviath_core::ReadPathSet::compile(&grant_entries, workdir, home.as_deref(), cfg!(windows))
             .map_err(|e| format!("read_paths grant in your config.toml: {e}"))?;
@@ -71,17 +80,20 @@ pub(crate) fn compile_read_path_policy(
             .map(|e| format!("\"{e}\""))
             .collect::<Vec<_>>()
             .join(", ");
+        let specific = agent.map_or_else(
+            || format!("[security]\nread_paths = [{entries}]"),
+            |name| format!("[agent_read_paths.{name}]\nallow = [{entries}]"),
+        );
         format!(
-            "agent '{name}' declares [read_paths] but nothing grants them; reads outside \
+            "{shown} declares [read_paths] but nothing grants them; reads outside \
              the workdir will be refused. To grant them, add to your config.toml either:\n\
              [security]\nallow_blueprint_read_paths = true\n\
-             or the specific paths:\n[agent_read_paths.{name}]\nallow = [{entries}]",
-            name = agent_name,
+             or the specific paths:\n{specific}",
         )
     });
     Ok((
         leviath_core::ReadPathPolicy {
-            agent: agent_name.to_string(),
+            agent: agent.unwrap_or("raw").to_string(),
             blueprint: declared,
             grants,
             allow_blueprint,
@@ -99,19 +111,19 @@ pub(crate) fn compile_read_path_policy(
 /// with a half-saved file, and it fails in the safe direction - a run keeps the
 /// grants it had rather than losing them to a typo.
 pub(crate) fn read_path_policy_for(
-    agent_name: &str,
+    agent: Option<&str>,
     declared: &[String],
     config: &crate::config::Config,
     workdir: &std::path::Path,
 ) -> Option<leviath_core::ReadPathPolicy> {
-    match compile_read_path_policy(agent_name, declared, config, workdir) {
+    match compile_read_path_policy(agent, declared, config, workdir) {
         Ok((policy, _warning)) => Some(policy),
         Err(error) => {
             // Pre-bound rather than left as lazy `%` fields: a method call or a
             // borrow inside a structured field only runs when the callsite is
             // enabled, and tracing caches that interest process-wide, so under
             // a coverage run the region can be unreachable.
-            let agent = agent_name;
+            let agent = agent.unwrap_or("raw");
             let reason = error;
             tracing::warn!(
                 agent = %agent,

@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn the_bundled_seed_command_is_still_pre_approved() {
         let keys: std::collections::HashSet<String> = crate::config::Config::default()
-            .safe_keys_for_agent("coder", None)
+            .safe_keys_for_agent(Some("coder"), None)
             .into_keys()
             .collect();
         let policy = SeedCommandPolicy::new(

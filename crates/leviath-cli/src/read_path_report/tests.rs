@@ -45,7 +45,7 @@ fn config(machine_wide: &[&str], agent: &str, per_agent: &[&str]) -> Config {
 /// hold on every OS.
 fn report(agent: &str, declared: &[&str], config: &Config) -> GrantReport {
     report_entries(
-        agent,
+        Some(agent),
         &declared.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
         config,
         std::path::Path::new("/work"),
@@ -214,7 +214,7 @@ fn a_declaration_that_cannot_compile_here_is_undetermined() {
 fn a_malformed_config_grant_is_an_error() {
     let config = config(&["regex:relative/.*"], "cto", &[]);
     let err = report_entries(
-        "cto",
+        Some("cto"),
         &["/data/runs".to_string()],
         &config,
         std::path::Path::new("/work"),

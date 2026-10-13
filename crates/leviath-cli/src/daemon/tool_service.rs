@@ -282,8 +282,9 @@ impl<T> Live<T> {
 /// lets a resume redo the resolution the spawn did rather than an
 /// approximation of it.
 pub(crate) struct ConfigSource {
-    /// The blueprint's name, which the per-agent config tables are keyed by.
-    pub agent_name: String,
+    /// The blueprint the per-agent config tables are looked up under; `None`
+    /// for a graph its caller wrote, which they never apply to.
+    pub agent_name: Option<String>,
     /// The graph's `safe_commands`, when it declares any.
     pub blueprint_safe: Option<leviath_runtime::spec::graph::SafeCommandsDef>,
     /// The graph's `read_paths`, empty when it declares none.
@@ -335,12 +336,12 @@ impl AgentToolState {
         let source = &self.config_source;
         self.safe_keys.set(
             config
-                .safe_keys_for_agent(&source.agent_name, source.blueprint_safe.as_ref())
+                .safe_keys_for_agent(source.agent_name.as_deref(), source.blueprint_safe.as_ref())
                 .into_keys()
                 .collect(),
         );
         self.global_perms
-            .set(config.permissions_for_agent(&source.agent_name));
+            .set(config.permissions_for_agent(source.agent_name.as_deref()));
         self.blueprint_may_loosen.store(
             config.security.allow_blueprint_permissions,
             std::sync::atomic::Ordering::Relaxed,
@@ -352,7 +353,7 @@ impl AgentToolState {
         // rather than widen it, which is the wrong direction for a file people
         // edit to get unstuck. A set that will not compile is left alone.
         if let Some(policy) = crate::daemon::spawn::read_path_policy_for(
-            &source.agent_name,
+            source.agent_name.as_deref(),
             &source.blueprint_read_paths,
             config,
             &source.workdir,
@@ -1102,7 +1103,7 @@ pub(crate) mod tests {
     /// with no blueprint-side declarations, over a workdir nothing reads.
     fn test_config_source() -> Arc<ConfigSource> {
         Arc::new(ConfigSource {
-            agent_name: "tester".to_string(),
+            agent_name: Some("tester".to_string()),
             blueprint_safe: None,
             blueprint_read_paths: Vec::new(),
             workdir: std::env::temp_dir(),
@@ -1771,7 +1772,7 @@ pub(crate) mod tests {
         allow.insert("read_file".to_string(), ToolPolicy::Allow);
         let state = Arc::new(AgentToolState {
             config_source: Arc::new(ConfigSource {
-                agent_name: "tester".to_string(),
+                agent_name: Some("tester".to_string()),
                 blueprint_safe: None,
                 blueprint_read_paths: vec![outside.path().to_string_lossy().to_string()],
                 workdir: workdir.path().to_path_buf(),
@@ -1820,7 +1821,7 @@ pub(crate) mod tests {
         let workdir = tempfile::tempdir().unwrap();
         let state = Arc::new(AgentToolState {
             config_source: Arc::new(ConfigSource {
-                agent_name: "tester".to_string(),
+                agent_name: Some("tester".to_string()),
                 blueprint_safe: None,
                 // An empty entry is refused by the compiler, which is the arm
                 // a resume has to survive.
@@ -4447,7 +4448,7 @@ pub(crate) mod tests {
             let hub = InteractionHub::new();
             let mut state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
             Arc::get_mut(&mut state).expect("sole owner").config_source = Arc::new(ConfigSource {
-                agent_name: "tester".to_string(),
+                agent_name: Some("tester".to_string()),
                 blueprint_safe: None,
                 blueprint_read_paths: Vec::new(),
                 workdir: std::env::temp_dir(),

@@ -205,10 +205,12 @@ pub(crate) fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPoli
         //
         // Defaulting them to `Ask` instead would change what working agents do:
         // every fan-out would stop on a prompt, and an unattended run would
-        // block on an approval nothing is there to give. `spawn_agent` can only
-        // name an agent the user installed, the tree is depth-capped, and
-        // children inherit `--no-seed-commands`, so the `Allow` default keeps
-        // working agents working while making the user's own setting count. Set
+        // block on an approval nothing is there to give. A child named by
+        // blueprint is one the user installed, a child the model writes as a
+        // graph is asked about separately (below) and gets no per-agent
+        // grants, the tree is depth-capped, and children inherit
+        // `--no-seed-commands`, so the `Allow` default keeps working agents
+        // working while making the user's own setting count. Set
         // `spawn_agent = "ask"` to be prompted.
         "spawn_agent" | "check_agent" | "wait_for_agent" | "send_to_agent" | "kill_agent" => {
             ToolPolicy::Allow

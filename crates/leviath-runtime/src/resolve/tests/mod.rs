@@ -281,7 +281,7 @@ impl ResolveEnv for Fake {
         self.seed_sights.lock().unwrap().push(format!(
             "{} {} {:?} {}",
             cx.run_id,
-            cx.agent,
+            cx.agent.unwrap_or("(raw)"),
             cx.launch.unattended,
             cx.graph.stages.len()
         ));

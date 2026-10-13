@@ -412,47 +412,52 @@ impl Default for Config {
 }
 
 impl Config {
-    /// The permission ceiling to apply to `agent_name`: the global
+    /// The permission ceiling to apply to the blueprint `agent`: the global
     /// `[tool_permissions]` with that agent's `[agent_tool_permissions.<name>]`
-    /// entries laid over it.
+    /// entries laid over it. `None`, a graph its caller wrote, gets the global
+    /// table only: per-agent grants name blueprints the operator installed,
+    /// never a name a caller chose.
     ///
     /// Returned by value (rather than as two maps threaded through
     /// [`crate::tools::resolve_policy`]) so the ceiling is resolved exactly once,
     /// at spawn, and every later lookup reads a single flat map.
-    pub(crate) fn permissions_for_agent(&self, agent_name: &str) -> HashMap<String, ToolPolicy> {
+    pub(crate) fn permissions_for_agent(&self, agent: Option<&str>) -> HashMap<String, ToolPolicy> {
         let mut merged = self.tool_permissions.clone();
-        if let Some(per_agent) = self.agent_tool_permissions.get(agent_name) {
+        if let Some(per_agent) = agent.and_then(|name| self.agent_tool_permissions.get(name)) {
             merged.extend(per_agent.iter().map(|(k, v)| (k.clone(), *v)));
         }
         merged
     }
 
-    /// The safe-command keys in effect for `agent_name`, and where each came
-    /// from. Resolved once at spawn, mirroring [`Self::permissions_for_agent`].
+    /// The safe-command keys in effect for the blueprint `agent` (`None` for
+    /// a graph its caller wrote, which gets the global ones only), and where
+    /// each came from. Resolved once at spawn, mirroring
+    /// [`Self::permissions_for_agent`].
     ///
     /// `blueprint` is the graph's own `safe_commands`, which contributes
     /// only when the user opted in - see
     /// [`crate::approvals::resolve_safe_keys`].
     pub(crate) fn safe_keys_for_agent(
         &self,
-        agent_name: &str,
+        agent: Option<&str>,
         blueprint: Option<&leviath_runtime::spec::graph::SafeCommandsDef>,
     ) -> std::collections::BTreeMap<String, crate::approvals::SafeSource> {
         crate::approvals::resolve_safe_keys(
             &self.safe_commands,
-            self.agent_safe_commands.get(agent_name),
+            agent.and_then(|name| self.agent_safe_commands.get(name)),
             blueprint,
             self.security.allow_blueprint_safe_commands,
         )
     }
 
-    /// Every read-path grant that applies to `agent_name`: the machine-wide
-    /// `[security] read_paths` list plus that agent's
-    /// `[agent_read_paths.<name>]` entries. Resolved once at spawn, mirroring
+    /// Every read-path grant that applies to the blueprint `agent`: the
+    /// machine-wide `[security] read_paths` list plus that agent's
+    /// `[agent_read_paths.<name>]` entries; the machine-wide list alone for
+    /// `None`, a graph its caller wrote. Resolved once at spawn, mirroring
     /// [`Self::permissions_for_agent`].
-    pub(crate) fn read_path_grants_for_agent(&self, agent_name: &str) -> Vec<String> {
+    pub(crate) fn read_path_grants_for_agent(&self, agent: Option<&str>) -> Vec<String> {
         let mut grants = self.security.read_paths.clone();
-        if let Some(per_agent) = self.agent_read_paths.get(agent_name) {
+        if let Some(per_agent) = agent.and_then(|name| self.agent_read_paths.get(name)) {
             grants.extend(per_agent.allow.iter().cloned());
         }
         grants
@@ -3029,7 +3034,7 @@ meshy_api_key = "msy-existing"
             HashMap::from([("shell".to_string(), ToolPolicy::Allow)]),
         );
 
-        let coder = config.permissions_for_agent("coder");
+        let coder = config.permissions_for_agent(Some("coder"));
         assert_eq!(coder.get("shell"), Some(&ToolPolicy::Allow), "granted");
         assert_eq!(
             coder.get("write_file"),
@@ -3038,7 +3043,7 @@ meshy_api_key = "msy-existing"
         );
 
         // Any other agent sees the global setting untouched.
-        let other = config.permissions_for_agent("researcher");
+        let other = config.permissions_for_agent(Some("researcher"));
         assert_eq!(other.get("shell"), Some(&ToolPolicy::Ask));
     }
 
@@ -3051,7 +3056,7 @@ meshy_api_key = "msy-existing"
             !config.security.allow_blueprint_read_paths,
             "blueprint read paths must be opt-in"
         );
-        assert!(config.read_path_grants_for_agent("cto").is_empty());
+        assert!(config.read_path_grants_for_agent(Some("cto")).is_empty());
 
         config.security.read_paths = vec!["~/.leviath/runs".to_string()];
         config.agent_read_paths.insert(
@@ -3062,7 +3067,7 @@ meshy_api_key = "msy-existing"
         );
 
         assert_eq!(
-            config.read_path_grants_for_agent("cto"),
+            config.read_path_grants_for_agent(Some("cto")),
             vec![
                 "~/.leviath/runs".to_string(),
                 "glob:~/design-docs/**".to_string(),
@@ -3070,7 +3075,7 @@ meshy_api_key = "msy-existing"
         );
         // Any other agent gets the machine-wide grants only.
         assert_eq!(
-            config.read_path_grants_for_agent("researcher"),
+            config.read_path_grants_for_agent(Some("researcher")),
             vec!["~/.leviath/runs".to_string()]
         );
     }

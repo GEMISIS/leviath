@@ -884,7 +884,7 @@ mod tests {
         let code = CodeFiles::new();
         let cx = SeedCx {
             run_id: &run_id,
-            agent: "a",
+            agent: Some("a"),
             graph: &g,
             launch: &launch,
             workdir: Path::new(""),
