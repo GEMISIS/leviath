@@ -494,7 +494,11 @@ pub(crate) async fn send_message(
                          attachments from"
                     ))
                 })?;
-                parts_of(listed, std::path::Path::new(&meta.workdir), max_bytes)
+                parts_of(
+                    listed,
+                    std::path::Path::new(&meta.workdir),
+                    &crate::commands::serve::core::attachments::FileBudget::new(max_bytes),
+                )
             })
             .await
             .gql()?

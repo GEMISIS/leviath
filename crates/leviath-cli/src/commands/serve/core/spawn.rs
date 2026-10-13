@@ -141,30 +141,8 @@ async fn server_issues(state: &AppState, request: &mut Request) -> SpawnIssues {
         .workdir
         .get_or_insert_with(|| std::env::current_dir().unwrap_or_default())
         .clone();
-    // `--workdir-root` is the operator's answer to "where is this API allowed
-    // to work": without it, a caller-supplied `"/"` would point a
-    // tool-executing run at the whole filesystem. A request that names no
-    // workdir works where the server started, which is held to the same
-    // root, and the refusal says that is where the directory came from. The
-    // check resolves symlinks, so it runs on the blocking pool.
-    let checking = std::sync::Arc::clone(limits);
-    let checked = super::super::blocking::blocking(move || checking.check_workdir(&workdir)).await;
-    if let Err(message) = checked {
-        let message = match named {
-            true => message,
-            false => format!(
-                "the request names no workdir, so the run would work in the directory the \
-                 server was started in: {message}"
-            ),
-        };
-        issues.push(
-            SpawnIssue::new(
-                SpecPath::root().field("workdir"),
-                IssueCode::NotAllowed,
-                message,
-            )
-            .hint("send a workdir under the server's --workdir-root"),
-        );
+    if let Some(refused) = workdir_refusal(state, workdir, named).await {
+        issues.push(refused);
     }
     // `unattended` and `allow` are the same lever: an allow list approves
     // tools without a person just as an unattended run does, so a server that
@@ -213,6 +191,42 @@ async fn server_issues(state: &AppState, request: &mut Request) -> SpawnIssues {
         }
     }
     issues
+}
+
+/// Why this server will not have a run work in `workdir`, when it will not.
+/// `named` is whether the request named it, rather than leaving the run to
+/// work where the server was started.
+///
+/// `--workdir-root` is the operator's answer to "where is this API allowed
+/// to work": without it, a caller-supplied `"/"` would point a
+/// tool-executing run at the whole filesystem. A request that names no
+/// workdir works where the server started, which is held to the same root,
+/// and the refusal says that is where the directory came from. The check
+/// resolves symlinks, so it runs on the blocking pool.
+pub(crate) async fn workdir_refusal(
+    state: &AppState,
+    workdir: std::path::PathBuf,
+    named: bool,
+) -> Option<SpawnIssue> {
+    let checking = std::sync::Arc::clone(&state.limits);
+    let message = super::super::blocking::blocking(move || checking.check_workdir(&workdir))
+        .await
+        .err()?;
+    let message = match named {
+        true => message,
+        false => format!(
+            "the request names no workdir, so the run would work in the directory the \
+             server was started in: {message}"
+        ),
+    };
+    Some(
+        SpawnIssue::new(
+            SpecPath::root().field("workdir"),
+            IssueCode::NotAllowed,
+            message,
+        )
+        .hint("send a workdir under the server's --workdir-root"),
+    )
 }
 
 /// Point a request for a blueprint this server lists from a configured

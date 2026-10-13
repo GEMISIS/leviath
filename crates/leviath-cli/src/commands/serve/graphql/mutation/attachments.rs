@@ -62,11 +62,11 @@ pub(crate) struct AttachmentWrite {
 pub(crate) fn parts_of(
     listed: Vec<AttachmentWrite>,
     workdir: &std::path::Path,
-    max_bytes: u64,
+    budget: &attachments::FileBudget,
 ) -> Result<Vec<InboundPart>, ServeError> {
     let mut parts = Vec::with_capacity(listed.len());
     for item in listed {
-        let mut part = attachments::read_within(&item.path, workdir, max_bytes)?;
+        let mut part = attachments::read_within(&item.path, workdir, budget)?;
         part.region = item.region.map(|region| region.name);
         if let Some(name) = item.name {
             part.name = name;

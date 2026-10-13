@@ -388,6 +388,32 @@ async fn a_body_that_cannot_be_a_run_is_refused_before_the_daemon() {
     }
 }
 
+/// A workdir outside `--workdir-root` is refused before any file in it is
+/// read: the answer is the 403 for the workdir, not the 400 a missing file
+/// would have been, and the daemon is never asked.
+#[tokio::test]
+async fn a_refused_workdir_has_none_of_its_files_read() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let (mut state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
+        run_id: "never".into(),
+        warnings: Default::default(),
+    }));
+    state.limits = Arc::new(ServeLimits {
+        workdir_root: Some(root.path().to_path_buf()),
+        ..ServeLimits::default()
+    });
+    let body = serde_json::json!({
+        "blueprint": "compat-probe",
+        "task": "read @not-there.txt",
+        "workdir": outside.path(),
+        "parts": [{"path": "not-there.png"}],
+    });
+    let (status, answer) = send(state, spawn(body)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
+    assert!(seen.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn a_file_over_the_ceiling_is_refused_wherever_it_is_named() {
     let work = tempfile::tempdir().unwrap();

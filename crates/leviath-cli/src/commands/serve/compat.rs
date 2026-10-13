@@ -121,9 +121,17 @@ pub(super) async fn spawn_agent(
             ServeError::NotFound(_) => e,
             other => ServeError::BadRequest(other.to_string()),
         })?;
-    // The files the body names are read on the blocking pool.
-    let (body, regions, parts, left_out) =
-        super::blocking::blocking(move || with_files(body, &declared, parts, max_upload)).await?;
+    // The workdir is held to `--workdir-root` before any file in it is read,
+    // so a request this server refuses reads nothing. The check resolves
+    // symlinks, so it and the reading run on the blocking pool.
+    let limits = std::sync::Arc::clone(&state.limits);
+    let (body, regions, parts, left_out) = super::blocking::blocking(move || {
+        limits
+            .check_workdir(&workdir_of(&body))
+            .map_err(ServeError::Forbidden)?;
+        with_files(body, &declared, parts, max_upload)
+    })
+    .await?;
     let request = launch_of(body, regions, parts)
         .and_then(|launch| launch.into_request_for(source))
         .map_err(ServeError::BadRequest)?;
@@ -151,25 +159,29 @@ type WithFiles = (
     Vec<String>,
 );
 
+/// Where the run `body` asks for works: the workdir it names, else where the
+/// server was started.
+fn workdir_of(body: &SpawnAgentReq) -> std::path::PathBuf {
+    body.workdir.clone().map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        std::path::PathBuf::from,
+    )
+}
+
 /// Read the files `body` names inside the workdir, and the ones its task and
 /// regions name with `@path`, where the run will work, and fill each region's
-/// input from its text. Blocking: every file is read here.
+/// input from its text. Blocking: every file is read here, all of them
+/// together held to `max_upload` bytes.
 fn with_files(
     mut body: SpawnAgentReq,
     declared: &[InputDecl],
     mut parts: Vec<leviath_core::mime::InboundPart>,
     max_upload: u64,
 ) -> Result<WithFiles, ServeError> {
-    let workdir = body.workdir.clone().map_or_else(
-        || std::env::current_dir().unwrap_or_default(),
-        std::path::PathBuf::from,
-    );
-    parts.extend(super::upload::json_parts(
-        &body.parts,
-        &workdir,
-        max_upload,
-    )?);
-    let (task, named) = super::upload::inline_parts(&body.task, None, &workdir, max_upload)?;
+    let workdir = workdir_of(&body);
+    let budget = super::core::attachments::FileBudget::new(max_upload);
+    parts.extend(super::upload::json_parts(&body.parts, &workdir, &budget)?);
+    let (task, named) = super::upload::inline_parts(&body.task, None, &workdir, &budget)?;
     body.task = task;
     parts.extend(named);
     let mut filling = Vec::new();
@@ -195,8 +207,7 @@ fn with_files(
             ));
             continue;
         }
-        let (kept, named) =
-            super::upload::inline_parts(&text, Some(&region), &workdir, max_upload)?;
+        let (kept, named) = super::upload::inline_parts(&text, Some(&region), &workdir, &budget)?;
         parts.extend(named);
         regions.insert(input.clone(), kept);
         from.insert(input, region);

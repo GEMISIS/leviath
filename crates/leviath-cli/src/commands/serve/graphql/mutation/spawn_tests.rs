@@ -480,6 +480,39 @@ async fn this_servers_refusals_are_issues_beside_the_daemons() {
     }
 }
 
+/// A request whose workdir this server refuses has none of its attachments
+/// read: it is refused at `workdir`, and the file it names, which is not
+/// there, is never looked for.
+#[tokio::test]
+async fn a_refused_workdir_has_none_of_its_attachments_read() {
+    let root = tempfile::tempdir().expect("a workdir root");
+    let outside = tempfile::tempdir().expect("a workdir outside it");
+    let limits = ServeLimits {
+        workdir_root: Some(root.path().to_path_buf()),
+        ..Default::default()
+    };
+    let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
+    let answer = run(
+        state(control, limits),
+        SPAWN,
+        serde_json::json!({ "request": {
+            "source": { "blueprint": { "name": "coder" } },
+            "workdir": outside.path().to_string_lossy(),
+            "attachments": [{ "content": { "path": "not-there.png" } }],
+        } }),
+    )
+    .await;
+    let issues = answer["data"]["spawnRun"]["issues"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let paths: Vec<&str> = issues
+        .iter()
+        .filter_map(|issue| issue["path"].as_str())
+        .collect();
+    assert_eq!(paths, ["workdir"], "{answer}");
+}
+
 /// A daemon that answers with something that is neither a run nor a refusal,
 /// or is not there at all, is a GraphQL error carrying its code.
 #[tokio::test]

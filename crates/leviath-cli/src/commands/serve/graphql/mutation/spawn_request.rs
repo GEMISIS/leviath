@@ -267,6 +267,8 @@ pub(crate) struct SpawnRunRequest {
 pub(crate) struct Policy {
     /// The largest attachment, in bytes.
     pub(crate) max_bytes: u64,
+    /// What the attachments named by path may come to between them.
+    pub(crate) files: attachments::FileBudget,
 }
 
 /// One name read through its newtype, or an issue at `at`.
@@ -343,7 +345,7 @@ fn attachment(
 ) -> Option<Attachment> {
     let (default_name, data) = match write.content {
         AttachmentContentWrite::Path(path) => {
-            match attachments::read_within(&path, workdir, policy.max_bytes) {
+            match attachments::read_within(&path, workdir, &policy.files) {
                 Ok(part) => (Some(part.name), Some(part.data)),
                 Err(e) => {
                     let code = attachment_code(&e);
@@ -585,6 +587,18 @@ fn absolute(workdir: Option<String>) -> PathBuf {
 }
 
 impl SpawnRunRequest {
+    /// Where the run would work, and whether the request said so rather
+    /// than leaving it to where this server was started.
+    pub(crate) fn workdir(&self) -> (PathBuf, bool) {
+        (absolute(self.workdir.clone()), self.workdir.is_some())
+    }
+
+    /// Whether the request carries any attachments, which may be files read
+    /// from its workdir.
+    pub(crate) fn has_attachments(&self) -> bool {
+        self.attachments.as_ref().is_some_and(|a| !a.is_empty())
+    }
+
     /// The runtime's request with every value that did not read left out,
     /// beside the issues with those values; or only the issues, when the
     /// request names no source to check the rest against. This server's own

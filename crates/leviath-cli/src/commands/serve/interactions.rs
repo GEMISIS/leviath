@@ -146,8 +146,9 @@ async fn workdir_parts(
     super::blocking::blocking(move || match crate::runstate::read_meta(&id) {
         Ok(meta) => {
             let workdir = std::path::Path::new(&meta.workdir);
-            let mut parts = super::upload::json_parts(&listed, workdir, max_upload)?;
-            let (kept, named) = super::upload::inline_parts(&text, None, workdir, max_upload)?;
+            let budget = super::core::attachments::FileBudget::new(max_upload);
+            let mut parts = super::upload::json_parts(&listed, workdir, &budget)?;
+            let (kept, named) = super::upload::inline_parts(&text, None, workdir, &budget)?;
             parts.extend(named);
             Ok((kept, parts))
         }

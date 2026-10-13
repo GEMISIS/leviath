@@ -16,7 +16,7 @@ use axum::extract::multipart::Multipart;
 use leviath_core::mime::{Delivery, InboundPart, MimeType};
 use serde::{Deserialize, Serialize};
 
-use super::core::attachments;
+use super::core::attachments::{self, FileBudget};
 use super::core::error::ServeError;
 
 /// One entry of a JSON `parts` list.
@@ -47,24 +47,25 @@ fn delivery(word: &str) -> Result<Delivery, ServeError> {
 }
 
 /// A file inside `workdir` as a part, refused when the path escapes, the
-/// file is missing or empty, or the file is over `max_bytes`.
+/// file is missing, empty or not a file, or it is over what `budget` has
+/// left.
 ///
 /// The reading itself is [`attachments::read_within`], which GraphQL's
 /// `attachments` lists call too; this wraps its refusal in the status and body
 /// a REST client reads.
-fn read_within(path: &str, workdir: &Path, max_bytes: u64) -> Result<InboundPart, ServeError> {
-    attachments::read_within(path, workdir, max_bytes)
+fn read_within(path: &str, workdir: &Path, budget: &FileBudget) -> Result<InboundPart, ServeError> {
+    attachments::read_within(path, workdir, budget)
 }
 
 /// Every entry of a JSON `parts` list, read from the workdir.
 pub(super) fn json_parts(
     listed: &[PartRef],
     workdir: &Path,
-    max_bytes: u64,
+    budget: &FileBudget,
 ) -> Result<Vec<InboundPart>, ServeError> {
     let mut parts = Vec::with_capacity(listed.len());
     for item in listed {
-        let mut part = read_within(&item.path, workdir, max_bytes)?;
+        let mut part = read_within(&item.path, workdir, budget)?;
         part.region = item.region.clone();
         if let Some(name) = &item.name {
             part.name = name.clone();
@@ -88,7 +89,7 @@ pub(super) fn inline_parts(
     text: &str,
     region: Option<&str>,
     workdir: &Path,
-    max_bytes: u64,
+    budget: &FileBudget,
 ) -> Result<(String, Vec<InboundPart>), ServeError> {
     let (text, parts, unresolved) = leviath_core::mime::inline_refs::parts_from_text(
         text,
@@ -97,7 +98,7 @@ pub(super) fn inline_parts(
             let full = workdir.join(path);
             leviath_core::resolves_within(&full, workdir) && full.is_file()
         },
-        &mut |path| read_within(path, workdir, max_bytes),
+        &mut |path| read_within(path, workdir, budget),
     )?;
     // The command line warns the person typing; over HTTP the daemon's log is
     // where a typo'd path can be seen, since the request still goes through.
@@ -251,7 +252,7 @@ mod tests {
             deliver: Some("text".to_string()),
             caption: Some("v1".to_string()),
         }];
-        let parts = json_parts(&listed, dir.path(), 1024).unwrap();
+        let parts = json_parts(&listed, dir.path(), &FileBudget::new(1024)).unwrap();
         assert_eq!(parts[0].name, "the-hero");
         assert_eq!(parts[0].region.as_deref(), Some("art"));
         assert_eq!(parts[0].mime_type.as_ref().unwrap().as_str(), "image/png");
@@ -265,7 +266,7 @@ mod tests {
             deliver: None,
             caption: None,
         }];
-        let parts = json_parts(&bare, dir.path(), 1024).unwrap();
+        let parts = json_parts(&bare, dir.path(), &FileBudget::new(1024)).unwrap();
         assert_eq!(parts[0].name, "hero.png");
         assert_eq!(parts[0].mime_type, None);
 
@@ -278,7 +279,9 @@ mod tests {
                 deliver: deliver.map(str::to_string),
                 caption: None,
             }];
-            json_parts(&listed, dir.path(), max).unwrap_err().status()
+            json_parts(&listed, dir.path(), &FileBudget::new(max))
+                .unwrap_err()
+                .status()
         };
         assert_eq!(refused("../x.png", None, None, 1024), StatusCode::FORBIDDEN);
         assert_eq!(
@@ -313,7 +316,7 @@ mod tests {
             "edit @hero.png and \\@literal, not @../etc/passwd or @channel",
             Some("task"),
             dir.path(),
-            1024,
+            &FileBudget::new(1024),
         )
         .unwrap();
         assert_eq!(
@@ -323,11 +326,17 @@ mod tests {
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].name, "hero.png");
         assert_eq!(parts[0].region.as_deref(), Some("task"));
-        let (_, typed) = inline_parts("@hero.png:image/webp", None, dir.path(), 1024).unwrap();
+        let (_, typed) = inline_parts(
+            "@hero.png:image/webp",
+            None,
+            dir.path(),
+            &FileBudget::new(1024),
+        )
+        .unwrap();
         assert_eq!(typed[0].mime_type.as_ref().unwrap().as_str(), "image/webp");
         assert!(typed[0].region.is_none());
         assert_eq!(
-            inline_parts("@hero.png", None, dir.path(), 4)
+            inline_parts("@hero.png", None, dir.path(), &FileBudget::new(4))
                 .unwrap_err()
                 .status(),
             StatusCode::PAYLOAD_TOO_LARGE
