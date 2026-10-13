@@ -54,21 +54,27 @@ pub(crate) fn read_within(
             "part path '{path}' is outside the run's working directory"
         )));
     }
-    let unreadable =
-        |e: std::io::Error| ServeError::BadRequest(format!("part '{path}' could not be read: {e}"));
-    let (file, meta) = std::fs::File::open(&full)
+    let left = budget.left.get();
+    // Opened, looked at and read in one chain, so a failure anywhere is the
+    // one refusal; anything but a regular file is not read at all.
+    let (meta, data) = std::fs::File::open(&full)
         .and_then(|file| file.metadata().map(|meta| (file, meta)))
-        .map_err(unreadable)?;
+        .and_then(|(file, meta)| {
+            let mut data = Vec::new();
+            match meta.is_file() {
+                true => file
+                    .take(left.saturating_add(1))
+                    .read_to_end(&mut data)
+                    .map(|_| (meta, data)),
+                false => Ok((meta, data)),
+            }
+        })
+        .map_err(|e| ServeError::BadRequest(format!("part '{path}' could not be read: {e}")))?;
     if !meta.is_file() {
         return Err(ServeError::BadRequest(format!(
             "part '{path}' is not a file"
         )));
     }
-    let left = budget.left.get();
-    let mut data = Vec::new();
-    file.take(left.saturating_add(1))
-        .read_to_end(&mut data)
-        .map_err(unreadable)?;
     let size = (data.len() as u64).max(meta.len());
     if size > left {
         return Err(ServeError::PayloadTooLarge(format!(

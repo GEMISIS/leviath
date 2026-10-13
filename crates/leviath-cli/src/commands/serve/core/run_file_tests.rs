@@ -102,6 +102,10 @@ async fn a_file_with_no_start_or_a_step_that_will_not_decode_cannot_be_walked() 
         assert_eq!(initial(&run_id, &reader).unwrap_err().code(), "INTERNAL");
         let walked = walk(&run_id, &reader, &mut |_| ControlFlow::Continue(()));
         assert_eq!(walked.unwrap_err().code(), "INTERNAL");
+        let pointed = walk_points(&run_id, &reader, &mut |_, _| ControlFlow::Continue(()));
+        assert_eq!(pointed.unwrap_err().code(), "INTERNAL");
+        let paired = walk_pairs(&run_id, &reader, &mut |_| ControlFlow::Continue(()));
+        assert_eq!(paired.unwrap_err().code(), "INTERNAL");
 
         let run_id = recorded();
         bad_step(&run_id, 1);

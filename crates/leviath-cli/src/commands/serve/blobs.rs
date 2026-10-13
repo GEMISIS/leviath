@@ -246,11 +246,23 @@ fn file_body(
     known: Option<MimeType>,
 ) -> Option<(Payload, MimeType)> {
     use std::io::Read as _;
-    let file = std::fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    if len <= LOADED_BYTES {
-        let mut bytes = Vec::with_capacity(len as usize);
-        (&file).read_to_end(&mut bytes).ok()?;
+    // Opened, looked at and, when small, read in one chain: a failure
+    // anywhere is the one miss, and anything but a regular file is not read.
+    let (file, len, loaded) = std::fs::File::open(path)
+        .and_then(|file| file.metadata().map(|meta| (file, meta)))
+        .and_then(|(file, meta)| {
+            let mut bytes = Vec::new();
+            match meta.is_file() && meta.len() <= LOADED_BYTES {
+                true => (&file)
+                    .read_to_end(&mut bytes)
+                    .map(|_| (file, meta, Some(bytes))),
+                false => Ok((file, meta, None)),
+            }
+        })
+        .ok()
+        .filter(|(_, meta, _)| meta.is_file())
+        .map(|(file, meta, loaded)| (file, meta.len(), loaded))?;
+    if let Some(bytes) = loaded {
         let mime_type = known.unwrap_or_else(|| registry.resolve(None, name, &bytes));
         return Some((Payload::Loaded(bytes), mime_type));
     }

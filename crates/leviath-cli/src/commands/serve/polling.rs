@@ -2357,6 +2357,81 @@ mod tests {
         .await;
     }
 
+    /// A sweep asked for while one is running is folded into it as one more
+    /// pass, and the sweep ends once that pass has run.
+    #[tokio::test]
+    async fn a_sweep_asked_for_while_one_runs_is_one_more_pass() {
+        crate::runstate::with_isolated_runs_dir_async("sweep_twice", |_d| async move {
+            let (state, _rx) = state_with(no_daemon_client());
+            let client = reqwest::Client::new();
+            let outbox = outbox();
+            sweep(&state, &client, &outbox);
+            sweep(&state, &client, &outbox);
+            let held = Arc::clone(&outbox);
+            leviath_testkit::wait_until("both passes are done", move || held.begin_sweep()).await;
+        })
+        .await;
+    }
+
+    /// A daemon serving one connection that sends nothing, and hangs up when
+    /// told to.
+    fn quiet_daemon(
+        dir: &std::path::Path,
+        hang_up: tokio::sync::oneshot::Receiver<()>,
+    ) -> (ControlClient, tokio::task::JoinHandle<()>) {
+        let id = control_id(dir);
+        let mut listener = bind_control_listener(&id).unwrap();
+        let served = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let _ = hang_up.await;
+            drop(stream);
+        });
+        (ControlClient::new(id), served)
+    }
+
+    /// While a stream is up and quiet, the relay still sweeps on its own
+    /// schedule: a run whose completion it never heard about gets its
+    /// webhook on the next round.
+    #[tokio::test]
+    async fn a_quiet_stream_is_swept_on_schedule() {
+        crate::runstate::with_isolated_runs_dir_async("sweep_schedule", |_d| async move {
+            let (url, receiver) = fake_receiver(vec![200]).await;
+            finished_with_callback("unheard", &url);
+            let dir = tempfile::tempdir().unwrap();
+            let (hang_up, told) = tokio::sync::oneshot::channel();
+            let (control, served) = quiet_daemon(dir.path(), told);
+            let (state, _rx) = state_with(control);
+            let relay = tokio::spawn(async move {
+                let client = reqwest::Client::new();
+                let mut link = LinkWatch::new(&state);
+                let timing = Timing {
+                    backoff: Duration::ZERO,
+                    sweep_every: Duration::from_millis(50),
+                    settle: Duration::from_millis(50),
+                };
+                let mut sweeps = Sweeps::new(&timing);
+                consume_once(
+                    &state,
+                    &client,
+                    &outbox(),
+                    &mut link,
+                    &mut None,
+                    &mut sweeps,
+                )
+                .await;
+            });
+            let requests = tokio::time::timeout(Duration::from_secs(20), receiver)
+                .await
+                .expect("the scheduled sweep sent it")
+                .unwrap();
+            assert!(requests[0].contains("agent_completed:unheard"));
+            hang_up.send(()).unwrap();
+            served.await.unwrap();
+            relay.await.unwrap();
+        })
+        .await;
+    }
+
     /// No more webhooks are sent at once than the outbox has room for: one
     /// started while every place is taken waits until one frees up.
     #[tokio::test]
