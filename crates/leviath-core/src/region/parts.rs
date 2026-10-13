@@ -62,11 +62,6 @@ impl EntryContent {
         self.parts.iter().all(|p| !p.is_stored())
     }
 
-    /// Whether any part is stored by reference.
-    pub fn has_stored(&self) -> bool {
-        !self.is_text_only()
-    }
-
     /// The stored parts, in order.
     pub fn stored(&self) -> impl Iterator<Item = &Part> {
         self.parts.iter().filter(|p| p.is_stored())
@@ -113,12 +108,6 @@ impl EntryContent {
                 (None, PartBody::Stored(b)) => crate::text::estimate_tokens(&b.stand_in),
             })
             .sum()
-    }
-
-    /// The same content with `part` appended.
-    #[cfg(test)]
-    pub fn with_part(self, part: Part) -> Self {
-        self.with_parts(std::iter::once(part))
     }
 
     /// The same content with every part of `parts` appended, rendered once.
@@ -334,7 +323,6 @@ mod tests {
         assert_eq!(c.to_string(), "hello");
         assert_eq!(format!("{c:?}"), "\"hello\"");
         assert!(c.is_text_only());
-        assert!(!c.has_stored());
         assert_eq!(c.stored_count(), 0);
         assert_eq!(c.parts().len(), 1);
         assert_eq!(serde_json::to_string(&c).unwrap(), "\"hello\"");
@@ -371,7 +359,7 @@ mod tests {
     fn stored_parts_render_their_stand_in_and_serialise_as_parts() {
         let c = EntryContent::from_parts(vec![Part::text("look:"), stored("a.png")]);
         assert_eq!(c.as_str(), "look:\n[image/png, 3 B] a.png");
-        assert!(c.has_stored());
+        assert!(!c.is_text_only());
         assert_eq!(c.stored_count(), 1);
         assert!(format!("{c:?}").contains("EntryContent"));
         let json = serde_json::to_string(&c).unwrap();
@@ -379,7 +367,7 @@ mod tests {
         assert!(json.contains("\"sha256\""));
         let back: EntryContent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, c);
-        let with = EntryContent::text("first\n").with_part(stored("b.png"));
+        let with = EntryContent::text("first\n").with_parts([stored("b.png")]);
         assert_eq!(with.as_str(), "first\n[image/png, 3 B] b.png");
         let parts_only: EntryContent = vec![stored("c.png")].into();
         assert_eq!(parts_only.parts().len(), 1);

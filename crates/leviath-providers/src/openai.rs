@@ -253,13 +253,6 @@ impl OpenAIProvider {
         }
     }
 
-    /// How often a video job is polled. Tests shorten it.
-    #[must_use]
-    pub fn with_poll_interval(mut self, interval: std::time::Duration) -> Self {
-        self.poll_interval = interval;
-        self
-    }
-
     /// Run a media model: images, video, speech or transcription.
     async fn run_media(
         &self,

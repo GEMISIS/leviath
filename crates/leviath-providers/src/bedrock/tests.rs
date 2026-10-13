@@ -14,11 +14,12 @@ fn client() -> reqwest::Client {
 
 /// A provider whose every host is `url`.
 fn provider_at(url: &str) -> BedrockProvider {
-    BedrockProvider::new(client(), "ABSK-test".to_string())
+    let mut p = BedrockProvider::new(client(), "ABSK-test".to_string())
         .with_base_url(Some(url.to_string()))
         .with_control_url(Some(url.to_string()))
-        .with_mantle_url(Some(url.to_string()))
-        .with_pricing_url(Some(format!("{url}/prices")))
+        .with_mantle_url(Some(url.to_string()));
+    p.pricing_url = Some(format!("{url}/prices"));
+    p
 }
 
 fn request(model: &str) -> InferenceRequest {
@@ -242,10 +243,10 @@ fn a_gateway_replaces_the_runtime_and_silences_the_side_calls() {
     assert_eq!(p.control_base(), None);
     assert_eq!(p.mantle_hosts(), None);
     assert_eq!(p.price_url(), None);
-    let p = p
+    let mut p = p
         .with_control_url(Some("http://control.local/".to_string()))
-        .with_mantle_url(Some("http://mantle.local/".to_string()))
-        .with_pricing_url(Some("http://prices.local/index.json".to_string()));
+        .with_mantle_url(Some("http://mantle.local/".to_string()));
+    p.pricing_url = Some("http://prices.local/index.json".to_string());
     assert_eq!(p.control_base().as_deref(), Some("http://control.local"));
     assert_eq!(
         p.mantle_hosts(),
@@ -258,8 +259,7 @@ fn a_gateway_replaces_the_runtime_and_silences_the_side_calls() {
     let p = p
         .with_base_url(None)
         .with_control_url(None)
-        .with_mantle_url(None)
-        .with_pricing_url(None);
+        .with_mantle_url(None);
     assert_eq!(p.runtime_base(), "http://gateway.local/bedrock");
     assert_eq!(p.control_base().as_deref(), Some("http://control.local"));
 }

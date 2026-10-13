@@ -529,12 +529,6 @@ impl Region {
         self.content.iter().map(|e| e.content.stored_count()).sum()
     }
 
-    /// Enable taint tracking for this region.
-    pub fn with_taint_tracking(mut self) -> Self {
-        self.taint = Some(crate::taint::RegionTaint::new());
-        self
-    }
-
     /// Enable taint tracking on this region (mutable).
     pub fn enable_taint_tracking(&mut self) {
         if self.taint.is_none() {
@@ -675,24 +669,6 @@ impl Region {
         let entry = self.content.remove(index);
         self.current_tokens = self.current_tokens.saturating_sub(entry.tokens);
         true
-    }
-
-    /// Add an entry with a taint level.
-    #[cfg(test)]
-    pub fn add_tainted_entry(
-        &mut self,
-        content: impl Into<EntryContent>,
-        tokens: usize,
-        taint_level: crate::taint::TaintLevel,
-    ) -> crate::error::Result<()> {
-        self.push_entry(
-            content.into(),
-            tokens,
-            None,
-            EntryKind::default(),
-            taint_level,
-            None,
-        )
     }
 
     /// Add a typed entry with a taint level.
@@ -1865,8 +1841,8 @@ mod tests {
 
     #[test]
     fn test_region_with_taint_tracking() {
-        let region =
-            Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+        let mut region = Region::new("test".to_string(), RegionKind::Temporary, 1000);
+        region.enable_taint_tracking();
         assert!(region.taint.is_some());
         assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
     }
@@ -1891,12 +1867,13 @@ mod tests {
 
     #[test]
     fn test_add_tainted_entry() {
-        let mut region =
-            Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+        let mut region = Region::new("test".to_string(), RegionKind::Temporary, 1000);
+        region.enable_taint_tracking();
         region
-            .add_tainted_entry(
+            .add_typed_tainted_entry(
                 "secret data".to_string(),
                 10,
+                EntryKind::Text,
                 crate::taint::TaintLevel::Private,
             )
             .unwrap();
@@ -1909,11 +1886,12 @@ mod tests {
 
     #[test]
     fn test_add_tainted_entry_checks_budget() {
-        let mut region =
-            Region::new("test".to_string(), RegionKind::Temporary, 10).with_taint_tracking();
-        let result = region.add_tainted_entry(
+        let mut region = Region::new("test".to_string(), RegionKind::Temporary, 10);
+        region.enable_taint_tracking();
+        let result = region.add_typed_tainted_entry(
             "too much".to_string(),
             20,
+            EntryKind::Text,
             crate::taint::TaintLevel::Internal,
         );
         assert!(result.is_err());
@@ -1921,21 +1899,31 @@ mod tests {
 
     #[test]
     fn test_add_entry_tracks_taint_as_public() {
-        let mut region =
-            Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+        let mut region = Region::new("test".to_string(), RegionKind::Temporary, 1000);
+        region.enable_taint_tracking();
         region.add_entry("public data".to_string(), 10).unwrap();
         assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
     }
 
     #[test]
     fn test_taint_recovery_on_remove_oldest() {
-        let mut region =
-            Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+        let mut region = Region::new("test".to_string(), RegionKind::Temporary, 1000);
+        region.enable_taint_tracking();
         region
-            .add_tainted_entry("private".to_string(), 10, crate::taint::TaintLevel::Private)
+            .add_typed_tainted_entry(
+                "private".to_string(),
+                10,
+                EntryKind::Text,
+                crate::taint::TaintLevel::Private,
+            )
             .unwrap();
         region
-            .add_tainted_entry("public".to_string(), 10, crate::taint::TaintLevel::Public)
+            .add_typed_tainted_entry(
+                "public".to_string(),
+                10,
+                EntryKind::Text,
+                crate::taint::TaintLevel::Public,
+            )
             .unwrap();
         assert_eq!(
             region.taint_level(),
@@ -1948,10 +1936,15 @@ mod tests {
 
     #[test]
     fn test_taint_recovery_on_clear() {
-        let mut region =
-            Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+        let mut region = Region::new("test".to_string(), RegionKind::Temporary, 1000);
+        region.enable_taint_tracking();
         region
-            .add_tainted_entry("private".to_string(), 10, crate::taint::TaintLevel::Private)
+            .add_typed_tainted_entry(
+                "private".to_string(),
+                10,
+                EntryKind::Text,
+                crate::taint::TaintLevel::Private,
+            )
             .unwrap();
         region.clear();
         assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
@@ -1966,14 +1959,24 @@ mod tests {
                 eviction_strategy: EvictionStrategy::PerItem,
             },
             50000,
-        )
-        .with_taint_tracking();
+        );
+        region.enable_taint_tracking();
 
         region
-            .add_tainted_entry("private".to_string(), 10, crate::taint::TaintLevel::Private)
+            .add_typed_tainted_entry(
+                "private".to_string(),
+                10,
+                EntryKind::Text,
+                crate::taint::TaintLevel::Private,
+            )
             .unwrap();
         region
-            .add_tainted_entry("public1".to_string(), 10, crate::taint::TaintLevel::Public)
+            .add_typed_tainted_entry(
+                "public1".to_string(),
+                10,
+                EntryKind::Text,
+                crate::taint::TaintLevel::Public,
+            )
             .unwrap();
         assert_eq!(
             region.taint_level(),
@@ -1982,7 +1985,12 @@ mod tests {
 
         // Third entry evicts the private one
         region
-            .add_tainted_entry("public2".to_string(), 10, crate::taint::TaintLevel::Public)
+            .add_typed_tainted_entry(
+                "public2".to_string(),
+                10,
+                EntryKind::Text,
+                crate::taint::TaintLevel::Public,
+            )
             .unwrap();
         assert_eq!(region.entry_count(), 2);
         assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
@@ -1997,8 +2005,8 @@ mod tests {
                 eviction_strategy: EvictionStrategy::PerItem,
             },
             1000,
-        )
-        .with_taint_tracking();
+        );
+        region.enable_taint_tracking();
 
         region
             .add_typed_tainted_entry(
@@ -2072,8 +2080,8 @@ mod tests {
                 eviction_strategy: EvictionStrategy::PerItem,
             },
             5,
-        )
-        .with_taint_tracking();
+        );
+        region.enable_taint_tracking();
 
         let result = region.add_typed_tainted_entry(
             "too large".to_string(),
@@ -2100,7 +2108,7 @@ mod tests {
             },
             1000,
         );
-        // No .with_taint_tracking()
+        // No taint tracking
 
         region
             .add_typed_tainted_entry(
@@ -2288,8 +2296,8 @@ mod tests {
 
     #[test]
     fn test_remove_oldest_turn_group_calls_taint_remove_for_each_entry() {
-        let mut region =
-            Region::new("conv".to_string(), RegionKind::Temporary, 50000).with_taint_tracking();
+        let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 50000);
+        region.enable_taint_tracking();
 
         // AssistantTurn (Private) + 1 ToolResult (Internal) + 1 trailing Public entry
         region
@@ -2320,9 +2328,10 @@ mod tests {
             )
             .unwrap();
         region
-            .add_tainted_entry(
+            .add_typed_tainted_entry(
                 "public stuff".to_string(),
                 5,
+                EntryKind::Text,
                 crate::taint::TaintLevel::Public,
             )
             .unwrap();
@@ -2420,8 +2429,8 @@ mod tests {
 
     #[test]
     fn test_add_entry_with_metadata_tracks_taint_as_public() {
-        let mut region =
-            Region::new("data".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000);
+        region.enable_taint_tracking();
 
         region
             .add_entry_with_metadata("content".to_string(), 10, serde_json::json!({"key": "val"}))
@@ -2439,8 +2448,8 @@ mod tests {
 
     #[test]
     fn test_add_typed_entry_tracks_taint_as_public() {
-        let mut region =
-            Region::new("conv".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+        let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 1000);
+        region.enable_taint_tracking();
 
         region
             .add_typed_entry(
@@ -2641,26 +2650,29 @@ mod tests {
 
     #[test]
     fn test_remove_entries_by_prefix_with_taint_tracking() {
-        let mut region =
-            Region::new("system".to_string(), RegionKind::Pinned, 50000).with_taint_tracking();
+        let mut region = Region::new("system".to_string(), RegionKind::Pinned, 50000);
+        region.enable_taint_tracking();
         region
-            .add_tainted_entry(
+            .add_typed_tainted_entry(
                 "[Stage instructions: Be terse.]".to_string(),
                 10,
+                EntryKind::Text,
                 crate::taint::TaintLevel::Private,
             )
             .unwrap();
         region
-            .add_tainted_entry(
+            .add_typed_tainted_entry(
                 "Core identity block".to_string(),
                 20,
+                EntryKind::Text,
                 crate::taint::TaintLevel::Public,
             )
             .unwrap();
         region
-            .add_tainted_entry(
+            .add_typed_tainted_entry(
                 "[Stage instructions: Be verbose.]".to_string(),
                 15,
+                EntryKind::Text,
                 crate::taint::TaintLevel::Internal,
             )
             .unwrap();
@@ -2708,23 +2720,38 @@ mod tests {
                 eviction_strategy: EvictionStrategy::Bulk { overflow: 2 },
             },
             50000,
-        )
-        .with_taint_tracking();
+        );
+        region.enable_taint_tracking();
 
         // Add 5 entries (3+2): at threshold, no eviction
         region
-            .add_tainted_entry("private".to_string(), 10, crate::taint::TaintLevel::Private)
+            .add_typed_tainted_entry(
+                "private".to_string(),
+                10,
+                EntryKind::Text,
+                crate::taint::TaintLevel::Private,
+            )
             .unwrap();
         for i in 1..5 {
             region
-                .add_tainted_entry(format!("pub{}", i), 10, crate::taint::TaintLevel::Public)
+                .add_typed_tainted_entry(
+                    format!("pub{}", i),
+                    10,
+                    EntryKind::Text,
+                    crate::taint::TaintLevel::Public,
+                )
                 .unwrap();
         }
         assert_eq!(region.entry_count(), 5);
 
         // 6th entry triggers bulk eviction to max_items=3
         region
-            .add_tainted_entry("pub5".to_string(), 10, crate::taint::TaintLevel::Public)
+            .add_typed_tainted_entry(
+                "pub5".to_string(),
+                10,
+                EntryKind::Text,
+                crate::taint::TaintLevel::Public,
+            )
             .unwrap();
         assert_eq!(region.entry_count(), 3);
         // Private entry was evicted, only public remain
@@ -2794,7 +2821,12 @@ mod tests {
         // When taint tracking is NOT enabled, the taint level is silently ignored.
         let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000);
         region
-            .add_tainted_entry("data".to_string(), 10, crate::taint::TaintLevel::Private)
+            .add_typed_tainted_entry(
+                "data".to_string(),
+                10,
+                EntryKind::Text,
+                crate::taint::TaintLevel::Private,
+            )
             .unwrap();
         assert_eq!(region.entry_count(), 1);
         assert_eq!(region.taint_level(), None);
@@ -3306,8 +3338,8 @@ mod tests {
             "kv".to_string(),
             RegionKind::HashMap { max_entries: None },
             10_000,
-        )
-        .with_taint_tracking();
+        );
+        region.enable_taint_tracking();
         region
             .upsert_by_key("k1", "value one".to_string(), 10)
             .unwrap();
@@ -3332,8 +3364,8 @@ mod tests {
                 max_entries: Some(1),
             },
             10_000,
-        )
-        .with_taint_tracking();
+        );
+        region.enable_taint_tracking();
         region
             .upsert_by_key("first", "aaa".to_string(), 10)
             .unwrap();

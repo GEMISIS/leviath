@@ -275,11 +275,6 @@ impl ToolExecutor {
         self.clients.contains_key(server_name)
     }
 
-    /// Get the number of connected servers.
-    pub fn server_count(&self) -> usize {
-        self.clients.len()
-    }
-
     /// Map a ToolResult into an ExecutionResult.
     ///
     /// The model-readable blocks contribute to `text`; the binary payloads
@@ -399,7 +394,7 @@ mod tests {
     #[test]
     fn test_tool_executor_creation() {
         let executor = ToolExecutor::new();
-        assert_eq!(executor.server_count(), 0);
+        assert!(!executor.has_client("server1"));
     }
 
     // ─── ToolExecutor::default ──────────────────────────────────────────
@@ -407,7 +402,7 @@ mod tests {
     #[test]
     fn test_tool_executor_default() {
         let executor = ToolExecutor::default();
-        assert_eq!(executor.server_count(), 0);
+        assert!(!executor.has_client("server1"));
     }
 
     // ─── map_result: text content ───────────────────────────────────────
@@ -574,7 +569,6 @@ mod tests {
         let mut executor = ToolExecutor::new();
         let result = executor.shutdown_all().await;
         assert!(result.is_ok());
-        assert_eq!(executor.server_count(), 0);
     }
 
     // ─── one lock per server ─────────────────────────────────────────────
@@ -678,7 +672,6 @@ mod tests {
             executor.remove_client("slow").is_none(),
             "a busy server is kept"
         );
-        assert_eq!(executor.server_count(), 1);
         assert!(
             executor.has_client("slow"),
             "kept, which is how a caller tells a busy server from an unknown one"
@@ -702,11 +695,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_client_and_server_count_reflects_it() {
+    async fn add_client_registers_the_server() {
         let mut executor = ToolExecutor::new();
         let client = spawn_echo_client().await;
         let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
-        assert_eq!(executor.server_count(), 1);
+        assert!(executor.has_client("server1"));
     }
 
     /// Removing a server takes back its client and drops the aliases that
@@ -717,11 +710,11 @@ mod tests {
         let mut executor = ToolExecutor::new();
         let client = spawn_echo_client().await;
         let _ = executor.add_client_advertised("server1".to_string(), client, &HashSet::new());
-        assert_eq!(executor.server_count(), 1);
+        assert!(executor.has_client("server1"));
 
         assert!(executor.remove_client("nope").is_none());
         let mut taken = executor.remove_client("server1").expect("was registered");
-        assert_eq!(executor.server_count(), 0);
+        assert!(!executor.has_client("server1"));
         let result = executor
             .execute("server1__echo", serde_json::json!({}))
             .await;
@@ -785,7 +778,7 @@ mod tests {
 
         let result = executor.shutdown_all().await;
         assert!(result.is_ok());
-        assert_eq!(executor.server_count(), 0);
+        assert!(!executor.has_client("server1"));
     }
 
     // ─── ExecutionResult ────────────────────────────────────────────────

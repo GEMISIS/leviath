@@ -383,8 +383,10 @@ impl ModelMime {
             .all(|w| self.input.iter().any(|have| pattern_covers(have, w)))
     }
 
-    /// Whether the model takes anything beyond text.
-    pub fn takes_mime(&self) -> bool {
+    /// Whether the model takes anything beyond text: what the tables' tests
+    /// check for each model they list.
+    #[cfg(test)]
+    pub(crate) fn takes_mime(&self) -> bool {
         self.input.iter().any(|p| !p.starts_with("text/"))
     }
 }

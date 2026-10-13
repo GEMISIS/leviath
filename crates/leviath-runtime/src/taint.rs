@@ -442,8 +442,8 @@ mod tests {
 
     fn make_window_with_taint(taint: TaintLevel) -> ContextWindow {
         let mut window = ContextWindow::new(10000);
-        let region =
-            Region::new("conv".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
+        let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 5000);
+        region.enable_taint_tracking();
         window.add_region(region);
         if taint != TaintLevel::Public {
             window
@@ -697,10 +697,10 @@ clearance = "public"
     fn gate_blocked_identifies_source_regions() {
         let mut gate = TaintGate::new(SecurityConfig::default());
         let mut window = ContextWindow::new(10000);
-        let r1 =
-            Region::new("clean".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
-        let r2 =
-            Region::new("dirty".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
+        let mut r1 = Region::new("clean".to_string(), RegionKind::Temporary, 5000);
+        r1.enable_taint_tracking();
+        let mut r2 = Region::new("dirty".to_string(), RegionKind::Temporary, 5000);
+        r2.enable_taint_tracking();
         window.add_region(r1);
         window.add_region(r2);
 

@@ -151,13 +151,6 @@ impl JsonRpcMessage {
             error: None,
         }
     }
-
-    /// Whether this message is a notification: a method call with no id, which
-    /// must never be answered.
-    #[cfg(test)]
-    pub fn is_notification(&self) -> bool {
-        self.id.is_none() && self.method.is_some()
-    }
 }
 
 /// A JSON-RPC 2.0 error object.
@@ -590,7 +583,6 @@ mod tests {
             json(&msg),
             r#"{"jsonrpc":"2.0","id":7,"result":{"sessionId":"s1"}}"#
         );
-        assert!(!msg.is_notification());
     }
 
     #[test]
@@ -604,7 +596,6 @@ mod tests {
             json(&msg),
             r#"{"jsonrpc":"2.0","id":"abc","error":{"code":-32601,"message":"no such method"}}"#
         );
-        assert!(!msg.is_notification());
     }
 
     #[test]
@@ -650,7 +641,6 @@ mod tests {
         );
         // No `id` key at all - a notification must never invite a response.
         assert!(!json(&msg).contains("\"id\""));
-        assert!(msg.is_notification());
     }
 
     #[test]
@@ -664,13 +654,6 @@ mod tests {
             json(&msg),
             r#"{"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{"sessionId":"s1"}}"#
         );
-        assert!(!msg.is_notification());
-    }
-
-    #[test]
-    fn a_response_with_neither_id_nor_method_is_not_a_notification() {
-        let msg: JsonRpcMessage = serde_json::from_str(r#"{"jsonrpc":"2.0"}"#).unwrap();
-        assert!(!msg.is_notification());
     }
 
     #[test]

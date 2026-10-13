@@ -1197,8 +1197,8 @@ mod tests {
     #[test]
     fn test_add_tainted_to_region() {
         let mut window = ContextWindow::new(10000);
-        let region =
-            Region::new("tools".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
+        let mut region = Region::new("tools".to_string(), RegionKind::Temporary, 5000);
+        region.enable_taint_tracking();
         window.add_region(region);
 
         window
@@ -1237,8 +1237,10 @@ mod tests {
     #[test]
     fn test_overall_taint_is_max_across_regions() {
         let mut window = ContextWindow::new(10000);
-        let r1 = Region::new("a".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
-        let r2 = Region::new("b".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
+        let mut r1 = Region::new("a".to_string(), RegionKind::Temporary, 5000);
+        r1.enable_taint_tracking();
+        let mut r2 = Region::new("b".to_string(), RegionKind::Temporary, 5000);
+        r2.enable_taint_tracking();
         window.add_region(r1);
         window.add_region(r2);
 
@@ -1270,9 +1272,10 @@ mod tests {
     #[test]
     fn test_taint_summary() {
         let mut window = ContextWindow::new(10000);
-        let r1 = Region::new("conv".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
-        let r2 =
-            Region::new("tools".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
+        let mut r1 = Region::new("conv".to_string(), RegionKind::Temporary, 5000);
+        r1.enable_taint_tracking();
+        let mut r2 = Region::new("tools".to_string(), RegionKind::Temporary, 5000);
+        r2.enable_taint_tracking();
         window.add_region(r1);
         window.add_region(r2);
 
@@ -1304,7 +1307,8 @@ mod tests {
     fn test_taint_recovery_through_eviction() {
         with_tracing(|| {});
         let mut window = ContextWindow::new(100);
-        let r = Region::new("temp".to_string(), RegionKind::Temporary, 100).with_taint_tracking();
+        let mut r = Region::new("temp".to_string(), RegionKind::Temporary, 100);
+        r.enable_taint_tracking();
         window.add_region(r);
 
         window
@@ -3968,7 +3972,7 @@ mod tests {
     #[test]
     fn test_add_tainted_to_region_propagates_budget_error() {
         // Region is found, but the entry exceeds its token budget, so the
-        // inner `add_tainted_entry` error must propagate through the `?`.
+        // region's refusal must come back out of `typed_write`.
         let mut window = ContextWindow::new(10_000);
         let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 10);
         region.enable_taint_tracking();

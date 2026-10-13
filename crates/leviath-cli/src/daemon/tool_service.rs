@@ -1877,9 +1877,9 @@ pub(crate) mod tests {
         let hub = InteractionHub::new();
         // `install_tool` writes into the scan dir rather than the real
         // `~/.leviath/tools`, so a test install is what the next refresh finds.
-        let builtins = Arc::new(leviath_tools::BuiltinTools::new(
-            leviath_tools::ToolContext::new(workdir).with_tools_dir(Some(scan_dir.clone())),
-        ));
+        let mut ctx = leviath_tools::ToolContext::new(workdir);
+        ctx.tools_dir = Some(scan_dir.clone());
+        let builtins = Arc::new(leviath_tools::BuiltinTools::new(ctx));
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let mut allow = HashMap::new();
         // The write tools and the installer default to Ask; allow them so tests
@@ -3952,7 +3952,7 @@ pub(crate) mod tests {
             content.as_str().contains("text/plain block of"),
             "{content}"
         );
-        assert!(!content.has_stored());
+        assert!(content.is_text_only());
     }
 
     /// The store the answer tests give their tools.
@@ -4580,7 +4580,7 @@ mod mcp_content_tests {
             out.as_str(),
             "the answer\n[image/png block of 11 B dropped: this run has no blob store]"
         );
-        assert!(!out.has_stored());
+        assert!(out.is_text_only());
         // Bytes with neither a type nor a name are still accounted for.
         let nameless = with_attached(
             "t",

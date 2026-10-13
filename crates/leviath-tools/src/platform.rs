@@ -100,8 +100,10 @@ impl PlatformCapabilities {
         Self::desktop()
     }
 
-    /// Build a capability set from an explicit collection (tests, future hosts).
-    pub fn from_capabilities(caps: impl IntoIterator<Item = ToolCapability>) -> Self {
+    /// Build a capability set from an explicit collection, for a test that
+    /// needs a platform no build target has.
+    #[cfg(test)]
+    pub(crate) fn from_capabilities(caps: impl IntoIterator<Item = ToolCapability>) -> Self {
         Self {
             capabilities: caps.into_iter().collect(),
         }

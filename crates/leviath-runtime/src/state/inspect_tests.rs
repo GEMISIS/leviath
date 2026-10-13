@@ -9,6 +9,15 @@ use leviath_core::taint::TaintLevel;
 use leviath_core::{RegionKind, region::EntryKind as CoreKind};
 use serde_json::json;
 
+/// The content an [`EntryState`] holds: its parts when it has any, and its
+/// text as one plain part when it has none. The inverse of [`entry_of`].
+fn content_of(entry: &EntryState) -> EntryContent {
+    match entry.parts.is_empty() {
+        true => EntryContent::text(entry.text.clone()),
+        false => EntryContent::from_parts(entry.parts.iter().filter_map(part_from).collect()),
+    }
+}
+
 fn agent(stage: &str, status: AgentStatus) -> AgentState {
     AgentState {
         agent_id: "a".to_string(),

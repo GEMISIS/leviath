@@ -155,7 +155,7 @@ pub(crate) mod tests {
 
     #[test]
     fn platform_satisfies_caps_gates_on_support() {
-        use leviath_tools::{PlatformCapabilities, ToolCapability};
+        use leviath_tools::PlatformCapabilities;
         // Empty requirement is always satisfied.
         let mobile = PlatformCapabilities::mobile();
         assert!(platform_satisfies_caps(&mobile, &[]));
@@ -163,11 +163,7 @@ pub(crate) mod tests {
         assert!(platform_satisfies_caps(&mobile, &["network".to_string()]));
         assert!(!platform_satisfies_caps(&mobile, &["shell".to_string()]));
         // An unknown cap name is never satisfiable, even on a full desktop.
-        let desktop = PlatformCapabilities::from_capabilities([
-            ToolCapability::Network,
-            ToolCapability::FileSystem,
-            ToolCapability::ProcessSpawn,
-        ]);
+        let desktop = PlatformCapabilities::desktop();
         assert!(!platform_satisfies_caps(&desktop, &["mystery".to_string()]));
     }
 

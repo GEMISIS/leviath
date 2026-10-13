@@ -109,15 +109,6 @@ impl MemoryBlobStore {
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// How many bytes the store holds for `run_id`.
-    #[cfg(test)]
-    pub fn bytes_for(&self, run_id: &str) -> u64 {
-        crate::sync::lock(&self.runs)
-            .get(run_id)
-            .map(|m| m.values().map(|v| v.len() as u64).sum())
-            .unwrap_or(0)
-    }
 }
 
 impl BlobStore for MemoryBlobStore {
@@ -187,8 +178,6 @@ mod tests {
         let r1 = store.put("run-a", &blob, &reg).unwrap();
         let r2 = store.put("run-a", &blob, &reg).unwrap();
         assert_eq!(r1, r2);
-        assert_eq!(store.bytes_for("run-a"), 3);
-        assert_eq!(store.bytes_for("run-b"), 0);
         assert_eq!(&*store.read("run-a", &r1.sha256).unwrap(), &[1, 2, 3]);
         assert!(store.has("run-a", &r1.sha256));
         assert!(!store.has("run-b", &r1.sha256));
@@ -258,7 +247,6 @@ mod tests {
             panic!("poison");
         })
         .join();
-        assert_eq!(store.bytes_for("x"), 0);
         assert!(store.list("x").unwrap().is_empty());
     }
 }

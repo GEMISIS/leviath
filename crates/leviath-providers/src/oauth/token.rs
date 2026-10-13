@@ -259,13 +259,6 @@ impl OAuthTokenSource {
         self
     }
 
-    /// Override the clock. Tests drive expiry with this.
-    #[must_use]
-    pub fn with_clock(mut self, clock: Clock) -> Self {
-        self.clock = clock;
-        self
-    }
-
     /// The lock file guarding cross-process refresh of this grant.
     fn lock_path(&self) -> PathBuf {
         let mut path = self.store_path.clone().into_os_string();

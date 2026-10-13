@@ -484,13 +484,14 @@ fn the_debug_form_never_prints_a_key() {
 
 /// A signed-in provider whose account host is `account`.
 fn subscription(url: &str, account: &str) -> XaiProvider {
-    signed_in(
+    let mut p = signed_in(
         url,
         Arc::new(Signin {
             refreshes: AtomicUsize::new(0),
         }),
-    )
-    .with_account_url(Some(format!("{account}/")))
+    );
+    p.account_url = account.to_string();
+    p
 }
 
 #[tokio::test]
@@ -670,7 +671,6 @@ async fn a_subscription_quotes_its_retention_setting_once_read() {
     let key = keyed("http://127.0.0.1:1");
     key.refresh_retention().await;
     assert!(key.live_retention("grok-4.3").is_none());
-    let _ = subscription("http://x", "http://y").with_account_url(None);
 }
 
 #[tokio::test]
@@ -709,7 +709,8 @@ async fn a_media_model_runs_through_both_entry_points() {
     .to_string()
     .into_bytes();
     let (url, _) = spawn_mock_sequence(vec![(200, "OK", reply.clone()), (200, "OK", reply)]).await;
-    let provider = keyed(&url).with_poll_interval(std::time::Duration::from_millis(1));
+    let mut provider = keyed(&url);
+    provider.poll_interval = std::time::Duration::from_millis(1);
     let buffered = provider
         .infer(&request("grok-imagine-image"))
         .await

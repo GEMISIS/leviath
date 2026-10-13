@@ -3430,7 +3430,7 @@ mod tests {
         assert_eq!(region.content.len(), 1);
         let entry = &region.content[0];
         assert_eq!(entry.content.parts()[0].inline_text(), Some("the report"));
-        assert!(entry.content.has_stored());
+        assert!(!entry.content.is_text_only());
         assert_eq!(entry.content.parts()[1].name.as_deref(), Some("w1/hero"));
         assert!(
             entry.tokens < 400,

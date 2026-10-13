@@ -629,12 +629,6 @@ pub fn response_approved(resp: &InteractionResponse) -> bool {
     resp.approved.unwrap_or(false)
 }
 
-/// Generate a simple monotonic ID from stage index + iteration.
-#[cfg(test)]
-pub fn make_interaction_id(stage_idx: usize, iteration: usize) -> String {
-    format!("{}-{}", stage_idx, iteration)
-}
-
 /// The id one interaction request answers to: `<run id>-<kind>-<tail>`.
 ///
 /// The run id leads because the id has to be unique across every request the
@@ -1037,12 +1031,6 @@ mod tests {
     }
 
     #[test]
-    fn test_make_interaction_id() {
-        let id = make_interaction_id(2, 5);
-        assert_eq!(id, "2-5");
-    }
-
-    #[test]
     fn test_free_text_request_not_required() {
         let r = InteractionRequest::free_text("ft1", "optional?", "stage1", false);
         assert_eq!(r.kind, InteractionKind::FreeText);
@@ -1238,16 +1226,6 @@ mod tests {
     }
 
     #[test]
-    fn test_make_interaction_id_zero() {
-        assert_eq!(make_interaction_id(0, 0), "0-0");
-    }
-
-    #[test]
-    fn test_make_interaction_id_large() {
-        assert_eq!(make_interaction_id(999, 1000), "999-1000");
-    }
-
-    #[test]
     fn test_response_as_choice_no_choice_index() {
         let opts = vec!["A".to_string(), "B".to_string()];
         let r = InteractionResponse::text("id", "hello");
@@ -1407,12 +1385,6 @@ mod tests {
         let r = InteractionResponse::approval("id", true, ApprovalScope::Run);
         assert!(response_approved(&r));
         assert_eq!(r.scope, Some(ApprovalScope::Run));
-    }
-
-    #[test]
-    fn test_make_interaction_id_various() {
-        assert_eq!(make_interaction_id(1, 2), "1-2");
-        assert_eq!(make_interaction_id(10, 20), "10-20");
     }
 
     #[test]

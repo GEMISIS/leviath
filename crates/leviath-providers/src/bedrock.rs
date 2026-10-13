@@ -390,14 +390,6 @@ impl BedrockProvider {
         self
     }
 
-    /// Replace the URL the price file is read from.
-    pub fn with_pricing_url(mut self, url: Option<String>) -> Self {
-        if let Some(url) = url {
-            self.pricing_url = Some(url);
-        }
-        self
-    }
-
     /// The configured region.
     pub fn region(&self) -> &str {
         &self.region

@@ -279,7 +279,6 @@ pub struct MemorySink {
     events: std::sync::Mutex<Vec<TelemetryEvent>>,
     lanes: std::sync::Mutex<Vec<LaneHealth>>,
     providers: std::sync::Mutex<Vec<Vec<ProviderHealth>>>,
-    flushes: std::sync::atomic::AtomicUsize,
 }
 
 impl MemorySink {
@@ -297,11 +296,6 @@ impl MemorySink {
     pub fn provider_samples(&self) -> Vec<Vec<ProviderHealth>> {
         crate::sync::lock(&self.providers).clone()
     }
-
-    /// How many times `force_flush` was called.
-    pub fn flush_count(&self) -> usize {
-        self.flushes.load(std::sync::atomic::Ordering::SeqCst)
-    }
 }
 
 impl TelemetrySink for MemorySink {
@@ -315,11 +309,6 @@ impl TelemetrySink for MemorySink {
 
     fn observe_providers(&self, down: &[ProviderHealth]) {
         crate::sync::lock(&self.providers).push(down.to_vec());
-    }
-
-    fn force_flush(&self) {
-        self.flushes
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -388,15 +377,6 @@ mod tests {
         assert!(sink.provider_samples()[1].is_empty());
 
         NoopSink.observe_providers(&[]);
-    }
-
-    #[test]
-    fn memory_sink_counts_flushes() {
-        let sink = MemorySink::default();
-        assert_eq!(sink.flush_count(), 0);
-        sink.force_flush();
-        sink.force_flush();
-        assert_eq!(sink.flush_count(), 2);
     }
 
     #[test]

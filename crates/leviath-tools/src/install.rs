@@ -771,11 +771,10 @@ mod tests {
     /// Built-ins over `workdir` that install into `tools`, with the names a
     /// spawn would reserve on top of the built-ins.
     fn tools_installing_into(workdir: &Path, tools: &Path) -> BuiltinTools {
-        BuiltinTools::new(
-            ToolContext::new(workdir.to_path_buf())
-                .with_tools_dir(Some(tools.to_path_buf()))
-                .with_reserved_names(vec!["acme_search".to_string()]),
-        )
+        let mut ctx = ToolContext::new(workdir.to_path_buf())
+            .with_reserved_names(vec!["acme_search".to_string()]);
+        ctx.tools_dir = Some(tools.to_path_buf());
+        BuiltinTools::new(ctx)
     }
 
     /// Through the public `execute`, so the dispatch arm is what is tested:
@@ -884,11 +883,9 @@ mod tests {
     #[test]
     fn each_half_refuses_without_its_own_directory() {
         let workdir = tempfile::tempdir().unwrap();
-        let builtins = BuiltinTools::new(
-            ToolContext::new(workdir.path().to_path_buf())
-                .with_tools_dir(None)
-                .with_agent_tools_dir(None),
-        );
+        let mut ctx = ToolContext::new(workdir.path().to_path_buf()).with_agent_tools_dir(None);
+        ctx.tools_dir = None;
+        let builtins = BuiltinTools::new(ctx);
         let global = builtins.install_global_tool(&json!({"name": "upper", "source": UPPER}));
         assert!(
             global.starts_with("[error] install_global_tool: no home directory"),
@@ -908,11 +905,10 @@ mod tests {
         let workdir = tempfile::tempdir().unwrap();
         let global_dir = tempfile::tempdir().unwrap();
         let own_dir = tempfile::tempdir().unwrap();
-        let builtins = BuiltinTools::new(
-            ToolContext::new(workdir.path().to_path_buf())
-                .with_tools_dir(Some(global_dir.path().to_path_buf()))
-                .with_agent_tools_dir(Some(own_dir.path().to_path_buf())),
-        );
+        let mut ctx = ToolContext::new(workdir.path().to_path_buf())
+            .with_agent_tools_dir(Some(own_dir.path().to_path_buf()));
+        ctx.tools_dir = Some(global_dir.path().to_path_buf());
+        let builtins = BuiltinTools::new(ctx);
 
         let out = builtins
             .execute(
@@ -940,11 +936,10 @@ mod tests {
         let workdir = tempfile::tempdir().unwrap();
         let global_dir = tempfile::tempdir().unwrap();
         let own_dir = tempfile::tempdir().unwrap();
-        let builtins = BuiltinTools::new(
-            ToolContext::new(workdir.path().to_path_buf())
-                .with_tools_dir(Some(global_dir.path().to_path_buf()))
-                .with_agent_tools_dir(Some(own_dir.path().to_path_buf())),
-        );
+        let mut ctx = ToolContext::new(workdir.path().to_path_buf())
+            .with_agent_tools_dir(Some(own_dir.path().to_path_buf()));
+        ctx.tools_dir = Some(global_dir.path().to_path_buf());
+        let builtins = BuiltinTools::new(ctx);
 
         let out = builtins.install_self_tool(&json!({"name": "upper", "source": UPPER}));
         assert!(out.starts_with("Installed tool 'upper'"), "{out}");

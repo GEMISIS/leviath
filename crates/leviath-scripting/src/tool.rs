@@ -2540,7 +2540,7 @@ mod parts_tests {
         let tool = tool_from("// @tool t\n#{ parts: [find_part(\"hero.png\")] }");
         let out = execute(&tool, serde_json::json!({}), host.clone());
         assert_eq!(out.parts().len(), 1);
-        assert!(out.has_stored());
+        assert!(!out.is_text_only());
 
         // The refusals a script can earn.
         for (src, expect) in [
