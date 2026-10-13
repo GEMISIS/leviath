@@ -171,7 +171,7 @@ async fn a_run_file_with_a_broken_start_or_step_has_no_history() {
     use leviath_runtime::runfile::codec::{FrameKind, encode, header};
     let runs = tempfile::tempdir().unwrap();
     let dir = recorded(runs.path());
-    let spec = leviath_runtime::runfile::RunFileReader::open(&path_in(&dir))
+    let spec = leviath_runtime::runfile::RunFileReader::read(&path_in(&dir))
         .unwrap()
         .spec()
         .clone();

@@ -147,8 +147,10 @@ fn a_layout_2_run_file_reads_back_as_it_did_once_upgraded() {
 
     // Byte for byte: every frame but the spec is the one the old file held.
     let after = run.bytes();
-    let (old, _) = codec::frames(&before);
-    let (new, end) = codec::frames(&after);
+    let old = codec::scan(&before).frames;
+    let codec::Scan {
+        frames: new, end, ..
+    } = codec::scan(&after);
     assert_eq!(end, after.len());
     assert_eq!(old.len(), new.len());
     assert_eq!(new[0].kind, FrameKind::Spec);
@@ -218,7 +220,7 @@ fn a_layout_2_file_that_does_not_read_is_refused_and_left_as_it_was() {
     let header = &fixture[..codec::HEADER_LEN];
     let not_a_spec = codec::encode(FrameKind::Spec, &"not a spec".to_string()).unwrap();
     let state_first = {
-        let (frames, _) = codec::frames(&fixture);
+        let frames = codec::scan(&fixture).frames;
         let state = frames.iter().find(|f| f.kind == FrameKind::State).unwrap();
         fixture[state.offset..state.end()].to_vec()
     };
@@ -250,11 +252,30 @@ fn a_torn_last_frame_is_left_out_and_kept_in_the_original() {
     assert_eq!(report.cut, 3);
     assert_eq!(std::fs::read(&report.original).unwrap(), torn);
     let reader = RunFileReader::read(&run.file()).unwrap();
-    assert_eq!(reader.cut_bytes(), 0);
+    assert_eq!(reader.torn_bytes(), 0);
     assert_eq!(
         json_of(reader.latest_state().unwrap()),
         expected()["latest"]
     );
+}
+
+/// A damaged frame with whole frames after it is not a tear: leaving it out
+/// would leave out every frame after it too, so the file is refused and left
+/// as it was.
+#[test]
+fn a_damaged_frame_in_the_middle_is_refused_and_left_as_it_was() {
+    let run = Layout2::new();
+    let mut bytes = run.bytes();
+    let frames = codec::scan(&bytes).frames;
+    let middle = frames[frames.len() / 2];
+    assert!(frames.len() > 2, "frames after the damaged one");
+    bytes[middle.body] ^= 0xff;
+    run.set_bytes(&bytes);
+    let err = upgrade(&run.dir).unwrap_err();
+    let at = format!("corrupt at byte {}", middle.offset);
+    assert!(err.to_string().contains(&at), "{err}");
+    assert!(run.bytes() == bytes, "the file was changed");
+    assert!(!run.dir.join("legacy").exists());
 }
 
 /// Every spec frame in the file is upgraded, not only the first.
@@ -262,12 +283,12 @@ fn a_torn_last_frame_is_left_out_and_kept_in_the_original() {
 fn every_spec_frame_is_upgraded() {
     let run = Layout2::new();
     let fixture = run.bytes();
-    let (frames, _) = codec::frames(&fixture);
+    let frames = codec::scan(&fixture).frames;
     let spec = &fixture[frames[0].offset..frames[0].end()];
     run.set_bytes(&[fixture.as_slice(), spec].concat());
     upgrade(&run.dir).unwrap();
     let after = run.bytes();
-    let (frames, _) = codec::frames(&after);
+    let frames = codec::scan(&after).frames;
     let specs: Vec<RunSpec> = frames
         .iter()
         .filter(|f| f.kind == FrameKind::Spec)

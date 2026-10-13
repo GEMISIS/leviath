@@ -83,13 +83,19 @@ pub(crate) fn upgrade(run_dir: &Path) -> Result<UpgradeReport, ConvertError> {
 
 /// The layout-2 run file `bytes`, read from `path`, in this build's layout,
 /// with the run's id and how many bytes of torn tail were left out. A file
-/// whose spec does not read as layout 2 wrote it is refused.
+/// whose spec does not read as layout 2 wrote it is refused, and so is one
+/// with a damaged frame that whole frames follow: leaving it out would drop
+/// them too.
 fn rewrite(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, RunId, usize), ConvertError> {
     let unreadable = |why: String| ConvertError::Unreadable {
         path: path.to_path_buf(),
         why,
     };
-    let (frames, end) = codec::frames(bytes);
+    let scan = codec::scan(bytes);
+    if let Some(damage) = scan.stop.damage() {
+        return Err(unreadable(damage.to_string()));
+    }
+    let (frames, end) = (scan.frames, scan.end);
     if frames.first().is_none_or(|f| f.kind != FrameKind::Spec) {
         return Err(unreadable("it does not start with the run's spec".into()));
     }

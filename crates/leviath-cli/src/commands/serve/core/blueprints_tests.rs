@@ -24,7 +24,7 @@ fn text_of(source: &str) -> ManifestText {
 /// started in.
 fn respec(run_id: &str, edit: impl FnOnce(&mut RunSpec)) {
     let path = run_file::path(run_id);
-    let reader = RunFileReader::open(&path).unwrap();
+    let reader = RunFileReader::read(&path).unwrap();
     let mut spec = reader.spec().clone();
     edit(&mut spec);
     let start = reader.state_at(0).unwrap();
@@ -64,7 +64,7 @@ async fn a_run_answers_from_its_own_file() {
         assert_eq!(read.source, BlueprintSource::Snapshot);
         assert_eq!(read.parsed.name, "coder");
         assert_eq!(read.parsed.version, "0.0.0");
-        let spec = RunFileReader::open(&run_file::path(&run_id))
+        let spec = RunFileReader::read(&run_file::path(&run_id))
             .unwrap()
             .spec()
             .clone();
@@ -103,7 +103,7 @@ async fn a_run_without_a_file_is_not_found() {
 async fn a_raw_graph_is_named_by_its_title() {
     crate::runstate::with_isolated_runs_dir_async("bp-raw", |_d| async move {
         let run_id = recorded();
-        let mut spec = RunFileReader::open(&run_file::path(&run_id))
+        let mut spec = RunFileReader::read(&run_file::path(&run_id))
             .unwrap()
             .spec()
             .clone();

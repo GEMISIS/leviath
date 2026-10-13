@@ -53,13 +53,13 @@ pub(crate) fn require(run_id: &str) -> Result<RunFileReader, ServeError> {
     open(run_id)?.ok_or_else(|| ServeError::run_not_found(run_id))
 }
 
-/// A run file that would not read, said so that whoever reads it knows what
-/// to do about one in the older layout.
+/// A run file that would not read, said so that whoever reads it knows
+/// whether the daemon converts it or it stays as it is.
 pub(crate) fn unreadable(run_id: &str, e: &dyn std::fmt::Display) -> ServeError {
-    ServeError::Internal(format!(
-        "Run '{run_id}' has a run file this server cannot read ({e}). A run directory \
-         from an older release, or a run file an alpha build wrote, is converted when the \
-         daemon starts."
+    ServeError::Internal(crate::runstate::run_file::why_unreadable(
+        run_id,
+        &crate::runstate::run_dir(run_id),
+        e,
     ))
 }
 

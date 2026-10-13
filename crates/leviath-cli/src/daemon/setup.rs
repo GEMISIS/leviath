@@ -1395,7 +1395,7 @@ binds = [{ region = "task" }]
 
     /// The status `run_id`'s file holds last.
     fn status_on_disk(runs: &std::path::Path, run_id: &str) -> leviath_runtime::state::RunStatus {
-        leviath_runtime::runfile::RunFileReader::open(
+        leviath_runtime::runfile::RunFileReader::read(
             &runs.join(run_id).join(leviath_core::files::RUN_FILE),
         )
         .and_then(|r| r.latest_state())

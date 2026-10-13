@@ -97,7 +97,7 @@ impl HistoryRead {
             .ok_or_else(|| "this host keeps no run files".to_string())?
             .join(run_id)
             .join(leviath_core::files::RUN_FILE);
-        let reader = crate::runfile::RunFileReader::open(&path)
+        let reader = crate::runfile::RunFileReader::read(&path)
             .map_err(|e| format!("the run file of '{run_id}' cannot be read: {e}"))?;
         let last_seq = reader.last_seq();
         let (recorded, deltas) = reader
@@ -163,9 +163,14 @@ impl HistoryRead {
         self.runs_dir
             .as_ref()
             .map(|dir| dir.join(run_id).join(leviath_core::files::RUN_FILE))
-            .and_then(|path| crate::runfile::RunFileReader::open(&path).ok())
-            .and_then(|reader| reader.latest_state().ok())
-            .map(|state| state.children.iter().map(ToString::to_string).collect())
+            .and_then(|path| crate::runfile::RunFileTail::read(&path).ok())
+            .map(|tail| {
+                tail.state
+                    .children
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }

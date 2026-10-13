@@ -447,7 +447,7 @@ async fn a_run_that_takes_an_edge_records_the_move_in_its_run_file() {
     drop(control);
     host.serve(control_rx).await;
 
-    let file = leviath_runtime::runfile::RunFileReader::open(
+    let file = leviath_runtime::runfile::RunFileReader::read(
         &runs
             .path()
             .join(&run_id)

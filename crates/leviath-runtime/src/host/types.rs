@@ -285,6 +285,14 @@ pub enum NotPlaced {
     /// The run cannot be brought back on this machine as it stands. The row
     /// says why, in its wait reason.
     Held(Box<RunListEntry>),
+    /// The run's file is damaged, so the run is not read back. The file is
+    /// left as it is.
+    Damaged {
+        /// The run's row: failed, saying where the file is damaged.
+        entry: Box<RunListEntry>,
+        /// What is wrong with the file.
+        why: String,
+    },
 }
 
 /// The daemon-installed last resort for cancelling a run the world cannot hold:

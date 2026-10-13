@@ -119,7 +119,7 @@ impl Home {
             .iter()
             .map(|name| {
                 let file = self.runs().join(name).join(leviath_core::files::RUN_FILE);
-                let reader = leviath_runtime::runfile::RunFileReader::open(&file).unwrap();
+                let reader = leviath_runtime::runfile::RunFileReader::read(&file).unwrap();
                 (name.to_string(), reader.spec().clone())
             })
             .collect()

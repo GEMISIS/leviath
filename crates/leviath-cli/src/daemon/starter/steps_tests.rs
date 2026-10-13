@@ -322,11 +322,11 @@ async fn a_refusal_after_the_file_is_written_is_recorded_on_it() {
         .path()
         .join(&run_id)
         .join(leviath_core::files::RUN_FILE);
-    let state = RunFileReader::open(&path).unwrap().latest_state().unwrap();
+    let state = RunFileReader::read(&path).unwrap().latest_state().unwrap();
     let issues: SpawnIssues = refusal(IssueCode::Unavailable, "the provider went away");
 
     record_failed(&path, &state, &issues).expect("the refusal is written");
-    match RunFileReader::open(&path)
+    match RunFileReader::read(&path)
         .unwrap()
         .latest_state()
         .unwrap()
@@ -337,7 +337,7 @@ async fn a_refusal_after_the_file_is_written_is_recorded_on_it() {
     }
     // It ended before it entered a stage, so every stage reads never reached
     // rather than still to come.
-    let ledger = RunFileReader::open(&path)
+    let ledger = RunFileReader::read(&path)
         .unwrap()
         .latest_state()
         .unwrap()
@@ -482,7 +482,7 @@ binds = [{ region = "task" }]
         .next()
         .expect("the run was recorded before it was bound")
         .path();
-    let state = RunFileReader::open(&run_dir.join(leviath_core::files::RUN_FILE))
+    let state = RunFileReader::read(&run_dir.join(leviath_core::files::RUN_FILE))
         .unwrap()
         .latest_state()
         .unwrap();

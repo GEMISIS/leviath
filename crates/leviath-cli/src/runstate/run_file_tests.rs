@@ -90,7 +90,10 @@ async fn a_forced_cancel_is_the_run_files_last_step() {
     bytes.extend_from_slice(b" and nothing else");
     std::fs::write(torn.join(leviath_core::files::RUN_FILE), bytes).unwrap();
     crate::test_support::with_tracing(|| {
-        assert_eq!(force_cancel_in(&torn, 5), ForceCancelOutcome::WriteFailed);
+        assert!(matches!(
+            force_cancel_in(&torn, 5),
+            ForceCancelOutcome::WriteFailed(_)
+        ));
     });
 }
 
@@ -185,4 +188,24 @@ async fn the_views_of_a_run_read_its_run_file() {
         assert_eq!(context_history(&run_id).len(), history.points.len());
     })
     .await;
+}
+
+/// A run file that does not read is converted by the daemon when an earlier
+/// release or an alpha build wrote it, and is left as it is otherwise.
+#[test]
+fn an_unreadable_run_says_whether_the_daemon_converts_it() {
+    use crate::runstate::run_file::why_unreadable;
+    let old = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../leviath-legacy-runs/tests/fixtures/finished");
+    let says = why_unreadable("r1", &old, &"not a run file");
+    assert!(
+        says.contains("the daemon converts it when it next starts"),
+        "{says}"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let says = why_unreadable("r2", dir.path(), &"run file is corrupt at byte 9");
+    assert!(
+        says.ends_with("cannot read: run file is corrupt at byte 9. The file is left as it is"),
+        "{says}"
+    );
 }

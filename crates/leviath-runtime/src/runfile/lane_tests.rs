@@ -35,7 +35,7 @@ fn run_dir(runs: &Path, run_id: &str) -> PathBuf {
 }
 
 fn file(runs: &Path, run_id: &str) -> RunFileReader {
-    RunFileReader::open(&runs.join(run_id).join(leviath_core::files::RUN_FILE)).unwrap()
+    RunFileReader::read(&runs.join(run_id).join(leviath_core::files::RUN_FILE)).unwrap()
 }
 
 #[tokio::test]

@@ -36,7 +36,7 @@ pub(crate) fn started_at(
     edit: impl FnOnce(&mut RunState),
 ) -> RunFileWriter {
     let template = recorded();
-    let reader = RunFileReader::open(&run_file::path(&template)).expect("the template reads");
+    let reader = RunFileReader::read(&run_file::path(&template)).expect("the template reads");
     let mut spec = reader.spec().clone();
     spec.run_id = RunId::new(run_id).expect("a run id");
     spec.created_at = created_at.unwrap_or(spec.created_at);
@@ -232,7 +232,7 @@ pub(crate) fn append(writer: &mut RunFileWriter, records: &[RunRecord]) {
 
 /// The stages of the run `writer` is writing, in the graph's order.
 fn writer_stages(writer: &RunFileWriter) -> Vec<StageName> {
-    RunFileReader::open(writer.path())
+    RunFileReader::read(writer.path())
         .expect("the run file reads")
         .spec()
         .graph

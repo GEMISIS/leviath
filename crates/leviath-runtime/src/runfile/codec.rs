@@ -76,8 +76,13 @@ pub enum CodecError {
     },
     /// A frame's checksum or length is wrong at this offset.
     Corrupt(u64),
-    /// A frame names a kind this build does not know.
-    UnknownKind(u8),
+    /// A whole frame names a kind this build does not know.
+    UnknownKind {
+        /// Where the frame starts.
+        at: u64,
+        /// Its kind byte.
+        kind: u8,
+    },
     /// A frame's payload does not decode as its kind's type.
     Decode(String),
     /// The frame at this offset decompresses to more than `limit` bytes.
@@ -101,7 +106,10 @@ impl fmt::Display for CodecError {
                  (file {found}, this build {expected}); open it with the build that wrote it"
             ),
             Self::Corrupt(at) => write!(f, "run file is corrupt at byte {at}"),
-            Self::UnknownKind(k) => write!(f, "run file has a frame of unknown kind {k}"),
+            Self::UnknownKind { at, kind } => write!(
+                f,
+                "run file has a frame of unknown kind {kind} at byte {at}"
+            ),
             Self::Decode(e) => write!(f, "run file frame does not decode: {e}"),
             Self::TooLarge { at, limit } => write!(
                 f,
@@ -257,44 +265,129 @@ fn u32_at(bytes: &[u8], at: usize) -> Option<usize> {
 
 /// Read the frame that starts at `offset`, checking its checksum.
 pub fn frame_at(bytes: &[u8], offset: usize) -> Result<FrameRef, CodecError> {
-    let corrupt = CodecError::Corrupt(offset as u64);
-    let kind_byte = *bytes.get(offset).ok_or(corrupt.clone())?;
-    let len = u32_at(bytes, offset + 1).ok_or(corrupt.clone())?;
-    let body = offset + 5;
-    let body_bytes = bytes.get(body..body + len).ok_or(corrupt.clone())?;
-    let crc = u32_at(bytes, body + len).ok_or(corrupt.clone())?;
-    let trailer = u32_at(bytes, body + len + 4).ok_or(corrupt.clone())?;
-    let mut h = crc32fast::Hasher::new();
-    h.update(&[kind_byte]);
-    h.update(body_bytes);
-    if h.finalize() as usize != crc || trailer != len {
-        return Err(corrupt);
-    }
-    let kind = FrameKind::from_byte(kind_byte).ok_or(CodecError::UnknownKind(kind_byte))?;
+    let (kind_byte, len) = whole(bytes, offset).ok_or(CodecError::Corrupt(offset as u64))?;
+    let kind = FrameKind::from_byte(kind_byte).ok_or(CodecError::UnknownKind {
+        at: offset as u64,
+        kind: kind_byte,
+    })?;
     Ok(FrameRef {
         kind,
         offset,
-        body,
+        body: offset + 5,
         len,
     })
 }
 
-/// Every whole frame after the header, in order, and the offset where the
-/// good frames end. A torn or corrupt tail stops the walk; the caller cuts
-/// the file back to that offset.
-pub fn frames(bytes: &[u8]) -> (Vec<FrameRef>, usize) {
-    let mut out = Vec::new();
+/// The kind byte and body length of a whole frame at `offset`, whatever its
+/// kind: it fits in `bytes`, its trailing length repeats its length, and its
+/// checksum holds. The checksum is worked out last, so a guess at a frame
+/// that is not one costs no more than reading its lengths.
+fn whole(bytes: &[u8], offset: usize) -> Option<(u8, usize)> {
+    let kind = *bytes.get(offset)?;
+    let len = u32_at(bytes, offset + 1)?;
+    let body = offset + 5;
+    let body_bytes = bytes.get(body..body + len)?;
+    let crc = u32_at(bytes, body + len)?;
+    if u32_at(bytes, body + len + 4)? != len {
+        return None;
+    }
+    let mut h = crc32fast::Hasher::new();
+    h.update(&[kind]);
+    h.update(body_bytes);
+    (h.finalize() as usize == crc).then_some((kind, len))
+}
+
+/// Where a walk over a file's frames stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    /// At the end of the file: everything after the header is whole frames.
+    End,
+    /// At a frame a crash left unfinished, with no whole frame after it. A
+    /// writer appends one frame at a time, so the bytes from `at` on are its
+    /// last write, torn, and cutting them loses nothing that was written
+    /// whole.
+    Torn {
+        /// Where the torn frame starts.
+        at: usize,
+    },
+    /// At a frame that does not check out, with a whole frame after it. A
+    /// crash tears only the last write, so this is damage, and cutting the
+    /// file here would lose every frame after it.
+    Corrupt {
+        /// Where the damaged frame starts.
+        at: usize,
+    },
+    /// At a whole frame of a kind this build does not know.
+    UnknownKind {
+        /// Where the frame starts.
+        at: usize,
+        /// Its kind byte.
+        kind: u8,
+    },
+}
+
+impl Stop {
+    /// What is wrong with the file when the walk stopped at damage. `None`
+    /// at its end and at a torn last write, which a reader leaves out and
+    /// only a writer cuts.
+    pub fn damage(self) -> Option<CodecError> {
+        match self {
+            Self::End | Self::Torn { .. } => None,
+            Self::Corrupt { at } => Some(CodecError::Corrupt(at as u64)),
+            Self::UnknownKind { at, kind } => Some(CodecError::UnknownKind {
+                at: at as u64,
+                kind,
+            }),
+        }
+    }
+}
+
+/// A file's frames, read forward from its header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scan {
+    /// Every whole frame before the walk stopped, in order.
+    pub frames: Vec<FrameRef>,
+    /// Where those frames end.
+    pub end: usize,
+    /// Why the walk stopped there.
+    pub stop: Stop,
+}
+
+/// Walk the frames after the header, stopping at the end or at the first
+/// frame that does not read, and say which.
+pub fn scan(bytes: &[u8]) -> Scan {
+    let mut frames = Vec::new();
     let mut at = HEADER_LEN.min(bytes.len());
-    while at < bytes.len() {
+    let stop = loop {
+        if at >= bytes.len() {
+            break Stop::End;
+        }
         match frame_at(bytes, at) {
             Ok(f) => {
                 at = f.end();
-                out.push(f);
+                frames.push(f);
             }
-            Err(_) => break,
+            Err(CodecError::UnknownKind { kind, .. }) => break Stop::UnknownKind { at, kind },
+            Err(_) => match whole_frame_after(bytes, at) {
+                true => break Stop::Corrupt { at },
+                false => break Stop::Torn { at },
+            },
         }
+    };
+    Scan {
+        frames,
+        end: at,
+        stop,
     }
-    (out, at)
+}
+
+/// Whether a whole frame, of any kind, starts anywhere after `at`.
+///
+/// Every offset is tried. A frame whose body was damaged still says how
+/// long it is, so the next whole frame is found one frame along; a torn last
+/// write is only as long as one frame.
+fn whole_frame_after(bytes: &[u8], at: usize) -> bool {
+    (at + 1..bytes.len()).any(|offset| whole(bytes, offset).is_some())
 }
 
 /// The frame that ends at `end`, read backwards from its trailing length.
@@ -333,8 +426,13 @@ mod tests {
             (FrameKind::Delta, "d2"),
         ]);
         check_header(&f, &FP).unwrap();
-        let (all, end) = frames(&f);
-        assert_eq!(end, f.len());
+        let Scan {
+            frames: all,
+            end,
+            stop,
+        } = scan(&f);
+        assert_eq!((end, stop), (f.len(), Stop::End));
+        assert_eq!(stop.damage(), None);
         let kinds: Vec<FrameKind> = all.iter().map(|r| r.kind).collect();
         assert_eq!(
             kinds,
@@ -353,23 +451,95 @@ mod tests {
         );
     }
 
+    /// A last frame cut anywhere, or left as zeroes or junk, is a torn last
+    /// write: the walk stops where it starts, and it is not damage.
     #[test]
     fn a_torn_tail_stops_the_walk_at_the_last_whole_frame() {
         let mut f = file(&[(FrameKind::Spec, "spec"), (FrameKind::Delta, "d1")]);
         let whole = f.len();
-        f.extend(encode(FrameKind::Delta, &"d2".to_string()).unwrap());
-        f.truncate(f.len() - 3);
-        let (all, end) = frames(&f);
-        assert_eq!(all.len(), 2);
-        assert_eq!(end, whole);
-        let mut flipped = file(&[(FrameKind::Spec, "spec")]);
-        let last = flipped.len() - 10;
-        flipped[last] ^= 0xff;
-        assert_eq!(frames(&flipped).0.len(), 0);
+        let next = encode(FrameKind::Delta, &"a longer third payload".to_string()).unwrap();
+        for cut in 1..next.len() {
+            let mut torn = f.clone();
+            torn.extend_from_slice(&next[..cut]);
+            let s = scan(&torn);
+            assert_eq!((s.frames.len(), s.end), (2, whole), "cut at {cut}");
+            assert_eq!(s.stop, Stop::Torn { at: whole }, "cut at {cut}");
+            assert_eq!(s.stop.damage(), None);
+        }
+        for tail in [&[0u8; 4096][..], b"torn"] {
+            let mut torn = f.clone();
+            torn.extend_from_slice(tail);
+            assert_eq!(scan(&torn).stop, Stop::Torn { at: whole });
+        }
+        // The last frame whole but for one bad byte, with nothing after it.
+        f.extend(next);
+        let last = f.len() - 10;
+        f[last] ^= 0xff;
+        assert_eq!(scan(&f).stop, Stop::Torn { at: whole });
+        assert_eq!(frame_at(&f, whole), Err(CodecError::Corrupt(whole as u64)));
+    }
+
+    /// A damaged frame with a whole frame anywhere after it is damage, not a
+    /// tear: a crash tears only the last write. That holds when the damage
+    /// is in the body, when it is in the length, and when the file also ends
+    /// in a tear.
+    #[test]
+    fn a_damaged_frame_with_whole_frames_after_it_is_corrupt() {
+        let f = file(&[
+            (FrameKind::Spec, "spec"),
+            (FrameKind::Delta, "d1"),
+            (FrameKind::State, "s1"),
+        ]);
+        let d1 = frame_at(&f, frame_at(&f, HEADER_LEN).unwrap().end()).unwrap();
+        let corrupt = Stop::Corrupt { at: d1.offset };
+        for byte in [d1.body, d1.offset + 1, d1.offset] {
+            let mut damaged = f.clone();
+            damaged[byte] ^= 0x5a;
+            let s = scan(&damaged);
+            assert_eq!((s.frames.len(), s.end, s.stop), (1, d1.offset, corrupt));
+            assert_eq!(s.stop.damage(), Some(CodecError::Corrupt(d1.offset as u64)));
+            damaged.extend(b"torn");
+            assert_eq!(scan(&damaged).stop, corrupt);
+        }
+    }
+
+    /// A whole frame of a kind this build does not know stops the walk by
+    /// name, in the middle of a file or at its end. After a damaged frame it
+    /// still counts as whole, so the damage is not taken for a tear.
+    #[test]
+    fn an_unknown_kind_is_named_wherever_it_is() {
+        let spec = file(&[(FrameKind::Spec, "spec")]);
+        let at = spec.len();
+        let mut f = spec.clone();
+        f.extend(unknown_kind_frame());
+        let unknown = Stop::UnknownKind { at, kind: 99 };
+        assert_eq!(scan(&f).stop, unknown);
+        f.extend(encode(FrameKind::Delta, &"d1".to_string()).unwrap());
+        assert_eq!(scan(&f).stop, unknown);
         assert_eq!(
-            frame_at(&flipped, HEADER_LEN),
-            Err(CodecError::Corrupt(HEADER_LEN as u64))
+            unknown.damage(),
+            Some(CodecError::UnknownKind {
+                at: at as u64,
+                kind: 99
+            })
         );
+        let mut damaged = spec;
+        damaged.extend(encode(FrameKind::Delta, &"d1".to_string()).unwrap());
+        damaged[at + 5] ^= 0xff;
+        damaged.extend(unknown_kind_frame());
+        assert_eq!(scan(&damaged).stop, Stop::Corrupt { at });
+    }
+
+    /// A whole frame whose kind byte is 99.
+    fn unknown_kind_frame() -> Vec<u8> {
+        let mut bad = encode(FrameKind::Spec, &"x".to_string()).unwrap();
+        bad[0] = 99;
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(&[99]);
+        let len = bad.len() - FRAME_OVERHEAD;
+        crc.update(&bad[5..5 + len]);
+        bad[5 + len..9 + len].copy_from_slice(&crc.finalize().to_le_bytes());
+        bad
     }
 
     /// A body is decompressed into a buffer the size its header gives, not
@@ -497,7 +667,7 @@ mod tests {
     #[test]
     fn a_frame_body_that_is_missing_or_not_compressed_does_not_decode() {
         let f = file(&[(FrameKind::Spec, "spec")]);
-        let mut frame = frames(&f).0[0];
+        let mut frame = scan(&f).frames[0];
         frame.len = f.len();
         assert_eq!(
             frame.decode::<String>(&f),
@@ -523,21 +693,18 @@ mod tests {
     #[test]
     fn unknown_kinds_and_bad_payloads_are_named() {
         let mut f = file(&[(FrameKind::Spec, "spec")]);
-        let mut bad = encode(FrameKind::Spec, &"x".to_string()).unwrap();
-        bad[0] = 99;
-        let mut crc = crc32fast::Hasher::new();
-        crc.update(&[99]);
-        let len = bad.len() - FRAME_OVERHEAD;
-        crc.update(&bad[5..5 + len]);
-        bad[5 + len..9 + len].copy_from_slice(&crc.finalize().to_le_bytes());
         let at = f.len();
-        f.extend(bad);
-        assert_eq!(frame_at(&f, at), Err(CodecError::UnknownKind(99)));
+        f.extend(unknown_kind_frame());
+        let unknown = CodecError::UnknownKind {
+            at: at as u64,
+            kind: 99,
+        };
+        assert_eq!(frame_at(&f, at), Err(unknown.clone()));
         assert_eq!(
-            CodecError::UnknownKind(99).to_string(),
-            "run file has a frame of unknown kind 99"
+            unknown.to_string(),
+            format!("run file has a frame of unknown kind 99 at byte {at}")
         );
-        let spec = frames(&f).0[0];
+        let spec = scan(&f).frames[0];
         let err = spec.decode::<[u64; 8]>(&f).unwrap_err();
         assert!(
             err.to_string()

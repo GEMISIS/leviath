@@ -164,7 +164,7 @@ async fn an_old_run_found_on_resume_converts_against_the_daemon() {
     );
     crate::daemon::recovery::resume_all(&mut world, &starter, &runs);
     let run =
-        leviath_runtime::runfile::RunFileReader::open(&old.join(leviath_core::files::RUN_FILE))
+        leviath_runtime::runfile::RunFileReader::read(&old.join(leviath_core::files::RUN_FILE))
             .unwrap();
     let main = run.spec().stage("main").unwrap();
     assert_eq!(main.model.context_window, 64_000);
@@ -415,7 +415,7 @@ async fn a_converted_batch_keeps_the_executions_the_old_journal_named() {
     use leviath_runtime::state::journal::ToolOutcomeState;
     let path = old.join(leviath_core::files::RUN_FILE);
     let events_of = |path: &Path| {
-        let file = leviath_runtime::runfile::RunFileReader::open(path).unwrap();
+        let file = leviath_runtime::runfile::RunFileReader::read(path).unwrap();
         file.deltas(1, file.last_seq())
             .unwrap()
             .into_iter()

@@ -64,7 +64,7 @@ pub(crate) fn garbage(run_id: &str, bytes: &[u8]) {
 
 /// Rewrite `run_id`'s file as its spec alone, with no state to start from.
 pub(crate) fn stateless(run_id: &str) {
-    let spec = leviath_runtime::runfile::RunFileReader::open(&path(run_id))
+    let spec = leviath_runtime::runfile::RunFileReader::read(&path(run_id))
         .unwrap()
         .spec()
         .clone();
@@ -125,7 +125,7 @@ async fn a_run_with_no_file_is_a_miss_and_one_that_will_not_read_is_an_error() {
         garbage("broken", b"not a run file");
         let broken = open("broken").unwrap_err();
         assert_eq!(broken.code(), "INTERNAL");
-        assert!(broken.to_string().contains("converted"), "{broken}");
+        assert!(broken.to_string().contains("left as it is"), "{broken}");
 
         let run_id = recorded();
         let reader = require(&run_id).unwrap();

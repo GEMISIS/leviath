@@ -1,10 +1,9 @@
 //! Forcing a run that nothing drives any more to a terminal state on disk.
-//! Split out of `runstate.rs` for size.
 
 use super::*;
 
 /// The outcome of forcing a run to a terminal state on disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ForceCancelOutcome {
     /// The run was live on disk and is now recorded terminal.
     Terminated,
@@ -13,8 +12,9 @@ pub(crate) enum ForceCancelOutcome {
     /// No run directory with that id exists.
     NoSuchRun,
     /// The directory exists but the cancel could not be recorded in its run
-    /// file.
-    WriteFailed,
+    /// file, for this reason: a file that does not read (damaged, or
+    /// written by a build this one does not know) is never written to.
+    WriteFailed(String),
 }
 
 impl ForceCancelOutcome {
@@ -67,7 +67,8 @@ pub(crate) fn force_cancel_in(run_dir: &Path, now: i64) -> ForceCancelOutcome {
                 .map(|_| ForceCancelOutcome::Terminated)
         });
     recorded.unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "could not record a cancel in a run's file");
-        ForceCancelOutcome::WriteFailed
+        let why = e.to_string();
+        tracing::warn!(error = %why, "could not record a cancel in a run's file");
+        ForceCancelOutcome::WriteFailed(why)
     })
 }

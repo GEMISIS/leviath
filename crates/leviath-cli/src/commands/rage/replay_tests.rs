@@ -56,7 +56,7 @@ fn the_run_file_is_rewritten_without_its_secrets() {
     let dir = a_run(runs.path());
     let scratch = tempfile::tempdir().unwrap();
     let bundle = copied(&dir, &Scrubber::new(Vec::new()), scratch.path());
-    let original = RunFileReader::open(&crate::runstate::run_file::path_in(&dir)).unwrap();
+    let original = RunFileReader::read(&crate::runstate::run_file::path_in(&dir)).unwrap();
     let bytes = member(&bundle, "runs/r/run.lvr").to_vec();
     let rewritten = RunFileReader::from_bytes(Path::new("run.lvr"), bytes).unwrap();
     assert_eq!(rewritten.last_seq(), original.last_seq());

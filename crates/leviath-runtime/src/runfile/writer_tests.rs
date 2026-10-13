@@ -29,7 +29,7 @@ fn a_new_file_holds_the_spec_its_code_and_the_first_state() {
     assert_eq!(w.path(), path);
     assert!(!w.is_empty());
     assert_eq!(w.seq(), 0);
-    let r = RunFileReader::open(&path).unwrap();
+    let r = RunFileReader::read(&path).unwrap();
     assert_eq!(r.spec(), &spec());
     assert_eq!(
         r.code(&Digest::of(b"code")).unwrap(),
@@ -101,7 +101,7 @@ fn steps_must_follow_one_another() {
     assert_eq!(w.seq(), 1);
     // A checkpoint taken by hand is where the next read starts.
     w.checkpoint(&w.state().clone()).unwrap();
-    let r = RunFileReader::open(&path).unwrap();
+    let r = RunFileReader::read(&path).unwrap();
     assert_eq!(r.checkpoints(), 2);
     assert_eq!(r.last_checkpoint().0, 1);
 }
@@ -128,7 +128,7 @@ fn checkpoints_come_every_so_many_steps() {
         size_ratio: 1000.0,
     };
     write_run(&path, &states, policy);
-    let r = RunFileReader::open(&path).unwrap();
+    let r = RunFileReader::read(&path).unwrap();
     // The first, one after every fifth step, and one at the finish.
     let steps = states.len() as u32 - 1;
     assert_eq!(
@@ -146,13 +146,13 @@ fn checkpoints_come_when_the_deltas_outgrow_the_last_one() {
         size_ratio: 1000.0,
     };
     write_run(&path, &states, by_count_only);
-    let rare = RunFileReader::open(&path).unwrap().checkpoints();
+    let rare = RunFileReader::read(&path).unwrap().checkpoints();
     let by_size = CheckpointPolicy {
         every: 1000,
         size_ratio: 0.2,
     };
     write_run(&path, &states, by_size);
-    let sized = RunFileReader::open(&path).unwrap().checkpoints();
+    let sized = RunFileReader::read(&path).unwrap().checkpoints();
     assert_eq!(rare, 2);
     assert!(sized > rare);
 }
@@ -172,7 +172,7 @@ fn a_reopened_writer_carries_on_counting_toward_its_next_checkpoint() {
     let mut w = RunFileWriter::open(&path, policy).unwrap();
     assert_eq!(w.seq(), 2);
     w.record(states[3].clone(), 3, vec![]).unwrap();
-    assert_eq!(RunFileReader::open(&path).unwrap().checkpoints(), 2);
+    assert_eq!(RunFileReader::read(&path).unwrap().checkpoints(), 2);
 }
 
 #[test]
@@ -187,12 +187,12 @@ fn a_new_owner_is_written_with_the_next_step() {
     };
     w.owner_on_next_step(owner(2));
     assert_eq!(
-        RunFileReader::open(&path).unwrap().owners().unwrap(),
+        RunFileReader::read(&path).unwrap().owners().unwrap(),
         Vec::new()
     );
     w.record(changed(&initial(), "x"), 3, vec![]).unwrap();
     assert_eq!(
-        RunFileReader::open(&path).unwrap().owners().unwrap(),
+        RunFileReader::read(&path).unwrap().owners().unwrap(),
         vec![owner(2)]
     );
 }
@@ -208,7 +208,7 @@ fn a_failed_write_leaves_the_file_as_it_was() {
     assert!(w.checkpoint(&initial()).is_err());
     assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
     assert_eq!(w.seq(), 0);
-    let r = RunFileReader::open(&path).unwrap();
+    let r = RunFileReader::read(&path).unwrap();
     assert_eq!(r.latest_state().unwrap(), initial());
 }
 
@@ -221,7 +221,7 @@ fn a_finished_run_ends_on_a_checkpoint() {
         size_ratio: 1000.0,
     };
     write_run(&path, &states, policy);
-    let r = RunFileReader::open(&path).unwrap();
+    let r = RunFileReader::read(&path).unwrap();
     assert_eq!(r.last_checkpoint().0, r.last_seq());
     for status in [RunStatus::Error("x".into()), RunStatus::Cancelled] {
         let (_d, p) = temp();
@@ -231,7 +231,7 @@ fn a_finished_run_ends_on_a_checkpoint() {
             ..initial()
         };
         w.record(done, 1, vec![]).unwrap();
-        assert_eq!(RunFileReader::open(&p).unwrap().checkpoints(), 2);
+        assert_eq!(RunFileReader::read(&p).unwrap().checkpoints(), 2);
     }
 }
 
@@ -244,7 +244,7 @@ fn measure_the_default_checkpoint_policy() {
     let states = scripted_run(120);
     let size = |policy| {
         write_run(&path, &states, policy);
-        let r = RunFileReader::open(&path).unwrap();
+        let r = RunFileReader::read(&path).unwrap();
         (std::fs::metadata(&path).unwrap().len(), r.checkpoints())
     };
     let deltas_only = size(CheckpointPolicy {

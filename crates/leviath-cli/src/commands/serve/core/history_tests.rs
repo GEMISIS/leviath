@@ -141,7 +141,7 @@ async fn a_state_with_no_window_is_no_point() {
 fn as_converted(run_id: &str, first_point_at: Option<i64>, seq: u64) {
     use leviath_runtime::runfile::{CheckpointPolicy, RunFileReader, RunFileWriter};
     let path = run_file::path(run_id);
-    let reader = RunFileReader::open(&path).unwrap();
+    let reader = RunFileReader::read(&path).unwrap();
     let mut spec = reader.spec().clone();
     spec.listed = Some(leviath_runtime::spec::run_spec::ListedAs {
         model: None,

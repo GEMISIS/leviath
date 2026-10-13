@@ -337,7 +337,7 @@ fn report_forced(
             ),
             None => bail!("no such run"),
         },
-        O::WriteFailed => bail!("could not write '{run_id}' metadata to record the cancel"),
+        O::WriteFailed(why) => bail!("could not record the cancel in run '{run_id}''s file: {why}"),
     }
 }
 

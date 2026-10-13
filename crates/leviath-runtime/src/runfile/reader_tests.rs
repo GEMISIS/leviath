@@ -342,7 +342,7 @@ fn a_file_with_no_checkpoint_opens_but_has_no_state() {
     assert_eq!(r.spec(), &spec());
     assert!(!r.is_empty());
     assert_eq!(r.path(), Path::new("r.lvr2"));
-    assert_eq!(r.cut_bytes(), 0);
+    assert_eq!(r.torn_bytes(), 0);
     assert!(r.owners().unwrap().is_empty());
     // The spec names code the file does not hold.
     assert_eq!(
@@ -361,7 +361,7 @@ fn a_file_with_no_checkpoint_opens_but_has_no_state() {
 fn opening_a_missing_file_says_which() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("gone.lvr2");
-    let err = RunFileReader::open(&path).unwrap_err();
+    let err = RunFileReader::read(&path).unwrap_err();
     assert!(matches!(err.kind, RunFileErrorKind::Io(_)));
     assert_eq!(err.path, path);
     assert!(matches!(
@@ -380,7 +380,7 @@ fn every_step_of_a_written_run_reads_back_as_the_state_it_was() {
         size_ratio: 100.0,
     };
     let w = write_run(&path, &states, policy);
-    let r = RunFileReader::open(&path).unwrap();
+    let r = RunFileReader::read(&path).unwrap();
     assert_eq!(r.len(), w.len());
     assert_eq!(r.code_files().unwrap(), code());
     assert_eq!(r.last_seq(), states.len() as u64 - 1);
@@ -398,8 +398,10 @@ fn every_step_of_a_written_run_reads_back_as_the_state_it_was() {
     assert_eq!(replayed, r.state_at(12).unwrap());
 }
 
+/// A torn tail is left out of what is read and left on the file; the writer
+/// that carries the run on cuts it off and appends after the rest.
 #[test]
-fn a_torn_tail_is_cut_off_the_file_and_the_rest_kept() {
+fn a_torn_tail_is_read_past_and_cut_only_by_the_writer() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.lvr2");
     let states = scripted_run(3);
@@ -419,13 +421,17 @@ fn a_torn_tail_is_cut_off_the_file_and_the_rest_kept() {
     .unwrap();
     bytes.extend(&next[..next.len() - 2]);
     std::fs::write(&path, &bytes).unwrap();
-    let r = RunFileReader::open(&path).unwrap();
-    assert_eq!(r.cut_bytes(), next.len() - 2);
+    let r = RunFileReader::read(&path).unwrap();
+    assert_eq!(r.torn_bytes(), next.len() - 2);
     assert_eq!(r.len(), whole);
-    assert_eq!(std::fs::metadata(&path).unwrap().len(), whole);
+    assert!(
+        std::fs::read(&path).unwrap() == bytes,
+        "reading wrote to the file"
+    );
     assert_eq!(r.latest_state().unwrap().seq, states.len() as u64 - 1);
-    // And a writer carries on from it.
+    // The writer cuts the tear off and carries on from the rest.
     let mut w = RunFileWriter::open(&path, CheckpointPolicy::default()).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), whole);
     let mut more = states.last().unwrap().clone();
     more.title = Some("after the tear".into());
     assert_eq!(
@@ -526,7 +532,7 @@ fn a_stored_part_reads_from_beside_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.lvr");
     write_run(&path, &scripted_run(1), CheckpointPolicy::default());
-    let r = RunFileReader::open(&path).unwrap();
+    let r = RunFileReader::read(&path).unwrap();
     assert_eq!(r.dir(), dir.path());
     let here = Digest::of(b"here");
     let blobs = dir.path().join(leviath_core::files::BLOBS_DIR);
@@ -554,6 +560,8 @@ fn read_only(path: &Path, on: bool) {
     std::fs::set_permissions(path, perms).unwrap();
 }
 
+/// A torn tail on a file the writer may only read is read past, and the
+/// writer, which would have to cut it, cannot open the file.
 #[test]
 fn a_torn_tail_that_cannot_be_cut_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
@@ -563,7 +571,8 @@ fn a_torn_tail_that_cannot_be_cut_is_an_error() {
     bytes.extend(b"torn");
     std::fs::write(&path, &bytes).unwrap();
     read_only(&path, true);
-    let err = RunFileReader::open(&path).unwrap_err();
+    assert_eq!(RunFileReader::read(&path).unwrap().torn_bytes(), 4);
+    let err = RunFileWriter::open(&path, CheckpointPolicy::default()).unwrap_err();
     assert!(matches!(err.kind, RunFileErrorKind::Io(_)));
     // And a writer cannot append to a file it may only read.
     read_only(&path, false);
@@ -573,4 +582,110 @@ fn a_torn_tail_that_cannot_be_cut_is_an_error() {
     assert!(matches!(err.kind, RunFileErrorKind::Io(_)));
     // Writable again, so the directory can be cleaned up on every platform.
     read_only(&path, false);
+}
+
+/// A run of six steps checkpointed every two, with the body of the delta for
+/// step 2 damaged: whole frames follow it, the last checkpoint among them.
+pub(crate) fn damaged_in_the_middle(path: &Path) -> (Vec<u8>, usize) {
+    let policy = CheckpointPolicy {
+        every: 2,
+        size_ratio: f64::MAX,
+    };
+    drop(write_run(path, &scripted_run(5), policy));
+    let mut bytes = std::fs::read(path).unwrap();
+    let frames = codec::scan(&bytes).frames;
+    let damaged = frames
+        .iter()
+        .filter(|f| f.kind == FrameKind::Delta)
+        .nth(1)
+        .copied()
+        .unwrap();
+    let later_checkpoint = frames
+        .iter()
+        .any(|f| f.kind == FrameKind::State && f.offset > damaged.offset);
+    assert!(later_checkpoint);
+    bytes[damaged.body] ^= 0xff;
+    std::fs::write(path, &bytes).unwrap();
+    (bytes, damaged.offset)
+}
+
+/// A damaged frame with whole frames after it is damage, not a torn last
+/// write: reading the file says where, a writer refuses it, and every byte
+/// stays where it was, the checkpoint after the damage included.
+#[test]
+fn a_damaged_middle_frame_is_refused_and_nothing_is_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.lvr");
+    let (bytes, at) = damaged_in_the_middle(&path);
+    let corrupt = RunFileErrorKind::Codec(CodecError::Corrupt(at as u64));
+    assert_eq!(RunFileReader::read(&path).unwrap_err().kind, corrupt);
+    let refused = RunFileWriter::open(&path, CheckpointPolicy::default()).map(|_| ());
+    assert_eq!(refused.unwrap_err().kind, corrupt);
+    assert!(
+        std::fs::read(&path).unwrap() == bytes,
+        "the file was changed"
+    );
+}
+
+/// A whole frame of a kind this build does not know, in the middle of a
+/// file, is refused by name, and nothing is cut.
+#[test]
+fn an_unknown_kind_in_the_middle_is_refused_and_nothing_is_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.lvr");
+    drop(write_run(
+        &path,
+        &scripted_run(3),
+        CheckpointPolicy::default(),
+    ));
+    let mut bytes = std::fs::read(&path).unwrap();
+    let frame = codec::scan(&bytes).frames[1];
+    bytes[frame.offset] = 99;
+    let mut crc = crc32fast::Hasher::new();
+    crc.update(&[99]);
+    crc.update(&bytes[frame.body..frame.body + frame.len]);
+    let at_crc = frame.body + frame.len;
+    bytes[at_crc..at_crc + 4].copy_from_slice(&crc.finalize().to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    let unknown = RunFileErrorKind::Codec(CodecError::UnknownKind {
+        at: frame.offset as u64,
+        kind: 99,
+    });
+    assert_eq!(RunFileReader::read(&path).unwrap_err().kind, unknown);
+    let refused = RunFileWriter::open(&path, CheckpointPolicy::default()).map(|_| ());
+    assert_eq!(refused.unwrap_err().kind, unknown);
+    assert!(
+        std::fs::read(&path).unwrap() == bytes,
+        "the file was changed"
+    );
+}
+
+/// A torn tail on a file whose last state does not decode is left on it:
+/// the writer refuses the file before it cuts anything.
+#[test]
+fn a_writer_that_cannot_go_on_cuts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.lvr");
+    drop(write_run(
+        &path,
+        &scripted_run(1),
+        CheckpointPolicy::default(),
+    ));
+    let mut bytes = std::fs::read(&path).unwrap();
+    let last = *codec::scan(&bytes).frames.last().unwrap();
+    // A checkpoint whose payload is not a state, framed whole.
+    let not_a_state = codec::encode(FrameKind::State, &(last_seq_of(&path) + 1, "junk")).unwrap();
+    bytes.truncate(last.end());
+    bytes.extend(not_a_state);
+    bytes.extend(b"torn");
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(RunFileWriter::open(&path, CheckpointPolicy::default()).is_err());
+    assert!(
+        std::fs::read(&path).unwrap() == bytes,
+        "the file was changed"
+    );
+}
+
+fn last_seq_of(path: &Path) -> u64 {
+    RunFileReader::read(path).unwrap().last_seq()
 }

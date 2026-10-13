@@ -62,7 +62,7 @@ pub fn read_for_resume(
     if !path.exists() {
         return Ok(None);
     }
-    let reader = crate::runfile::RunFileReader::open(&path)?;
+    let reader = crate::runfile::RunFileReader::read(&path)?;
     let mut state = reader.latest_state()?;
     if let (Some(fan_out), Some(runs_dir)) = (state.fan_out.as_mut(), run_dir.parent()) {
         settle_finished_workers(fan_out, runs_dir);
@@ -136,7 +136,7 @@ fn settle_finished_workers(fan_out: &mut crate::state::FanOutState, runs_dir: &s
     for (item, run) in active {
         let dir = runs_dir.join(run.as_str());
         let reader =
-            crate::runfile::RunFileReader::open(&dir.join(leviath_core::files::RUN_FILE)).ok();
+            crate::runfile::RunFileReader::read(&dir.join(leviath_core::files::RUN_FILE)).ok();
         let finished = reader
             .and_then(|reader| reader.latest_state().ok().map(|state| (state, reader)))
             .and_then(|(state, reader)| worker_result(reader.spec(), &state, &dir));
@@ -436,6 +436,35 @@ pub fn held_entry(
         read_paths: md.read_paths,
         has_final_output: state.final_output.is_some(),
         may_never_finish: spec.warnings().iter().map(ToString::to_string).collect(),
+    }
+}
+
+/// The listing row of the run `run_id`, whose file did not read back for
+/// `why`: failed, saying so, with nothing else known about it. The file is
+/// left as it is, so the row says that too.
+pub fn damaged_entry(run_id: &str, why: &str) -> crate::host::RunListEntry {
+    crate::host::RunListEntry {
+        run_id: run_id.to_string(),
+        title: None,
+        status: crate::components::AgentStatus::Error {
+            message: format!("{why}; the file is left as it is"),
+        },
+        wait_reason: None,
+        stage: String::new(),
+        stage_index: None,
+        num_stages: None,
+        iteration: 0,
+        tool_calls: 0,
+        last_progress_at: None,
+        started_at: None,
+        active: None,
+        unattended: leviath_core::Unattended::default(),
+        empty_output: false,
+        splits_degraded: 0,
+        broken_scripts: Vec::new(),
+        read_paths: None,
+        has_final_output: false,
+        may_never_finish: Vec::new(),
     }
 }
 

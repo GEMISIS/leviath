@@ -23,7 +23,7 @@ fn written() -> (tempfile::TempDir, std::path::PathBuf, RunFileWriter) {
 #[test]
 fn a_run_with_no_steps_is_listed_as_resolved() {
     let (_dir, path, _writer) = written();
-    let meta = summary(&RunFileReader::open(&path).unwrap()).unwrap();
+    let meta = summary(&RunFileReader::read(&path).unwrap()).unwrap();
     let spec = spec();
     assert_eq!(meta.run_id, spec.run_id.as_str());
     assert_eq!(meta.updated_at, spec.created_at);
@@ -50,7 +50,7 @@ fn a_run_is_listed_as_of_its_last_step() {
     });
     writer.record(next, 1234, Vec::new()).unwrap();
 
-    let meta = summary(&RunFileReader::open(&path).unwrap()).unwrap();
+    let meta = summary(&RunFileReader::read(&path).unwrap()).unwrap();
     assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Error);
     assert_eq!(meta.error.as_deref(), Some("it broke"));
     assert_eq!(meta.title.as_deref(), Some("A title"));
@@ -72,7 +72,7 @@ fn a_run_lists_its_title_error_and_read_path_grants() {
         granted: 2,
     });
     writer.record(next, 99, Vec::new()).unwrap();
-    let meta = summary(&RunFileReader::open(&path).unwrap()).unwrap();
+    let meta = summary(&RunFileReader::read(&path).unwrap()).unwrap();
     assert_eq!(meta.title_error.as_deref(), Some("mock/m failed: HTTP 403"));
     assert_eq!(
         meta.read_paths,

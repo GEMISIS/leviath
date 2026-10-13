@@ -166,7 +166,7 @@ impl Run {
             let bytes = std::fs::read(path).unwrap();
             let mut held = contains(&bytes, needle);
             if codec::check_header(&bytes, leviath_runtime::runfile::fingerprint()).is_ok() {
-                let (frames, _) = codec::frames(&bytes);
+                let frames = codec::scan(&bytes).frames;
                 held |= frames.iter().any(|f| {
                     let plain = zstd::stream::decode_all(&bytes[f.body..f.body + f.len]).unwrap();
                     contains(&plain, needle)
@@ -188,7 +188,7 @@ impl Run {
     /// frame is decompressed.
     pub fn file_holds(&self, needle: &str) -> bool {
         let bytes = std::fs::read(self.path("run.lvr")).unwrap();
-        let (frames, _) = codec::frames(&bytes);
+        let frames = codec::scan(&bytes).frames;
         frames.iter().any(|f| {
             let plain = zstd::stream::decode_all(&bytes[f.body..f.body + f.len]).unwrap();
             plain.windows(needle.len()).any(|w| w == needle.as_bytes())
@@ -215,7 +215,7 @@ impl RunFile {
     pub fn read(path: &Path) -> Self {
         let bytes = std::fs::read(path).unwrap();
         codec::check_header(&bytes, leviath_runtime::runfile::fingerprint()).unwrap();
-        let (frames, end) = codec::frames(&bytes);
+        let codec::Scan { frames, end, .. } = codec::scan(&bytes);
         assert_eq!(end, bytes.len());
         assert_eq!(frames[0].kind, FrameKind::Spec);
         let (mut code, mut states, mut deltas) = (Vec::new(), Vec::new(), Vec::new());

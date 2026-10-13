@@ -252,7 +252,7 @@ async fn the_run_file_ends_where_the_run_does() {
         .path()
         .join("run-42")
         .join(leviath_core::files::RUN_FILE);
-    let file = RunFileReader::open(&path).unwrap();
+    let file = RunFileReader::read(&path).unwrap();
     let recorded = file.latest_state().unwrap();
     assert!(recorded.seq > 1);
     // The file numbers the steps, and a live read says which one it is at.
@@ -474,7 +474,7 @@ fn tool_world(
 /// Whether `run_id`'s file under `dir` records call `call` finishing.
 fn file_has_finished(dir: &std::path::Path, run_id: &str, call: &str) -> bool {
     let path = dir.join(run_id).join(leviath_core::files::RUN_FILE);
-    let Ok(file) = RunFileReader::open(&path) else {
+    let Ok(file) = RunFileReader::read(&path) else {
         return false;
     };
     file.deltas(1, file.last_seq())
@@ -749,7 +749,7 @@ type Ended = (
 /// (call id, execution id, outcome).
 fn executions_in_file(dir: &std::path::Path, run_id: &str) -> (Vec<Sent>, Vec<Ended>) {
     use crate::state::RunEvent;
-    let file = RunFileReader::open(&dir.join(run_id).join(leviath_core::files::RUN_FILE)).unwrap();
+    let file = RunFileReader::read(&dir.join(run_id).join(leviath_core::files::RUN_FILE)).unwrap();
     let events: Vec<RunEvent> = file
         .deltas(1, file.last_seq())
         .unwrap()

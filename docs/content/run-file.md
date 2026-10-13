@@ -145,9 +145,13 @@ its digest, and a run that names one is not resumed until it is put back. The er
 On a run given a 2 MB image that handed back a 59 KB answer, `run.lvr` came to 12 KB. With the
 image copied in, it came to 2.1 MB.
 
-A crash can cut a frame short. Every frame carries a checksum, so the next open finds a torn frame
-at the end and cuts it off. The run resumes from its last complete step. `lev run show` leaves the
-torn step out too, and says so.
+A crash can cut a frame short. Every frame carries a checksum, so a torn frame at the end is found
+and left out of what is read. Only the daemon cuts it off, when it next writes to the run, which
+then resumes from its last complete step. `lev run show` leaves the torn step out too, and says so.
+
+A damaged frame with whole frames after it is not a torn write, because a crash only tears the last
+one. Nothing cuts such a file: the daemon lists the run as failed, naming the byte where the damage
+starts, and leaves the file as it is. `lev run show` and the API say the same.
 
 ## Resuming a run
 
@@ -260,7 +264,8 @@ Alpha builds wrote run files in an earlier binary layout, which this build refus
 fingerprint. The daemon upgrades each one in place in the same pass at start: the spec's stage
 plans are rewritten in this build's shape, and every other frame is copied as it was, so the run
 reads back exactly as it did. The file as it was stays in the run's `legacy/` folder as
-`run.v2.lvr`, and the directory is saved in the home's backup first.
+`run.v2.lvr`, and the directory is saved in the home's backup first. A run file in any other
+layout this build does not know is listed as failed, saying so, and left as it is.
 
 An old run never recorded a machine fingerprint, so its resume does not compare one. It comes back
 on whatever providers this machine has under the same names, in whatever sandbox the settings give

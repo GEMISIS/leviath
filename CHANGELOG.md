@@ -227,6 +227,17 @@ same list.
 
 ### Fixed
 
+- A run file with a damaged step in the middle keeps every step after it.
+  Opening the file took any frame that did not check out as a step a crash
+  left half written and cut the file there, so one bad frame deleted the
+  rest of the run, checkpoints included. Only the last frame can be torn by
+  a crash, so only a writer cuts, and only that. A run whose file is damaged
+  is listed as failed, naming the byte, and the file is left as it is.
+  Reading a run (`run_history`, `lev run show`, the API, a page-in) never
+  writes to its file, so it cannot cut a live run's file while the run is
+  writing to it.
+- No frame of a run file decompresses past 1 GiB, whatever its header
+  claims. One whose header gave no size was decompressed with no limit.
 - A tool approval prompt names only the commands that still need approving.
   A line that ran `cd`, `cat`, `ls` and one `sed` read `Allow cat x, cd, echo
   +4 more`, with `sed` hidden in the count, and a stage or run grant also

@@ -946,7 +946,7 @@ binds = [{{ region = "task" }}]
         let mut next = writer.state().clone();
         next.status = status;
         writer.record(next, 1, Vec::new()).unwrap();
-        let graph = leviath_runtime::runfile::RunFileReader::open(&path)
+        let graph = leviath_runtime::runfile::RunFileReader::read(&path)
             .unwrap()
             .spec()
             .graph

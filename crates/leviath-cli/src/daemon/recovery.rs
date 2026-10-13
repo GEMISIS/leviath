@@ -66,22 +66,38 @@ fn convert_old(starter: &DaemonStarter, dir: &Path, all: bool) {
     }
 }
 
-/// Read the run in `dir` from its run file. `None` when the directory holds
-/// none, or one that cannot be read (said in the log), or a run that never
-/// resumes: one converted from an earlier release without its blueprint.
-fn read_run(dir: &Path) -> Option<Resumable> {
-    let run = leviath_runtime::restore::read_for_resume(dir)
-        .inspect_err(|e| {
-            tracing::warn!(error = %e, "a run file could not be read; the run is not resumed");
-        })
-        .ok()
-        .flatten()?;
+/// Read the run in `dir` from its run file. `Ok(None)` when the directory
+/// holds none (or a file that is not one), or a run that never resumes: one
+/// converted from an earlier release without its blueprint. A run file that
+/// does not read is an error saying why, said in the log too; nothing
+/// writes to it.
+fn read_run(dir: &Path) -> Result<Option<Resumable>, String> {
+    let run = match leviath_runtime::restore::read_for_resume(dir) {
+        Ok(run) => run,
+        Err(_) if !crate::runstate::run_file::is_run_file(dir) => return Ok(None),
+        Err(e) => {
+            let why = e.to_string();
+            tracing::warn!(error = %why, "a run file could not be read; the run is not resumed and the file is left as it is");
+            return Err(why);
+        }
+    };
+    let Some(run) = run else {
+        return Ok(None);
+    };
     if let Some(why) = run.spec.origin.never_resumes() {
         let id = run.spec.run_id.to_string();
         tracing::info!(run_id = %id, why = %why, "the run cannot resume: its graph is only what an old run recorded");
-        return None;
+        return Ok(None);
     }
-    Some(run)
+    Ok(Some(run))
+}
+
+/// The run id of the run directory `dir`: its name.
+fn run_id_of(dir: &Path) -> String {
+    dir.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// A run read back from its file and bound to this machine, ready to place.
@@ -181,10 +197,23 @@ pub(crate) fn resume_all(
     // call that was in flight is not run again: it comes back interrupted.
     let crashed = leviath_runtime::restore::begin_session(runs_dir);
     // Only a run that has not finished is read: the run index says which
-    // those are without reading the file of every run that has.
+    // those are without reading the file of every run that has. A run whose
+    // file does not read is listed, failed and saying why, rather than left
+    // out of the listing with its file looking unfinished.
+    let mut held = Vec::new();
     let found: Vec<Resumable> = crate::run_index::unfinished(runs_dir)
         .iter()
-        .filter_map(|dir| read_run(dir))
+        .filter_map(|dir| {
+            read_run(dir)
+                .inspect_err(|why| {
+                    held.push(leviath_runtime::restore::damaged_entry(
+                        &run_id_of(dir),
+                        why,
+                    ));
+                })
+                .ok()
+                .flatten()
+        })
         .map(|mut run| {
             if crashed {
                 leviath_runtime::restore::interrupt_in_flight(&mut run.state);
@@ -194,7 +223,6 @@ pub(crate) fn resume_all(
         .collect();
     starter.refresh_world(world);
     let mut placed: Vec<Placed> = Vec::new();
-    let mut held = Vec::new();
     for run in leviath_runtime::restore::triage(found, |r| r) {
         let spec = run.spec.clone();
         // Before the serve loop runs, so binding here holds up nothing.
@@ -245,7 +273,12 @@ pub(crate) async fn bind_paged(
     let config = starter.checked_config().await;
     let dir = starter.runs_dir.join(run_id);
     convert_old(starter, &dir, false);
-    let run = read_run(&dir).ok_or(NotPlaced::Missing)?;
+    let run = read_run(&dir)
+        .map_err(|why| NotPlaced::Damaged {
+            entry: Box::new(leviath_runtime::restore::damaged_entry(run_id, &why)),
+            why,
+        })?
+        .ok_or(NotPlaced::Missing)?;
     let revive = match (&run.state.status, purpose) {
         (RunStatus::Complete, _) => return Err(NotPlaced::Stopped(AgentStatus::Complete)),
         (RunStatus::Error(message), _) => {

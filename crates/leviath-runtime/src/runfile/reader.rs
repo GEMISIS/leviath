@@ -1,7 +1,7 @@
 //! Reading a run file: its spec, its code, its state at any step, and the
 //! stored parts it names beside it.
 //!
-//! [`RunFileReader::open`] reads the whole file once and indexes its frames.
+//! [`RunFileReader::read`] reads the whole file once and indexes its frames.
 //! Nothing else is decoded until it is asked for, and the index is built by
 //! reading only the first bytes of a frame's payload: every state and delta
 //! starts with its `seq`, and every code frame with its digest.
@@ -37,44 +37,30 @@ pub struct RunFileReader {
     owners: Vec<FrameRef>,
     states: Vec<(u64, FrameRef)>,
     deltas: Vec<(u64, FrameRef)>,
-    cut: usize,
+    torn: usize,
 }
 
 impl RunFileReader {
-    /// Open the run file at `path`.
-    ///
-    /// A torn tail (a frame a crash left half written) is cut off the file
-    /// and logged, the same as the journal before it: everything before it
-    /// is whole and is kept.
-    pub fn open(path: &Path) -> Result<Self, RunFileError> {
-        let reader = Self::read(path)?;
-        if reader.cut > 0 {
-            let keep = reader.bytes.len() as u64;
-            let cut = reader.cut;
-            tracing::warn!(
-                path = %path.display(),
-                cut,
-                keep,
-                "run file ended in a torn frame; cutting it off"
-            );
-            truncate(path, keep)?;
-        }
-        Ok(reader)
-    }
-
-    /// Read the run file at `path` without writing to it: a torn tail is
-    /// dropped from what is read, and left on the file for its writer.
+    /// Read the run file at `path`. Reading never writes to it: a torn tail
+    /// (the last frame, left unfinished by a crash) is dropped from what is
+    /// read and left on the file for its writer to cut.
     pub fn read(path: &Path) -> Result<Self, RunFileError> {
         Self::from_bytes(path, read_file(path)?)
     }
 
     /// Read a run file from bytes already in memory. `path` names it in
-    /// errors. A torn tail is dropped from the bytes but nothing is written.
+    /// errors. A torn tail is dropped from the bytes; a damaged frame with
+    /// whole frames after it, or a frame of a kind this build does not know,
+    /// is an error naming where it starts.
     pub fn from_bytes(path: &Path, mut bytes: Vec<u8>) -> Result<Self, RunFileError> {
         let err = |e: CodecError| RunFileError::codec(path, e);
         codec::check_header(&bytes, super::fingerprint()).map_err(err)?;
-        let (frames, end) = codec::frames(&bytes);
-        let cut = bytes.len() - end;
+        let scan = codec::scan(&bytes);
+        if let Some(damage) = scan.stop.damage() {
+            return Err(err(damage));
+        }
+        let (frames, end) = (scan.frames, scan.end);
+        let torn = bytes.len() - end;
         bytes.truncate(end);
         let Some(first) = frames.first().filter(|f| f.kind == FrameKind::Spec) else {
             return Err(RunFileError::new(path, RunFileErrorKind::NoSpec));
@@ -88,7 +74,7 @@ impl RunFileReader {
             owners: Vec::new(),
             states: Vec::new(),
             deltas: Vec::new(),
-            cut,
+            torn,
             bytes: Vec::new(),
         };
         for frame in frames.into_iter().skip(1) {
@@ -127,9 +113,9 @@ impl RunFileReader {
         self.bytes.len() <= codec::HEADER_LEN
     }
 
-    /// How many bytes of torn tail were cut off when it was opened.
-    pub fn cut_bytes(&self) -> usize {
-        self.cut
+    /// How many bytes of torn tail the file ends in, left out of what was read.
+    pub fn torn_bytes(&self) -> usize {
+        self.torn
     }
 
     /// The run's spec.

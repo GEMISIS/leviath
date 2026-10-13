@@ -8,7 +8,7 @@
 //! reads the file and nothing else, so it works for a finished run and with
 //! no daemon running.
 
-use anyhow::{Context, bail};
+use anyhow::bail;
 use clap::Args;
 use leviath_runtime::runfile::view;
 
@@ -55,14 +55,13 @@ pub async fn execute(args: ShowArgs) -> anyhow::Result<()> {
 /// What `args` asks for, as it is printed.
 pub(crate) fn render(args: &ShowArgs) -> anyhow::Result<String> {
     let id = &resolve(&args.run_id)?;
-    let reader = runstate::run_file::open_in(&runstate::run_dir(id)).with_context(|| {
-        format!(
-            "run '{id}' has no run file this build reads; `lev ps --all` lists the runs there \
-             are, and a run from an older release or an alpha build is converted when the \
-             daemon starts"
-        )
-    })?;
-    if let Some(note) = torn_note(id, reader.cut_bytes()) {
+    let dir = runstate::run_dir(id);
+    if !runstate::run_file::path_in(&dir).is_file() {
+        bail!("run '{id}' has no run file; `lev ps --all` lists the runs there are");
+    }
+    let reader = runstate::run_file::open_in(&dir)
+        .map_err(|e| anyhow::anyhow!(runstate::run_file::why_unreadable(id, &dir, &e)))?;
+    if let Some(note) = torn_note(id, reader.torn_bytes()) {
         eprintln!("{note}");
     }
     // On stderr, beside the torn-step note, so `--json` stays one document.
@@ -136,13 +135,13 @@ fn resolve(given: &str) -> anyhow::Result<String> {
 }
 
 /// What to say about a run file that ends in a step a crash left half
-/// written, `cut` bytes of it: nothing when it ends whole.
-pub(crate) fn torn_note(id: &str, cut: usize) -> Option<String> {
-    (cut > 0).then(|| {
+/// written, `torn` bytes of it: nothing when it ends whole.
+pub(crate) fn torn_note(id: &str, torn: usize) -> Option<String> {
+    (torn > 0).then(|| {
         format!(
             "warning: run '{id}' has a last step that was never finished being written \
-             ({cut} bytes); it is left out here, and the daemon cuts it off when it next \
-             opens the run"
+             ({torn} bytes); it is left out here, and the daemon cuts it off when it next \
+             writes to the run"
         )
     })
 }

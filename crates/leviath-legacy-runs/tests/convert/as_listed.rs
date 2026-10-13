@@ -14,7 +14,7 @@ use crate::common::{Run, RunFile, fixtures_dir};
 
 /// The run's record as `lev ps` reads it from the converted file.
 fn listed(run: &Run) -> leviath_core::run_meta::RunMeta {
-    let reader = RunFileReader::open(&run.path("run.lvr")).unwrap();
+    let reader = RunFileReader::read(&run.path("run.lvr")).unwrap();
     leviath_runtime::runfile::summary(&reader).unwrap()
 }
 
