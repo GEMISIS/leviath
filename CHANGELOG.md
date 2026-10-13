@@ -248,6 +248,13 @@ same list.
   five minutes, sends at most eight at once, and leaves a webhook whose
   secret did not read owed rather than dropping it. A skip also reaches
   `/ws` and GraphQL subscribers as `events_dropped`.
+- A file a request names by path (a REST `parts` entry or `@path`, a GraphQL
+  attachment) is read no further than the upload limit, and the files one
+  request names are held to that limit between them. Each was read whole
+  before its size was checked, and a request could name any number of them.
+  A path that is not a regular file is refused, and the `--workdir-root`
+  check comes before any file is read, on the compatibility spawn route and
+  on GraphQL `spawnRun`.
 - A raw graph gets only the global tool permissions, safe commands and read
   paths. Its title was the name `[agent_tool_permissions.<name>]`,
   `[agent_safe_commands.<name>]` and `[agent_read_paths.<name>]` were looked

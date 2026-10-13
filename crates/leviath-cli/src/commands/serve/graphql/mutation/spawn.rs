@@ -263,8 +263,10 @@ pub(crate) enum ValidateSpawnResult {
 
 /// What a request is read with on this server.
 fn policy(state: &AppState) -> Policy {
+    let max_bytes = state.limits.request_limits.max_upload_bytes;
     Policy {
-        max_bytes: state.limits.request_limits.max_upload_bytes,
+        max_bytes,
+        files: crate::commands::serve::core::attachments::FileBudget::new(max_bytes),
     }
 }
 
@@ -277,6 +279,16 @@ async fn read(
     state: &AppState,
     request: SpawnRunRequest,
 ) -> Result<leviath_runtime::spec::request::SpawnRequest, SpawnIssues> {
+    // An attachment named by path is a file in the workdir, which is held to
+    // `--workdir-root` before any of them is read.
+    if request.has_attachments() {
+        let (workdir, named) = request.workdir();
+        if let Some(refused) = spawn_core::workdir_refusal(state, workdir, named).await {
+            let mut issues = SpawnIssues::new();
+            issues.push(refused);
+            return Err(issues);
+        }
+    }
     // An attachment named by path is a file read, so the request is read on
     // the blocking pool.
     let policy = policy(state);
