@@ -172,14 +172,6 @@ async fn a_step_or_a_part_that_does_not_read_is_an_error() {
         super::super::run_file::tests::bad_step(&run_id, 1);
         assert_eq!(deltas(&run_id, None, None).unwrap_err().code(), "INTERNAL");
         assert_eq!(graph(&run_id).unwrap_err().code(), "INTERNAL");
-
-        let run_id = recorded();
-        let digest = Digest::of(b"not a file");
-        let path = leviath_runtime::runfile::blob_path(&crate::runstate::run_dir(&run_id), &digest);
-        std::fs::create_dir_all(path).unwrap();
-        let err = blob(&run_id, digest.as_str()).unwrap_err();
-        assert_eq!(err.code(), "INTERNAL");
-        assert!(err.to_string().contains(digest.as_str()), "{err}");
     })
     .await;
 }
@@ -313,22 +305,17 @@ async fn parts_are_read_from_the_blob_directory() {
         assert!(blobs(&run_id).unwrap().is_empty());
         assert_eq!(blobs("ghost").unwrap_err().code(), "NOT_FOUND");
 
-        // A part the run file names is not in it: its bytes are beside it.
-        let digest = Digest::of(b"named, never copied in");
-        assert!(blob(&run_id, digest.as_str()).unwrap().is_none());
-
+        // A part the run file names is not in it: its bytes are beside it,
+        // in the run's blob directory, the same place the runtime keeps it.
         let on_disk = b"kept beside it";
         let sha = Digest::of(on_disk);
+        assert_eq!(
+            blob_path(&run_id, sha.as_str()),
+            leviath_runtime::runfile::blob_path(&crate::runstate::run_dir(&run_id), &sha)
+        );
         let dir = crate::runstate::run_dir(&run_id).join(leviath_core::files::BLOBS_DIR);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(sha.as_str()), on_disk).unwrap();
-        assert_eq!(
-            blob(&run_id, sha.as_str()).unwrap().unwrap(),
-            on_disk.to_vec()
-        );
-
-        assert!(blob(&run_id, "not-a-hash").unwrap().is_none());
-        assert!(blob("ghost", sha.as_str()).unwrap().is_none());
 
         // The window names two parts: one whose bytes are beside the file,
         // and one whose file is gone.

@@ -588,16 +588,31 @@ impl MimeRegistry {
         name: Option<&str>,
         bytes: &[u8],
     ) -> MimeType {
+        self.resolve_with(declared, name, bytes, || std::str::from_utf8(bytes).is_ok())
+    }
+
+    /// [`resolve`](Self::resolve) for bytes too many to hold: `head` is the
+    /// start of them, enough to sniff, and `is_text` says whether all of them
+    /// are valid UTF-8. It is asked only when the declared type, the sniff
+    /// and the name all leave the type open, so a caller reads the rest of
+    /// the bytes only then.
+    pub fn resolve_with(
+        &self,
+        declared: Option<&MimeType>,
+        name: Option<&str>,
+        head: &[u8],
+        is_text: impl FnOnce() -> bool,
+    ) -> MimeType {
         if let Some(t) = declared {
             return t.clone();
         }
-        if let Some(t) = self.sniff(bytes) {
+        if let Some(t) = self.sniff(head) {
             return t;
         }
         if let Some(t) = name.and_then(|n| self.from_name(n)) {
             return t;
         }
-        if std::str::from_utf8(bytes).is_ok() {
+        if is_text() {
             return super::text_plain();
         }
         super::octet_stream()

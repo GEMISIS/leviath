@@ -255,6 +255,12 @@ same list.
   A path that is not a regular file is refused, and the `--workdir-root`
   check comes before any file is read, on the compatibility spawn route and
   on GraphQL `spawnRun`.
+- A run's raw file, stored part or export over 1 MiB is sent from disk a
+  block at a time, and a `Range` request reads only the bytes it asks for.
+  Each was read whole into memory first, so a one-byte range of a large
+  video cost the whole video. The `Content-Type` is decided as before; a
+  large file is read through for UTF-8 only when its first bytes and its
+  name leave the type open.
 - A multipart body with a second `request` field is refused rather than
   read as the last one, a file field named like `partition` or `parts` is
   refused rather than taken as a `part`, and a body cut off mid-file is a
