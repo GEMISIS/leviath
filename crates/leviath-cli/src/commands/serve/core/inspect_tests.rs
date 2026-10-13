@@ -140,7 +140,10 @@ async fn a_file_whose_steps_do_not_decode_is_an_error() {
             .unwrap(),
         );
         garbage(&run_id, &bytes);
-        assert_eq!(context(&run_id).unwrap_err().code(), "INTERNAL");
+        assert_eq!(graph(&run_id).unwrap_err().code(), "INTERNAL");
+        // Where the run is now is read from the file's ends, which a stray
+        // frame earlier in it does not reach.
+        assert!(context(&run_id).is_ok());
 
         // A state frame that is not a state.
         let run_id = recorded();
@@ -190,6 +193,33 @@ async fn steps_are_read_in_any_window() {
         let backwards = deltas(&run_id, Some(3), Some(1)).unwrap_err();
         assert_eq!(backwards.code(), "BAD_USER_INPUT");
         assert_eq!(deltas("ghost", None, None).unwrap_err().code(), "NOT_FOUND");
+        // Past the last step, and from step 0, which is the start.
+        assert!(deltas(&run_id, Some(4), None).unwrap().is_empty());
+        assert_eq!(seqs(deltas(&run_id, Some(0), Some(1)).unwrap()), vec![1]);
+    })
+    .await;
+}
+
+/// A run with no steps yet has an empty page of them, not a refused one; a
+/// page is at most [`MAX_STEPS`] steps, and a wider range is refused.
+#[tokio::test]
+async fn steps_are_read_a_page_at_a_time() {
+    crate::runstate::with_isolated_runs_dir_async("inspect-pages", |_d| async move {
+        let run_id = recorded();
+        assert!(deltas(&run_id, None, None).unwrap().is_empty());
+        for at in 0..MAX_STEPS + 5 {
+            step(&run_id, at as i64, Vec::new(), |s| s.cursor.iteration += 1);
+        }
+        assert_eq!(deltas(&run_id, None, None).unwrap().len() as u64, MAX_STEPS);
+        let rest = deltas(&run_id, Some(MAX_STEPS + 1), None).unwrap();
+        assert_eq!(rest.len(), 5);
+        let wide = deltas(&run_id, Some(1), Some(MAX_STEPS + 1)).unwrap_err();
+        assert_eq!(wide.code(), "BAD_USER_INPUT");
+        assert!(wide.to_string().contains("at most 200 steps"), "{wide}");
+        assert_eq!(
+            deltas(&run_id, Some(1), Some(MAX_STEPS)).unwrap().len() as u64,
+            MAX_STEPS
+        );
     })
     .await;
 }

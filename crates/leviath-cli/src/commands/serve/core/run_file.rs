@@ -53,6 +53,35 @@ pub(crate) fn require(run_id: &str) -> Result<RunFileReader, ServeError> {
     open(run_id)?.ok_or_else(|| ServeError::run_not_found(run_id))
 }
 
+/// The run's spec, read from the front of its file alone, or a miss naming
+/// the run.
+pub(crate) fn require_spec(
+    run_id: &str,
+) -> Result<leviath_runtime::spec::run_spec::RunSpec, ServeError> {
+    let path = present(run_id)?;
+    leviath_runtime::runfile::read_spec(&path).map_err(|e| unreadable(run_id, &e))
+}
+
+/// The run as its file stands, read from the file's two ends rather than
+/// walked, or a miss naming the run.
+pub(crate) fn require_tail(
+    run_id: &str,
+) -> Result<leviath_runtime::runfile::RunFileTail, ServeError> {
+    let path = present(run_id)?;
+    leviath_runtime::runfile::RunFileTail::read(&path).map_err(|e| unreadable(run_id, &e))
+}
+
+/// Where the run's file is, or a miss naming the run when it has none. A
+/// path that is there but is not a file is left for the read to refuse: the
+/// run exists, and saying it does not would send a client looking elsewhere.
+fn present(run_id: &str) -> Result<PathBuf, ServeError> {
+    let path = path(run_id);
+    match path.exists() {
+        true => Ok(path),
+        false => Err(ServeError::run_not_found(run_id)),
+    }
+}
+
 /// A run file that would not read, said so that whoever reads it knows
 /// whether the daemon converts it or it stays as it is.
 pub(crate) fn unreadable(run_id: &str, e: &dyn std::fmt::Display) -> ServeError {
@@ -89,12 +118,23 @@ pub(crate) fn initial(run_id: &str, reader: &RunFileReader) -> Result<RunState, 
     reader.state_at(0).map_err(|e| unreadable(run_id, &e))
 }
 
-/// The state the run started in, and every step after it.
-fn steps(run_id: &str, reader: &RunFileReader) -> Result<(RunState, Vec<StateDelta>), ServeError> {
+/// The state the run started in, and every step after it, each decoded only
+/// when a walk reaches it: a walk that stops early decodes no more.
+fn steps<'r>(
+    run_id: &str,
+    reader: &'r RunFileReader,
+) -> Result<
+    (
+        RunState,
+        impl Iterator<Item = Result<StateDelta, ServeError>> + 'r,
+    ),
+    ServeError,
+> {
     let state = initial(run_id, reader)?;
+    let id = run_id.to_string();
     let deltas = reader
-        .deltas(state.seq + 1, reader.last_seq())
-        .map_err(|e| unreadable(run_id, &e))?;
+        .delta_iter(state.seq + 1, reader.last_seq())
+        .map(move |delta| delta.map_err(|e| unreadable(&id, &e)));
     Ok((state, deltas))
 }
 
@@ -106,11 +146,12 @@ pub(crate) fn walk(
     visit: &mut dyn FnMut(Step<'_>) -> ControlFlow<()>,
 ) -> Result<(), ServeError> {
     let (mut state, deltas) = steps(run_id, reader)?;
-    for delta in &deltas {
+    for delta in deltas {
+        let delta = delta?;
         let cursor = state.cursor.clone();
         delta.apply(&mut state);
         let step = Step {
-            delta,
+            delta: &delta,
             cursor: &cursor,
             after: &state,
         };
@@ -134,9 +175,10 @@ pub(crate) fn walk_points(
     visit: &mut dyn FnMut(&StateDelta, &RunState) -> ControlFlow<()>,
 ) -> Result<(), ServeError> {
     let (mut state, deltas) = steps(run_id, reader)?;
-    for delta in &deltas {
-        let flow = leviath_runtime::runfile::history::step_points(delta, &mut state, &mut |at| {
-            visit(delta, at)
+    for delta in deltas {
+        let delta = delta?;
+        let flow = leviath_runtime::runfile::history::step_points(&delta, &mut state, &mut |at| {
+            visit(&delta, at)
         });
         if flow.is_break() {
             break;
@@ -153,11 +195,12 @@ pub(crate) fn walk_pairs(
     visit: &mut dyn FnMut(Pair<'_>) -> ControlFlow<()>,
 ) -> Result<(), ServeError> {
     let (mut state, deltas) = steps(run_id, reader)?;
-    for delta in &deltas {
+    for delta in deltas {
+        let delta = delta?;
         let before = state.clone();
         delta.apply(&mut state);
         let pair = Pair {
-            delta,
+            delta: &delta,
             before: &before,
             after: &state,
         };

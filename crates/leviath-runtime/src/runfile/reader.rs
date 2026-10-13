@@ -223,11 +223,20 @@ impl RunFileReader {
 
     /// The deltas for steps `from` to `to`, both included, in order.
     pub fn deltas(&self, from: u64, to: u64) -> Result<Vec<StateDelta>, RunFileError> {
+        self.delta_iter(from, to).collect()
+    }
+
+    /// [`deltas`](Self::deltas), each decoded only when it is reached, so a
+    /// reader that stops early decodes no more of the file than it read.
+    pub fn delta_iter(
+        &self,
+        from: u64,
+        to: u64,
+    ) -> impl Iterator<Item = Result<StateDelta, RunFileError>> + '_ {
         self.deltas
             .iter()
-            .filter(|(s, _)| *s >= from && *s <= to)
+            .filter(move |(s, _)| *s >= from && *s <= to)
             .map(|(_, f)| self.decode(f))
-            .collect()
     }
 }
 

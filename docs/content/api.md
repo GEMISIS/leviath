@@ -617,7 +617,7 @@ run that finished last week and while the daemon is down. The one exception is `
 |---|---|
 | `GET /api/runs/{id}/spec` | The spec the run was resolved to: graph, inputs, launch policy, delivery, and the machine it was placed on |
 | `GET /api/runs/{id}/state?at=<seq>` | The run's whole state after step `seq`. Without `at`, as it is now |
-| `GET /api/runs/{id}/deltas?from=&to=` | The steps between `from` and `to`, both inclusive, oldest first |
+| `GET /api/runs/{id}/deltas?from=&to=` | The steps between `from` and `to`, both inclusive, oldest first, at most 200 at a time |
 | `GET /api/runs/{id}/graph` | The run's stages and edges, with how often it entered each stage and took each edge |
 
 A step is one numbered change to the run, and `seq` counts them from 1. Each delta carries its
@@ -628,6 +628,11 @@ recorded, such as an inference attempt or a tool call:
 [{"seq": 2, "at": 1790848532, "changes": [],
   "events": [{"ToolStarted": {"id": "call_1", "name": "shell", "args": {"command": "ls"}}}]}]
 ```
+
+`/deltas` answers one page. `from` defaults to the first step, and `to` to 200 steps on from it,
+stopping at the run's last. A run with no steps yet, or a `from` past its last, answers `[]`. A `to`
+before `from`, or a range wider than 200, is a 400 rather than a page cut short. GraphQL's
+`Run.deltas` reads by the same rule.
 
 The graph is small enough to draw directly. Each node carries `stage`, its `visits` and whether it
 is `current`:
