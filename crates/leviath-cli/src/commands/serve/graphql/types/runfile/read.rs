@@ -5,8 +5,8 @@
 //! the same on both surfaces, a step past the run's last coded
 //! `RANGE_NOT_SATISFIABLE` as REST answers it 416. What this adds is GraphQL's
 //! shape: a run with no run file reads as null rather than as a miss, a step a
-//! client names is a GraphQL `Int` checked here, and one `deltas` call answers
-//! at most [`MAX_STEPS`] steps.
+//! client names is a GraphQL `Int` checked here. One `deltas` call answers
+//! at most [`inspect::MAX_STEPS`] steps, as one REST read does.
 
 use super::super::super::super::blocking::blocking;
 use super::super::super::super::core::error::ServeError;
@@ -17,9 +17,6 @@ use super::delta::StateDelta;
 use super::graph::RunGraph;
 use super::spec::RunSpec;
 use super::state::RunState;
-
-/// The most steps one `deltas` call answers with.
-pub(crate) const MAX_STEPS: u64 = 200;
 
 /// `read`'s answer, with a run that has no run file read as `None`.
 fn present<T>(read: Result<T, ServeError>) -> Result<Option<T>, ServeError> {
@@ -56,38 +53,18 @@ pub(crate) async fn state(
     Ok(state.as_ref().map(RunState::from))
 }
 
-/// The steps from `from` to `to`, both included.
-///
-/// `from` defaults to the first step and `to` to as far as one call answers,
-/// or the last step, whichever comes first. A range wider than [`MAX_STEPS`]
-/// is refused rather than cut short, so a client never mistakes a page for
-/// the whole.
+/// The steps from `from` to `to`, both included, on the rule REST reads them
+/// by (see [`inspect::deltas`]).
 pub(crate) async fn deltas(
     run_id: &str,
     from: Option<i32>,
     to: Option<i32>,
 ) -> Result<Vec<StateDelta>, ServeError> {
-    let from = step("from", from.unwrap_or(1))?.max(1);
+    let from = from.map(|n| step("from", n)).transpose()?;
     let to = to.map(|n| step("to", n)).transpose()?;
-    if let Some(to) = to
-        && to < from
-    {
-        return Err(ServeError::BadRequest(format!(
-            "`to` ({to}) is before `from` ({from})"
-        )));
-    }
-    if let Some(to) = to
-        && to - from >= MAX_STEPS
-    {
-        return Err(ServeError::BadRequest(format!(
-            "one call reads at most {MAX_STEPS} steps; {from} to {to} is {}",
-            to - from + 1
-        )));
-    }
     counted(run_id);
     let id = run_id.to_string();
-    let to = to.unwrap_or(from + MAX_STEPS - 1);
-    let deltas = present(blocking(move || inspect::deltas(&id, Some(from), Some(to))).await)?;
+    let deltas = present(blocking(move || inspect::deltas(&id, from, to)).await)?;
     Ok(deltas.iter().flatten().map(StateDelta::from).collect())
 }
 

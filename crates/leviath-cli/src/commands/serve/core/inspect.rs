@@ -23,7 +23,7 @@ use super::run_file;
 /// and tools each stage got, and its launch policy. The webhook's signing
 /// secret is named by where the machine keeps it, never held in the spec.
 pub(crate) fn spec(run_id: &str) -> Result<RunSpec, ServeError> {
-    Ok(run_file::require(run_id)?.spec().clone())
+    run_file::require_spec(run_id)
 }
 
 /// A run's state at step `at`, or as it is now.
@@ -65,21 +65,37 @@ fn state_at(reader: &RunFileReader, run_id: &str, seq: u64) -> Result<RunState, 
         })
 }
 
-/// The run's steps from `from` to `to`, both included. `from` defaults to the
-/// first step and `to` to the last.
+/// The most steps one read of a run's steps answers with.
+pub(crate) const MAX_STEPS: u64 = 200;
+
+/// The run's steps from `from` to `to`, both included, one page at most.
+///
+/// `from` defaults to the first step and `to` to as far as one page goes;
+/// either way the answer stops at the run's last step, so a run with no
+/// steps yet, or a `from` past its last, answers with none. A `to` before
+/// `from`, or a range wider than [`MAX_STEPS`], is refused rather than cut
+/// short, so a client never mistakes a page for the whole.
 pub(crate) fn deltas(
     run_id: &str,
     from: Option<u64>,
     to: Option<u64>,
 ) -> Result<Vec<StateDelta>, ServeError> {
-    let reader = run_file::require(run_id)?;
-    let from = from.unwrap_or(1);
-    let to = to.unwrap_or_else(|| reader.last_seq());
-    if from > to {
-        return Err(ServeError::BadRequest(format!(
-            "`from` ({from}) is after `to` ({to})"
-        )));
+    let from = from.unwrap_or(1).max(1);
+    if let Some(to) = to {
+        if to < from {
+            return Err(ServeError::BadRequest(format!(
+                "`to` ({to}) is before `from` ({from})"
+            )));
+        }
+        if to - from >= MAX_STEPS {
+            return Err(ServeError::BadRequest(format!(
+                "one read answers with at most {MAX_STEPS} steps; {from} to {to} is {}",
+                to - from + 1
+            )));
+        }
     }
+    let to = to.unwrap_or_else(|| from.saturating_add(MAX_STEPS - 1));
+    let reader = run_file::require(run_id)?;
     reader
         .deltas(from, to)
         .map_err(|e| run_file::unreadable(run_id, &e))
@@ -218,37 +234,38 @@ fn count_unjoined(unjoined: &mut Vec<GraphEdge>, record: &TransitionRecord) {
 /// earlier release whose record kept none, which that release had no window
 /// to show for either.
 pub(crate) fn context(run_id: &str) -> Result<ContextSnapshot, ServeError> {
-    let reader = run_file::require(run_id)?;
-    let state = state_at(&reader, run_id, reader.last_seq())?;
+    let (spec, state) = latest(run_id)?;
     if state.context.regions.is_empty() {
         return Err(ServeError::NotFound(format!(
             "No context snapshot for run '{run_id}'"
         )));
     }
-    Ok(leviath_runtime::runfile::context_snapshot(
-        reader.spec(),
-        &state,
+    Ok(leviath_runtime::runfile::context_snapshot(&spec, &state))
+}
+
+/// The run's spec and its state as of its last step, read from the two ends
+/// of its file rather than replayed from the start.
+fn latest(run_id: &str) -> Result<(RunSpec, RunState), ServeError> {
+    let tail = run_file::require_tail(run_id)?;
+    Ok((
+        tail.spec,
+        leviath_runtime::runfile::as_it_stands(tail.state),
     ))
 }
 
 /// The run's per-stage ledger as of its last step: one record per stage it
 /// entered. Empty for a run that has not reached its first stage.
 pub(crate) fn stages(run_id: &str) -> Result<Vec<StageRecord>, ServeError> {
-    let reader = run_file::require(run_id)?;
-    let state = state_at(&reader, run_id, reader.last_seq())?;
-    Ok(leviath_runtime::runfile::stage_records(
-        reader.spec(),
-        &state,
-    ))
+    let (spec, state) = latest(run_id)?;
+    Ok(leviath_runtime::runfile::stage_records(&spec, &state))
 }
 
 /// The stored parts the run's context holds as of its last step, by hash,
 /// first appearance first, each marked stored when its file is in the run's
 /// blob directory.
 pub(crate) fn blobs(run_id: &str) -> Result<Vec<crate::blobs::BlobEntry>, ServeError> {
-    let reader = run_file::require(run_id)?;
-    let state = state_at(&reader, run_id, reader.last_seq())?;
-    let snapshot = leviath_runtime::runfile::context_snapshot(reader.spec(), &state);
+    let (spec, state) = latest(run_id)?;
+    let snapshot = leviath_runtime::runfile::context_snapshot(&spec, &state);
     Ok(crate::blobs::list_from(run_id, &snapshot))
 }
 

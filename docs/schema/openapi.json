@@ -4116,7 +4116,7 @@
           "runs"
         ],
         "summary": "A run's steps",
-        "description": "Each step's changes to the run's state and the events that happened during it, in order.",
+        "description": "Each step's changes to the run's state and the events that happened during it, in order, one page of at most 200. A run with no steps yet, or a `from` past its last, answers an empty list.",
         "parameters": [
           {
             "name": "from",
@@ -4134,7 +4134,7 @@
               "type": "integer",
               "minimum": 0
             },
-            "description": "The last step. Defaults to the last."
+            "description": "The last step, at most 199 after `from`. Defaults to 200 steps on from `from`, stopping at the run's last."
           }
         ],
         "responses": {

@@ -255,6 +255,13 @@ same list.
   A path that is not a regular file is refused, and the `--workdir-root`
   check comes before any file is read, on the compatibility spawn route and
   on GraphQL `spawnRun`.
+- `GET /api/runs/{id}/deltas` and GraphQL `Run.deltas` page a run's steps
+  by one rule: at most 200 a read, `to` defaulting to 200 steps on from
+  `from`. REST read every step by default, and a run with no steps yet was
+  a 400 (`from` 1 after `to` 0); it is an empty page. A run's spec is read
+  from the front of its file, and its context, stages and stored parts
+  from its end, instead of each read walking the whole file, and a walk
+  over a run's history decodes no more steps than it reads.
 - A run's raw file, stored part or export over 1 MiB is sent from disk a
   block at a time, and a `Range` request reads only the bytes it asks for.
   Each was read whole into memory first, so a one-byte range of a large

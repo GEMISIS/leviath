@@ -114,6 +114,29 @@ async fn a_file_with_no_start_or_a_step_that_will_not_decode_cannot_be_walked() 
     .await;
 }
 
+/// A walk decodes each step only when it reaches it: one that stops at the
+/// first step reads a file whose later step does not decode.
+#[tokio::test]
+async fn a_walk_that_stops_early_decodes_no_further() {
+    runstate::with_isolated_runs_dir_async("run-file-lazy", |_d| async move {
+        let run_id = recorded();
+        step(&run_id, 10, Vec::new(), |s| s.title = Some("first".into()));
+        let after = step(&run_id, 20, Vec::new(), |s| s.title = Some("second".into()));
+        bad_step(&run_id, after + 1);
+        let reader = require(&run_id).unwrap();
+        let mut seen = Vec::new();
+        let walked = walk(&run_id, &reader, &mut |step| {
+            seen.push(step.after.title.clone());
+            ControlFlow::Break(())
+        });
+        assert!(walked.is_ok());
+        assert_eq!(seen, [Some("first".to_string())]);
+        let all = walk(&run_id, &reader, &mut |_| ControlFlow::Continue(()));
+        assert_eq!(all.unwrap_err().code(), "INTERNAL");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_run_with_no_file_is_a_miss_and_one_that_will_not_read_is_an_error() {
     runstate::with_isolated_runs_dir_async("run-file-open", |_d| async move {
