@@ -307,6 +307,19 @@ pub(crate) enum ServerEvent {
         restart_advised: Option<String>,
     },
 
+    /// This server's stream from the daemon skipped `count` events it never
+    /// got: the daemon's recorder fell behind, or the server was away longer
+    /// than the daemon keeps events for.
+    ///
+    /// The same `events_dropped` frame a subscriber that fell behind this
+    /// server's own bus is sent, and it means the same: re-read what is shown
+    /// rather than trust the stream. Like [`DaemonLink`](Self::DaemonLink) it
+    /// is about no run in particular, so every subscription receives it.
+    EventsDropped {
+        /// How many events were skipped.
+        count: u64,
+    },
+
     /// Whether `config.toml` on disk loads has changed.
     ///
     /// About the machine rather than a run, like
@@ -356,6 +369,7 @@ impl ServerEvent {
             | ServerEvent::ToolCallFinished { run_id, .. }
             | ServerEvent::AgentSpend { run_id, .. } => run_id,
             ServerEvent::DaemonLink { .. }
+            | ServerEvent::EventsDropped { .. }
             | ServerEvent::UpdateProgress { .. }
             | ServerEvent::UpdateFinished { .. }
             | ServerEvent::ConfigHealth { .. } => "",
@@ -367,13 +381,17 @@ impl ServerEvent {
     ///
     /// The update frames are deliberately not in that second group, and
     /// neither is [`ConfigHealth`](Self::ConfigHealth). A link event explains
-    /// why a run's events stopped arriving, which is something a per-run
-    /// subscriber has to know; an update happening on the machine is not about
-    /// the run it is watching, and neither is the config file being edited -
-    /// the run in front of it keeps going on the config it started with either
-    /// way. `/ws` is where a console watches for both.
+    /// why a run's events stopped arriving, and a dropped-events one that some
+    /// may never arrive, which a per-run subscriber has to know; an update
+    /// happening on the machine is not about the run it is watching, and
+    /// neither is the config file being edited - the run in front of it keeps
+    /// going on the config it started with either way. `/ws` is where a
+    /// console watches for both.
     pub(crate) fn is_for_run(&self, run_id: &str) -> bool {
-        matches!(self, ServerEvent::DaemonLink { .. }) || self.run_id() == run_id
+        matches!(
+            self,
+            ServerEvent::DaemonLink { .. } | ServerEvent::EventsDropped { .. }
+        ) || self.run_id() == run_id
     }
 
     /// The [`DaemonLink`](Self::DaemonLink) event for what `control` currently

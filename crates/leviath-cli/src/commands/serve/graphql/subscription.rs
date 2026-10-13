@@ -185,10 +185,11 @@ impl Scope {
         }
         match event.run_id() {
             // A machine-level frame, which reaches a run scope only as the
-            // link frame: that one explains why a run's frames stopped, so a
-            // scoped subscription still gets it, and `run_frames` drops the
-            // others before any scope is consulted because they are about the
-            // install and belong to `machineEvents`.
+            // link or lost-events frame: those explain why a run's frames
+            // stopped or may be missing, so a scoped subscription still gets
+            // them, and `run_frames` drops the others before any scope is
+            // consulted because they are about the install and belong to
+            // `machineEvents`.
             "" => true,
             run_id => runs.contains(run_id),
         }
@@ -257,9 +258,13 @@ fn run_frames(live: RunLive) -> impl Stream<Item = RunEventFrame> + use<> {
                     live.last_seq = stamped.seq;
                     let asked_for = match RunEventType::of(&stamped.event) {
                         Some(kind) => live.types.wants(kind),
-                        // The link frame is not in the run vocabulary and is
-                        // never filtered out: it is what explains a silence.
-                        None => matches!(stamped.event, ServerEvent::DaemonLink { .. }),
+                        // The link and lost-events frames are not in the run
+                        // vocabulary and are never filtered out: they explain
+                        // a silence.
+                        None => matches!(
+                            stamped.event,
+                            ServerEvent::DaemonLink { .. } | ServerEvent::EventsDropped { .. }
+                        ),
                     };
                     if asked_for
                         && live.scope.keeps(&live.state, &stamped.event).await
@@ -284,10 +289,13 @@ fn machine_frames(live: MachineLive) -> impl Stream<Item = MachineEventFrame> + 
             match live.frames.next().await? {
                 Ok(stamped) => {
                     live.last_seq = stamped.seq;
-                    if MachineEventType::of(&stamped.event)
-                        .is_some_and(|kind| live.types.wants(kind))
-                        && let Some(frame) = super::events::machine_frame(stamped)
-                    {
+                    // Lost events are never filtered out, like this
+                    // subscription's own `EventsDropped`.
+                    let asked_for = match MachineEventType::of(&stamped.event) {
+                        Some(kind) => live.types.wants(kind),
+                        None => matches!(stamped.event, ServerEvent::EventsDropped { .. }),
+                    };
+                    if asked_for && let Some(frame) = super::events::machine_frame(stamped) {
                         return Some((frame, live));
                     }
                 }

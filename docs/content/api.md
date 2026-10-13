@@ -2182,13 +2182,15 @@ with either way.
 | `agent_completed` | The run reaches a terminal status | `status`, `result` (its error), `final_output` |
 | `daemon_link` | This server's link to the daemon changes | `connected`, `daemon`, `restarted`, `restart_advised` |
 | `config_health` | `config.toml` stops loading, loads again, or breaks for a different reason | `healthy`, `path`, `error`, `config_mtime` |
-| `events_dropped` | This socket fell behind and the oldest events were dropped before it read them | `count` |
+| `events_dropped` | This socket fell behind, or the server's own stream from the daemon skipped events | `count` |
 
 `events_dropped` is about your connection rather than a run, so it has no `run_id` and reaches
 `/ws/agents/{id}` too: nothing can say whether the lost events were that run's. The server keeps
 the latest few hundred events for each socket, and a client that reads slower than they arrive
-loses the oldest. When one arrives, re-read what you show, such as `GET /api/runs` or the run you
-are watching, rather than trusting what the stream has told you so far.
+loses the oldest. The server sends one to every socket too when its own stream from the daemon
+skips events, which happens when the daemon falls behind or the server was away for long. When one
+arrives, re-read what you show, such as `GET /api/runs` or the run you are watching, rather than
+trusting what the stream has told you so far.
 
 `agent_spend` arrives while the run is still going, which is the point: a run that quietly spends
 far more than intended looks, from the outside, exactly like one making ordinary progress. Each
@@ -2332,11 +2334,13 @@ timeout_secs = 10      # per-attempt request timeout
 
 **It survives a restart of `lev serve`.** `lev serve` sends the webhook, not the daemon, so a run
 needs a server running at some point after it finishes. A server records each delivery once it is
-over: delivered, refused, or out of retries. When it starts, it sends every finished run that has
-a callback and no such record. That covers a retry the last server was waiting on when it stopped,
-and a run that finished while no server was running. The `delivery_id` is the same, so a receiver
-that already has it drops the repeat. Only runs that finished after the server first kept this
-record are sent, so upgrading does not resend old webhooks.
+over: delivered, refused, or out of retries. It sweeps for every finished run that has a callback
+and no such record when its stream from the daemon opens, when that stream skips events, and every
+five minutes besides. That covers a retry the last server was waiting on when it stopped, a run
+that finished while no server was running, and one whose file or secret did not read when it
+finished. The `delivery_id` is the same, so a receiver that already has it drops the repeat. Only
+runs that finished after the server first kept this record are sent, so upgrading does not resend
+old webhooks. At most eight webhooks are sent at once, so a backlog goes out at that pace.
 
 > [!TIP]
 > [The Lair](https://leviath.dev/lair) is a full reference client for this API (connection, spawn, live

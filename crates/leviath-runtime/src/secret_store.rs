@@ -79,11 +79,21 @@ impl SecretStore {
         Ok(())
     }
 
-    /// The secret kept under `reference`, when the store holds it.
+    /// The secret kept under `reference`, when the store holds it and it
+    /// reads.
     pub fn read(&self, reference: &SecretRef) -> Option<Secret> {
-        std::fs::read_to_string(self.path(reference))
-            .ok()
-            .map(Secret::new)
+        self.read_checked(reference).ok().flatten()
+    }
+
+    /// The secret kept under `reference`: `Ok(None)` when the store does not
+    /// hold it, and an error when it may but could not be read just now, so a
+    /// caller can tell a secret that is gone from one it should try again.
+    pub fn read_checked(&self, reference: &SecretRef) -> io::Result<Option<Secret>> {
+        match std::fs::read_to_string(self.path(reference)) {
+            Ok(text) => Ok(Some(Secret::new(text))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Forget the secret kept under `reference`. Forgetting one the store
@@ -158,6 +168,19 @@ mod tests {
         // A runs directory with no parent keeps its store inside it.
         let root = Path::new("/");
         assert_eq!(SecretStore::of_runs(root).dir(), root.join(SECRETS_DIR));
+    }
+
+    /// A secret the store does not hold is told from one it could not read:
+    /// a path standing where the secret's file should be, but a directory,
+    /// does not read.
+    #[test]
+    fn a_missing_secret_is_told_from_one_that_does_not_read() {
+        let (_home, store, _runs) = store();
+        let reference = minted("r-1");
+        assert!(matches!(store.read_checked(&reference), Ok(None)));
+        std::fs::create_dir_all(store.dir().join(reference.as_str())).unwrap();
+        assert!(store.read_checked(&reference).is_err());
+        assert_eq!(store.read(&reference), None);
     }
 
     #[test]

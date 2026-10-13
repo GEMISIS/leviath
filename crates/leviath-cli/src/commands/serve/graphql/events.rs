@@ -249,6 +249,7 @@ macro_rules! frames {
                 match event {
                     $( ServerEvent::$rsource { .. } => Some(Self::$rvalue), )*
                     $( ServerEvent::$msource { .. } => None, )*
+                    ServerEvent::EventsDropped { .. } => None,
                 }
             }
         }
@@ -265,6 +266,7 @@ macro_rules! frames {
                 match event {
                     $( ServerEvent::$msource { .. } => Some(Self::$mvalue), )*
                     $( ServerEvent::$rsource { .. } => None, )*
+                    ServerEvent::EventsDropped { .. } => None,
                 }
             }
         }
@@ -876,6 +878,9 @@ pub(crate) fn run_frame(stamped: Stamped) -> Option<RunEventFrame> {
             restarted,
             restart_advised,
         } => daemon_link_changed(head, connected, daemon, restarted, restart_advised).into(),
+        ServerEvent::EventsDropped { count } => {
+            RunEventFrame::EventsDropped(dropped(count, stamped.seq))
+        }
         ServerEvent::ConfigHealth { .. }
         | ServerEvent::UpdateProgress { .. }
         | ServerEvent::UpdateFinished { .. } => return None,
@@ -893,6 +898,9 @@ pub(crate) fn machine_frame(stamped: Stamped) -> Option<MachineEventFrame> {
             restarted,
             restart_advised,
         } => daemon_link_changed(head, connected, daemon, restarted, restart_advised).into(),
+        ServerEvent::EventsDropped { count } => {
+            MachineEventFrame::EventsDropped(dropped(count, stamped.seq))
+        }
         ServerEvent::ConfigHealth {
             healthy,
             path,

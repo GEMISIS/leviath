@@ -539,7 +539,7 @@ async fn execute_with_shutdown(
     let event_state = state.clone();
     let _event_guard = AbortOnDrop(tokio::spawn(polling::event_loop(
         event_state,
-        polling::RECONNECT_BACKOFF,
+        polling::TIMING,
     )));
 
     // Config-health watcher, behind the same kind of guard for the same

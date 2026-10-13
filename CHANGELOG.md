@@ -238,6 +238,16 @@ same list.
   writing to it.
 - No frame of a run file decompresses past 1 GiB, whatever its header
   claims. One whose header gave no size was decompressed with no limit.
+- `lev serve` sends a completion webhook it would have lost. It swept for
+  owed webhooks once, before subscribing to the daemon, and a first
+  subscription starts after the newest event, so a run that finished in
+  between sent none; nor did one whose events the stream skipped (a daemon
+  that fell behind, or a server away longer than the daemon keeps events),
+  or one whose file or signing secret did not read at that moment. It now
+  sweeps once the stream opens, whenever the stream skips events, and every
+  five minutes, sends at most eight at once, and leaves a webhook whose
+  secret did not read owed rather than dropping it. A skip also reaches
+  `/ws` and GraphQL subscribers as `events_dropped`.
 - A raw graph gets only the global tool permissions, safe commands and read
   paths. Its title was the name `[agent_tool_permissions.<name>]`,
   `[agent_safe_commands.<name>]` and `[agent_read_paths.<name>]` were looked

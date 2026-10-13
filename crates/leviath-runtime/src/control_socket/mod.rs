@@ -34,7 +34,7 @@ use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 mod client;
 pub use client::{
-    CodeMismatch, ControlClient, LinkStatus, RESTART_GRACE, StartupEvent, StartupWatch,
+    CodeMismatch, ControlClient, LinkStatus, RESTART_GRACE, StartupEvent, StartupWatch, Streamed,
     WorldEventStream,
 };
 mod startup;
