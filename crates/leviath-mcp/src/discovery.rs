@@ -196,18 +196,14 @@ impl MCPServerConfig {
     }
 }
 
-/// Tool discovery service that aggregates tools from multiple MCP servers.
-pub struct ToolDiscovery {
-    /// Discovered tools from all connected servers, keyed by server name
-    servers: HashMap<String, Vec<ToolMetadata>>,
-}
+/// Tool discovery: connects to an MCP server and lists the tools it offers.
+#[derive(Default)]
+pub struct ToolDiscovery;
 
 impl ToolDiscovery {
     /// Create a new tool discovery service.
     pub fn new() -> Self {
-        Self {
-            servers: HashMap::new(),
-        }
+        Self
     }
 
     /// Discover tools from an already-connected MCP client.
@@ -219,7 +215,6 @@ impl ToolDiscovery {
         tracing::info!(server = %server_name, "Discovering tools from MCP client");
 
         let tools = client.list_tools().await?;
-        self.servers.insert(server_name.to_string(), tools.clone());
 
         // Bind `tool_count` in a plain `let` (rather than as an inline
         // `tool_count = tools.len()` field) so the length is computed
@@ -258,17 +253,6 @@ impl ToolDiscovery {
 
         let tools = self.discover_from_client(&config.name, &mut client).await?;
         Ok((tools, client))
-    }
-
-    /// Get the number of servers registered.
-    pub fn server_count(&self) -> usize {
-        self.servers.len()
-    }
-}
-
-impl Default for ToolDiscovery {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -378,26 +362,13 @@ mod tests {
 
     // --- ToolDiscovery ---
 
-    #[test]
-    fn new_server_count_is_zero() {
-        let discovery = ToolDiscovery::new();
-        assert_eq!(discovery.server_count(), 0);
-    }
-
-    #[test]
-    fn default_same_as_new() {
-        let d1 = ToolDiscovery::new();
-        let d2 = ToolDiscovery::default();
-        assert_eq!(d1.server_count(), d2.server_count());
-    }
-
     // --- discover_from_client / discover_from_config ---
     //
     // Same Python-backed JSON-RPC stub approach used in client.rs's tests
     // (a minimal in-process server reading one request per line from stdin).
 
     #[tokio::test]
-    async fn discover_from_client_returns_tools_and_indexes_by_server_name() {
+    async fn discover_from_client_returns_the_servers_tools() {
         let _guard = always_on_tracing_guard();
         let mut client = MCPClient::spawn(
             "python3",
@@ -416,7 +387,6 @@ mod tests {
 
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");
-        assert_eq!(discovery.server_count(), 1);
     }
 
     #[tokio::test]
@@ -437,7 +407,6 @@ mod tests {
 
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");
-        assert_eq!(discovery.server_count(), 1);
 
         // The returned client is live and connected (capabilities were parsed).
         assert!(client.capabilities().is_some());
@@ -457,7 +426,6 @@ mod tests {
         let mut discovery = ToolDiscovery::new();
         let result = discovery.discover_from_config(&config).await;
         assert!(result.is_err());
-        assert_eq!(discovery.server_count(), 0);
     }
 
     /// Initializes successfully but responds with a JSON-RPC error to
@@ -481,7 +449,6 @@ mod tests {
         let mut discovery = ToolDiscovery::new();
         let result = discovery.discover_from_client("server1", &mut client).await;
         assert!(result.is_err());
-        assert_eq!(discovery.server_count(), 0);
     }
 
     #[tokio::test]
@@ -500,7 +467,6 @@ mod tests {
         let mut discovery = ToolDiscovery::new();
         let result = discovery.discover_from_config(&config).await;
         assert!(result.is_err());
-        assert_eq!(discovery.server_count(), 0);
     }
 
     #[tokio::test]
@@ -516,7 +482,6 @@ mod tests {
         let mut discovery = ToolDiscovery::new();
         let result = discovery.discover_from_config(&config).await;
         assert!(result.is_err());
-        assert_eq!(discovery.server_count(), 0);
     }
 
     // ─── transport resolution ─────────────────────────────────────────────

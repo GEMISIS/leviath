@@ -111,16 +111,6 @@ impl BuiltinTools {
         self
     }
 
-    /// Create a BuiltinTools instance with an explicit platform capability set,
-    /// for tests or hosts that need to override the compile-time default.
-    pub fn with_capabilities(ctx: ToolContext, platform: PlatformCapabilities) -> Self {
-        Self {
-            ctx,
-            platform,
-            shell_executor: None,
-        }
-    }
-
     /// Whether a built-in named `canonical_name` is available on this platform.
     fn available(&self, canonical_name: &str) -> bool {
         self.platform
@@ -161,10 +151,11 @@ mod tests {
     /// Built-ins over a mobile capability set (no `ProcessSpawn`), so the
     /// `shell` tool and its `bash` alias are filtered out.
     fn make_mobile_tools(dir: &std::path::Path) -> BuiltinTools {
-        BuiltinTools::with_capabilities(
-            ToolContext::new(dir.to_path_buf()),
-            PlatformCapabilities::mobile(),
-        )
+        BuiltinTools {
+            ctx: ToolContext::new(dir.to_path_buf()),
+            platform: PlatformCapabilities::mobile(),
+            shell_executor: None,
+        }
     }
 
     #[test]
@@ -2458,13 +2449,6 @@ mod tests {
     }
 
     #[test]
-    fn from_capabilities_builds_explicit_set() {
-        let caps = PlatformCapabilities::from_capabilities([ToolCapability::Network]);
-        assert!(caps.supports(ToolCapability::Network));
-        assert!(!caps.supports(ToolCapability::FileSystem));
-    }
-
-    #[test]
     fn tool_required_capabilities_by_name() {
         assert_eq!(
             tool_required_capabilities("shell"),
@@ -2510,13 +2494,14 @@ mod tests {
     #[tokio::test]
     async fn a_platform_without_a_filesystem_has_no_installer() {
         let dir = tempfile::tempdir().unwrap();
-        let tools = BuiltinTools::with_capabilities(
-            ToolContext::new(dir.path().to_path_buf()),
-            PlatformCapabilities::from_capabilities([
+        let tools = BuiltinTools {
+            ctx: ToolContext::new(dir.path().to_path_buf()),
+            platform: PlatformCapabilities::from_capabilities([
                 ToolCapability::ProcessSpawn,
                 ToolCapability::Network,
             ]),
-        );
+            shell_executor: None,
+        };
         let defs: Vec<String> = tools.tool_defs().into_iter().map(|t| t.name).collect();
         for installer in ["install_self_tool", "install_global_tool"] {
             assert!(!defs.contains(&installer.to_string()), "{installer}");
@@ -2728,7 +2713,7 @@ mod binary_read_tests {
         let out = tools
             .execute("read_file", json!({"path": "hero.png"}))
             .await;
-        assert!(out.has_stored(), "{out}");
+        assert!(!out.is_text_only(), "{out}");
         assert!(out.as_str().starts_with("'hero.png' is not text."), "{out}");
         assert!(out.as_str().contains("[image/png, 10 B] hero.png"), "{out}");
         let sha = &out.stored().next().unwrap().blob().unwrap().sha256;

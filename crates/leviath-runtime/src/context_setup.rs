@@ -8,18 +8,9 @@ use leviath_core::{EvictionStrategy, Region, RegionKind, truncate_at_boundary};
 
 use crate::ContextWindow;
 use crate::spec::graph::RegionDef;
-use crate::spec::run_spec::RunSpec;
 
 pub(crate) mod parts;
 pub(crate) use parts::{PartSink, text_part};
-
-/// The tokens a region gets in one stage: what that stage's plan resolved it
-/// to, or its budget against that stage's window when the plan has no entry
-/// for it (a region the stage hides). The same figure the pipeline's stage
-/// setup uses: both read it from `pipeline::spec_view::budget_in`.
-pub fn stage_region_budget(spec: &RunSpec, stage: usize, def: &RegionDef) -> usize {
-    crate::pipeline::spec_view::budget_in(spec, stage, def)
-}
 
 /// The window's region for a declared one, holding `budget` tokens.
 pub fn region_from_def(def: &RegionDef, budget: usize) -> Region {
@@ -106,24 +97,6 @@ pub(crate) fn fit_seed_to_budget(content: &str, max_tokens: usize) -> String {
         "{}{SEED_TRUNCATION_MARKER}",
         truncate_at_boundary(content, room)
     )
-}
-
-/// Swap a [`ContextWindow`] to one stage's own layout in place, keeping each
-/// carried-over region's content by name. Each region gets the budget the
-/// stage's plan resolved it to.
-#[cfg(test)]
-pub fn apply_stage_layout(
-    window: &mut ContextWindow,
-    spec: &RunSpec,
-    stage: usize,
-    layout: &crate::spec::graph::RegionLayoutDef,
-) {
-    let regions = layout
-        .regions
-        .iter()
-        .map(|def| region_from_def(def, stage_region_budget(spec, stage, def)))
-        .collect();
-    swap_layout(window, regions);
 }
 
 /// Swap a window to a stage's own layout, given as its regions each already
@@ -327,7 +300,14 @@ mod tests {
     /// Swap `window` to `regions` as a stage whose own layout they are.
     fn swap_to(window: &mut ContextWindow, regions: Vec<RegionDef>) {
         let spec = spec_of(graph_with(regions));
-        apply_stage_layout(window, &spec, 0, &spec.graph.layout);
+        let regions = spec
+            .graph
+            .layout
+            .regions
+            .iter()
+            .map(|def| region_from_def(def, crate::pipeline::spec_view::budget_in(&spec, 0, def)))
+            .collect();
+        apply_layout(window, regions);
     }
 
     /// The infra region is added when the layout does not already declare it. A
@@ -708,30 +688,6 @@ mod tests {
         );
     }
 
-    /// A stage's regions, already holding their budgets, swap a window the
-    /// same way the stage's layout does from a spec.
-    #[test]
-    fn swapping_to_regions_matches_swapping_to_a_stage_layout() {
-        let bp = graph_with(vec![
-            region("task", RegionKind::Pinned, 5000),
-            region("notes", RegionKind::Temporary, 3000),
-        ]);
-        let mut by_regions = seeded_window(bp, "the task");
-        let mut by_spec = by_regions.clone();
-        let next = vec![region("task", RegionKind::Pinned, 4000)];
-        let regions = next.iter().map(|r| region_from_def(r, 4000)).collect();
-        apply_layout(&mut by_regions, regions);
-        swap_to(&mut by_spec, next);
-        let shape = |w: &ContextWindow| {
-            w.regions
-                .iter()
-                .map(|r| (r.name.clone(), r.max_tokens, r.content.len()))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(shape(&by_regions), shape(&by_spec));
-        assert_eq!(by_regions.hidden, by_spec.hidden);
-    }
-
     #[test]
     fn a_percentage_budget_is_capped_then_floored() {
         let pct = |percent, min, max| Budget::Percent { percent, min, max };
@@ -890,17 +846,20 @@ mod tests {
             min: None,
             max: None,
         };
-        assert_eq!(stage_region_budget(&spec, 0, &half), 50_000);
+        assert_eq!(
+            crate::pipeline::spec_view::budget_in(&spec, 0, &half),
+            50_000
+        );
         spec.stages[0]
             .region_budgets
             .insert(half.name.clone(), 1234);
         assert_eq!(
-            stage_region_budget(&spec, 0, &half),
+            crate::pipeline::spec_view::budget_in(&spec, 0, &half),
             1234,
             "the plan's figure wins"
         );
         assert_eq!(
-            stage_region_budget(&spec, 9, &half),
+            crate::pipeline::spec_view::budget_in(&spec, 9, &half),
             crate::pipeline::DEFAULT_CONTEXT_WINDOW_TOKENS / 2,
             "no plan: the default window, as the stage setup sizes it"
         );

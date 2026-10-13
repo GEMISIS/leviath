@@ -26,13 +26,6 @@ impl HttpRefresh {
             profile,
         }
     }
-
-    /// Point at a different token endpoint. Tests use this.
-    #[must_use]
-    pub fn with_token_url(mut self, url: String) -> Self {
-        self.token_url = url;
-        self
-    }
 }
 
 /// Whether an error body says the grant is gone rather than merely unhappy.
@@ -144,8 +137,16 @@ mod tests {
     use leviath_testkit::spawn_mock_server;
 
     fn refresher(url: &str) -> HttpRefresh {
-        HttpRefresh::new(reqwest::Client::new(), &crate::codex::PROFILE)
-            .with_token_url(url.to_string())
+        refresher_for(&crate::codex::PROFILE, url)
+    }
+
+    /// A refresher for `profile` whose token endpoint is `url`.
+    fn refresher_for(profile: &'static OAuthProfile, url: &str) -> HttpRefresh {
+        HttpRefresh {
+            client: reqwest::Client::new(),
+            token_url: url.to_string(),
+            profile,
+        }
     }
 
     #[tokio::test]
@@ -267,8 +268,7 @@ mod tests {
     async fn each_issuer_gets_the_body_encoding_it_accepts() {
         let reply = br#"{"access_token":"at-new"}"#.to_vec();
         let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", reply.clone()).await;
-        HttpRefresh::new(reqwest::Client::new(), &crate::grok::PROFILE)
-            .with_token_url(url)
+        refresher_for(&crate::grok::PROFILE, &url)
             .refresh("rt-old")
             .await
             .expect("refresh");
@@ -288,8 +288,7 @@ mod tests {
     async fn a_terminal_refusal_names_the_account_and_the_provider() {
         let url =
             spawn_mock_server(400, "Bad Request", br#"{"error":"invalid_grant"}"#.to_vec()).await;
-        let err = HttpRefresh::new(reqwest::Client::new(), &crate::grok::PROFILE)
-            .with_token_url(url)
+        let err = refresher_for(&crate::grok::PROFILE, &url)
             .refresh("rt-old")
             .await
             .unwrap_err();

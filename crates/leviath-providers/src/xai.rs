@@ -118,13 +118,6 @@ impl XaiProvider {
         }
     }
 
-    /// Poll a video task this often. Tests shorten it.
-    #[must_use]
-    pub fn with_poll_interval(mut self, interval: std::time::Duration) -> Self {
-        self.poll_interval = interval;
-        self
-    }
-
     /// Run a media model: images, video or speech.
     async fn run_media(
         &self,
@@ -146,15 +139,6 @@ impl XaiProvider {
             self.poll_interval,
         )
         .await
-    }
-
-    /// Point a subscription's account reads somewhere else. Tests use this.
-    #[must_use]
-    pub fn with_account_url(mut self, url: Option<String>) -> Self {
-        if let Some(url) = url {
-            self.account_url = url.trim_end_matches('/').to_string();
-        }
-        self
     }
 
     /// Whether `model` is sent the configured effort: what the subscription's

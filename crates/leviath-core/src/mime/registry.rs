@@ -326,12 +326,6 @@ impl MimeRegistry {
         Self::from_defaults(DEFAULTS)
     }
 
-    /// [`Self::builtin`], reporting why the compiled rows would not load.
-    #[cfg(test)]
-    pub fn builtin_checked() -> Result<Self, RegistryError> {
-        Self::from_toml_str(DEFAULTS, "builtin")
-    }
-
     /// A registry from a defaults document, or the empty one when it will
     /// not load.
     fn from_defaults(text: &str) -> Self {
@@ -677,7 +671,7 @@ mod tests {
 
     #[test]
     fn defaults_parse_and_resolve() {
-        MimeRegistry::builtin_checked().expect("the compiled defaults load");
+        MimeRegistry::from_toml_str(DEFAULTS, "builtin").expect("the compiled defaults load");
         let reg = MimeRegistry::builtin();
         let png = reg.info(&mt("image/png"));
         assert_eq!(png.family, "image");

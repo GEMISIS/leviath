@@ -132,15 +132,6 @@ impl ToolContext {
         self
     }
 
-    /// Point `install_global_tool` at a directory other than the data root's
-    /// `tools/`, or at nothing at all. Builder-style. Tests use it to install
-    /// into a temporary directory and to reach the no-home refusal without
-    /// touching the environment.
-    pub fn with_tools_dir(mut self, dir: Option<PathBuf>) -> Self {
-        self.tools_dir = dir;
-        self
-    }
-
     /// The names `install_tool` refuses beyond the built-ins it can see for
     /// itself: at spawn, the run's MCP tool names. Builder-style.
     pub fn with_reserved_names(mut self, names: Vec<String>) -> Self {

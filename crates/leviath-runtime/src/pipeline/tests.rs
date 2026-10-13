@@ -21682,7 +21682,7 @@ mod typed_tool_results {
             .find(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
             .unwrap();
         assert_eq!(entry.content.parts().len(), 2);
-        assert!(entry.content.has_stored());
+        assert!(!entry.content.is_text_only());
         assert_eq!(
             entry.tokens,
             leviath_core::estimate_tokens("here is the shot") + part_tokens

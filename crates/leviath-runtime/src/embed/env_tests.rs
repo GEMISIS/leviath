@@ -197,12 +197,6 @@ async fn models_tools_and_code_answer_through_the_shared_host() {
         e.sniff(&registry, "a.txt", b"hi", None).unwrap(),
         "text/plain"
     );
-    let custom = env().with_mime_registry(leviath_core::mime::MimeRegistry::empty());
-    let registry = custom.mime_registry(&rows).unwrap();
-    assert_eq!(
-        custom.sniff(&registry, "x", &[0xff], None).unwrap(),
-        "application/octet-stream"
-    );
 }
 
 #[tokio::test]

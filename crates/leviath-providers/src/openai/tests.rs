@@ -616,7 +616,8 @@ async fn a_media_model_runs_on_its_own_route_through_the_provider() {
         (200, "OK", reply.to_string().into_bytes()),
     ])
     .await;
-    let provider = provider_with_url(url).with_poll_interval(std::time::Duration::from_millis(1));
+    let mut provider = provider_with_url(url);
+    provider.poll_interval = std::time::Duration::from_millis(1);
     let request = InferenceRequest {
         model: "gpt-image-1".into(),
         ..simple_request()

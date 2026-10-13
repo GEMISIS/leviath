@@ -30,9 +30,9 @@ use crate::interaction_hub::{AnswerError, InteractionHub};
 use crate::persistence::{RunMetadata, TokenTotals};
 use crate::world::{AgentId, LaneSnapshot, PipelineWorld};
 
-// Sections of the former single-file host, one per concern. Glob re-exported so
-// every existing `host::ControlOp` / `host::WorldEvent` path keeps working and
-// the split stays a pure move.
+// The host's parts, one file per concern. Glob re-exported, so callers name
+// every type by its `host::` path (`host::ControlOp`, `host::WorldEvent`)
+// whichever file holds it.
 mod events;
 pub use events::*;
 mod types;

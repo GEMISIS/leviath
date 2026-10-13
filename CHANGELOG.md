@@ -620,11 +620,28 @@ same list.
   `InteractionPointState`: a resumed run reopens its point as it is placed.
   `taint::resolve_security`, `interaction::request_id_prefix` and
   `CredentialStoreKind::is_keychain`, which only their own tests called, are
-  gone. Functions that only other tests call are built for tests alone:
-  `Region::add_tainted_entry`, `EntryContent::with_part`,
+  gone. So are `Region::add_tainted_entry`, `EntryContent::with_part`,
   `MimeRegistry::builtin_checked`, `MemoryBlobStore::bytes_for`,
   `interaction::make_interaction_id`, `context_setup::apply_stage_layout`
-  and `state::inspect::content_of`.
+  and `state::inspect::content_of`, which only other tests called.
+- **Breaking, library.** More public items that only tests called. The tests
+  now use what production uses, or set a public or private field directly.
+  - `leviath_core`: `Region::with_taint_tracking` (use
+    `enable_taint_tracking`), `EntryContent::has_stored` (use
+    `!is_text_only()`) and `MemorySink::flush_count`.
+  - `leviath_mcp`: `ToolDiscovery::server_count` and
+    `ToolExecutor::server_count` (`has_client` remains). `ToolDiscovery`
+    holds no tool list of its own any more; nothing read it.
+  - `leviath_providers`: `compiled::is_compiled`,
+    `BedrockProvider::with_pricing_url`, `HttpRefresh::with_token_url`,
+    `OAuthTokenSource::with_clock`, `XaiProvider::with_account_url`, and
+    `with_poll_interval` on `XaiProvider` and `OpenAIProvider`.
+    `ModelMime::takes_mime` is built for tests alone.
+  - `leviath_tools`: `ToolContext::with_tools_dir` (`tools_dir` is a public
+    field) and `BuiltinTools::with_capabilities`.
+    `PlatformCapabilities::from_capabilities` is built for tests alone.
+  - `leviath_runtime`: `EmbedEnv::with_mime_registry`, which no embedder
+    could reach, and `context_setup::stage_region_budget`.
 
 ## 0.6.4 - 2026-09-26
 

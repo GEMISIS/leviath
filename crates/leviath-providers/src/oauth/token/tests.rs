@@ -94,6 +94,13 @@ fn source(path: &Path, transport: Arc<dyn RefreshTransport>) -> OAuthTokenSource
     OAuthTokenSource::new("codex", path.to_path_buf(), transport)
 }
 
+/// [`source`] on a clock that always reads `now`.
+fn source_at(path: &Path, transport: Arc<dyn RefreshTransport>, now: u64) -> OAuthTokenSource {
+    let mut src = source(path, transport);
+    src.clock = Arc::new(move || now);
+    src
+}
+
 #[tokio::test]
 async fn eight_concurrent_callers_refresh_exactly_once() {
     // The whole reason refresh_stale takes the failing token. A second
@@ -143,7 +150,7 @@ async fn an_expired_token_refreshes_before_the_request() {
     let (_dir, path) = store_with(grant(&token_expiring_at(1_000), "rt-0"));
     let transport = Counting::new();
     // Inside the margin: expiry is 1000, margin is 120, so 900 is due.
-    let src = source(&path, transport.clone()).with_clock(Arc::new(|| 900));
+    let src = source_at(&path, transport.clone(), 900);
 
     let creds = src.credentials().await.expect("credentials");
     assert_eq!(creds.access_token, "access-1");
@@ -155,7 +162,7 @@ async fn a_token_outside_the_margin_is_used_as_is() {
     let access = token_expiring_at(1_000);
     let (_dir, path) = store_with(grant(&access, "rt-0"));
     let transport = Counting::new();
-    let src = source(&path, transport.clone()).with_clock(Arc::new(|| 879));
+    let src = source_at(&path, transport.clone(), 879);
 
     let creds = src.credentials().await.expect("credentials");
     assert_eq!(creds.access_token, access);
@@ -171,7 +178,7 @@ async fn the_margin_boundary_refreshes() {
     // 1000 - 120 = 880 is the first second that counts as due.
     let (_dir, path) = store_with(grant(&token_expiring_at(1_000), "rt-0"));
     let transport = Counting::new();
-    let src = source(&path, transport.clone()).with_clock(Arc::new(|| 880));
+    let src = source_at(&path, transport.clone(), 880);
     src.credentials().await.expect("credentials");
     assert_eq!(transport.count(), 1);
 }

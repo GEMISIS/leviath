@@ -50,12 +50,6 @@ pub const COMPILED: &[&str] = &[
 /// Whether this build can run providers written as Rhai scripts.
 pub const SCRIPTED: bool = cfg!(feature = "rhai");
 
-/// Whether this build carries the provider `kind`. False for a kind this
-/// crate does not know at all.
-pub fn is_compiled(kind: &str) -> bool {
-    COMPILED.contains(&kind)
-}
-
 /// The cargo feature that builds `kind`, or `None` for a kind this crate does
 /// not know.
 pub fn feature_for(kind: &str) -> Option<&'static str> {
@@ -133,7 +127,7 @@ mod tests {
         let order: Vec<&str> = KNOWN
             .iter()
             .map(|(kind, _)| *kind)
-            .filter(|kind| is_compiled(kind))
+            .filter(|kind| COMPILED.contains(kind))
             .collect();
         assert_eq!(order, COMPILED);
     }

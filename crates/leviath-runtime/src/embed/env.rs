@@ -96,12 +96,6 @@ impl EmbedEnv {
         self
     }
 
-    /// The mime registry attached bytes are typed by.
-    pub fn with_mime_registry(mut self, mime: leviath_core::mime::MimeRegistry) -> Self {
-        self.mime = mime;
-        self
-    }
-
     /// The default tool service, which each bound run is registered with.
     pub fn with_basic_tools(mut self, tools: Arc<BasicToolService>) -> Self {
         self.tools = Some(tools);
