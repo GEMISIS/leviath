@@ -48,12 +48,7 @@ pub(crate) type Envs<'a> = dyn Fn(&RunGraph) -> DaemonEnv + Sync + 'a;
 /// What looks each stage of a resumable old run up as it converts: the
 /// daemon's own answers, in the daemon or asked of it from a converting
 /// child.
-#[cfg(feature = "legacy-runs")]
 pub(crate) type Stages<'a> = dyn leviath_legacy_runs::StageLookup + 'a;
-
-/// Without the converter no stage is looked up.
-#[cfg(not(feature = "legacy-runs"))]
-pub(crate) type Stages<'a> = dyn Sync + 'a;
 
 /// Where a pass over the old runs says how far along it is: the daemon's
 /// start-up board, or the output of a child converting for the daemon.
@@ -86,16 +81,13 @@ impl Progress for StartupBoard {
 /// provider that does not load) is left out of the daemon's log: a lookup
 /// that fails is in the converted run's own log, with what it fell back to,
 /// and a thousand old runs would otherwise log it a thousand times.
-#[cfg(feature = "legacy-runs")]
 pub(crate) struct Lookup<'a>(pub(crate) &'a Envs<'a>);
 
 /// Run `f` with nothing it logs reaching the daemon's log.
-#[cfg(feature = "legacy-runs")]
 fn quietly<T>(f: impl FnOnce() -> T) -> T {
     tracing::dispatcher::with_default(&tracing::Dispatch::none(), f)
 }
 
-#[cfg(feature = "legacy-runs")]
 impl leviath_legacy_runs::StageLookup for Lookup<'_> {
     fn model(
         &self,
@@ -182,12 +174,10 @@ impl Unconverted {
     }
 
     /// Why the run in the directory `name` did not convert, when it did not.
-    #[cfg(feature = "legacy-runs")]
     fn why(&self, name: &str) -> Option<&str> {
         self.runs.get(name).map(String::as_str)
     }
 
-    #[cfg(feature = "legacy-runs")]
     fn add(&mut self, name: String, why: String) {
         self.runs.insert(name, why);
         self.changed = true;
@@ -223,16 +213,12 @@ enum Done {
     /// Not an old run directory.
     Nothing,
     /// Converted into a run file.
-    #[cfg(feature = "legacy-runs")]
     Converted,
     /// A layout-2 run file, upgraded in place.
-    #[cfg(feature = "legacy-runs")]
     Upgraded,
     /// Tried, and not converted.
-    #[cfg(feature = "legacy-runs")]
     Failed,
     /// Left as it was: it did not convert before.
-    #[cfg(feature = "legacy-runs")]
     Held,
 }
 
@@ -249,13 +235,9 @@ impl Pass {
     fn add(&mut self, done: Done) {
         match done {
             Done::Nothing => {}
-            #[cfg(feature = "legacy-runs")]
             Done::Converted => self.converted += 1,
-            #[cfg(feature = "legacy-runs")]
             Done::Upgraded => self.upgraded += 1,
-            #[cfg(feature = "legacy-runs")]
             Done::Failed => self.failed += 1,
-            #[cfg(feature = "legacy-runs")]
             Done::Held => self.held += 1,
         }
     }
@@ -285,7 +267,6 @@ impl Pass {
 /// layout, looking each stage up through `envs` when given, and say how far
 /// along it is on `board`. Each is saved in the home's backup first, and one
 /// that did not convert before is left as it is. Returns what it did.
-#[cfg(feature = "legacy-runs")]
 pub(crate) fn convert_all(
     runs_dir: &Path,
     agents_dir: Option<&Path>,
@@ -299,17 +280,6 @@ pub(crate) fn convert_all(
         lookup.as_ref().map(|l| l as &Stages<'_>),
         board,
     )
-}
-
-/// Without the converter there is nothing to look a stage up for.
-#[cfg(not(feature = "legacy-runs"))]
-pub(crate) fn convert_all(
-    runs_dir: &Path,
-    agents_dir: Option<&Path>,
-    _envs: Option<&Envs<'_>>,
-    board: &dyn Progress,
-) -> Upgrade {
-    convert_each(runs_dir, agents_dir, None, board)
 }
 
 /// [`convert_all`], looking each stage up through `stages`.
@@ -350,12 +320,8 @@ pub(crate) fn convert_each(
 /// the way [`convert_all`] does for each run, and say what it did the way an
 /// upgrade at start does.
 pub(crate) fn convert_one(dir: &Path, agents_dir: Option<&Path>, envs: Option<&Envs<'_>>) {
-    #[cfg(feature = "legacy-runs")]
     let lookup = envs.map(Lookup);
-    #[cfg(feature = "legacy-runs")]
     let stages = lookup.as_ref().map(|l| l as &Stages<'_>);
-    #[cfg(not(feature = "legacy-runs"))]
-    let stages = envs.and(None);
     let runs_dir = dir.parent().unwrap_or(dir);
     let mut unconverted = Unconverted::load(runs_dir);
     let backup = Backup::of_runs(runs_dir);
@@ -378,7 +344,6 @@ pub(crate) fn convert_one(dir: &Path, agents_dir: Option<&Path>, envs: Option<&E
 
 /// The old runs under `runs_dir` waiting to be converted: those that did
 /// not fail to convert before.
-#[cfg(feature = "legacy-runs")]
 fn to_convert(runs_dir: &Path) -> Vec<PathBuf> {
     let held = Unconverted::load(runs_dir);
     old_runs(runs_dir)
@@ -389,7 +354,6 @@ fn to_convert(runs_dir: &Path) -> Vec<PathBuf> {
 
 /// How many of `waiting` hold a run file in this build's layout now, whoever
 /// converted or upgraded them.
-#[cfg(feature = "legacy-runs")]
 fn done_of(waiting: &[PathBuf]) -> usize {
     waiting
         .iter()
@@ -401,7 +365,6 @@ fn done_of(waiting: &[PathBuf]) -> usize {
 
 /// The name of the run directory `dir`, as the list of runs that did not
 /// convert names it.
-#[cfg(feature = "legacy-runs")]
 fn dir_name(dir: &Path) -> String {
     dir.file_name()
         .unwrap_or_default()
@@ -412,7 +375,6 @@ fn dir_name(dir: &Path) -> String {
 /// Every directory under `runs_dir` that holds an old run or a layout-2 run
 /// file, in name order. A conversion that was stopped part way is put back
 /// first, so the run is converted again.
-#[cfg(feature = "legacy-runs")]
 fn old_runs(runs_dir: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(runs_dir)
         .into_iter()
@@ -430,7 +392,6 @@ fn old_runs(runs_dir: &Path) -> Vec<PathBuf> {
 
 /// Put back the old run in `dir` when its conversion was stopped part way,
 /// saying so in the log.
-#[cfg(feature = "legacy-runs")]
 fn put_back(dir: &Path) {
     let shown = dir.display().to_string();
     match leviath_legacy_runs::put_back(dir) {
@@ -445,25 +406,12 @@ fn put_back(dir: &Path) {
     }
 }
 
-/// Without the converter every run directory is looked at, so one this
-/// build cannot read is reported.
-#[cfg(not(feature = "legacy-runs"))]
-fn old_runs(runs_dir: &Path) -> Vec<PathBuf> {
-    std::fs::read_dir(runs_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .collect()
-}
-
 /// Convert the run in `dir` when it is an old run, or upgrade its run file
 /// when it is in layout 2, unless it failed to before: saved in `backup`
 /// first (one that cannot be saved is left as it is, and is tried again at
 /// the next start), and listed in `unconverted` when it does not convert.
 /// What each conversion filled in is in the run's own log, and at debug
 /// level in the daemon's; what it did is added to `upgrade`.
-#[cfg(feature = "legacy-runs")]
 fn convert_in(
     dir: &Path,
     agents_dir: Option<&Path>,
@@ -523,7 +471,6 @@ fn convert_in(
 /// Upgrade the layout-2 run file in `dir`, the directory `name`, already
 /// saved in the backup, listing it in `unconverted` when it does not
 /// upgrade, and add what it did to `upgrade`.
-#[cfg(feature = "legacy-runs")]
 fn upgrade_in(
     dir: &Path,
     (name, unconverted): (String, &mut Unconverted),
@@ -549,23 +496,6 @@ fn upgrade_in(
     }
 }
 
-/// Without the converter, a run directory with no run file this build reads
-/// is only reported.
-#[cfg(not(feature = "legacy-runs"))]
-fn convert_in(
-    dir: &Path,
-    _agents_dir: Option<&Path>,
-    _stages: Option<&Stages<'_>>,
-    _kept: (&Backup, &mut Unconverted),
-    _upgrade: &mut Upgrade,
-) -> Done {
-    if dir.is_dir() && !crate::runstate::run_file::is_run_file(dir) {
-        let shown = dir.display();
-        tracing::warn!(dir = %shown, "a run directory with no run file this build can read");
-    }
-    Done::Nothing
-}
-
 /// What the daemon has at start for converting old runs, before its host
 /// exists.
 pub(crate) struct AtStart<'a> {
@@ -580,13 +510,11 @@ pub(crate) struct AtStart<'a> {
     pub(crate) pool: &'a crate::daemon::mcp_pool::McpPool,
     /// The child that converts the runs, so the memory converting takes
     /// leaves with it; `None` converts them in the daemon.
-    #[cfg(feature = "legacy-runs")]
     pub(crate) child: Option<ChildCmd>,
 }
 
 /// How the daemon starts the child that converts its old runs (see
 /// [`crate::daemon::convert_child`]).
-#[cfg(feature = "legacy-runs")]
 #[derive(Debug, Clone)]
 pub(crate) struct ChildCmd {
     pub(crate) program: PathBuf,
@@ -599,7 +527,6 @@ pub(crate) struct ChildCmd {
     pub(crate) quiet_limit: std::time::Duration,
 }
 
-#[cfg(feature = "legacy-runs")]
 impl ChildCmd {
     /// How long a child may say nothing. It says something after every run,
     /// and the largest old run converts in seconds.
@@ -673,13 +600,10 @@ pub(crate) async fn convert_at_start(
     start: AtStart<'_>,
     board: &StartupBoard,
 ) -> Upgrade {
-    #[cfg(feature = "legacy-runs")]
     let (old, layout2): (Vec<PathBuf>, Vec<PathBuf>) = to_convert(runs_dir)
         .into_iter()
         .partition(|dir| leviath_legacy_runs::is_legacy(dir));
-    #[cfg(feature = "legacy-runs")]
     let waiting = old.len() + layout2.len();
-    #[cfg(feature = "legacy-runs")]
     if let Some(cmd) = start.child.as_ref().filter(|_| waiting > 0) {
         match crate::daemon::convert_child::convert(cmd, runs_dir, &start, board).await {
             Ok(upgrade) => return upgrade,
@@ -711,7 +635,6 @@ async fn in_daemon(runs_dir: &Path, start: &AtStart<'_>, board: &StartupBoard) -
 
 /// The MCP servers the stages of every unfinished old run under `runs_dir`
 /// connect to.
-#[cfg(feature = "legacy-runs")]
 pub(crate) fn servers_of_unfinished(
     runs_dir: &Path,
     agents_dir: Option<&Path>,
@@ -734,15 +657,6 @@ pub(crate) fn servers_of_unfinished(
         .filter_map(|dir| leviath_legacy_runs::graph(&dir, &env).ok())
         .flat_map(|graph| crate::daemon::starter::mcp_configs(&graph))
         .collect()
-}
-
-/// Without the converter there are no old runs to connect servers for.
-#[cfg(not(feature = "legacy-runs"))]
-pub(crate) fn servers_of_unfinished(
-    _runs_dir: &Path,
-    _agents_dir: Option<&Path>,
-) -> Vec<leviath_mcp::MCPServerConfig> {
-    Vec::new()
 }
 
 #[cfg(test)]

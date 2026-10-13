@@ -37,4 +37,4 @@ which is what `lev blueprint migrate` writes. Nothing else reads an
 `agent.leviath` any more.
 
 The CLI is the only crate that depends on this one. Nothing else should.
-It is never published.
+It is published only because `lev` is, and is deleted before 1.0.

@@ -206,10 +206,6 @@ jobs:
         run: cargo check -p leviath-runtime --all-targets
       - name: Check the facade without its optional features
         run: cargo check -p leviath
-      # The release publishes `lev` without `legacy-runs` (its crate is never
-      # published, so prod.yml deletes the feature), which no other job builds.
-      - name: Check the lev that crates.io gets
-        run: cargo check -p leviath-cli --no-default-features --features providers
       - name: Build each provider on its own
         run: |
           for provider in anthropic openai openai-subscription xai xai-subscription google \

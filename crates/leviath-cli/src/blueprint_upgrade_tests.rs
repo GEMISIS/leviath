@@ -30,7 +30,6 @@ fn old_blueprint(dir: &Path, manifest: &[u8]) {
 /// An old blueprint of the user's own becomes an `agent.toml` beside its
 /// scripts, which this build reads; the old manifest is kept under
 /// `legacy/`, and a second pass finds nothing to do.
-#[cfg(feature = "legacy-runs")]
 #[test]
 fn an_old_blueprint_is_migrated_beside_its_files() {
     let home = tempfile::tempdir().unwrap();
@@ -155,7 +154,6 @@ fn a_bundled_blueprint_that_cannot_be_replaced_is_left_alone() {
 /// cannot be written is left exactly as it was, with every problem named.
 /// Outside the installed agents a blueprint named like a bundled one is
 /// migrated, never replaced.
-#[cfg(feature = "legacy-runs")]
 #[test]
 fn a_blueprint_that_cannot_be_migrated_is_left_as_it_was() {
     let home = tempfile::tempdir().unwrap();
@@ -199,7 +197,6 @@ fn a_blueprint_that_cannot_be_migrated_is_left_as_it_was() {
 /// old docs taught) does not stop the upgrade: the new file leaves it out,
 /// the outcome warns about it with its value, and the warning is kept beside
 /// the blueprint for `lev list` and `lev validate`.
-#[cfg(feature = "legacy-runs")]
 #[test]
 fn a_key_the_old_parser_ignored_is_dropped_with_a_warning() {
     let home = tempfile::tempdir().unwrap();

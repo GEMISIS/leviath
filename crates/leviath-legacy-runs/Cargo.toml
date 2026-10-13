@@ -11,9 +11,9 @@ rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
-# Temporary: it carries old runs and blueprints over and is deleted before
-# 1.0, so it is never published.
-publish = false
+# Temporary: it carries what 0.6 releases wrote over to the run file and
+# `agent.toml`, and is deleted before 1.0. It is published because `lev` is,
+# so an install from crates.io upgrades a home the way a release binary does.
 
 [dependencies]
 # `migrate` writes an `agent.toml`.

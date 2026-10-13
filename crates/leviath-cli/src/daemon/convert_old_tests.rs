@@ -2,12 +2,9 @@ use super::*;
 
 use std::path::PathBuf;
 
-#[cfg(feature = "legacy-runs")]
 use std::{collections::HashSet, sync::Arc};
 
-#[cfg(feature = "legacy-runs")]
 use crate::daemon::mcp_pool::McpPool;
-#[cfg(feature = "legacy-runs")]
 use crate::test_support::{FakeProvider, McpStub};
 
 fn fixture(name: &str) -> PathBuf {
@@ -64,7 +61,6 @@ system_prompt = "probe"
 /// An old run stopped mid tool batch converts at start with the window this
 /// machine gives its model and every tool its stage had, its MCP server's
 /// among them; a finished one converts too, without its servers connected.
-#[cfg(feature = "legacy-runs")]
 #[tokio::test]
 async fn old_runs_convert_at_start_with_this_machines_models_and_tools() {
     let home = tempfile::tempdir().unwrap();
@@ -145,7 +141,6 @@ async fn old_runs_convert_at_start_with_this_machines_models_and_tools() {
 
 /// An old run the daemon finds when it brings its runs back is converted
 /// against the daemon's own providers and tools, and comes back with them.
-#[cfg(feature = "legacy-runs")]
 #[tokio::test]
 async fn an_old_run_found_on_resume_converts_against_the_daemon() {
     let home = tempfile::tempdir().unwrap();
@@ -186,7 +181,6 @@ async fn an_old_run_found_on_resume_converts_against_the_daemon() {
 
 /// A stage this machine cannot serve, or whose tools it cannot give, is
 /// answered with why.
-#[cfg(feature = "legacy-runs")]
 #[test]
 fn what_the_machine_cannot_answer_comes_back_as_why() {
     use leviath_legacy_runs::StageLookup;
@@ -248,7 +242,6 @@ fn unconverted(runs: &Path) -> Option<serde_json::Value> {
 /// A run that does not convert is left as it was and listed, and later
 /// starts leave it alone rather than trying it again; a new release tries it
 /// again, and the list goes once nothing is on it.
-#[cfg(feature = "legacy-runs")]
 #[test]
 fn a_run_that_does_not_convert_is_tried_once_per_release() {
     let home = tempfile::tempdir().unwrap();
@@ -292,7 +285,6 @@ fn a_run_that_does_not_convert_is_tried_once_per_release() {
 /// beside the old run directories that are converted, and reads back: saved
 /// in the backup first, the file as it was kept beside it, and counted apart
 /// from the runs converted. A later start has nothing left to do.
-#[cfg(feature = "legacy-runs")]
 #[test]
 fn a_layout_2_run_file_is_upgraded_at_start() {
     let home = tempfile::tempdir().unwrap();
@@ -341,7 +333,6 @@ fn a_layout_2_run_file_is_upgraded_at_start() {
 
 /// A layout-2 run file that does not upgrade is left as it was and listed,
 /// as an old run that does not convert is, and later starts leave it alone.
-#[cfg(feature = "legacy-runs")]
 #[test]
 fn a_layout_2_run_file_that_does_not_upgrade_is_listed() {
     let home = tempfile::tempdir().unwrap();
@@ -367,7 +358,6 @@ fn a_layout_2_run_file_that_does_not_upgrade_is_listed() {
 
 /// A run that cannot be backed up first is not converted, and is not listed
 /// as one that does not convert: the next start tries again.
-#[cfg(feature = "legacy-runs")]
 #[test]
 fn a_run_that_cannot_be_backed_up_is_not_converted() {
     let home = tempfile::tempdir().unwrap();
@@ -385,7 +375,6 @@ fn a_run_that_cannot_be_backed_up_is_not_converted() {
 
 /// A list that cannot be written is said so in the log, and changes nothing
 /// else.
-#[cfg(feature = "legacy-runs")]
 #[test]
 fn a_list_that_cannot_be_written_is_said_so() {
     let home = tempfile::tempdir().unwrap();
@@ -402,7 +391,6 @@ fn a_list_that_cannot_be_written_is_said_so() {
 /// An old run stopped mid tool batch carries the batch on after it converts,
 /// rather than dispatching it again: each call stays the one execution the
 /// old journal named, and the call that was running ends once, unobserved.
-#[cfg(feature = "legacy-runs")]
 #[tokio::test]
 async fn a_converted_batch_keeps_the_executions_the_old_journal_named() {
     let home = tempfile::tempdir().unwrap();
@@ -519,7 +507,6 @@ fn the_child_is_this_lev_converting_these_runs() {
 
 /// A run whose conversion was stopped part way is put back and converted
 /// again; one that cannot be put back is said so and left as it is.
-#[cfg(feature = "legacy-runs")]
 #[test]
 fn a_run_stopped_part_way_converts_again() {
     let home = tempfile::tempdir().unwrap();

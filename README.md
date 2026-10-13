@@ -371,7 +371,7 @@ graph TD
 | `leviath-mcp` | MCP tool servers over stdio and HTTP/SSE |
 | `leviath-agent-client` | Agent Client Protocol wire types (JSON-RPC over stdio) |
 | `leviath-blueprint` | The `agent.toml` blueprint format and lint findings |
-| `leviath-legacy-runs` | Converts older run directories into run files, and `agent.leviath` blueprints into `agent.toml`. Used by `lev` only, never published |
+| `leviath-legacy-runs` | Converts older run directories into run files, and `agent.leviath` blueprints into `agent.toml`. Used by `lev` only, and deleted before 1.0 |
 | `leviath-package` | Blueprint bundling and install |
 | `leviath-scripting` | Rhai sandbox |
 | `leviath-telemetry` | OpenTelemetry export |

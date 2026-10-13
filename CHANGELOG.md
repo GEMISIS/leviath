@@ -94,6 +94,12 @@ same list.
   child process, so the daemon does not keep the memory converting took; if
   the child stops, the daemon converts the rest. An idle daemon reads its run
   list only when a run's file changed.
+- `lev` installed with `cargo install leviath-cli` upgrades a 0.6 home the
+  way a release binary does: it converts old runs and migrates
+  `agent.leviath` blueprints, at daemon start and with
+  `lev blueprint migrate`. The converter, `leviath-legacy-runs`, is
+  published alongside `lev` until 1.0, so every build carries it, and the
+  `legacy-runs` feature is gone.
 - `fan_out` holds each item to the worker's declared inputs as `spawn_agent`
   does: an item missing a required input is refused, with the item's path.
 - `lev respond <id> <answer>` takes what the question shows: `allow`,

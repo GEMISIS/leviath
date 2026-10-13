@@ -408,7 +408,6 @@ async fn a_resumed_run_counts_the_questions_it_already_asked() {
 }
 
 /// `src`'s files and directories, copied under `dst`.
-#[cfg(feature = "legacy-runs")]
 fn copy_dir(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).unwrap();
     for entry in std::fs::read_dir(src).unwrap().flatten() {
@@ -426,7 +425,6 @@ fn copy_dir(src: &Path, dst: &Path) {
 /// the daemon looks at it, and is then read like any other run. One that is
 /// already a run file, and a directory that is no run at all, are left as
 /// they are.
-#[cfg(feature = "legacy-runs")]
 #[tokio::test]
 async fn an_old_run_directory_is_converted_on_first_load() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -480,7 +478,6 @@ async fn an_old_run_directory_is_converted_on_first_load() {
 /// A finished run converted from the older layout still hands back its
 /// answer: the file stays where a run keeps it, and the run file names it
 /// rather than holding a copy.
-#[cfg(feature = "legacy-runs")]
 #[test]
 fn a_converted_run_answers_from_the_file_its_run_file_names() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -511,7 +508,6 @@ fn a_converted_run_answers_from_the_file_its_run_file_names() {
 
 /// An old run whose blueprint is gone converts from what it recorded, lists
 /// and reads like any other, and is never brought back to run.
-#[cfg(feature = "legacy-runs")]
 #[test]
 fn a_run_converted_without_its_blueprint_never_resumes() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
