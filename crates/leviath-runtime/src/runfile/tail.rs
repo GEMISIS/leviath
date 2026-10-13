@@ -13,8 +13,13 @@
 //!
 //! Any file this cannot read from its ends (a torn tail, a step out of
 //! place, no checkpoint at all) is read whole instead, by the
-//! [`RunFileReader`], so either way the answer and any error are that
-//! reader's.
+//! [`RunFileReader`], and the answer and any error are that reader's.
+//!
+//! The one place the two differ is a frame damaged before the last
+//! checkpoint. Reading from the ends never reaches it, so this answers with
+//! the run's current state, while the whole reader refuses the file. A run
+//! listing shows such a run as it last stood; resuming it, which reads the
+//! file whole, says where it is damaged.
 
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::Path;

@@ -64,6 +64,22 @@ pub(crate) fn open_in(dir: &Path) -> anyhow::Result<RunFileReader> {
     Ok(RunFileReader::read(&path_in(dir))?)
 }
 
+/// What to say about the run `id`, in `dir`, whose file did not read for
+/// `e`. A run directory an earlier release wrote, or a run file in an alpha
+/// build's layout, is converted when the daemon next starts; any other file
+/// (damaged, or written by a build this one does not know) stays as it is.
+pub(crate) fn why_unreadable(id: &str, dir: &Path, e: &dyn std::fmt::Display) -> String {
+    match leviath_legacy_runs::is_legacy(dir) || leviath_legacy_runs::needs_upgrade(dir) {
+        true => format!(
+            "run '{id}' was written by an earlier release or an alpha build ({e}); the daemon \
+             converts it when it next starts"
+        ),
+        false => format!(
+            "run '{id}' has a run file this build cannot read: {e}. The file is left as it is"
+        ),
+    }
+}
+
 /// The run in `dir` as of its last step, read from the two ends of its file.
 pub(crate) fn tail_in(dir: &Path) -> anyhow::Result<RunFileTail> {
     Ok(RunFileTail::read(&path_in(dir))?)

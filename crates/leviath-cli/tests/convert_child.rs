@@ -105,7 +105,7 @@ fn the_child_converts_every_old_run_for_its_daemon() {
     assert!(kinds.iter().any(|k| k == "model"), "{kinds:?}");
     for run in ["a-done", "b-old"] {
         let file = runs.join(run).join("run.lvr");
-        let reader = leviath_runtime::runfile::RunFileReader::open(&file).unwrap();
+        let reader = leviath_runtime::runfile::RunFileReader::read(&file).unwrap();
         let old = leviath_legacy_runs::meta(&runs.join(run).join("legacy")).unwrap();
         assert_eq!(reader.spec().run_id.as_str(), old.run_id);
     }

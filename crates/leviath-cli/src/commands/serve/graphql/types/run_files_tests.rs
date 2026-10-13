@@ -21,7 +21,7 @@ fn review_then_build(run_id: &str) {
     use leviath_runtime::runfile::{CheckpointPolicy, RunFileReader, RunFileWriter};
 
     let recorded = run_file::tests::recorded();
-    let reader = RunFileReader::open(&run_file::path(&recorded)).expect("a recorded run");
+    let reader = RunFileReader::read(&run_file::path(&recorded)).expect("a recorded run");
     let mut spec = reader.spec().clone();
     let text = "[blueprint]\nname = \"coder\"\nversion = \"1.0.0\"\n\n[graph]\n\
                 stages = [{ name = \"review\", accepts_messages = false }, { name = \"build\" }]\n\

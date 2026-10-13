@@ -215,10 +215,11 @@ fn the_frame_types_keep_their_structure() {
     assert!(
         hash == STRUCTURE_HASH,
         "the run file's frame types changed shape. If the_binary_layout_matches_its_version \
-         fails too, the bytes changed: bump runfile::LAYOUT_VERSION, give runfile::FINGERPRINT \
-         a new value, add an upgrade from the old fingerprint to leviath-legacy-runs, and set \
-         STRUCTURE_HASH to the hash below. If only this test fails, the readable form changed \
-         but not the bytes: set STRUCTURE_HASH alone. This build's hash: {hash}"
+         fails too, or a frame kind was added or removed, the bytes changed: bump \
+         runfile::LAYOUT_VERSION, give runfile::FINGERPRINT a new value, add an upgrade from \
+         the old fingerprint to leviath-legacy-runs, and set STRUCTURE_HASH to the hash below. \
+         Otherwise only the readable form changed: set STRUCTURE_HASH alone. This build's \
+         hash: {hash}"
     );
 }
 

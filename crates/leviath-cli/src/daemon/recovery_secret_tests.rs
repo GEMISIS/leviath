@@ -157,7 +157,7 @@ async fn a_run_whose_secret_is_gone_is_held_until_it_is_back() {
     assert!(recovered.reloaded.is_empty());
     assert_eq!(recovered.held.len(), 1);
     let state =
-        leviath_runtime::runfile::RunFileReader::open(&crate::runstate::run_file::path_in(&dir))
+        leviath_runtime::runfile::RunFileReader::read(&crate::runstate::run_file::path_in(&dir))
             .unwrap()
             .latest_state()
             .unwrap();

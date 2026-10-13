@@ -17,7 +17,7 @@ use crate::common::Run;
 
 /// The run's record as `lev ps` reads it from the converted file.
 fn listed(run: &Run) -> leviath_core::run_meta::RunMeta {
-    let reader = RunFileReader::open(&run.path("run.lvr")).unwrap();
+    let reader = RunFileReader::read(&run.path("run.lvr")).unwrap();
     leviath_runtime::runfile::summary(&reader).unwrap()
 }
 
@@ -537,7 +537,7 @@ fn a_record_without_a_cost_shows_none() {
     assert_eq!((meta.cost_usd, meta.unpriced_calls), (None, 0));
     let stage = &file.last.ledger[0].spend;
     assert_eq!((stage.unpriced_calls, stage.cost_unknown), (0, true));
-    let reader = RunFileReader::open(&run.path("run.lvr")).unwrap();
+    let reader = RunFileReader::read(&run.path("run.lvr")).unwrap();
     let tail = leviath_runtime::runfile::RunFileTail::of(&reader).unwrap();
     let stages = leviath_runtime::runfile::stage_records(&tail.spec, &tail.state);
     assert_eq!((stages[0].cost_usd, stages[0].unpriced_calls), (None, 0));

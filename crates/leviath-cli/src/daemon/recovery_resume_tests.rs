@@ -152,7 +152,7 @@ fn live(world: &mut PipelineWorld, run_id: &str) -> RunState {
 /// What `run_id`'s file says of its tool calls, one line per event: a call
 /// started, sent as an execution, or ended as one.
 fn told_in_file(runs: &Path, run_id: &str) -> Vec<String> {
-    let file = leviath_runtime::runfile::RunFileReader::open(&run_file(runs, run_id))
+    let file = leviath_runtime::runfile::RunFileReader::read(&run_file(runs, run_id))
         .expect("the run file reads");
     file.deltas(1, file.last_seq())
         .expect("the steps read")
@@ -180,7 +180,7 @@ fn told_in_file(runs: &Path, run_id: &str) -> Vec<String> {
 /// first.
 fn asked_by_in_file(runs: &Path, run_id: &str, call: &str) -> (Vec<String>, Vec<String>) {
     use leviath_runtime::state::journal::CallKind;
-    let file = leviath_runtime::runfile::RunFileReader::open(&run_file(runs, run_id))
+    let file = leviath_runtime::runfile::RunFileReader::read(&run_file(runs, run_id))
         .expect("the run file reads");
     let events: Vec<RunEvent> = file
         .deltas(1, file.last_seq())
@@ -439,7 +439,7 @@ async fn finished_fan_out_workers_come_back_as_done_after_a_restart() {
     });
     let config = {
         let reader =
-            leviath_runtime::runfile::RunFileReader::open(&run_file(runs.path(), &parent)).unwrap();
+            leviath_runtime::runfile::RunFileReader::read(&run_file(runs.path(), &parent)).unwrap();
         match &reader.spec().graph.stages[0].mode {
             StageMode::FanOut(def) => def.clone(),
             other => panic!("the split stage fans out: {other:?}"),
@@ -674,7 +674,7 @@ async fn a_profiled_run_and_its_narrowed_child_keep_their_settings_across_a_rest
 /// when the daemon stops before the parent records it. Returns its run id.
 async fn worker_on_disk(starter: &DaemonStarter, parent: &str, item: &str) -> String {
     use leviath_runtime::spec::env::Caller;
-    let spec = leviath_runtime::runfile::RunFileReader::open(&run_file(&starter.runs_dir, parent))
+    let spec = leviath_runtime::runfile::RunFileReader::read(&run_file(&starter.runs_dir, parent))
         .unwrap()
         .spec()
         .clone();
@@ -719,7 +719,7 @@ async fn a_worker_its_parent_never_recorded_runs_its_item_once() {
     let mismatched = worker_on_disk(&starter, &parent, "w2").await;
     let config = {
         let reader =
-            leviath_runtime::runfile::RunFileReader::open(&run_file(runs.path(), &parent)).unwrap();
+            leviath_runtime::runfile::RunFileReader::read(&run_file(runs.path(), &parent)).unwrap();
         match &reader.spec().graph.stages[0].mode {
             StageMode::FanOut(def) => def.clone(),
             other => panic!("the split stage fans out: {other:?}"),
@@ -877,7 +877,7 @@ async fn a_call_running_at_a_clean_stop_is_not_started_again() {
 /// What the last step on `run_id`'s file says its batch is held on, if
 /// anything.
 fn held_on_disk(runs: &Path, run_id: &str) -> Option<leviath_runtime::state::HeldBatch> {
-    leviath_runtime::runfile::RunFileReader::open(&run_file(runs, run_id))
+    leviath_runtime::runfile::RunFileReader::read(&run_file(runs, run_id))
         .and_then(|file| file.latest_state())
         .ok()?
         .pending?
@@ -988,7 +988,7 @@ async fn stop(world: PipelineWorld, first: &DaemonStarter, crashed: bool) {
 
 /// Whether the last step on `run_id`'s file has it paused.
 fn paused_on_disk(runs: &Path, run_id: &str) -> bool {
-    leviath_runtime::runfile::RunFileReader::open(&run_file(runs, run_id))
+    leviath_runtime::runfile::RunFileReader::read(&run_file(runs, run_id))
         .and_then(|file| file.latest_state())
         .is_ok_and(|s| s.status == RunStatus::Paused)
 }

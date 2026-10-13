@@ -113,11 +113,22 @@ impl RunFileWriter {
         })
     }
 
-    /// Carry on writing the run file at `path`, from its last step. A torn
-    /// tail is cut off first.
+    /// Carry on writing the run file at `path`, from its last step.
+    ///
+    /// A torn tail (the last write, left unfinished by a crash) is cut off
+    /// first, and only once the file has read and its last state decoded, so
+    /// a file the writer cannot go on with is left exactly as it was. A
+    /// damaged frame with whole frames after it is never cut: the file is
+    /// refused, naming where.
     pub fn open(path: &Path, policy: CheckpointPolicy) -> Result<Self, RunFileError> {
-        let reader = RunFileReader::open(path)?;
+        let reader = RunFileReader::read(path)?;
         let state = reader.latest_state()?;
+        if reader.torn_bytes() > 0 {
+            let (torn, keep) = (reader.torn_bytes(), reader.len());
+            let shown = path.display().to_string();
+            tracing::warn!(path = %shown, torn, keep, "run file ended in a torn frame; cutting it off");
+            super::reader::truncate(path, keep)?;
+        }
         let file =
             leviath_sys::open_private_append(path).map_err(|e| RunFileError::io(path, &e))?;
         let checkpoint = reader.last_checkpoint();

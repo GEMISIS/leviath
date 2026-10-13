@@ -181,7 +181,7 @@ proptest! {
                 recorded.push(at);
             }
         }
-        let file = crate::runfile::RunFileReader::open(&path).unwrap();
+        let file = crate::runfile::RunFileReader::read(&path).unwrap();
         let mut replayed = first;
         for (delta, expected) in file.deltas(1, file.last_seq()).unwrap().iter().zip(&recorded) {
             delta.apply(&mut replayed);

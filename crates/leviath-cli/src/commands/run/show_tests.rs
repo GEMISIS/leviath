@@ -172,6 +172,32 @@ async fn a_torn_last_step_is_left_out_and_said_so() {
     assert!(torn_note("r-1", 0).is_none());
 }
 
+/// A run file damaged in the middle is refused with where, and left as it
+/// is.
+#[tokio::test]
+async fn a_damaged_step_is_refused_with_where() {
+    runstate::with_isolated_runs_dir_async("run-show-damaged", |_d| async move {
+        let id = three_steps();
+        let file = runstate::run_dir(&id).join(leviath_core::files::RUN_FILE);
+        let mut bytes = std::fs::read(&file).unwrap();
+        let first = leviath_runtime::runfile::codec::scan(&bytes)
+            .frames
+            .into_iter()
+            .find(|f| f.kind == leviath_runtime::runfile::codec::FrameKind::Delta)
+            .unwrap();
+        bytes[first.body] ^= 0xff;
+        std::fs::write(&file, &bytes).unwrap();
+        let err = render(&args(&id)).unwrap_err().to_string();
+        let at = format!("corrupt at byte {}", first.offset);
+        assert!(err.contains(&at) && err.contains("left as it is"), "{err}");
+        assert!(
+            std::fs::read(&file).unwrap() == bytes,
+            "the file was changed"
+        );
+    })
+    .await;
+}
+
 /// Rewrite the run in `dir` with `edit` made to its spec, from the state it
 /// started in.
 fn respec(dir: &std::path::Path, edit: impl FnOnce(&mut leviath_runtime::spec::run_spec::RunSpec)) {

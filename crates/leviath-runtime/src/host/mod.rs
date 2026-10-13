@@ -673,6 +673,12 @@ impl WorldHost {
                         let _ = reply.send(Err(Self::held_refusal(&agent_id, &entry)));
                         return;
                     }
+                    Err(NotPlaced::Damaged { why, .. }) => {
+                        let _ = reply.send(Err(format!(
+                            "run '{agent_id}' cannot be read back, so it reads no messages: {why}"
+                        )));
+                        return;
+                    }
                     Ok(_) | Err(NotPlaced::Missing) => self.status_in_world(&agent_id),
                 };
                 if let Some(why) = Self::undeliverable(&agent_id, status.as_ref()) {

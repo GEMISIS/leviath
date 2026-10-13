@@ -26,7 +26,7 @@ fn offline() -> AppState {
 /// started in.
 fn respec(run_id: &str, edit: impl FnOnce(&mut RunSpec)) {
     let path = run_file::path(run_id);
-    let reader = RunFileReader::open(&path).unwrap();
+    let reader = RunFileReader::read(&path).unwrap();
     let mut spec = reader.spec().clone();
     edit(&mut spec);
     let start = reader.state_at(0).unwrap();
@@ -131,7 +131,7 @@ async fn a_file_whose_steps_do_not_decode_is_an_error() {
         // Two spec frames: the second one is a file this build never wrote.
         let path = run_file::path(&run_id);
         let mut bytes = std::fs::read(&path).unwrap();
-        let spec = RunFileReader::open(&path).unwrap().spec().clone();
+        let spec = RunFileReader::read(&path).unwrap().spec().clone();
         bytes.extend(
             leviath_runtime::runfile::codec::encode(
                 leviath_runtime::runfile::codec::FrameKind::Spec,

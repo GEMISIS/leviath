@@ -5442,6 +5442,10 @@ fn disk_reloader(asked: Arc<Mutex<Vec<(String, PageIn)>>>) -> Reloader {
                 wait_reason: None,
                 ..held_row(run_id)
             }))),
+            ("damaged", _) => Err(NotPlaced::Damaged {
+                entry: Box::new(crate::restore::damaged_entry(run_id, DAMAGE)),
+                why: DAMAGE.to_string(),
+            }),
             _ => Err(NotPlaced::Missing),
         }
     })
@@ -5515,6 +5519,63 @@ async fn resuming_a_cancelled_run_lists_it_once() {
     assert_eq!(host.world.agent_status(live), Some(AgentStatus::Active));
     assert!(host.finished().is_empty());
     assert_eq!(host.list().len(), 1);
+}
+
+/// What `disk_reloader` says is wrong with the file of the run `damaged`.
+const DAMAGE: &str = "run file is corrupt at byte 120";
+
+/// A run whose file is damaged is listed failed, saying where; a message or
+/// a resume is refused with that; and a cancel moves its row to the
+/// finished ones still saying it, not relabelled as cancelled.
+#[tokio::test]
+async fn a_run_whose_file_is_damaged_says_so_and_stays_failed() {
+    let mut host = host_with(vec![]);
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    host.set_reloader(disk_reloader(asked.clone()));
+    let terminated = Arc::new(Mutex::new(Vec::new()));
+    host.set_force_terminator(recording_terminator(terminated.clone()));
+
+    let refused = ask(&mut host, |reply| ControlOp::Message {
+        agent_id: "damaged".to_string(),
+        content: "hi".to_string(),
+        target_region: None,
+        parts: Vec::new(),
+        reply,
+    })
+    .await;
+    let why = refused.expect_err("a damaged run reads no messages");
+    assert!(
+        why.contains("cannot be read back") && why.contains(DAMAGE),
+        "{why}"
+    );
+    let row = crate::restore::damaged_entry("damaged", DAMAGE);
+    assert_eq!(host.list(), vec![row.clone()]);
+    assert_eq!(
+        row.status,
+        AgentStatus::Error {
+            message: format!("{DAMAGE}; the file is left as it is")
+        }
+    );
+
+    let resumed = ask(&mut host, |reply| ControlOp::Resume {
+        run_id: "damaged".to_string(),
+        reply,
+    })
+    .await;
+    let why = resumed.expect_err("a damaged run does not resume");
+    assert!(
+        why.contains("cannot be read back to resume") && why.contains(DAMAGE),
+        "{why}"
+    );
+
+    let cancelled = ask(&mut host, |reply| ControlOp::Cancel {
+        run_id: "damaged".to_string(),
+        reply,
+    })
+    .await;
+    assert!(cancelled);
+    assert!(host.list().is_empty());
+    assert_eq!(host.finished()[0].status, row.status);
 }
 
 /// A run held because this machine cannot take it back is listed, paused,

@@ -2217,7 +2217,7 @@ mod tests {
         let path = runs.join(run_id).join(leviath_core::files::RUN_FILE);
         let read = async {
             loop {
-                let meta = crate::runfile::RunFileReader::open(&path)
+                let meta = crate::runfile::RunFileReader::read(&path)
                     .ok()
                     .and_then(|read| crate::runfile::summary(&read).ok())
                     .filter(|meta| meta.status == status);
@@ -2640,7 +2640,7 @@ mod tests {
             .join("run-flush")
             .join(leviath_core::files::RUN_FILE);
         let read =
-            crate::runfile::RunFileReader::open(&path).expect("the run file flushed on stop");
+            crate::runfile::RunFileReader::read(&path).expect("the run file flushed on stop");
         let meta = crate::runfile::summary(&read).unwrap();
         assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Complete);
 

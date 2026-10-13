@@ -82,7 +82,7 @@ fn stepped_with(
 /// Every event `run_id`'s file holds, step by step.
 fn steps_of(runs: &Path, run_id: &str) -> Vec<Vec<RunEvent>> {
     let read =
-        crate::runfile::RunFileReader::open(&runs.join(run_id).join(leviath_core::files::RUN_FILE))
+        crate::runfile::RunFileReader::read(&runs.join(run_id).join(leviath_core::files::RUN_FILE))
             .unwrap();
     read.deltas(1, read.last_seq())
         .unwrap()
@@ -201,7 +201,7 @@ async fn a_snapshot_writes_its_step_into_the_run_file_and_nothing_else() {
     let stats = run_lane(dir.path(), vec![PersistMsg::Snapshot(stepped("run-1"))]).await;
     let run_dir = dir.path().join("run-1");
     let read =
-        crate::runfile::RunFileReader::open(&run_dir.join(leviath_core::files::RUN_FILE)).unwrap();
+        crate::runfile::RunFileReader::read(&run_dir.join(leviath_core::files::RUN_FILE)).unwrap();
     assert_eq!(read.latest_state().unwrap(), initial());
     let written: Vec<String> = std::fs::read_dir(&run_dir)
         .unwrap()
@@ -594,7 +594,7 @@ async fn the_files_beside_a_run_are_named_by_its_step_and_never_copied_in() {
     .await;
     let run_dir = dir.path().join("run-1");
     let path = run_dir.join(leviath_core::files::RUN_FILE);
-    let files = crate::runfile::RunFileReader::open(&path)
+    let files = crate::runfile::RunFileReader::read(&path)
         .unwrap()
         .latest_state()
         .unwrap()

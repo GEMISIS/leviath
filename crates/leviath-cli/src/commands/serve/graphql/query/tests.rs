@@ -997,7 +997,7 @@ async fn a_run_reports_the_graph_in_its_file() {
         let before = ask().await;
 
         let path = crate::commands::serve::core::run_file::path(&run_id);
-        let reader = RunFileReader::open(&path).expect("the run file reads");
+        let reader = RunFileReader::read(&path).expect("the run file reads");
         let mut spec = reader.spec().clone();
         spec.graph.description = Some("as the run was resolved".to_string());
         let start = reader.state_at(0).expect("the first state");

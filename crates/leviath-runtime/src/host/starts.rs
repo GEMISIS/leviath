@@ -102,8 +102,8 @@ impl WorldHost {
             return;
         };
         tokio::task::spawn_blocking(move || {
-            let recorded = crate::runfile::RunFileReader::open(&path)
-                .and_then(|reader| reader.latest_state())
+            let recorded = crate::runfile::RunFileTail::read(&path)
+                .map(|tail| tail.state)
                 .ok();
             let _ = reply.send(recorded.map(Box::new));
         });

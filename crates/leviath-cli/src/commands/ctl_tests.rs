@@ -306,7 +306,10 @@ async fn forcing_a_run_whose_metadata_cannot_be_written_reports_the_failure() {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("could not write"), "got: {err}");
+        assert!(
+            err.to_string().contains("could not record the cancel"),
+            "got: {err}"
+        );
     })
     .await;
 }

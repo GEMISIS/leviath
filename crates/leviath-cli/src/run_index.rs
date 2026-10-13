@@ -185,41 +185,57 @@ fn write_index(path: &Path, index: &impl Serialize) {
 }
 
 /// Every run under `runs_dir` and its directory, through its index, which
-/// is brought up to date and saved.
-fn indexed(runs_dir: &Path) -> Vec<(PathBuf, RunMeta)> {
+/// is brought up to date and saved, and every directory holding a run file
+/// that does not read (damaged, or in a layout this build does not know).
+fn indexed(runs_dir: &Path) -> (Vec<(PathBuf, RunMeta)>, Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(runs_dir) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
     dirs.sort();
     let mut index = RunIndex::load(runs_dir);
-    let runs = dirs
-        .iter()
-        .filter_map(|d| index.run(d).map(|run| (d.clone(), run)))
-        .collect();
+    let mut unreadable = Vec::new();
+    let mut runs = Vec::new();
+    for dir in &dirs {
+        match index.run(dir) {
+            Some(run) => runs.push((dir.clone(), run)),
+            None if runstate::run_file::is_run_file(dir) => unreadable.push(dir.clone()),
+            None => {}
+        }
+    }
     index.keep_only(&dirs.into_iter().collect());
     index.save();
-    runs
+    (runs, unreadable)
 }
 
 /// Every run under `runs_dir`, newest first, through its index, which is
 /// brought up to date and saved.
 pub(crate) fn list(runs_dir: &Path) -> Vec<RunMeta> {
-    let mut runs: Vec<RunMeta> = indexed(runs_dir).into_iter().map(|(_, run)| run).collect();
+    let mut runs: Vec<RunMeta> = indexed(runs_dir)
+        .0
+        .into_iter()
+        .map(|(_, run)| run)
+        .collect();
     runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
     runs
 }
 
 /// Every run directory under `runs_dir` whose run has not finished, through
 /// its index: what a daemon brings back when it starts, found without
-/// reading the file of every run that finished.
+/// reading the file of every run that finished. A run file that does not
+/// read cannot say it finished, so its directory is among them, for the
+/// daemon to say what is wrong with it.
 pub(crate) fn unfinished(runs_dir: &Path) -> Vec<PathBuf> {
     unfinished_at_a_glance(runs_dir).unwrap_or_else(|| {
-        indexed(runs_dir)
+        let (runs, mut unreadable) = indexed(runs_dir);
+        let mut open: Vec<PathBuf> = runs
             .into_iter()
             .filter(|(_, run)| !runstate::is_terminal_status(&run.status))
             .map(|(dir, _)| dir)
-            .collect()
+            .collect();
+        open.append(&mut unreadable);
+        open.sort();
+        open
     })
 }
 

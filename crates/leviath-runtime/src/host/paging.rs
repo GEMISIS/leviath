@@ -111,7 +111,7 @@ impl WorldHost {
                 self.parked.remove(run_id);
                 self.finished.retain(|(_, entry)| entry.run_id != run_id);
             }
-            Err(NotPlaced::Held(entry)) => {
+            Err(NotPlaced::Held(entry) | NotPlaced::Damaged { entry, .. }) => {
                 self.parked.insert(run_id.to_string(), (**entry).clone());
             }
             Err(_) => {}

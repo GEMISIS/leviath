@@ -284,6 +284,11 @@ impl WorldHost {
             Err(NotPlaced::Held(entry)) => {
                 return Err(Self::held_resume_refusal(run_id, &entry));
             }
+            Err(NotPlaced::Damaged { why, .. }) => {
+                return Err(format!(
+                    "run '{run_id}' cannot be read back to resume: {why}"
+                ));
+            }
             Err(_) => return Ok(false),
         };
         let mut acted = was_unloaded;
@@ -323,15 +328,18 @@ impl WorldHost {
 
     /// Cancel a run the world cannot hold, on its file. A run held out of
     /// the world for this machine moves from the held rows to the finished
-    /// ones, cancelled.
+    /// ones, cancelled. A row that has already failed (a run whose file did
+    /// not read) moves as it is, so it still says what is wrong.
     pub(super) fn force_cancel(&mut self, run_id: &str) -> bool {
         let forced = self
             .force_terminator
             .as_mut()
             .is_some_and(|terminate| terminate(run_id));
         if forced && let Some(mut entry) = self.parked.remove(run_id) {
-            entry.status = AgentStatus::Cancelled;
-            entry.wait_reason = None;
+            if !crate::pipeline::is_terminal_status(&entry.status) {
+                entry.status = AgentStatus::Cancelled;
+                entry.wait_reason = None;
+            }
             self.record_finished(entry, chrono::Utc::now().timestamp());
         }
         forced

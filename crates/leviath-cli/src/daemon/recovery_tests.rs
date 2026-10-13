@@ -84,7 +84,7 @@ async fn a_recorded_run_comes_back_with_its_own_spec_and_state() {
     assert_eq!(recovered.reloaded.len(), 1);
     assert_eq!(recovered.reloaded[0].0, run_id);
     let entity = entity_of(&mut world, &run_id).expect("the run is in the world");
-    let on_disk = RunFileReader::open(&run_file(runs.path(), &run_id)).unwrap();
+    let on_disk = RunFileReader::read(&run_file(runs.path(), &run_id)).unwrap();
     assert_eq!(
         *world.world().get::<RunSpecC>(entity).unwrap().0,
         *on_disk.spec(),
@@ -120,7 +120,7 @@ async fn finished_failed_and_cancelled_runs_stay_on_disk() {
 
 /// The last state `run_id`'s file holds.
 fn state_on_disk(runs: &Path, run_id: &str) -> RunState {
-    RunFileReader::open(&run_file(runs, run_id))
+    RunFileReader::read(&run_file(runs, run_id))
         .and_then(|r| r.latest_state())
         .expect("the run file reads")
 }
@@ -205,7 +205,9 @@ async fn a_refusal_that_cannot_be_recorded_still_leaves_the_run_out() {
         runs.path(),
         &coder(agent.path()),
     );
-    let found = read_run(&runs.path().join(&run_id)).expect("the run reads");
+    let found = read_run(&runs.path().join(&run_id))
+        .unwrap()
+        .expect("the run reads");
     // The file goes away between reading it and recording the refusal.
     std::fs::remove_file(run_file(runs.path(), &run_id)).unwrap();
 
@@ -240,6 +242,61 @@ async fn what_is_not_a_readable_run_is_passed_over() {
     // No runs directory at all brings back nothing.
     let gone = runs.path().join("gone");
     assert!(resume_all(&mut world, &starter, &gone).reloaded.is_empty());
+}
+
+/// A run whose file has a damaged step with whole steps after it is not
+/// resumed and not written to: it comes back as a failed row saying where
+/// the file is damaged, and paging it in says the same. Nothing is cut, so
+/// the steps after the damage are still on disk.
+#[tokio::test]
+async fn a_run_whose_file_is_damaged_is_listed_failed_and_left_as_it_is() {
+    use leviath_runtime::components::AgentStatus;
+    use leviath_runtime::runfile::codec::{self, FrameKind};
+    let agent = tempfile::tempdir().unwrap();
+    let runs = tempfile::tempdir().unwrap();
+    let run_id = run_on_disk(
+        Config::default(),
+        registry(),
+        runs.path(),
+        &coder(agent.path()),
+    );
+    for title in ["one", "two"] {
+        change(runs.path(), &run_id, |s| s.title = Some(title.to_string()));
+    }
+    let path = run_file(runs.path(), &run_id);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let delta = codec::scan(&bytes)
+        .frames
+        .into_iter()
+        .find(|f| f.kind == FrameKind::Delta)
+        .expect("a step");
+    bytes[delta.body] ^= 0xff;
+    std::fs::write(&path, &bytes).unwrap();
+
+    let starter = starter(Config::default(), registry(), runs.path());
+    let mut world = world_for(&starter);
+    let recovered = resume_all(&mut world, &starter, runs.path());
+    assert!(recovered.reloaded.is_empty());
+    let where_ = format!("corrupt at byte {}", delta.offset);
+    let [row] = recovered.held.as_slice() else {
+        panic!("one row: {:?}", recovered.held)
+    };
+    assert_eq!(row.run_id, run_id);
+    let AgentStatus::Error { message } = &row.status else {
+        panic!("failed: {:?}", row.status)
+    };
+    assert!(message.contains(&where_), "{message}");
+    match reload_run(&mut world, &starter, &run_id, PageIn::Resume) {
+        Err(NotPlaced::Damaged { entry, why }) => {
+            assert_eq!(entry.run_id, run_id);
+            assert!(why.contains(&where_), "{why}");
+        }
+        other => panic!("damaged: {other:?}"),
+    }
+    assert!(
+        std::fs::read(&path).unwrap() == bytes,
+        "the file was changed"
+    );
 }
 
 /// Only a resume brings a cancelled run back, paused so resuming it carries
@@ -403,7 +460,9 @@ async fn a_resumed_run_counts_the_questions_it_already_asked() {
         )
         .unwrap();
 
-    let found = read_run(&runs.path().join(&run_id)).expect("the run reads");
+    let found = read_run(&runs.path().join(&run_id))
+        .unwrap()
+        .expect("the run reads");
     assert_eq!(found.asked, 1);
 }
 
@@ -454,7 +513,9 @@ async fn an_old_run_directory_is_converted_on_first_load() {
         old.join("legacy").join("meta.json").is_file(),
         "the old files are kept aside"
     );
-    let found = read_run(&old).expect("the converted run reads as a run file");
+    let found = read_run(&old)
+        .unwrap()
+        .expect("the converted run reads as a run file");
     assert!(!found.spec.run_id.as_str().is_empty());
     assert!(runs.join("broken").join("meta.json").is_file());
     // Both were saved in the home's backup before anything changed.
@@ -465,7 +526,7 @@ async fn an_old_run_directory_is_converted_on_first_load() {
 
     // Converting again finds nothing to do.
     crate::daemon::convert_old::convert_one(&old, None, None);
-    assert!(read_run(&old).is_some());
+    assert!(read_run(&old).unwrap().is_some());
     // A runs directory that is not there converts nothing.
     crate::daemon::convert_old::convert_all(
         &runs.join("gone"),
@@ -524,7 +585,7 @@ fn a_run_converted_without_its_blueprint_never_resumes() {
         crate::daemon::convert_old::convert_one(&dir, None, None);
         let meta = crate::runstate::read_meta_from(&dir).expect("the run file reads");
         assert_eq!(meta.agent_name, "probe");
-        assert!(read_run(&dir).is_none());
+        assert!(read_run(&dir).unwrap().is_none());
     });
 }
 

@@ -36,7 +36,7 @@ fn walked(runs: &Path) -> String {
     );
     let run_id = run_on_disk(Config::default(), registry, runs, &manifest);
     let path = file_of(runs, &run_id);
-    let reader = RunFileReader::open(&path).expect("the run file reads");
+    let reader = RunFileReader::read(&path).expect("the run file reads");
     let edges = reader.spec().graph.edges.clone();
     let first = edges
         .iter()
@@ -185,7 +185,7 @@ async fn a_live_run_is_read_from_the_daemon() {
     crate::runstate::with_isolated_runs_dir_async("graphql-runfile-live", |_base| async move {
         let runs = crate::runstate::runs_dir();
         let run_id = walked(&runs);
-        let mut live = RunFileReader::open(&file_of(&runs, &run_id))
+        let mut live = RunFileReader::read(&file_of(&runs, &run_id))
             .expect("the run file reads")
             .latest_state()
             .expect("a state");
@@ -369,7 +369,7 @@ async fn a_bad_step_behind_a_checkpoint_fails_only_what_reads_it() {
         let runs = crate::runstate::runs_dir();
         let run_id = walked(&runs);
         let path = file_of(&runs, &run_id);
-        let mut last = RunFileReader::open(&path)
+        let mut last = RunFileReader::read(&path)
             .expect("the run file reads")
             .latest_state()
             .expect("a state");
