@@ -87,14 +87,14 @@ The same four answers everywhere, so there is no vocabulary to learn per hook:
 | `false` | refuse, no reason given |
 | `#{ action: "modify", value: ... }` | proceed with `value` |
 | `#{ action: "cancel", reason: "..." }` | refuse |
-| `#{ action: "retry" }` | do it again |
+| `#{ action: "retry" }` | reserved: every hook refuses it, and the run ends in an error |
 
 Hooks are a **return-value contract**. Rhai passes arguments by value, so mutating `ctx` does
 nothing. The script has to return its decision.
 
-Not every hook can honour `retry`, and one that cannot says so rather than treating it as allow.
-Today none of them do: it is reserved for re-inference, which needs an attempt bound first or a hook
-that always retries would wedge the run.
+`retry` is reserved for re-inference, which needs an attempt bound first, or a hook that always
+retries would wedge the run. No hook honours it yet. One that gets it says so rather than treating
+it as allow, and the run ends in an error naming the hook.
 
 ## What hooks cannot do
 

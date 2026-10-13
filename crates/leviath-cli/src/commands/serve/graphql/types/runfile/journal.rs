@@ -280,23 +280,10 @@ impl From<&SettledState> for SettledStep {
     }
 }
 
-/// What caused a context change, as this schema names it.
+/// What caused a context change, as this schema names it: the journal's
+/// word for it, as the run file's reader names it.
 pub(crate) fn cause_of(c: CauseState) -> ContextCause {
-    match c {
-        CauseState::Seed => ContextCause::Seed,
-        CauseState::Message => ContextCause::Message,
-        CauseState::ModelReply => ContextCause::ModelReply,
-        CauseState::ToolResult => ContextCause::ToolResult,
-        CauseState::ProducedPart => ContextCause::ProducedPart,
-        CauseState::Compaction => ContextCause::Compaction,
-        CauseState::Transform => ContextCause::Transform,
-        CauseState::ContextTool => ContextCause::ContextTool,
-        CauseState::Hook => ContextCause::Hook,
-        CauseState::FanOut => ContextCause::FanOut,
-        CauseState::Interaction => ContextCause::Interaction,
-        CauseState::Resume => ContextCause::Resume,
-        CauseState::Framework => ContextCause::Framework,
-    }
+    leviath_core::ContextCause::from(c).into()
 }
 
 /// One region's side of a committed context change.

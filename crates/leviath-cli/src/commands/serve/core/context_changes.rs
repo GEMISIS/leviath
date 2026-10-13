@@ -21,7 +21,6 @@ use leviath_runtime::runfile::history::{ContextChangeRecord, IndexedChange, Regi
 use leviath_runtime::runfile::record::RegionCommit;
 use leviath_runtime::spec::run_spec::RunSpec;
 use leviath_runtime::state::context::RegionChange;
-use leviath_runtime::state::journal::CauseState;
 use leviath_runtime::state::{Change, ContextDiff, ContextState, RunEvent, RunState};
 
 use super::error::ServeError;
@@ -88,30 +87,11 @@ pub(crate) fn read(run_id: &str) -> Result<Vec<IndexedChange>, ServeError> {
     Ok(changes)
 }
 
-/// What caused a change, as the journal names it.
-fn cause(c: CauseState) -> ContextCause {
-    match c {
-        CauseState::Seed => ContextCause::Seed,
-        CauseState::Message => ContextCause::Message,
-        CauseState::ModelReply => ContextCause::ModelReply,
-        CauseState::ToolResult => ContextCause::ToolResult,
-        CauseState::ProducedPart => ContextCause::ProducedPart,
-        CauseState::Compaction => ContextCause::Compaction,
-        CauseState::Transform => ContextCause::Transform,
-        CauseState::ContextTool => ContextCause::ContextTool,
-        CauseState::Hook => ContextCause::Hook,
-        CauseState::FanOut => ContextCause::FanOut,
-        CauseState::Interaction => ContextCause::Interaction,
-        CauseState::Resume => ContextCause::Resume,
-        CauseState::Framework => ContextCause::Framework,
-    }
-}
-
 /// The change an event kept whole, at `at`.
 fn recorded(event: &RunEvent, at: i64) -> Option<ContextChangeRecord> {
     match event {
         RunEvent::ContextCommitted(commit) => Some(ContextChangeRecord {
-            cause: cause(commit.cause),
+            cause: commit.cause.into(),
             revision_before: Some(commit.revision_before.clone()),
             revision_after: Some(commit.revision_after.clone()),
             execution_id: commit.execution_id.clone(),
@@ -137,7 +117,7 @@ fn recorded(event: &RunEvent, at: i64) -> Option<ContextChangeRecord> {
         // moved nor what the region held, so a reader gets the counts it does
         // carry and nothing invented around them.
         RunEvent::ContextNoted(note) => Some(ContextChangeRecord {
-            cause: cause(note.cause),
+            cause: note.cause.into(),
             revision_before: None,
             revision_after: None,
             execution_id: None,
@@ -162,7 +142,7 @@ fn recorded(event: &RunEvent, at: i64) -> Option<ContextChangeRecord> {
 /// The change `diff` made in `step`, when the step names its cause and it
 /// touched a region's entries.
 fn change(spec: &RunSpec, step: &Pair<'_>, diff: &ContextDiff) -> Option<ContextChangeRecord> {
-    let cause = cause_of(step)?;
+    let cause = inferred_cause(step)?;
     let before = &step.before.context;
     let after = &step.after.context;
     let mut regions: Vec<RegionTransition> = diff
@@ -212,7 +192,7 @@ fn revision(spec: &RunSpec, state: &RunState) -> String {
 }
 
 /// The one cause the step's events name, if they name exactly one.
-fn cause_of(step: &Pair<'_>) -> Option<ContextCause> {
+fn inferred_cause(step: &Pair<'_>) -> Option<ContextCause> {
     let mut causes: Vec<ContextCause> = step
         .delta
         .events

@@ -170,6 +170,28 @@ impl From<ContextCause> for CauseState {
     }
 }
 
+/// What caused a context change, as the run file kept it, back in the
+/// journal's own words: what a reader of the file shows.
+impl From<CauseState> for ContextCause {
+    fn from(c: CauseState) -> Self {
+        match c {
+            CauseState::Seed => Self::Seed,
+            CauseState::Message => Self::Message,
+            CauseState::ModelReply => Self::ModelReply,
+            CauseState::ToolResult => Self::ToolResult,
+            CauseState::ProducedPart => Self::ProducedPart,
+            CauseState::Compaction => Self::Compaction,
+            CauseState::Transform => Self::Transform,
+            CauseState::ContextTool => Self::ContextTool,
+            CauseState::Hook => Self::Hook,
+            CauseState::FanOut => Self::FanOut,
+            CauseState::Interaction => Self::Interaction,
+            CauseState::Resume => Self::Resume,
+            CauseState::Framework => Self::Framework,
+        }
+    }
+}
+
 /// One region's side of a committed context change.
 pub(crate) fn region_commit(r: &RegionCommit) -> RegionCommitState {
     RegionCommitState {
