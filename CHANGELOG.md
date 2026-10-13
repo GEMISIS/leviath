@@ -38,7 +38,7 @@ same list.
   `POST /api/runs` takes a `SpawnRequest`. The 0.6.4 `/api/agents` routes
   stay, marked deprecated, for older Lair builds; their stages route keeps
   0.6.4's status words. Every answer from one carries a `Deprecation`
-  header (RFC 9745), and 0.7.0 removes them. New: `POST /api/runs/validate`,
+  header (RFC 9745), and 0.8.0 removes them. New: `POST /api/runs/validate`,
   `GET /api/schema/spawn-request`, `GET /api/blueprints/{name}/inputs`, and
   `/api/runs/{id}/spec`, `/state`, `/deltas` and `/graph`.
 - **Breaking, GraphQL.** `spawnRun(request: SpawnRunRequest!)` takes a

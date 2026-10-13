@@ -19,7 +19,7 @@
 //! that do fill it. `POST /api/runs` takes inputs by name and refuses one the
 //! blueprint does not declare.
 //!
-//! These routes are kept for older clients until 0.7.0, which removes them.
+//! These routes are kept for older clients until 0.8.0, which removes them.
 //! Every answer from one carries a `Deprecation` header.
 
 use axum::extract::{Path as AxumPath, Query, State};
