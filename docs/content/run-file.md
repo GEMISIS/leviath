@@ -303,5 +303,6 @@ The same data is on the HTTP API, GraphQL, and in the `run_history` tool an agen
 [Inspecting a run](/docs/inspecting-a-run) shows each.
 
 The file's frame types have a published JSON Schema, `docs/schema/run-file.schema.json` in the
-repository. Its hash is the fingerprint in every run file's header. A build whose frame types
-differ refuses a file by name rather than reading it into the wrong shape.
+repository. The fingerprint in every run file's header names the binary layout those types are
+written in. It changes only when the layout does, never for a reworded description. A build with a
+different layout refuses a file by name rather than reading it into the wrong shape.

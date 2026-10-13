@@ -11,9 +11,9 @@
 //! few seeks, not a scan. The checksum covers the kind and the body, so a
 //! frame torn by a crash mid-write is found and cut off rather than decoded.
 //!
-//! The fingerprint is a hash of the frame types' shapes. A file written by a
-//! build whose types differ is refused whole, by name, rather than decoded
-//! into the wrong shape.
+//! The fingerprint names the frame types' binary layout. A file written in
+//! another layout is refused whole, by name, rather than decoded into the
+//! wrong shape.
 
 use std::fmt;
 
@@ -49,7 +49,7 @@ pub enum FrameKind {
 }
 
 impl FrameKind {
-    fn from_byte(b: u8) -> Option<Self> {
+    pub(crate) fn from_byte(b: u8) -> Option<Self> {
         Some(match b {
             1 => Self::Spec,
             2 => Self::Code,
@@ -90,7 +90,7 @@ impl fmt::Display for CodecError {
             Self::Fingerprint { found, expected } => write!(
                 f,
                 "this run file was written by a build with different run types \
-                 (file {found}, this build {expected}); convert it or use the build that wrote it"
+                 (file {found}, this build {expected}); open it with the build that wrote it"
             ),
             Self::Corrupt(at) => write!(f, "run file is corrupt at byte {at}"),
             Self::UnknownKind(k) => write!(f, "run file has a frame of unknown kind {k}"),

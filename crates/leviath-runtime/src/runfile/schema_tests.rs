@@ -123,21 +123,169 @@ fn the_binary_layout_matches_its_version() {
     );
 }
 
-/// The fingerprint written into the build is the hash of the frame schemas
-/// this build generates, so a change to any frame type fails here until the
-/// new value is written in.
-#[test]
-fn the_fingerprint_is_the_hash_of_this_builds_frame_schemas() {
+/// The hash of [`structure`] over every frame type's schema, the frame kinds
+/// and the layout version. When it changes, a frame type changed shape: the
+/// message in [`the_frame_types_keep_their_structure`] says what to do.
+const STRUCTURE_HASH: &str = "ab11232496fbe40f86f1539a050d5777c1e678c93b250e17c9821791881e8522";
+
+/// Keywords that only document a schema: how the readable form reads and what
+/// a field means. Postcard writes none of them.
+const DOC_ONLY: &[&str] = &[
+    "$comment",
+    "$schema",
+    "default",
+    "deprecated",
+    "description",
+    "examples",
+    "readOnly",
+    "required",
+    "title",
+    "writeOnly",
+];
+
+/// Keywords whose value is kept as it is.
+const KEPT: &[&str] = &[
+    "$ref", "const", "enum", "format", "maxItems", "maximum", "minItems", "minimum", "pattern",
+    "type",
+];
+
+/// A schema with what only documents it taken out.
+///
+/// The walk knows where a schema sits. Under `properties` and `$defs` the keys
+/// are names, so a field called `description` or `default` stays; `const`,
+/// `enum` and the other kept keywords are values and are never walked. A
+/// keyword it does not know panics, so a schemars upgrade that starts writing
+/// a new one is looked at rather than hashed blind.
+fn structure(schema: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    let Value::Object(map) = schema else {
+        return schema.clone();
+    };
+    let mut out = serde_json::Map::new();
+    for (key, value) in map {
+        let kept = match key.as_str() {
+            k if DOC_ONLY.contains(&k) => continue,
+            k if KEPT.contains(&k) => value.clone(),
+            "properties" | "$defs" => Value::Object(
+                value
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(name, s)| (name.clone(), structure(s)))
+                    .collect(),
+            ),
+            "items" | "additionalProperties" => structure(value),
+            "anyOf" | "oneOf" | "allOf" | "prefixItems" => {
+                Value::Array(value.as_array().unwrap().iter().map(structure).collect())
+            }
+            other => panic!("the run file schema uses `{other}`, which `structure` does not know"),
+        };
+        out.insert(key.clone(), kept);
+    }
+    Value::Object(out)
+}
+
+/// Every frame kind this build reads, by byte.
+fn frame_kinds() -> String {
+    (0..=u8::MAX)
+        .filter_map(|b| super::codec::FrameKind::from_byte(b).map(|k| format!("{b} {k:?}")))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The hash of `schemas`' structure, the frame kinds and the layout version.
+fn structure_hash(schemas: &serde_json::Value) -> String {
     use sha2::Digest as _;
     let mut h = sha2::Sha256::new();
-    h.update(super::frame_schemas().to_string().as_bytes());
+    for (name, schema) in schemas.as_object().unwrap() {
+        h.update(name.as_bytes());
+        h.update(structure(schema).to_string().as_bytes());
+    }
+    h.update(frame_kinds().as_bytes());
     h.update(super::LAYOUT_VERSION.to_le_bytes());
-    let worked_out: [u8; 32] = h.finalize().into();
+    hex::encode(h.finalize())
+}
+
+/// A frame type's shape is held still: a new field, a removed variant, a
+/// changed type or a new frame kind fails here. A doc comment does not, so
+/// documenting a frame type never asks for a new fingerprint.
+#[test]
+fn the_frame_types_keep_their_structure() {
+    let hash = structure_hash(&super::frame_schemas());
     assert!(
-        worked_out == super::FINGERPRINT,
-        "the frame schemas changed: set runfile::FINGERPRINT to {:#04x?}",
-        worked_out
+        hash == STRUCTURE_HASH,
+        "the run file's frame types changed shape. If the_binary_layout_matches_its_version \
+         fails too, the bytes changed: bump runfile::LAYOUT_VERSION, give runfile::FINGERPRINT \
+         a new value, add an upgrade from the old fingerprint to leviath-legacy-runs, and set \
+         STRUCTURE_HASH to the hash below. If only this test fails, the readable form changed \
+         but not the bytes: set STRUCTURE_HASH alone. This build's hash: {hash}"
     );
+}
+
+/// The fingerprint names one binary layout. A new layout version comes with a
+/// new fingerprint, and both are written here together.
+#[test]
+fn the_fingerprint_names_this_layout() {
+    assert_eq!(
+        (super::LAYOUT_VERSION, hex::encode(super::FINGERPRINT)),
+        (
+            3,
+            "fd1f989506392df390e42aa60ccaa79037e94be23ce4c35a8ec9f7425c657cb6".to_string()
+        ),
+    );
+}
+
+/// Rewording every description, default and title a schema carries leaves its
+/// structure's hash where it was.
+#[test]
+fn documentation_is_not_structure() {
+    fn reword(v: &mut serde_json::Value) {
+        use serde_json::Value;
+        let Value::Object(map) = v else { return };
+        for (key, value) in map.iter_mut() {
+            match key.as_str() {
+                "description" | "title" => *value = Value::String("reworded".into()),
+                "default" => *value = Value::String("another".into()),
+                "properties" | "$defs" => {
+                    value.as_object_mut().unwrap().values_mut().for_each(reword)
+                }
+                "items" | "additionalProperties" => reword(value),
+                "anyOf" | "oneOf" | "allOf" | "prefixItems" => {
+                    value.as_array_mut().unwrap().iter_mut().for_each(reword)
+                }
+                _ => {}
+            }
+        }
+    }
+    let schemas = super::frame_schemas();
+    let mut reworded = schemas.clone();
+    reworded
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .for_each(reword);
+    assert_ne!(reworded, schemas);
+    assert_eq!(structure_hash(&reworded), structure_hash(&schemas));
+}
+
+/// A field named like a keyword is a field: taking away `InputDecl`'s
+/// `description` field changes the structure.
+#[test]
+fn a_field_named_like_a_keyword_is_structure() {
+    let schemas = super::frame_schemas();
+    let mut without = schemas.clone();
+    let removed = without["spec"]["$defs"]["InputDecl"]["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("description");
+    assert!(removed.is_some());
+    assert_ne!(structure_hash(&without), structure_hash(&schemas));
+}
+
+/// The frame kinds are part of the structure.
+#[test]
+fn the_frame_kinds_are_listed_by_byte() {
+    assert_eq!(frame_kinds(), "1 Spec,2 Code,4 Delta,5 State,6 Owner");
 }
 
 #[test]

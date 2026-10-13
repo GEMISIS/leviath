@@ -130,7 +130,7 @@ Raising the cap to admit one long file is how a limit stops being one. If a file
 
 `docs/schema/blueprint.schema.json`, `spawn-request.schema.json` and `run-file.schema.json` are generated from the types they describe. After changing one of those types, run `cargo xtask schema` and commit what it writes. A test in the owning crate fails while a checked-in schema differs from what the build generates, so `cargo test` (and CI) catches a schema left behind; `cargo xtask schema --check` runs just those tests.
 
-A change to a run file's frame types also changes the fingerprint in every run file's header, and `LAYOUT_HASH` in `crates/leviath-runtime/src/runfile/schema_tests.rs` holds the binary layout: that test prints the new hash to record.
+Two tests in `crates/leviath-runtime/src/runfile/schema_tests.rs` hold a run file's frame types still. `STRUCTURE_HASH` covers their shape, leaving out descriptions, defaults and titles, so rewording a doc comment moves nothing. `LAYOUT_HASH` covers the bytes postcard writes. When the bytes change, bump `LAYOUT_VERSION`, give `FINGERPRINT` a new value and add an upgrade for files carrying the old one to `leviath-legacy-runs`; each failing test prints the hash to record.
 
 ### Where a test module lives
 
