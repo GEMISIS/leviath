@@ -158,6 +158,8 @@ up to date:
 - each run file an alpha build wrote in an earlier binary layout is upgraded in place, and the file
   as it was stays in the run's `legacy/` folder as `run.v2.lvr`.
 
+[Upgrading from 0.6](/docs/upgrading) covers what else changes, outside your home.
+
 Before it changes any of them, the daemon saves it under `~/.leviath/backups/<version>-<time>/`:
 
 | Folder | Holds |
