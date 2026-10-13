@@ -16,6 +16,7 @@
 //! wrong shape.
 
 use std::fmt;
+use std::io::Read as _;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -79,6 +80,13 @@ pub enum CodecError {
     UnknownKind(u8),
     /// A frame's payload does not decode as its kind's type.
     Decode(String),
+    /// The frame at this offset decompresses to more than `limit` bytes.
+    TooLarge {
+        /// Where the frame starts.
+        at: u64,
+        /// The most a frame's payload may be.
+        limit: u64,
+    },
     /// A payload could not be encoded.
     Encode(String),
 }
@@ -95,6 +103,10 @@ impl fmt::Display for CodecError {
             Self::Corrupt(at) => write!(f, "run file is corrupt at byte {at}"),
             Self::UnknownKind(k) => write!(f, "run file has a frame of unknown kind {k}"),
             Self::Decode(e) => write!(f, "run file frame does not decode: {e}"),
+            Self::TooLarge { at, limit } => write!(
+                f,
+                "run file frame at byte {at} decompresses to more than {limit} bytes"
+            ),
             Self::Encode(e) => write!(f, "run file frame does not encode: {e}"),
         }
     }
@@ -186,7 +198,7 @@ impl FrameRef {
         let body = bytes
             .get(self.body..self.body + self.len)
             .ok_or(CodecError::Corrupt(self.offset as u64))?;
-        let raw = decompress(body).map_err(|e| CodecError::Decode(e.to_string()))?;
+        let raw = decompress(body, self.offset)?;
         postcard::from_bytes(&raw).map_err(|e| CodecError::Decode(e.to_string()))
     }
 }
@@ -194,16 +206,47 @@ impl FrameRef {
 /// The most bytes one frame's payload decompresses to.
 const MAX_PAYLOAD: u64 = 1 << 30;
 
-/// A frame body, decompressed into a buffer of the size its zstd header
-/// gives, which every body [`encode`] writes carries. Sized from the header
-/// rather than for the largest payload a frame may hold: a buffer that big
-/// would be mapped and handed back on every decode, at more cost than
-/// decoding a small frame. A body whose header gives no size is
-/// decompressed as a stream.
-fn decompress(body: &[u8]) -> std::io::Result<Vec<u8>> {
-    match zstd::zstd_safe::get_frame_content_size(body) {
-        Ok(Some(size)) => zstd::bulk::decompress(body, size.min(MAX_PAYLOAD) as usize),
-        _ => zstd::stream::decode_all(body),
+/// The most a decode sets aside before it starts, whatever a body's header
+/// claims. A header is only bytes in the file, so a small body may claim a
+/// gigabyte; the buffer grows past this only as real output arrives.
+const RESERVE: u64 = 16 << 20;
+
+/// The body of the frame at `at`, decompressed: at most [`MAX_PAYLOAD`]
+/// bytes, whatever its header says or leaves out.
+fn decompress(body: &[u8], at: usize) -> Result<Vec<u8>, CodecError> {
+    decompress_within(body, at, MAX_PAYLOAD, RESERVE)
+}
+
+/// [`decompress`], refusing more than `limit` bytes of output and setting
+/// aside at most `reserve` up front.
+///
+/// The buffer starts at the size the zstd header gives, which every body
+/// [`encode`] writes carries, so a small frame decodes into exactly the
+/// room it needs. A header claiming more than `limit` is refused before
+/// anything is decoded. A body that gives no size, or more output than its
+/// header said (two zstd frames back to back), is stopped one byte past
+/// `limit`.
+fn decompress_within(
+    body: &[u8],
+    at: usize,
+    limit: u64,
+    reserve: u64,
+) -> Result<Vec<u8>, CodecError> {
+    let too_large = CodecError::TooLarge {
+        at: at as u64,
+        limit,
+    };
+    let declared = zstd::zstd_safe::get_frame_content_size(body).ok().flatten();
+    if declared.is_some_and(|size| size > limit) {
+        return Err(too_large);
+    }
+    let mut out = Vec::with_capacity(declared.unwrap_or(0).min(reserve) as usize);
+    zstd::stream::read::Decoder::with_buffer(body)
+        .and_then(|decoder| decoder.take(limit + 1).read_to_end(&mut out))
+        .map_err(|e| CodecError::Decode(e.to_string()))?;
+    match out.len() as u64 > limit {
+        true => Err(too_large),
+        false => Ok(out),
     }
 }
 
@@ -336,7 +379,7 @@ mod tests {
     fn a_body_decompresses_to_the_size_it_says() {
         let raw = postcard::to_stdvec(&"a payload".to_string()).unwrap();
         let sized = zstd::bulk::compress(&raw, ZSTD_LEVEL).unwrap();
-        let out = decompress(&sized).unwrap();
+        let out = decompress(&sized, 0).unwrap();
         assert_eq!(out, raw);
         assert_eq!(out.capacity(), raw.len());
 
@@ -358,6 +401,49 @@ mod tests {
         f.extend(frame);
         let read = frame_at(&f, HEADER_LEN).unwrap();
         assert_eq!(read.decode::<String>(&f).unwrap(), "a payload");
+    }
+
+    /// No body decompresses past the limit, whether its header says how big
+    /// it is or not. A header claiming more is refused before decoding, and a
+    /// stream that runs on is stopped one byte past the limit.
+    #[test]
+    fn no_body_decompresses_past_the_limit() {
+        let raw = vec![7u8; 100];
+        let sized = zstd::bulk::compress(&raw, ZSTD_LEVEL).unwrap();
+        let streamed = zstd::stream::encode_all(raw.as_slice(), ZSTD_LEVEL).unwrap();
+        let too_large = Err(CodecError::TooLarge { at: 40, limit: 99 });
+        for body in [&sized, &streamed] {
+            assert_eq!(decompress_within(body, 40, 100, 8).unwrap(), raw);
+            assert_eq!(decompress_within(body, 40, 99, 8), too_large);
+        }
+        // Two zstd frames back to back: the header names the first one's
+        // size, and the output runs on past it.
+        let mut twice = sized.clone();
+        twice.extend_from_slice(&sized);
+        assert_eq!(
+            decompress_within(&twice, 40, 150, 8).unwrap_err(),
+            CodecError::TooLarge { at: 40, limit: 150 }
+        );
+        assert_eq!(decompress_within(&twice, 40, 200, 8).unwrap().len(), 200);
+        assert_eq!(
+            CodecError::TooLarge { at: 40, limit: 99 }.to_string(),
+            "run file frame at byte 40 decompresses to more than 99 bytes"
+        );
+    }
+
+    /// A frame whose payload is over the limit is refused when it is decoded.
+    #[test]
+    fn a_frame_over_the_limit_does_not_decode() {
+        let f = file(&[(FrameKind::Spec, "spec")]);
+        let frame = frame_at(&f, HEADER_LEN).unwrap();
+        let body = &f[frame.body..frame.body + frame.len];
+        assert_eq!(
+            decompress_within(body, frame.offset, 1, RESERVE),
+            Err(CodecError::TooLarge {
+                at: HEADER_LEN as u64,
+                limit: 1
+            })
+        );
     }
 
     /// A frame cut anywhere (in its kind, its body, its checksum or its
