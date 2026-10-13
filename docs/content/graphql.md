@@ -1580,7 +1580,9 @@ Delivery is at-most-once, and a gap is announced rather than inferred. `EventsDr
 you fell behind, and `count` is how many frames went past unread. It is counted off the server's
 numbering, so it includes frames your filter would have dropped anyway: an upper bound, never an
 under-count. The broadcast is bounded, and a listener that cannot keep up is skipped past rather
-than allowed to hold up the daemon. Treat it as the cue to re-read whatever you render.
+than allowed to hold up the daemon. It also arrives, on every subscription whatever its filter,
+when the server's own stream from the daemon skipped `count` events. Treat it as the cue to re-read
+whatever you render.
 `DaemonLinkChangedEvent` arrives whatever `types` says and whatever the scope is, because a run's
 frames stopping looks exactly like a quiet run without it.
 

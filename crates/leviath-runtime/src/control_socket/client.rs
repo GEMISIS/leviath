@@ -824,7 +824,9 @@ impl ControlClient {
         Ok(WorldEventStream {
             lines,
             _write: write_half,
+            opened: cursor.clone(),
             cursor,
+            held: None,
         })
     }
 }
@@ -872,6 +874,25 @@ pub struct WorldEventStream {
     // Held open so the connection (and thus the subscription) stays alive.
     _write: tokio::io::WriteHalf<ClientStream>,
     cursor: Option<super::EventCursor>,
+    /// Where a pick-up said the stream starts, not yet handed to the reader.
+    opened: Option<super::EventCursor>,
+    /// The event read just after a gap, handed over after the gap is.
+    held: Option<WorldEvent>,
+}
+
+/// What a stream hands its reader, for one that has to know when events were
+/// lost rather than only see the ones that arrived.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Streamed {
+    /// The daemon said where the stream starts: after the newest event for a
+    /// first subscription, after the cursor for one it picked up. A daemon
+    /// too old to number its events never says.
+    Opened(super::EventCursor),
+    /// An event.
+    Event(WorldEvent),
+    /// The daemon numbered this many events the stream never got: its
+    /// recorder fell behind, or a pick-up asked for more than it keeps.
+    Missed(u64),
 }
 
 /// The number a daemon puts beside each event it streams.
@@ -890,19 +911,55 @@ impl WorldEventStream {
     /// subscription down once per unknown event.
     pub async fn next(&mut self) -> Option<WorldEvent> {
         loop {
-            let line = self.lines.next_line().await.ok().flatten()?;
-            if let Ok(event) = serde_json::from_str(&line) {
-                let seq = serde_json::from_str::<Numbered>(&line)
-                    .ok()
-                    .and_then(|n| n.seq);
-                if let (Some(cursor), Some(seq)) = (self.cursor.as_mut(), seq) {
-                    cursor.after = seq;
-                }
+            if let Streamed::Event(event) = self.next_item().await? {
                 return Some(event);
             }
-            if let Ok(ControlResponse::Subscribed { session, after }) = serde_json::from_str(&line)
+        }
+    }
+
+    /// The next thing the stream says, or `None` once the connection closes:
+    /// where it opened, an event, or how many events it missed.
+    ///
+    /// Every numbered line moves the cursor, an event of a kind this client
+    /// does not know included, so a newer daemon's events neither stall the
+    /// cursor nor read as a gap. A number further on than the next one is a
+    /// gap, said before the event that showed it.
+    pub async fn next_item(&mut self) -> Option<Streamed> {
+        if let Some(cursor) = self.opened.take() {
+            return Some(Streamed::Opened(cursor));
+        }
+        if let Some(event) = self.held.take() {
+            return Some(Streamed::Event(event));
+        }
+        loop {
+            let line = self.lines.next_line().await.ok().flatten()?;
+            let event = serde_json::from_str::<WorldEvent>(&line).ok();
+            if event.is_none()
+                && let Ok(ControlResponse::Subscribed { session, after }) =
+                    serde_json::from_str(&line)
             {
-                self.cursor = Some(super::EventCursor { session, after });
+                let cursor = super::EventCursor { session, after };
+                self.cursor = Some(cursor.clone());
+                return Some(Streamed::Opened(cursor));
+            }
+            let seq = serde_json::from_str::<Numbered>(&line)
+                .ok()
+                .and_then(|n| n.seq);
+            let missed = match (self.cursor.as_mut(), seq) {
+                (Some(cursor), Some(seq)) => {
+                    let missed = seq.saturating_sub(cursor.after.saturating_add(1));
+                    cursor.after = seq;
+                    missed
+                }
+                _ => 0,
+            };
+            match (missed, event) {
+                (0, Some(event)) => return Some(Streamed::Event(event)),
+                (0, None) => {}
+                (missed, event) => {
+                    self.held = event;
+                    return Some(Streamed::Missed(missed));
+                }
             }
         }
     }

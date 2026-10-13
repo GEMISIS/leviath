@@ -32,17 +32,30 @@ pub(crate) fn path_in(dir: &Path) -> PathBuf {
     dir.join(leviath_core::files::RUN_FILE)
 }
 
-/// What a run's webhook is signed with: `None` for a webhook with no
-/// secret, the secret as the store beside the runs holds it, or the
-/// reference the spec names it by when the store no longer holds it.
-pub(crate) type CallbackSecret = Option<Result<Secret, SecretRef>>;
+/// What a run's webhook is signed with.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CallbackSecret {
+    /// The webhook has no secret: it is sent unsigned.
+    Unsigned,
+    /// The secret, as the store beside the runs holds it.
+    Signed(Secret),
+    /// The store no longer holds the secret the spec names.
+    Gone(SecretRef),
+    /// The store may hold it, but it did not read just now, for this reason.
+    Unreadable(SecretRef, String),
+}
 
 /// The secret the webhook of the run in `dir`, resolved to `spec`, is signed
 /// with. The spec only names it; the secret is read from the store.
 pub(crate) fn callback_secret(dir: &Path, spec: &RunSpec) -> CallbackSecret {
-    let reference = spec.delivery.callback_secret()?;
-    let held = SecretStore::of_run_dir(dir).read(reference);
-    Some(held.ok_or_else(|| reference.clone()))
+    let Some(reference) = spec.delivery.callback_secret() else {
+        return CallbackSecret::Unsigned;
+    };
+    match SecretStore::of_run_dir(dir).read_checked(reference) {
+        Ok(Some(secret)) => CallbackSecret::Signed(secret),
+        Ok(None) => CallbackSecret::Gone(reference.clone()),
+        Err(e) => CallbackSecret::Unreadable(reference.clone(), e.to_string()),
+    }
 }
 
 /// Whether `dir` holds a run file, told from its first few bytes alone: a

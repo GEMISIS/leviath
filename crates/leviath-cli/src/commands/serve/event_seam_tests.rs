@@ -184,7 +184,7 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
     };
     let relay = tokio::spawn(super::polling::event_loop(
         state.clone(),
-        super::polling::RECONNECT_BACKOFF,
+        super::polling::TIMING,
     ));
 
     let app = Router::new()

@@ -77,15 +77,68 @@ fn a_delivery_is_claimed_once() {
 }
 
 /// An outbox that cannot be written still hands out deliveries, as a server
-/// with no outbox would; it only forgets them across a restart.
+/// with no outbox would. A delivery it settles is not sent again while it
+/// runs, though nothing on disk says so: a restart may send it again.
 #[test]
 fn an_unwritable_outbox_still_delivers() {
     let dir = tempfile::tempdir().unwrap();
     let blocked = dir.path().join("webhooks");
     std::fs::write(&blocked, b"a file where the directory would go").unwrap();
-    let outbox = Outbox::open(blocked, 7);
+    let outbox = Outbox::open(blocked.clone(), 7);
     assert_eq!(outbox.since, 7);
     assert!(outbox.claim("agent_completed:r1"));
     outbox.settle("agent_completed:r1");
-    assert!(outbox.claim("agent_completed:r1"), "nothing was recorded");
+    assert!(
+        !outbox.claim("agent_completed:r1"),
+        "settled in this process"
+    );
+    let restarted = Outbox::open(blocked, 9);
+    assert!(
+        restarted.claim("agent_completed:r1"),
+        "nothing was recorded"
+    );
+}
+
+/// A start that does not read as a second is written again from now, and
+/// the next open keeps that. One that cannot be read at all (a directory
+/// where the file goes) is left as it is, and the outbox counts from now.
+#[test]
+fn a_damaged_start_is_written_again_and_an_unreadable_one_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let webhooks = dir.path().join("webhooks");
+    std::fs::create_dir_all(&webhooks).unwrap();
+    std::fs::write(webhooks.join(SINCE), b"not a second").unwrap();
+    assert_eq!(Outbox::open(webhooks.clone(), 40).since, 40);
+    assert_eq!(Outbox::open(webhooks.clone(), 90).since, 40, "rewritten");
+
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(other.join(SINCE)).unwrap();
+    assert_eq!(Outbox::open(other.clone(), 60).since, 60);
+    assert!(other.join(SINCE).is_dir(), "left as it was");
+}
+
+/// A delivery given up unsent, because something it needs did not read just
+/// now, can be claimed again by the next sweep.
+#[test]
+fn a_released_delivery_can_be_claimed_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let outbox = Outbox::open(dir.path().join("webhooks"), 0);
+    assert!(outbox.claim("agent_completed:r1"));
+    outbox.release("agent_completed:r1");
+    assert!(outbox.claim("agent_completed:r1"));
+}
+
+/// One sweep runs at a time. One asked for while it runs is folded into a
+/// single pass more, however many times it is asked for.
+#[test]
+fn sweeps_asked_for_while_one_runs_are_one_more_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let outbox = Outbox::open(dir.path().join("webhooks"), 0);
+    assert!(outbox.begin_sweep());
+    assert!(!outbox.begin_sweep());
+    assert!(!outbox.begin_sweep());
+    assert!(outbox.end_sweep(), "one more pass");
+    assert!(!outbox.end_sweep(), "and then done");
+    assert!(outbox.begin_sweep(), "a new sweep can start");
+    assert!(!outbox.end_sweep());
 }

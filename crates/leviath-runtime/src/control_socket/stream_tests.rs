@@ -374,3 +374,88 @@ async fn a_daemon_that_hangs_up_on_a_pick_up_gives_an_ended_stream() {
     assert_eq!(stream.next().await, None);
     assert_eq!(served.await.unwrap(), ["resubscribe"]);
 }
+
+/// A daemon on `id` serving one connection: on a plain `subscribe` it writes
+/// `lines` as they are, then closes the connection.
+fn scripted_daemon(
+    id: &crate::control_socket::ControlId,
+    lines: Vec<String>,
+) -> tokio::task::JoinHandle<()> {
+    let mut listener = crate::control_socket::bind_control_listener(id).unwrap();
+    tokio::spawn(async move {
+        let stream = listener.accept().await.unwrap().unwrap();
+        let (read, mut write) = tokio::io::split(stream);
+        let mut read = BufReader::new(read).lines();
+        while let Ok(Some(line)) = read.next_line().await {
+            if line.contains("\"subscribe\"") {
+                break;
+            }
+        }
+        for line in lines {
+            write
+                .write_all(format!("{line}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    })
+}
+
+/// A stream read item by item says where it opened, hands over each event,
+/// and says how many events were numbered past it, before the event that
+/// showed the gap. A numbered line of a kind this client does not know moves
+/// the cursor without reading as a gap, and a line that is not one at all is
+/// passed over.
+#[tokio::test]
+async fn a_stream_says_where_it_opened_and_how_many_events_it_missed() {
+    use crate::control_socket::Streamed;
+    let dir = tempfile::tempdir().unwrap();
+    let id = crate::control_socket::control_id(dir.path());
+    let client = crate::control_socket::ControlClient::new(id.clone());
+    let opened = ControlResponse::Subscribed {
+        session: "s".to_string(),
+        after: 4,
+    };
+    let numbered = |seq, run: &str| numbered_line(seq, &completed(run)).trim_end().to_string();
+    let served = scripted_daemon(
+        &id,
+        vec![
+            serde_json::to_string(&opened).unwrap(),
+            numbered(5, "five"),
+            r#"{"type":"from_a_newer_daemon","seq":6}"#.to_string(),
+            numbered(7, "seven"),
+            numbered(10, "ten"),
+            r#"{"type":"from_a_newer_daemon","seq":13}"#.to_string(),
+            "not a line from a daemon".to_string(),
+            numbered(14, "fourteen"),
+        ],
+    );
+    let mut stream = client.subscribe().await.unwrap();
+    let mut items = Vec::new();
+    while let Some(item) = stream.next_item().await {
+        items.push(item);
+    }
+    let opened = EventCursor {
+        session: "s".to_string(),
+        after: 4,
+    };
+    assert_eq!(
+        items,
+        [
+            Streamed::Opened(opened.clone()),
+            Streamed::Event(completed("five")),
+            Streamed::Event(completed("seven")),
+            Streamed::Missed(2),
+            Streamed::Event(completed("ten")),
+            Streamed::Missed(2),
+            Streamed::Event(completed("fourteen")),
+        ]
+    );
+    assert_eq!(
+        stream.cursor(),
+        Some(EventCursor {
+            after: 14,
+            ..opened
+        })
+    );
+    served.await.unwrap();
+}

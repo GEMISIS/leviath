@@ -130,7 +130,10 @@ async fn a_webhook_secret_is_kept_beside_the_runs_and_never_in_the_run_file() {
     assert!(recovered.held.is_empty());
     let spec = crate::runstate::run_file::spec_in(&dir).unwrap();
     let secret = crate::runstate::run_file::callback_secret(&dir, &spec);
-    assert_eq!(secret, Some(Ok(Secret::new(SECRET))));
+    assert_eq!(
+        secret,
+        crate::runstate::run_file::CallbackSecret::Signed(Secret::new(SECRET))
+    );
 }
 
 /// A run whose secret has gone from the store is held on a restart, with

@@ -17,13 +17,61 @@ use super::webhook_outbox::Outbox;
 use crate::config::WebhookConfig;
 use crate::runstate;
 
-/// The reconnect backoff between subscribe passes in production.
-pub(super) const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
+/// How long the relay waits to reconnect, and when it sweeps for owed
+/// webhooks of its own accord.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Timing {
+    /// The pause between a stream ending and the next subscribe.
+    pub(super) backoff: Duration,
+    /// How often owed webhooks are swept for while the stream is up: the
+    /// floor under a run whose file or secret did not read when its
+    /// completion arrived.
+    pub(super) sweep_every: Duration,
+    /// How long after a stream opens, or says it lost events, a second sweep
+    /// follows the first. A run's completion reaches the stream before its
+    /// last step reaches its file, so a sweep at that moment can read a run
+    /// that has not finished yet.
+    pub(super) settle: Duration,
+}
+
+/// The production [`Timing`].
+pub(super) const TIMING: Timing = Timing {
+    backoff: Duration::from_millis(500),
+    sweep_every: Duration::from_secs(300),
+    settle: Duration::from_secs(5),
+};
+
+/// The relay's sweeps for owed webhooks while a stream is up.
+pub(super) struct Sweeps {
+    every: tokio::time::Interval,
+    settle: Duration,
+}
+
+impl Sweeps {
+    /// Sweeps on `timing`, the first `settle` from now.
+    pub(super) fn new(timing: &Timing) -> Self {
+        let mut every = tokio::time::interval_at(
+            tokio::time::Instant::now() + timing.settle,
+            timing.sweep_every,
+        );
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        Self {
+            every,
+            settle: timing.settle,
+        }
+    }
+
+    /// A sweep was just made; the next follows `settle` from now, and the
+    /// ones after it every `sweep_every`.
+    fn follow_up(&mut self) {
+        self.every.reset_after(self.settle);
+    }
+}
 
 /// Subscribe to the daemon's event stream and forward events forever,
-/// reconnecting (after `backoff`) whenever the stream ends or the daemon is
-/// briefly unreachable. Never returns; tests pass a zero backoff.
-pub(super) async fn event_loop(state: AppState, backoff: Duration) {
+/// reconnecting (after `timing.backoff`) whenever the stream ends or the
+/// daemon is briefly unreachable. Never returns.
+pub(super) async fn event_loop(state: AppState, timing: Timing) {
     // The shared factory's client, with a connect and a total timeout, so a
     // webhook endpoint that accepts a connection and never answers cannot
     // hang a delivery. `checked_client`, not `client`: the webhook URL comes
@@ -41,17 +89,25 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
     );
     // Opening the outbox reads, and may make, its directory.
     let outbox = Arc::new(blocking(move || Outbox::open(dir, now)).await);
-    send_owed(&state, &client, &outbox, &runs).await;
     let mut link = LinkWatch::new(&state);
     // Where the stream had got to when it last dropped, so the next one
     // starts with what was missed: above all a run that a restarted daemon
     // finished before this loop was back, whose webhook is fired from here.
     let mut cursor = None;
+    let mut sweeps = Sweeps::new(&timing);
     loop {
-        consume_once(&state, &client, &outbox, &mut link, &mut cursor).await;
+        consume_once(
+            &state,
+            &client,
+            &outbox,
+            &mut link,
+            &mut cursor,
+            &mut sweeps,
+        )
+        .await;
         // The stream ended (daemon closed / restarted) or was unreachable; back
         // off briefly, then re-subscribe.
-        tokio::time::sleep(backoff).await;
+        tokio::time::sleep(timing.backoff).await;
     }
 }
 
@@ -126,8 +182,12 @@ impl LinkWatch {
 }
 
 /// Send the webhook of every finished run that still owes one: those a
-/// previous server was still retrying when it stopped, and those that
-/// finished while no server was running to see them.
+/// previous server was still retrying when it stopped, those that finished
+/// while no server was running to see them, and those whose completion this
+/// server's stream did not bring it.
+///
+/// One at a time as room frees up among the deliveries being sent, so a
+/// backlog is read and sent at the pace it goes out rather than all at once.
 async fn send_owed(
     state: &AppState,
     client: &reqwest::Client,
@@ -135,42 +195,96 @@ async fn send_owed(
     runs: &std::path::Path,
 ) {
     let cfg = state.current_config().await.webhook.clone();
-    // Every run's record, and the answer of each one owed, are read on the
-    // blocking pool.
+    // Every run's record is read on the blocking pool.
     let (held, runs) = (Arc::clone(outbox), runs.to_path_buf());
     let owed = blocking(move || {
         let metas = crate::run_index::list(&runs);
         held.owed(&metas, |run_id| delivery_id("agent_completed", run_id))
             .into_iter()
-            .map(|meta| {
-                let final_output = runstate::read_final_output(&meta.run_id);
-                (meta.run_id.clone(), meta.status.wire(), final_output)
-            })
+            .map(|meta| (meta.run_id.clone(), meta.status.wire()))
             .collect::<Vec<_>>()
     })
     .await;
-    for (run_id, status, final_output) in owed {
-        fire_completion_webhook(client, &cfg, outbox, &run_id, status, final_output.as_ref()).await;
+    for (run_id, status) in owed {
+        let room = Arc::clone(&outbox.permits)
+            .acquire_owned()
+            .await
+            .expect("the outbox never closes its permits");
+        let id = run_id.clone();
+        let final_output = blocking(move || runstate::read_final_output(&id)).await;
+        let sent = Delivery {
+            client,
+            cfg: &cfg,
+            outbox,
+            room: Some(room),
+        };
+        sent.completion(&run_id, status, final_output.as_ref())
+            .await;
     }
+}
+
+/// Sweep for owed webhooks on a task of its own, so the stream keeps being
+/// read while a backlog goes out. A sweep asked for while one is running is
+/// one more pass of it once it is done.
+fn sweep(state: &AppState, client: &reqwest::Client, outbox: &Arc<Outbox>) {
+    if !outbox.begin_sweep() {
+        return;
+    }
+    let (state, client, outbox) = (state.clone(), client.clone(), Arc::clone(outbox));
+    let runs = runstate::runs_dir();
+    tokio::spawn(async move {
+        loop {
+            send_owed(&state, &client, &outbox, &runs).await;
+            if !outbox.end_sweep() {
+                break;
+            }
+        }
+    });
 }
 
 /// One subscribe-and-consume pass: forward events until the stream ends,
 /// starting after `cursor` and leaving it where the stream got to. Returns
 /// immediately if the daemon can't be reached.
+///
+/// Owed webhooks are swept for when the stream opens with nothing to pick up
+/// from (a first subscription, or a daemon that is not the one the cursor
+/// was from, starts after the newest event), when it says events were lost,
+/// and on `sweeps` while it is up.
 async fn consume_once(
     state: &AppState,
     client: &reqwest::Client,
     outbox: &Arc<Outbox>,
     link: &mut LinkWatch,
     cursor: &mut Option<leviath_runtime::control_socket::EventCursor>,
+    sweeps: &mut Sweeps,
 ) {
+    use leviath_runtime::control_socket::Streamed;
     let Ok(mut stream) = state.control.subscribe_from(cursor.as_ref()).await else {
         link.down(state);
         return;
     };
     link.up(state);
-    while let Some(event) = stream.next().await {
-        handle_event(state, client, outbox, event).await;
+    let before = cursor.clone();
+    loop {
+        tokio::select! {
+            item = stream.next_item() => match item {
+                Some(Streamed::Event(event)) => handle_event(state, client, outbox, event).await,
+                Some(Streamed::Opened(opened)) => {
+                    if before.as_ref().is_none_or(|from| from.session != opened.session) {
+                        sweep(state, client, outbox);
+                        sweeps.follow_up();
+                    }
+                }
+                Some(Streamed::Missed(count)) => {
+                    tracing::warn!(count, "the daemon's event stream skipped events; sweeping for owed webhooks");
+                    super::events::send(&state.event_tx, ServerEvent::EventsDropped { count });
+                    sweep(state, client, outbox);
+                    sweeps.follow_up();
+                }
+                None => break,
+            },
+            _ = sweeps.every.tick() => sweep(state, client, outbox),
+        }
     }
     // A stream that dropped before the daemon said where it starts leaves
     // the cursor where it was.
@@ -436,7 +550,8 @@ fn delivery_id(event: &str, run_id: &str) -> String {
 /// Returns whether a delivery was started.
 ///
 /// The run file, the claim, the secret and the settled marker are file work,
-/// done on the blocking pool.
+/// done on the blocking pool. The delivery goes out once there is room among
+/// the ones being sent (see [`Delivery`]).
 async fn fire_completion_webhook(
     client: &reqwest::Client,
     cfg: &WebhookConfig,
@@ -445,22 +560,62 @@ async fn fire_completion_webhook(
     status: &str,
     final_output: Option<&leviath_core::output::FinalOutput>,
 ) -> bool {
-    let (held, id) = (Arc::clone(outbox), run_id.to_string());
-    let Some(ready) = blocking(move || outgoing(&held, &id)).await else {
-        return false;
+    let live = Delivery {
+        client,
+        cfg,
+        outbox,
+        room: None,
     };
-    let payload = completion_payload(&ready.meta, status, final_output, &ready.delivery);
-    // Serialize once so the signature covers the exact bytes we send. `Value`'s
-    // `Display` is infallible and byte-identical to `to_vec`.
-    let body = payload.to_string().into_bytes();
-    let signature = ready.secret.map(|secret| sign(secret.expose(), &body));
-    let (client, cfg, outbox) = (client.clone(), cfg.clone(), Arc::clone(outbox));
-    let (url, delivery) = (ready.url, ready.delivery);
-    tokio::spawn(async move {
-        fire_webhook(client, url, body, signature, &delivery, cfg).await;
-        blocking(move || outbox.settle(&delivery)).await;
-    });
-    true
+    live.completion(run_id, status, final_output).await
+}
+
+/// What one completion webhook is sent with.
+struct Delivery<'a> {
+    client: &'a reqwest::Client,
+    cfg: &'a WebhookConfig,
+    outbox: &'a Arc<Outbox>,
+    /// Its place among the deliveries being sent, when the caller waited for
+    /// one; the delivery waits for its own when not.
+    room: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl Delivery<'_> {
+    /// Start the completion webhook of `run_id` (see
+    /// [`fire_completion_webhook`]).
+    async fn completion(
+        self,
+        run_id: &str,
+        status: &str,
+        final_output: Option<&leviath_core::output::FinalOutput>,
+    ) -> bool {
+        let (held, id) = (Arc::clone(self.outbox), run_id.to_string());
+        let Some(ready) = blocking(move || outgoing(&held, &id)).await else {
+            return false;
+        };
+        let payload = completion_payload(&ready.meta, status, final_output, &ready.delivery);
+        // Serialize once so the signature covers the exact bytes we send.
+        // `Value`'s `Display` is infallible and byte-identical to `to_vec`.
+        let body = payload.to_string().into_bytes();
+        let signature = ready.secret.map(|secret| sign(secret.expose(), &body));
+        let (client, cfg, outbox) = (
+            self.client.clone(),
+            self.cfg.clone(),
+            Arc::clone(self.outbox),
+        );
+        let (url, delivery, room) = (ready.url, ready.delivery, self.room);
+        tokio::spawn(async move {
+            let _room = match room {
+                Some(room) => room,
+                None => Arc::clone(&outbox.permits)
+                    .acquire_owned()
+                    .await
+                    .expect("the outbox never closes its permits"),
+            };
+            fire_webhook(client, url, body, signature, &delivery, cfg).await;
+            blocking(move || outbox.settle(&delivery)).await;
+        });
+        true
+    }
 }
 
 /// A completion webhook this server has claimed to send.
@@ -478,12 +633,14 @@ struct Outgoing {
 /// The webhook run `run_id` owes, claimed in `outbox`, or `None` when it owes
 /// none or it is not this call's to send.
 ///
-/// Blocking: the run file and the secret store are read, and a webhook whose
-/// secret is lost is settled here, unsent.
+/// Blocking: the run file and the secret store are read. A webhook whose
+/// secret is gone is settled here, unsent. One whose run file or secret does
+/// not read just now is left owed, for a later sweep to send.
 fn outgoing(outbox: &Outbox, run_id: &str) -> Option<Outgoing> {
+    use runstate::run_file::CallbackSecret;
     let dir = runstate::run_dir(run_id);
     let Ok(tail) = runstate::run_file::tail_in(&dir) else {
-        return None; // metadata not yet persisted
+        return None; // not readable now; a sweep reads it again
     };
     let meta = leviath_runtime::runfile::summary_of(&tail.spec, &tail.state, tail.updated_at);
     let Some(url) = meta.callback_url.clone() else {
@@ -495,12 +652,18 @@ fn outgoing(outbox: &Outbox, run_id: &str) -> Option<Outgoing> {
     }
     // Read on its own, so nothing sent but the signature comes from it.
     let secret = match runstate::run_file::callback_secret(&dir, &tail.spec) {
-        None => None,
-        Some(Ok(secret)) => Some(secret),
-        Some(Err(reference)) => {
+        CallbackSecret::Unsigned => None,
+        CallbackSecret::Signed(secret) => Some(secret),
+        CallbackSecret::Gone(reference) => {
             let reference = reference.to_string();
             tracing::warn!(run_id = %run_id, secret = %reference, "the run's webhook was not posted: its signing secret is not in the secret store");
             outbox.settle(&delivery);
+            return None;
+        }
+        CallbackSecret::Unreadable(reference, why) => {
+            let reference = reference.to_string();
+            tracing::warn!(run_id = %run_id, secret = %reference, error = %why, "the run's webhook waits: its signing secret did not read, and a later sweep tries again");
+            outbox.release(&delivery);
             return None;
         }
     };
@@ -650,6 +813,21 @@ mod tests {
     /// An outbox of its own, in a directory nothing else uses.
     fn outbox() -> Arc<Outbox> {
         Arc::new(Outbox::open(tempfile::tempdir().unwrap().keep(), 0))
+    }
+
+    /// No pause between passes, and no sweep of the relay's own accord
+    /// while a test runs.
+    fn quick() -> Timing {
+        Timing {
+            backoff: Duration::ZERO,
+            sweep_every: Duration::from_secs(3600),
+            settle: Duration::from_secs(3600),
+        }
+    }
+
+    /// Sweeps on [`quick`] timing.
+    fn sweeps() -> Sweeps {
+        Sweeps::new(&quick())
     }
 
     fn state_with(control: ControlClient) -> (AppState, broadcast::Receiver<Stamped>) {
@@ -1591,6 +1769,7 @@ mod tests {
             &outbox(),
             &mut LinkWatch::new(&state),
             &mut None,
+            &mut sweeps(),
         )
         .await; // returns when the stream closes
         server.await.unwrap();
@@ -1607,6 +1786,7 @@ mod tests {
             &outbox(),
             &mut LinkWatch::new(&state),
             &mut None,
+            &mut sweeps(),
         )
         .await; // subscribe fails → returns immediately
     }
@@ -1676,6 +1856,7 @@ mod tests {
             &outbox(),
             &mut LinkWatch::new(&state),
             &mut cursor,
+            &mut sweeps(),
         )
         .await;
         server.await.unwrap();
@@ -1703,7 +1884,15 @@ mod tests {
         let first = EventLog::recording(&world);
         let served = log_daemon(&id, &first);
         drop(world);
-        consume_once(&state, &client, &outbox(), &mut link, &mut cursor).await;
+        consume_once(
+            &state,
+            &client,
+            &outbox(),
+            &mut link,
+            &mut cursor,
+            &mut sweeps(),
+        )
+        .await;
         served.await.unwrap();
         let down = serde_json::to_value(rx.try_recv().unwrap().event).unwrap();
         assert_eq!(down["connected"], false);
@@ -1721,7 +1910,15 @@ mod tests {
             .unwrap();
         drop(world);
         let served = log_daemon(&id, &second);
-        consume_once(&state, &client, &outbox(), &mut link, &mut cursor).await;
+        consume_once(
+            &state,
+            &client,
+            &outbox(),
+            &mut link,
+            &mut cursor,
+            &mut sweeps(),
+        )
+        .await;
         served.await.unwrap();
         let frames: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
             .map(|frame| tag(&frame))
@@ -1785,7 +1982,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (control, server) = reconnecting_daemon(dir.path(), 2);
         let (state, mut rx) = state_with(control);
-        let handle = tokio::spawn(event_loop(state, Duration::ZERO));
+        let handle = tokio::spawn(event_loop(state, quick()));
         assert_eq!(tag(&rx.recv().await.unwrap()), "agent_status");
         let down = serde_json::to_value(rx.recv().await.unwrap().event).unwrap();
         assert_eq!(down["type"], "daemon_link");
@@ -1809,8 +2006,24 @@ mod tests {
         let (state, mut rx) = state_with(no_daemon_client());
         let client = reqwest::Client::new();
         let mut link = LinkWatch::new(&state);
-        consume_once(&state, &client, &outbox(), &mut link, &mut None).await;
-        consume_once(&state, &client, &outbox(), &mut link, &mut None).await;
+        consume_once(
+            &state,
+            &client,
+            &outbox(),
+            &mut link,
+            &mut None,
+            &mut sweeps(),
+        )
+        .await;
+        consume_once(
+            &state,
+            &client,
+            &outbox(),
+            &mut link,
+            &mut None,
+            &mut sweeps(),
+        )
+        .await;
         let down = serde_json::to_value(rx.try_recv().unwrap().event).unwrap();
         assert_eq!(down["type"], "daemon_link");
         assert_eq!(down["connected"], false);
@@ -1841,7 +2054,15 @@ mod tests {
         };
 
         // Pass 1: nothing listening.
-        consume_once(&state, &client, &outbox(), &mut link, &mut None).await;
+        consume_once(
+            &state,
+            &client,
+            &outbox(),
+            &mut link,
+            &mut None,
+            &mut sweeps(),
+        )
+        .await;
         let down = next(&mut rx);
         assert_eq!(down["connected"], false);
 
@@ -1870,7 +2091,15 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             drop(events);
         });
-        consume_once(&state, &client, &outbox(), &mut link, &mut None).await;
+        consume_once(
+            &state,
+            &client,
+            &outbox(),
+            &mut link,
+            &mut None,
+            &mut sweeps(),
+        )
+        .await;
         ender.await.unwrap();
         server_a.await.unwrap();
         let up = next(&mut rx);
@@ -1893,7 +2122,15 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             drop(events);
         });
-        consume_once(&state, &client, &outbox(), &mut link, &mut None).await;
+        consume_once(
+            &state,
+            &client,
+            &outbox(),
+            &mut link,
+            &mut None,
+            &mut sweeps(),
+        )
+        .await;
         ender.await.unwrap();
         server_b.await.unwrap();
         let up = next(&mut rx);
@@ -1963,5 +2200,242 @@ mod tests {
     fn a_run_that_submitted_nothing_sends_a_null_answer() {
         let payload = completion_payload(&payload_meta(), "complete", None, "d-3");
         assert!(payload["final_output"].is_null());
+    }
+
+    /// A finished run, `run_id`, whose webhook goes to `url`.
+    fn finished_with_callback(run_id: &str, url: &str) {
+        let mut meta = RunMeta::new(
+            run_id.into(),
+            "coder".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        meta.callback_url = Some(url.to_string());
+        meta.status = leviath_core::run_meta::RunStatus::Complete;
+        create_run(&meta).unwrap();
+    }
+
+    /// A daemon serving one connection: it reads the client's request, runs
+    /// `meanwhile`, then writes `lines` and hangs up.
+    fn scripted_daemon(
+        dir: &std::path::Path,
+        meanwhile: impl FnOnce() + Send + 'static,
+        lines: Vec<String>,
+    ) -> (ControlClient, tokio::task::JoinHandle<()>) {
+        let id = control_id(dir);
+        let mut listener = bind_control_listener(&id).unwrap();
+        let handle = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut read = BufReader::new(read_half).lines();
+            let _request = read.next_line().await.unwrap();
+            meanwhile();
+            for line in lines {
+                write_half
+                    .write_all(format!("{line}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        (ControlClient::new(id), handle)
+    }
+
+    /// The line a numbering daemon opens a stream with.
+    fn opened(session: &str, after: u64) -> String {
+        serde_json::to_string(
+            &leviath_runtime::control_socket::ControlResponse::Subscribed {
+                session: session.to_string(),
+                after,
+            },
+        )
+        .unwrap()
+    }
+
+    /// An event line numbered `seq`.
+    fn numbered(seq: u64) -> String {
+        let mut line = serde_json::to_value(WorldEvent::Status {
+            run_id: "r".into(),
+            agent_id: "a".into(),
+            status: "active".into(),
+            stage: "s".into(),
+            iteration: 0,
+            tool_calls: 0,
+            accepts_messages: true,
+            wait_reason: None,
+            title: None,
+        })
+        .unwrap();
+        line["seq"] = seq.into();
+        line.to_string()
+    }
+
+    /// A run that finishes after the relay subscribed, but before the daemon
+    /// said where the stream starts, is in no event the stream sends: a first
+    /// subscription starts after the newest event. The relay sweeps once the
+    /// stream opens, so its webhook goes out anyway.
+    #[tokio::test]
+    async fn a_run_finished_as_the_stream_opens_still_gets_its_webhook() {
+        crate::runstate::with_isolated_runs_dir_async("open_race", |_d| async move {
+            let (url, receiver) = fake_receiver(vec![200]).await;
+            let dir = tempfile::tempdir().unwrap();
+            let (control, server) = scripted_daemon(
+                dir.path(),
+                move || finished_with_callback("raced", &url),
+                vec![opened("s", 9)],
+            );
+            let (state, _rx) = state_with(control);
+            let client = reqwest::Client::new();
+            let mut link = LinkWatch::new(&state);
+            consume_once(
+                &state,
+                &client,
+                &outbox(),
+                &mut link,
+                &mut None,
+                &mut sweeps(),
+            )
+            .await;
+            server.await.unwrap();
+            let requests = tokio::time::timeout(Duration::from_secs(20), receiver)
+                .await
+                .expect("the webhook went out")
+                .unwrap();
+            assert!(requests[0].contains("agent_completed:raced"));
+        })
+        .await;
+    }
+
+    /// A stream picked up in the same session sweeps for nothing on opening,
+    /// but one that says it skipped events puts an `events_dropped` frame on
+    /// the bus and sweeps: a completion may have been among them.
+    #[tokio::test]
+    async fn a_gap_in_the_stream_is_said_and_swept_for() {
+        crate::runstate::with_isolated_runs_dir_async("gap_sweep", |_d| async move {
+            let (url, receiver) = fake_receiver(vec![200]).await;
+            let dir = tempfile::tempdir().unwrap();
+            let (control, server) = scripted_daemon(
+                dir.path(),
+                move || finished_with_callback("in-the-gap", &url),
+                vec![opened("s", 1), numbered(2), numbered(5)],
+            );
+            let (state, mut rx) = state_with(control);
+            let client = reqwest::Client::new();
+            let mut cursor = Some(leviath_runtime::control_socket::EventCursor {
+                session: "s".to_string(),
+                after: 1,
+            });
+            let mut link = LinkWatch::new(&state);
+            consume_once(
+                &state,
+                &client,
+                &outbox(),
+                &mut link,
+                &mut cursor,
+                &mut sweeps(),
+            )
+            .await;
+            server.await.unwrap();
+            let frames: Vec<serde_json::Value> = std::iter::from_fn(|| rx.try_recv().ok())
+                .map(|f| serde_json::to_value(f.event).unwrap())
+                .collect();
+            let dropped: Vec<&serde_json::Value> = frames
+                .iter()
+                .filter(|f| f["type"] == "events_dropped")
+                .collect();
+            assert_eq!(dropped.len(), 1, "{frames:?}");
+            assert_eq!(dropped[0]["count"], 2);
+            let requests = tokio::time::timeout(Duration::from_secs(20), receiver)
+                .await
+                .expect("the sweep sent the webhook")
+                .unwrap();
+            assert!(requests[0].contains("agent_completed:in-the-gap"));
+            assert_eq!(cursor.unwrap().after, 5);
+        })
+        .await;
+    }
+
+    /// No more webhooks are sent at once than the outbox has room for: one
+    /// started while every place is taken waits until one frees up.
+    #[tokio::test]
+    async fn a_delivery_waits_for_room_among_the_ones_being_sent() {
+        crate::runstate::with_isolated_runs_dir_async("delivery_room", |_d| async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/hook", listener.local_addr().unwrap());
+            finished_with_callback("waiting", &url);
+            let outbox = outbox();
+            let mut taken: Vec<_> = (0..super::super::webhook_outbox::AT_ONCE)
+                .map(|_| Arc::clone(&outbox.permits).try_acquire_owned().unwrap())
+                .collect();
+            let client = reqwest::Client::new();
+            let started =
+                fire_completion_webhook(&client, &fast_cfg(), &outbox, "waiting", "complete", None)
+                    .await;
+            assert!(started);
+            let early = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+            assert!(early.is_err(), "sent with no room");
+            taken.pop();
+            let (mut sock, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
+                .await
+                .expect("sent once there was room")
+                .unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap();
+            assert!(String::from_utf8_lossy(&buf[..n]).contains("agent_completed:waiting"));
+        })
+        .await;
+    }
+
+    /// A webhook whose signing secret is there but does not read just now is
+    /// neither sent unsigned nor settled: it stays owed for the next sweep.
+    #[tokio::test]
+    async fn a_webhook_whose_secret_does_not_read_waits_for_a_later_sweep() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "webhook_secret_unreadable",
+            |_d| async move {
+                let mut meta = RunMeta::new(
+                    "locked".into(),
+                    "coder".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/w".into(),
+                    1,
+                );
+                meta.callback_url = Some("http://127.0.0.1:9/hook".to_string());
+                meta.status = leviath_core::run_meta::RunStatus::Complete;
+                crate::runstate::create_signed_run(
+                    &meta,
+                    &format!("{:032x}", rand::random::<u128>()),
+                )
+                .unwrap();
+                let store =
+                    leviath_runtime::secret_store::SecretStore::of_runs(&runstate::runs_dir());
+                let kept = std::fs::read_dir(store.dir())
+                    .unwrap()
+                    .flatten()
+                    .map(|e| e.path())
+                    .find(|p| p.to_string_lossy().contains("locked"))
+                    .expect("the run's secret is kept");
+                std::fs::remove_file(&kept).unwrap();
+                std::fs::create_dir_all(&kept).unwrap();
+                let outbox = outbox();
+                let client = reqwest::Client::new();
+                let started = fire_completion_webhook(
+                    &client,
+                    &fast_cfg(),
+                    &outbox,
+                    "locked",
+                    "complete",
+                    None,
+                )
+                .await;
+                assert!(!started);
+                assert!(outbox.claim("agent_completed:locked"), "still owed");
+            },
+        )
+        .await;
     }
 }
