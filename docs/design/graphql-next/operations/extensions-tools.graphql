@@ -1,0 +1,227 @@
+# Extensions (the Rhai files that plug into one extension point each), the
+# tools a model can call (typed by source), how a stage's authored tool list
+# selects them, approval policies, and what a historical call was shown.
+
+# T0 Operator audits the callable catalogue with each tool's source as its type, every tool file with why it is not offered when it is not, and MCP servers alongside.
+query CallableToolsAndSources($first: Int! = 100) {
+  tools(first: $first, orderBy: [{ field: NAME, direction: ASC }]) {
+    results {
+      __typename
+      id
+      name
+      defaultPermission
+      revision { number digest description arguments }
+      ... on BuiltinTool { aliases }
+      ... on CustomTool {
+        requiredCapabilities
+        accepts
+        produces
+        extension { id relativePath compileError blueprint { name } }
+      }
+      ... on McpTool { nameOnServer server { name } }
+    }
+    cursor
+    total
+  }
+  customTools: tools(first: $first, filter: { customTool: {} }) {
+    results { name ... on CustomTool { extension { relativePath } } }
+    total
+  }
+  toolFiles: extensions(first: $first, filter: { toolExtension: {} }) {
+    results { __typename relativePath compileError ... on ToolExtension { tool { name } nameTakenBy { __typename name } } }
+    total
+  }
+  mcpServers(first: $first) {
+    results {
+      __typename
+      id
+      name
+      ... on StdioMcpServer { command args envNames }
+      ... on HttpMcpServer { url headerNames authorization }
+      ... on UnresolvedMcpServer { configError }
+    }
+    cursor
+    total
+  }
+}
+
+# T1 Operator reviews the Rhai files in a blueprint's directory that nothing names yet, before deciding which extension point should claim one.
+query UnclaimedExtensionFiles($blueprintName: String!) {
+  blueprint(name: $blueprintName) {
+    id
+    name
+    path
+    unclaimedFiles { path relativePath }
+    extensions(first: 100) { results { __typename relativePath compileError } total }
+  }
+}
+
+# T8 Operator compares an extension's current content with its earlier revisions and edits before editing it, and reads one exact earlier revision.
+query ExtensionRevisionHistory($ref: ExtensionRef!, $revisionId: ID!, $first: Int! = 20) {
+  extension(ref: $ref) {
+    __typename
+    id
+    relativePath
+    compileError
+    revision { id number digest createdAt createdBy content }
+    revisions(first: $first) { results { id number digest createdAt createdBy } cursor total }
+    history(first: $first) { results { number at by why changes { field } } cursor total }
+  }
+  earlier: node(id: $revisionId) { id ... on ExtensionRevision { number digest content extension { id } } }
+}
+
+# T2 Blueprint author checks how each stage's authored tool list selects tools on this machine: names, groups, MCP servers, patterns, and names that match nothing.
+query BlueprintToolTokenResolution($blueprintName: String!) {
+  blueprint(name: $blueprintName) {
+    id
+    name
+    revision {
+      id
+      stages {
+        name
+        tools {
+          grants {
+            __typename
+            ... on ToolByName { name matches { __typename name } }
+            ... on AllBuiltinTools { token }
+            ... on AllSubagentTools { token }
+            ... on AllCustomTools { token }
+            ... on AllMcpTools { token }
+            ... on AllTools { token }
+            ... on ToolsOfMcpServer { serverName server { name toolListing { __typename } } }
+            ... on ToolsMatching { pattern }
+            ... on MachineCustomTools { directory }
+          }
+          requiredTools { name matches { __typename name } }
+          permissions { permission selector { __typename ... on ToolByName { name } ... on ToolsMatching { pattern } } }
+        }
+      }
+    }
+  }
+}
+
+# T3 Author validates stage hook source for the points it must handle before saving it; the draft names its extension point, so no kind argument is needed.
+query ValidateStageHookDraft($content: String!, $points: [StageHookPoint!]) {
+  validateExtension(draft: { stageHook: { content: $content, points: $points } }) {
+    valid
+    problems { __typename severity message ... on TextProblem { line column } }
+  }
+}
+
+# T4 Operator writes a tool extension pinned to the revision read, and reads back the compile result and the tool it defines.
+mutation UpsertToolExtension($request: UpsertExtensionRequest!) {
+  upsertExtension(request: $request) {
+    alreadyInState
+    extension {
+      __typename
+      id
+      relativePath
+      compileError
+      revision { id number digest }
+      ... on ToolExtension {
+        tool { name requiredCapabilities revision { number description arguments } }
+        nameTakenBy { __typename name }
+      }
+    }
+  }
+}
+
+# T5 Operator inspects what a historical call asked for and the exact tool definition the model was shown when it made it, or that it called a tool it was not offered.
+query HistoricalToolCallResolution($runId: ID!, $first: Int! = 50) {
+  run(id: $runId) {
+    id
+    executions(first: $first) {
+      results {
+        id
+        journalPosition
+        dispatchedAt
+        stage { name }
+        state { __typename ... on ExecutionEnded { outcome endedAt } ... on ExecutionRunning { since } }
+        approval { __typename id settlement { __typename } }
+        spawnedRuns { id }
+        call {
+          toolName
+          providerCallId
+          rawArguments
+          tool {
+            __typename
+            ... on ToolRevision {
+              id
+              number
+              digest
+              name
+              description
+              arguments
+              tool { __typename name revision { digest } }
+            }
+            ... on ToolNotOffered { name }
+          }
+          arguments { __typename ... on MalformedArguments { error } ... on UntypedToolArguments { schema } }
+        }
+      }
+      cursor
+      total
+    }
+  }
+}
+
+# T6 Operator previews how an approval policy treats a tool call; the server classifies the tool itself, so the caller passes no kind.
+query ApprovalPolicyPreview($policyName: String!, $toolName: String!, $arguments: JSON, $blueprintName: String) {
+  approvalPolicy(name: $policyName) {
+    id
+    name
+    isBuiltIn
+    revision {
+      number
+      digest
+      unlistedTools
+      toolRules { permission selector { __typename ... on ToolByName { name } ... on ToolsMatching { pattern } } }
+    }
+    decide(toolName: $toolName, arguments: $arguments, blueprintName: $blueprintName) {
+      toolName
+      tool { __typename name }
+      configured
+      decided
+      reason
+    }
+  }
+}
+
+# T7 Maintainer checks compile state across every extension point, and which runs and stages each file serves.
+query ExtensionCompileHealth($first: Int! = 100) {
+  broken: extensions(first: $first, filter: { compileError: { isNull: false } }) {
+    results { __typename id relativePath compileError }
+    total
+  }
+  extensions(first: $first) {
+    results {
+      __typename
+      id
+      relativePath
+      compileError
+      ... on ToolExtension { tool { name } nameTakenBy { name } }
+      ... on StageHook { blueprint { name } calledAt { point stage { name } } }
+      ... on RegionHook { blueprint { name } regions { name } }
+      ... on OutputValidator { blueprint { name } checksBlueprintOutput stages { name } }
+      ... on MimeCheck { owner: blueprint { name } rules { mimeType } }
+      ... on ProviderExtension { declares { claimedName defaultModel } providers { name } }
+      ... on DependencyCheck { blueprint { name } }
+      ... on DependencyInstaller { blueprint { name } }
+    }
+    cursor
+    total
+  }
+}
+
+# T9 New: operator follows one custom tool from the tool to its file and back, the link v1 did not have between a script and the tool it defines.
+query CustomToolAndItsFile($toolName: String!) {
+  tool(name: $toolName) {
+    __typename
+    id
+    name
+    revision { number digest description }
+    ... on CustomTool {
+      extension { id path relativePath compileError revision { number digest } tool { id } }
+    }
+  }
+}
