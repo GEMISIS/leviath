@@ -171,8 +171,9 @@ path naming a file in the working directory, attaches that file, or fills the in
 when it is text. Anything else is the input's text.
 
 Each row names its type, the files it takes, its token room (`≤117k tok`, its region's share of the
-entry model's context window) and whether it is required. A declared default is filled in already,
-and a row you leave alone is not sent. A picker shows only files of the types the input or its
+entry model's context window) and whether it is required. A choice or a toggle starts on its
+declared default. Any other row starts empty, showing its default in grey if it has one. An empty
+row is not sent, so the run takes the blueprint's default. A picker shows only files of the types the input or its
 region accepts. It takes as many files as the token budget allows, added and removed in the same
 picker.
 

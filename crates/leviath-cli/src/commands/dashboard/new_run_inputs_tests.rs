@@ -698,7 +698,8 @@ fn every_input_gets_a_row_for_its_type() {
     assert_eq!(keys, ["tone", "strict", "limit", "tags", "cover", "shots"]);
     assert_eq!(rows[0].pick, Some(1), "the default option");
     assert_eq!(rows[1].pick, None, "a toggle with no default is not set");
-    assert_eq!(rows[2].edit.value(), "3", "a default is pre-typed");
+    assert_eq!(rows[2].edit.value(), "", "a default is not typed in");
+    assert_eq!(rows[2].default.as_deref(), Some("3"), "it is the hint");
     assert!(!rows[2].required, "a default means it is never missing");
     assert_eq!(rows[4].accepts, ["image/*"]);
     assert!(rows[4].takes_files() && !rows[4].takes_text());
@@ -794,13 +795,14 @@ fn typed_rows_resolve_to_typed_values() {
     std::fs::write(work.join("hero.png"), b"\x89PNG\r\n\x1a\nbody").unwrap();
     std::fs::write(work.join("a.txt"), "a").unwrap();
     dash.new_run_inputs[1].pick = Some(0);
+    dash.new_run_inputs[2].edit = LineEdit::new("4", false);
     dash.new_run_inputs[3].edit = LineEdit::new("x, y", false);
     dash.new_run_inputs[4].files = vec![PathBuf::from("hero.png")];
     dash.new_run_inputs[5].files = vec![PathBuf::from("a.txt"), PathBuf::from("hero.png")];
     let got = dash.new_run_input_values().unwrap();
     assert_eq!(got.values.get("tone"), Some(&text("blunt")));
     assert_eq!(got.values.get("strict"), Some(&RawInput::Bool(false)));
-    assert_eq!(got.values.get("limit"), Some(&RawInput::Int(3)));
+    assert_eq!(got.values.get("limit"), Some(&RawInput::Int(4)));
     assert_eq!(
         got.values.get("tags"),
         Some(&RawInput::List(vec![text("x"), text("y")]))
@@ -916,6 +918,53 @@ fn typed_rows_draw_for_their_types() {
     let drawn = screen(&mut dash);
     assert!(drawn.contains("[ ] no"), "{drawn}");
     assert!(drawn.contains("← → to choose"), "{drawn}");
+}
+
+/// A typed row with a default starts empty and shows the default in grey,
+/// focused or not, on one line. Left empty it sends nothing, so the run takes
+/// the default from the blueprint, and a region the default fills is not
+/// required. What is typed replaces the default rather than adding to it.
+#[test]
+fn an_empty_row_shows_the_blueprints_default_and_sends_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dash = typed_dash(dir.path());
+    let mut diff = decl("diff", text_type(), false);
+    diff.default = Some(InputValue::Text("Review\n  the workdir.".to_string()));
+    let mut cover = decl(
+        "cover",
+        InputType::File {
+            accepts: Vec::new(),
+        },
+        false,
+    );
+    cover.default = Some(InputValue::File("hero.png".to_string()));
+    let regions = vec![("diff".to_string(), Vec::new(), true, 0)];
+    dash.new_run_inputs = rows_for(&[diff, cover], &regions);
+    let row = &dash.new_run_inputs[0];
+    assert_eq!(row.edit.value(), "");
+    assert_eq!(row.default.as_deref(), Some("Review the workdir."));
+    assert!(!row.required, "the default fills the required region");
+    assert_eq!(row.note(), "");
+
+    let drawn = screen(&mut dash);
+    assert!(drawn.contains("default: Review the workdir."), "{drawn}");
+    assert!(drawn.contains("default: hero.png"), "{drawn}");
+    dash.new_run_focus = NewRunPane::Inputs;
+    for row in 0..2 {
+        dash.new_run_input_selected = row;
+        let drawn = screen(&mut dash);
+        assert!(drawn.contains("default: Review the workdir."), "{drawn}");
+        assert!(drawn.contains("default: hero.png"), "{drawn}");
+    }
+
+    let got = dash.new_run_input_values().unwrap();
+    assert!(got.values.is_empty(), "{:?}", got.values);
+    assert!(got.parts.is_empty());
+    assert_eq!(dash.check_new_run_inputs(&got), 0);
+
+    dash.new_run_input_selected = 0;
+    type_str(&mut dash, "@changes.diff");
+    assert_eq!(dash.new_run_inputs[0].edit.value(), "@changes.diff");
 }
 
 /// Starting a run whose inputs do not check keeps the screen open with the

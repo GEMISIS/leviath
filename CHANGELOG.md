@@ -554,6 +554,11 @@ same list.
   spot.
 - The dashboard's stage graph shows a stage that ran for two hours as
   `2h0m`, not `120m0s`.
+- On the dashboard's new-run screen, an input with a default starts empty
+  and shows the blueprint's default in grey, such as the reviewer's `diff`.
+  Left empty, the input is not sent and the run takes the default from the
+  blueprint. The default was typed into the field, so anything you typed was
+  added to the end of it.
 
 ### Added
 

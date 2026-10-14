@@ -56,6 +56,10 @@ pub(super) struct NewRunInput {
     pub(super) accepts: Vec<String>,
     /// Whether the run refuses to start without it.
     pub(super) required: bool,
+    /// The blueprint's default, as one line of text, shown in grey while the
+    /// row is empty. An empty row is not sent, so the run takes the default
+    /// from the blueprint.
+    pub(super) default: Option<String>,
     /// The region's token budget, resolved against the entry model's context
     /// window. `0` means none applies.
     pub(super) max_tokens: usize,
@@ -72,7 +76,8 @@ pub(super) struct NewRunInput {
 
 impl NewRunInput {
     /// A row for `decl`, with nothing entered: a declared default is
-    /// pre-picked for a choice or a toggle and pre-typed for anything else.
+    /// pre-picked for a choice or a toggle, and anything else starts empty
+    /// with the default as its hint.
     pub(super) fn new(decl: &InputDecl) -> Self {
         let region = decl
             .binds
@@ -92,20 +97,22 @@ impl NewRunInput {
             ty: decl.ty.clone(),
             accepts,
             required: decl.required && decl.default.is_none(),
+            default: decl.default.as_ref().map(|value| {
+                let text = value.render_text();
+                text.split_whitespace().collect::<Vec<_>>().join(" ")
+            }),
             max_tokens: 0,
             edit: LineEdit::new(String::new(), false),
             files: Vec::new(),
             pick: None,
             issue: None,
         };
-        if let Some(default) = &decl.default {
-            match (&decl.ty, default.to_raw()) {
-                (InputType::Bool, RawInput::Bool(on)) => row.pick = Some(usize::from(on)),
-                (InputType::Choice { options }, RawInput::Text(name)) => {
-                    row.pick = options.iter().position(|o| o.as_str() == name);
-                }
-                (_, _) => row.edit = LineEdit::new(default.render_text(), false),
+        match (&decl.ty, decl.default.as_ref().map(|value| value.to_raw())) {
+            (InputType::Bool, Some(RawInput::Bool(on))) => row.pick = Some(usize::from(on)),
+            (InputType::Choice { options }, Some(RawInput::Text(name))) => {
+                row.pick = options.iter().position(|o| o.as_str() == name);
             }
+            _ => {}
         }
         row
     }
@@ -236,12 +243,14 @@ impl NewRunInput {
         }
     }
 
-    /// A text field: what was typed, or a hint at what it wants.
+    /// A text field: what was typed, or a hint: the blueprint's default when
+    /// it declares one, else what the row wants.
     fn text_spans(&self, on: bool) -> Vec<Span<'static>> {
-        let hint = match (&self.ty, self.takes_files()) {
-            (InputType::Text { .. }, true) => "text, or ^O for files".to_string(),
-            (InputType::Text { .. }, false) => "text".to_string(),
-            (ty, _) => ty.describe(),
+        let hint = match (&self.default, &self.ty, self.takes_files()) {
+            (Some(default), _, _) => format!("default: {default}"),
+            (None, InputType::Text { .. }, true) => "text, or ^O for files".to_string(),
+            (None, InputType::Text { .. }, false) => "text".to_string(),
+            (None, ty, _) => ty.describe(),
         };
         // Keep the hint visible whenever the field is empty, focused or not,
         // so a row never looks blank and nobody forgets what it wants.
@@ -264,12 +273,14 @@ impl NewRunInput {
         spans
     }
 
-    /// The spans for a file row: the chosen names, or a prompt to choose.
+    /// The spans for a file row: the chosen names, or the blueprint's
+    /// default, or a prompt to choose.
     fn file_spans(&self, on: bool) -> Vec<Span<'static>> {
         if self.files.is_empty() {
-            let prompt = match on {
-                true => "Enter to choose files",
-                false => "no files chosen",
+            let prompt = match (&self.default, on) {
+                (Some(default), _) => format!("default: {default}"),
+                (None, true) => "Enter to choose files".to_string(),
+                (None, false) => "no files chosen".to_string(),
             };
             return vec![Span::styled(prompt, Style::default().fg(C_DIM))];
         }
@@ -330,7 +341,8 @@ pub(super) fn rows_for(inputs: &[InputDecl], regions: &[RegionRoom]) -> Vec<NewR
             if let (InputType::Text { .. }, Some(i)) = (&row.ty, found) {
                 let (_, accepts, required, max_tokens) = &regions[i];
                 row.accepts = accepts.clone();
-                row.required |= *required;
+                // A default fills the region when the row is left empty.
+                row.required |= *required && row.default.is_none();
                 row.max_tokens = *max_tokens;
             }
             (found.unwrap_or(usize::MAX), row)
