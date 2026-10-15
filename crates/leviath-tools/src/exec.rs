@@ -42,27 +42,6 @@ fn directory_listing(path: &std::path::Path) -> String {
     out
 }
 
-/// Fold `..` components of `raw` lexically, without touching the filesystem.
-///
-/// `None` when a `..` would climb past the root: that request is unresolvable
-/// whatever any allowlist says. `Path::components` already drops interior
-/// `.`, and every caller passes an absolute path, so no `CurDir` survives.
-/// Shared by [`resolve_within`] and [`BuiltinTools::resolve_outside`].
-fn fold_parents(raw: &Path) -> Option<PathBuf> {
-    let mut normalized = PathBuf::new();
-    for component in raw.components() {
-        match component {
-            Component::ParentDir => {
-                if !normalized.pop() {
-                    return None;
-                }
-            }
-            c => normalized.push(c),
-        }
-    }
-    Some(normalized)
-}
-
 /// Resolve `requested` against `workdir`, refusing anything that leaves it.
 ///
 /// The shared definition of "inside the workspace" for every path a tool or
@@ -82,8 +61,11 @@ pub fn resolve_within(
     workdir: &Path,
     within: fn(&Path, &Path) -> bool,
 ) -> anyhow::Result<PathBuf> {
+    // This platform's spelling, whichever one was asked for: `nul` handed back
+    // as it is would be a relative path, and on Unix a write to it makes a
+    // file of that name wherever the daemon was started.
     if is_null_device(requested) {
-        return Ok(PathBuf::from(requested));
+        return Ok(PathBuf::from(NULL_DEVICE));
     }
     let raw = if Path::new(requested).is_absolute() {
         PathBuf::from(requested)
@@ -92,7 +74,7 @@ pub fn resolve_within(
     };
 
     // Normalize by resolving .. and . without requiring the path to exist.
-    let Some(normalized) = fold_parents(&raw) else {
+    let Some(normalized) = leviath_core::paths::fold_dot_dot(&raw) else {
         anyhow::bail!("path '{}' escapes the working directory", requested);
     };
 
@@ -278,7 +260,7 @@ impl BuiltinTools {
 
         // Fold `..` lexically; popping past the filesystem root is
         // unresolvable no matter what any allowlist says.
-        let Some(normalized) = fold_parents(&raw) else {
+        let Some(normalized) = leviath_core::paths::fold_dot_dot(&raw) else {
             anyhow::bail!("path '{requested}' cannot be resolved");
         };
 
@@ -396,6 +378,12 @@ impl BuiltinTools {
             None => return "[error] missing 'path' argument".to_string(),
         };
         let old_str = match args.get("old_str").and_then(|v| v.as_str()) {
+            Some("") => {
+                return "[error] 'old_str' is empty, so it names no place in the file. Copy \
+                        the exact text to replace into 'old_str', with enough around it to be \
+                        unique. To write a whole file, use write_file."
+                    .to_string();
+            }
             Some(s) => s.to_string(),
             None => return "[error] missing 'old_str' argument".to_string(),
         };
@@ -444,12 +432,20 @@ impl BuiltinTools {
     /// Priority:
     /// - Windows: cmd.exe (always available)
     /// - Unix: $SHELL env var (user's preferred shell) → bash → zsh → sh
+    ///
+    /// Worked out once per process. A `$SHELL` that is used is leaked to give
+    /// it a `'static` life, which costs nothing once and a string per call when
+    /// every shell call asked again. The `shell` tool's description already
+    /// names the shell found the first time.
     pub(crate) fn detect_shell() -> (&'static str, &'static str) {
-        Self::detect_shell_for(
-            std::env::consts::OS,
-            std::env::var("SHELL").ok(),
-            &Self::shell_path_exists,
-        )
+        static SHELL: std::sync::OnceLock<(&str, &str)> = std::sync::OnceLock::new();
+        *SHELL.get_or_init(|| {
+            Self::detect_shell_for(
+                std::env::consts::OS,
+                std::env::var("SHELL").ok(),
+                &Self::shell_path_exists,
+            )
+        })
     }
 
     /// Whether `path` names something on disk.
@@ -591,6 +587,12 @@ impl BuiltinTools {
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
+        // Filled as the command writes, outside the timed future, so a timeout
+        // still has what the command wrote before it.
+        let mut stdout = Captured::default();
+        let mut stderr = Captured::default();
+        let mut cut = false;
+
         // Spawn *inside* the timed future so the reaper guard lives exactly as
         // long as the command does: dropping this future (timeout, or the whole
         // batch dropped because the agent was cancelled) drops the guard, which
@@ -604,33 +606,51 @@ impl BuiltinTools {
             // each other and with the wait. `piped()` above guarantees both.
             let mut out = child.stdout.take().expect("stdout was piped");
             let mut err = child.stderr.take().expect("stderr was piped");
-            let (stdout, stderr, status) = tokio::join!(
-                capture_capped(&mut out, cap),
-                capture_capped(&mut err, cap),
-                child.wait(),
+            let (exited, on_exit) = tokio::sync::oneshot::channel();
+            let waited = async {
+                let status = child.wait().await;
+                let _ = exited.send(());
+                status
+            };
+            let (status, was_cut) = tokio::join!(
+                waited,
+                drain(
+                    &mut out,
+                    &mut err,
+                    cap,
+                    on_exit,
+                    AFTER_EXIT,
+                    &mut stdout,
+                    &mut stderr
+                ),
             );
+            cut = was_cut;
             // The exit status is the only fallible part worth failing on, so it
             // stays the single error edge this block has - the same shape
             // `wait_with_output()` presented. A pipe that errors mid-read is
             // handled inside `capture_capped` as an early end of output.
-            status.map(|status| (stdout, stderr, status))
+            status
         };
+        // Its own statement, so the future and its hold on the captures are
+        // gone before they are read below.
+        let outcome = timeout(timeout_duration, run).await;
 
-        match timeout(timeout_duration, run).await {
-            Err(_) => format!("[timed out] Command exceeded 60s: {}", command),
-            Ok(Err(e)) => format!("[error] Failed to spawn shell '{}': {}", shell, e),
-            Ok(Ok((stdout, stderr, status))) => {
-                let body = Self::format_command_output(
+        let body = match outcome {
+            Err(_) => timed_out(command, timeout_duration, &stdout, &stderr),
+            Ok(Err(e)) => return format!("[error] Failed to spawn shell '{}': {}", shell, e),
+            Ok(Ok(status)) => with_background_note(
+                Self::format_command_output(
                     &stdout.kept,
                     &stderr.kept,
                     status.success(),
                     status.code().unwrap_or(-1),
-                );
-                match capture_note(&stdout, &stderr, cap) {
-                    Some(note) => format!("{body}\n\n{note}"),
-                    None => body,
-                }
-            }
+                ),
+                cut,
+            ),
+        };
+        match capture_note(&stdout, &stderr, cap) {
+            Some(note) => format!("{body}\n\n{note}"),
+            None => body,
         }
     }
 
@@ -857,7 +877,7 @@ fn write_file_at(path_str: &str, path: &Path, content: &str, append: bool) -> St
             .and_then(|mut file| std::io::Write::write_all(&mut file, content.as_bytes()));
         (written, "appended")
     } else {
-        (std::fs::write(path, content), "wrote")
+        (replace_file(path, content.as_bytes()), "wrote")
     };
     match written {
         Ok(()) => format!(
@@ -866,6 +886,22 @@ fn write_file_at(path_str: &str, path: &Path, content: &str, append: bool) -> St
             path_str
         ),
         Err(e) => format!("[error] Failed to write '{}': {}", path_str, e),
+    }
+}
+
+/// Write `bytes` to `path`, replacing a file that is there in one step.
+///
+/// `fs::write` truncates and then writes, so a daemon stopped between the two
+/// leaves the file empty or half written, and a reader in between sees the
+/// same. A file that is there is replaced by renaming a written copy over it
+/// instead, keeping its permissions, so an edited script stays executable. A
+/// new file is written plainly: there is nothing to lose, and it gets the mode
+/// any other new file would. So is anything that is not a regular file, such
+/// as the null device, which has no directory a copy could be staged in.
+fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    match path.is_file() {
+        true => leviath_sys::write_atomic(path, bytes, None),
+        false => std::fs::write(path, bytes),
     }
 }
 
@@ -884,7 +920,7 @@ fn edit_file_at(path_str: &str, path: &Path, old_str: &str, new_str: &str) -> St
         ),
         1 => {
             let new_content = content.replacen(old_str, new_str, 1);
-            match std::fs::write(path, &new_content) {
+            match replace_file(path, new_content.as_bytes()) {
                 Ok(()) => format!("Successfully edited '{}'", path_str),
                 Err(e) => format!("[error] Failed to write '{}': {}", path_str, e),
             }
@@ -956,10 +992,13 @@ pub(crate) const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 pub fn is_null_device(path: &str) -> bool {
     // `NUL` is the Windows spelling, matched on every platform for the same
     // reason the redirect classifier does: a command should not depend on who
-    // ran it. On Unix the name resolves to an ordinary file in the workdir, and
-    // treating it as a sink writes nothing rather than creating litter.
+    // ran it. Either spelling resolves to [`NULL_DEVICE`], so neither makes a
+    // file.
     path == "/dev/null" || path.eq_ignore_ascii_case("nul")
 }
+
+/// The discard device as this platform names it.
+pub const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
 /// Most of a file `read_file` returns.
 ///
@@ -989,11 +1028,92 @@ pub(crate) fn cap_file_content(content: &str, cap: usize, file_len: u64) -> Stri
 }
 
 /// What one stream produced, and how much of it was kept.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct Captured {
     pub(crate) kept: Vec<u8>,
     /// Everything the child wrote, including what was discarded.
     pub(crate) total: u64,
+}
+
+/// How long a command's output is still read after its shell exits.
+///
+/// Output the shell wrote before exiting is already in the pipe, so this only
+/// has to cover the reads that drain it. Past it, whatever still holds the
+/// pipes open is something the command left running in the background.
+pub(crate) const AFTER_EXIT: Duration = Duration::from_millis(250);
+
+/// Read a command's two streams until both end, or until `grace` after
+/// `exited` fires, whichever comes first. Returns whether the streams were
+/// cut off rather than ended.
+///
+/// The second case is a background job: `server &` exits the shell at once,
+/// but the job inherited the shell's stdout and stderr and holds them open,
+/// so reading to the end waits as long as the job runs. What was read stays
+/// in `stdout` and `stderr` whichever way this ends, and also when the caller
+/// drops it at a timeout.
+pub(crate) async fn drain(
+    out: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    err: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    cap: usize,
+    exited: tokio::sync::oneshot::Receiver<()>,
+    grace: Duration,
+    stdout: &mut Captured,
+    stderr: &mut Captured,
+) -> bool {
+    let both = async {
+        tokio::join!(
+            capture_capped(out, cap, stdout),
+            capture_capped(err, cap, stderr)
+        );
+    };
+    let cut = async {
+        // A sender dropped unsent means the wait failed: no shell is running
+        // either way.
+        let _ = exited.await;
+        tokio::time::sleep(grace).await;
+    };
+    tokio::select! {
+        () = both => false,
+        () = cut => true,
+    }
+}
+
+/// What a call that ran out of time says: the limit it had, and what the
+/// command wrote before it was stopped.
+pub(crate) fn timed_out(
+    command: &str,
+    limit: Duration,
+    stdout: &Captured,
+    stderr: &Captured,
+) -> String {
+    let limit = match limit.as_secs() {
+        0 => format!("{} ms", limit.as_millis()),
+        secs => format!("{secs} s"),
+    };
+    let mut text =
+        format!("[timed out] Command exceeded the {limit} limit and was stopped: {command}");
+    for (name, captured) in [("stdout", stdout), ("stderr", stderr)] {
+        let shown = String::from_utf8_lossy(&captured.kept);
+        if !shown.trim().is_empty() {
+            text.push_str(&format!("\n{name} before it was stopped:\n{shown}"));
+        }
+    }
+    text
+}
+
+/// The note on a call whose shell exited while something it started was still
+/// running.
+pub(crate) const BACKGROUND_NOTE: &str = "[background] The shell exited while a process it \
+    started was still running. That process was stopped, and only what was written before the \
+    shell exited is shown. A shell call runs its command to completion: run the process in the \
+    foreground and wait for it, or start it some other way.";
+
+/// `body`, with [`BACKGROUND_NOTE`] after it when [`drain`] cut the streams off.
+pub(crate) fn with_background_note(body: String, cut: bool) -> String {
+    match cut {
+        true => format!("{body}\n\n{BACKGROUND_NOTE}"),
+        false => body,
+    }
 }
 
 /// Read `stream` to EOF, keeping at most `cap` bytes.
@@ -1012,24 +1132,26 @@ pub(crate) struct Captured {
 /// `&mut dyn` rather than a generic: a generic here gets one instrumented
 /// monomorphization per call site, and `cargo llvm-cov` reports the ones the
 /// tests do not reach as uncovered.
+///
+/// Fills `into` as it reads rather than returning at the end, so what arrived
+/// before a timeout dropped the read is still there.
 pub(crate) async fn capture_capped(
     stream: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
     cap: usize,
-) -> Captured {
+    into: &mut Captured,
+) {
     use tokio::io::AsyncReadExt;
 
-    let mut kept: Vec<u8> = Vec::new();
-    let mut total: u64 = 0;
     let mut buf = [0u8; 8192];
     loop {
         let n = match stream.read(&mut buf).await {
-            Ok(0) | Err(_) => return Captured { kept, total },
+            Ok(0) | Err(_) => return,
             Ok(n) => n,
         };
-        total += n as u64;
-        if kept.len() < cap {
-            let room = cap - kept.len();
-            kept.extend_from_slice(&buf[..n.min(room)]);
+        into.total += n as u64;
+        if into.kept.len() < cap {
+            let room = cap - into.kept.len();
+            into.kept.extend_from_slice(&buf[..n.min(room)]);
         }
     }
 }
