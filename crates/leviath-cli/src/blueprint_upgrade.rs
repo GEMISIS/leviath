@@ -1,10 +1,12 @@
-//! Installed blueprints in the old `agent.leviath` format become `agent.toml`
-//! blueprints when the daemon starts.
+//! Installed blueprints in an older form become blueprints this build reads
+//! when the daemon starts.
 //!
-//! This build reads only `agent.toml`. A blueprint directory that holds an
-//! `agent.leviath` and no `agent.toml` (everything a previous release
-//! installed) is upgraded in place: a blueprint this build ships is replaced
-//! by the bundled one, and any other is migrated, the way `lev blueprint
+//! This build reads only `agent.toml`, with each fan-out declaring its
+//! `workers_available`. A blueprint directory that holds an `agent.leviath`
+//! and no `agent.toml` (everything a 0.6 release installed), or an
+//! `agent.toml` whose fan-outs name one `worker` (what earlier alpha builds
+//! wrote), is upgraded in place: a blueprint this build ships is replaced by
+//! the bundled one, and any other is migrated, the way `lev blueprint
 //! migrate` would, with the new file written beside its scripts. Either way
 //! the old files are kept under the directory's `legacy/`, as a converted
 //! run's are. A blueprint that cannot be migrated, or would lose a setting
@@ -77,9 +79,21 @@ fn name_of(dir: &Path) -> String {
         .into_owned()
 }
 
-/// Whether `dir` holds an old blueprint and no new one.
-fn is_old(dir: &Path) -> bool {
+/// Whether `dir` holds an `agent.leviath` and no `agent.toml`.
+fn is_leviath(dir: &Path) -> bool {
     dir.join(OLD_MANIFEST).is_file() && !dir.join(leviath_blueprint::FILE_NAME).exists()
+}
+
+/// The text of `dir`'s `agent.toml` when its fan-outs name one `worker`.
+fn old_fan_outs(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join(leviath_blueprint::FILE_NAME))
+        .ok()
+        .filter(|text| crate::blueprint_edit::fan_out_form::names_one_worker(text))
+}
+
+/// Whether `dir` holds a blueprint in an older form.
+fn is_old(dir: &Path) -> bool {
+    is_leviath(dir) || old_fan_outs(dir).is_some()
 }
 
 /// Every old blueprint in `agents_dir` and in each of `others` (each a
@@ -170,9 +184,10 @@ fn upgrade_one(
     dir: &Path,
     bundled: Option<&'static crate::bundled::BundledAgent>,
 ) -> Upgraded {
-    let outcome = match bundled {
-        Some(agent) => reinstall(parent, dir, agent),
-        None => migrate(dir),
+    let outcome = match (bundled, is_leviath(dir)) {
+        (Some(agent), _) => reinstall(parent, dir, agent),
+        (None, true) => migrate(dir),
+        (None, false) => rewrite(dir),
     };
     Upgraded {
         dir: dir.to_path_buf(),
@@ -293,6 +308,45 @@ fn migrate(dir: &Path) -> Result<Outcome, Vec<String>> {
     Ok(Outcome::Migrated { notes, dropped })
 }
 
+/// Rewrite the `agent.toml` in `dir` whose fan-outs name one `worker`, the
+/// file as it was kept under `legacy/` (as `agent.toml`, or the next free
+/// `agent.N.toml` when an earlier upgrade kept one there).
+fn rewrite(dir: &Path) -> Result<Outcome, Vec<String>> {
+    let file = dir.join(leviath_blueprint::FILE_NAME);
+    let text =
+        std::fs::read_to_string(&file).map_err(|e| vec![format!("{}: {e}", file.display())])?;
+    let (new, changed) = crate::blueprint_edit::fan_out_form::rewrite_fan_outs(&text)
+        .map_err(|why| vec![why])?
+        .ok_or(vec![
+            "it has no fan-out naming one `worker` any more".to_string(),
+        ])?;
+    let legacy = dir.join(LEGACY_DIR);
+    let kept = (0..)
+        .map(|n| match n {
+            0 => legacy.join(leviath_blueprint::FILE_NAME),
+            n => legacy.join(format!("agent.{n}.toml")),
+        })
+        .find(|path| !path.exists())
+        .expect("there is always a name not yet taken");
+    std::fs::create_dir_all(&legacy)
+        .and_then(|()| std::fs::write(&kept, &text))
+        .and_then(|()| leviath_sys::write_atomic(&file, new.as_bytes(), None))
+        .map_err(|e| vec![format!("could not write the rewritten blueprint: {e}")])?;
+    let notes = changed
+        .iter()
+        .map(|c| {
+            format!(
+                "the fan-out of stage '{}' now declares its one worker as '{}' in workers_available",
+                c.stage, c.worker
+            )
+        })
+        .collect();
+    Ok(Outcome::Migrated {
+        notes,
+        dropped: Vec::new(),
+    })
+}
+
 /// Keep the warnings of the blueprint just upgraded in `dir` beside it, for
 /// `lev list` and `lev validate` to show. A note that cannot be written is
 /// said in the log: the warnings are still in the upgrade's summary.
@@ -309,10 +363,15 @@ fn keep_warnings(dir: &Path, dropped: &[String]) {
 /// Why the old blueprint in `dir` cannot be migrated, read without changing
 /// anything; `None` when it can be.
 fn problems(dir: &Path) -> Option<String> {
-    let manifest = std::fs::read_to_string(dir.join(OLD_MANIFEST)).unwrap_or_default();
-    leviath_legacy_runs::migrate_noted(&manifest)
-        .err()
-        .map(|problems| problems.join("; "))
+    match old_fan_outs(dir) {
+        Some(text) => crate::blueprint_edit::fan_out_form::rewrite_fan_outs(&text).err(),
+        None => {
+            let manifest = std::fs::read_to_string(dir.join(OLD_MANIFEST)).unwrap_or_default();
+            leviath_legacy_runs::migrate_noted(&manifest)
+                .err()
+                .map(|problems| problems.join("; "))
+        }
+    }
 }
 
 /// Upgrade at daemon start, each outcome in the daemon's log and added to
@@ -333,7 +392,7 @@ pub(crate) fn upgrade_logged(
             Outcome::Migrated { notes, dropped } => {
                 upgrade.blueprints += 1;
                 let notes = notes.join("; ");
-                tracing::info!(blueprint = %name, dir = %dir, backup = %saved, notes = %notes, "migrated an agent.leviath blueprint to agent.toml; the old file is under legacy/, and the whole directory as it was is in the backup");
+                tracing::info!(blueprint = %name, dir = %dir, backup = %saved, notes = %notes, "upgraded a blueprint in an older form to this build's agent.toml; the old file is under legacy/, and the whole directory as it was is in the backup");
                 for line in dropped {
                     tracing::warn!(blueprint = %name, dir = %dir, dropped = %line, "a key of the migrated blueprint was dropped");
                     upgrade.warnings.push(format!("blueprint '{name}': {line}"));
@@ -347,7 +406,7 @@ pub(crate) fn upgrade_logged(
                 upgrade.blueprints_failed += 1;
                 upgrade.left.push(dir.clone());
                 for problem in problems {
-                    tracing::warn!(blueprint = %name, dir = %dir, problem = %problem, "an agent.leviath blueprint could not be migrated and was left as it was");
+                    tracing::warn!(blueprint = %name, dir = %dir, problem = %problem, "a blueprint in an older form could not be upgraded and was left as it was");
                     upgrade.warnings.push(format!(
                         "blueprint '{name}' at {dir} was left as it was: {problem}"
                     ));
@@ -366,14 +425,26 @@ pub(crate) fn pending_lines(agents_dir: Option<&Path>, others: &[PathBuf]) -> Ve
         .map(|(_, dir, _)| {
             let shown = dir.display();
             let (name, to) = (name_of(&dir), dir.join(leviath_blueprint::FILE_NAME));
-            match problems(&dir) {
-                Some(problems) => format!(
+            match (problems(&dir), is_leviath(&dir)) {
+                (Some(problems), false) => format!(
+                    "blueprint '{name}' names its fan-out's worker the way earlier builds did \
+                     (`worker = ...`), and could not be upgraded, so it is not listed: \
+                     {problems}. Fix it, then rewrite it with `lev blueprint migrate {shown}`"
+                ),
+                (None, false) => format!(
+                    "blueprint '{name}' names its fan-out's worker the way earlier builds did \
+                     (`worker = ...`), so it is not listed: the daemon upgrades it when it \
+                     starts (`lev daemon restart`), or rewrite it with `lev blueprint migrate \
+                     {shown} -o {} --force`",
+                    to.display()
+                ),
+                (Some(problems), true) => format!(
                     "blueprint '{name}' is an agent.leviath from an earlier release \
                      that could not be upgraded, so it is not listed: {problems}. Fix it, then \
                      convert it with `lev blueprint migrate {shown} -o {}`",
                     to.display()
                 ),
-                None => format!(
+                (None, true) => format!(
                     "blueprint '{name}' is an agent.leviath from an earlier release, so \
                      it is not listed: the daemon upgrades it when it starts (`lev daemon \
                      restart`), or convert it with `lev blueprint migrate {shown} -o {}`",

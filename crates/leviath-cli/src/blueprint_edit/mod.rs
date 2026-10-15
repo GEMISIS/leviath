@@ -27,6 +27,7 @@ pub(crate) mod catalog;
 pub(crate) mod check;
 mod doc;
 mod edges;
+pub(crate) mod fan_out_form;
 mod layout_store;
 mod mime;
 mod order;
