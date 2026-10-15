@@ -188,6 +188,24 @@ fn a_worker_that_does_not_match_its_item_is_cancelled_and_the_item_runs_fresh() 
     }
 }
 
+/// A worker whose item names a worker the fan-out does not declare is
+/// cancelled: nothing says what it should be running.
+#[test]
+fn a_worker_whose_item_names_an_undeclared_worker_is_cancelled() {
+    let mut world = World::new();
+    let stray = WorkItem {
+        worker: WorkerName::new("ghost").unwrap(),
+        ..item("a")
+    };
+    let parent = fanning_parent(&mut world, vec![stray]);
+    let a = worker(&mut world, parent, "run-a", "a");
+    assert_eq!(
+        settle_unrecorded_worker(&mut world, parent, a),
+        Some(UnrecordedWorker::Cancelled)
+    );
+    assert!(world.get::<ParentRef>(a).is_none(), "not linked");
+}
+
 /// The inputs compared are the ones the item gives, checked as a start
 /// checks them: a worker started with them is adopted.
 #[test]

@@ -469,6 +469,17 @@ carry = { compact = { prompt = "Keep the gist" } }
     let text = renamed.to_toml();
     assert!(text.contains("fan_out = { stage = \"e2\""), "{text}");
     assert!(text.contains("{ name = \"back\", stage = \"a2\""), "{text}");
+    // A fan-out with no worker list yet still follows its stage's rename.
+    let mut bare = ManifestDoc::parse(
+        "[blueprint]\nname = \"bare\"\n[graph]\nentry = \"x\"\n[[graph.stages]]\nname = \"x\"\nmode = { fan_out = { stage = \"x\" } }\n",
+    )
+    .unwrap();
+    bare.rename_stage("x", "y").unwrap();
+    assert!(
+        bare.to_toml().contains("fan_out = { stage = \"y\" }"),
+        "{}",
+        bare.to_toml()
+    );
     // The unknown `when` and the edges with no `to` or no `from` are left
     // out.
     let edges = doc.edges();

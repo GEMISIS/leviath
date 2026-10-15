@@ -126,6 +126,40 @@ async fn a_read_that_panics_lets_the_call_go_on() {
     );
 }
 
+/// A spawner whose every worker blueprint fails to load.
+struct Unloadable;
+
+impl FanOutSpawner for Unloadable {
+    fn prepare_worker(&self, request: SpawnRequest, caller: Caller) -> WorkerPrep {
+        TestSpawner::ok().prepare_worker(request, caller)
+    }
+
+    fn find_worker(&self, query: &str) -> Result<BlueprintRef, String> {
+        BlueprintRef::parse(query).map_err(|e| e.to_string())
+    }
+
+    fn worker_inputs(&self, _source: &SpawnSource) -> Result<Option<Vec<InputDecl>>, String> {
+        Err("no blueprint named \"probe\" is installed".to_string())
+    }
+}
+
+/// A worker blueprint that will not load refuses the call once the read
+/// lands, saying why, and starts nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_blueprint_that_will_not_load_refuses_the_call() {
+    let mut world = io_world();
+    let e = calling(&mut world, Arc::new(Unloadable), serde_json::json!("rust"));
+    until(&mut world, start_pending_fan_outs, |w| {
+        w.get::<PendingFanOut>(e).is_none()
+    })
+    .await;
+    assert!(world.get::<FanOutWaiting>(e).is_none(), "nothing started");
+    let said = super::tests::conversation_text(&world, e);
+    assert!(said.contains("could not be loaded"), "{said}");
+    assert!(said.contains("is installed"), "{said}");
+    assert!(said.contains("Nothing was started."), "{said}");
+}
+
 /// A call whose agent is paused waits for it to resume; one whose agent
 /// stopped is not started.
 #[test]

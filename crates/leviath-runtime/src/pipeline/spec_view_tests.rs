@@ -450,6 +450,31 @@ fn a_split_stage_is_told_its_workers_reply_budget() {
     );
 }
 
+/// With several workers, the hint names each worker whose cap it can see.
+#[test]
+fn a_split_stage_with_several_workers_is_told_each_ones_budget() {
+    let mut spec = two_stage_spec();
+    spec.graph.stages[0].mode = fan_out("split it");
+    spec.graph.stages[1].max_iterations = Some(20);
+    if let StageMode::FanOut(f) = &mut spec.graph.stages[0].mode {
+        f.workers_available
+            .push(crate::spec::graph::WorkerOption::named_after(
+                WorkerSource::Blueprint(
+                    crate::spec::names::BlueprintRef::parse("elsewhere").unwrap(),
+                ),
+                "Something else",
+            ));
+    }
+    let prompt = stage_setup(&spec, 0).system_prompt.unwrap();
+    assert!(
+        prompt.contains(
+            "Each work item goes to the worker it names, which has a limited number of replies \
+             to do its share and hand back its result: build has at most 20."
+        ),
+        "{prompt}"
+    );
+}
+
 #[test]
 fn a_stage_prompt_folds_in_its_split_and_its_output_demand() {
     let mut spec = two_stage_spec();

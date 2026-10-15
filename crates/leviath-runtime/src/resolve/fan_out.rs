@@ -44,9 +44,10 @@ pub(super) fn shape(plans: &mut [StagePlan], graph: &RunGraph, inputs: &WorkerIn
 /// each item.
 fn shape_tool(tool: &mut ToolDef, fan: &FanOutDef, stage: &StageName, inputs: &WorkerInputs) {
     let mut schema = tool.schema.value().clone();
-    if let Some(properties) = schema["properties"].as_object_mut() {
-        properties.remove("agent");
-    }
+    schema["properties"]
+        .as_object_mut()
+        .expect("the fan_out schema has properties")
+        .remove("agent");
     if fan.sole_worker().is_none() {
         let item = &mut schema["properties"]["items"]["items"];
         item["properties"]["worker"] = serde_json::json!({
@@ -54,9 +55,10 @@ fn shape_tool(tool: &mut ToolDef, fan: &FanOutDef, stage: &StageName, inputs: &W
             "enum": fan.workers_available.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(),
             "description": menu(fan, stage, inputs),
         });
-        if let Some(required) = item["required"].as_array_mut() {
-            required.push("worker".into());
-        }
+        item["required"]
+            .as_array_mut()
+            .expect("the fan_out item schema lists what it requires")
+            .push("worker".into());
     }
     tool.schema = JsonDoc::new(schema);
 }

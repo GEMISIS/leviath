@@ -521,25 +521,16 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
         // The stage that made the call: a fan-out stage's own settings when it
         // is one, so a stage that set `max_items` or `on_worker_failure` still
         // gets them, and its declared workers are the only ones there are.
-        let Some((spec, stage)) = world
+        let spec = world
             .get::<RunSpecC>(entity)
-            .zip(world.get::<StageCursor>(entity))
-            .map(|(spec, cursor)| (spec.0.clone(), cursor.index))
-            .and_then(|(spec, index)| {
-                let stage = spec.graph.stages.get(index)?.clone();
-                Some((spec, stage))
-            })
-        else {
-            answer_call(
-                world,
-                entity,
-                &call_id,
-                "[error] fan_out refused: this agent has no stage to fan out from. Nothing was \
-                 started."
-                    .to_string(),
-            );
-            continue;
-        };
+            .expect("a run calling fan_out was placed from its spec")
+            .0
+            .clone();
+        let index = world
+            .get::<StageCursor>(entity)
+            .expect("a run calling fan_out is at a stage")
+            .index;
+        let stage = spec.graph.stages[index].clone();
         let stage_config = match &stage.mode {
             StageMode::FanOut(def) => Some(def.clone()),
             _ => None,
@@ -610,24 +601,28 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
         // checked against its own worker's, each at its item's path: this
         // run's own graph for a worker stage, the blueprint's when the spawner
         // could read it.
-        let decls_of = |name: &WorkerName| {
-            let worker = config.worker(name.as_str())?;
-            match &worker.runs {
-                WorkerSource::Stage(_) => Some(items::WorkerDecls {
-                    decls: &spec.graph.inputs,
-                    same_graph: true,
-                }),
-                _ => read
-                    .get(name)?
-                    .as_ref()
-                    .ok()?
-                    .as_deref()
-                    .map(|decls| items::WorkerDecls {
-                        decls,
-                        same_graph: false,
+        let known: BTreeMap<&WorkerName, Option<items::WorkerDecls>> = config
+            .workers_available
+            .iter()
+            .map(|worker| {
+                let decls = match &worker.runs {
+                    WorkerSource::Stage(_) => Some(items::WorkerDecls {
+                        decls: &spec.graph.inputs,
+                        same_graph: true,
                     }),
-            }
-        };
+                    _ => read
+                        .get(&worker.name)
+                        .and_then(|read| read.as_ref().ok())
+                        .and_then(Option::as_deref)
+                        .map(|decls| items::WorkerDecls {
+                            decls,
+                            same_graph: false,
+                        }),
+                };
+                (&worker.name, decls)
+            })
+            .collect();
+        let decls_of = |name: &WorkerName| known.get(name).copied().flatten();
         if let Err(issues) = items::check_items(&items, decls_of) {
             answer_call(
                 world,
@@ -3855,6 +3850,22 @@ mod tests {
         let bare = world.spawn(parent_state()).id();
         let err = start_worker(&mut world, bare, &config, &item("d")).unwrap_err();
         assert!(err.contains("no run spec"), "{err}");
+    }
+
+    /// The report calls an item by its id, and by its worker too when the
+    /// fan-out has more than one, so the merge can tell them apart.
+    #[test]
+    fn an_item_is_labelled_with_its_worker_when_there_are_several() {
+        let mut config = cfg(None, 2, WorkerFailure::Continue);
+        let w = WorkerName::new("w").unwrap();
+        assert_eq!(label(&config, "a", &w), "a");
+        config
+            .workers_available
+            .push(crate::spec::graph::WorkerOption::named_after(
+                WorkerSource::Query("docs".into()),
+                "Checking one page",
+            ));
+        assert_eq!(label(&config, "a", &w), "a (w)");
     }
 }
 

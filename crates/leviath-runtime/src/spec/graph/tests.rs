@@ -687,6 +687,93 @@ fn an_output_artifact_with_a_bad_mime_type_is_reported() {
     assert!(def.artifacts[0].required);
 }
 
+/// A fan-out's workers are checked: none at all, two of one name, one that
+/// does not say what it is for; and so is the stage the fan-out names.
+#[test]
+fn a_fan_outs_workers_and_its_stage_are_checked() {
+    let mut g = minimal();
+    g.stages.push(stage("split"));
+    g.stages.push(stage("work"));
+    g.stages[3].allow_as_worker = true;
+    let at = "graph.stages.split.mode.fan_out";
+    let with = |g: &mut RunGraph, change: &dyn Fn(&mut FanOutDef)| {
+        let mut fan = crate::test_graph::fan_out_to("split", "work");
+        change(&mut fan);
+        g.stages[2].mode = StageMode::FanOut(fan);
+        codes(g)
+    };
+    assert_eq!(with(&mut g, &|_| {}), Vec::<String>::new());
+    assert_eq!(
+        with(&mut g, &|f| f.workers_available.clear()),
+        [format!("{at}.workers_available Missing")]
+    );
+    assert_eq!(
+        with(&mut g, &|f| {
+            let again = f.workers_available[0].clone();
+            f.workers_available.push(again);
+        }),
+        [format!("{at}.workers_available[1].name Duplicate")]
+    );
+    assert_eq!(
+        with(&mut g, &|f| f.workers_available[0].use_for = " ".into()),
+        [format!("{at}.workers_available[0].use_for Missing")]
+    );
+    assert_eq!(
+        with(&mut g, &|f| f.stage = StageName::new("work").unwrap()),
+        [format!("{at}.stage Conflict")]
+    );
+}
+
+/// A worker's name is made from what it runs, kept to what a name allows, and
+/// a worker as a blueprint writes it reads back as one, with exactly one of
+/// what it runs.
+#[test]
+fn a_worker_is_named_and_written_as_a_blueprint_writes_it() {
+    use super::{WorkerEntry, WorkerOption, worker_name_from};
+    use crate::spec::names::WorkerName;
+    assert_eq!(worker_name_from("my agent").as_str(), "my_agent");
+    assert_eq!(worker_name_from("").as_str(), "worker");
+    assert_eq!(worker_name_from("9lives").as_str(), "_9lives");
+    assert_eq!(
+        WorkerOption::named_after(WorkerSource::Query("a fixer".into()), "x")
+            .name
+            .as_str(),
+        "worker"
+    );
+
+    let entry = |stage: Option<&str>, blueprint: Option<&str>, query: Option<&str>| WorkerEntry {
+        name: WorkerName::new("w").unwrap(),
+        stage: stage.map(|s| StageName::new(s).unwrap()),
+        blueprint: blueprint.map(str::to_string),
+        query: query.map(str::to_string),
+        use_for: "x".into(),
+    };
+    let none = WorkerOption::try_from(entry(None, None, None)).unwrap_err();
+    assert!(none.contains("exactly one of"), "{none}");
+    let two = WorkerOption::try_from(entry(Some("s"), Some("b"), None)).unwrap_err();
+    assert!(two.contains("exactly one of"), "{two}");
+    let bad = WorkerOption::try_from(entry(None, Some("coder@zz"), None)).unwrap_err();
+    assert!(bad.contains("blueprint 'coder@zz'"), "{bad}");
+
+    for runs in [
+        WorkerSource::Query("a fixer".into()),
+        WorkerSource::BlueprintFile(
+            crate::spec::names::BlueprintPath::new(
+                std::env::temp_dir().join("fixer").to_string_lossy(),
+            )
+            .unwrap(),
+        ),
+    ] {
+        let option = WorkerOption {
+            name: WorkerName::new("w").unwrap(),
+            runs: runs.clone(),
+            use_for: "x".into(),
+        };
+        let back = WorkerOption::try_from(WorkerEntry::from(option)).unwrap();
+        assert_eq!(back.runs, runs);
+    }
+}
+
 /// The two refusals a graph shares with 0.6.4's validation: a gate that asks
 /// for a file change on a stage that cannot change a file, and a fan-out into a
 /// stage that never agreed to be a worker. Both are reported with 0.6.4's

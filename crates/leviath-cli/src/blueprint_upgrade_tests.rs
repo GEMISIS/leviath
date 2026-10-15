@@ -563,3 +563,33 @@ fn an_old_fan_out_that_does_not_rewrite_is_left_and_named() {
         broken
     );
 }
+
+/// A rewrite that cannot read the manifest, finds no old fan-out in it, or
+/// cannot keep the old copy, fails saying so and changes nothing.
+#[test]
+fn a_rewrite_that_cannot_go_ahead_says_why() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let missing = tmp.path().join("missing");
+    std::fs::create_dir_all(&missing).unwrap();
+    let why = rewrite(&missing).unwrap_err();
+    assert!(why[0].contains(leviath_blueprint::FILE_NAME), "{why:?}");
+
+    let current = tmp.path().join("current");
+    toml_blueprint(&current, "[blueprint]\nname = \"current\"\n");
+    let why = rewrite(&current).unwrap_err();
+    assert!(why[0].contains("no fan-out naming one `worker`"), "{why:?}");
+
+    let blocked = tmp.path().join("blocked");
+    toml_blueprint(&blocked, OLD_FAN_OUT);
+    std::fs::write(blocked.join(LEGACY_DIR), b"a file where legacy/ goes").unwrap();
+    let why = rewrite(&blocked).unwrap_err();
+    assert!(
+        why[0].contains("could not write the rewritten blueprint"),
+        "{why:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(blocked.join(leviath_blueprint::FILE_NAME)).unwrap(),
+        OLD_FAN_OUT
+    );
+}

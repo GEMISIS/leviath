@@ -90,6 +90,10 @@ async fn a_fan_out_worker_blueprint_is_pinned_to_the_installed_revision() {
     ghost.stages[0].mode = fan("ghost");
     let mut kept = g.clone();
     kept.stages[0].mode = fan(&pinned);
+    let mut asked = g.clone();
+    if let StageMode::FanOut(def) = &mut asked.stages[0].mode {
+        def.workers_available[0].runs = WorkerSource::Query("anyone".into());
+    }
     let env = Fake {
         blueprints: [("coder".to_string(), installed(graph()))].into(),
         ..Fake::default()
@@ -117,6 +121,8 @@ async fn a_fan_out_worker_blueprint_is_pinned_to_the_installed_revision() {
         worker(kept).await,
         WorkerSource::Blueprint(BlueprintRef::parse(&pinned).unwrap())
     );
+    // A worker found by a description is found when it starts, not here.
+    assert_eq!(worker(asked).await, WorkerSource::Query("anyone".into()));
 }
 
 #[tokio::test]
