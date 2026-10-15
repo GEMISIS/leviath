@@ -852,7 +852,9 @@ directory, and `blobUrl` for a hash a client already holds.
 
 A signed link carries its own permission, so it works in an `<img src>` or a download link, where a
 header cannot be set. What it is not is your API token in a URL. It opens one path, it lasts five
-minutes, and it opens byte routes only. The signing key is random per server process and never
+minutes, and it opens byte routes only. The signature covers the link's query too, so a `fileUrl`
+whose `path=` is edited to name another file is refused; only `download` may be added. Names are
+percent-encoded, so a file called `my report #2.pdf` links correctly. The signing key is random per server process and never
 written down, so a restart invalidates every link it handed out. Links are relative, so they keep
 whatever host, scheme and port you reached the server on.
 

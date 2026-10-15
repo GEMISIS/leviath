@@ -11,12 +11,18 @@
 //!   `503` at once rather than queued, so a flood is refused instead of
 //!   piling up behind whatever is slow;
 //! - a timeout per request, after which the handler is dropped and the client
-//!   gets `408`.
+//!   gets `408`. Dropping it does not undo what it had already started: a
+//!   read on the blocking pool runs to its end, and a spawn the daemon took is
+//!   a run. A client that retries a spawn after a `408` can start it twice.
 //!
 //! The websocket routes are outside both. A subscription is meant to stay open
-//! for hours, and it is the one place the API streams: every other route
-//! builds its whole body before answering, so cutting a handler at the deadline
-//! never cuts a body in half.
+//! for hours.
+//!
+//! Both ceilings end when the handler answers, not when the body has been
+//! sent. Most routes build their whole body before answering, but the byte
+//! routes (`files/raw`, `blobs`, `artifacts` and `exports`) send a file's body
+//! a block at a time afterwards. A large download is not cut at the deadline,
+//! and does not hold a slot while it streams.
 //!
 //! A few routes are outside the deadline only, listed in [`DEADLINE_EXEMPT`]
 //! with the reason each: they wait on a browser, an MCP server's handshake or
@@ -180,8 +186,8 @@ pub(super) async fn limit_requests(
         return next.run(req).await;
     }
 
-    // Held until the response is built, then released. The body is sent after
-    // that, which is fine: nothing but the websocket routes streams one.
+    // Held until the response is built, then released. A byte route's body
+    // is sent after that, so a long download does not hold a slot.
     let _permit = match &gate.in_flight {
         None => None,
         Some(semaphore) => match Arc::clone(semaphore).try_acquire_owned() {

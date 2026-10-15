@@ -331,6 +331,22 @@ fn bytes_response(
         HeaderValue::from_str(mime_type.as_str()).expect("a mime type is printable ASCII"),
     );
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    // A run's files are whatever its agent wrote, so none of them may act as a
+    // page of this server's origin. `nosniff` stops a browser second-guessing
+    // the type into HTML, and `sandbox` opens an HTML or SVG file opened
+    // directly in an origin of its own, with scripts off, so it cannot reach
+    // the API with the console's token. A PDF is left out: Chrome's viewer
+    // refuses to show one sent with `sandbox`, and it runs no page scripts.
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    if !mime_type.as_str().starts_with("application/pdf") {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("sandbox"),
+        );
+    }
     if let Some(cr) = content_range {
         headers.insert(
             header::CONTENT_RANGE,
@@ -398,14 +414,12 @@ pub(super) async fn get_blob(
 
 /// The bytes of run `id`'s stored part `sha256`, typed and named.
 fn blob_bytes(config: &ConfigReloader, id: &str, sha256: &str) -> Result<Typed, ServeError> {
-    runstate::read_meta(id).map_err(|_| ServeError::run_not_found(id))?;
     // What the context says about it, when it says anything: the type it
     // was stored as and the name it carries. A blob the context no longer
-    // references is typed by sniffing, and named by its hash.
-    let known = stored_parts(id)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|b| b.sha256 == sha256);
+    // references is typed by sniffing, and named by its hash. Read the way
+    // the listing reads it, so a run with no file is a 404 and a run file
+    // that will not read is the server's fault, not a missing run.
+    let known = stored_parts(id)?.into_iter().find(|b| b.sha256 == sha256);
     let registry = config.check().config.mime_registry_or_defaults();
     let declared = known
         .as_ref()
@@ -962,19 +976,22 @@ mod tests {
         .await;
     }
 
-    /// A run whose record reads and whose run file does not has its listing
-    /// refused as the server's fault, not as a run with no parts.
+    /// A run whose record reads and whose run file does not has its listing,
+    /// and each of its parts, refused as the server's fault, not as a run with
+    /// no parts or a part nobody named.
     #[tokio::test]
     async fn a_run_file_that_will_not_read_fails_the_listing() {
         crate::runstate::with_isolated_runs_dir_async("blobs_unreadable", |_d| async move {
             let workdir = tempfile::tempdir().unwrap();
-            seed_run("blobs-broken", workdir.path());
+            let (sha, _) = seed_run("blobs-broken", workdir.path());
             std::fs::write(
                 runstate::run_dir("blobs-broken").join(leviath_core::files::RUN_FILE),
                 b"not a run file",
             )
             .unwrap();
             let (status, _, _) = call("/api/runs/blobs-broken/blobs").await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            let (status, _, _) = call(&format!("/api/runs/blobs-broken/blobs/{sha}")).await;
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         })
         .await;
@@ -1026,6 +1043,37 @@ mod tests {
             assert_eq!(status, StatusCode::NOT_FOUND);
             let (status, _, _) = call("/api/runs/ghost/files/raw?path=x").await;
             assert_eq!(status, StatusCode::NOT_FOUND);
+        })
+        .await;
+    }
+
+    /// A page an agent wrote cannot act as part of the API's origin.
+    ///
+    /// Every file goes out with `nosniff`, and every type but PDF with a
+    /// `sandbox` policy, so an HTML file opened from a link runs no script that
+    /// could reach the API with the console's token.
+    #[tokio::test]
+    async fn a_served_file_cannot_run_as_a_page_of_this_origin() {
+        crate::runstate::with_isolated_runs_dir_async("raw_files_sandboxed", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                workdir.path().join("page.html"),
+                "<script>fetch('/api/config')</script>",
+            )
+            .unwrap();
+            std::fs::write(workdir.path().join("doc.pdf"), b"%PDF-1.7\n").unwrap();
+            let run_id = "sandboxed-run";
+            seed_run(run_id, workdir.path());
+
+            let (_, headers, _) =
+                call(&format!("/api/runs/{run_id}/files/raw?path=page.html")).await;
+            assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+            assert_eq!(headers[header::CONTENT_SECURITY_POLICY], "sandbox");
+
+            let (_, headers, _) = call(&format!("/api/runs/{run_id}/files/raw?path=doc.pdf")).await;
+            assert_eq!(headers[header::CONTENT_TYPE], "application/pdf");
+            assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+            assert!(headers.get(header::CONTENT_SECURITY_POLICY).is_none());
         })
         .await;
     }

@@ -279,6 +279,21 @@ async fn a_multipart_body_that_cannot_be_read_is_refused() {
     let not_json = multipart("/api/runs", &[("request", None, b"{")]);
     assert_eq!(send(offline(), not_json).await.0, StatusCode::BAD_REQUEST);
 
+    // A file sent as a type no blueprint could name: refused, not sniffed.
+    let bad_type = multipart(
+        "/api/runs",
+        &[
+            ("request", None, CODER.as_bytes()),
+            ("report", Some("text/x|y"), b"# notes"),
+        ],
+    );
+    let (status, body) = send(offline(), bad_type).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"].as_str().unwrap().contains("'text/x|y'"),
+        "{body}"
+    );
+
     let not_a_request = multipart("/api/runs", &[("request", None, br#"{"source": 1}"#)]);
     assert_eq!(
         send(offline(), not_a_request).await.0,

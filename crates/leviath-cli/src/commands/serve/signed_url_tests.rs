@@ -7,14 +7,14 @@
 
 use std::sync::Arc;
 
-use super::{URL_TTL_SECS, UrlSigner, is_signable, signed_path};
+use super::{URL_TTL_SECS, UrlSigner, encode, is_signable, signed_path};
 
 /// A signature opens the path it was minted for, until it expires.
 #[test]
 fn a_signature_opens_its_own_path_until_it_expires() {
     let signer = UrlSigner::default();
     let now = 1_788_924_523;
-    let query = signer.sign("/api/runs/run-a/blobs/abc", now);
+    let query = signer.sign("/api/runs/run-a/blobs/abc", "", now);
 
     assert!(signer.verify("/api/runs/run-a/blobs/abc", Some(&query), now));
     // Still good a minute later, and worthless once the window has passed.
@@ -43,7 +43,7 @@ fn a_signature_opens_its_own_path_until_it_expires() {
 fn a_signature_does_not_open_another_path() {
     let signer = UrlSigner::default();
     let now = 1_788_924_523;
-    let query = signer.sign("/api/runs/run-a/blobs/abc", now);
+    let query = signer.sign("/api/runs/run-a/blobs/abc", "", now);
 
     assert!(!signer.verify("/api/runs/run-b/blobs/abc", Some(&query), now));
     assert!(!signer.verify("/api/runs/run-a/blobs/def", Some(&query), now));
@@ -57,7 +57,7 @@ fn another_servers_signature_does_not_open_this_ones_files() {
     let theirs = UrlSigner::default();
     let ours = UrlSigner::default();
     let now = 1_788_924_523;
-    let query = theirs.sign("/api/runs/run-a/blobs/abc", now);
+    let query = theirs.sign("/api/runs/run-a/blobs/abc", "", now);
 
     assert!(theirs.verify("/api/runs/run-a/blobs/abc", Some(&query), now));
     assert!(!ours.verify("/api/runs/run-a/blobs/abc", Some(&query), now));
@@ -70,7 +70,7 @@ fn a_malformed_query_opens_nothing() {
     let signer = UrlSigner::default();
     let now = 1_788_924_523;
     let path = "/api/runs/run-a/blobs/abc";
-    let good = signer.sign(path, now);
+    let good = signer.sign(path, "", now);
     let signature = good
         .split('&')
         .find_map(|pair| pair.strip_prefix("sig="))
@@ -142,8 +142,91 @@ fn a_minted_url_is_a_relative_path_with_its_grant() {
     assert!(url.starts_with("/api/runs/run-a/files/raw?"), "{url}");
     assert!(url.contains("path=out.png"), "{url}");
     assert!(url.contains("download=1"), "{url}");
-    // And it verifies, which is the point: the extra parameters are outside the
-    // signature, so the route reads them and the grant still holds.
     let (path, query) = url.split_once('?').expect("a query");
     assert!(signer.verify(path, Some(query), now));
+}
+
+/// A link to one file in a working directory opens that file and no other.
+///
+/// `files/raw` names its file in the query, so the query is inside the
+/// signature: a link minted for `out.png` with its `path=` edited, or with a
+/// second `path=` added, is refused.
+#[test]
+fn a_file_link_does_not_open_another_file() {
+    let signer = Arc::new(UrlSigner::default());
+    let now = 1_788_924_523;
+    let url = signed_path(
+        &signer,
+        "/api/runs/run-a/files/raw",
+        &[("path", "out.png")],
+        now,
+    );
+    let (path, query) = url.split_once('?').expect("a query");
+    assert!(signer.verify(path, Some(query), now));
+
+    let edited = query.replace("path=out.png", "path=.env");
+    assert!(!signer.verify(path, Some(&edited), now), "{edited}");
+    let doubled = format!("{query}&path=.env");
+    assert!(!signer.verify(path, Some(&doubled), now), "{doubled}");
+    let dropped = query.replace("&path=out.png", "");
+    assert!(!signer.verify(path, Some(&dropped), now), "{dropped}");
+}
+
+/// `download` is the one parameter outside the signature. It only decides
+/// whether the browser saves the file or shows it, so a console may add it to a
+/// link it was handed.
+#[test]
+fn download_may_be_added_to_a_minted_link() {
+    let signer = Arc::new(UrlSigner::default());
+    let now = 1_788_924_523;
+    let url = signed_path(
+        &signer,
+        "/api/runs/run-a/files/raw",
+        &[("path", "out.png")],
+        now,
+    );
+    let (path, query) = url.split_once('?').expect("a query");
+    assert!(signer.verify(path, Some(&format!("{query}&download=1")), now));
+    assert!(signer.verify(path, Some(&format!("{query}&download")), now));
+    // A name that only starts with it is signed like any other.
+    assert!(!signer.verify(path, Some(&format!("{query}&downloads=1")), now));
+}
+
+/// A name with a space, `&`, `#`, `+`, `%` or `/` comes back as itself.
+///
+/// Written into a link as it is, `&` would end the name and start another
+/// parameter, `#` would end the URL, and `+` would read back as a space.
+#[test]
+fn odd_names_survive_the_link() {
+    let signer = Arc::new(UrlSigner::default());
+    let now = 1_788_924_523;
+    for name in [
+        "my report.pdf",
+        "a&b=c.txt",
+        "notes#2.md",
+        "c++.txt",
+        "100%.txt",
+        "out/plot.png",
+        "été.txt",
+    ] {
+        let url = signed_path(&signer, "/api/runs/run-a/files/raw", &[("path", name)], now);
+        let (path, query) = url.split_once('?').expect("a query");
+        assert!(!query.contains('#'), "{url}");
+        assert!(signer.verify(path, Some(query), now), "{url}");
+        // Decoded the way the route's query extractor decodes it.
+        let read = url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == "path")
+            .map(|(_, value)| value.into_owned());
+        assert_eq!(read.as_deref(), Some(name), "{url}");
+    }
+}
+
+/// [`encode`] leaves the unreserved characters and encodes the rest, so an
+/// artifact name is one path segment however it is spelled.
+#[test]
+fn encode_keeps_a_name_to_one_segment() {
+    assert_eq!(encode("final-v1.2_x~"), "final-v1.2_x~");
+    assert_eq!(encode("my plot"), "my%20plot");
+    assert_eq!(encode("a/b"), "a%2Fb");
+    assert_eq!(encode("x?y#z"), "x%3Fy%23z");
 }
