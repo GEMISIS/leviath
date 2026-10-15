@@ -249,6 +249,15 @@ temp-env = "0.3"
 # The `Entry` API under the OS credential store, used directly so tests can
 # install an in-memory store as the process default.
 keyring-core = "1"
+# The OS credential store itself, behind `leviath-sys`'s `keychain` feature.
+keyring = "4"
+# The charset decoder `reqwest::Response::text` uses, so `leviath-net`'s capped
+# read decodes a body the same way.
+encoding_rs = "0.8"
+# `leviath-mcp`'s tests build event streams with it.
+async-stream = "0.3"
+# Installs the repo's pre-commit hook the first time `xtask` builds.
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 # Property tests (a test dependency only). The default features fork each
 # case into a process of its own and time it out, which these tests need not.
 proptest = { version = "1", default-features = false, features = ["std"] }
@@ -289,6 +298,17 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 # it at a tenth of the bytes. Both codecs were already in the lockfile through
 # reqwest, so this adds no crate.
 tower-http = { version = "0.7", features = ["cors", "compression-gzip", "compression-br"] }
+# The CLI's tests drive a router with `ServiceExt::oneshot`; nothing at runtime
+# names tower itself.
+tower = { version = "0.5", features = ["util"] }
+# Test-only for the CLI: `SO_LINGER(0)` on one websocket test's socket, and a
+# real TLS client with a PEM root store for the HTTPS server's tests. All three
+# are already in the tree through tokio and axum-server.
+socket2 = "0.6"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+# The Windows VERSIONINFO resource the CLI's build script writes into lev.exe.
+winresource = "0.1.31"
 # The GraphQL surface on `lev serve` (`POST /graphql`, `GET /ws/graphql`).
 # Code-first: the Rust types are the schema, and `docs/schema/leviath.graphql`
 # is generated from them and held in lockstep by a test, the way the OpenAPI

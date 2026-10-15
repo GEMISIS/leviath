@@ -53,7 +53,7 @@ tokio = { workspace = true, features = ["process"] }
 # `keychain` feature is unconditional, so on Windows that enabled `dep:keyring`
 # for a dependency that did not exist for the target and the crate failed to
 # compile. macOS and Linux both being unix hid it until CI.
-keyring = { version = "4", optional = true }
+keyring = { workspace = true, optional = true }
 keyring-core = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]

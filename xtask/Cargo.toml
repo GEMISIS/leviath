@@ -27,7 +27,7 @@ tempfile = { workspace = true }
 # `cargo build`/`cargo test`/`cargo clippy` at the workspace level, so the
 # hook is a mandatory part of getting the project working locally rather
 # than a manual, easy-to-forget `git config core.hooksPath` step.
-cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+cargo-husky = { workspace = true }
 
 [lints]
 workspace = true
