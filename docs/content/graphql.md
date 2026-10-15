@@ -926,7 +926,7 @@ that leave it, and its `availableTools` is its `tools` list.
         stuck { afterIterations afterMinutes afterToolCalls }
       }
       interactionPoints { name prompt style options required }
-      fanOut { maxWorkers maxItems onWorkerFailure workerStageName workerStage { name } }
+      fanOut { maxWorkers maxItems onWorkerFailure workersAvailable { name stageName blueprint useFor } }
       effective { includesBatchHint shellHintEligible tracksTaint }
     }
   }

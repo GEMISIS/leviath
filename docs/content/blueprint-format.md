@@ -342,11 +342,15 @@ style = "multiple_choice"
 options = ["approve", "revise"]
 ```
 
-A stage that splits its work over worker runs names its worker:
+A stage that splits its work over worker runs names itself and the workers it may hand items to,
+each with what it is for:
 
 ```toml
 [graph.stages.mode.fan_out]
-worker = { stage = "review_area" }
+stage = "split_review"
+workers_available = [
+    { name = "area", stage = "review_area", use_for = "Reviewing one area of the change" },
+]
 merge_stage = "report"
 max_workers = 8
 ```

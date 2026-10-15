@@ -138,7 +138,8 @@ fan_out({
 
 `agent` is an installed blueprint's name, or the absolute directory of one outside the run's
 workspace. Every item starts one worker, they all run at once, and the call returns a single
-report covering all of them. Three things are worth knowing:
+report covering all of them. A [fan-out stage](#the-fan-out-stage) offers no `agent`: it hands
+items only to the workers its blueprint declares. Three things are worth knowing:
 
 **Each item's `inputs` are everything its worker gets.** They are the inputs the worker's blueprint
 declares, checked before any worker starts the way `spawn_agent` checks them. That is this
@@ -172,7 +173,7 @@ tool_routing = { default_region = "conversation", tool_regions = { fan_out = "su
 ## The fan-out stage
 
 A fan-out stage is a stage whose whole job is one `fan_out` call. It grants the tool
-automatically. It takes its worker and caps from the blueprint rather than from the call, and
+automatically. It takes its workers and caps from the blueprint rather than from the call, and
 moves to `merge_stage` once the workers are done:
 
 ```mermaid
@@ -194,7 +195,10 @@ and should carry on afterwards with what they found.
 name = "fix"
 
 [graph.stages.mode.fan_out]
-worker = { stage = "fix_one" }   # which worker to run, see below
+stage = "fix"                    # the stage this fan-out belongs to
+workers_available = [            # the workers it may hand items to, see below
+    { name = "fixer", stage = "fix_one", use_for = "Fixing one failing test" },
+]
 split_prompt = "..."             # tells the stage what to split the work into
 merge_stage = "verify"           # stage the parent resumes at once workers finish
 max_workers = 8                  # how many run at once; leave it out for no cap
@@ -206,7 +210,8 @@ The `[graph.stages.mode.fan_out]` table is what makes the stage a fan-out stage.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `worker` | required | What each item runs: `{ stage = "x" }`, `{ blueprint = { name = "x" } }`, or `{ query = "..." }` |
+| `stage` | required | The stage this fan-out belongs to: the stage it sits under |
+| `workers_available` | required | The workers it may hand items to, at least one. See below |
 | `merge_stage` | unset | Stage that reconciles worker results before the parent moves on |
 | `results_region` | `conversation` | Where the consolidated worker report lands |
 | `max_items` | unset | Most work items the split may produce, at least 1. Unset means however many it produces |
@@ -218,10 +223,95 @@ The `[graph.stages.mode.fan_out]` table is what makes the stage a fan-out stage.
 The stage answers a `split_prompt` with a `fan_out` call. `max_attempts = 0` lets the stage through
 on the first refusal.
 
-`worker` takes one of three shapes. `{ stage = "x" }` runs a stage of *this* blueprint, which must
-set `allow_as_worker = true`. `{ blueprint = { name = "x" } }` runs a separate installed blueprint.
-`{ query = "..." }` is a hint matched against installed blueprints. `lev validate` checks that a
-named worker stage exists, and that a named worker blueprint is installed on this machine.
+### The workers a stage may hand items to
+
+A fan-out stage lists its workers in `workers_available`, each for a different kind of item. The
+model picks one of them for each item, and may mix them in one call. It cannot name anything else.
+
+```toml
+[[graph.stages]]
+name = "split_review"
+description = "Hand the change out for review, one item per area or question"
+tools = ["fan_out"]
+
+[graph.stages.mode.fan_out]
+stage = "split_review"
+merge_stage = "deep_review"
+max_workers = 30
+workers_available = [
+    {
+        name = "code",
+        stage = "review_worker",          # a stage of this blueprint (it sets allow_as_worker)
+        use_for = "Reviewing one area of the code in depth",
+    },
+    {
+        name = "docs",
+        blueprint = "writing-assistant",  # an installed blueprint
+        use_for = "Checking one docs page against the code it describes",
+    },
+    {
+        name = "research",
+        blueprint = "researcher",
+        use_for = "Finding out what a standard or a dependency says about something",
+    },
+]
+```
+
+Each worker has three keys:
+
+| Key | Meaning |
+|---|---|
+| `name` | What the model writes to pick this worker |
+| `stage`, `blueprint` or `query` | What it runs. Exactly one of them |
+| `use_for` | When to pick it, written for the model |
+
+`stage` runs a stage of *this* blueprint, which must set `allow_as_worker = true`. `blueprint`
+runs a separate installed blueprint by name (`name` or `name@digest`), or one read from the
+absolute directory it names. `query` is matched against the installed blueprints when the worker
+starts. Each worker can span several lines as above, with a comma between its keys.
+
+`lev validate` refuses a fan-out with no `stage`, or one that names another stage. It refuses an
+empty list, two workers sharing a name, and a worker that runs none or more than one thing. It
+also refuses a missing `use_for`, and a worker stage that does not exist or does not allow it. A
+named worker blueprint must be installed on this machine.
+
+With one worker, the model names nothing: every item goes to it. With several, each item of the
+`fan_out` call carries a `worker` field, limited to the declared names. Its description lists each
+worker's `use_for` and the inputs it takes, so the model knows which to pick:
+
+```json
+{"items": [
+  {"id": "serve-auth", "worker": "code",     "inputs": {"task": "Review serve/auth.rs", "diff": "..."}},
+  {"id": "api-docs",   "worker": "docs",     "inputs": {"task": "Check api.md's auth section"}},
+  {"id": "rfc-6750",   "worker": "research", "inputs": {"task": "Is the Bearer scheme case-insensitive?"}}
+]}
+```
+
+Each item's inputs are checked against its own worker's inputs, and the merged report names each
+item's worker (`## serve-auth (code)`).
+
+A call that gets a worker wrong is refused before any worker starts, as an error the model corrects
+on its next turn. Every problem in the call is listed at once, and the message ends with `Nothing
+was started.` An item naming a worker the stage does not have reads:
+
+```
+[error] fan_out refused: items[1] names the worker "reviewer", which this stage does not have.
+This stage's workers are:
+- code: Reviewing one area of the code in depth
+- docs: Checking one docs page against the code it describes
+- research: Finding out what a standard or a dependency says about something
+Set each item's "worker" to one of those names and call fan_out again. Nothing was started.
+```
+
+The other refusals:
+
+| The call | Why it is refused |
+|---|---|
+| An item with no `worker`, in a stage with several | Each item has to name the worker that takes it |
+| An `agent`, in any fan-out stage | The stage runs only the workers its blueprint declares |
+| A `worker` other than the only one, in a one-worker stage | That worker takes every item |
+| A worker whose blueprint does not load | Its items cannot start; the message names the blueprint |
+| An item whose inputs do not fit its worker | Each problem is named at its item's path |
 
 ### If the stage never fans out
 
@@ -234,7 +324,8 @@ merge stage knows it is working from nothing. `lev ps` renders the run as
 
 ```toml
 [graph.stages.mode.fan_out]
-worker = { blueprint = { name = "researcher" } }
+stage = "investigate"
+workers_available = [{ name = "researcher", blueprint = "researcher", use_for = "Researching one thread" }]
 max_attempts = 5   # a small local model may need more than a nudge
 # max_attempts = 0 # or none at all, when an empty fan-out is an acceptable outcome
 ```
@@ -267,12 +358,12 @@ ended a `deep-researcher` run whose four workers had already finished.
 
 A worker is spawned from its work item's `inputs`, the way `lev run --input` hands them in. So the
 worker's blueprint must declare every input its items carry, usually `task`, bound to a region that
-receives it. For a `{ stage = "x" }` worker, that is this blueprint's own `[[graph.inputs]]`. Every
+receives it. For a worker that runs a stage, that is this blueprint's own `[[graph.inputs]]`. Every
 item is checked against them before any worker starts: a name nothing declares, a value of the wrong
 type, and an input the worker requires that the item leaves out with no default to fall back on.
 Each is refused at its item's path.
 
-A `{ stage = "x" }` worker is the one exception to the last of these. The inputs this blueprint
+A worker that runs a stage is the one exception to the last of these. The inputs this blueprint
 requires of a run started from the outside, a `--diff` say, are not demanded of its own workers.
 The parent met that contract, and the worker's share of the diff travels inside its work item. A
 worker that runs another blueprint is held to that blueprint's required inputs, as a child started
@@ -280,16 +371,19 @@ with `spawn_agent` is.
 
 ### A worker that is a whole other agent
 
-A `{ stage = "x" }` worker keeps the work inside this blueprint. `{ blueprint = { name = "x" } }`
-hands each item to a separate installed blueprint instead, which is worth doing when one already
-does the job:
+A worker that runs a stage keeps the work inside this blueprint. One with `blueprint = "x"` hands
+each item to a separate installed blueprint instead, which is worth doing when one already does the
+job:
 
 ```toml
 [[graph.stages]]
 name = "investigate"
 
 [graph.stages.mode.fan_out]
-worker = { blueprint = { name = "researcher" } }   # every item is a full researcher run
+stage = "investigate"
+workers_available = [   # every item is a full researcher run
+    { name = "researcher", blueprint = "researcher", use_for = "Researching one sub-question" },
+]
 merge_stage = "analyze"
 max_workers = 30
 ```
@@ -361,7 +455,8 @@ has the whole thing.
 
 ```toml
 [graph.stages.mode.fan_out]
-worker = { stage = "gather_worker" }
+stage = "split"
+workers_available = [{ name = "gather", stage = "gather_worker", use_for = "Gathering one slice" }]
 merge_stage = "build"
 results_region = "worker_rows"   # default: conversation
 max_items = 12                   # default: however many the split produces
