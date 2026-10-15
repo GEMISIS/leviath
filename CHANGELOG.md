@@ -15,6 +15,32 @@ same list.
 
 ### Changed
 
+- **Breaking.** A fan-out stage declares the workers it may hand items to.
+  `[graph.stages.mode.fan_out]` names its `stage` and lists
+  `workers_available`, each with a `name`, one of `stage`, `blueprint` or
+  `query`, and a `use_for` the model chooses by. With several workers, each
+  item of a `fan_out` call names its `worker`, and one call may mix them;
+  with one, the model names nothing. A name the stage does not declare, an
+  `agent` in a fan-out stage, or a worker whose blueprint does not load is
+  refused before anything starts, with the stage's workers listed. The
+  stage's `fan_out` tool offers only those names. The daemon rewrites an
+  installed `agent.toml` still written with `worker = {...}` at start (saved
+  in the home's backup first, the old file kept under `legacy/`), and
+  `lev blueprint migrate` rewrites one anywhere else. The bundled blueprints
+  use the new form. REST `fan_outs` and GraphQL `FanOut` list
+  `workers_available`; the run-file state view lists each item's worker.
+- **Breaking.** Run files move to binary layout 4: a fan-out in progress
+  keeps the worker of each item. The daemon upgrades layout-2 and layout-3
+  files at start, saved in the backup first and the original kept as
+  `legacy/run.v2.lvr` or `run.v3.lvr`. Each old fan-out becomes one of its
+  stage with its one worker.
+- **Breaking, library.** `FanOutDef` has `stage` and `workers_available` in
+  place of `worker`, and `FanOutDef::with_worker` in place of `same_graph`.
+  `WorkItem` and the run file's `WorkItemState` carry their `worker`, and a
+  fan-out's running items are `(id, worker, run)`.
+  `FanOutSpawner::worker_inputs` returns `Result<Option<_>, String>`, the
+  error saying why a blueprint does not load.
+  `leviath_legacy_runs::ConvertError::NotLayout2` is `NotOldLayout`.
 - **Breaking.** Every run starts from one typed spawn request and is
   recorded in one run file. A `SpawnRequest` names a blueprint and gives it
   typed inputs, or carries a whole run graph of its own; `lev run`, REST,
@@ -227,6 +253,14 @@ same list.
 
 ### Fixed
 
+- A fan-out stage runs only the worker its blueprint declares. A reviewer
+  run's `fan_out` call named `"agent": "review"`, which replaced the stage's
+  `review_worker`, and ten workers were queued for a blueprint that does not
+  exist: each failed to start, and the run went on without them. Such a call
+  is now refused, and a worker blueprint that does not load refuses the call
+  before any worker is queued.
+- The bundled reviewer's summary no longer asks for "the report file you
+  wrote": no stage of it can write a file.
 - A run file with a damaged step in the middle keeps every step after it.
   Opening the file took any frame that did not check out as a step a crash
   left half written and cut the file there, so one bad frame deleted the

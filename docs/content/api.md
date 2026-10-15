@@ -1195,6 +1195,9 @@ stage, resolved the way the daemon will apply them:
   "fan_outs": [
     {
       "stage": "split_review",
+      "workers_available": [
+        { "name": "area", "stage": "review_worker", "use_for": "Reviewing one area of the change in depth" }
+      ],
       "worker_stage": "review_worker",
       "merge_stage": "deep_review",
       "max_workers": 8,
@@ -1209,9 +1212,10 @@ stage, resolved the way the daemon will apply them:
 ```
 
 `max_workers` is `null` when the stage names none, which starts every item at once. `max_items` is
-`null` when there is no ceiling. Whichever of `worker_agent`,
-`worker_stage` or `worker_query` the stage uses is the one present. A blueprint that never fans out
-has an empty list. `blueprints.fan_outs` in the `capabilities` list on `GET /api/config` says the
+`null` when there is no ceiling. `workers_available` lists every worker the stage may hand items to,
+each with exactly one of `stage`, `blueprint` and `query`. When there is one worker, whichever of
+`worker_agent`, `worker_stage` or `worker_query` it uses is present too; with several, none is. A
+blueprint that never fans out has an empty list. `blueprints.fan_outs` in the `capabilities` list on `GET /api/config` says the
 daemon reports this.
 
 Changing a cap is a manifest write: `PUT /api/blueprints/{name}` with the manifest text, and the

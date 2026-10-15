@@ -32,7 +32,8 @@ anything it:
 1. saves every installed blueprint and every old run directory under
    `~/.leviath/backups/<version>-<time>/`;
 2. turns each installed `agent.leviath` into an `agent.toml`, or replaces it with this release's
-   copy of a bundled blueprint;
+   copy of a bundled blueprint. An `agent.toml` an alpha build wrote, whose fan-outs name one
+   `worker`, is rewritten the same way;
 3. converts each old run directory into a run file, keeping the old files in the run's `legacy/`
    folder;
 4. resumes the runs that had not finished.
@@ -57,6 +58,20 @@ lev blueprint migrate ./path/to/agent.leviath -o ./path/to/agent.toml
 `lev validate`, `lev add`, `lev pack` and `lev run` say the same when they are handed an
 `agent.leviath`. Without `-o`, the converted blueprint is printed, with a note for each setting
 it left out.
+
+### Fan-out stages
+
+A fan-out stage now names its own stage and every worker it may hand items to, each with what it
+is for (see [the workers a stage may hand items to](/docs/sub-agents#the-workers-a-stage-may-hand-items-to)).
+An `agent.toml` an alpha build wrote still says `worker = { stage = "x" }`. The daemon rewrites
+the ones it sees, and `lev blueprint migrate` rewrites any other:
+
+```bash
+lev blueprint migrate ./path/to/agent.toml -o ./path/to/agent.toml --force
+```
+
+A whole run graph sent over the API, or by `spawn_agent` or `fan_out`, has to use the new form
+too.
 
 ### HTTP clients
 
