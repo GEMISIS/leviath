@@ -279,6 +279,20 @@ same list.
   documentation (`2001:db8::/32`) and local-use NAT64 (`64:ff9b:1::/48`). An
   IPv6 address that carries an IPv4 one, as IPv4-compatible (`::a.b.c.d`),
   NAT64 (`64:ff9b::/96`) or 6to4 (`2002::/16`), is judged by the IPv4 one.
+- A `shell` call that starts something in the background (`sleep 30 &`)
+  returns when its shell exits, with a note that the job was stopped. The
+  job held the shell's output open, so the call waited for its 60 s
+  timeout. A call that does time out names its real limit and keeps what the
+  command wrote before it was stopped.
+- `write_file` and `edit_file` replace a file that is there in one step,
+  keeping its permissions, so a run stopped mid-write leaves the old file
+  whole. `edit_file` refuses an empty `old_str` with a message saying what
+  to send instead.
+- On macOS and Linux, `write_file` and `read_file` on `nul` use `/dev/null`.
+  The path was handed back as it was, relative, so a write made a file
+  named `nul` in the directory the daemon was started in.
+- The shell the `shell` tool runs is worked out once per process, rather
+  than leaking a copy of `$SHELL` on every call.
 - Signed links percent-encode file and artifact names, so a name with a
   space, `&`, `#`, `+` or `%` links to itself.
 - `lev serve --host localhost` and `--host ::1` start. Only an IPv4 address

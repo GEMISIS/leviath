@@ -7,7 +7,7 @@ use leviath_core::region::EntryContent;
 use leviath_core::resolves_within;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
@@ -1295,6 +1295,56 @@ mod tests {
         assert_eq!(content, "foo qux baz");
     }
 
+    /// An empty `old_str` names no place in the file. Every file contains it
+    /// once more than it has characters, so unchecked it reads as "not
+    /// unique", or, in an empty file, matches once and writes `new_str` at the
+    /// start.
+    #[tokio::test]
+    async fn edit_file_refuses_an_empty_old_str() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        fs::write(dir.path().join("empty.txt"), "").unwrap();
+
+        let result = tools
+            .execute(
+                "edit_file",
+                json!({"path": "empty.txt", "old_str": "", "new_str": "added"}),
+            )
+            .await;
+        assert!(result.contains("'old_str' is empty"), "{result}");
+        assert!(result.contains("write_file"), "{result}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("empty.txt")).unwrap(),
+            ""
+        );
+    }
+
+    /// An edit replaces the file in one step and keeps its permissions, so a
+    /// script stays executable and a reader never sees it half written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_edit_replaces_the_file_and_keeps_its_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let script = dir.path().join("run.sh");
+        fs::write(&script, "echo old\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let before = fs::metadata(&script).unwrap().ino();
+
+        let result = tools
+            .execute(
+                "edit_file",
+                json!({"path": "run.sh", "old_str": "old", "new_str": "new"}),
+            )
+            .await;
+        assert!(result.contains("Successfully edited"), "{result}");
+        let after = fs::metadata(&script).unwrap();
+        assert_eq!(after.permissions().mode() & 0o777, 0o755);
+        assert_ne!(after.ino(), before, "a copy was renamed over it");
+        assert_eq!(fs::read_to_string(&script).unwrap(), "echo new\n");
+    }
+
     #[tokio::test]
     async fn edit_file_string_not_found() {
         let dir = tempfile::tempdir().unwrap();
@@ -1817,9 +1867,107 @@ mod tests {
     // ─── Bounded shell capture ──────────────────────────────────────────────
 
     use crate::exec::{
-        Captured, MAX_CAPTURE_BYTES, MAX_READ_FILE_BYTES, cap_file_content, capture_capped,
-        capture_note,
+        BACKGROUND_NOTE, Captured, MAX_CAPTURE_BYTES, MAX_READ_FILE_BYTES, cap_file_content,
+        capture_capped, capture_note, drain, timed_out, with_background_note,
     };
+
+    /// A pipe something else still holds open: it never ends and never says
+    /// anything.
+    struct HeldOpen;
+
+    impl tokio::io::AsyncRead for HeldOpen {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    /// Streams that end are read to their end, whenever the shell exits.
+    #[tokio::test]
+    async fn drain_reads_streams_that_end_to_the_end() {
+        let (exited, on_exit) = tokio::sync::oneshot::channel();
+        exited.send(()).unwrap();
+        let (mut out, mut err) = (&b"out"[..], &b"err"[..]);
+        let (mut stdout, mut stderr) = (Captured::default(), Captured::default());
+        let cut = drain(
+            &mut out,
+            &mut err,
+            100,
+            on_exit,
+            Duration::from_secs(30),
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        assert!(!cut);
+        assert_eq!(
+            (&stdout.kept[..], &stderr.kept[..]),
+            (&b"out"[..], &b"err"[..])
+        );
+    }
+
+    /// A stream held open after the shell exited is cut off once the grace
+    /// has passed, keeping what the other stream said.
+    #[tokio::test]
+    async fn drain_stops_reading_a_stream_held_open_after_the_shell_exits() {
+        let (exited, on_exit) = tokio::sync::oneshot::channel();
+        exited.send(()).unwrap();
+        let (mut out, mut err) = (&b"started"[..], HeldOpen);
+        let (mut stdout, mut stderr) = (Captured::default(), Captured::default());
+        let cut = drain(
+            &mut out,
+            &mut err,
+            100,
+            on_exit,
+            Duration::from_millis(10),
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        assert!(cut);
+        assert_eq!(stdout.kept, b"started");
+    }
+
+    /// The background note is added only when the streams were cut off.
+    #[test]
+    fn the_background_note_follows_a_cut() {
+        assert_eq!(with_background_note("out".into(), false), "out");
+        let noted = with_background_note("out".into(), true);
+        assert_eq!(noted, format!("out\n\n{BACKGROUND_NOTE}"));
+    }
+
+    /// A timed-out call names the limit it had, in the unit that reads, and
+    /// whatever each stream said before it was stopped.
+    #[test]
+    fn a_timed_out_call_names_its_limit_and_keeps_what_was_said() {
+        let said = |text: &str| Captured {
+            kept: text.as_bytes().to_vec(),
+            total: text.len() as u64,
+        };
+        let text = timed_out(
+            "make",
+            Duration::from_secs(60),
+            &said("building\n"),
+            &said(""),
+        );
+        assert!(text.starts_with("[timed out]"), "{text}");
+        assert!(text.contains("the 60 s limit"), "{text}");
+        assert!(
+            text.contains("stdout before it was stopped:\nbuilding"),
+            "{text}"
+        );
+        assert!(!text.contains("stderr"), "{text}");
+
+        let quick = timed_out("x", Duration::from_millis(100), &said(""), &said("oops"));
+        assert!(quick.contains("the 100 ms limit"), "{quick}");
+        assert!(
+            quick.contains("stderr before it was stopped:\noops"),
+            "{quick}"
+        );
+    }
 
     /// A reader that hands back `chunk` `count` times and records how many
     /// reads it was asked for, standing in for a child's pipe.
@@ -1851,7 +1999,8 @@ mod tests {
     async fn capture_capped_keeps_the_cap_and_counts_what_it_dropped() {
         let payload = vec![b'a'; 5000];
         let mut source = &payload[..];
-        let got = capture_capped(&mut source, 100).await;
+        let mut got = Captured::default();
+        capture_capped(&mut source, 100, &mut got).await;
         assert_eq!(got.kept.len(), 100);
         assert_eq!(got.total, 5000);
     }
@@ -1860,7 +2009,8 @@ mod tests {
     async fn capture_capped_keeps_everything_under_the_cap() {
         let payload = [b'a'; 40];
         let mut source = &payload[..];
-        let got = capture_capped(&mut source, 100).await;
+        let mut got = Captured::default();
+        capture_capped(&mut source, 100, &mut got).await;
         assert_eq!(got.kept.len(), 40);
         assert_eq!(got.total, 40);
     }
@@ -1877,7 +2027,8 @@ mod tests {
             chunk: 1_000,
             reads: reads.clone(),
         };
-        let got = capture_capped(&mut source, 100).await;
+        let mut got = Captured::default();
+        capture_capped(&mut source, 100, &mut got).await;
         assert_eq!(got.total, 10_000, "the tail was not read");
         assert_eq!(got.kept.len(), 100);
         // Ten chunks plus the final empty read that signals EOF.
@@ -1905,7 +2056,8 @@ mod tests {
             }
         }
         let mut source = FailsAfterOne(false);
-        let got = capture_capped(&mut source, 100).await;
+        let mut got = Captured::default();
+        capture_capped(&mut source, 100, &mut got).await;
         assert_eq!(got.kept, b"partial");
         assert_eq!(got.total, 7);
     }
@@ -2135,6 +2287,50 @@ mod tests {
             .shell_with_timeout(&json!({"command": "sleep 5"}), Duration::from_millis(100))
             .await;
         assert!(result.contains("[timed out]"));
+        // The limit it actually had, not a fixed 60 s.
+        assert!(result.contains("the 100 ms limit"), "{result}");
+    }
+
+    /// A command that writes and then runs out of time keeps what it wrote.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_command_keeps_what_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .shell_with_timeout(
+                &json!({"command": "echo halfway; sleep 5"}),
+                Duration::from_millis(500),
+            )
+            .await;
+        assert!(result.contains("[timed out]"), "{result}");
+        assert!(
+            result.contains("stdout before it was stopped:\nhalfway"),
+            "{result}"
+        );
+    }
+
+    /// A command that starts something in the background returns when its
+    /// shell does, not when the background job lets go of the output. The job
+    /// inherits the shell's stdout and stderr, so reading them to the end
+    /// waits as long as the job runs: a `sleep 30 &` held the call to its
+    /// timeout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_background_job_does_not_hold_the_call_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let started = std::time::Instant::now();
+        let result = tools
+            .shell_with_timeout(
+                &json!({"command": "echo started; sleep 30 &"}),
+                Duration::from_secs(20),
+            )
+            .await;
+        assert!(started.elapsed() < Duration::from_secs(5), "{result}");
+        assert!(result.contains("started"), "{result}");
+        assert!(result.contains("[background]"), "{result}");
+        assert!(!result.contains("[timed out]"), "{result}");
     }
 
     /// A timed-out (or cancelled) command takes its *grandchildren* with it.
@@ -2225,6 +2421,10 @@ mod tests {
         assert!(!flag.is_empty());
         #[cfg(not(windows))]
         assert_eq!(flag, "-c");
+        // Worked out once: a second call hands back the same string, rather
+        // than leaking a fresh copy of `$SHELL` on every shell call.
+        let (again, _) = BuiltinTools::detect_shell();
+        assert!(std::ptr::eq(shell, again));
     }
 
     /// Drives the real filesystem probe (`shell_path_exists`) through the seam,
@@ -2613,6 +2813,27 @@ mod tests {
             !result.contains("escape"),
             "the null device is not an escape: {result}"
         );
+    }
+
+    /// Either spelling of the null device writes to this platform's, so neither
+    /// leaves a file behind. Handed back as it is, `nul` is a relative path, and
+    /// on Unix a write to it makes a file named `nul` wherever the daemon was
+    /// started.
+    #[tokio::test]
+    async fn either_null_device_spelling_writes_nowhere() {
+        let dir = tempfile::tempdir().unwrap();
+        for spelling in ["nul", "NUL", "/dev/null"] {
+            let resolved =
+                resolve_within(spelling, dir.path(), leviath_core::resolves_within).unwrap();
+            assert_eq!(resolved, std::path::PathBuf::from(exec::NULL_DEVICE));
+        }
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute("write_file", json!({"path": "nul", "content": "gone"}))
+            .await;
+        assert!(!result.contains("escape"), "{result}");
+        assert!(!dir.path().join("nul").exists());
+        assert!(!std::path::Path::new("nul").exists(), "nor in the cwd");
     }
 
     /// The control, so the allowance above cannot be mistaken for containment

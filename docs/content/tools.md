@@ -35,6 +35,10 @@ Read and modify files relative to the agent's working directory.
 [part](/docs/mime) on the result rather than inlining it. A model that takes the type sees the
 bytes, and one that does not sees a one-line stand-in.
 
+`write_file` and `edit_file` replace a file that is already there in one step: a copy is written
+beside it and renamed over it, keeping its permissions. A run stopped mid-write leaves the old file
+whole. `edit_file` refuses an empty `old_str`, which names no place in the file.
+
 `write_file` with `append` lets a file too large for one reply be written in parts. Both installers
 refuse a script that does not compile, lacks `// @tool` or `// @description`, or takes an existing
 tool's name. See [installing a tool from a run](/docs/rhai-tools#installing-a-tool-from-a-run).
@@ -51,6 +55,11 @@ tool's name. See [installing a tool from a run](/docs/rhai-tools#installing-a-to
 
 `bash` is an accepted alias for `shell`: a stage's `tools` may name either, and both
 resolve to the same tool advertised to the model.
+
+A call that runs out of time says so with the limit it had, and keeps what the command wrote
+before it was stopped. A call returns when its shell exits. Something the command left running
+in the background (`server &`) is stopped then, and the result says so, since a background job
+would otherwise hold the call open until the timeout.
 
 ### Which shell you get
 
