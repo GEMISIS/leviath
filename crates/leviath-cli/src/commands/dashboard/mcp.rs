@@ -305,7 +305,7 @@ async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
         _ => return fail(format!("'{name}' uses stdio transport and cannot log in")),
     };
     let grants = grants_of(ctx, &config);
-    let mut store = match grants.load() {
+    let store = match grants.load() {
         Ok(store) => store,
         Err(e) => return fail(format!("Could not read MCP logins: {e}")),
     };
@@ -321,13 +321,10 @@ async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
         )
         .await
     {
-        Ok(leviath_mcp::LoginOutcome::Authenticated(auth)) => {
-            store.set(name, *auth);
-            match grants.save(&store) {
-                Ok(()) => ok(format!("Authenticated with '{name}'")),
-                Err(e) => fail(format!("Login succeeded but saving failed: {e}")),
-            }
-        }
+        Ok(leviath_mcp::LoginOutcome::Authenticated(auth)) => match grants.set(name, *auth) {
+            Ok(()) => ok(format!("Authenticated with '{name}'")),
+            Err(e) => fail(format!("Login succeeded but saving failed: {e}")),
+        },
         Ok(leviath_mcp::LoginOutcome::NotRequired) => ok(format!(
             "'{name}' needs no login: it accepted the configured request"
         )),

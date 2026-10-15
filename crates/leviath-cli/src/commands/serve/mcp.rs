@@ -206,8 +206,8 @@ async fn read_config(path: PathBuf) -> Result<Config, ServeError> {
 /// the blocking pool: under the keychain the grants are a round trip to the OS
 /// store.
 ///
-/// A grant file that will not load is an error here, not an empty set: the
-/// login would save over every other server's grant.
+/// A grant file that will not load is an error here, not an empty set: it
+/// holds every other server's grant, and the login could not save into it.
 async fn read_admin(paths: AdminPaths) -> Result<(Config, McpGrants, AuthStore), ServeError> {
     blocking(move || {
         let config = Config::load_from_path(&paths.config)?;
@@ -509,7 +509,7 @@ pub(super) async fn signed_in(
     name: &str,
 ) -> Result<(LoginStatus, MCPServerConfig), ServeError> {
     let admin = &state.mcp;
-    let (config, grants, mut held) = read_admin(admin_paths()).await?;
+    let (config, grants, held) = read_admin(admin_paths()).await?;
     let server = named(&config, name)?;
     let url = match server.resolve() {
         Ok(leviath_mcp::ResolvedTransport::Http { url, .. }) => url.to_string(),
@@ -535,8 +535,8 @@ pub(super) async fn signed_in(
     let LoginOutcome::Authenticated(auth) = outcome else {
         return Ok((LoginStatus::NotRequired, server));
     };
-    held.set(name, *auth);
-    blocking(move || grants.save(&held))
+    let name = name.to_string();
+    blocking(move || grants.set(&name, *auth))
         .await
         .map_err(|e| ServeError::Internal(e.to_string()))?;
     Ok((LoginStatus::Authenticated, server))

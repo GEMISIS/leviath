@@ -45,10 +45,12 @@ pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// half-written file and a crash mid-write leaves the old one whole.
 ///
 /// `mode` is the permission the new file is created with (`Some(0o600)` for
-/// a secret). `None` keeps what the target had, or the platform default for
-/// a new file, so an agent manifest saved by the editor is not quietly made
-/// owner-only. A symlink at `path` is followed: the file it points at is what
-/// is replaced, not the link.
+/// a secret). `None` keeps what the target had, so an agent manifest saved
+/// by the editor is not quietly made owner-only. With no target to copy
+/// from, `None` leaves the new file as it was staged: owner-only (`0o600`)
+/// on Unix, which is how `tempfile` creates it. A caller that wants a new
+/// file others can read writes it some other way. A symlink at `path` is
+/// followed: the file it points at is what is replaced, not the link.
 ///
 /// Use this rather than `fs::write`, which truncates the target and then
 /// writes into it: a process that dies between the two leaves `config.toml`,
@@ -382,10 +384,13 @@ mod tests {
         assert_eq!(mode_of(&path), 0o600);
         // Nothing staged is left behind.
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-        // A fresh file, no mode asked for: created and readable.
+        // A fresh file, no mode asked for: created, readable, and owner-only
+        // on Unix, as the doc says.
         let plain = dir.path().join("agent.toml");
         write_atomic(&plain, b"[agent]", None).unwrap();
         assert_eq!(std::fs::read(&plain).unwrap(), b"[agent]");
+        #[cfg(unix)]
+        assert_eq!(mode_of(&plain), 0o600);
     }
 
     /// `None` keeps the permissions the target already had, so replacing a

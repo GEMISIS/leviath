@@ -160,15 +160,23 @@ impl McpGrants {
     /// Every grant, or none when there is no file yet.
     ///
     /// A file that will not load is an error rather than an empty set: it
-    /// holds every server's grant, and a save over an empty set would lose
-    /// them all.
+    /// holds every server's grant, and reading it as none would show them
+    /// all logged out.
     pub fn load(&self) -> anyhow::Result<AuthStore> {
         AuthStore::load_with(&self.path, self.store()?)
     }
 
-    /// Write `grants` back through the backend they belong in.
-    pub fn save(&self, grants: &AuthStore) -> anyhow::Result<()> {
-        grants.save_with(&self.path, self.store()?)
+    /// Save `auth` as `server`'s grant, through the backend it belongs in.
+    ///
+    /// Onto the grants as they stand when it lands, under the store's lock,
+    /// never a copy read earlier: a login spends minutes in a browser, and a
+    /// copy read before it would save back every other server's grant as it
+    /// was then, over a token the daemon refreshed meanwhile.
+    pub fn set(&self, server: &str, auth: leviath_mcp::ServerAuth) -> anyhow::Result<()> {
+        AuthStore::update_with(&self.path, self.store()?, &mut |grants| {
+            grants.set(server, auth.clone());
+            Ok(true)
+        })
     }
 
     /// Every grant a listing shows, and why it could not show them, when it
@@ -197,19 +205,23 @@ impl McpGrants {
     /// where the other order would strand a refresh token nothing points at.
     /// A secret the file does not name is deleted too, so a stranded one has
     /// a way out.
+    ///
+    /// Under the store's lock, as [`set`](Self::set) is.
     pub fn forget(&self, server: &str) -> anyhow::Result<bool> {
         let store = self.store()?;
-        let mut grants = AuthStore::load_with(&self.path, store)?;
-        let named = grants.remove(server);
-        let deleted = match store {
-            Some(store) => store
-                .delete(&leviath_core::mcp_account(server))
-                .map_err(|e| anyhow::anyhow!("could not forget the login for '{server}': {e}"))?,
-            None => false,
-        };
-        if named {
-            grants.save_with(&self.path, store)?;
-        }
+        let (mut named, mut deleted) = (false, false);
+        AuthStore::update_with(&self.path, store, &mut |grants| {
+            named = grants.remove(server);
+            deleted = match store {
+                Some(store) => store
+                    .delete(&leviath_core::mcp_account(server))
+                    .map_err(|e| {
+                        anyhow::anyhow!("could not forget the login for '{server}': {e}")
+                    })?,
+                None => false,
+            };
+            Ok(named)
+        })?;
         Ok(named || deleted)
     }
 
@@ -379,16 +391,16 @@ mod tests {
             dir.path().join("mcp-auth.json"),
             Ok(Some(Box::new(leviath_core::MemoryStore::new()))),
         );
-        let mut held = grants.load().unwrap();
-        assert!(held.server_names().is_empty());
-        held.set(
-            "remote",
-            leviath_mcp::ServerAuth {
-                access_token: "secret-token".to_string(),
-                ..Default::default()
-            },
-        );
-        grants.save(&held).unwrap();
+        assert!(grants.load().unwrap().server_names().is_empty());
+        grants
+            .set(
+                "remote",
+                leviath_mcp::ServerAuth {
+                    access_token: "secret-token".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let file = std::fs::read_to_string(grants.path()).unwrap();
         assert!(!file.contains("secret-token"), "{file}");
         assert_eq!(
@@ -411,17 +423,17 @@ mod tests {
             dir.path().join("mcp-auth.json"),
             Ok(Some(Box::new(leviath_core::MemoryStore::new()))),
         );
-        let mut held = AuthStore::default();
         for server in ["remote", "other"] {
-            held.set(
-                server,
-                leviath_mcp::ServerAuth {
-                    refresh_token: Some("refresh-secret".to_string()),
-                    ..Default::default()
-                },
-            );
+            grants
+                .set(
+                    server,
+                    leviath_mcp::ServerAuth {
+                        refresh_token: Some("refresh-secret".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
         }
-        grants.save(&held).unwrap();
         let store = grants.store().unwrap().unwrap();
         let account = leviath_core::mcp_account("remote");
         assert!(store.get(&account).unwrap().is_some());
@@ -516,9 +528,9 @@ mod tests {
                 leviath_core::MemoryStore::new(),
             )))),
         );
-        let mut held = AuthStore::default();
-        held.set("remote", leviath_mcp::ServerAuth::default());
-        grants.save(&held).unwrap();
+        grants
+            .set("remote", leviath_mcp::ServerAuth::default())
+            .unwrap();
 
         let err = grants.forget("remote").unwrap_err();
         assert!(err.to_string().contains("the keychain is locked"), "{err}");
@@ -536,7 +548,11 @@ mod tests {
         );
         let err = grants.load().unwrap_err();
         assert!(err.to_string().contains("no keychain"), "{err}");
-        assert!(grants.save(&AuthStore::default()).is_err());
+        assert!(
+            grants
+                .set("remote", leviath_mcp::ServerAuth::default())
+                .is_err()
+        );
         assert!(grants.forget("remote").is_err());
         assert!(grants.authorization_header("remote", 0).await.is_err());
         assert!(!grants.path().exists(), "nothing was written");
@@ -555,16 +571,16 @@ mod tests {
             grants.authorization_header("remote", 0).await.unwrap(),
             None
         );
-        let mut held = AuthStore::default();
-        held.set(
-            "remote",
-            leviath_mcp::ServerAuth {
-                access_token: "live".to_string(),
-                expires_at: u64::MAX,
-                ..Default::default()
-            },
-        );
-        grants.save(&held).unwrap();
+        grants
+            .set(
+                "remote",
+                leviath_mcp::ServerAuth {
+                    access_token: "live".to_string(),
+                    expires_at: u64::MAX,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert_eq!(
             grants.authorization_header("remote", 0).await.unwrap(),
             Some(("Authorization".to_string(), "Bearer live".to_string()))
