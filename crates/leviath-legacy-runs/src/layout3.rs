@@ -512,23 +512,41 @@ mod tests {
     use leviath_runtime::runfile::codec::{self, FrameKind};
     use leviath_runtime::spec::names::WorkerName;
 
-    /// A stage that does not fan out keeps its mode as it was.
+    /// A fan-out to one stage worker, as layout 3 wrote it.
+    fn old_fan_out() -> FanOutDef {
+        FanOutDef {
+            worker: WorkerSource::Stage(StageName::new("w").unwrap()),
+            merge_stage: None,
+            max_workers: None,
+            on_worker_failure: WorkerFailure::Continue,
+            split_prompt: String::new(),
+            results_region: None,
+            max_items: None,
+            max_attempts: None,
+        }
+    }
+
+    /// A stage that does not fan out keeps its mode as it was, and one that
+    /// does becomes a fan-out of that stage. Every mode is driven here, in one
+    /// place: coverage counts a function by its best-covered build, and the
+    /// integration tests' build sees only some of them.
     #[test]
-    fn a_mode_that_is_not_a_fan_out_comes_through_as_it_was() {
+    fn every_mode_comes_through() {
         let stage = StageName::new("s").unwrap();
-        assert!(matches!(
-            StageMode::Interactive.upgraded(&stage),
-            graph::StageMode::Interactive
-        ));
-        assert!(matches!(
-            StageMode::Output.upgraded(&stage),
-            graph::StageMode::Output
-        ));
-        let points = match StageMode::InteractivePoints(Vec::new()).upgraded(&stage) {
-            graph::StageMode::InteractivePoints(points) => points.len(),
-            _ => usize::MAX,
-        };
-        assert_eq!(points, 0);
+        // Compared as text: a match would leave an arm only a failure reaches.
+        let shown = |mode: StageMode| format!("{:?}", mode.upgraded(&stage));
+        assert_eq!(shown(StageMode::Autonomous), "Autonomous");
+        assert_eq!(shown(StageMode::Interactive), "Interactive");
+        assert_eq!(shown(StageMode::Output), "Output");
+        assert_eq!(
+            shown(StageMode::InteractivePoints(Vec::new())),
+            "InteractivePoints([])"
+        );
+        let fan = shown(StageMode::FanOut(old_fan_out()));
+        assert!(
+            fan.starts_with("FanOut(FanOutDef { stage: StageName(\"s\")"),
+            "{fan}"
+        );
     }
 
     /// A worker already running when layout 3 stopped keeps running under the
@@ -537,16 +555,7 @@ mod tests {
     fn a_running_item_keeps_its_run_under_the_one_worker() {
         let fan = FanOutState {
             stage: StageName::new("split").unwrap(),
-            config: FanOutDef {
-                worker: WorkerSource::Stage(StageName::new("w").unwrap()),
-                merge_stage: None,
-                max_workers: None,
-                on_worker_failure: WorkerFailure::Continue,
-                split_prompt: String::new(),
-                results_region: None,
-                max_items: None,
-                max_attempts: None,
-            },
+            config: old_fan_out(),
             max_workers: None,
             queued: vec![WorkItemState {
                 id: "b".into(),
