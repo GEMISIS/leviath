@@ -400,6 +400,7 @@ pub(crate) fn worker_cap(config: &FanOutDef) -> Option<usize> {
 
 /// What one worker's inputs are checked against: the declarations of the
 /// graph it runs, and whether that is its parent's own graph.
+#[derive(Clone, Copy)]
 pub(crate) struct WorkerDecls<'a> {
     /// The graph's declared inputs.
     pub decls: &'a [InputDecl],

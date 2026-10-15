@@ -583,6 +583,15 @@ async fn every_mirrored_function_in_stage_runs() {
     };
     exercise(std::slice::from_ref(&fan_out)).await;
 
+    let workers: Vec<super::stage::FanOutWorker> = fan_out
+        .config
+        .workers_available
+        .iter()
+        .map(super::stage::FanOutWorker::from)
+        .collect();
+    exercise(&workers).await;
+    exercise_list(&workers).await;
+
     let stage_context = StageContext {
         blueprint: Arc::clone(&parsed),
         at: plan_at,

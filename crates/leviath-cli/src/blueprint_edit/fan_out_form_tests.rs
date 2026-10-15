@@ -119,4 +119,17 @@ fn nothing_to_rewrite_or_nothing_readable() {
     let nothing = "[graph]\n[[graph.stages]]\nname = \"a\"\nmode = { fan_out = { worker = { blueprint = {} } } }\n";
     let err = rewrite_fan_outs(nothing).unwrap_err();
     assert!(err.contains("stage 'a'"), "{err}");
+    let empty = "[graph]\n[[graph.stages]]\nname = \"a\"\nmode = { fan_out = { worker = {} } }\n";
+    let err = rewrite_fan_outs(empty).unwrap_err();
+    assert!(err.contains("names nothing"), "{err}");
+}
+
+/// A stage with a description but no name is no stage a worker can name, so
+/// it lends no `use_for`, and the rewrite goes on past it.
+#[test]
+fn a_nameless_stage_lends_no_description() {
+    let text = format!("{TABLE_FORM}\n[[graph.stages]]\ndescription = \"No name\"\n");
+    let (new, changed) = rewrite_fan_outs(&text).unwrap().unwrap();
+    assert_eq!(changed.len(), 1);
+    assert!(new.contains("use_for = \"Doing one part\""), "{new}");
 }

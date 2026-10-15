@@ -299,5 +299,7 @@ mod tests {
             presented_token(&req_to("/ws", None, Some("token=a+b/c="))).as_deref(),
             Some("a+b/c=")
         );
+        // An upgrade with no query at all presents nothing.
+        assert!(presented_token(&req_to("/ws", None, None)).is_none());
     }
 }

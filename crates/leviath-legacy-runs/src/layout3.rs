@@ -505,3 +505,142 @@ impl From<StateDelta> for state::StateDelta {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviath_runtime::runfile::codec::{self, FrameKind};
+    use leviath_runtime::spec::names::WorkerName;
+
+    /// A stage that does not fan out keeps its mode as it was.
+    #[test]
+    fn a_mode_that_is_not_a_fan_out_comes_through_as_it_was() {
+        let stage = StageName::new("s").unwrap();
+        assert!(matches!(
+            StageMode::Interactive.upgraded(&stage),
+            graph::StageMode::Interactive
+        ));
+        assert!(matches!(
+            StageMode::Output.upgraded(&stage),
+            graph::StageMode::Output
+        ));
+        let points = match StageMode::InteractivePoints(Vec::new()).upgraded(&stage) {
+            graph::StageMode::InteractivePoints(points) => points.len(),
+            _ => usize::MAX,
+        };
+        assert_eq!(points, 0);
+    }
+
+    /// A worker already running when layout 3 stopped keeps running under the
+    /// fan-out's one worker, as a queued item does.
+    #[test]
+    fn a_running_item_keeps_its_run_under_the_one_worker() {
+        let fan = FanOutState {
+            stage: StageName::new("split").unwrap(),
+            config: FanOutDef {
+                worker: WorkerSource::Stage(StageName::new("w").unwrap()),
+                merge_stage: None,
+                max_workers: None,
+                on_worker_failure: WorkerFailure::Continue,
+                split_prompt: String::new(),
+                results_region: None,
+                max_items: None,
+                max_attempts: None,
+            },
+            max_workers: None,
+            queued: vec![WorkItemState {
+                id: "b".into(),
+                inputs: InputValues::default(),
+            }],
+            active: vec![("a".into(), RunId::new("run-a").unwrap())],
+            done: Vec::new(),
+            failed: Vec::new(),
+            paused: false,
+            origin: FanOutOrigin::Stage,
+            parts: Vec::new(),
+        };
+        let upgraded = state::FanOutState::from(fan);
+        let w = WorkerName::new("w").unwrap();
+        assert_eq!(
+            upgraded.active,
+            [("a".to_string(), w.clone(), RunId::new("run-a").unwrap())]
+        );
+        assert_eq!(upgraded.queued[0].worker, w);
+        assert_eq!(upgraded.config.stage.as_str(), "split");
+    }
+
+    /// Every change but a fan-out's is the same in both layouts: written as
+    /// this build writes it, read as layout 3 and converted, it is the same
+    /// bytes. This is also what holds the mirror's variants in this build's
+    /// order.
+    #[test]
+    fn every_change_but_a_fan_outs_comes_through_unchanged() {
+        use state::Change as C;
+        let stage = StageName::new("s").unwrap();
+        let record = StageRecord {
+            stage: stage.clone(),
+            status: state::StageStatus::Complete,
+            entered: true,
+            spend: Default::default(),
+            models: Vec::new(),
+            visits: Vec::new(),
+            region_tokens: BTreeMap::new(),
+            first_call_prompt_tokens: None,
+            runaway_warned: false,
+            output_cap_raised: false,
+            started_at: Some(1),
+            ended_at: Some(2),
+            clock: Default::default(),
+        };
+        let changes: Vec<C> = vec![
+            C::Status(RunStatus::Complete),
+            C::Cursor(Cursor {
+                stage,
+                visit: "v".into(),
+                iteration: 1,
+            }),
+            C::Phase(PipelinePhase::Done),
+            C::AcceptsMessages(true),
+            C::Visits(BTreeMap::new()),
+            C::Progress(Default::default()),
+            C::LedgerRecord(1, record),
+            C::LedgerTruncate(2),
+            C::Context(Default::default()),
+            C::Pending(None),
+            C::Inbox(Vec::new()),
+            C::Interactions(Vec::new()),
+            C::Totals(Default::default()),
+            C::Clock(Default::default()),
+            C::Flags(Default::default()),
+            C::Children(vec![RunId::new("run-c").unwrap()]),
+            C::Title(Some("t".into())),
+            C::FinalOutput(None),
+            C::WaitReason(None),
+            C::LastTransition(None),
+            C::TitleError(Some("e".into())),
+            C::ReadPaths(None),
+            C::Point(Default::default()),
+            C::Held(None),
+            C::Files(Default::default()),
+            C::Blobs(Vec::new()),
+            C::Grants(Default::default()),
+            C::Written(3),
+            C::LastProgressAt(Some(4)),
+            C::RemoteJobs(BTreeMap::new()),
+            C::FanOut(None),
+        ];
+        for change in changes {
+            let written = codec::encode(FrameKind::Delta, &change).unwrap();
+            let read: Change = codec::frame_at(&written, 0)
+                .unwrap()
+                .decode(&written)
+                .unwrap();
+            let back = state::Change::from(read);
+            assert_eq!(
+                codec::encode(FrameKind::Delta, &back).unwrap(),
+                written,
+                "{back:?}"
+            );
+        }
+    }
+}

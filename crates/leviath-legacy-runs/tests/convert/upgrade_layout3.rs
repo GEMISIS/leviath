@@ -220,3 +220,22 @@ fn a_layout_3_file_whose_state_does_not_read_is_refused() {
     assert_eq!(run.bytes(), bad);
     assert!(!run.dir.join("legacy").exists());
 }
+
+/// So is one whose step does not read: a frame that checks out but holds
+/// nothing a step could be.
+#[test]
+fn a_layout_3_file_whose_step_does_not_read_is_refused() {
+    let run = Layout3::new();
+    let fixture = run.bytes();
+    let spec = {
+        let frames = codec::scan(&fixture).frames;
+        fixture[..frames[0].end()].to_vec()
+    };
+    let not_a_step = codec::encode(FrameKind::Delta, &()).unwrap();
+    let bad = [spec, not_a_step].concat();
+    std::fs::write(run.file(), &bad).unwrap();
+    let err = upgrade(&run.dir).unwrap_err();
+    assert!(matches!(err, ConvertError::Unreadable { .. }), "{err}");
+    assert_eq!(run.bytes(), bad);
+    assert!(!run.dir.join("legacy").exists());
+}
