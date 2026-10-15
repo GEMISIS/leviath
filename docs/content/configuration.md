@@ -532,7 +532,10 @@ Because there is nobody to ask at that moment, a seed command also has to be cov
 `[safe_commands]`. `--no-seed-commands` refuses seed commands for one run.
 
 **`allow_local_network`** is off by default. Off, an agent's fetches cannot reach cloud metadata
-endpoints, your own `lev serve`, or anything else on your LAN.
+endpoints, your own `lev serve`, or anything else on your LAN. The check covers each redirect, and
+the address the fetch finally connects to. So a name that answers with a public address when
+checked and a private one when dialled (DNS rebinding) is refused too. The proxies this machine
+is set to use are exempt, since a request through one connects to the proxy, not the site.
 
 **`allow_blueprint_permissions`** off still lets a blueprint pre-approve `web_search` and
 `web_fetch`. Anything else is clamped to the built-in default. To grant one tool to one agent

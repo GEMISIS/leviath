@@ -2869,6 +2869,8 @@ name = "leviath-net"
 version = "0.6.4"
 dependencies = [
  "encoding_rs",
+ "http",
+ "hyper-util",
  "leviath-testkit",
  "reqwest",
  "tokio",

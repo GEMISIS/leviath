@@ -12,21 +12,19 @@
 //! redirect hop, because a public URL that answers `302 Location:
 //! http://169.254.169.254/` reaches exactly the same place.
 //!
-//! ## What this does not cover
-//!
-//! A hostname is resolved here and then resolved *again* by the HTTP client when
-//! it connects. A DNS entry with a very short TTL that answers publicly the first
-//! time and privately the second slips through that window - classic DNS
-//! rebinding. Closing it needs a custom connector that dials the exact address
-//! this module approved, which the shared blocking client cannot express today.
-//! The check still stops every direct attempt (literal IPs, hostnames that
-//! resolve privately, and redirects), which is the whole of the reachable
-//! surface for a model that is picking URLs rather than running an attack.
+//! A hostname is resolved by the check and then resolved *again* by the HTTP
+//! client when it connects. A DNS entry with a very short TTL that answers
+//! publicly the first time and privately the second would slip through that
+//! window: DNS rebinding. [`CheckedResolver`] closes it. It is the client's
+//! resolver, and it applies the same address rule to the answer the client is
+//! about to dial. [`checked_client`] carries it, and a client built elsewhere
+//! for URLs an agent chose installs it with `dns_resolver`.
 
 pub mod read_caps;
 pub mod sse;
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The floor every outbound HTTP client in the workspace gets.
@@ -107,21 +105,110 @@ fn redirect_decision(
 ///
 /// `allow_local` is threaded through to the same check, so a caller that
 /// legitimately talks to `localhost` (an Ollama endpoint) does not have to
-/// choose between that and having a redirect policy at all.
+/// choose between that and having a redirect policy at all. Without it, the
+/// client resolves names through [`CheckedResolver`], so the address it dials
+/// is held to the rule the URL was.
 pub fn checked_client(timeouts: ClientTimeouts, allow_local: bool) -> reqwest::Client {
-    client_builder(timeouts)
-        .redirect(reqwest::redirect::Policy::custom(
-            move |attempt| match redirect_decision(
-                attempt.previous().len(),
-                attempt.url(),
-                allow_local,
-            ) {
+    let builder =
+        client_builder(timeouts).redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            match redirect_decision(attempt.previous().len(), attempt.url(), allow_local) {
                 Ok(()) => attempt.follow(),
                 Err(e) => attempt.error(e),
-            },
-        ))
+            }
+        }));
+    let builder = match allow_local {
+        true => builder,
+        false => builder.dns_resolver(Arc::new(CheckedResolver::new(never))),
+    };
+    builder
         .build()
         .expect("building an HTTP client fails only on TLS backend init")
+}
+
+/// The `allow_local` of a client that never allows local addresses.
+fn never() -> bool {
+    false
+}
+
+/// A DNS resolver that holds the addresses a client is about to dial to the
+/// rule [`check_url`] holds a URL to.
+///
+/// [`check_url`] resolves a name to judge it, and the client resolves it again
+/// to connect. Without this, a name could answer with a public address to the
+/// first lookup and a private one to the second. With it, the second answer is
+/// judged too, and a name with any restricted address fails to connect.
+///
+/// `allow_local` is asked on every lookup, so a process-wide client can follow
+/// a setting that is mirrored into an atomic.
+///
+/// The proxies this machine is set to use are left alone. A request through a
+/// proxy has the client look up the proxy rather than the site, and a proxy
+/// on the LAN is the user's own choice, not one a model made.
+#[derive(Debug, Clone)]
+pub struct CheckedResolver {
+    /// Whether local addresses are allowed right now.
+    allow_local: fn() -> bool,
+    /// The hosts of the proxies this machine is set to use.
+    proxies: Vec<String>,
+}
+
+impl CheckedResolver {
+    /// A resolver for a client whose local-address setting `allow_local`
+    /// reports, exempting the proxies the environment and system name.
+    pub fn new(allow_local: fn() -> bool) -> Self {
+        Self {
+            allow_local,
+            proxies: proxy_hosts(&hyper_util::client::proxy::matcher::Matcher::from_system()),
+        }
+    }
+}
+
+impl reqwest::dns::Resolve for CheckedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        let exempt =
+            (self.allow_local)() || self.proxies.iter().any(|p| p.eq_ignore_ascii_case(&host));
+        Box::pin(async move {
+            let found: Vec<SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let addrs = vetted(&host, found, exempt)?;
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// The addresses a lookup found, or the restricted one that refuses them all.
+///
+/// Every address must pass, as in [`check_url`]: which one the client would
+/// try first is not this function's to predict.
+fn vetted(
+    host: &str,
+    found: Vec<SocketAddr>,
+    exempt: bool,
+) -> Result<Vec<SocketAddr>, UrlRejection> {
+    match found
+        .iter()
+        .map(SocketAddr::ip)
+        .find(|ip| !exempt && is_restricted_addr(*ip))
+    {
+        Some(addr) => Err(UrlRejection::PrivateAddress {
+            host: host.to_string(),
+            addr,
+        }),
+        None => Ok(found),
+    }
+}
+
+/// The hosts of the proxies `matcher` sends plain and TLS requests through.
+///
+/// Asked about a name nobody excludes, so a `NO_PROXY` list does not hide a
+/// proxy that other requests go through.
+fn proxy_hosts(matcher: &hyper_util::client::proxy::matcher::Matcher) -> Vec<String> {
+    ["http://leviath.invalid/", "https://leviath.invalid/"]
+        .into_iter()
+        .filter_map(|dst| matcher.intercept(&http::Uri::from_static(dst)))
+        .filter_map(|proxy| proxy.uri().host().map(str::to_string))
+        .collect()
 }
 
 /// A redirect policy for a client whose requests carry credentials: a hop is
@@ -215,23 +302,44 @@ impl std::fmt::Display for UrlRejection {
     }
 }
 
+/// So a refusal can be a resolver's error, which reqwest boxes.
+impl std::error::Error for UrlRejection {}
+
 /// Whether `addr` is outside the public internet, and so off-limits to a fetch
 /// whose URL an agent chose.
 ///
 /// Covers loopback, RFC 1918 private, link-local (which includes the
-/// `169.254.169.254` cloud metadata endpoint), CGNAT, unspecified, multicast,
-/// broadcast, and documentation ranges - plus the IPv6 equivalents. IPv4-mapped
-/// IPv6 addresses are unwrapped first, so `::ffff:127.0.0.1` cannot be used to
-/// smuggle a loopback address past a v6 check.
+/// `169.254.169.254` cloud metadata endpoint), CGNAT, `0.0.0.0/8`, multicast,
+/// broadcast, and documentation ranges - plus the IPv6 equivalents. An IPv6
+/// address that carries an IPv4 one is judged by the IPv4 one, so
+/// `::ffff:127.0.0.1` cannot smuggle a loopback address past a v6 check.
 fn is_restricted_addr(addr: IpAddr) -> bool {
     match addr {
         IpAddr::V4(v4) => is_restricted_v4(v4),
-        // `::ffff:a.b.c.d` is the same host as `a.b.c.d`; classify it as v4 so
-        // the v4 rules (which are the detailed ones) actually apply.
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+        // Classified as v4, so the v4 rules (which are the detailed ones)
+        // actually apply.
+        IpAddr::V6(v6) => match embedded_v4(v6) {
             Some(v4) => is_restricted_v4(v4),
             None => is_restricted_v6(v6),
         },
+    }
+}
+
+/// The IPv4 address an IPv6 one reaches, for the forms that carry one:
+/// mapped (`::ffff:a.b.c.d`), compatible (`::a.b.c.d`), NAT64
+/// (`64:ff9b::a.b.c.d`) and 6to4 (`2002:aabb:ccdd::`, for `a.b.c.d`).
+///
+/// NAT64 and 6to4 are judged by the address they lead to: a NAT64 gateway
+/// turns `64:ff9b::7f00:1` into a connection to `127.0.0.1` on its own side.
+fn embedded_v4(a: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = a.segments();
+    let v4 = |hi: u16, lo: u16| Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
+    match s {
+        [0, 0, 0, 0, 0, 0 | 0xffff, hi, lo] | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => {
+            Some(v4(hi, lo))
+        }
+        [0x2002, hi, lo, ..] => Some(v4(hi, lo)),
+        _ => None,
     }
 }
 
@@ -240,7 +348,9 @@ fn is_restricted_v4(a: Ipv4Addr) -> bool {
     a.is_loopback()
         || a.is_private()
         || a.is_link_local()
-        || a.is_unspecified()
+        // 0.0.0.0/8 - "this network". Linux connects `0.0.0.1` to the local
+        // host, so the whole range goes, not only `0.0.0.0`.
+        || b0 == 0
         || a.is_multicast()
         || a.is_broadcast()
         || a.is_documentation()
@@ -253,15 +363,21 @@ fn is_restricted_v4(a: Ipv4Addr) -> bool {
         || b0 >= 240
 }
 
+/// The IPv6 rules, for an address [`embedded_v4`] found no IPv4 one in. So
+/// `::1` and `::` are judged as IPv4 `0.0.0.1` and `0.0.0.0`, which the v4
+/// rules refuse.
 fn is_restricted_v6(a: Ipv6Addr) -> bool {
-    let seg0 = a.segments()[0];
-    a.is_loopback()
-        || a.is_unspecified()
-        || a.is_multicast()
+    let [seg0, seg1, seg2, ..] = a.segments();
+    a.is_multicast()
         // fc00::/7 - unique local. `is_unique_local` is unstable.
         || (seg0 & 0xfe00) == 0xfc00
         // fe80::/10 - link-local unicast. `is_unicast_link_local` is unstable.
         || (seg0 & 0xffc0) == 0xfe80
+        // 64:ff9b:1::/48 - NAT64 for local use, translating to whatever the
+        // operator's network holds.
+        || (seg0 == 0x64 && seg1 == 0xff9b && seg2 == 1)
+        // 2001:db8::/32 - documentation.
+        || (seg0 == 0x2001 && seg1 == 0x0db8)
 }
 
 /// Check one URL against the outbound policy.
@@ -791,5 +907,131 @@ mod tests {
         assert!(!is_restricted_addr("8.8.8.8".parse().unwrap()));
         assert!(is_restricted_addr("ff02::1".parse().unwrap()));
         assert!(!is_restricted_addr("2001:4860:4860::8888".parse().unwrap()));
+    }
+
+    /// The ranges that reach a restricted address by another spelling: all of
+    /// `0.0.0.0/8`, an IPv4 address carried in IPv6 (compatible, NAT64,
+    /// 6to4), NAT64 for local use, and IPv6 documentation.
+    #[test]
+    fn restricted_classification_sees_through_other_spellings() {
+        for s in [
+            "0.0.0.1",
+            "0.255.255.255",
+            "::",
+            "::1",
+            "::127.0.0.1",            // IPv4-compatible loopback
+            "::ffff:169.254.169.254", // mapped metadata endpoint
+            "64:ff9b::7f00:1",        // NAT64 to 127.0.0.1
+            "64:ff9b::a9fe:a9fe",     // NAT64 to 169.254.169.254
+            "2002:7f00:1::",          // 6to4 around 127.0.0.1
+            "2002:c0a8:101::1",       // 6to4 around 192.168.1.1
+            "64:ff9b:1::1",           // NAT64 for local use
+            "2001:db8::1",            // documentation
+        ] {
+            assert!(is_restricted_addr(s.parse().unwrap()), "{s}");
+        }
+        // Each leads somewhere public, so each is allowed.
+        for s in ["64:ff9b::808:808", "2002:808:808::", "::ffff:8.8.8.8"] {
+            assert!(!is_restricted_addr(s.parse().unwrap()), "{s}");
+        }
+    }
+
+    /// The addresses a lookup found pass only when none is restricted, and
+    /// an exempt lookup passes whatever it found.
+    #[test]
+    fn a_lookup_passes_only_when_every_address_does() {
+        let addr = |s: &str| SocketAddr::new(s.parse().unwrap(), 0);
+        let public = vec![addr("93.184.216.34")];
+        assert_eq!(vetted("h", public.clone(), false), Ok(public));
+
+        let split = vec![addr("93.184.216.34"), addr("127.0.0.1")];
+        let refused = vetted("split.example", split.clone(), false).unwrap_err();
+        assert_eq!(refused.kind(), "private_address");
+        assert!(refused.to_string().contains("127.0.0.1"), "{refused}");
+        assert_eq!(vetted("split.example", split.clone(), true), Ok(split));
+    }
+
+    /// The hosts of the proxies plain and TLS requests go through, each once
+    /// it is named, and none without a proxy.
+    #[test]
+    fn the_proxy_hosts_are_read_from_the_matcher() {
+        use hyper_util::client::proxy::matcher::Matcher;
+        let both = Matcher::builder()
+            .http("http://proxy.corp:3128")
+            .https("http://tls-proxy.corp:3129")
+            .build();
+        assert_eq!(proxy_hosts(&both), ["proxy.corp", "tls-proxy.corp"]);
+        assert!(proxy_hosts(&Matcher::builder().build()).is_empty());
+        // Whatever this machine is set to, reading it does not fail.
+        let _ = CheckedResolver::new(never);
+    }
+
+    /// What the resolver hands the client: refused for a name with a
+    /// restricted address, unless local addresses are allowed or the name is
+    /// a proxy's, and the lookup's own error for a name that does not resolve.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_resolver_refuses_what_check_url_would() {
+        use reqwest::dns::Resolve as _;
+        let name = |s: &str| s.parse::<reqwest::dns::Name>().expect("a name");
+        let strict = CheckedResolver {
+            allow_local: never,
+            proxies: Vec::new(),
+        };
+        // `.err()`, as the addresses are not `Debug`.
+        let refused = strict
+            .resolve(name("localhost"))
+            .await
+            .err()
+            .expect("loopback is refused")
+            .to_string();
+        assert!(refused.contains("'localhost' resolves to"), "{refused}");
+
+        let local = CheckedResolver {
+            allow_local: || true,
+            proxies: Vec::new(),
+        };
+        let found: Vec<SocketAddr> = local
+            .resolve(name("localhost"))
+            .await
+            .expect("allowed")
+            .collect();
+        assert!(found.iter().all(|a| a.ip().is_loopback()), "{found:?}");
+
+        let proxy = CheckedResolver {
+            allow_local: never,
+            proxies: vec!["LOCALHOST".to_string()],
+        };
+        assert!(proxy.resolve(name("localhost")).await.is_ok());
+
+        assert!(strict.resolve(name("nowhere.invalid")).await.is_err());
+    }
+
+    /// The client end to end: a URL that names a loopback host by name is
+    /// refused when it connects, and allowed when local addresses are. An IP
+    /// literal is not looked up, so it is [`check_url`]'s alone to judge.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn checked_client_refuses_to_dial_a_name_that_resolves_privately() {
+        let addr = redirecting_server(String::new(), 0).await;
+        let by_name = format!("http://localhost:{}/hook", addr.port());
+
+        let err = checked_client(ClientTimeouts::default(), false)
+            .get(&by_name)
+            .send()
+            .await
+            .expect_err("a name resolving to loopback is not dialled");
+        let mut chain = err.to_string();
+        let mut src: Option<&dyn std::error::Error> = std::error::Error::source(&err);
+        while let Some(e) = src {
+            chain.push_str(&format!(": {e}"));
+            src = e.source();
+        }
+        assert!(chain.contains("resolves to"), "{chain}");
+
+        let resp = checked_client(ClientTimeouts::default(), true)
+            .get(&by_name)
+            .send()
+            .await
+            .expect("local addresses are allowed");
+        assert_eq!(resp.status().as_u16(), 204);
     }
 }

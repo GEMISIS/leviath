@@ -187,6 +187,11 @@ regex = "1.13"
 # `leviath-net` (which also holds the shared client); `leviath-mcp` uses it for
 # `url::Host`. `reqwest::Url` IS this crate's `Url`, so the two interoperate.
 url = "2.5"
+# Both already in the tree via reqwest. `leviath-net`'s resolver asks
+# hyper-util's proxy matcher, the one reqwest's `system-proxy` uses, which
+# hosts are this machine's proxies; `http::Uri` is the type it asks with.
+http = "1"
+hyper-util = { version = "0.1", default-features = false, features = ["client-proxy", "client-proxy-system"] }
 tiktoken-rs = "0.12"
 # Compiles tool-parameter JSON Schemas and validates model-supplied arguments
 # before dispatch (issue #155). `default-features = false` is deliberate: the
