@@ -1,9 +1,10 @@
 //! `lev blueprint`: work on blueprint files.
 //!
 //! `lev blueprint migrate` converts an `agent.leviath` manifest into an
-//! `agent.toml` describing exactly the same run. Validate the result with
-//! `lev validate agent.toml`. An `agent.leviath` is read by the
-//! `leviath-legacy-runs` crate.
+//! `agent.toml` describing exactly the same run, and rewrites an
+//! `agent.toml` whose fan-outs name one `worker` the way this build reads
+//! them. Validate the result with `lev validate agent.toml`. An
+//! `agent.leviath` is read by the `leviath-legacy-runs` crate.
 
 use std::path::{Path, PathBuf};
 
@@ -23,14 +24,16 @@ pub struct BlueprintArgs {
 /// The `lev blueprint` subcommands.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum BlueprintCommand {
-    /// Convert an `agent.leviath` manifest into an `agent.toml` blueprint
+    /// Convert an `agent.leviath` manifest into an `agent.toml` blueprint, or
+    /// rewrite an `agent.toml` whose fan-outs name one `worker`
     Migrate(MigrateArgs),
 }
 
 /// Arguments for `lev blueprint migrate`.
 #[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
 pub struct MigrateArgs {
-    /// The manifest: an `agent.leviath`, or the directory holding one.
+    /// The manifest: an `agent.leviath`, an `agent.toml` whose fan-outs name
+    /// one `worker`, or the directory holding one.
     #[arg(value_name = "PATH")]
     pub path: PathBuf,
 
@@ -63,21 +66,11 @@ pub(crate) fn migrate(args: &MigrateArgs) -> anyhow::Result<Option<String>> {
     let manifest = manifest_path(&args.path);
     let text = std::fs::read_to_string(&manifest)
         .with_context(|| format!("could not read '{}'", manifest.display()))?;
-    let Migrated {
-        name,
-        text: blueprint,
-        notes,
-        dropped,
-    } = convert(&text).map_err(|problems| {
-        let mut lines = vec![format!(
-            "'{}' does not convert: {} problem(s)",
-            manifest.display(),
-            problems.len()
-        )];
-        lines.extend(problems.iter().map(|p| format!("  {p}")));
-        anyhow::anyhow!(lines.join("\n"))
-    })?;
-    for line in said(&name, &notes, &dropped) {
+    let (blueprint, lines) = match manifest.extension().is_some_and(|e| e == "toml") {
+        true => rewritten(&manifest, &text)?,
+        false => converted(&manifest, &text)?,
+    };
+    for line in lines {
         eprintln!("{line}");
     }
     let Some(out) = &args.output else {
@@ -99,6 +92,49 @@ pub(crate) fn migrate(args: &MigrateArgs) -> anyhow::Result<Option<String>> {
     Ok(None)
 }
 
+/// An `agent.leviath`'s text as an `agent.toml`, and what to tell the
+/// person running the migration, or every problem with it.
+fn converted(manifest: &Path, text: &str) -> anyhow::Result<(String, Vec<String>)> {
+    let Migrated {
+        name,
+        text: blueprint,
+        notes,
+        dropped,
+    } = convert(text).map_err(|problems| {
+        let mut lines = vec![format!(
+            "'{}' does not convert: {} problem(s)",
+            manifest.display(),
+            problems.len()
+        )];
+        lines.extend(problems.iter().map(|p| format!("  {p}")));
+        anyhow::anyhow!(lines.join("\n"))
+    })?;
+    Ok((blueprint, said(&name, &notes, &dropped)))
+}
+
+/// An `agent.toml` with each fan-out that names one `worker` rewritten to
+/// declare its `workers_available`, and a note for each; refused when no
+/// fan-out names one.
+fn rewritten(manifest: &Path, text: &str) -> anyhow::Result<(String, Vec<String>)> {
+    let shown = manifest.display();
+    let (blueprint, changed) = crate::blueprint_edit::fan_out_form::rewrite_fan_outs(text)
+        .map_err(|why| anyhow::anyhow!("'{shown}' does not rewrite: {why}"))?
+        .with_context(|| {
+            format!("'{shown}' has no fan-out naming one `worker`; nothing to migrate")
+        })?;
+    let notes = changed
+        .iter()
+        .map(|c| {
+            format!(
+                "note: the fan-out of stage '{}' now declares its one worker as '{}' in \
+                 workers_available",
+                c.stage, c.worker
+            )
+        })
+        .collect();
+    Ok((blueprint, notes))
+}
+
 /// What a migration tells the person running it besides the blueprint: a
 /// `note:` for each setting the new file spells differently, and a
 /// `warning:` for each key it dropped because the old release never read it.
@@ -113,11 +149,13 @@ fn said(name: &str, notes: &[String], dropped: &[impl std::fmt::Display]) -> Vec
 /// The name of an `agent.leviath` manifest, inside its directory.
 const MANIFEST_FILE: &str = "agent.leviath";
 
-/// The manifest `path` names: itself, or the `agent.leviath` in it.
+/// The manifest `path` names: itself, or the `agent.leviath` in it, or its
+/// `agent.toml` when it holds no `agent.leviath`.
 fn manifest_path(path: &Path) -> PathBuf {
-    match path.is_dir() {
-        true => path.join(MANIFEST_FILE),
-        false => path.to_path_buf(),
+    match (path.is_dir(), path.join(MANIFEST_FILE).is_file()) {
+        (true, true) => path.join(MANIFEST_FILE),
+        (true, false) => path.join(leviath_blueprint::FILE_NAME),
+        (false, _) => path.to_path_buf(),
     }
 }
 
@@ -276,6 +314,60 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             .await
             .is_err()
         );
+    }
+
+    /// An `agent.toml` whose fan-out names one `worker`, by its directory or
+    /// by its file, is rewritten to declare its `workers_available`, and
+    /// validates; one with nothing to rewrite, or whose worker names nothing,
+    /// is refused.
+    #[test]
+    fn an_agent_toml_with_an_old_fan_out_is_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(leviath_blueprint::FILE_NAME);
+        let old = "[blueprint]\nname = \"split\"\nversion = \"0.1.0\"\n\n[graph]\n\
+                   layout = { total_budget_tokens = 1000, regions = [{ name = \"task\", kind = \"pinned\", budget = 500 }] }\n\
+                   inputs = [{ name = \"task\", type = \"text\", binds = [{ region = \"task\" }] }]\n\n\
+                   [[graph.stages]]\nname = \"split\"\nmode = { fan_out = { worker = { stage = \"w\" } } }\n\n\
+                   [[graph.stages]]\nname = \"w\"\nallow_as_worker = true\n";
+        std::fs::write(&file, old).unwrap();
+        let printed = migrate(&MigrateArgs {
+            path: dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .unwrap()
+        .expect("printed");
+        assert!(printed.contains("workers_available"), "{printed}");
+        let out = dir.path().join("new.toml");
+        assert!(
+            migrate(&MigrateArgs {
+                path: file.clone(),
+                output: Some(out.clone()),
+                force: false,
+            })
+            .unwrap()
+            .is_none()
+        );
+        leviath_blueprint::validate(&out).expect("the rewritten blueprint validates");
+
+        let err = migrate(&MigrateArgs {
+            path: out,
+            ..Default::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("nothing to migrate"), "{err}");
+        std::fs::write(
+            &file,
+            old.replace("{ stage = \"w\" }", "{ blueprint = {} }"),
+        )
+        .unwrap();
+        let err = migrate(&MigrateArgs {
+            path: file,
+            ..Default::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("does not rewrite"), "{err}");
     }
 
     /// Every problem a manifest has is listed, one per line; a manifest that

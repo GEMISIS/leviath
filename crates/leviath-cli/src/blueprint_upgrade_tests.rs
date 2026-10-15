@@ -428,3 +428,138 @@ fn a_failed_reinstall_never_loses_the_old_files() {
 fn aside_of(agents: &Path, bundled: &crate::bundled::BundledAgent) -> PathBuf {
     agents.join(format!(".{}.old-{}", bundled.name, std::process::id()))
 }
+
+/// An `agent.toml` an earlier build wrote, whose fan-out names one worker the
+/// old way, its worker stage `w` described.
+const OLD_FAN_OUT: &str = "[blueprint]\nname = \"splitter\"\nversion = \"0.1.0\"\n\n[graph]\n\
+     layout = { total_budget_tokens = 1000, regions = [{ name = \"task\", kind = \"pinned\", budget = 500 }] }\n\
+     inputs = [{ name = \"task\", type = \"text\", binds = [{ region = \"task\" }] }]\n\n\
+     [[graph.stages]]\nname = \"split\"\nmode = { fan_out = { worker = { stage = \"w\" } } }\n\n\
+     [[graph.stages]]\nname = \"w\"\ndescription = \"Doing one part\"\nallow_as_worker = true\n";
+
+/// A blueprint directory at `dir` whose `agent.toml` is `text`.
+fn toml_blueprint(dir: &Path, text: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join(leviath_blueprint::FILE_NAME), text).unwrap();
+}
+
+/// An `agent.toml` whose fan-out names one worker is rewritten in place to
+/// declare it in `workers_available`, and loads; the file as it was is kept
+/// under `legacy/`, a second such file beside it, and a pass over the new
+/// one finds nothing to do.
+#[test]
+fn an_agent_toml_with_an_old_fan_out_is_rewritten_in_place() {
+    let home = tempfile::tempdir().unwrap();
+    let agents = home.path().join("agents");
+    let dir = agents.join("splitter");
+    toml_blueprint(&dir, OLD_FAN_OUT);
+
+    let done = upgrade_all(
+        Some(&agents),
+        &[],
+        &backup(home.path()),
+        &StartupBoard::default(),
+    );
+    assert_eq!(
+        done[0].outcome,
+        Outcome::Migrated {
+            notes: vec![
+                "the fan-out of stage 'split' now declares its one worker as 'w' in \
+                 workers_available"
+                    .to_string()
+            ],
+            dropped: Vec::new(),
+        }
+    );
+    let loaded = leviath_blueprint::load(&dir).expect("the rewritten blueprint loads");
+    let leviath_runtime::spec::graph::StageMode::FanOut(fan) = &loaded.graph.stages[0].mode else {
+        panic!("still a fan-out");
+    };
+    assert_eq!(fan.sole_worker().unwrap().use_for, "Doing one part");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("legacy/agent.toml")).unwrap(),
+        OLD_FAN_OUT
+    );
+    let again = upgrade_all(
+        Some(&agents),
+        &[],
+        &backup(home.path()),
+        &StartupBoard::default(),
+    );
+    assert!(again.is_empty());
+
+    // A second old file keeps the first one kept.
+    toml_blueprint(&dir, OLD_FAN_OUT);
+    upgrade_all(
+        Some(&agents),
+        &[],
+        &backup(home.path()),
+        &StartupBoard::default(),
+    );
+    assert!(dir.join("legacy/agent.1.toml").is_file());
+}
+
+/// An install of a bundled blueprint in the old fan-out form is replaced by
+/// the bundled one, as an old `agent.leviath` install is.
+#[test]
+fn a_bundled_install_with_an_old_fan_out_is_replaced() {
+    let home = tempfile::tempdir().unwrap();
+    let agents = home.path().join("agents");
+    let reviewer = agents.join("reviewer");
+    toml_blueprint(&reviewer, OLD_FAN_OUT);
+    let done = upgrade_all(
+        Some(&agents),
+        &[],
+        &backup(home.path()),
+        &StartupBoard::default(),
+    );
+    assert_eq!(done[0].outcome, Outcome::Reinstalled);
+    assert_eq!(
+        std::fs::read_to_string(reviewer.join("legacy").join(leviath_blueprint::FILE_NAME))
+            .unwrap(),
+        OLD_FAN_OUT
+    );
+    assert!(leviath_blueprint::load(&reviewer).is_ok());
+}
+
+/// One whose worker names nothing is left as it was, and says why; a
+/// command names both kinds of waiting file, with the command that rewrites
+/// each.
+#[test]
+fn an_old_fan_out_that_does_not_rewrite_is_left_and_named() {
+    let home = tempfile::tempdir().unwrap();
+    let agents = home.path().join("agents");
+    let broken = OLD_FAN_OUT.replace("{ stage = \"w\" }", "{ blueprint = {} }");
+    toml_blueprint(&agents.join("broken"), &broken);
+    toml_blueprint(&agents.join("fine"), OLD_FAN_OUT);
+    let lines = pending_lines(Some(&agents), &[]);
+    let named = |name: &str| {
+        lines
+            .iter()
+            .find(|l| l.contains(&format!("'{name}'")))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let line = named("broken");
+    assert!(line.contains("could not be upgraded"), "{line}");
+    assert!(line.contains("names nothing"), "{line}");
+    let line = named("fine");
+    assert!(line.contains("lev daemon restart"), "{line}");
+    assert!(line.contains("--force"), "{line}");
+
+    let done = upgrade_all(
+        Some(&agents),
+        &[],
+        &backup(home.path()),
+        &StartupBoard::default(),
+    );
+    let broken_done = done.iter().find(|d| d.name() == "broken").unwrap();
+    let Outcome::Failed(problems) = &broken_done.outcome else {
+        panic!("left as it was");
+    };
+    assert!(problems[0].contains("names nothing"), "{problems:?}");
+    assert_eq!(
+        std::fs::read_to_string(agents.join("broken").join(leviath_blueprint::FILE_NAME)).unwrap(),
+        broken
+    );
+}
