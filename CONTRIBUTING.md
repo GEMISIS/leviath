@@ -53,12 +53,13 @@ The hook installs itself the first time you build or test, with no setup step. `
 The hook enforces, before every commit:
 
 - **formatting** (`cargo fmt --check`)
-- **clippy** with warnings-as-errors
+- **clippy** with warnings-as-errors (`cargo clippy --all-targets --all-features -- -D warnings`)
 - **doc lints** (`cargo doc` with `-D warnings`, so no broken or private intra-doc links and no stray HTML)
-- the **full test suite**
 - the **coverage-suppression-marker lint** (`ast-grep scan`, if `ast-grep` is installed; CI always enforces it)
+- the **structure check** (`cargo xtask structure`, below)
+- the **docs check** (`cargo xtask docs`)
 
-It does **not** run the full `cargo xtask coverage` check, which is several minutes, too slow for a local commit gate. CI runs it on every push instead, enforcing 100% for real.
+It does **not** run the tests, nor the `cargo xtask coverage` check, which is several minutes, too slow for a local commit gate. Run `cargo test --workspace --all-features` yourself before you push. CI runs both on every push, enforcing 100% coverage for real.
 
 If the hook script itself changes (e.g. a commit edits `.cargo-husky/hooks/pre-commit`), `cargo-husky` only reinstalls it on a *fresh* compile of its crate, not on incremental builds. Force it with:
 
@@ -202,6 +203,8 @@ its before-and-after numbers there.
 
 Declare a dependency in `[workspace.dependencies]` and reference it from a crate as `{ workspace = true }`. A version written inline in a crate manifest is invisible to anyone reading the root, which is how one crate ends up on a different minor from the rest without anybody deciding that.
 
+The one exception is the allocator. `mimalloc` and `leviath-alloc` are declared in `crates/leviath-cli/Cargo.toml`, and `libmimalloc-sys` in `crates/leviath-alloc/Cargo.toml`, so that no library crate can pick an allocator up from the workspace table. Only the binary chooses one.
+
 A version requirement here records **the minimum this workspace has actually been tested against, as of the last time someone deliberately raised it** — not the oldest version that might still compile. Raising a floor to match `Cargo.lock` is a no-op for resolution (the lock already picks that version), so it costs nothing and stops the requirement drifting into a claim nobody has checked. Do it when you notice the gap; there is no obligation to chase every release.
 
 To find genuinely duplicated dependencies, ask cargo:
@@ -225,12 +228,15 @@ carry one version — so there is one command:
 cargo xtask version 0.1.3
 ```
 
-That writes `[workspace.package] version`, the eleven intra-workspace pins in
-`[workspace.dependencies]` just below it, the allocator pin in
+That writes `[workspace.package] version`, every intra-workspace pin in
+`[workspace.dependencies]` just below it, the `leviath-alloc` pin in
 `crates/leviath-cli/Cargo.toml` (which lives there rather than in the workspace
 table because only the composition-root binary should pick an allocator), and
-`Cargo.lock`, then moves `## Unreleased` in `CHANGELOG.md` under a dated
-`## 0.1.3` heading and opens a fresh empty one. The pins exist because
+`Cargo.lock`. It then renames `## Unreleased` in `CHANGELOG.md` to a dated
+`## 0.1.3 - <date>` heading, so there has to be an `## Unreleased` heading to
+rename. It opens no empty one behind it, because leviath.dev's docs check
+rejects a section with no entries; the next person to write an entry adds the
+heading back. The pins exist because
 `cargo publish` refuses a path dependency with no version requirement, and Cargo
 has no way to make those requirements inherit the workspace version — so they
 are written out, and they have to agree. `cargo xtask version --check` is the CI
@@ -298,4 +304,4 @@ got wrong and why the replacement is shaped the way it is. Worth reading before 
 
 ## Regenerating the workflow diagrams
 
-The agent workflow SVGs in `docs/assets/agents/` are rendered from the Mermaid sources in `docs/assets/agents/src/`. See `docs/assets/agents/src/README.md` for the render command and theme configs. If you change an agent's stage graph in `crates/leviath-cli/agents/<name>/agent.leviath`, update its `.mmd` source and re-render both the light and dark variants.
+The agent workflow SVGs in `docs/assets/agents/` are rendered from the Mermaid sources in `docs/assets/agents/src/`. See `docs/assets/agents/src/README.md` for the render command and theme configs. If you change an agent's stage graph in `crates/leviath-cli/agents/<name>/agent.toml`, update its `.mmd` source and re-render both the light and dark variants.

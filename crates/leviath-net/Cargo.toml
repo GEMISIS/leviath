@@ -20,7 +20,7 @@ readme = "README.md"
 reqwest = { workspace = true }
 # The decoder `reqwest::Response::text` uses, so a capped read of a body
 # declaring `charset=` decodes it the same way the uncapped one did.
-encoding_rs = "0.8"
+encoding_rs = { workspace = true }
 # The resolver's lookup (`tokio::net::lookup_host`, on the blocking pool) and
 # the proxy matcher that tells it which hosts are proxies. All three are
 # already under reqwest.

@@ -692,8 +692,12 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
                 drift.join("; ")
             );
 
-            let prod = std::fs::read_to_string(PROD_WORKFLOW).unwrap_or_default();
-            let ci = std::fs::read_to_string(CI_WORKFLOW).unwrap_or_default();
+            // An error rather than an empty file: read as empty, a missing
+            // workflow reports every crate as missing from its release list.
+            let prod = std::fs::read_to_string(PROD_WORKFLOW)
+                .with_context(|| format!("reading {PROD_WORKFLOW}"))?;
+            let ci = std::fs::read_to_string(CI_WORKFLOW)
+                .with_context(|| format!("reading {CI_WORKFLOW}"))?;
             let manifests = crate::structure::crate_manifests()?;
             let opted_out = opted_out_of_publish(&manifests);
             let missing = missing_from_release_lists(&manifest, &prod, &ci, &opted_out);

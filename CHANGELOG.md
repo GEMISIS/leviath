@@ -306,6 +306,16 @@ same list.
   `McpGrants::save` is `McpGrants::set(server, auth)`, and
   `AuthStore::update_with` is the way to change a store other processes
   write.
+- `leviath-alloc` fails to build if `libmimalloc-sys` renumbers the option
+  next to the one it sets, its audit note names the mimalloc v3 header it
+  builds against, and it carries the crates.io metadata and README the
+  other crates do.
+- Every dependency version but the allocator's is declared once, in the
+  workspace table, and `tower` is a test-only dependency of `leviath-cli`.
+  `cargo xtask version --check` names a release workflow it cannot read,
+  rather than listing every crate as missing from it. CONTRIBUTING lists
+  what the pre-commit hook runs (not the tests) and what a version bump
+  does to the changelog.
 - `leviath_sys::write_atomic`'s doc says what it does with no mode and no
   file to copy one from: the new file is owner-only (`0o600`) on Unix.
 - The shell the `shell` tool runs is worked out once per process, rather

@@ -21,8 +21,13 @@ description = "Allocator tuning for the leviath binary: one audited mimalloc opt
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [features]
 # Off by default, so a build that does not ask for mimalloc compiles no FFI

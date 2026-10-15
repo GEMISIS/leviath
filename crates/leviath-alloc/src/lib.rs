@@ -33,22 +33,31 @@
 //! options table. It allocates nothing, frees nothing, holds no lock, and is
 //! documented callable at any time; subsequent purge decisions read the
 //! stored value. The option index for `mi_option_purge_delay` is `15` in
-//! the mimalloc v2 header vendored by `libmimalloc-sys` 0.1.49, anchored on
-//! both sides by constants that crate does bind: `mi_option_eager_commit_delay
-//! = 14` and `mi_option_use_numa_nodes = 16` (the crate predates the
-//! `reset_delay` to `purge_delay` rename and simply does not name index 15).
-//! The test below asserts the round trip through `mi_option_get`, so a
-//! vendored-header reordering would fail loudly rather than silently tune
-//! the wrong knob.
+//! the mimalloc v3 header `libmimalloc-sys` 0.1.49 builds by default (3.3.2),
+//! the option just before `mi_option_use_numa_nodes = 16`, which that crate
+//! does bind. It does not name index 15: it predates the `reset_delay` to
+//! `purge_delay` rename. A build-time check holds the index next to its
+//! neighbour, so a release that renumbers the binding fails to compile, and
+//! the test below asserts the round trip through `mi_option_get`, so a
+//! reordered header fails loudly too, rather than silently tuning the wrong
+//! knob.
 
 /// The environment variable mimalloc itself reads for this option; a user
 /// who set it keeps their value.
 pub const PURGE_DELAY_VAR: &str = "MIMALLOC_PURGE_DELAY";
 
-/// `mi_option_purge_delay` in the vendored mimalloc v2 option enum. See the
+/// `mi_option_purge_delay` in the vendored mimalloc v3 option enum. See the
 /// module-level audit note for how this index is pinned.
 #[cfg(feature = "mimalloc")]
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
+// The index sits just before the neighbour `libmimalloc-sys` names, so a
+// release of that crate that renumbers the options stops the build here.
+#[cfg(feature = "mimalloc")]
+const _: () = assert!(
+    MI_OPTION_PURGE_DELAY + 1 == libmimalloc_sys::mi_option_use_numa_nodes,
+    "mi_option_purge_delay is no longer the option before use_numa_nodes"
+);
 
 /// Configure mimalloc to purge freed memory at free time, unless the user
 /// chose their own delay via [`PURGE_DELAY_VAR`].
