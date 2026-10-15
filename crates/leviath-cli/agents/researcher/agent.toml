@@ -1,6 +1,6 @@
 [blueprint]
 name = "researcher"
-version = "0.6.0"
+version = "0.6.1"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 
 # gather -> analyze -> summarize -> summary
@@ -476,7 +476,10 @@ max_iterations = 4
 max_revisits = 1
 
 [graph.stages.mode.fan_out]
-worker = { blueprint = { name = "researcher" } }
+stage = "dig"
+workers_available = [
+    { name = "researcher", blueprint = "researcher", use_for = "Researching one narrower thread of the question and reporting what it found, with sources" },
+]
 max_workers = 3
 max_items = 3
 split_prompt = """

@@ -1,5 +1,6 @@
 //! Step 1: where the graph comes from.
 
+use super::fan_out::WorkerInputs;
 use super::{Source, rebase};
 use crate::spec::env::ResolveEnv;
 use crate::spec::graph::{RunGraph, StageMode, WorkerSource};
@@ -70,40 +71,55 @@ pub(super) async fn load(
     }
 }
 
-/// Pin each fan-out stage's installed worker blueprint to the revision
+/// Pin each fan-out stage's installed worker blueprints to the revision
 /// installed now, so every worker of the run (and of the run resumed) runs
-/// the blueprint the run was resolved against.
+/// the blueprint the run was resolved against, and say what inputs each
+/// declared worker takes, for the stage's `fan_out` tool to list.
 ///
 /// A worker blueprint that cannot be loaded is reported at `at`'s
-/// `stages.<stage>.mode.fan_out.worker`, with everything else wrong with the
-/// request: found here, it costs nothing, where found when the first worker
-/// starts it costs every stage the run paid for on the way there.
+/// `stages.<stage>.mode.fan_out.workers_available[i]`, with everything else
+/// wrong with the request: found here, it costs nothing, where found when the
+/// first worker starts it costs every stage the run paid for on the way there.
 pub(super) async fn pin_workers(
     graph: &mut RunGraph,
     at: &SpecPath,
     env: &dyn ResolveEnv,
     issues: &mut SpawnIssues,
-) {
+) -> WorkerInputs {
+    let own: Vec<String> = graph.inputs.iter().map(|d| d.name.to_string()).collect();
+    let mut inputs = WorkerInputs::new();
     for stage in &mut graph.stages {
         let StageMode::FanOut(fan) = &mut stage.mode else {
             continue;
         };
-        let WorkerSource::Blueprint(reference) = &mut fan.worker else {
-            continue;
-        };
-        match env.blueprint(reference).await {
-            Ok(loaded) => {
-                reference.digest = reference.digest.take().or(loaded.reference.digest);
-            }
-            Err(issue) => {
-                let worker = at
-                    .field("stages")
-                    .key(stage.name.as_str())
-                    .field("mode")
-                    .field("fan_out")
-                    .field("worker");
-                issues.push(rebase(&worker, issue));
+        for (i, worker) in fan.workers_available.iter_mut().enumerate() {
+            let key = (stage.name.clone(), worker.name.clone());
+            let reference = match &mut worker.runs {
+                WorkerSource::Stage(_) => {
+                    inputs.insert(key, own.clone());
+                    continue;
+                }
+                WorkerSource::Blueprint(reference) => reference,
+                WorkerSource::BlueprintFile(_) | WorkerSource::Query(_) => continue,
+            };
+            match env.blueprint(reference).await {
+                Ok(loaded) => {
+                    reference.digest = reference.digest.take().or(loaded.reference.digest);
+                    let names = loaded.graph.inputs.iter().map(|d| d.name.to_string());
+                    inputs.insert(key, names.collect());
+                }
+                Err(issue) => {
+                    let worker = at
+                        .field("stages")
+                        .key(stage.name.as_str())
+                        .field("mode")
+                        .field("fan_out")
+                        .field("workers_available")
+                        .index(i);
+                    issues.push(rebase(&worker, issue));
+                }
             }
         }
     }
+    inputs
 }

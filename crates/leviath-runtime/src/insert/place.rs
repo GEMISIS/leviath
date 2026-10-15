@@ -767,7 +767,11 @@ pub(crate) fn worker_entities(world: &mut World, state: &RunState) -> HashMap<St
     let Some(fan_out) = &state.fan_out else {
         return HashMap::new();
     };
-    let wanted: Vec<String> = fan_out.active.iter().map(|(_, r)| r.to_string()).collect();
+    let wanted: Vec<String> = fan_out
+        .active
+        .iter()
+        .map(|(_, _, r)| r.to_string())
+        .collect();
     let mut q = world.query::<(Entity, &AgentState)>();
     q.iter(world)
         .filter(|(_, s)| wanted.contains(&s.agent_id))
@@ -793,6 +797,7 @@ pub(crate) fn fan_out(
             .iter()
             .map(|item| crate::fanout::WorkItem {
                 id: item.id.clone(),
+                worker: item.worker.clone(),
                 inputs: item
                     .inputs
                     .0
@@ -804,7 +809,7 @@ pub(crate) fn fan_out(
         active: f
             .active
             .iter()
-            .map(|(item, run)| (item.clone(), run.to_string()))
+            .map(|(item, worker, run)| (item.clone(), worker.clone(), run.to_string()))
             .collect(),
         summaries: f.done.clone(),
         failures: f.failed.clone(),

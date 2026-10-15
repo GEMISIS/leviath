@@ -12,6 +12,7 @@
 //! A world with no runtime ([`FanOutIo`] absent, a world assembled by hand)
 //! does each in place.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
@@ -211,23 +212,27 @@ pub(crate) fn drain_hand_ups(world: &mut World) -> Vec<HandedUp> {
     landed
 }
 
-/// A `fan_out` call whose worker's inputs are being read off the tick. The
+/// A `fan_out` call whose workers' inputs are being read off the tick. The
 /// call waits, as [`PendingFanOut`], until they land.
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct ReadingWorkerInputs;
 
-/// The inputs a waiting `fan_out` call's worker declares, read off the tick:
-/// `None` when they could not be read, and each worker's own start checks
-/// them then.
-#[derive(Component, Debug, Clone)]
-pub(crate) struct WorkerInputs(pub(crate) Option<Vec<InputDecl>>);
+/// What reading one worker blueprint's inputs found: its declarations, `None`
+/// when this spawner cannot read it (the worker's own start checks its item
+/// then), or why the blueprint does not load.
+pub(crate) type InputsOf = Result<Option<Vec<InputDecl>>, String>;
 
-/// A read of a worker's inputs that has finished.
+/// The inputs a waiting `fan_out` call's worker blueprints declare, read off
+/// the tick, by worker.
+#[derive(Component, Debug, Clone)]
+pub(crate) struct WorkerInputs(pub(crate) BTreeMap<WorkerName, InputsOf>);
+
+/// A read of a call's worker inputs that has finished.
 pub(crate) struct InputsRead {
     /// The agent whose `fan_out` call it is for.
     entity: Entity,
-    /// What was read.
-    decls: Option<Vec<InputDecl>>,
+    /// What was read, by worker.
+    read: BTreeMap<WorkerName, InputsOf>,
 }
 
 /// The blueprint whose inputs a `fan_out` call's worker takes: one it names,
@@ -254,29 +259,39 @@ impl WorkerBlueprint {
     }
 }
 
-/// Read the inputs of `worker` for `entity`'s `fan_out` call, through the
-/// installed spawner. On the world's runtime when it has one (`None` now; the
-/// read lands as [`WorkerInputs`] on a later pass); otherwise in place,
-/// returned now. A world with no spawner reads nothing.
+/// Read the inputs of each of `workers` for `entity`'s `fan_out` call,
+/// through the installed spawner. On the world's runtime when it has one
+/// (`None` now; the read lands as [`WorkerInputs`] on a later pass);
+/// otherwise in place, returned now. A world with no spawner reads nothing,
+/// and every worker's own start checks its items.
 pub(crate) fn read_inputs(
     world: &World,
     entity: Entity,
-    worker: WorkerBlueprint,
-) -> Option<Option<Vec<InputDecl>>> {
+    workers: Vec<(WorkerName, WorkerBlueprint)>,
+) -> Option<BTreeMap<WorkerName, InputsOf>> {
+    let unread: BTreeMap<WorkerName, InputsOf> = workers
+        .iter()
+        .map(|(name, _)| (name.clone(), Ok(None)))
+        .collect();
     let Some(spawner) = world
         .get_resource::<FanOutSpawnerRes>()
         .map(|r| r.0.clone())
     else {
-        return Some(None);
+        return Some(unread);
     };
-    let read = move || {
-        let source = match worker {
-            WorkerBlueprint::Named(source) => source,
-            WorkerBlueprint::Query(query) => {
-                SpawnSource::Blueprint(spawner.find_worker(&query).ok()?)
-            }
-        };
-        spawner.worker_inputs(&source)
+    let read = move || -> BTreeMap<WorkerName, InputsOf> {
+        workers
+            .into_iter()
+            .map(|(name, worker)| {
+                let inputs = match worker {
+                    WorkerBlueprint::Named(source) => spawner.worker_inputs(&source),
+                    WorkerBlueprint::Query(query) => spawner
+                        .find_worker(&query)
+                        .and_then(|found| spawner.worker_inputs(&SpawnSource::Blueprint(found))),
+                };
+                (name, inputs)
+            })
+            .collect()
     };
     let Some(io) = world.get_resource::<FanOutIo>() else {
         return Some(read());
@@ -291,14 +306,14 @@ pub(crate) fn read_inputs(
         async move {
             let _ = tx.send(InputsRead {
                 entity,
-                decls: read(),
+                read: read(),
             });
             wake.notify_one();
         },
         move |_| {
             let _ = lost_tx.send(InputsRead {
                 entity,
-                decls: None,
+                read: unread,
             });
             lost_wake.notify_one();
         },
@@ -316,11 +331,11 @@ pub(crate) fn land_inputs(world: &mut World) {
         }
     }
     // An agent that went meanwhile has no call left to check.
-    for InputsRead { entity, decls } in landed {
+    for InputsRead { entity, read } in landed {
         let _ = world.get_entity_mut(entity).map(|mut agent| {
             agent
                 .remove::<ReadingWorkerInputs>()
-                .insert(WorkerInputs(decls));
+                .insert(WorkerInputs(read));
         });
     }
 }

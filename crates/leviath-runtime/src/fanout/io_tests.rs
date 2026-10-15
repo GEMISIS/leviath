@@ -37,10 +37,12 @@ impl FanOutSpawner for Reading {
         BlueprintRef::parse(query).map_err(|e| e.to_string())
     }
 
-    fn worker_inputs(&self, _source: &SpawnSource) -> Option<Vec<InputDecl>> {
+    fn worker_inputs(&self, _source: &SpawnSource) -> Result<Option<Vec<InputDecl>>, String> {
         self.on.lock().unwrap().push(std::thread::current().id());
         assert!(!self.panics, "the read blew up");
-        Some(topic_blueprint(cfg(None, 1, WorkerFailure::Continue)).inputs)
+        Ok(Some(
+            topic_blueprint(cfg(None, 1, WorkerFailure::Continue)).inputs,
+        ))
     }
 }
 

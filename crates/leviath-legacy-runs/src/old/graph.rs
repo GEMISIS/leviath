@@ -265,7 +265,7 @@ impl Conv {
             })
             .collect();
         StageDef {
-            name,
+            name: name.clone(),
             description: s.description.clone(),
             system_prompt: s
                 .config
@@ -277,7 +277,7 @@ impl Conv {
             required_tools: self.names(p.field("required_tools"), &s.required_tools),
             connectors: self.names::<McpServerName>(p.field("connectors"), &s.available_connectors),
             max_iterations: self.opt_small(p.field("max_iterations"), s.max_iterations),
-            mode: self.mode(&s.mode, &p.field("mode")),
+            mode: self.mode(&s.mode, &name, &p.field("mode")),
             layout: s
                 .context_layout
                 .as_ref()
@@ -400,7 +400,7 @@ impl Conv {
         })
     }
 
-    fn mode(&mut self, m: &bp::StageMode, p: &SpecPath) -> StageMode {
+    fn mode(&mut self, m: &bp::StageMode, stage: &StageName, p: &SpecPath) -> StageMode {
         match m {
             bp::StageMode::Autonomous => StageMode::Autonomous,
             bp::StageMode::Interactive => StageMode::Interactive,
@@ -412,10 +412,12 @@ impl Conv {
                     .map(|(i, pt)| self.point(pt, &p.index(i)))
                     .collect(),
             ),
-            bp::StageMode::FanOut { config } => match self.fan_out(config, &p.field("fan_out")) {
-                Some(f) => StageMode::FanOut(f),
-                None => StageMode::Autonomous,
-            },
+            bp::StageMode::FanOut { config } => {
+                match self.fan_out(config, stage, &p.field("fan_out")) {
+                    Some(f) => StageMode::FanOut(f),
+                    None => StageMode::Autonomous,
+                }
+            }
         }
     }
 
@@ -448,7 +450,14 @@ impl Conv {
         }
     }
 
-    fn fan_out(&mut self, f: &bp::FanOutConfig, p: &SpecPath) -> Option<FanOutDef> {
+    /// An old fan-out of `stage`: its one worker, named after what it runs,
+    /// taking every item.
+    fn fan_out(
+        &mut self,
+        f: &bp::FanOutConfig,
+        stage: &StageName,
+        p: &SpecPath,
+    ) -> Option<FanOutDef> {
         let worker = match (&f.worker_agent, &f.worker_stage, &f.worker_query) {
             (Some(agent), None, None) => match WorkerSource::named(agent) {
                 Ok(worker) => worker,
@@ -469,7 +478,8 @@ impl Conv {
             }
         };
         Some(FanOutDef {
-            worker,
+            stage: stage.clone(),
+            workers_available: vec![WorkerOption::named_after(worker, EVERY_ITEM)],
             merge_stage: f
                 .merge_stage
                 .as_ref()

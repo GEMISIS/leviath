@@ -1195,7 +1195,8 @@ fn every_split_prompt_names_only_inputs_its_worker_takes() {
             let StageMode::FanOut(fan) = &stage.mode else {
                 continue;
             };
-            let worker_inputs = match &fan.worker {
+            let worker = fan.sole_worker().expect("a bundled fan-out has one worker");
+            let worker_inputs = match &worker.runs {
                 WorkerSource::Blueprint(reference) => {
                     let (_, worker) = files
                         .iter()

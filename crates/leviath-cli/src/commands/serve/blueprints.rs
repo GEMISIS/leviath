@@ -402,6 +402,17 @@ fn region_info(region: &RegionDef, total_budget_tokens: u32) -> RegionInfo {
     }
 }
 
+/// What a fan-out worker runs, as its `stage`, `blueprint` or `query`: the
+/// one that applies is the one present.
+fn runs_of(runs: &WorkerSource) -> (Option<String>, Option<String>, Option<String>) {
+    match runs {
+        WorkerSource::Stage(stage) => (Some(stage.to_string()), None, None),
+        WorkerSource::Blueprint(blueprint) => (None, Some(blueprint.to_string()), None),
+        WorkerSource::BlueprintFile(path) => (None, Some(path.to_string()), None),
+        WorkerSource::Query(query) => (None, None, Some(query.clone())),
+    }
+}
+
 /// The fan-out stages of a blueprint, with their limits resolved.
 ///
 /// The manifest text is on the same response, so a client *could* work these
@@ -416,14 +427,27 @@ fn fan_out_infos(graph: &RunGraph) -> Vec<FanOutInfo> {
         .iter()
         .filter_map(|stage| match &stage.mode {
             StageMode::FanOut(fan_out) => {
-                let (worker_agent, worker_stage, worker_query) = match &fan_out.worker {
-                    WorkerSource::Blueprint(blueprint) => (Some(blueprint.to_string()), None, None),
-                    WorkerSource::BlueprintFile(path) => (Some(path.to_string()), None, None),
-                    WorkerSource::Stage(stage) => (None, Some(stage.to_string()), None),
-                    WorkerSource::Query(query) => (None, None, Some(query.clone())),
-                };
+                let workers: Vec<FanOutWorkerInfo> = fan_out
+                    .workers_available
+                    .iter()
+                    .map(|w| {
+                        let (stage, blueprint, query) = runs_of(&w.runs);
+                        FanOutWorkerInfo {
+                            name: w.name.to_string(),
+                            stage,
+                            blueprint,
+                            query,
+                            use_for: w.use_for.clone(),
+                        }
+                    })
+                    .collect();
+                let (worker_stage, worker_agent, worker_query) = fan_out
+                    .sole_worker()
+                    .map(|w| runs_of(&w.runs))
+                    .unwrap_or_default();
                 Some(FanOutInfo {
                     stage: stage.name.to_string(),
+                    workers_available: workers,
                     worker_agent,
                     worker_stage,
                     worker_query,
@@ -1143,19 +1167,23 @@ system_prompt = "Plan the work"
 
 [[graph.stages]]
 name = "spread"
-mode = { fan_out = { worker = { stage = "worker" }, merge_stage = "gather", split_prompt = "split it", results_region = "findings", on_worker_failure = "fail_all", max_items = 12 } }
+mode = { fan_out = { stage = "spread", workers_available = [{ name = "part", stage = "worker", use_for = "Doing one part" }], merge_stage = "gather", split_prompt = "split it", results_region = "findings", on_worker_failure = "fail_all", max_items = 12 } }
 
 [[graph.stages]]
 name = "wide"
-mode = { fan_out = { worker = { blueprint = { name = "researcher" } }, split_prompt = "split it", max_workers = 4 } }
+mode = { fan_out = { stage = "wide", workers_available = [{ name = "researcher", blueprint = "researcher", use_for = "Researching one part" }], split_prompt = "split it", max_workers = 4 } }
 
 [[graph.stages]]
 name = "asked"
-mode = { fan_out = { worker = { query = "someone who reads papers" }, max_items = 0 } }
+mode = { fan_out = { stage = "asked", workers_available = [{ name = "reader", query = "someone who reads papers", use_for = "Reading one paper" }], max_items = 0 } }
 
 [[graph.stages]]
 name = "local"
-mode = { fan_out = { worker = { blueprint_file = "/opt/agents/reader" } } }
+mode = { fan_out = { stage = "local", workers_available = [{ name = "reader", blueprint = "/opt/agents/reader", use_for = "Reading one paper" }] } }
+
+[[graph.stages]]
+name = "mixed"
+mode = { fan_out = { stage = "mixed", workers_available = [{ name = "part", stage = "worker", use_for = "Doing one part" }, { name = "researcher", blueprint = "researcher", use_for = "Researching one part" }] } }
 
 [[graph.stages]]
 name = "worker"
@@ -1190,11 +1218,22 @@ system_prompt = "Gather"
             .unwrap();
         let bp: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
+        let part = serde_json::json!({
+            "name": "part",
+            "stage": "worker",
+            "use_for": "Doing one part",
+        });
+        let researcher = serde_json::json!({
+            "name": "researcher",
+            "blueprint": "researcher",
+            "use_for": "Researching one part",
+        });
         assert_eq!(
             bp["fan_outs"],
             serde_json::json!([
                 {
                     "stage": "spread",
+                    "workers_available": [part],
                     "worker_stage": "worker",
                     "merge_stage": "gather",
                     "max_workers": null,
@@ -1204,6 +1243,7 @@ system_prompt = "Gather"
                 },
                 {
                     "stage": "wide",
+                    "workers_available": [researcher],
                     "worker_agent": "researcher",
                     "max_workers": 4,
                     "max_items": null,
@@ -1211,6 +1251,11 @@ system_prompt = "Gather"
                 },
                 {
                     "stage": "asked",
+                    "workers_available": [{
+                        "name": "reader",
+                        "query": "someone who reads papers",
+                        "use_for": "Reading one paper",
+                    }],
                     "worker_query": "someone who reads papers",
                     "max_workers": null,
                     "max_items": null,
@@ -1218,7 +1263,19 @@ system_prompt = "Gather"
                 },
                 {
                     "stage": "local",
+                    "workers_available": [{
+                        "name": "reader",
+                        "blueprint": reader,
+                        "use_for": "Reading one paper",
+                    }],
                     "worker_agent": reader,
+                    "max_workers": null,
+                    "max_items": null,
+                    "on_worker_failure": "continue",
+                },
+                {
+                    "stage": "mixed",
+                    "workers_available": [part, researcher],
                     "max_workers": null,
                     "max_items": null,
                     "on_worker_failure": "continue",

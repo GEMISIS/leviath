@@ -1580,7 +1580,7 @@ to = "plan"
             r#"
 [[graph.stages]]
 name = "split"
-mode = { fan_out = { worker = { blueprint = { name = "researcher" } }, merge_stage = "merge" } }
+mode = { fan_out = { stage = "split", workers_available = [{ name = "researcher", blueprint = "researcher", use_for = "Doing one item" }], merge_stage = "merge" } }
 
 [[graph.stages]]
 name = "merge"

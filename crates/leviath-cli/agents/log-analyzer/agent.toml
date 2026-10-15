@@ -1,6 +1,6 @@
 [blueprint]
 name = "log-analyzer"
-version = "0.4.0"
+version = "0.4.1"
 description = "Analyzes log files - sweeps many files or time windows in parallel, then identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
 
 [graph]
@@ -142,7 +142,10 @@ max_iterations = 4
 max_revisits = 1
 
 [graph.stages.mode.fan_out]
-worker = { stage = "scan_worker" }
+stage = "split_logs"
+workers_available = [
+    { name = "sweep", stage = "scan_worker", use_for = "Sweeping one log file or time window for errors, anomalies and trends" },
+]
 merge_stage = "analyze"
 # Every slice at once rather than in waves; the daemon's inference pool paces
 # the requests. Set to 0 for no cap at all.

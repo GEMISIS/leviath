@@ -17,6 +17,10 @@ use leviath_providers::Provider as _;
 #[derive(Component, Debug, PartialEq)]
 struct Marker(u8);
 
+fn worker_name(name: &str) -> crate::spec::names::WorkerName {
+    crate::spec::names::WorkerName::new(name).unwrap()
+}
+
 fn sn(name: &str) -> StageName {
     StageName::new(name).unwrap()
 }
@@ -716,7 +720,6 @@ fn a_mid_run_state_is_placed_exactly() {
 fn a_fan_out_in_progress_is_placed_with_its_workers() {
     let spec = Arc::new(two_stage_spec());
     let config = crate::spec::graph::FanOutDef {
-        worker: crate::spec::graph::WorkerSource::Stage(sn("build")),
         merge_stage: Some(sn("build")),
         max_workers: Some(3),
         on_worker_failure: crate::spec::graph::WorkerFailure::FailAll,
@@ -724,6 +727,7 @@ fn a_fan_out_in_progress_is_placed_with_its_workers() {
         results_region: Some(crate::spec::names::RegionName::new("task").unwrap()),
         max_items: Some(9),
         max_attempts: Some(2),
+        ..crate::test_graph::fan_out_to("plan", "build")
     };
     let mut state = mid_run();
     state.phase = PipelinePhase::FanOut;
@@ -734,6 +738,7 @@ fn a_fan_out_in_progress_is_placed_with_its_workers() {
         max_workers: Some(3),
         queued: vec![WorkItemState {
             id: "q1".into(),
+            worker: worker_name("build"),
             inputs: crate::spec::inputs::InputValues(
                 [(
                     crate::spec::names::InputName::new("topic").unwrap(),
@@ -744,8 +749,16 @@ fn a_fan_out_in_progress_is_placed_with_its_workers() {
             ),
         }],
         active: vec![
-            ("a1".into(), RunId::new("worker-1").unwrap()),
-            ("a2".into(), RunId::new("worker-gone").unwrap()),
+            (
+                "a1".into(),
+                worker_name("build"),
+                RunId::new("worker-1").unwrap(),
+            ),
+            (
+                "a2".into(),
+                worker_name("build"),
+                RunId::new("worker-gone").unwrap(),
+            ),
         ],
         done: vec![("d1".into(), "summary".into())],
         failed: vec![("f1".into(), "broke".into())],
@@ -779,13 +792,18 @@ fn a_fan_out_in_progress_is_placed_with_its_workers() {
     assert_eq!(restored.config, config);
     assert_eq!(restored.max_workers, Some(3));
     assert_eq!(restored.pending[0].id, "q1");
+    assert_eq!(restored.pending[0].worker, worker_name("build"));
     assert_eq!(
         restored.pending[0].inputs["topic"],
         crate::spec::inputs::RawInput::Text("rust".into())
     );
     assert_eq!(
         restored.active,
-        vec![("a1".to_string(), "worker-1".to_string())]
+        vec![(
+            "a1".to_string(),
+            worker_name("build"),
+            "worker-1".to_string()
+        )]
     );
     assert_eq!(
         restored.summaries,
@@ -811,8 +829,8 @@ fn a_tool_started_fan_out_keeps_the_calls_worker() {
         ),
         crate::spec::graph::WorkerSource::Query("find one".into()),
     ] {
-        let mut config = crate::spec::graph::FanOutDef::same_graph(sn("build"));
-        config.worker = worker;
+        let mut config = crate::test_graph::fan_out_to("build", "build");
+        config.workers_available[0].runs = worker;
         let mut state = mid_run();
         state.fan_out = Some(FanOutState {
             stage: sn("build"),

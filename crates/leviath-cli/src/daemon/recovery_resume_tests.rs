@@ -374,7 +374,8 @@ model = { models = [{ provider = "anthropic", model = "m" }] }
 system_prompt = "Split."
 
 [graph.stages.mode.fan_out]
-worker = { stage = "work" }
+stage = "split"
+workers_available = [{ name = "work", stage = "work", use_for = "Doing one item" }]
 merge_stage = "merge"
 max_workers = 4
 
@@ -446,6 +447,8 @@ async fn finished_fan_out_workers_come_back_as_done_after_a_restart() {
         }
     };
     let id = |run: &str| RunId::new(run).unwrap();
+    let worker = config.workers_available[0].name.clone();
+    let w = worker.clone();
     change(runs.path(), &parent, |s| {
         s.status = RunStatus::Waiting;
         s.phase = PipelinePhase::FanOut;
@@ -457,9 +460,9 @@ async fn finished_fan_out_workers_come_back_as_done_after_a_restart() {
             max_workers: Some(4),
             queued: Vec::new(),
             active: vec![
-                ("w1".to_string(), id(&finished)),
-                ("w2".to_string(), id(&failed)),
-                ("w3".to_string(), id(&running)),
+                ("w1".to_string(), w.clone(), id(&finished)),
+                ("w2".to_string(), w.clone(), id(&failed)),
+                ("w3".to_string(), w.clone(), id(&running)),
             ],
             done: Vec::new(),
             failed: Vec::new(),
@@ -481,7 +484,7 @@ async fn finished_fan_out_workers_come_back_as_done_after_a_restart() {
         [("w1".to_string(), "w1 found it".to_string())]
     );
     assert_eq!(fan_out.failed, [("w2".to_string(), "w2 broke".to_string())]);
-    assert_eq!(fan_out.active, [("w3".to_string(), id(&running))]);
+    assert_eq!(fan_out.active, [("w3".to_string(), worker, id(&running))]);
 }
 
 /// After a daemon died, a call it had running comes back interrupted rather
@@ -725,8 +728,10 @@ async fn a_worker_its_parent_never_recorded_runs_its_item_once() {
             other => panic!("the split stage fans out: {other:?}"),
         }
     };
+    let worker = config.workers_available[0].name.clone();
     let queued = |id: &str, task: &str| WorkItemState {
         id: id.to_string(),
+        worker: worker.clone(),
         inputs: leviath_runtime::spec::inputs::InputValues(
             [(
                 leviath_runtime::spec::names::InputName::new("task").unwrap(),
@@ -759,7 +764,10 @@ async fn a_worker_its_parent_never_recorded_runs_its_item_once() {
     let now = live(&mut world, &parent);
     let fan_out = now.fan_out.expect("still fanning out");
     let id = |run: &str| leviath_runtime::spec::names::RunId::new(run).unwrap();
-    assert_eq!(fan_out.active, [("w1".to_string(), id(&started))]);
+    assert_eq!(
+        fan_out.active,
+        [("w1".to_string(), worker.clone(), id(&started))]
+    );
     assert_eq!(
         fan_out
             .queued

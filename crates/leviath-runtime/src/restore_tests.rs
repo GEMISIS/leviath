@@ -444,12 +444,21 @@ fn a_fan_out_comes_back_with_the_workers_that_finished_settled() {
     let mut parent = crate::runfile::reader_tests::initial();
     parent.fan_out = Some(FanOutState {
         stage: parent.cursor.stage.clone(),
-        config: crate::spec::graph::FanOutDef::same_graph(parent.cursor.stage.clone()),
+        config: crate::test_graph::fan_out_to(
+            parent.cursor.stage.as_str(),
+            parent.cursor.stage.as_str(),
+        ),
         max_workers: Some(8),
         queued: Vec::new(),
         active: ids
             .iter()
-            .map(|id| (format!("i-{id}"), RunId::new(*id).unwrap()))
+            .map(|id| {
+                (
+                    format!("i-{id}"),
+                    crate::spec::graph::worker_name_from(parent.cursor.stage.as_str()),
+                    RunId::new(*id).unwrap(),
+                )
+            })
             .collect(),
         done: Vec::new(),
         failed: Vec::new(),
@@ -502,7 +511,7 @@ fn a_fan_out_comes_back_with_the_workers_that_finished_settled() {
             ("i-w-stopped".to_string(), "worker cancelled".to_string()),
         ]
     );
-    let still: Vec<&str> = fan_out.active.iter().map(|(_, r)| r.as_str()).collect();
+    let still: Vec<&str> = fan_out.active.iter().map(|(_, _, r)| r.as_str()).collect();
     assert_eq!(still, ["w-going", "w-gone"]);
 }
 

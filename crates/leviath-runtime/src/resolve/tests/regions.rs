@@ -1,5 +1,5 @@
 use super::*;
-use crate::spec::graph::{FanOutDef, StageMode, WorkerFailure, WorkerSource};
+use crate::spec::graph::{FanOutDef, StageMode, WorkerFailure};
 use crate::spec::inputs::{InputValue, Template};
 
 fn slot_input(name: &str, ty: InputType, binds: Vec<InputSlot>) -> InputDecl {
@@ -21,14 +21,9 @@ fn int_at_least_one() -> InputType {
 async fn inputs_fill_their_slots_in_the_graph() {
     let mut g = graph();
     g.stages[1].mode = StageMode::FanOut(FanOutDef {
-        worker: WorkerSource::Stage(n("plan")),
-        merge_stage: None,
         max_workers: Some(4),
         on_worker_failure: WorkerFailure::Continue,
-        split_prompt: String::new(),
-        results_region: None,
-        max_items: None,
-        max_attempts: None,
+        ..crate::test_graph::fan_out_to("build", "plan")
     });
     g.stages[0].allow_as_worker = true;
     g.stages[0].model.models = vec![model("mock/old"), model("mock/new")];

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_graphql::{Enum, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
-use leviath_runtime::spec::graph::{StageDef, StageMode as Mode, WorkerSource};
+use leviath_runtime::spec::graph::{StageDef, StageMode as Mode, WorkerOption, WorkerSource};
 
 use crate::commands::serve::core::blueprints::ParsedBlueprint;
 
@@ -77,6 +77,44 @@ pub(crate) struct FanOut {
     pub(crate) config: leviath_runtime::spec::graph::FanOutDef,
 }
 
+/// One worker a fan-out may hand items to. Exactly one of `stageName`,
+/// `blueprint` and `query` is set: what the worker runs.
+#[mirror(list)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct FanOutWorker {
+    /// What the model names it by when it hands it an item.
+    pub(crate) name: String,
+    /// The stage of this blueprint it runs, by name, when that is what it
+    /// runs.
+    pub(crate) stage_name: Option<String>,
+    /// The installed blueprint, or the directory of a blueprint, it runs,
+    /// when that is what it runs.
+    pub(crate) blueprint: Option<String>,
+    /// A description an installed blueprint is found by when the worker
+    /// starts, when that is how.
+    pub(crate) query: Option<String>,
+    /// When to pick it, as the model reads it.
+    pub(crate) use_for: String,
+}
+
+impl From<&WorkerOption> for FanOutWorker {
+    fn from(worker: &WorkerOption) -> Self {
+        let (stage_name, blueprint, query) = match &worker.runs {
+            WorkerSource::Stage(stage) => (Some(stage.to_string()), None, None),
+            WorkerSource::Blueprint(blueprint) => (None, Some(blueprint.to_string()), None),
+            WorkerSource::BlueprintFile(path) => (None, Some(path.to_string()), None),
+            WorkerSource::Query(query) => (None, None, Some(query.clone())),
+        };
+        Self {
+            name: worker.name.to_string(),
+            stage_name,
+            blueprint,
+            query,
+            use_for: worker.use_for.clone(),
+        }
+    }
+}
+
 /// What a stage's fan-out splits into, and how.
 ///
 /// Only a `FAN_OUT` stage has one. Every other mode answers null, rather than a
@@ -84,41 +122,46 @@ pub(crate) struct FanOut {
 #[mirror]
 #[Object]
 impl FanOut {
-    /// A separate installed blueprint run as the worker, by name. It has to be
-    /// installed when the fan-out runs, and it may not be installed now, so this
-    /// is a name rather than a blueprint.
-    async fn worker_agent(&self) -> Option<String> {
-        match &self.config.worker {
-            WorkerSource::Blueprint(blueprint) => Some(blueprint.to_string()),
-            WorkerSource::BlueprintFile(path) => Some(path.to_string()),
-            WorkerSource::Stage(_) | WorkerSource::Query(_) => None,
-        }
+    /// Every worker the fan-out may hand items to. With more than one, the
+    /// model names one for each item, and a name not here is refused.
+    async fn workers_available(&self) -> Vec<FanOutWorker> {
+        self.config
+            .workers_available
+            .iter()
+            .map(FanOutWorker::from)
+            .collect()
     }
 
-    /// A stage of this same blueprint run as the worker. That stage has to allow
-    /// it.
+    /// A separate installed blueprint run as the worker, by name, when the
+    /// fan-out has one worker and that is what it runs. It has to be installed
+    /// when the fan-out runs, and it may not be installed now, so this is a
+    /// name rather than a blueprint.
+    async fn worker_agent(&self) -> Option<String> {
+        self.sole().blueprint
+    }
+
+    /// A stage of this same blueprint run as the worker, when the fan-out has
+    /// one worker and that is what it runs. That stage has to allow it.
     ///
     /// Null when the fan-out runs a separate blueprint or a query instead, and
     /// also when it names a stage this blueprint does not declare, which
     /// `lev validate` refuses and the daemon will not spawn.
     /// `workerStageName` tells those apart.
     async fn worker_stage(&self) -> Option<Stage> {
-        refs::stage(&self.blueprint, self.named_worker_stage()?)
+        refs::stage(&self.blueprint, self.sole().stage_name.as_deref()?)
     }
 
-    /// The stage name the fan-out wrote for its worker, verbatim. Null when it
-    /// names no stage of this blueprint.
-    async fn worker_stage_name(&self) -> Option<&str> {
-        self.named_worker_stage()
+    /// The stage name the fan-out wrote for its one worker, verbatim. Null when
+    /// it names no stage of this blueprint.
+    async fn worker_stage_name(&self) -> Option<String> {
+        self.sole().stage_name
     }
 
-    /// A description matched against the installed blueprints, when the manifest
-    /// would rather describe the worker than name it.
-    async fn worker_query(&self) -> Option<&str> {
-        match &self.config.worker {
-            WorkerSource::Query(query) => Some(query),
-            _ => None,
-        }
+    /// A description matched against the installed blueprints, when the
+    /// fan-out has one worker and the manifest would rather describe it than
+    /// name it.
+    async fn worker_query(&self) -> Option<String> {
+        self.sole().query
     }
 
     /// The stage that reconciles what the workers sent back.
@@ -187,13 +230,19 @@ impl FanOut {
 }
 
 impl FanOut {
-    /// The stage of this graph the workers run, when that is how the fan-out
-    /// picks its worker.
-    fn named_worker_stage(&self) -> Option<&str> {
-        match &self.config.worker {
-            WorkerSource::Stage(stage) => Some(stage.as_str()),
-            _ => None,
-        }
+    /// The fan-out's one worker, or nothing in each field when it declares
+    /// several.
+    fn sole(&self) -> FanOutWorker {
+        self.config
+            .sole_worker()
+            .map(FanOutWorker::from)
+            .unwrap_or_else(|| FanOutWorker {
+                name: String::new(),
+                stage_name: None,
+                blueprint: None,
+                query: None,
+                use_for: String::new(),
+            })
     }
 }
 

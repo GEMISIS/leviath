@@ -35,9 +35,10 @@ pub use region::{
     STAGE_INSTRUCTIONS_REGION, Seed, SeedRefresh,
 };
 pub use stage::{
-    AnswerStyle, CodeRef, FanOutDef, InteractionPointDef, ModelChoice, ModelParams, OutputCap,
-    ParamScalar, SeedToolCall, StageDef, StageHooks, StageMode, ToolGroup, ToolRoutingDef,
-    ToolSelector, UnattendedPoint, WorkerFailure, WorkerSource,
+    AnswerStyle, CodeRef, EVERY_ITEM, FanOutDef, InteractionPointDef, ModelChoice, ModelParams,
+    OutputCap, ParamScalar, SeedToolCall, StageDef, StageHooks, StageMode, ToolGroup,
+    ToolRoutingDef, ToolSelector, UnattendedPoint, WorkerEntry, WorkerFailure, WorkerOption,
+    WorkerSource, worker_name_from,
 };
 
 use super::inputs::InputDecl;

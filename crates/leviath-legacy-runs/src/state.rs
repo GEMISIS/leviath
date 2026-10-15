@@ -9,7 +9,9 @@ use leviath_core::run_meta::{
     RunFlags, RunMeta, RunStatus as OldStatus, StageRecord as OldStage, StageRunStatus,
     StageVisitRecord, WaitReason,
 };
-use leviath_runtime::spec::graph::{FanOutDef, RunGraph, StageDef, StageMode};
+use leviath_runtime::spec::graph::{
+    EVERY_ITEM, FanOutDef, RunGraph, StageDef, StageMode, WorkerOption, WorkerSource,
+};
 use leviath_runtime::spec::inputs::{InputValue, InputValues};
 use leviath_runtime::spec::names::{InputName, RunId, StageName};
 use leviath_runtime::spec::run_spec::RunSpec;
@@ -538,11 +540,27 @@ fn fan_out(
     report: &mut Report,
 ) -> (FanOutState, usize) {
     let task = InputName::new("task").expect("`task` is an input name");
+    let config = match &stage.mode {
+        StageMode::FanOut(def) => def.clone(),
+        _ => {
+            report.note(format!(
+                "the fan-out a `fan_out` call started in stage \"{}\" resumes with that stage as its worker: an old run did not keep the call's settings",
+                stage.name
+            ));
+            FanOutDef::with_worker(
+                stage.name.clone(),
+                WorkerOption::named_after(WorkerSource::Stage(stage.name.clone()), EVERY_ITEM),
+            )
+        }
+    };
+    // An old fan-out had one worker, which took every item.
+    let worker = config.workers_available[0].name.clone();
     let queued = f
         .pending
         .iter()
         .map(|item| WorkItemState {
             id: item.id.clone(),
+            worker: worker.clone(),
             inputs: InputValues(BTreeMap::from([(
                 task.clone(),
                 InputValue::Text(format!(
@@ -568,7 +586,7 @@ fn fan_out(
     for (item, run) in &f.active {
         match RunId::new(run.as_str()) {
             Ok(id) if runs.is_some_and(|r| r.join(run).is_dir()) => {
-                active.push((item.clone(), id));
+                active.push((item.clone(), worker.clone(), id));
             }
             Ok(_) => {
                 let why = format!(
@@ -590,16 +608,6 @@ fn fan_out(
             f.parts.len()
         ));
     }
-    let config = match &stage.mode {
-        StageMode::FanOut(def) => def.clone(),
-        _ => {
-            report.note(format!(
-                "the fan-out a `fan_out` call started in stage \"{}\" resumes with that stage as its worker: an old run did not keep the call's settings",
-                stage.name
-            ));
-            FanOutDef::same_graph(stage.name.clone())
-        }
-    };
     let state = FanOutState {
         stage: stage.name.clone(),
         config,

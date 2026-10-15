@@ -352,23 +352,23 @@ tool_routing = { default_region = "r", tool_regions = { bash = 3, read_file = "r
 
 [[graph.stages]]
 name = "c"
-mode = { fan_out = { worker = { blueprint = { name = "w", digest = "sha256:ab" } } } }
+mode = { fan_out = { stage = "c", workers_available = [{ name = "w", blueprint = "w@sha256:ab", use_for = "x" }] } }
 
 [[graph.stages]]
 name = "d"
-mode = { fan_out = { worker = { blueprint_file = "/agents/w" } } }
+mode = { fan_out = { stage = "d", workers_available = [{ name = "w", blueprint = "/agents/w", use_for = "x" }] } }
 
 [[graph.stages]]
 name = "e"
-mode = { fan_out = { worker = { query = "reads logs" } } }
+mode = { fan_out = { stage = "e", workers_available = [{ name = "logs", query = "reads logs", use_for = "x" }, { name = "back", stage = "a", use_for = "x" }] } }
 
 [[graph.stages]]
 name = "f"
-mode = { fan_out = { worker = { blueprint = { digest = "x" } } } }
+mode = { fan_out = { stage = "f", workers_available = [{ name = "f" }] } }
 
 [[graph.stages]]
 name = "g"
-mode = { fan_out = { worker = {} } }
+mode = { fan_out = { stage = "g", workers_available = [] } }
 
 [[graph.stages]]
 mode = "autonomous"
@@ -455,14 +455,20 @@ carry = { compact = { prompt = "Keep the gist" } }
         worker("e"),
         Some((WorkerKind::Query, "reads logs".to_string()))
     );
-    assert_eq!(worker("f"), None, "a blueprint with no name");
-    assert_eq!(worker("g"), None, "a worker that names nothing");
+    assert_eq!(worker("f"), None, "a worker that runs nothing");
+    assert_eq!(worker("g"), None, "no workers at all");
     // The stage with no name is no stage the editor can name.
     assert_eq!(doc.stage_names(), ["a", "b", "c", "d", "e", "f", "g"]);
     // A rename steps over edges with no name or no stage to leave.
     let mut renamed = doc.clone();
     renamed.rename_stage("g", "h").unwrap();
     assert!(renamed.edge("a", "h").is_some());
+    // A fan-out's own stage and a worker running a stage follow a rename.
+    renamed.rename_stage("e", "e2").unwrap();
+    renamed.rename_stage("a", "a2").unwrap();
+    let text = renamed.to_toml();
+    assert!(text.contains("fan_out = { stage = \"e2\""), "{text}");
+    assert!(text.contains("{ name = \"back\", stage = \"a2\""), "{text}");
     // The unknown `when` and the edges with no `to` or no `from` are left
     // out.
     let edges = doc.edges();
@@ -831,14 +837,17 @@ fn stage_fields_write_and_delete_the_way_the_lair_does() {
         doc.set_fan_out("work", FanOutField::MaxWorkers(Some(2))),
         Err(EditError::OutOfRange(_))
     ));
-    // A fan-out reads from the start: its worker is the first other stage,
-    // or the stage itself when it is the only one.
+    // A fan-out reads from the start: a fan-out of its stage whose one
+    // worker is the first other stage, or the stage itself when it is the
+    // only one.
     doc.set_stage_mode("work", &StageModeView::FanOut).unwrap();
+    let text = doc.to_toml();
     assert!(
-        doc.to_toml()
-            .contains("mode = { fan_out = { worker = { stage = \"finish\" } } }"),
-        "{}",
-        doc.to_toml()
+        text.contains(
+            "mode = { fan_out = { stage = \"work\", workers_available = [{ name = \"finish\", \
+             stage = \"finish\", use_for = \"Takes every item this fan-out hands out\" }] } }"
+        ),
+        "{text}"
     );
     assert!(doc.file().is_ok());
     let mut alone = small("[[graph.stages]]\nname = \"a\"\n");
@@ -878,37 +887,62 @@ fn stage_fields_write_and_delete_the_way_the_lair_does() {
     // Picking fan-out again keeps the settings.
     doc.set_stage_mode("work", &StageModeView::FanOut).unwrap();
     assert_eq!(doc.stage("work").unwrap().fan_out.max_workers, Some(4));
-    // A blueprint worker by name, pinned, or by directory; a query.
+    // A blueprint worker by name, pinned, or by directory; a query. The
+    // worker keeps its name and what it is for.
     for (kind, value, written) in [
         (
             WorkerKind::Agent,
             "researcher",
-            r#"worker = { blueprint = { name = "researcher" } }"#,
+            r#"blueprint = "researcher""#,
         ),
         (
             WorkerKind::Agent,
             "researcher@sha256:ab",
-            r#"worker = { blueprint = { name = "researcher", digest = "sha256:ab" } }"#,
+            r#"blueprint = "researcher@sha256:ab""#,
         ),
-        (
-            WorkerKind::Agent,
-            "/agents/r",
-            r#"worker = { blueprint_file = "/agents/r" }"#,
-        ),
-        (
-            WorkerKind::Query,
-            "reads logs",
-            r#"worker = { query = "reads logs" }"#,
-        ),
+        (WorkerKind::Agent, "/agents/r", r#"blueprint = "/agents/r""#),
+        (WorkerKind::Query, "reads logs", r#"query = "reads logs""#),
     ] {
         doc.set_fan_out("work", FanOutField::Worker(Some((kind, value.into()))))
             .unwrap();
-        assert!(doc.to_toml().contains(written), "{}", doc.to_toml());
+        let text = doc.to_toml();
+        assert!(text.contains(written), "{text}");
+        assert!(text.contains("name = \"finish\""), "{text}");
         assert_eq!(
             doc.stage("work").unwrap().fan_out.worker,
             Some((kind, value.to_string()))
         );
     }
+    doc.set_fan_out("work", FanOutField::Worker(None)).unwrap();
+    assert!(!doc.to_toml().contains("workers_available"));
+    // With none left, a worker is declared afresh, named after what it runs.
+    for (kind, value, name) in [
+        (WorkerKind::Agent, "/agents/r/", "r"),
+        (WorkerKind::Agent, "helper@sha256:ab", "helper"),
+        (WorkerKind::Query, "reads logs", "worker"),
+    ] {
+        doc.set_fan_out("work", FanOutField::Worker(Some((kind, value.into()))))
+            .unwrap();
+        let text = doc.to_toml();
+        assert!(text.contains(&format!("name = \"{name}\"")), "{text}");
+        doc.set_fan_out("work", FanOutField::Worker(None)).unwrap();
+    }
+    // Removing one of several workers keeps the rest.
+    doc.set_fan_out(
+        "work",
+        FanOutField::Worker(Some((WorkerKind::Stage, "finish".into()))),
+    )
+    .unwrap();
+    let two = doc.to_toml().replace(
+        "use_for = \"Takes every item this fan-out hands out\" }]",
+        "use_for = \"x\" }, { name = \"q\", query = \"y\", use_for = \"y\" }]",
+    );
+    let mut doc = ManifestDoc::parse(&two).unwrap();
+    doc.set_fan_out("work", FanOutField::Worker(None)).unwrap();
+    assert_eq!(
+        doc.stage("work").unwrap().fan_out.worker,
+        Some((WorkerKind::Query, "y".to_string()))
+    );
     doc.set_fan_out("work", FanOutField::Worker(None)).unwrap();
     doc.set_fan_out("work", FanOutField::MergeStage(None))
         .unwrap();

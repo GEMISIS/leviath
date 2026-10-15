@@ -402,14 +402,10 @@ fn model_settings_reach_the_request_as_written() {
 
 fn fan_out(split: &str) -> StageMode {
     StageMode::FanOut(FanOutDef {
-        worker: WorkerSource::Stage(StageName::new("build").unwrap()),
-        merge_stage: None,
         max_workers: Some(2),
         on_worker_failure: WorkerFailure::Continue,
         split_prompt: split.to_string(),
-        results_region: None,
-        max_items: None,
-        max_attempts: None,
+        ..crate::test_graph::fan_out_to("plan", "build")
     })
 }
 
@@ -430,8 +426,7 @@ fn a_split_stage_is_told_its_workers_reply_budget() {
         ),
         "{prompt}"
     );
-    // Not named: a model shown the stage's name passed it back as the call's
-    // `agent`, which reads as a blueprint.
+    // One worker is not named: there is nothing to pick.
     assert!(!prompt.contains("build"), "{prompt}");
 
     spec.graph.stages[1].max_iterations = None;
@@ -444,7 +439,7 @@ fn a_split_stage_is_told_its_workers_reply_budget() {
 
     spec.graph.stages[1].max_iterations = Some(20);
     if let StageMode::FanOut(f) = &mut spec.graph.stages[0].mode {
-        f.worker =
+        f.workers_available[0].runs =
             WorkerSource::Blueprint(crate::spec::names::BlueprintRef::parse("elsewhere").unwrap());
     }
     assert!(

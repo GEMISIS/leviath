@@ -1,13 +1,14 @@
-//! Upgrading a run file in binary layout 2 to this build's layout, in place.
+//! Upgrading a run file in binary layout 2 or 3 to this build's layout, in
+//! place.
 //!
-//! The upgraded file is the old one with each spec frame read as layout 2
-//! wrote it and written again as this build writes it, and every other frame
-//! copied byte for byte: no other frame changed shape (see
-//! [`crate::layout2`]). A frame torn by a crash at the end of the old file is
-//! left out, as any reader of the file would cut it off. The old file is kept
-//! in the run's `legacy/` directory first, and the new one then replaces it in
-//! one step, so the run directory always holds one whole run file or the
-//! other.
+//! The upgraded file is the old one with each spec, state and delta frame read
+//! as its layout wrote it and written again as this build writes it, and the
+//! code and owner frames copied byte for byte, since they did not change shape
+//! (see [`crate::layout2`] and [`crate::layout3`]). A frame torn by a crash at
+//! the end of the old file is left out, as any reader of the file would cut it
+//! off. The old file is kept in the run's `legacy/` directory first, and the
+//! new one then replaces it in one step, so the run directory always holds one
+//! whole run file or the other.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -16,10 +17,11 @@ use leviath_core::files::RUN_FILE;
 use leviath_runtime::runfile::codec::{self, FrameKind, HEADER_LEN};
 use leviath_runtime::spec::names::RunId;
 use leviath_runtime::spec::run_spec::RunSpec;
+use leviath_runtime::state::{RunState, StateDelta};
 
 use crate::ConvertError;
-use crate::layout2;
 use crate::write::LEGACY_DIR;
+use crate::{layout2, layout3};
 
 /// What upgrading a run file did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,12 +38,43 @@ pub struct UpgradeReport {
     pub cut: usize,
 }
 
-/// The name the old file is kept under in `legacy/`, the `n`th time one
-/// with other bytes is already there.
-fn kept_name(n: u32) -> String {
+/// The older layouts a run file is upgraded from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// Alpha builds before stage plans kept one chosen model.
+    Two,
+    /// Builds before a fan-out declared the workers it may hand items to.
+    Three,
+}
+
+impl Layout {
+    /// The layout whose fingerprint `head` carries, if it is an older one.
+    fn of(head: &[u8; HEADER_LEN]) -> Option<Self> {
+        [
+            (Self::Two, &layout2::FINGERPRINT),
+            (Self::Three, &layout3::FINGERPRINT),
+        ]
+        .into_iter()
+        .find(|(_, fingerprint)| codec::check_header(head, fingerprint).is_ok())
+        .map(|(layout, _)| layout)
+    }
+
+    /// Its number, as the name of a kept file carries it.
+    fn number(self) -> u32 {
+        match self {
+            Self::Two => 2,
+            Self::Three => 3,
+        }
+    }
+}
+
+/// The name the old file in `layout` is kept under in `legacy/`, the `n`th
+/// time one with other bytes is already there.
+fn kept_name(layout: Layout, n: u32) -> String {
+    let v = layout.number();
     match n {
-        0 => "run.v2.lvr".to_string(),
-        n => format!("run.v2.{n}.lvr"),
+        0 => format!("run.v{v}.lvr"),
+        n => format!("run.v{v}.{n}.lvr"),
     }
 }
 
@@ -54,23 +87,27 @@ fn header_of(path: &Path) -> Option<[u8; HEADER_LEN]> {
         .map(|()| head)
 }
 
+/// The older layout of the run file in `run_dir`, if it is in one.
+fn layout_of(run_dir: &Path) -> Option<Layout> {
+    header_of(&run_dir.join(RUN_FILE)).and_then(|head| Layout::of(&head))
+}
+
 pub(crate) fn needs_upgrade(run_dir: &Path) -> bool {
-    header_of(&run_dir.join(RUN_FILE))
-        .is_some_and(|head| codec::check_header(&head, &layout2::FINGERPRINT).is_ok())
+    layout_of(run_dir).is_some()
 }
 
 pub(crate) fn upgrade(run_dir: &Path) -> Result<UpgradeReport, ConvertError> {
     let path = run_dir.join(RUN_FILE);
-    if !needs_upgrade(run_dir) {
-        return Err(ConvertError::NotLayout2 { path });
-    }
+    let Some(layout) = layout_of(run_dir) else {
+        return Err(ConvertError::NotOldLayout { path });
+    };
     // A file that went between the two reads reads as one with no frames,
     // which is refused below.
     let bytes = std::fs::read(&path).unwrap_or_default();
-    let (upgraded, run_id, cut) = rewrite(&path, &bytes)?;
+    let (upgraded, run_id, cut) = rewrite(&path, &bytes, layout)?;
     let legacy = run_dir.join(LEGACY_DIR);
     let original = leviath_sys::perms::create_private_dir_all(&legacy)
-        .and_then(|()| keep(&legacy, &bytes))
+        .and_then(|()| keep(&legacy, &bytes, layout))
         .and_then(|kept| leviath_sys::perms::write_private(&path, &upgraded).map(|()| kept))
         .map_err(ConvertError::io(run_dir))?;
     Ok(UpgradeReport {
@@ -81,12 +118,16 @@ pub(crate) fn upgrade(run_dir: &Path) -> Result<UpgradeReport, ConvertError> {
     })
 }
 
-/// The layout-2 run file `bytes`, read from `path`, in this build's layout,
-/// with the run's id and how many bytes of torn tail were left out. A file
-/// whose spec does not read as layout 2 wrote it is refused, and so is one
-/// with a damaged frame that whole frames follow: leaving it out would drop
-/// them too.
-fn rewrite(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, RunId, usize), ConvertError> {
+/// The run file `bytes` in `layout`, read from `path`, in this build's
+/// layout, with the run's id and how many bytes of torn tail were left out. A
+/// file with a frame that does not read as its layout wrote it is refused, and
+/// so is one with a damaged frame that whole frames follow: leaving it out
+/// would drop them too.
+fn rewrite(
+    path: &Path,
+    bytes: &[u8],
+    layout: Layout,
+) -> Result<(Vec<u8>, RunId, usize), ConvertError> {
     let unreadable = |why: String| ConvertError::Unreadable {
         path: path.to_path_buf(),
         why,
@@ -102,16 +143,35 @@ fn rewrite(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, RunId, usize), Convert
     let mut run_id = None;
     let mut out = codec::header(leviath_runtime::runfile::fingerprint());
     for frame in &frames {
+        let read = |e: codec::CodecError| unreadable(format!("{e}"));
         match frame.kind {
             FrameKind::Spec => {
-                let spec: RunSpec = frame
-                    .decode::<layout2::RunSpec>(bytes)
-                    .map_err(|e| unreadable(e.to_string()))?
-                    .into();
+                let spec: RunSpec = match layout {
+                    Layout::Two => frame.decode::<layout2::RunSpec>(bytes).map(Into::into),
+                    Layout::Three => frame.decode::<layout3::RunSpec>(bytes).map(Into::into),
+                }
+                .map_err(read)?;
                 run_id.get_or_insert_with(|| spec.run_id.clone());
                 out.extend(crate::write::frame(FrameKind::Spec, &spec));
             }
-            _ => out.extend_from_slice(&bytes[frame.offset..frame.end()]),
+            // A state and a delta are the same shape in layouts 2 and 3.
+            FrameKind::State => {
+                let state: RunState = frame
+                    .decode::<layout3::RunState>(bytes)
+                    .map_err(read)?
+                    .into();
+                out.extend(crate::write::frame(FrameKind::State, &state));
+            }
+            FrameKind::Delta => {
+                let delta: StateDelta = frame
+                    .decode::<layout3::StateDelta>(bytes)
+                    .map_err(read)?
+                    .into();
+                out.extend(crate::write::frame(FrameKind::Delta, &delta));
+            }
+            FrameKind::Code | FrameKind::Owner => {
+                out.extend_from_slice(&bytes[frame.offset..frame.end()])
+            }
         }
     }
     let run_id = run_id.expect("the first frame is a spec");
@@ -122,10 +182,10 @@ fn rewrite(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, RunId, usize), Convert
 /// answer where. A file an earlier upgrade kept there is never written over:
 /// one with the same bytes is this copy already, and one with other bytes
 /// keeps its name while this one takes the next.
-fn keep(legacy: &Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+fn keep(legacy: &Path, bytes: &[u8], layout: Layout) -> std::io::Result<PathBuf> {
     let free_or_same = |path: &PathBuf| std::fs::read(path).ok().is_none_or(|held| held == bytes);
     let path = (0..)
-        .map(|n| legacy.join(kept_name(n)))
+        .map(|n| legacy.join(kept_name(layout, n)))
         .find(free_or_same)
         .expect("there is always a name not yet taken");
     match path.is_file() {

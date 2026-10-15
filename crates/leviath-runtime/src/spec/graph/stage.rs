@@ -11,7 +11,7 @@ use super::policy::{NudgeDef, SandboxDef};
 use super::region::RegionLayoutDef;
 use crate::spec::names::{
     BlueprintPath, BlueprintRef, McpServerName, MimePattern, ModelRef, NameError, RegionName,
-    StageName, ToolName,
+    StageName, ToolName, WorkerName,
 };
 
 /// One stage.
@@ -437,8 +437,14 @@ pub enum AnswerStyle {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FanOutDef {
-    /// What each worker runs.
-    pub worker: WorkerSource,
+    /// The stage this fan-out belongs to. In a blueprint it is the stage the
+    /// fan-out sits under, named again so the declaration says on its own
+    /// which stage hands the work out.
+    pub stage: StageName,
+    /// The workers this fan-out may hand items to, at least one. With more
+    /// than one, the model names the worker for each item, and a name not on
+    /// this list is refused before anything starts.
+    pub workers_available: Vec<WorkerOption>,
     /// The stage the merged results go to.
     #[serde(default)]
     pub merge_stage: Option<StageName>,
@@ -476,11 +482,12 @@ impl FanOutDef {
 }
 
 impl FanOutDef {
-    /// A fan-out whose workers run `stage` of the same graph, with every
+    /// A fan-out of `stage` that hands every item to one worker, with every
     /// other setting at its default.
-    pub fn same_graph(stage: StageName) -> Self {
+    pub fn with_worker(stage: StageName, worker: WorkerOption) -> Self {
         Self {
-            worker: WorkerSource::Stage(stage),
+            stage,
+            workers_available: vec![worker],
             merge_stage: None,
             max_workers: None,
             on_worker_failure: WorkerFailure::Continue,
@@ -488,6 +495,152 @@ impl FanOutDef {
             results_region: None,
             max_items: None,
             max_attempts: None,
+        }
+    }
+
+    /// The declared worker named `name`.
+    pub fn worker(&self, name: &str) -> Option<&WorkerOption> {
+        self.workers_available
+            .iter()
+            .find(|w| w.name.as_str() == name)
+    }
+
+    /// The one worker of a fan-out that declares exactly one, which then
+    /// takes every item without the model naming it.
+    pub fn sole_worker(&self) -> Option<&WorkerOption> {
+        match self.workers_available.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        }
+    }
+}
+
+/// What a fan-out's only worker is for when nothing says more: it takes
+/// every item. A fan-out with one worker never shows this to the model, which
+/// has nothing to pick.
+pub const EVERY_ITEM: &str = "Takes every item this fan-out hands out";
+
+/// One worker a fan-out may hand items to: what the model calls it, what it
+/// runs, and when to pick it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(try_from = "WorkerEntry", into = "WorkerEntry")]
+pub struct WorkerOption {
+    /// What the model writes to hand this worker an item.
+    pub name: WorkerName,
+    /// What the worker runs.
+    pub runs: WorkerSource,
+    /// When to pick it, written for the model.
+    pub use_for: String,
+}
+
+impl WorkerOption {
+    /// A worker running `runs`, named after what it runs: the stage, the
+    /// blueprint, the last part of a blueprint's directory, or `worker` for a
+    /// query.
+    pub fn named_after(runs: WorkerSource, use_for: impl Into<String>) -> Self {
+        let name = match &runs {
+            WorkerSource::Stage(stage) => worker_name_from(stage.as_str()),
+            WorkerSource::Blueprint(blueprint) => worker_name_from(blueprint.name.as_str()),
+            WorkerSource::BlueprintFile(path) => worker_name_from(
+                &path
+                    .path()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            WorkerSource::Query(_) => worker_name_from(""),
+        };
+        Self {
+            name,
+            runs,
+            use_for: use_for.into(),
+        }
+    }
+}
+
+/// `text` as a worker name: each character a worker name does not allow
+/// becomes `_`, a name that would start with a digit or `-` gets a `_` in
+/// front, and no text at all is `worker`.
+pub fn worker_name_from(text: &str) -> WorkerName {
+    let mut name: String = text
+        .chars()
+        .map(
+            |c| match c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                true => c,
+                false => '_',
+            },
+        )
+        .take(63)
+        .collect();
+    if name.is_empty() {
+        name.push_str("worker");
+    }
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+        name.insert(0, '_');
+    }
+    WorkerName::new(name).expect("only allowed characters, a letter or `_` first, at most 64")
+}
+
+/// A worker as a blueprint writes it: a `name`, exactly one of `stage`,
+/// `blueprint` or `query`, and `use_for`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerEntry {
+    /// What the model writes to hand this worker an item.
+    pub name: WorkerName,
+    /// A stage of this same graph, one that sets `allow_as_worker`.
+    #[serde(default)]
+    pub stage: Option<StageName>,
+    /// A blueprint: an installed one's name (`name` or `name@digest`), or the
+    /// absolute directory of one.
+    #[serde(default)]
+    pub blueprint: Option<String>,
+    /// A description an installed blueprint is found by when the worker
+    /// starts.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// When to pick this worker, written for the model.
+    pub use_for: String,
+}
+
+impl TryFrom<WorkerEntry> for WorkerOption {
+    type Error = String;
+
+    fn try_from(entry: WorkerEntry) -> Result<Self, String> {
+        let name = entry.name;
+        let runs = match (entry.stage, entry.blueprint, entry.query) {
+            (Some(stage), None, None) => WorkerSource::Stage(stage),
+            (None, Some(blueprint), None) => WorkerSource::named(&blueprint)
+                .map_err(|e| format!("worker '{name}': blueprint '{blueprint}': {e}"))?,
+            (None, None, Some(query)) => WorkerSource::Query(query),
+            _ => {
+                return Err(format!(
+                    "worker '{name}' needs exactly one of `stage`, `blueprint` or `query`: what it runs"
+                ));
+            }
+        };
+        Ok(Self {
+            name,
+            runs,
+            use_for: entry.use_for,
+        })
+    }
+}
+
+impl From<WorkerOption> for WorkerEntry {
+    fn from(option: WorkerOption) -> Self {
+        let (stage, blueprint, query) = match option.runs {
+            WorkerSource::Stage(stage) => (Some(stage), None, None),
+            WorkerSource::Blueprint(blueprint) => (None, Some(blueprint.to_string()), None),
+            WorkerSource::BlueprintFile(path) => (None, Some(path.to_string()), None),
+            WorkerSource::Query(query) => (None, None, Some(query)),
+        };
+        Self {
+            name: option.name,
+            stage,
+            blueprint,
+            query,
+            use_for: option.use_for,
         }
     }
 }

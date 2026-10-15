@@ -198,7 +198,7 @@ fn a_fan_out_stage_needs_no_max_iterations() {
 
 [[graph.stages]]
 name = "split"
-mode = { fan_out = { worker = { stage = "work" } } }
+mode = { fan_out = { stage = "split", workers_available = [{ name = "work", stage = "work", use_for = "Doing one item" }] } }
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 
 [[graph.stages]]
@@ -231,7 +231,7 @@ fn a_fail_all_fan_out_without_an_escape_is_warned_about() {
 
 [[graph.stages]]
 name = "split"
-mode = { fan_out = { worker = { stage = "work" }, on_worker_failure = "fail_all" } }
+mode = { fan_out = { stage = "split", workers_available = [{ name = "work", stage = "work", use_for = "Doing one item" }], on_worker_failure = "fail_all" } }
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 
 [[graph.stages]]
@@ -257,7 +257,7 @@ fn a_fan_out_to_a_blueprint_that_will_not_load_is_an_error() {
 
 [[graph.stages]]
 name = "split"
-mode = {{ fan_out = {{ worker = {worker} }} }}
+mode = {{ fan_out = {{ stage = "split", workers_available = [{{ name = "w", {worker}, use_for = "Doing one item" }}] }} }}
 model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
 
 [[graph.stages]]
@@ -271,7 +271,7 @@ model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
     let env_for =
         |toml: &str| LintEnv::default().with_workers(&graph_of(toml), Some(agents.path()));
 
-    let ghost = fan_to(r#"{ blueprint = { name = "ghost" } }"#);
+    let ghost = fan_to(r#"blueprint = "ghost""#);
     let found = lint(&ghost, &env_for(&ghost));
     let missing = with_code(&found, "fanout-worker-missing");
     assert_eq!(missing.len(), 1, "{:?}", codes(&found));
@@ -282,10 +282,10 @@ model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
         missing[0].message
     );
 
-    let helper = fan_to(r#"{ blueprint = { name = "helper" } }"#);
+    let helper = fan_to(r#"blueprint = "helper""#);
     assert!(with_code(&lint(&helper, &env_for(&helper)), "fanout-worker-missing").is_empty());
     // A worker picked at run time has no name to load until then.
-    let query = fan_to(r#"{ query = "a researcher" }"#);
+    let query = fan_to(r#"query = "a researcher""#);
     assert!(with_code(&lint(&query, &env_for(&query)), "fanout-worker-missing").is_empty());
     let unasked = lint(&ghost, &LintEnv::default());
     assert!(with_code(&unasked, "fanout-worker-missing").is_empty());
@@ -302,7 +302,7 @@ fn a_fan_out_on_a_graph_with_no_bound_input_is_an_error() {
 
 [[graph.stages]]
 name = "split"
-mode = { fan_out = { worker = { stage = "work" } } }
+mode = { fan_out = { stage = "split", workers_available = [{ name = "work", stage = "work", use_for = "Doing one item" }] } }
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 
 [[graph.stages]]
@@ -336,7 +336,7 @@ fn a_fan_out_onto_another_agent_is_not_held_to_this_blueprints_regions() {
 
 [[graph.stages]]
 name = "split"
-mode = { fan_out = { worker = { blueprint = { name = "some-other-agent" } } } }
+mode = { fan_out = { stage = "split", workers_available = [{ name = "some-other-agent", blueprint = "some-other-agent", use_for = "Doing one item" }] } }
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 "#,
     );
@@ -357,7 +357,7 @@ fn a_continuing_fan_out_needs_no_escape() {
 
 [[graph.stages]]
 name = "split"
-mode = { fan_out = { worker = { stage = "work" } } }
+mode = { fan_out = { stage = "split", workers_available = [{ name = "work", stage = "work", use_for = "Doing one item" }] } }
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 
 [[graph.stages]]
@@ -380,7 +380,7 @@ fn a_dead_end_edge_satisfies_the_fan_out_escape_check() {
 
 [[graph.stages]]
 name = "split"
-mode = { fan_out = { worker = { stage = "work" }, on_worker_failure = "fail_all" } }
+mode = { fan_out = { stage = "split", workers_available = [{ name = "work", stage = "work", use_for = "Doing one item" }], on_worker_failure = "fail_all" } }
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 
 [[graph.stages]]
@@ -2314,7 +2314,7 @@ fn fan_out_worker_and_merge_stages_are_reachable() {
 
 [[graph.stages]]
 name = "split"
-mode = { fan_out = { worker = { stage = "work" }, merge_stage = "merge" } }
+mode = { fan_out = { stage = "split", workers_available = [{ name = "work", stage = "work", use_for = "Doing one item" }], merge_stage = "merge" } }
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 
 [[graph.stages]]
@@ -4293,7 +4293,7 @@ fn an_input_bound_only_to_a_stage_setting_does_not_hold_work_items() {
         r#"
 [[graph.stages]]
 name = "split"
-mode = { fan_out = { worker = { stage = "work" } } }
+mode = { fan_out = { stage = "split", workers_available = [{ name = "work", stage = "work", use_for = "Doing one item" }] } }
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 
 [[graph.stages]]

@@ -76,10 +76,33 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         find_installed(self.agents_dir.as_deref(), query)
     }
 
-    fn worker_inputs(&self, source: &SpawnSource) -> Option<Vec<InputDecl>> {
-        self.starter
-            .graph_of(&SpawnRequest::new(source.clone()))
-            .map(|graph| graph.inputs)
+    fn worker_inputs(&self, source: &SpawnSource) -> Result<Option<Vec<InputDecl>>, String> {
+        let loaded = match source {
+            SpawnSource::Blueprint(reference) => crate::daemon::resolve_env::load_installed(
+                self.starter.agents_dir.as_deref(),
+                reference,
+            ),
+            SpawnSource::BlueprintFile(path) => crate::daemon::resolve_env::load_file(path),
+            SpawnSource::Raw(graph) => return Ok(Some(graph.inputs.clone())),
+        };
+        loaded
+            .map(|loaded| Some(loaded.graph.inputs))
+            .map_err(|issue| why_not(&issue))
+    }
+}
+
+/// Why a worker blueprint did not load, as the model that named it reads it:
+/// what went wrong, and the blueprints there are when it names some. The
+/// hint for a person (`lev add`) and the path inside the request are left
+/// out.
+fn why_not(issue: &leviath_runtime::spec::issues::SpawnIssue) -> String {
+    match issue.known.as_slice() {
+        [] => issue.message.clone(),
+        known => format!(
+            "{}. Known: {}",
+            issue.message.trim_end_matches('.'),
+            known.join(", ")
+        ),
     }
 }
 
@@ -327,10 +350,44 @@ binds = [{ region = "task" }]
             leviath_runtime::spec::names::BlueprintPath::new(dir.path().to_string_lossy()).unwrap();
         let inputs = spawner
             .worker_inputs(&SpawnSource::BlueprintFile(path))
-            .expect("the blueprint loads");
+            .expect("the blueprint loads")
+            .expect("the daemon reads it");
         assert_eq!(inputs[0].name.as_str(), "task");
+        let graph = crate::daemon::resolve_env::load_file(
+            &leviath_runtime::spec::names::BlueprintPath::new(dir.path().to_string_lossy())
+                .unwrap(),
+        )
+        .unwrap()
+        .graph;
+        let raw = spawner
+            .worker_inputs(&SpawnSource::Raw(Box::new(graph)))
+            .expect("a graph in hand reads")
+            .expect("and has inputs");
+        assert_eq!(raw, inputs);
         let gone = SpawnSource::Blueprint(BlueprintRef::parse("gone").unwrap());
-        assert!(spawner.worker_inputs(&gone).is_none());
+        let why = spawner.worker_inputs(&gone).unwrap_err();
+        assert!(why.contains("\"gone\""), "{why}");
+    }
+
+    /// Why a worker blueprint did not load reads as the model needs it: what
+    /// went wrong, and the blueprints there are when the issue names some.
+    #[test]
+    fn why_a_worker_did_not_load_names_the_blueprints_there_are() {
+        use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpecPath};
+        let issue = SpawnIssue::new(
+            SpecPath::root(),
+            IssueCode::Unresolvable,
+            "no blueprint named \"review\" is installed.",
+        );
+        assert_eq!(
+            why_not(&issue),
+            "no blueprint named \"review\" is installed."
+        );
+        let issue = issue.known(["coder", "reviewer"]);
+        assert_eq!(
+            why_not(&issue),
+            "no blueprint named \"review\" is installed. Known: coder, reviewer"
+        );
     }
 
     #[test]

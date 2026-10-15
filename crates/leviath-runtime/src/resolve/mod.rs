@@ -58,6 +58,7 @@ use crate::spec::run_spec::{RunSpec, SpecOrigin};
 mod attach;
 mod code;
 mod defaults;
+mod fan_out;
 mod inputs;
 mod launch;
 mod output;
@@ -144,7 +145,7 @@ pub async fn resolve(
     }
 
     let mut graph = src.graph.clone();
-    source::pin_workers(&mut graph, &src.at, env, &mut issues).await;
+    let worker_inputs = source::pin_workers(&mut graph, &src.at, env, &mut issues).await;
     inputs::apply_slots(&mut graph, &checked.values);
     defaults::grant_mode_tools(&mut graph);
     defaults::fold(&mut graph, &limits);
@@ -178,8 +179,9 @@ pub async fn resolve(
         &mut issues,
     )
     .await;
-    let plans = plans.map(|(plans, found)| {
+    let plans = plans.map(|(mut plans, found)| {
         code.add_found(found);
+        fan_out::shape(&mut plans, &graph, &worker_inputs);
         plans
     });
 

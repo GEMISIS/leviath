@@ -1,6 +1,6 @@
 [blueprint]
 name = "wide-researcher"
-version = "0.6.0"
+version = "0.6.1"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 
 # survey -> investigate (fan out) -> compare -> deep_dive -> challenge -> summarize -> polish -> summary
@@ -247,7 +247,10 @@ max_iterations = 4
 max_revisits = 1
 
 [graph.stages.mode.fan_out]
-worker = { blueprint = { name = "researcher" } }
+stage = "investigate"
+workers_available = [
+    { name = "researcher", blueprint = "researcher", use_for = "Researching one thread of the landscape and reporting what it found, with sources" },
+]
 merge_stage = "compare"
 # Every thread at once rather than in waves; the daemon's inference pool paces the
 # requests. Set to 0 for no cap at all.

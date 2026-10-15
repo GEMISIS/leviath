@@ -382,7 +382,13 @@ fn every_stage_mode_maps_to_one_value() {
         StageMode::from(&Mode::InteractivePoints(Vec::new())),
         StageMode::InteractivePoints
     );
-    let fanned = Mode::FanOut(FanOutDef::same_graph(StageName::new("work").unwrap()));
+    let fanned = Mode::FanOut(FanOutDef::with_worker(
+        StageName::new("split").unwrap(),
+        leviath_runtime::spec::graph::WorkerOption::named_after(
+            leviath_runtime::spec::graph::WorkerSource::Stage(StageName::new("work").unwrap()),
+            leviath_runtime::spec::graph::EVERY_ITEM,
+        ),
+    ));
     assert_eq!(StageMode::from(&fanned), StageMode::FanOut);
 }
 

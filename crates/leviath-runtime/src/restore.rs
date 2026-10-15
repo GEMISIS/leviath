@@ -133,17 +133,18 @@ fn audit_files(
 /// when it is not in the world either.
 fn settle_finished_workers(fan_out: &mut crate::state::FanOutState, runs_dir: &std::path::Path) {
     let active = std::mem::take(&mut fan_out.active);
-    for (item, run) in active {
+    for (item, worker, run) in active {
         let dir = runs_dir.join(run.as_str());
         let reader =
             crate::runfile::RunFileReader::read(&dir.join(leviath_core::files::RUN_FILE)).ok();
         let finished = reader
             .and_then(|reader| reader.latest_state().ok().map(|state| (state, reader)))
             .and_then(|(state, reader)| worker_result(reader.spec(), &state, &dir));
+        let label = || crate::fanout::label(&fan_out.config, &item, &worker);
         match finished {
-            Some(Ok(summary)) => fan_out.done.push((item, summary)),
-            Some(Err(why)) => fan_out.failed.push((item, why)),
-            None => fan_out.active.push((item, run)),
+            Some(Ok(summary)) => fan_out.done.push((label(), summary)),
+            Some(Err(why)) => fan_out.failed.push((label(), why)),
+            None => fan_out.active.push((item, worker, run)),
         }
     }
 }

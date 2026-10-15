@@ -74,7 +74,7 @@ pub(crate) enum StageKind {
     Interactive,
     InteractivePoints,
     FanOut {
-        worker: WorkerRef,
+        workers: Vec<WorkerRef>,
         merge: Option<String>,
         max_workers: Option<usize>,
     },
@@ -94,7 +94,7 @@ impl StageKind {
     }
 }
 
-/// Where a fan-out stage gets its workers.
+/// Where one of a fan-out stage's workers comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkerRef {
     /// A separate blueprint: an installed one by name, or one read from its
@@ -349,30 +349,35 @@ impl StageGraph {
                         back_edge: false,
                         unseen: Vec::new(),
                     };
-                    let worker = match &config.worker {
-                        WorkerSource::Stage(stage_name) => {
-                            if known.contains(stage_name.as_str()) && stage_name.as_str() != name {
-                                edges.push(fan_out_edge(stage_name.to_string()));
+                    let mut workers = Vec::new();
+                    for declared in &config.workers_available {
+                        workers.push(match &declared.runs {
+                            WorkerSource::Stage(stage_name) => {
+                                if known.contains(stage_name.as_str())
+                                    && stage_name.as_str() != name
+                                {
+                                    edges.push(fan_out_edge(stage_name.to_string()));
+                                }
+                                WorkerRef::Stage(stage_name.to_string())
                             }
-                            WorkerRef::Stage(stage_name.to_string())
-                        }
-                        WorkerSource::Query(query) => WorkerRef::Query(query.clone()),
-                        WorkerSource::Blueprint(reference) => {
-                            let worker = reference.name.to_string();
-                            let description = format!("worker blueprint {worker}");
-                            let id = external_node(&mut externals, &worker, description);
-                            edges.push(fan_out_edge(id));
-                            WorkerRef::Agent(worker)
-                        }
-                        WorkerSource::BlueprintFile(path) => {
-                            let worker = directory_name(path);
-                            let description =
-                                format!("worker blueprint at {}", path.path().display());
-                            let id = external_node(&mut externals, &worker, description);
-                            edges.push(fan_out_edge(id));
-                            WorkerRef::Agent(worker)
-                        }
-                    };
+                            WorkerSource::Query(query) => WorkerRef::Query(query.clone()),
+                            WorkerSource::Blueprint(reference) => {
+                                let worker = reference.name.to_string();
+                                let description = format!("worker blueprint {worker}");
+                                let id = external_node(&mut externals, &worker, description);
+                                edges.push(fan_out_edge(id));
+                                WorkerRef::Agent(worker)
+                            }
+                            WorkerSource::BlueprintFile(path) => {
+                                let worker = directory_name(path);
+                                let description =
+                                    format!("worker blueprint at {}", path.path().display());
+                                let id = external_node(&mut externals, &worker, description);
+                                edges.push(fan_out_edge(id));
+                                WorkerRef::Agent(worker)
+                            }
+                        });
+                    }
                     let merge = config.merge_stage.as_ref().map(|m| m.to_string());
                     if let Some(merge) = &merge
                         && known.contains(merge.as_str())
@@ -381,7 +386,7 @@ impl StageGraph {
                         edges.push(fan_out_edge(merge.clone()));
                     }
                     StageKind::FanOut {
-                        worker,
+                        workers,
                         merge,
                         max_workers: config.max_workers.map(|n| n as usize),
                     }
@@ -641,7 +646,7 @@ layout = { total_budget_tokens = 0, regions = [{ name = "clips", kind = "pinned"
 
 [[graph.stages]]
 name = "publish"
-mode = { fan_out = { worker = { blueprint = { name = "uploader" } } } }
+mode = { fan_out = { stage = "publish", workers_available = [{ name = "uploader", blueprint = "uploader", use_for = "Doing one item" }] } }
 
 [[graph.stages]]
 name = "recover"
@@ -1014,7 +1019,7 @@ to = "plan"
             r#"
 [[graph.stages]]
 name = "split"
-mode = { fan_out = { worker = { stage = "worker" }, merge_stage = "merge", max_workers = 3 } }
+mode = { fan_out = { stage = "split", workers_available = [{ name = "worker", stage = "worker", use_for = "Doing one item" }], merge_stage = "merge", max_workers = 3 } }
 
 [[graph.stages]]
 name = "worker"
@@ -1041,7 +1046,7 @@ to = "merge"
         assert_eq!(
             g.node("split").unwrap().kind,
             NodeKind::Stage(StageKind::FanOut {
-                worker: WorkerRef::Stage("worker".to_string()),
+                workers: vec![WorkerRef::Stage("worker".to_string())],
                 merge: Some("merge".to_string()),
                 max_workers: Some(3),
             })
@@ -1054,7 +1059,7 @@ to = "merge"
             r#"
 [[graph.stages]]
 name = "split"
-mode = { fan_out = { worker = { stage = "split" }, merge_stage = "split" } }
+mode = { fan_out = { stage = "split", workers_available = [{ name = "split", stage = "split", use_for = "Doing one item" }], merge_stage = "split" } }
 "#,
         );
         assert!(g.edges.is_empty());
@@ -1069,23 +1074,23 @@ mode = { fan_out = { worker = { stage = "split" }, merge_stage = "split" } }
             r#"
 [[graph.stages]]
 name = "a"
-mode = {{ fan_out = {{ worker = {{ blueprint = {{ name = "researcher" }} }} }} }}
+mode = {{ fan_out = {{ stage = "a", workers_available = [{{ name = "researcher", blueprint = "researcher", use_for = "Doing one item" }}] }} }}
 
 [[graph.stages]]
 name = "b"
-mode = {{ fan_out = {{ worker = {{ blueprint = {{ name = "researcher" }} }} }} }}
+mode = {{ fan_out = {{ stage = "b", workers_available = [{{ name = "researcher", blueprint = "researcher", use_for = "Doing one item" }}] }} }}
 
 [[graph.stages]]
 name = "c"
-mode = {{ fan_out = {{ worker = {{ query = "anything that reads logs" }} }} }}
+mode = {{ fan_out = {{ stage = "c", workers_available = [{{ name = "worker", query = "anything that reads logs", use_for = "Doing one item" }}] }} }}
 
 [[graph.stages]]
 name = "d"
-mode = {{ fan_out = {{ worker = {{ blueprint_file = '{}' }} }} }}
+mode = {{ fan_out = {{ stage = "d", workers_available = [{{ name = "worker", blueprint = '{}', use_for = "Doing one item" }}] }} }}
 
 [[graph.stages]]
 name = "e"
-mode = {{ fan_out = {{ worker = {{ blueprint_file = '{}' }} }} }}
+mode = {{ fan_out = {{ stage = "e", workers_available = [{{ name = "worker", blueprint = '{}', use_for = "Doing one item" }}] }} }}
 
 [[graph.edges]]
 name = "b"
@@ -1118,7 +1123,7 @@ to = "c"
         assert_eq!(
             g.node("d").unwrap().kind,
             NodeKind::Stage(StageKind::FanOut {
-                worker: WorkerRef::Agent("thumbnailer".to_string()),
+                workers: vec![WorkerRef::Agent("thumbnailer".to_string())],
                 merge: None,
                 max_workers: None,
             })
@@ -1127,7 +1132,7 @@ to = "c"
         assert_eq!(
             g.node("c").unwrap().kind,
             NodeKind::Stage(StageKind::FanOut {
-                worker: WorkerRef::Query("anything that reads logs".to_string()),
+                workers: vec![WorkerRef::Query("anything that reads logs".to_string())],
                 merge: None,
                 max_workers: None,
             })

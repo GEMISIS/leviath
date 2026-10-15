@@ -65,9 +65,16 @@ pub fn settle_unrecorded_worker(
     let mut w = world
         .get_mut::<FanOutWaiting>(parent)
         .expect("a proven worker's parent is fanning out");
+    let declared = w
+        .pending
+        .iter()
+        .find(|item| item.id == item_id)
+        .map(|item| item.worker.clone())
+        .expect("a proven worker's item is queued");
     w.pending.retain(|item| item.id != item_id);
     w.active.push(ActiveWorker {
         item_id,
+        worker: declared,
         entity: worker,
         run_id: worker_id.clone(),
     });
@@ -109,8 +116,12 @@ fn proven_worker(
     {
         return Err("it is not placed where a worker of its parent would be".to_string());
     }
-    let source = expected_source(world, &w.config, parent_spec)?;
-    let stage = match &w.config.worker {
+    let declared = w
+        .config
+        .worker(item.worker.as_str())
+        .ok_or("its item's worker is not one its parent's fan-out declares")?;
+    let source = expected_source(world, &declared.runs, parent_spec)?;
+    let stage = match &declared.runs {
         WorkerSource::Stage(stage) => Some(stage),
         WorkerSource::Blueprint(_) | WorkerSource::BlueprintFile(_) | WorkerSource::Query(_) => {
             None
@@ -119,7 +130,7 @@ fn proven_worker(
     if !runs_from(&source, &spec.origin) || spec.placement.worker_stage.as_ref() != stage {
         return Err("it does not run what the fan-out starts".to_string());
     }
-    let (request, _) = items::worker_request(parent_spec, &w.config, item, source, 0);
+    let (request, _) = items::worker_request(parent_spec, declared, item, source, 0);
     let decls: Vec<InputDecl> = spec
         .graph
         .inputs
@@ -149,14 +160,14 @@ fn proven_worker(
     }
 }
 
-/// What the fan-out `config` of a run whose spec is `parent` starts its
-/// workers from, as a start would work it out.
+/// What a fan-out worker running `runs`, of a run whose spec is `parent`,
+/// starts from, as a start would work it out.
 fn expected_source(
     world: &World,
-    config: &FanOutDef,
+    runs: &WorkerSource,
     parent: &RunSpec,
 ) -> Result<SpawnSource, String> {
-    Ok(match &config.worker {
+    Ok(match runs {
         WorkerSource::Stage(_) => parent.same_graph_source(),
         WorkerSource::Blueprint(blueprint) => SpawnSource::Blueprint(blueprint.clone()),
         WorkerSource::BlueprintFile(path) => SpawnSource::BlueprintFile(path.clone()),

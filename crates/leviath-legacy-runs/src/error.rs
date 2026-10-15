@@ -15,10 +15,10 @@ pub enum ConvertError {
         /// The run file.
         path: PathBuf,
     },
-    /// The directory holds no run file in binary layout 2 to upgrade: none at
-    /// all, or one in another layout, this build's among them.
-    #[error("{} is not a run file in layout 2; there is nothing to upgrade", path.display())]
-    NotLayout2 {
+    /// The directory holds no run file in an older binary layout to upgrade:
+    /// none at all, or one in another layout, this build's among them.
+    #[error("{} is not a run file in an older layout; there is nothing to upgrade", path.display())]
+    NotOldLayout {
         /// The run file.
         path: PathBuf,
     },

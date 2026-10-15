@@ -78,8 +78,16 @@ fn a_worker_for_a_queued_item_is_adopted_and_any_other_is_cancelled() {
     assert_eq!(
         w.to_state().active,
         [
-            ("a".to_string(), "run-a".to_string()),
-            ("b".to_string(), "run-b".to_string())
+            (
+                "a".to_string(),
+                WorkerName::new("w").unwrap(),
+                "run-a".to_string()
+            ),
+            (
+                "b".to_string(),
+                WorkerName::new("w").unwrap(),
+                "run-b".to_string()
+            )
         ]
     );
     assert_eq!(
@@ -187,6 +195,7 @@ fn a_worker_started_with_its_items_inputs_is_adopted() {
     let mut world = World::new();
     let with_task = WorkItem {
         id: "a".into(),
+        worker: WorkerName::new("w").unwrap(),
         inputs: [("task".to_string(), RawInput::Text("do a".into()))].into(),
     };
     let parent = fanning_parent(&mut world, vec![with_task]);
@@ -229,7 +238,8 @@ fn an_adopted_worker_is_seeded_from_its_parent_once() {
     for stepped in [false, true] {
         let mut world = World::new();
         let mut config = cfg(Some("merge"), 2, WorkerFailure::Continue);
-        config.worker = WorkerSource::Blueprint(BlueprintRef::parse("helper").unwrap());
+        config.workers_available[0].runs =
+            WorkerSource::Blueprint(BlueprintRef::parse("helper").unwrap());
         let mut graph = fanout_blueprint(config.clone());
         graph.transforms = vec![ContextTransformDef {
             from: BlueprintName::new("t").unwrap(),
@@ -416,7 +426,7 @@ fn a_worker_is_adopted_only_when_it_runs_what_the_fan_out_starts() {
             WorkerSource::Stage(stage) => Some(stage.clone()),
             _ => None,
         };
-        config.worker = source;
+        config.workers_available[0].runs = source;
         let parent = spawn_parent(&mut world, fanout_blueprint(config.clone()), "");
         if let Some(parent_origin) = parent_origin {
             let mut spec = world.get::<RunSpecC>(parent).unwrap().0.as_ref().clone();

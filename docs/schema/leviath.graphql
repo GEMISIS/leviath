@@ -4086,18 +4086,26 @@ Filter on `FanOutOutput`. Every field here mirrors the same-named field there; s
 """
 input FanOutInput {
 	"""
+	Filter on `FanOutOutput.workersAvailable`.
+	
+	Every worker the fan-out may hand items to. With more than one, the
+	model names one for each item, and a name not here is refused.
+	"""
+	workersAvailable: FanOutWorkerListInput
+	"""
 	Filter on `FanOutOutput.workerAgent`.
 	
-	A separate installed blueprint run as the worker, by name. It has to be
-	installed when the fan-out runs, and it may not be installed now, so this
-	is a name rather than a blueprint.
+	A separate installed blueprint run as the worker, by name, when the
+	fan-out has one worker and that is what it runs. It has to be installed
+	when the fan-out runs, and it may not be installed now, so this is a
+	name rather than a blueprint.
 	"""
 	workerAgent: StringFilter
 	"""
 	Filter on `FanOutOutput.workerStage`.
 	
-	A stage of this same blueprint run as the worker. That stage has to allow
-	it.
+	A stage of this same blueprint run as the worker, when the fan-out has
+	one worker and that is what it runs. That stage has to allow it.
 	
 	Null when the fan-out runs a separate blueprint or a query instead, and
 	also when it names a stage this blueprint does not declare, which
@@ -4108,15 +4116,16 @@ input FanOutInput {
 	"""
 	Filter on `FanOutOutput.workerStageName`.
 	
-	The stage name the fan-out wrote for its worker, verbatim. Null when it
-	names no stage of this blueprint.
+	The stage name the fan-out wrote for its one worker, verbatim. Null when
+	it names no stage of this blueprint.
 	"""
 	workerStageName: StringFilter
 	"""
 	Filter on `FanOutOutput.workerQuery`.
 	
-	A description matched against the installed blueprints, when the manifest
-	would rather describe the worker than name it.
+	A description matched against the installed blueprints, when the
+	fan-out has one worker and the manifest would rather describe it than
+	name it.
 	"""
 	workerQuery: StringFilter
 	"""
@@ -4205,8 +4214,16 @@ One fan-out item and what became of it: the worker running it, its summary,
 or why it failed.
 """
 type FanOutItemOutcomeOutput {
-	"The item's own id."
+	"""
+	The item's own id. A finished or failed item of a fan-out with several
+	workers carries its worker's name after it, as `id (worker)`.
+	"""
 	itemId: ID!
+	"""
+	The fan-out's worker running it, by name. Null for a finished or
+	failed item.
+	"""
+	worker: String
 	"The worker run, the summary or the failure."
 	detail: String!
 }
@@ -4230,6 +4247,8 @@ type FanOutItemOutput {
 type FanOutItemStateOutput {
 	"The item's own id."
 	id: ID!
+	"The fan-out's worker it goes to, by name."
+	worker: String!
 	"The inputs its worker gets."
 	inputs: [InputEntryOutput!]!
 }
@@ -4242,14 +4261,20 @@ block of defaults nobody wrote.
 """
 type FanOutOutput {
 	"""
-	A separate installed blueprint run as the worker, by name. It has to be
-	installed when the fan-out runs, and it may not be installed now, so this
-	is a name rather than a blueprint.
+	Every worker the fan-out may hand items to. With more than one, the
+	model names one for each item, and a name not here is refused.
+	"""
+	workersAvailable: [FanOutWorkerOutput!]!
+	"""
+	A separate installed blueprint run as the worker, by name, when the
+	fan-out has one worker and that is what it runs. It has to be installed
+	when the fan-out runs, and it may not be installed now, so this is a
+	name rather than a blueprint.
 	"""
 	workerAgent: String
 	"""
-	A stage of this same blueprint run as the worker. That stage has to allow
-	it.
+	A stage of this same blueprint run as the worker, when the fan-out has
+	one worker and that is what it runs. That stage has to allow it.
 	
 	Null when the fan-out runs a separate blueprint or a query instead, and
 	also when it names a stage this blueprint does not declare, which
@@ -4258,13 +4283,14 @@ type FanOutOutput {
 	"""
 	workerStage: StageOutput
 	"""
-	The stage name the fan-out wrote for its worker, verbatim. Null when it
-	names no stage of this blueprint.
+	The stage name the fan-out wrote for its one worker, verbatim. Null when
+	it names no stage of this blueprint.
 	"""
 	workerStageName: String
 	"""
-	A description matched against the installed blueprints, when the manifest
-	would rather describe the worker than name it.
+	A description matched against the installed blueprints, when the
+	fan-out has one worker and the manifest would rather describe it than
+	name it.
 	"""
 	workerQuery: String
 	"""
@@ -4314,10 +4340,8 @@ type FanOutOutput {
 type FanOutProgressOutput {
 	"The stage running the fan-out."
 	stage: String!
-	"Where its workers' graph comes from."
-	workerKind: FanOutWorkerKind!
-	"The blueprint, stage or query that names it."
-	worker: String!
+	"The workers it may hand items to."
+	workers: [FanOutProgressWorkerOutput!]!
 	"The stage that merges the results, when there is one."
 	mergeStage: String
 	"What one worker failing does to the rest."
@@ -4336,6 +4360,69 @@ type FanOutProgressOutput {
 	paused: Boolean!
 }
 
+"One worker a fan-out in progress may hand items to."
+type FanOutProgressWorkerOutput {
+	"What the model names it by."
+	name: String!
+	"Where its graph comes from."
+	kind: FanOutWorkerKind!
+	"The blueprint, stage or query that names it."
+	target: String!
+}
+
+"""
+Filter on `FanOutWorkerOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
+
+`and`, `or` and `not` compose filters of this same type, and `isNull` asks about the value being absent rather than about its contents.
+"""
+input FanOutWorkerInput {
+	"""
+	Filter on `FanOutWorkerOutput.name`.
+	
+	What the model names it by when it hands it an item.
+	"""
+	name: StringFilter
+	"""
+	Filter on `FanOutWorkerOutput.stageName`.
+	
+	The stage of this blueprint it runs, by name, when that is what it
+	runs.
+	"""
+	stageName: StringFilter
+	"""
+	Filter on `FanOutWorkerOutput.blueprint`.
+	
+	The installed blueprint, or the directory of a blueprint, it runs,
+	when that is what it runs.
+	"""
+	blueprint: StringFilter
+	"""
+	Filter on `FanOutWorkerOutput.query`.
+	
+	A description an installed blueprint is found by when the worker
+	starts, when that is how.
+	"""
+	query: StringFilter
+	"""
+	Filter on `FanOutWorkerOutput.useFor`.
+	
+	When to pick it, as the model reads it.
+	"""
+	useFor: StringFilter
+	"Every filter in this list has to hold."
+	and: [FanOutWorkerInput!]
+	"At least one filter in this list has to hold."
+	or: [FanOutWorkerInput!]
+	"This filter must not hold."
+	not: FanOutWorkerInput
+	"""
+	Match where the value itself is absent.
+	
+	`true` matches only where there is no value, `false` only where there is one.
+	"""
+	isNull: Boolean
+}
+
 "Where a fan-out's worker graph comes from."
 enum FanOutWorkerKind {
 	"An installed blueprint."
@@ -4346,6 +4433,44 @@ enum FanOutWorkerKind {
 	STAGE
 	"A blueprint chosen by a query."
 	QUERY
+}
+
+"Quantified tests over a list of `FanOutWorkerOutput`."
+input FanOutWorkerListInput {
+	"At least one item matches."
+	some: FanOutWorkerInput
+	"Every item matches."
+	every: FanOutWorkerInput
+	"No item matches."
+	none: FanOutWorkerInput
+	"Match where there is no list at all."
+	isNull: Boolean
+}
+
+"""
+One worker a fan-out may hand items to. Exactly one of `stageName`,
+`blueprint` and `query` is set: what the worker runs.
+"""
+type FanOutWorkerOutput {
+	"What the model names it by when it hands it an item."
+	name: String!
+	"""
+	The stage of this blueprint it runs, by name, when that is what it
+	runs.
+	"""
+	stageName: String
+	"""
+	The installed blueprint, or the directory of a blueprint, it runs,
+	when that is what it runs.
+	"""
+	blueprint: String
+	"""
+	A description an installed blueprint is found by when the worker
+	starts, when that is how.
+	"""
+	query: String
+	"When to pick it, as the model reads it."
+	useFor: String!
 }
 
 """

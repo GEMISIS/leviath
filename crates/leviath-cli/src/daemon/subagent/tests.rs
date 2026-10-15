@@ -1608,13 +1608,21 @@ async fn describe_blueprint_lists_stages_inputs_and_a_call() {
 /// Every mode a stage can have reads as one word.
 #[test]
 fn every_stage_mode_has_a_word() {
-    use leviath_runtime::spec::graph::{FanOutDef, StageMode};
+    use leviath_runtime::spec::graph::{
+        EVERY_ITEM, FanOutDef, StageMode, WorkerOption, WorkerSource,
+    };
     use leviath_runtime::spec::names::StageName;
     let words: Vec<&str> = [
         StageMode::Autonomous,
         StageMode::Interactive,
         StageMode::InteractivePoints(vec![]),
-        StageMode::FanOut(FanOutDef::same_graph(StageName::new("w").unwrap())),
+        StageMode::FanOut(FanOutDef::with_worker(
+            StageName::new("split").unwrap(),
+            WorkerOption::named_after(
+                WorkerSource::Stage(StageName::new("w").unwrap()),
+                EVERY_ITEM,
+            ),
+        )),
         StageMode::Output,
     ]
     .iter()

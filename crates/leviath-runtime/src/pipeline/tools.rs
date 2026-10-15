@@ -655,7 +655,15 @@ pub(crate) fn dispatch_tools(
             // than executed on garbage or surfaced to the user as a permission
             // prompt for arguments that were never valid. Deterministic, so a
             // gate-prompt re-run of the same batch refuses identically.
-            if let Some(refusal) = invalid_args_refusal(stage_inf, &c.name, &c.arguments) {
+            //
+            // `fan_out` is read by its own reader instead, which refuses all
+            // the schema does and says more: a fan-out stage's worker names
+            // are an `enum` in its schema, and a name off the list is answered
+            // with the stage's workers and what each is for, not a bare
+            // "not one of".
+            if !crate::fanout::is_fan_out_tool(&c.name)
+                && let Some(refusal) = invalid_args_refusal(stage_inf, &c.name, &c.arguments)
+            {
                 context_results.push((c.tool_id.clone(), refusal));
                 continue;
             }

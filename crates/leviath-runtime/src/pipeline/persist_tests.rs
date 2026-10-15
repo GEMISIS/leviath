@@ -363,14 +363,20 @@ fn a_worker_finishing_is_a_step_of_its_parents() {
         &mut world,
         parent,
         crate::fanout::FanOutState {
-            config: crate::spec::graph::FanOutDef::same_graph(
-                crate::spec::names::StageName::new("s").unwrap(),
-            ),
+            config: crate::test_graph::fan_out_to("fan", "s"),
             max_workers: Some(2),
             pending: Vec::new(),
             active: vec![
-                ("i1".to_string(), "w-1".to_string()),
-                ("i2".to_string(), "w-2".to_string()),
+                (
+                    "i1".to_string(),
+                    crate::spec::names::WorkerName::new("s").unwrap(),
+                    "w-1".to_string(),
+                ),
+                (
+                    "i2".to_string(),
+                    crate::spec::names::WorkerName::new("s").unwrap(),
+                    "w-2".to_string(),
+                ),
             ],
             summaries: Vec::new(),
             failures: Vec::new(),

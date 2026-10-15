@@ -321,25 +321,44 @@ pub(crate) fn tool(def: &ToolDef) -> Tool {
 /// The split decides how much each worker is handed, and a worker handed more
 /// than it can read in its replies runs out before it submits, so its share
 /// comes back with nothing. Read off the worker stage itself, so it is right for
-/// every blueprint and cannot drift from the cap it describes. The stage is not
-/// named: a model shown its name passed it back as the `fan_out` call's `agent`.
+/// every blueprint and cannot drift from the cap it describes. A fan-out with
+/// one worker does not name it, since there is nothing to pick; one with
+/// several names each by the name an item picks it with.
 fn worker_budget(graph: &RunGraph, stage: &StageDef) -> Option<String> {
     let StageMode::FanOut(f) = &stage.mode else {
         return None;
     };
-    let WorkerSource::Stage(name) = &f.worker else {
-        return None;
-    };
-    let replies = graph
-        .stages
+    let capped: Vec<(&str, u32)> = f
+        .workers_available
         .iter()
-        .find(|s| &s.name == name)?
-        .max_iterations?;
-    Some(format!(
-        "Each work item goes to one worker, which has at most {replies} replies to do its \
-         share and hand back its result. Give each item only what one worker can get through \
-         in that many replies."
-    ))
+        .filter_map(|w| match &w.runs {
+            WorkerSource::Stage(name) => {
+                let replies = graph.stage(name.as_str())?.max_iterations?;
+                Some((w.name.as_str(), replies))
+            }
+            _ => None,
+        })
+        .collect();
+    match (f.sole_worker(), capped.as_slice()) {
+        (_, []) => None,
+        (Some(_), [(_, replies), ..]) => Some(format!(
+            "Each work item goes to one worker, which has at most {replies} replies to do its \
+             share and hand back its result. Give each item only what one worker can get \
+             through in that many replies."
+        )),
+        (None, capped) => {
+            let each: Vec<String> = capped
+                .iter()
+                .map(|(name, replies)| format!("{name} has at most {replies}"))
+                .collect();
+            Some(format!(
+                "Each work item goes to the worker it names, which has a limited number of \
+                 replies to do its share and hand back its result: {}. Give each item only what \
+                 its worker can get through in that many replies.",
+                each.join(", ")
+            ))
+        }
+    }
 }
 
 /// The instructions a stage is entered with: its own prompt, a fan-out's split

@@ -496,6 +496,8 @@ impl From<&PendingBatch> for PendingToolBatch {
 pub(crate) struct FanOutItemState {
     /// The item's own id.
     pub(crate) id: ID,
+    /// The fan-out's worker it goes to, by name.
+    pub(crate) worker: String,
     /// The inputs its worker gets.
     pub(crate) inputs: Vec<InputEntry>,
 }
@@ -505,8 +507,12 @@ pub(crate) struct FanOutItemState {
 #[mirror(no_filter)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct FanOutItemOutcome {
-    /// The item's own id.
+    /// The item's own id. A finished or failed item of a fan-out with several
+    /// workers carries its worker's name after it, as `id (worker)`.
     pub(crate) item_id: ID,
+    /// The fan-out's worker running it, by name. Null for a finished or
+    /// failed item.
+    pub(crate) worker: Option<String>,
     /// The worker run, the summary or the failure.
     pub(crate) detail: String,
 }
@@ -524,16 +530,26 @@ pub(crate) enum FanOutWorkerKind {
     Query,
 }
 
+/// One worker a fan-out in progress may hand items to.
+#[mirror(no_filter)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct FanOutProgressWorker {
+    /// What the model names it by.
+    pub(crate) name: String,
+    /// Where its graph comes from.
+    pub(crate) kind: FanOutWorkerKind,
+    /// The blueprint, stage or query that names it.
+    pub(crate) target: String,
+}
+
 /// A fan-out in progress: the stage running it, its queue, and its workers.
 #[mirror(no_filter)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct FanOutProgress {
     /// The stage running the fan-out.
     pub(crate) stage: String,
-    /// Where its workers' graph comes from.
-    pub(crate) worker_kind: FanOutWorkerKind,
-    /// The blueprint, stage or query that names it.
-    pub(crate) worker: String,
+    /// The workers it may hand items to.
+    pub(crate) workers: Vec<FanOutProgressWorker>,
     /// The stage that merges the results, when there is one.
     pub(crate) merge_stage: Option<String>,
     /// What one worker failing does to the rest.
@@ -552,11 +568,12 @@ pub(crate) struct FanOutProgress {
     pub(crate) paused: bool,
 }
 
-/// Pairs of an item id and something about it, as outcomes.
+/// Pairs of an item id and something about it, as outcomes of no worker.
 fn outcomes<'a>(pairs: impl Iterator<Item = (&'a String, String)>) -> Vec<FanOutItemOutcome> {
     pairs
         .map(|(item, detail)| FanOutItemOutcome {
             item_id: ID(item.clone()),
+            worker: None,
             detail,
         })
         .collect()
@@ -565,20 +582,31 @@ fn outcomes<'a>(pairs: impl Iterator<Item = (&'a String, String)>) -> Vec<FanOut
 impl From<&FanOutState> for FanOutProgress {
     fn from(f: &FanOutState) -> Self {
         use leviath_runtime::spec::graph::{WorkerFailure, WorkerSource};
-        let (worker_kind, worker) = match &f.config.worker {
-            WorkerSource::Blueprint(blueprint) => {
-                (FanOutWorkerKind::Blueprint, blueprint.to_string())
-            }
-            WorkerSource::BlueprintFile(path) => {
-                (FanOutWorkerKind::BlueprintFile, path.to_string())
-            }
-            WorkerSource::Stage(stage) => (FanOutWorkerKind::Stage, stage.to_string()),
-            WorkerSource::Query(query) => (FanOutWorkerKind::Query, query.clone()),
-        };
+        let workers = f
+            .config
+            .workers_available
+            .iter()
+            .map(|w| {
+                let (kind, target) = match &w.runs {
+                    WorkerSource::Blueprint(blueprint) => {
+                        (FanOutWorkerKind::Blueprint, blueprint.to_string())
+                    }
+                    WorkerSource::BlueprintFile(path) => {
+                        (FanOutWorkerKind::BlueprintFile, path.to_string())
+                    }
+                    WorkerSource::Stage(stage) => (FanOutWorkerKind::Stage, stage.to_string()),
+                    WorkerSource::Query(query) => (FanOutWorkerKind::Query, query.clone()),
+                };
+                FanOutProgressWorker {
+                    name: w.name.to_string(),
+                    kind,
+                    target,
+                }
+            })
+            .collect();
         Self {
             stage: f.stage.to_string(),
-            worker_kind,
-            worker,
+            workers,
             merge_stage: f.config.merge_stage.as_ref().map(ToString::to_string),
             on_worker_failure: match f.config.on_worker_failure {
                 WorkerFailure::Continue => WorkerFailurePolicy::Continue,
@@ -590,10 +618,19 @@ impl From<&FanOutState> for FanOutProgress {
                 .iter()
                 .map(|item| FanOutItemState {
                     id: ID(item.id.clone()),
+                    worker: item.worker.to_string(),
                     inputs: entries(&item.inputs),
                 })
                 .collect(),
-            active: outcomes(f.active.iter().map(|(i, run)| (i, run.to_string()))),
+            active: f
+                .active
+                .iter()
+                .map(|(item, worker, run)| FanOutItemOutcome {
+                    item_id: ID(item.clone()),
+                    worker: Some(worker.to_string()),
+                    detail: run.to_string(),
+                })
+                .collect(),
             done: outcomes(f.done.iter().map(|(i, s)| (i, s.clone()))),
             failed: outcomes(f.failed.iter().map(|(i, e)| (i, e.clone()))),
             paused: f.paused,
