@@ -209,6 +209,32 @@ impl AuthStore {
         Ok(())
     }
 
+    /// Apply `change` to the grants in `path` as they stand, under a lock every
+    /// process that writes them takes, and save the result.
+    ///
+    /// Every writer saves the whole store. Loading early and saving late, the
+    /// daemon refreshing one server's token and a `lev mcp login` for another
+    /// each save over the other's change: a fresh login lost to a refresh that
+    /// read the file before it, or a rotated refresh token lost to a login,
+    /// which logs that server out. Here the store is read inside the lock, so
+    /// a change lands on what the file holds at that moment.
+    ///
+    /// `change` says whether there is anything to save. Failing, or saying
+    /// no, it leaves the store as it was.
+    pub fn update_with(
+        path: &Path,
+        store: Option<&dyn leviath_core::CredentialStore>,
+        change: &mut dyn FnMut(&mut Self) -> anyhow::Result<bool>,
+    ) -> anyhow::Result<()> {
+        create_parent_dir(path)?;
+        let _lock = lock_beside(path)?;
+        let mut this = Self::load_with(path, store)?;
+        match change(&mut this)? {
+            true => this.save_with(path, store),
+            false => Ok(()),
+        }
+    }
+
     /// The default store path, honoring `LEVIATH_HOME` like every other
     /// home-relative path this workspace uses.
     ///
@@ -252,6 +278,24 @@ impl AuthStore {
     pub fn server_names(&self) -> Vec<&str> {
         self.servers.keys().map(String::as_str).collect()
     }
+}
+
+/// Take the lock on the store at `path`, held until the file is dropped.
+///
+/// A file beside the store rather than the store itself: the store is
+/// replaced by a rename on every save, and a lock on a file that has just been
+/// renamed over locks nothing anyone else opens. The OS releases the lock if
+/// the process dies holding it.
+fn lock_beside(path: &Path) -> anyhow::Result<std::fs::File> {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&name)
+        .and_then(|file| file.lock().map(|()| file))
+        .map_err(|e| anyhow::anyhow!("Failed to lock the MCP auth store: {e}"))
 }
 
 /// Ensure the directory holding `path` exists.
@@ -709,6 +753,124 @@ mod tests {
                 Some(PathBuf::from("/tmp/lev-home-test/.leviath/mcp-auth.json"))
             );
         });
+    }
+
+    /// Two writers that each loaded the store before the other saved both
+    /// keep their change. Saved whole, the later one would drop the earlier
+    /// one's server: a refresh read before a login, saving over it.
+    #[test]
+    fn an_update_lands_on_the_store_as_it_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let mut seeded = AuthStore::default();
+        seeded.set("github", sample());
+        seeded.save(&path).unwrap();
+
+        // A refresh that loaded the store, and then a login that saved
+        // another server while the refresh was out.
+        let stale = AuthStore::load(&path).unwrap();
+        AuthStore::update_with(&path, None, &mut |fresh| {
+            fresh.set("linear", sample());
+            Ok(true)
+        })
+        .unwrap();
+        let mut refreshed = stale.get("github").unwrap().clone();
+        refreshed.access_token = "new".to_string();
+        AuthStore::update_with(&path, None, &mut |fresh| {
+            fresh.set("github", refreshed.clone());
+            Ok(true)
+        })
+        .unwrap();
+
+        let held = AuthStore::load(&path).unwrap();
+        assert!(
+            held.get("linear").is_some(),
+            "the login survived the refresh"
+        );
+        assert_eq!(held.get("github").unwrap().access_token, "new");
+    }
+
+    /// A change that fails, or says there is nothing to save, saves nothing.
+    #[test]
+    fn a_failed_change_leaves_the_store_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let mut seeded = AuthStore::default();
+        seeded.set("github", sample());
+        seeded.save(&path).unwrap();
+
+        let refused = AuthStore::update_with(&path, None, &mut |fresh| {
+            fresh.remove("github");
+            Err(anyhow::anyhow!("no"))
+        });
+        assert_eq!(refused.unwrap_err().to_string(), "no");
+        assert!(AuthStore::load(&path).unwrap().get("github").is_some());
+
+        // Nor does one that says there is nothing to save.
+        AuthStore::update_with(&path, None, &mut |fresh| {
+            let _ = fresh.remove("github");
+            Ok(false)
+        })
+        .unwrap();
+        assert!(AuthStore::load(&path).unwrap().get("github").is_some());
+    }
+
+    /// An update waits for another writer's lock rather than racing it, and
+    /// then reads what that writer saved.
+    #[test]
+    fn an_update_waits_for_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let held = lock_beside(&path).unwrap();
+
+        let waiting = path.clone();
+        let writer = std::thread::spawn(move || {
+            AuthStore::update_with(&waiting, None, &mut |fresh| {
+                fresh.set("linear", sample());
+                Ok(true)
+            })
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!path.exists(), "nothing is written while the lock is held");
+        // What the holder saved is what the waiting writer then reads.
+        let mut first = AuthStore::default();
+        first.set("github", sample());
+        first.save(&path).unwrap();
+        drop(held);
+
+        writer.join().unwrap().unwrap();
+        let both = AuthStore::load(&path).unwrap();
+        assert!(both.get("github").is_some() && both.get("linear").is_some());
+    }
+
+    /// Each step that can fail fails the update, saying which: a parent that
+    /// is a file, a lock that cannot be opened, and a store that will not
+    /// load.
+    #[test]
+    fn an_update_that_cannot_lock_or_load_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut nothing = |_: &mut AuthStore| -> anyhow::Result<bool> { Ok(true) };
+
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"a file").unwrap();
+        assert!(
+            AuthStore::update_with(&blocker.join("mcp-auth.json"), None, &mut nothing).is_err()
+        );
+
+        let path = dir.path().join("mcp-auth.json");
+        std::fs::create_dir(dir.path().join("mcp-auth.json.lock")).unwrap();
+        let locked = AuthStore::update_with(&path, None, &mut nothing).unwrap_err();
+        assert!(locked.to_string().contains("lock"), "{locked}");
+
+        let other = dir.path().join("other.json");
+        std::fs::write(&other, b"not json").unwrap();
+        let corrupt = AuthStore::update_with(&other, None, &mut nothing).unwrap_err();
+        assert!(corrupt.to_string().contains("corrupt"), "{corrupt}");
+
+        // The control: the same change on a store that loads goes through.
+        let fine = dir.path().join("fine.json");
+        AuthStore::update_with(&fine, None, &mut nothing).unwrap();
+        assert!(fine.exists());
     }
 
     #[test]

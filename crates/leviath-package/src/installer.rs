@@ -132,6 +132,44 @@ fn blueprint_meta(dir: &Path) -> ManifestMeta {
 /// process; the pid alone separates processes.
 static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// How old a staging directory is before an install takes it for one a
+/// crashed install left behind. Far longer than any install takes, so one
+/// still unpacking in another process is never swept from under it.
+const STALE_STAGING: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Remove the staging directories beside `install_dir` that are older than
+/// [`STALE_STAGING`] at `now`.
+///
+/// An install that dies between unpacking and the rename leaves its staging
+/// tree behind. It is outside what discovery scans, so it shadows nothing,
+/// but nothing else ever removes it. Best effort: a tree that will not go is
+/// left for the next install.
+fn sweep_stale_staging(install_dir: &Path, now: std::time::SystemTime) {
+    let Some(name) = install_dir.file_name() else {
+        return;
+    };
+    let mut prefix = name.to_os_string();
+    prefix.push(".staging-");
+    let prefix = prefix.to_string_lossy().into_owned();
+    let siblings = install_dir
+        .parent()
+        .into_iter()
+        .flat_map(fs::read_dir)
+        .flatten()
+        .flatten();
+    for entry in siblings {
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > STALE_STAGING);
+        if stale && entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 impl AgentInstaller {
     /// Create a new installer using the default installation directory.
     ///
@@ -145,11 +183,6 @@ impl AgentInstaller {
         leviath_core::paths::agents_dir()
             .map(Self::with_install_dir)
             .context("could not determine a home directory to install agents under")
-    }
-
-    /// [`try_new`](Self::try_new), panicking when no home directory resolves.
-    pub fn new() -> Self {
-        Self::try_new().expect("could not determine home directory")
     }
 
     /// Create an installer with a custom installation directory.
@@ -304,6 +337,7 @@ impl AgentInstaller {
         // too - a second message would describe a failure nothing can reach.
         let prepare = || -> std::io::Result<()> {
             fs::create_dir_all(&self.install_dir)?;
+            sweep_stale_staging(&self.install_dir, std::time::SystemTime::now());
             // A same-pid leftover from a crashed run would otherwise be
             // unpacked *into*, mixing two bundles.
             let _ = fs::remove_dir_all(&staging);
@@ -355,7 +389,17 @@ impl AgentInstaller {
     }
 
     /// Uninstall an agent by removing its directory.
+    ///
+    /// The name is held to the rule an install holds it to, one safe path
+    /// component: joined as it is, `..` or an absolute path would name a
+    /// directory outside the agents directory, and this removes it.
     pub fn uninstall(&self, agent_name: &str) -> anyhow::Result<()> {
+        if !leviath_core::is_safe_path_component(agent_name) {
+            anyhow::bail!(
+                "invalid agent name '{agent_name}': names may contain only letters, digits, \
+                 '.', '_' and '-'"
+            );
+        }
         let agent_dir = self.install_dir.join(agent_name);
 
         if !agent_dir.exists() {
@@ -379,7 +423,13 @@ impl AgentInstaller {
     /// `lev remove` to fix, and an error here would be the one thing standing
     /// between the user and the fix. Returning a `Result` no arm ever fills
     /// with `Err` only invites a caller to `.unwrap()` it.
+    ///
+    /// A name that is not one safe path component is never installed, so it
+    /// is `None` rather than a read outside the agents directory.
     pub fn get_installed(&self, name: &str) -> Option<InstalledAgent> {
+        if !leviath_core::is_safe_path_component(name) {
+            return None;
+        }
         let agent_dir = self.install_dir.join(name);
 
         if !agent_dir.exists() {
@@ -398,12 +448,6 @@ impl AgentInstaller {
             path: agent_dir,
             description: meta.description,
         })
-    }
-}
-
-impl Default for AgentInstaller {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -908,20 +952,61 @@ stages = []
         assert!(installer.get_installed("empty-agent").is_none());
     }
 
-    // ─── AgentInstaller::new / Default ─────────────────────────────────
+    // ─── AgentInstaller::try_new ───────────────────────────────────────
 
     #[test]
-    fn new_derives_install_dir_from_home() {
-        let installer = AgentInstaller::new();
-        assert!(installer.install_dir.ends_with(".leviath/agents"));
+    fn try_new_derives_install_dir_from_home() {
         let tried = AgentInstaller::try_new().expect("a home directory resolves here");
-        assert_eq!(tried.install_dir, installer.install_dir);
+        assert!(tried.install_dir.ends_with(".leviath/agents"));
     }
 
+    /// A name an install would refuse names nothing to remove or read: `..`
+    /// joined onto the agents directory is the directory above it.
     #[test]
-    fn default_matches_new() {
-        let installer = AgentInstaller::default();
-        assert!(installer.install_dir.ends_with(".leviath/agents"));
+    fn a_name_that_is_a_path_is_neither_removed_nor_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        fs::create_dir_all(&agents).unwrap();
+        fs::write(dir.path().join("agent.toml"), "[blueprint]\nname = \"x\"\n").unwrap();
+        let installer = AgentInstaller::with_install_dir(agents);
+
+        for name in ["..", "../agents", "/tmp"] {
+            let err = installer.uninstall(name).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid agent name"),
+                "{name}: {err}"
+            );
+            assert!(installer.get_installed(name).is_none(), "{name}");
+        }
+        assert!(
+            dir.path().join("agent.toml").exists(),
+            "nothing above was touched"
+        );
+    }
+
+    /// A staging tree a crashed install left behind is removed by the next
+    /// install once it is over an hour old, and a fresh one, which may be
+    /// another process's install in progress, is left alone.
+    #[test]
+    fn a_stale_staging_tree_is_swept_and_a_fresh_one_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        fs::create_dir_all(&agents).unwrap();
+        let staging = dir.path().join("agents.staging-424242-0");
+        fs::create_dir_all(staging.join("coder")).unwrap();
+        let unrelated = dir.path().join("notes");
+        fs::create_dir_all(&unrelated).unwrap();
+
+        sweep_stale_staging(&agents, std::time::SystemTime::now());
+        assert!(staging.exists(), "a fresh staging tree is kept");
+
+        let later = std::time::SystemTime::now() + STALE_STAGING * 2;
+        sweep_stale_staging(&agents, later);
+        assert!(!staging.exists(), "a stale one is swept");
+        assert!(unrelated.exists() && agents.exists(), "and nothing else");
+
+        // An install directory with no name to prefix sweeps nothing.
+        sweep_stale_staging(Path::new("/"), later);
     }
 
     // ─── install() (file-based) ────────────────────────────────────────

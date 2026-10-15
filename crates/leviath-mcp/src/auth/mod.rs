@@ -310,7 +310,7 @@ impl OAuthClient {
         now: u64,
         credentials: Option<&dyn leviath_core::CredentialStore>,
     ) -> anyhow::Result<Option<(String, String)>> {
-        let mut store = AuthStore::load_with(store_path, credentials)?;
+        let store = AuthStore::load_with(store_path, credentials)?;
         let Some(auth) = store.get(server_name) else {
             return Ok(None);
         };
@@ -323,8 +323,12 @@ impl OAuthClient {
                 )
             })?;
             let access = refreshed.access_token.clone();
-            store.set(server_name, refreshed);
-            store.save_with(store_path, credentials)?;
+            // Onto the store as it is now, not as it was before the refresh
+            // went out: a login can have saved in between.
+            AuthStore::update_with(store_path, credentials, &mut |fresh| {
+                fresh.set(server_name, refreshed.clone());
+                Ok(true)
+            })?;
             access
         } else {
             auth.access_token.clone()
@@ -726,7 +730,7 @@ fn system_now_secs() -> u64 {
 impl crate::transport::BearerRefresher for StoredTokenRefresher {
     async fn refresh(&self) -> anyhow::Result<String> {
         let credentials = self.credentials.as_deref();
-        let mut store = AuthStore::load_with(&self.store_path, credentials)?;
+        let store = AuthStore::load_with(&self.store_path, credentials)?;
         let auth = store.get(&self.server_name).ok_or_else(|| {
             anyhow::anyhow!(
                 "no stored credentials for MCP server '{}'",
@@ -735,8 +739,11 @@ impl crate::transport::BearerRefresher for StoredTokenRefresher {
         })?;
         let refreshed = self.oauth.refresh(auth, (self.clock)()).await?;
         let value = format!("Bearer {}", refreshed.access_token);
-        store.set(&self.server_name, refreshed);
-        store.save_with(&self.store_path, credentials)?;
+        // Onto the store as it is now: see [`AuthStore::update_with`].
+        AuthStore::update_with(&self.store_path, credentials, &mut |fresh| {
+            fresh.set(&self.server_name, refreshed.clone());
+            Ok(true)
+        })?;
         Ok(value)
     }
 }

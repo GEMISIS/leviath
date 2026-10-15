@@ -291,6 +291,23 @@ same list.
 - On macOS and Linux, `write_file` and `read_file` on `nul` use `/dev/null`.
   The path was handed back as it was, relative, so a write made a file
   named `nul` in the directory the daemon was started in.
+- `lev mcp login` (and the dashboard's and `lev serve`'s login) and the
+  daemon's MCP token refresh no longer overwrite each other's tokens. Each
+  loaded the whole token store early and saved it back late, so a refresh
+  could undo a login made meanwhile, or a login could put back a rotated
+  refresh token and log that server out. Each change now lands under a lock
+  on the store as it stands. A `mcp-auth.json.lock` file sits beside it.
+- `leviath_package::AgentInstaller::uninstall` and `get_installed` refuse a
+  name that is not one safe path component, as an install does, rather than
+  removing or reading the directory `..` names. An install sweeps staging
+  directories a crashed install left behind once they are an hour old.
+- **Breaking, library.** `AgentInstaller::new` and its `Default`, which
+  panicked without a home directory, are gone; use `try_new`.
+  `McpGrants::save` is `McpGrants::set(server, auth)`, and
+  `AuthStore::update_with` is the way to change a store other processes
+  write.
+- `leviath_sys::write_atomic`'s doc says what it does with no mode and no
+  file to copy one from: the new file is owner-only (`0o600`) on Unix.
 - The shell the `shell` tool runs is worked out once per process, rather
   than leaking a copy of `$SHELL` on every call.
 - Signed links percent-encode file and artifact names, so a name with a

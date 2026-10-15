@@ -215,7 +215,7 @@ async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
         }
     };
 
-    let mut store = env.grants.load()?;
+    let store = env.grants.load()?;
     // Reuse a prior registration if we have one, so re-login doesn't re-register.
     let reuse = store.get(name).map(|a| a.client_id.clone());
     let outcome = OAuthClient::new()
@@ -230,8 +230,7 @@ async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
         .await?;
     match outcome {
         LoginOutcome::Authenticated(auth) => {
-            store.set(name, *auth);
-            env.grants.save(&store)?;
+            env.grants.set(name, *auth)?;
             println!("✓ Authenticated with '{name}'.");
         }
         LoginOutcome::NotRequired => {
