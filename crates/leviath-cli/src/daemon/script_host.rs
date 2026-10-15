@@ -633,6 +633,13 @@ static HTTP_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
                     Err(e) => attempt.error(format!("refused to follow redirect: {e}")),
                 }
             }))
+            // And re-check the address it dials. The script's URL was checked
+            // by resolving its host, and the client resolves it again to
+            // connect: a name that answered publicly the first time and
+            // privately the second is refused here.
+            .dns_resolver(std::sync::Arc::new(leviath_net::CheckedResolver::new(
+                local_network_allowed,
+            )))
             .build()
             .expect("failed to build blocking reqwest client")
     });

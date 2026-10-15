@@ -3,7 +3,9 @@
 Outbound-request policy for Leviath: which URLs an agent-driven fetch may
 reach, and the shared HTTP client that enforces it. An agent fetches URLs the
 model chose, and the model chose them from context an attacker can influence, so
-the check runs before the request and again on every redirect hop. Also here:
+the check runs before the request, again on every redirect hop, and once more
+on the address the client dials, through a resolver that refuses a name whose
+answer changed to a private address. Also here:
 the redirect policy for clients that carry credentials, which keeps a key on
 the origin it was meant for, and the Server-Sent Events framing shared by every
 client that reads an event stream.

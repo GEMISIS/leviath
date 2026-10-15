@@ -551,8 +551,9 @@ A request with no `workdir` runs in the directory `lev serve` was started in. Un
 request named none.
 
 The callback check is the one a model-supplied URL gets. `[security] allow_local_network = true`
-lets a webhook reach a local service. A raw graph whose fan-out reads its worker from a directory is
-refused the same way as `source.blueprint_file`, at that stage's `mode.fan_out.worker`.
+lets a webhook reach a local service. A raw graph whose fan-out reads a worker from a directory is
+refused the same way as `source.blueprint_file`, at that worker's
+`mode.fan_out.workers_available[i]`.
 
 A blueprint this server lists from an `agent_paths` directory can still be named by name: the server
 points the request at that directory for you. `--no-remote-seed-commands` is not a refusal: the run

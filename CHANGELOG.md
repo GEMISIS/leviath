@@ -269,6 +269,16 @@ same list.
   `exports`) answer with `X-Content-Type-Options: nosniff`, and every type
   but PDF with `Content-Security-Policy: sandbox`, so an HTML file an agent
   wrote cannot run script as a page of the API's origin.
+- **Security.** Webhook deliveries and a script's `http_*` calls check the
+  address they connect to, not only the one the URL resolved to when it was
+  checked. A name that answered publicly and then privately (DNS rebinding)
+  is refused. The proxies the machine is set to use are exempt.
+  `leviath_net::CheckedResolver` is the resolver, for any client of URLs an
+  agent chose.
+- **Security.** The outbound policy also refuses all of `0.0.0.0/8`, IPv6
+  documentation (`2001:db8::/32`) and local-use NAT64 (`64:ff9b:1::/48`). An
+  IPv6 address that carries an IPv4 one, as IPv4-compatible (`::a.b.c.d`),
+  NAT64 (`64:ff9b::/96`) or 6to4 (`2002::/16`), is judged by the IPv4 one.
 - Signed links percent-encode file and artifact names, so a name with a
   space, `&`, `#`, `+` or `%` links to itself.
 - `lev serve --host localhost` and `--host ::1` start. Only an IPv4 address
