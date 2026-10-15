@@ -21,6 +21,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 
+use super::core::error::ServeError;
 use super::types::*;
 
 /// `GET /api/fs/dirs?path=<abs>`: list one directory's immediate
@@ -55,27 +56,12 @@ pub(super) fn dir_listing(
     state: &AppState,
     path: Option<&str>,
     hidden: bool,
-) -> Result<DirsResp, super::core::error::ServeError> {
-    use super::core::error::ServeError;
-
+) -> Result<DirsResp, ServeError> {
     let root = state.limits.workdir_root.as_deref();
     let cwd = picker_cwd();
 
     let listed = match path {
-        Some(p) => {
-            let requested = PathBuf::from(p);
-            if !requested.is_absolute() {
-                return Err(ServeError::BadRequest("path must be absolute".to_string()));
-            }
-            if let Some(root) = root
-                && !leviath_core::resolves_within(&requested, root)
-            {
-                return Err(ServeError::Forbidden(format!(
-                    "path '{p}' is outside the configured --workdir-root"
-                )));
-            }
-            requested
-        }
+        Some(p) => fenced(root, p)?,
         // No path: the picker's opening view - the cwd, clamped to the root
         // when one is set and the cwd falls outside it.
         None => match root {
@@ -83,25 +69,15 @@ pub(super) fn dir_listing(
             _ => cwd.clone(),
         },
     };
+    existing_dir(&listed)?;
 
-    match std::fs::metadata(&listed) {
-        Ok(m) if !m.is_dir() => {
-            return Err(ServeError::BadRequest(format!(
-                "'{}' is a file, not a directory",
-                listed.display()
-            )));
-        }
-        Ok(_) => {}
-        Err(_) => {
-            return Err(ServeError::NotFound(format!(
-                "directory '{}' not found",
-                listed.display()
-            )));
-        }
-    }
-
-    let entries = std::fs::read_dir(&listed)
-        .map_err(|e| ServeError::NotFound(format!("could not read '{}': {e}", listed.display())))?;
+    let entries = std::fs::read_dir(&listed).map_err(|e| {
+        refused(
+            &e,
+            format!("could not read '{}': {e}", listed.display()),
+            ServeError::NotFound,
+        )
+    })?;
     let mut dirs = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -189,45 +165,11 @@ pub(super) async fn create_dir(
 /// A picker needs the three refusals told apart: a path outside the fence, a
 /// parent that is not there, and a name already taken are three different things
 /// to show somebody.
-pub(super) fn made(
-    state: &AppState,
-    path: &str,
-    name: &str,
-) -> Result<MkdirResp, super::core::error::ServeError> {
-    use super::core::error::ServeError;
-
-    let parent = PathBuf::from(path);
-    if !parent.is_absolute() {
-        return Err(ServeError::BadRequest("path must be absolute".to_string()));
-    }
-    if let Some(root) = state.limits.workdir_root.as_deref()
-        && !leviath_core::resolves_within(&parent, root)
-    {
-        return Err(ServeError::Forbidden(format!(
-            "path '{}' is outside the configured --workdir-root",
-            path
-        )));
-    }
-    match std::fs::metadata(&parent) {
-        Ok(m) if !m.is_dir() => {
-            return Err(ServeError::BadRequest(format!(
-                "'{}' is a file, not a directory",
-                parent.display()
-            )));
-        }
-        Ok(_) => {}
-        Err(_) => {
-            return Err(ServeError::NotFound(format!(
-                "directory '{}' not found",
-                parent.display()
-            )));
-        }
-    }
-    if !is_one_segment(name) {
-        return Err(ServeError::BadRequest(format!(
-            "name '{}' must be a single directory name",
-            name
-        )));
+pub(super) fn made(state: &AppState, path: &str, name: &str) -> Result<MkdirResp, ServeError> {
+    let parent = fenced(state.limits.workdir_root.as_deref(), path)?;
+    existing_dir(&parent)?;
+    if let Some(why) = bad_name(name, cfg!(windows)) {
+        return Err(ServeError::BadRequest(why));
     }
 
     let target = parent.join(name);
@@ -244,8 +186,14 @@ pub(super) fn made(
             target.display()
         )));
     }
+    // Another request can make the same name between that check and this
+    // one; it is a 409 then too.
     std::fs::create_dir(&target).map_err(|e| {
-        ServeError::Internal(format!("could not create '{}': {e}", target.display()))
+        refused(
+            &e,
+            format!("could not create '{}': {e}", target.display()),
+            ServeError::Internal,
+        )
     })?;
 
     Ok(MkdirResp {
@@ -275,6 +223,88 @@ fn is_one_segment(name: &str) -> bool {
             Path::new(name).components().collect::<Vec<_>>().as_slice(),
             [Component::Normal(only)] if *only == std::ffi::OsStr::new(name)
         )
+}
+
+/// Why `name` cannot be the new directory, or `None` when it can.
+///
+/// `windows` is whether this is Windows, passed in so every refusal is tested
+/// on every system.
+fn bad_name(name: &str, windows: bool) -> Option<String> {
+    match (is_one_segment(name), windows && windows_reserves(name)) {
+        (false, _) => Some(format!("name '{name}' must be a single directory name")),
+        (true, true) => Some(format!(
+            "name '{name}' is one Windows keeps for a device, or ends in a dot or a \
+             space, which Windows drops"
+        )),
+        (true, false) => None,
+    }
+}
+
+/// Whether Windows would not make a directory of this name as it is spelled.
+///
+/// `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` and `LPT1` to `LPT9` name
+/// devices, with any extension and in any case, and a trailing dot or space is
+/// dropped. Only refused on Windows: `aux` is an ordinary folder anywhere else.
+fn windows_reserves(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix)
+            .is_some_and(|n| n.len() == 1 && matches!(n.as_bytes()[0], b'1'..=b'9'))
+    };
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || numbered("COM")
+        || numbered("LPT")
+        || name.ends_with(['.', ' '])
+}
+
+/// `path` as a directory the caller may name: absolute, and inside
+/// `--workdir-root` when one is set.
+fn fenced(root: Option<&Path>, path: &str) -> Result<PathBuf, ServeError> {
+    let requested = PathBuf::from(path);
+    if !requested.is_absolute() {
+        return Err(ServeError::BadRequest("path must be absolute".to_string()));
+    }
+    if let Some(root) = root
+        && !leviath_core::resolves_within(&requested, root)
+    {
+        return Err(ServeError::Forbidden(format!(
+            "path '{path}' is outside the configured --workdir-root"
+        )));
+    }
+    Ok(requested)
+}
+
+/// Refuse `dir` unless it is a directory that is there.
+fn existing_dir(dir: &Path) -> Result<(), ServeError> {
+    match std::fs::metadata(dir) {
+        Ok(m) if !m.is_dir() => Err(ServeError::BadRequest(format!(
+            "'{}' is a file, not a directory",
+            dir.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(e) => Err(refused(
+            &e,
+            format!("directory '{}' not found", dir.display()),
+            ServeError::NotFound,
+        )),
+    }
+}
+
+/// A filesystem refusal as the answer it is: 403 for a permission the server
+/// lacks, 409 for a name already taken, 404 for nothing there, and
+/// `otherwise` for the rest.
+fn refused(e: &std::io::Error, message: String, otherwise: fn(String) -> ServeError) -> ServeError {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => ServeError::Forbidden(message),
+        std::io::ErrorKind::AlreadyExists => ServeError::Conflict(message),
+        std::io::ErrorKind::NotFound => ServeError::NotFound(message),
+        _ => otherwise(message),
+    }
 }
 
 /// The filesystem root when a well-known directory (cwd, home) cannot be
@@ -580,7 +610,7 @@ mod tests {
     }
 
     /// A directory that exists but cannot be read (no read permission) is
-    /// reported, not a 500.
+    /// reported as the refusal it is: a 403, not a 404 or a 500.
     #[cfg(unix)]
     #[tokio::test]
     async fn list_dirs_unreadable_directory_is_reported() {
@@ -591,7 +621,7 @@ mod tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let (status, body) = get_dirs(app_with_root(None), Some(&locked.to_string_lossy())).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(status, StatusCode::FORBIDDEN);
         let msg = error_of(&body);
         let expected = format!("could not read '{}'", locked.display());
         assert!(msg.starts_with(&expected), "{msg}");
@@ -729,6 +759,76 @@ mod tests {
         std::fs::write(dir.path().join("afile"), "x").unwrap();
         let (status, _) = post_dir(app_with_root(None), &parent, "afile").await;
         assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    /// What the filesystem says is mapped to the answer it means. A name made
+    /// by another request between the check and `create_dir` is the race this
+    /// covers: `AlreadyExists` is a 409 like the checked case, not a 500.
+    #[test]
+    fn a_filesystem_refusal_is_the_answer_it_means() {
+        use std::io::{Error, ErrorKind};
+        let status = |kind: ErrorKind| {
+            refused(&Error::from(kind), "m".to_string(), ServeError::Internal).status()
+        };
+        assert_eq!(status(ErrorKind::PermissionDenied), StatusCode::FORBIDDEN);
+        assert_eq!(status(ErrorKind::AlreadyExists), StatusCode::CONFLICT);
+        assert_eq!(status(ErrorKind::NotFound), StatusCode::NOT_FOUND);
+        assert_eq!(
+            status(ErrorKind::InvalidInput),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// A parent the server may not write to is a 403.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_dir_in_a_read_only_parent_returns_403() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let (status, _) = post_dir(app_with_root(None), &locked.to_string_lossy(), "new").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+    }
+
+    /// On Windows a device name or a trailing dot or space is refused, with
+    /// why; anywhere else `aux` is an ordinary folder.
+    #[test]
+    fn device_names_are_refused_on_windows_only() {
+        for name in [
+            "CON",
+            "con",
+            "nul.txt",
+            "Aux.tar.gz",
+            "PRN ",
+            "COM1",
+            "lpt9",
+            "trail.",
+            "trail ",
+        ] {
+            assert!(windows_reserves(name), "{name}");
+            let why = bad_name(name, true).expect(name);
+            assert!(why.contains("Windows keeps"), "{why}");
+            assert_eq!(bad_name(name, false), None, "{name}");
+        }
+        for name in [
+            "console",
+            "COM0",
+            "COM10",
+            "LPT",
+            "nullish",
+            "My Project",
+            "auxiliary",
+        ] {
+            assert!(!windows_reserves(name), "{name}");
+            assert_eq!(bad_name(name, true), None, "{name}");
+        }
+        let why = bad_name("a/b", true).expect("a path");
+        assert!(why.contains("single directory name"), "{why}");
     }
 
     /// The machine refusing is neither a bad request nor a missing one: a name

@@ -167,18 +167,23 @@ async fn read_multipart(
     let (request, files) = super::upload::read_envelope(multipart, max_bytes).await?;
     let attachments = files
         .into_iter()
-        .map(|file| Attachment {
-            mime_type: file
-                .content_type
-                .as_deref()
-                .and_then(|t| MimePattern::new(t).ok()),
-            name: file.name,
-            region: None,
-            deliver: None,
-            caption: None,
-            data: Bytes(file.data),
+        .map(|file| {
+            Ok(Attachment {
+                mime_type: file
+                    .content_type
+                    .as_deref()
+                    .map(|t| {
+                        MimePattern::new(t).map_err(|e| super::upload::bad_type(&file.name, t, e))
+                    })
+                    .transpose()?,
+                name: file.name,
+                region: None,
+                deliver: None,
+                caption: None,
+                data: Bytes(file.data),
+            })
         })
-        .collect();
+        .collect::<Result<_, ServeError>>()?;
     Ok((request, attachments))
 }
 

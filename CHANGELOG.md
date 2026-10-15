@@ -261,6 +261,33 @@ same list.
   before any worker is queued.
 - The bundled reviewer's summary no longer asks for "the report file you
   wrote": no stage of it can write a file.
+- **Security.** A signed `fileUrl` opens only the file it was minted for. The
+  signature covered the route and not its query, so a link to one file with
+  its `path=` edited opened any other file in the run's working directory.
+  Every parameter but `download` is now signed.
+- **Security.** The byte routes (`files/raw`, `blobs`, `artifacts`,
+  `exports`) answer with `X-Content-Type-Options: nosniff`, and every type
+  but PDF with `Content-Security-Policy: sandbox`, so an HTML file an agent
+  wrote cannot run script as a page of the API's origin.
+- Signed links percent-encode file and artifact names, so a name with a
+  space, `&`, `#`, `+` or `%` links to itself.
+- `lev serve --host localhost` and `--host ::1` start. Only an IPv4 address
+  was accepted, though the warning for a non-local host named both. A name
+  that resolves to both families binds its IPv4 address.
+- The bearer scheme is matched in any case (`bearer` works), a WebSocket's
+  `?token=` is percent-decoded, and a 401 carries `WWW-Authenticate: Bearer`.
+- `/api/fs/dirs` answers 403 for a directory the server may not read or
+  write, rather than 404 or 500, and 409 when another request made the same
+  name first. On Windows it refuses a device name (`CON`, `nul.txt`) or a
+  name ending in a dot or a space.
+- A JSON body over `max_upload_bytes` on a route that also takes a form is
+  413, as a form is, not 400. A file part sent as a type the registry cannot
+  spell is refused with 400 rather than sniffed; `text/plain; charset=utf-8`
+  is read as `text/plain`.
+- `GET /api/runs/{id}/blobs/{sha256}` on a run whose file will not read is a
+  500 naming the run file, as the listing is, not a 404 for a missing run.
+- The API docs say that a download streams after the request's slot and
+  deadline end, and that a 408 does not undo a spawn the daemon accepted.
 - A run file with a damaged step in the middle keeps every step after it.
   Opening the file took any frame that did not check out as a step a crash
   left half written and cut the file there, so one bad frame deleted the

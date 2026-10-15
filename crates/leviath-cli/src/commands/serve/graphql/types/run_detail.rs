@@ -732,7 +732,10 @@ pub(crate) fn artifact(
     Artifact {
         url: super::super::super::signed_url::signed_path(
             &state.signer,
-            &format!("/api/runs/{run_id}/artifacts/{}", artifact.name),
+            &format!(
+                "/api/runs/{run_id}/artifacts/{}",
+                super::super::super::signed_url::encode(&artifact.name)
+            ),
             &[],
             leviath_core::duration::now_secs(),
         ),

@@ -22,8 +22,9 @@ a test, so a client generator or an agent can consume the contract directly.
 ## Security model
 
 - **A token is required.** The server refuses to start without `--token <t>` (or
-  `LEVIATH_API_TOKEN`). Every request must send `Authorization: Bearer <t>`; WebSocket clients
-  pass it as `?token=<t>` because browsers can't set WS headers. On shared machines prefer the
+  `LEVIATH_API_TOKEN`). Every request must send `Authorization: Bearer <t>`, and the scheme name
+  may be in any case. WebSocket clients pass it as `?token=<t>`, percent-encoded or not, because
+  browsers can't set WS headers. A 401 carries `WWW-Authenticate: Bearer`. On shared machines prefer the
   environment variable: a `--token` value is visible to other local users in the process table
   (`ps`).
 - **CORS is closed by default.** Pass `--cors <origin>` (e.g. `https://leviath.dev`) or `--cors "*"`
@@ -77,10 +78,18 @@ off. A flag wins over the config file, and the config file over the default.
 | Bytes per request body | 32 MiB | none | `[serve] max_upload_bytes` | 413; this is what bounds a multipart upload |
 
 Both answers carry the usual `{"error": "..."}` body. The websocket routes (`/ws`,
-`/ws/agents/{id}` and `/ws/graphql`) are outside both: a subscription is meant to stay open. They are the only
-place the API streams, so every other route has built its whole body before the deadline could
-cut it. An unauthenticated request takes a slot while it is being refused, so a flood without a
-token is refused at the cap like any other.
+`/ws/agents/{id}` and `/ws/graphql`) are outside both: a subscription is meant to stay open. An
+unauthenticated request takes a slot while it is being refused, so a flood without a token is
+refused at the cap like any other.
+
+The slot and the deadline both end when the route answers, not when its body has been sent. The
+byte routes (`files/raw`, `blobs`, `artifacts` and `exports`) send a file a block at a time
+after answering. So a large download is not cut off at 30 s, and it does not hold a slot while
+it streams.
+
+A 408 does not undo what the request had already started. A file read finishes, and a spawn the
+daemon accepted is a run. If a spawn gets a 408, list the runs before sending it again, or it
+may start twice.
 
 Three routes take a slot but have no deadline, because each waits on something slower than the
 default by design. Dropping one partway does damage a late answer would not:
@@ -1135,6 +1144,11 @@ and the working directory second, and serves the bytes under the artifact's own 
 the one to use when a client has the answer in hand. The answer's `artifacts` carry each file's
 `path` and, when the run could store it, its `sha256`, so the other two routes reach the same
 bytes.
+
+Every byte route answers with `X-Content-Type-Options: nosniff`, and every type but PDF with
+`Content-Security-Policy: sandbox`. A run's files are whatever its agent wrote. So an HTML or SVG
+file opened from a link runs in an origin of its own with scripts off, and cannot call the API
+with the console's token. PDF is left out because Chrome will not show one sent with `sandbox`.
 
 ## A run's files
 

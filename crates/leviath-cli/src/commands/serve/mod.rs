@@ -467,7 +467,7 @@ async fn execute_with_shutdown(
     // Resolve the API token before binding - refuse to start unauthenticated.
     let auth_token = std::sync::Arc::new(auth::resolve_token(args.token.as_deref())?);
     // The API can spawn tool-executing agents; loudly warn if bound off-host.
-    if args.host != "127.0.0.1" && args.host != "localhost" && args.host != "::1" {
+    if !is_local_host(&args.host) {
         tracing::warn!(
             host = %args.host,
             "serving the agent API on a non-local address - anyone who can reach \
@@ -721,7 +721,7 @@ async fn execute_with_shutdown(
         None => None,
     };
 
-    let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
+    let addr = listen_addr(&args.host, args.port).await?;
     let scheme = tls::scheme(tls.as_ref());
 
     // Bound before anything says it is listening. Announcing first would print
@@ -758,6 +758,50 @@ async fn execute_with_shutdown(
     }
 
     Ok(())
+}
+
+/// `--host` without the brackets an IPv6 address may be written in.
+fn bare_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+/// Whether `--host` keeps the API on this machine: a loopback address, or the
+/// name `localhost`.
+fn is_local_host(host: &str) -> bool {
+    let bare = bare_host(host);
+    match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => bare.eq_ignore_ascii_case("localhost"),
+    }
+}
+
+/// The address `--host` and `--port` name.
+///
+/// `--host` is an IP address, with or without the brackets an IPv6 one is
+/// often written in, or a name such as `localhost`, which is looked up. A name
+/// that resolves to both families binds its IPv4 address, because the console
+/// at leviath.dev reaches the server at `127.0.0.1`.
+async fn listen_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
+    let bare = bare_host(host);
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+    let found: Vec<SocketAddr> = tokio::net::lookup_host((bare, port))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("--host {host} is not an address, and looking it up failed: {e}")
+        })?
+        .collect();
+    // A lookup that succeeds with no address is not one the system resolver
+    // gives, so the error is built rather than waited for.
+    found
+        .iter()
+        .find(|addr| addr.is_ipv4())
+        .or(found.first())
+        .copied()
+        .ok_or(anyhow::anyhow!("--host {host} resolves to no address"))
 }
 
 /// Turn a failed bind into something a person can act on.
@@ -1902,6 +1946,16 @@ mod tests {
             let resp = app.clone().oneshot(elsewhere).await.expect("a response");
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
+            // The same grant, with its file edited to another one in the same
+            // working directory: refused too.
+            std::fs::write(workdir.path().join("secret.txt"), "not yours").expect("file written");
+            let edited = Request::builder()
+                .uri(url.replace("path=out.txt", "path=secret.txt"))
+                .body(Body::empty())
+                .expect("a request");
+            let resp = app.clone().oneshot(edited).await.expect("a response");
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
             // And without any grant at all: refused.
             let bare = Request::builder()
                 .uri("/api/runs/run-signed/files/raw?path=out.txt")
@@ -2462,62 +2516,6 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    #[test]
-    fn test_serve_args_defaults() {
-        let args = ServeArgs {
-            port: 3000,
-            name: None,
-            host: "127.0.0.1".to_string(),
-            cors: None,
-            token: Some("test-token".to_string()),
-            allow_admin: false,
-            print_graphql_schema: false,
-            workdir_root: None,
-            no_remote_yolo: false,
-            tls_cert: None,
-            tls_key: None,
-            no_remote_seed_commands: false,
-            max_concurrent_requests: None,
-            request_timeout_secs: None,
-        };
-        assert_eq!(args.port, 3000);
-        assert_eq!(args.host, "127.0.0.1");
-        assert_eq!(args.cors, None);
-    }
-
-    #[test]
-    fn test_app_state_clone() {
-        let state = test_state();
-        let cloned = state.clone();
-        // Both should work (no panic)
-        let _ = cloned.config.in_force().default_provider.clone();
-    }
-
-    #[test]
-    fn test_cors_wildcard_vs_specific() {
-        // Test the CORS logic paths used in execute()
-        let wildcard = "*";
-        let specific = "https://example.com";
-
-        let is_wildcard = wildcard == "*";
-        assert!(is_wildcard);
-
-        let is_specific = specific != "*";
-        assert!(is_specific);
-
-        // Test that specific CORS origin parses correctly
-        let parsed = specific.parse::<axum::http::HeaderValue>();
-        assert!(parsed.is_ok());
-    }
-
-    #[test]
-    fn test_cors_invalid_origin_falls_back() {
-        let invalid_cors = "not a valid header value \x00";
-        let result = invalid_cors.parse::<axum::http::HeaderValue>();
-        // Invalid header values fail to parse; the code falls back to "*"
-        assert!(result.is_err());
-    }
-
     #[tokio::test]
     async fn test_submit_interaction_full_router_reaches_daemon() {
         // The POST-interaction route is wired to the handler, which reaches the
@@ -2555,9 +2553,9 @@ mod tests {
     // reproduce locally at default test-thread concurrency, not a hypothetical.
 
     #[tokio::test]
-    async fn execute_binds_and_serves_with_wildcard_cors() {
+    async fn execute_binds_and_serves_without_cors() {
         crate::config::with_isolated_config_path_async(
-            "serve-mod-wildcard-cors",
+            "serve-mod-no-cors",
             |_fake_dir| async move {
                 with_tracing(|| {});
                 // port: 0 lets the OS assign a genuinely free ephemeral port at bind
@@ -3065,6 +3063,33 @@ mod tests {
             },
         )
         .await;
+    }
+
+    /// `--host` takes a name as well as an address, and an IPv6 address with or
+    /// without its brackets. `localhost` and `::1` used to be refused before
+    /// the server started, though the warning for a non-local host named them.
+    #[tokio::test]
+    async fn the_host_may_be_a_name_or_an_ipv6_address() {
+        for host in ["127.0.0.1", "::1", "[::1]", "localhost", "LOCALHOST"] {
+            let addr = listen_addr(host, 3000).await.expect(host);
+            assert!(addr.ip().is_loopback(), "{host}: {addr}");
+            assert_eq!(addr.port(), 3000);
+            assert!(is_local_host(host), "{host}");
+        }
+        // A name that resolves to both families binds its IPv4 address, where
+        // the console looks.
+        assert!(listen_addr("localhost", 0).await.unwrap().is_ipv4());
+        let any = listen_addr("0.0.0.0", 8080).await.unwrap();
+        assert!(any.ip().is_unspecified());
+        assert!(!is_local_host("0.0.0.0"));
+        assert!(!is_local_host("192.0.2.1"));
+        assert!(!is_local_host("example.com"));
+
+        let unknown = listen_addr("not a valid host", 1).await.unwrap_err();
+        assert!(
+            unknown.to_string().contains("--host not a valid host"),
+            "{unknown}"
+        );
     }
 
     #[tokio::test]

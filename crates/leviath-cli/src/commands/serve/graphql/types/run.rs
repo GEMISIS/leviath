@@ -1056,7 +1056,11 @@ impl Run {
         let state = ctx.data_unchecked::<AppState>();
         signed(
             state,
-            &format!("/api/runs/{}/artifacts/{name}", self.meta.run_id),
+            &format!(
+                "/api/runs/{}/artifacts/{}",
+                self.meta.run_id,
+                super::super::super::signed_url::encode(&name)
+            ),
             download,
         )
     }

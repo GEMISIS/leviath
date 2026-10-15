@@ -10,7 +10,8 @@
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::{StatusCode, header::AUTHORIZATION};
+use axum::http::StatusCode;
+use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -56,17 +57,29 @@ fn presented_token(req: &Request) -> Option<String> {
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
+        .and_then(bearer_credentials)
     {
         return Some(bearer.trim().to_string());
     }
     if !is_websocket_route(req.uri().path()) {
         return None;
     }
-    req.uri()
-        .query()
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")))
-        .map(|t| t.to_string())
+    // Percent-decoded, so a token holding `+`, `/` or `=` that a client
+    // encoded still matches. A bare `+` stays a `+` rather than becoming a
+    // space, so a client that pasted the token in as it is matches too.
+    let query = req.uri().query()?.replace('+', "%2B");
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(name, _)| name == "token")
+        .map(|(_, token)| token.into_owned())
+}
+
+/// The credentials of an `Authorization: Bearer <token>` header.
+///
+/// The scheme name is matched without regard to case, as RFC 9110 says it is:
+/// a client that sends `bearer` is not sending a wrong token.
+fn bearer_credentials(header: &str) -> Option<&str> {
+    let (scheme, credentials) = header.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then_some(credentials)
 }
 
 /// Whether `path` is one of the WebSocket upgrade routes (`/ws`, `/ws/...`).
@@ -109,8 +122,10 @@ pub(super) async fn require_auth(
     {
         return next.run(req).await;
     }
+    // A 401 names the scheme that would have worked, as RFC 9110 asks.
     (
         StatusCode::UNAUTHORIZED,
+        [(WWW_AUTHENTICATE, "Bearer")],
         "unauthorized: missing or invalid API token",
     )
         .into_response()
@@ -249,8 +264,40 @@ mod tests {
         let missing = app.clone().oneshot(req(None, None)).await.unwrap();
         assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
 
-        // Wrong token ⇒ 401.
+        // Wrong token ⇒ 401, naming the scheme that would have worked.
         let wrong = app.oneshot(req(Some("Bearer nope"), None)).await.unwrap();
         assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(wrong.headers()[WWW_AUTHENTICATE], "Bearer");
+    }
+
+    /// The scheme name is matched without regard to case, as RFC 9110 says,
+    /// and a header with no credentials after it presents nothing.
+    #[test]
+    fn the_bearer_scheme_is_matched_in_any_case() {
+        for header in ["Bearer tok123", "bearer tok123", "BEARER tok123"] {
+            assert_eq!(
+                presented_token(&req(Some(header), None)).as_deref(),
+                Some("tok123"),
+                "{header}"
+            );
+        }
+        assert!(presented_token(&req(Some("Bearer"), None)).is_none());
+        assert!(presented_token(&req(Some("Bearertok123"), None)).is_none());
+        assert!(presented_token(&req(Some("Basic tok123"), None)).is_none());
+    }
+
+    /// A WebSocket client that percent-encodes its token, as a URL builder
+    /// does, still presents the token itself.
+    #[test]
+    fn the_query_token_is_decoded() {
+        assert_eq!(
+            presented_token(&req_to("/ws", None, Some("token=a%2Bb%2Fc%3D"))).as_deref(),
+            Some("a+b/c=")
+        );
+        // Sent as it is, a `+` is still a `+`.
+        assert_eq!(
+            presented_token(&req_to("/ws", None, Some("token=a+b/c="))).as_deref(),
+            Some("a+b/c=")
+        );
     }
 }

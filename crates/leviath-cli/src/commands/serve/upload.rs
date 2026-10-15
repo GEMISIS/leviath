@@ -128,7 +128,7 @@ pub(super) struct FileField {
     pub(super) name: String,
     /// The file name it was sent with, when it was sent with one.
     pub(super) file_name: Option<String>,
-    /// The type it was sent as, other than the catch-all
+    /// The type it was sent as, without parameters, other than the catch-all
     /// `application/octet-stream`, which says nothing.
     pub(super) content_type: Option<String>,
     /// Its bytes.
@@ -142,6 +142,16 @@ pub(super) fn unreadable(status: axum::http::StatusCode, message: String) -> Ser
         axum::http::StatusCode::PAYLOAD_TOO_LARGE => ServeError::PayloadTooLarge(message),
         _ => ServeError::BadRequest(message),
     }
+}
+
+/// A file field sent with a `Content-Type` that is not a mime type.
+///
+/// Refused rather than sniffed: the client said what the bytes are, and
+/// quietly reading them as something else would hide its mistake.
+pub(super) fn bad_type(field: &str, sent: &str, why: impl std::fmt::Display) -> ServeError {
+    ServeError::BadRequest(format!(
+        "file field '{field}' was sent as '{sent}', which is not a mime type: {why}"
+    ))
 }
 
 /// Read a multipart body's envelope: exactly one `request` field of JSON,
@@ -182,8 +192,12 @@ pub(super) async fn read_envelope(
             .file_name()
             .map(str::to_string)
             .filter(|f| !f.is_empty());
+        // The `type/subtype` alone: a browser sends a text blob as
+        // `text/plain;charset=utf-8`, and the parameters say nothing the
+        // registry keeps.
         let content_type = field
             .content_type()
+            .map(|t| t.split(';').next().unwrap_or(t).trim())
             .filter(|t| *t != "application/octet-stream")
             .map(str::to_string);
         // A body over the server's limit, or one that ends mid-file: the
@@ -234,12 +248,14 @@ pub(super) async fn read_multipart(
         let name = file
             .file_name
             .unwrap_or_else(|| format!("part-{}", parts.len() + 1));
-        let mut part = InboundPart::from_bytes(name, file.data);
-        part.region = region;
-        part.mime_type = file
+        let mime_type = file
             .content_type
             .as_deref()
-            .and_then(|t| MimeType::parse(t).ok());
+            .map(|t| MimeType::parse(t).map_err(|e| bad_type(&file.name, t, e)))
+            .transpose()?;
+        let mut part = InboundPart::from_bytes(name, file.data);
+        part.region = region;
+        part.mime_type = mime_type;
         parts.push(part);
     }
     Ok(MultipartBody { request, parts })
@@ -285,7 +301,7 @@ pub(super) async fn json_or_multipart<T: serde::de::DeserializeOwned, S: Send + 
     }
     let axum::Json(value) = axum::Json::<serde_json::Value>::from_request(request, state)
         .await
-        .map_err(|e| ServeError::BadRequest(e.body_text()))?;
+        .map_err(|e| unreadable(e.status(), e.body_text()))?;
     Ok((body_from(value)?, Vec::new()))
 }
 
@@ -445,6 +461,15 @@ mod tests {
         assert_eq!(body.request["k"], 1);
         assert_eq!(body.parts.len(), 3);
         assert_eq!(body.parts[2].region.as_deref(), Some("art"));
+        // A type with parameters keeps its `type/subtype`.
+        let with_charset = b"--b\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{}\r\n\
+            --b\r\nContent-Disposition: form-data; name=\"part\"; filename=\"t\"\r\n\
+            Content-Type: text/plain; charset=utf-8\r\n\r\nxyz\r\n--b--\r\n";
+        let typed = form(with_charset.to_vec(), 1024).await.unwrap();
+        assert_eq!(
+            typed.parts[0].mime_type.as_ref().map(MimeType::as_str),
+            Some("text/plain")
+        );
         // No file name: numbered. An octet-stream type: no type at all, so
         // the daemon sniffs one.
         assert_eq!(body.parts[0].name, "part-1");
@@ -504,6 +529,16 @@ mod tests {
             ),
             (
                 b"--b\r\nContent-Disposition: form-data; name=\"part\"; filename=\"a\"\r\n\r\nxyz\r\n--b--\r\n"
+                    .to_vec(),
+                1024,
+                StatusCode::BAD_REQUEST,
+            ),
+            // A part sent as a type the registry cannot spell: refused, not
+            // sniffed.
+            (
+                b"--b\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{}\r\n\
+                  --b\r\nContent-Disposition: form-data; name=\"part\"; filename=\"a\"\r\n\
+                  Content-Type: text/x|y\r\n\r\nxyz\r\n--b--\r\n"
                     .to_vec(),
                 1024,
                 StatusCode::BAD_REQUEST,
@@ -586,6 +621,19 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+        // JSON over the body limit is too large, as a form over it is, not
+        // malformed.
+        let padding = "x".repeat(3 * 1024 * 1024);
+        let too_big = axum::extract::Request::builder()
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(format!(
+                "{{\"k\":1,\"pad\":\"{padding}\"}}"
+            )))
+            .unwrap();
+        let e = json_or_multipart::<Shape, ()>(&(), too_big, 1024)
+            .await
+            .unwrap_err();
+        assert_eq!(e.status(), StatusCode::PAYLOAD_TOO_LARGE);
         // A whole form: the request and its file both come through.
         let whole = request(
             "multipart/form-data; boundary=b",
