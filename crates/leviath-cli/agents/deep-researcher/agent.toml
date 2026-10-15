@@ -1,6 +1,6 @@
 [blueprint]
 name = "deep-researcher"
-version = "0.6.0"
+version = "0.6.1"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 
 # gather -> investigate (fan out) -> analyze -> challenge -> synthesize -> polish -> summary
@@ -271,7 +271,10 @@ max_iterations = 4
 max_revisits = 1
 
 [graph.stages.mode.fan_out]
-worker = { blueprint = { name = "researcher" } }
+stage = "investigate"
+workers_available = [
+    { name = "researcher", blueprint = "researcher", use_for = "Researching one sub-question of the topic and reporting what it found, with sources" },
+]
 merge_stage = "analyze"
 # Every sub-question at once rather than in waves; the daemon's inference
 # pool paces the requests. Set to 0 for no cap at all.

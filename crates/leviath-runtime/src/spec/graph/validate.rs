@@ -100,6 +100,62 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// A fan-out's declared workers: at least one, each with its own name and
+    /// a `use_for` the model can choose by, and a stage worker naming a stage
+    /// that lets itself be one.
+    fn workers(&mut self, fan: &super::FanOutDef, at: &SpecPath) {
+        if fan.workers_available.is_empty() {
+            self.issue(
+                at.clone(),
+                IssueCode::Missing,
+                "a fan-out needs at least one worker to hand items to",
+            )
+            .hint = Some(
+                "add one: { name = \"...\", stage = \"...\", use_for = \"when to pick it\" }"
+                    .into(),
+            );
+        }
+        let mut seen = BTreeSet::new();
+        for (i, worker) in fan.workers_available.iter().enumerate() {
+            let at = at.index(i);
+            if !seen.insert(worker.name.as_str()) {
+                self.issue(
+                    at.field("name"),
+                    IssueCode::Duplicate,
+                    format!("two workers are named \"{}\"", worker.name),
+                )
+                .hint = Some("give each worker a name of its own: the model picks by it".into());
+            }
+            if worker.use_for.trim().is_empty() {
+                self.issue(
+                    at.field("use_for"),
+                    IssueCode::Missing,
+                    format!("worker \"{}\" does not say what it is for", worker.name),
+                )
+                .hint = Some("set use_for to when to pick this worker: the model reads it".into());
+            }
+            let super::WorkerSource::Stage(target) = &worker.runs else {
+                continue;
+            };
+            self.need_stage(at.field("stage"), target.as_str());
+            if self
+                .g()
+                .stage(target.as_str())
+                .is_some_and(|w| !w.allow_as_worker)
+            {
+                self.issue(
+                    at.field("stage"),
+                    IssueCode::Conflict,
+                    format!("worker stage '{target}' must set allow_as_worker = true"),
+                )
+                .hint = Some(format!(
+                    "set allow_as_worker = true on stage '{target}', or have this worker run a \
+                     blueprint instead"
+                ));
+            }
+        }
+    }
+
     fn stages(&mut self) {
         let path = self.at.field("stages");
         if self.g().stages.is_empty() {
@@ -158,26 +214,21 @@ impl<'a> Validator<'a> {
                 if let Some(merge) = &fan.merge_stage {
                     self.need_stage(at.field("merge_stage"), merge.as_str());
                 }
-                if let super::WorkerSource::Stage(worker) = &fan.worker {
-                    self.need_stage(at.field("worker"), worker.as_str());
-                    if self
-                        .g()
-                        .stage(worker.as_str())
-                        .is_some_and(|w| !w.allow_as_worker)
-                    {
-                        self.issue(
-                            at.field("worker"),
-                            IssueCode::Conflict,
-                            format!(
-                                "fan_out worker_stage '{worker}' must set allow_as_worker = true"
-                            ),
-                        )
-                        .hint = Some(format!(
-                            "set allow_as_worker = true on stage '{worker}', or fan out to a \
-                             blueprint instead"
-                        ));
-                    }
+                if fan.stage != stage.name {
+                    self.issue(
+                        at.field("stage"),
+                        IssueCode::Conflict,
+                        format!(
+                            "this fan-out belongs to stage '{}', but names stage '{}'",
+                            stage.name, fan.stage
+                        ),
+                    )
+                    .hint = Some(format!(
+                        "set stage = \"{}\": a fan-out names the stage it belongs to",
+                        stage.name
+                    ));
                 }
+                self.workers(fan, &at.field("workers_available"));
                 if let Some(r) = &fan.results_region {
                     self.need_region(at.field("results_region"), r, all);
                 }

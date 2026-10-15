@@ -174,10 +174,11 @@ pub(crate) fn busy() -> RunState {
     });
     s.fan_out = Some(FanOutState {
         stage: stage("split"),
-        config: crate::spec::graph::FanOutDef::same_graph(stage("split")),
+        config: crate::test_graph::fan_out_to("split", "work"),
         max_workers: Some(2),
         queued: vec![WorkItemState {
             id: "i1".into(),
+            worker: crate::spec::names::WorkerName::new("work").unwrap(),
             inputs: InputValues(
                 [(
                     InputName::new("topic").unwrap(),
@@ -186,7 +187,11 @@ pub(crate) fn busy() -> RunState {
                 .into(),
             ),
         }],
-        active: vec![("i0".into(), RunId::new("w-1").unwrap())],
+        active: vec![(
+            "i0".into(),
+            crate::spec::names::WorkerName::new("work").unwrap(),
+            RunId::new("w-1").unwrap(),
+        )],
         done: vec![("i2".into(), "fine".into())],
         failed: vec![("i3".into(), "bad".into())],
         paused: true,

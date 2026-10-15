@@ -23,9 +23,9 @@
 //! warning; what each conversion filled in is in the run's own log. At start
 //! a pass says how far along it is on the daemon's start-up board.
 //!
-//! The same pass upgrades each run file an alpha build wrote in binary
-//! layout 2, which this build cannot read, to this build's layout in place
-//! (see [`leviath_legacy_runs::upgrade`]). It is taken in the same order and
+//! The same pass upgrades each run file an alpha build wrote in an older
+//! binary layout (2 or 3), which this build cannot read, to this build's
+//! layout in place (see [`leviath_legacy_runs::upgrade`]). It is taken in the same order and
 //! the same way: saved in the backup first, listed when it does not upgrade,
 //! and counted in the summary. The file as it was stays in the run's
 //! `legacy/` directory.
@@ -214,7 +214,7 @@ enum Done {
     Nothing,
     /// Converted into a run file.
     Converted,
-    /// A layout-2 run file, upgraded in place.
+    /// A run file in an older layout, upgraded in place.
     Upgraded,
     /// Tried, and not converted.
     Failed,
@@ -256,7 +256,7 @@ impl Pass {
             left_as_they_were = self.held,
             backup = %saved,
             unconverted = %list,
-            "old run directories and layout-2 run files: each converted or upgraded one was saved \
+            "old run directories and older run files: each converted or upgraded one was saved \
              in the backup first; one that does not convert is left as it was and listed, and is \
              tried again by the next release (or after the list is deleted)"
         );
@@ -372,7 +372,7 @@ fn dir_name(dir: &Path) -> String {
         .into_owned()
 }
 
-/// Every directory under `runs_dir` that holds an old run or a layout-2 run
+/// Every directory under `runs_dir` that holds an old run or an older run
 /// file, in name order. A conversion that was stopped part way is put back
 /// first, so the run is converted again.
 fn old_runs(runs_dir: &Path) -> Vec<PathBuf> {
@@ -407,7 +407,7 @@ fn put_back(dir: &Path) {
 }
 
 /// Convert the run in `dir` when it is an old run, or upgrade its run file
-/// when it is in layout 2, unless it failed to before: saved in `backup`
+/// when it is in an older layout, unless it failed to before: saved in `backup`
 /// first (one that cannot be saved is left as it is, and is tried again at
 /// the next start), and listed in `unconverted` when it does not convert.
 /// What each conversion filled in is in the run's own log, and at debug
@@ -419,8 +419,8 @@ fn convert_in(
     (backup, unconverted): (&Backup, &mut Unconverted),
     upgrade: &mut Upgrade,
 ) -> Done {
-    let layout2 = leviath_legacy_runs::needs_upgrade(dir);
-    if !layout2 && !leviath_legacy_runs::is_legacy(dir) {
+    let upgradable = leviath_legacy_runs::needs_upgrade(dir);
+    if !upgradable && !leviath_legacy_runs::is_legacy(dir) {
         return Done::Nothing;
     }
     let name = dir_name(dir);
@@ -434,7 +434,7 @@ fn convert_in(
         upgrade.failed += 1;
         return Done::Failed;
     }
-    if layout2 {
+    if upgradable {
         return upgrade_in(dir, (name, unconverted), upgrade);
     }
     let env = leviath_legacy_runs::ConvertEnv {
@@ -468,7 +468,7 @@ fn convert_in(
     }
 }
 
-/// Upgrade the layout-2 run file in `dir`, the directory `name`, already
+/// Upgrade the run file in an older layout in `dir`, the directory `name`, already
 /// saved in the backup, listing it in `unconverted` when it does not
 /// upgrade, and add what it did to `upgrade`.
 fn upgrade_in(
@@ -482,13 +482,13 @@ fn upgrade_in(
                 report.run_id.to_string(),
                 report.original.display().to_string(),
             );
-            tracing::debug!(run_id = %id, original = %kept, torn_bytes_left_out = report.cut, "upgraded a run file from layout 2");
+            tracing::debug!(run_id = %id, original = %kept, torn_bytes_left_out = report.cut, "upgraded a run file from an older layout");
             upgrade.upgraded += 1;
             Done::Upgraded
         }
         Err(e) => {
             let (shown, why) = (dir.display().to_string(), e.to_string());
-            tracing::warn!(dir = %shown, error = %why, "a run file in layout 2 could not be upgraded; it is left as it was");
+            tracing::warn!(dir = %shown, error = %why, "a run file in an older layout could not be upgraded; it is left as it was");
             unconverted.add(name, why);
             upgrade.failed += 1;
             Done::Failed
@@ -600,10 +600,10 @@ pub(crate) async fn convert_at_start(
     start: AtStart<'_>,
     board: &StartupBoard,
 ) -> Upgrade {
-    let (old, layout2): (Vec<PathBuf>, Vec<PathBuf>) = to_convert(runs_dir)
+    let (old, upgradable): (Vec<PathBuf>, Vec<PathBuf>) = to_convert(runs_dir)
         .into_iter()
         .partition(|dir| leviath_legacy_runs::is_legacy(dir));
-    let waiting = old.len() + layout2.len();
+    let waiting = old.len() + upgradable.len();
     if let Some(cmd) = start.child.as_ref().filter(|_| waiting > 0) {
         match crate::daemon::convert_child::convert(cmd, runs_dir, &start, board).await {
             Ok(upgrade) => return upgrade,
@@ -612,7 +612,7 @@ pub(crate) async fn convert_at_start(
                 // a run file now, and the daemon's pass skips it: what is on
                 // disk counts the runs converted and upgraded, whoever did it.
                 let rest = in_daemon(runs_dir, &start, board).await;
-                let done = (done_of(&old), done_of(&layout2));
+                let done = (done_of(&old), done_of(&upgradable));
                 return crate::daemon::convert_child::then(so_far, rest, done);
             }
         }

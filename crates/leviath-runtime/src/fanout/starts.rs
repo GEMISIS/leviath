@@ -37,6 +37,8 @@ pub(crate) struct WorkerLanded {
     parent: Entity,
     /// The work item it is for.
     item_id: String,
+    /// The declared worker the item went to.
+    worker: WorkerName,
     /// Where it sits in the tree, as worked out when it began.
     depths: Depths,
     /// How to place it, or why it did not start.
@@ -106,16 +108,20 @@ pub(super) fn begin(
         .get_resource::<FanOutSpawnerRes>()
         .map(|r| r.0.clone())
         .ok_or_else(|| "no fan-out spawner installed".to_string())?;
-    let (config, item) = (config.clone(), item.clone());
+    let worker = config
+        .worker(item.worker.as_str())
+        .cloned()
+        .ok_or_else(|| format!("this fan-out has no worker named '{}'", item.worker))?;
+    let item = item.clone();
     let prep: WorkerPrep = Box::pin(async move {
         // Off the tick from here: a query is a walk of the agents directory.
-        let source = match &config.worker {
+        let source = match &worker.runs {
             WorkerSource::Blueprint(blueprint) => SpawnSource::Blueprint(blueprint.clone()),
             WorkerSource::BlueprintFile(path) => SpawnSource::BlueprintFile(path.clone()),
             WorkerSource::Stage(_) => spec.same_graph_source(),
             WorkerSource::Query(query) => SpawnSource::Blueprint(spawner.find_worker(query)?),
         };
-        let (request, caller) = items::worker_request(&spec, &config, &item, source, parent_depth);
+        let (request, caller) = items::worker_request(&spec, &worker, &item, source, parent_depth);
         spawner.prepare_worker(request, caller).await
     });
     Ok(Start { prep, depths })
@@ -162,13 +168,15 @@ pub(super) fn depths(
     })
 }
 
-/// Run `prep` for `parent`'s item `item_id`. On the world's runtime when it
-/// has one, reporting when it lands; otherwise in place, which only a start
-/// that needs no waiting can be, and the result is returned to land now.
+/// Run `prep` for `parent`'s item `item_id`, which went to `worker`. On the
+/// world's runtime when it has one, reporting when it lands; otherwise in
+/// place, which only a start that needs no waiting can be, and the result is
+/// returned to land now.
 pub(super) fn launch(
     world: &World,
     parent: Entity,
     item_id: String,
+    worker: WorkerName,
     start: Start,
 ) -> Option<WorkerLanded> {
     let Start { mut prep, depths } = start;
@@ -183,12 +191,14 @@ pub(super) fn launch(
         return Some(WorkerLanded {
             parent,
             item_id,
+            worker,
             depths,
             result,
         });
     };
     let (tx, wake) = (starts.tx.clone(), starts.wake.clone());
-    let (lost_tx, lost_wake, lost_item) = (tx.clone(), wake.clone(), item_id.clone());
+    let (lost_tx, lost_wake) = (tx.clone(), wake.clone());
+    let (lost_item, lost_worker) = (item_id.clone(), worker.clone());
     // Supervised: the parent waits on this item as starting, and a start that
     // died without reporting would hold its fan-out open for good.
     crate::lane_supervisor::spawn_supervised(
@@ -199,6 +209,7 @@ pub(super) fn launch(
             let _ = tx.send(WorkerLanded {
                 parent,
                 item_id,
+                worker,
                 depths,
                 result,
             });
@@ -208,6 +219,7 @@ pub(super) fn launch(
             let _ = lost_tx.send(WorkerLanded {
                 parent,
                 item_id: lost_item,
+                worker: lost_worker,
                 depths,
                 result: Err(message),
             });
@@ -238,6 +250,7 @@ impl WorkerLanded {
 /// Place a landed start under `parent`, whose fan-out is `w`: the worker joins
 /// the running ones, linked to its parent, or the item is recorded as failed.
 pub(super) fn land(world: &mut World, parent: Entity, w: &mut FanOutWaiting, landed: WorkerLanded) {
+    let worker = landed.worker.clone();
     let (item_id, placed) = place(world, parent, landed);
     w.starting.retain(|item| item.id != item_id);
     match placed {
@@ -249,11 +262,12 @@ pub(super) fn land(world: &mut World, parent: Entity, w: &mut FanOutWaiting, lan
                 .unwrap_or_default();
             w.active.push(ActiveWorker {
                 item_id,
+                worker,
                 entity: child,
                 run_id,
             });
         }
-        Err(message) => w.failures.push((item_id, message)),
+        Err(message) => w.failures.push((w.label(&item_id, &worker), message)),
     }
 }
 

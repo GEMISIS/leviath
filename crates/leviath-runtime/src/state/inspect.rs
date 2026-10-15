@@ -680,13 +680,14 @@ fn fan_out_of(waiting: &crate::fanout::FanOutWaiting, stage: &StageName) -> FanO
             .into_iter()
             .map(|item| WorkItemState {
                 id: item.id,
+                worker: item.worker,
                 inputs: inputs_of(item.inputs),
             })
             .collect(),
         active: s
             .active
             .into_iter()
-            .filter_map(|(item, run)| Some((item, RunId::new(run).ok()?)))
+            .filter_map(|(item, worker, run)| Some((item, worker, RunId::new(run).ok()?)))
             .collect(),
         done: s.summaries,
         failed: s.failures,

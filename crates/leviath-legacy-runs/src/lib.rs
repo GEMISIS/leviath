@@ -34,11 +34,11 @@
 //! copy of the old parsed-blueprint types, kept here and nowhere else, and
 //! reads that as the runtime's run graph.
 //!
-//! Alpha builds wrote run files in an earlier binary layout, layout 2, whose
-//! stage plans this build does not read. [`upgrade()`]
-//! rewrites one in this build's layout in place, and keeps the file as it was
-//! in the run's `legacy/` directory; [`needs_upgrade`] tells such a file from
-//! its header alone.
+//! Alpha builds wrote run files in earlier binary layouts: layout 2, whose
+//! stage plans this build does not read, and layout 3, whose fan-outs named
+//! one worker. [`upgrade()`] rewrites one in this build's layout in place,
+//! and keeps the file as it was in the run's `legacy/` directory;
+//! [`needs_upgrade`] tells such a file from its header alone.
 //!
 //! This crate is temporary. It exists to carry runs and blueprints over to
 //! the new formats, only the CLI depends on it, and it is deleted before 1.0.
@@ -48,6 +48,7 @@ mod error;
 mod history;
 pub mod journal;
 mod layout2;
+mod layout3;
 mod legacy;
 mod manifest;
 mod migrate;
@@ -140,23 +141,25 @@ pub fn is_legacy(run_dir: &Path) -> bool {
     legacy::is_legacy(run_dir)
 }
 
-/// Whether `run_dir` holds a run file in layout 2 that [`upgrade()`] would
-/// upgrade, told from the file's header alone.
+/// Whether `run_dir` holds a run file in layout 2 or 3 that [`upgrade()`]
+/// would upgrade, told from the file's header alone.
 pub fn needs_upgrade(run_dir: &Path) -> bool {
     upgrade::needs_upgrade(run_dir)
 }
 
-/// Upgrade the layout-2 run file in `run_dir` to this build's layout, in
-/// place, keeping the file as it was as `legacy/run.v2.lvr` (or, when an
-/// earlier upgrade kept a different file there, under the next free name).
-/// The run reads back exactly as it did: each stage's model and reply cap
-/// move to where this build keeps them, and nothing else changes.
+/// Upgrade the layout-2 or layout-3 run file in `run_dir` to this build's
+/// layout, in place, keeping the file as it was as `legacy/run.v2.lvr` or
+/// `legacy/run.v3.lvr` (or, when an earlier upgrade kept a different file
+/// there, under the next free name). The run reads back as it did: each
+/// stage's model and reply cap move to where this build keeps them, and each
+/// fan-out becomes one of its stage with its one worker, which takes every
+/// item.
 ///
-/// A directory with no layout-2 run file, one already upgraded among them, is
-/// refused with [`ConvertError::NotLayout2`], so upgrading twice is
-/// harmless. A file whose spec does not read is [`ConvertError::Unreadable`],
-/// and a run whose old file cannot be kept is [`ConvertError::Io`]; either
-/// is left as it was.
+/// A directory with no run file in an older layout, one already upgraded
+/// among them, is refused with [`ConvertError::NotOldLayout`], so upgrading
+/// twice is harmless. A file with a frame that does not read is
+/// [`ConvertError::Unreadable`], and a run whose old file cannot be kept is
+/// [`ConvertError::Io`]; either is left as it was.
 pub fn upgrade(run_dir: &Path) -> Result<UpgradeReport, ConvertError> {
     upgrade::upgrade(run_dir)
 }

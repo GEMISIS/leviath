@@ -60,25 +60,32 @@ pub(super) fn lint_fanout_worker_loads(stage: &StageDef, env: &LintEnv) -> Vec<L
     let StageMode::FanOut(config) = &stage.mode else {
         return Vec::new();
     };
-    let WorkerSource::Blueprint(reference) = &config.worker else {
+    let Some(unloadable) = env.unloadable_workers.as_ref() else {
         return Vec::new();
     };
-    let Some(why) = env
-        .unloadable_workers
-        .as_ref()
-        .and_then(|unloadable| unloadable.get(&reference.to_string()))
-    else {
-        return Vec::new();
-    };
-    vec![
-        LintFinding::new(
-            LintSeverity::Error,
-            "fanout-worker-missing",
-            format!("fans out to blueprint '{reference}', which cannot be loaded: {why}"),
-        )
-        .in_stage(stage.name.as_str())
-        .with_fix("install it with `lev add`, or correct the name".to_string()),
-    ]
+    config
+        .workers_available
+        .iter()
+        .filter_map(|worker| match &worker.runs {
+            WorkerSource::Blueprint(reference) => Some((worker, reference)),
+            _ => None,
+        })
+        .filter_map(|(worker, reference)| {
+            let why = unloadable.get(&reference.to_string())?;
+            Some(
+                LintFinding::new(
+                    LintSeverity::Error,
+                    "fanout-worker-missing",
+                    format!(
+                        "worker '{}' runs blueprint '{reference}', which cannot be loaded: {why}",
+                        worker.name
+                    ),
+                )
+                .in_stage(stage.name.as_str())
+                .with_fix("install it with `lev add`, or correct the name".to_string()),
+            )
+        })
+        .collect()
 }
 
 /// A fan-out whose workers run this graph, which declares no input for a work
@@ -97,7 +104,10 @@ pub(super) fn lint_fanout_worker_task(graph: &RunGraph, stage: &StageDef) -> Vec
     let StageMode::FanOut(config) = &stage.mode else {
         return Vec::new();
     };
-    let WorkerSource::Stage(worker) = &config.worker else {
+    let Some(worker) = config.workers_available.iter().find_map(|w| match &w.runs {
+        WorkerSource::Stage(worker) => Some(worker),
+        _ => None,
+    }) else {
         return Vec::new();
     };
     let lands = graph.inputs.iter().any(|input| {

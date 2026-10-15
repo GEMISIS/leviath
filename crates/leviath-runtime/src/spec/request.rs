@@ -100,18 +100,22 @@ impl SpawnRequest {
             SpawnSource::Raw(graph) => {
                 let mut issues = SpawnIssues::new();
                 for stage in &graph.stages {
-                    if let super::graph::StageMode::FanOut(fan) = &stage.mode
-                        && let super::graph::WorkerSource::BlueprintFile(_) = fan.worker
-                    {
-                        issues.push(local_only(
-                            source
-                                .field("raw")
-                                .field("stages")
-                                .key(stage.name.as_str())
-                                .field("mode")
-                                .field("fan_out")
-                                .field("worker"),
-                        ));
+                    let super::graph::StageMode::FanOut(fan) = &stage.mode else {
+                        continue;
+                    };
+                    for (i, worker) in fan.workers_available.iter().enumerate() {
+                        if let super::graph::WorkerSource::BlueprintFile(_) = worker.runs {
+                            issues.push(local_only(
+                                source
+                                    .field("raw")
+                                    .field("stages")
+                                    .key(stage.name.as_str())
+                                    .field("mode")
+                                    .field("fan_out")
+                                    .field("workers_available")
+                                    .index(i),
+                            ));
+                        }
                     }
                 }
                 issues.into_result(())
@@ -269,14 +273,14 @@ mod tests {
     /// the same local read a `blueprint_file` source does.
     #[test]
     fn a_remote_raw_graph_may_not_name_a_worker_by_directory() {
-        use crate::spec::graph::{FanOutDef, StageMode, WorkerSource};
+        use crate::spec::graph::{StageMode, WorkerSource};
         let mut graph = crate::spec::graph::tests::minimal();
         let dir = std::env::temp_dir().join("w");
-        let mut fan = FanOutDef::same_graph(crate::spec::names::StageName::new("build").unwrap());
+        let mut fan = crate::test_graph::fan_out_to("plan", "build");
         graph.stages[0].mode = StageMode::FanOut(fan.clone());
         let request = SpawnRequest::new(SpawnSource::Raw(Box::new(graph.clone())));
         assert!(request.check_remote().is_ok());
-        fan.worker =
+        fan.workers_available[0].runs =
             WorkerSource::BlueprintFile(BlueprintPath::new(dir.to_string_lossy()).unwrap());
         graph.stages[0].mode = StageMode::FanOut(fan);
         let issues = SpawnRequest::new(SpawnSource::Raw(Box::new(graph)))
@@ -284,7 +288,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             issues.0[0].path.to_string(),
-            "source.raw.stages.plan.mode.fan_out.worker"
+            "source.raw.stages.plan.mode.fan_out.workers_available[0]"
         );
         assert_eq!(issues.0[0].code, IssueCode::NotAllowed);
     }

@@ -1,6 +1,6 @@
 [blueprint]
 name = "reviewer"
-version = "0.4.1"
+version = "0.4.2"
 description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 
 # discover -> scan -> split_review (review_worker x N) -> deep_review -> report -> summary
@@ -247,7 +247,10 @@ max_revisits = 1
 # others away, so a failed worker does not end the stage: it is named in the
 # results, and the deep review is told to cover its area itself.
 [graph.stages.mode.fan_out]
-worker = { stage = "review_worker" }
+stage = "split_review"
+workers_available = [
+    { name = "area", stage = "review_worker", use_for = "Reviewing one area of the change in depth" },
+]
 merge_stage = "deep_review"
 # Every area at once rather than in waves; the daemon's inference pool paces the
 # requests. Set to 0 for no cap at all.
@@ -462,6 +465,6 @@ system_prompt = """
 Say what this review found, for whoever asked for it.
 
 Lead with whether the change is safe to merge and why. Then the findings that
-would block it, and the ones worth fixing later. Name the report file you wrote.
+would block it, and the ones worth fixing later.
 
 If nothing blocking turned up, say so plainly - a clean review is a result."""

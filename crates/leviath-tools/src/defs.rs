@@ -600,7 +600,7 @@ impl BuiltinTools {
                     "properties": {
                         "agent": {
                             "type": "string",
-                            "description": "The blueprint to run for every item: an installed blueprint's name, or the absolute directory of one outside your working directory. Omit only inside a fan_out stage, which names its worker in the blueprint."
+                            "description": "The blueprint to run for every item: an installed blueprint's name, or the absolute directory of one outside your working directory."
                         },
                         "items": {
                             "type": "array",

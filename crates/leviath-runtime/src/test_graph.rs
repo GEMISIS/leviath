@@ -38,6 +38,27 @@ pub(crate) fn stage(name: &str) -> StageDef {
     toml::from_str(&format!("name = \"{name}\"\n")).expect("the stage reads")
 }
 
+/// The fan-out of stage `stage` that hands every item to `worker`, a stage of
+/// the same graph, under its own name.
+pub(crate) fn fan_out_to(stage: &str, worker: &str) -> crate::spec::graph::FanOutDef {
+    crate::spec::graph::FanOutDef::with_worker(
+        StageName::new(stage).expect("a valid name"),
+        crate::spec::graph::WorkerOption::named_after(
+            crate::spec::graph::WorkerSource::Stage(StageName::new(worker).expect("a valid name")),
+            "Doing one item",
+        ),
+    )
+}
+
+/// A work item `id` for the worker `worker`, with no inputs.
+pub(crate) fn work_item(id: &str, worker: &str) -> crate::fanout::WorkItem {
+    crate::fanout::WorkItem {
+        id: id.to_string(),
+        worker: crate::spec::names::WorkerName::new(worker).expect("a valid name"),
+        inputs: BTreeMap::new(),
+    }
+}
+
 /// A stage named `name` with the system prompt `p`, every other setting at its
 /// default.
 pub(crate) fn prompted(name: &str) -> StageDef {

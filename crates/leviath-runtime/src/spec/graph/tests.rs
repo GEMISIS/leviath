@@ -251,14 +251,12 @@ fn inputs_must_fit_their_slots() {
 fn fan_out_gates_carry_and_layout_refs_are_checked() {
     let mut g = minimal();
     g.stages[0].mode = StageMode::FanOut(FanOutDef {
-        worker: WorkerSource::Stage(StageName::new("nobody").unwrap()),
         merge_stage: Some(StageName::new("nowhere").unwrap()),
         max_workers: Some(0),
         on_worker_failure: WorkerFailure::Continue,
-        split_prompt: String::new(),
         results_region: Some(RegionName::new("ghost").unwrap()),
         max_items: Some(0),
-        max_attempts: None,
+        ..crate::test_graph::fan_out_to("plan", "nobody")
     });
     g.edges[0].carry = EdgeCarry::Custom {
         carry: vec![RegionName::new("ghost").unwrap()],
@@ -305,7 +303,7 @@ fn fan_out_gates_carry_and_layout_refs_are_checked() {
         got,
         vec![
             "graph.stages.plan.mode.fan_out.merge_stage Dangling",
-            "graph.stages.plan.mode.fan_out.worker Dangling",
+            "graph.stages.plan.mode.fan_out.workers_available[0].stage Dangling",
             "graph.stages.plan.mode.fan_out.results_region Dangling",
             "graph.stages.plan.mode.fan_out.max_workers OutOfRange",
             "graph.stages.plan.mode.fan_out.max_items OutOfRange",
@@ -703,15 +701,15 @@ fn a_gate_no_tool_can_satisfy_and_an_unwilling_worker_are_refused() {
     g.stages[0].tools = vec![ToolSelector::Tool(ToolName::new("list_dir").unwrap())];
     g.stages.push(stage("split"));
     g.stages.push(stage("work"));
-    g.stages[2].mode = StageMode::FanOut(FanOutDef::same_graph(StageName::new("work").unwrap()));
+    g.stages[2].mode = StageMode::FanOut(crate::test_graph::fan_out_to("split", "work"));
     let issues = g.validate(&SpecPath::root().field("graph")).unwrap_err();
     let got: Vec<String> = issues.iter().map(ToString::to_string).collect();
     assert_eq!(
         got,
         vec![
-            "graph.stages.split.mode.fan_out.worker: conflict: fan_out worker_stage 'work' must \
-             set allow_as_worker = true. set allow_as_worker = true on stage 'work', or fan out \
-             to a blueprint instead"
+            "graph.stages.split.mode.fan_out.workers_available[0].stage: conflict: worker \
+             stage 'work' must set allow_as_worker = true. set allow_as_worker = true on stage \
+             'work', or have this worker run a blueprint instead"
                 .to_string(),
             "graph.edges[0].gate.require_modifications: conflict: gate requires modifications, \
              but the stage has no file-modifying tool in available_tools. grant 'plan' \

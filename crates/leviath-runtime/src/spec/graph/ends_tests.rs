@@ -66,7 +66,7 @@ fn a_trap_beside_a_way_out_names_only_the_trap() {
 #[test]
 fn a_fan_out_ends_through_its_merge_stage() {
     let mut g = minimal();
-    let mut fan = FanOutDef::same_graph(StageName::new("build").unwrap());
+    let mut fan = crate::test_graph::fan_out_to("plan", "build");
     fan.merge_stage = Some(StageName::new("merge").unwrap());
     g.stages[0].mode = StageMode::FanOut(fan);
     g.edges.clear();

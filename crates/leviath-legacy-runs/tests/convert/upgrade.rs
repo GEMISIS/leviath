@@ -145,7 +145,8 @@ fn a_layout_2_run_file_reads_back_as_it_did_once_upgraded() {
         .collect();
     assert_eq!(json_of(code), expected["code"]);
 
-    // Byte for byte: every frame but the spec is the one the old file held.
+    // The same frames, in the same order: code and owner frames byte for
+    // byte, and the rest read above.
     let after = run.bytes();
     let old = codec::scan(&before).frames;
     let codec::Scan {
@@ -154,9 +155,11 @@ fn a_layout_2_run_file_reads_back_as_it_did_once_upgraded() {
     assert_eq!(end, after.len());
     assert_eq!(old.len(), new.len());
     assert_eq!(new[0].kind, FrameKind::Spec);
-    for (o, n) in old.iter().zip(&new).skip(1) {
+    for (o, n) in old.iter().zip(&new) {
         assert_eq!(o.kind, n.kind);
-        assert_eq!(before[o.offset..o.end()], after[n.offset..n.end()]);
+        if matches!(o.kind, FrameKind::Code | FrameKind::Owner) {
+            assert_eq!(before[o.offset..o.end()], after[n.offset..n.end()]);
+        }
     }
 }
 
@@ -169,7 +172,7 @@ fn upgrading_twice_or_a_file_this_build_wrote_changes_nothing() {
     let once = run.bytes();
     let err = upgrade(&run.dir).unwrap_err();
     assert!(
-        matches!(&err, ConvertError::NotLayout2 { path } if *path == run.file()),
+        matches!(&err, ConvertError::NotOldLayout { path } if *path == run.file()),
         "{err}"
     );
     assert!(err.to_string().contains("nothing to upgrade"), "{err}");
@@ -187,7 +190,7 @@ fn upgrading_twice_or_a_file_this_build_wrote_changes_nothing() {
     assert!(!needs_upgrade(&converted.dir));
     assert!(matches!(
         upgrade(&converted.dir),
-        Err(ConvertError::NotLayout2 { .. })
+        Err(ConvertError::NotOldLayout { .. })
     ));
     assert_eq!(std::fs::read(converted.path("run.lvr")).unwrap(), written);
     assert!(!converted.path("legacy/run.v2.lvr").exists());
@@ -204,7 +207,7 @@ fn a_directory_without_a_layout_2_file_has_nothing_to_upgrade() {
     for dir in [old.dir.as_path(), empty.path(), short.dir.as_path()] {
         assert!(!needs_upgrade(dir));
         let err = upgrade(dir).unwrap_err();
-        assert!(matches!(err, ConvertError::NotLayout2 { .. }), "{err}");
+        assert!(matches!(err, ConvertError::NotOldLayout { .. }), "{err}");
     }
     assert!(old.path("run.lvr").is_file());
     assert!(!old.path("legacy").exists());

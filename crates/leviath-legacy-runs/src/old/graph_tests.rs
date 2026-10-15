@@ -405,12 +405,16 @@ fn a_worker_agent_path_reads_as_a_blueprint_file() {
     let StageMode::FanOut(def) = &g.stages[0].mode else {
         panic!("a fan-out stage");
     };
+    assert_eq!(def.stage.as_str(), "fan");
+    let worker = def.sole_worker().expect("an old fan-out has one worker");
     assert_eq!(
-        def.worker,
+        worker.runs,
         WorkerSource::BlueprintFile(
             leviath_runtime::spec::names::BlueprintPath::new(dir.to_string_lossy()).unwrap()
         )
     );
+    assert_eq!(worker.name.as_str(), "my-worker");
+    assert_eq!(worker.use_for, leviath_runtime::spec::graph::EVERY_ITEM);
 }
 
 #[test]

@@ -104,22 +104,20 @@ impl StageModeView {
     }
 }
 
-/// Where a fan-out stage gets its workers.
+/// What a fan-out's worker runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerKind {
-    /// `worker = { blueprint = { name = "..." } }`: another blueprint,
-    /// installed or (as `{ blueprint_file = "/path" }`) read from a
-    /// directory.
+    /// `blueprint = "..."`: another blueprint, installed (by name, or
+    /// `name@digest`) or read from a directory (by path).
     Agent,
-    /// `worker = { stage = "..." }`: a stage of this blueprint.
+    /// `stage = "..."`: a stage of this blueprint.
     Stage,
-    /// `worker = { query = "..." }`: matched against installed blueprints at
-    /// run time.
+    /// `query = "..."`: matched against installed blueprints at run time.
     Query,
 }
 
 impl WorkerKind {
-    /// The key under `worker` the kind is written as.
+    /// The key of a `workers_available` entry the kind is written as.
     pub(crate) fn key(self) -> &'static str {
         match self {
             WorkerKind::Agent => "blueprint",
@@ -132,8 +130,9 @@ impl WorkerKind {
 /// A fan-out stage's settings, under `mode = { fan_out = {...} }`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct FanOutView {
-    /// What the workers run, and its value: a stage, a blueprint's name (or
-    /// `name@digest`, or a directory), or a query.
+    /// What the first of `workers_available` runs, and its value: a stage, a
+    /// blueprint's name (or `name@digest`, or a directory), or a query. The
+    /// editor shows and edits that one; any others are kept as written.
     pub worker: Option<(WorkerKind, String)>,
     /// `merge_stage`.
     pub merge_stage: Option<String>,
@@ -822,7 +821,10 @@ pub(super) fn fan_out_table(stage: &dyn TableLike) -> Option<&dyn TableLike> {
 
 fn fan_out_view(fan_out: &dyn TableLike) -> FanOutView {
     FanOutView {
-        worker: sub(fan_out, "worker").and_then(worker_of),
+        worker: fan_out
+            .get("workers_available")
+            .and_then(|workers| list_tables(workers).into_iter().next())
+            .and_then(worker_of),
         merge_stage: get_str(fan_out, "merge_stage").map(str::to_string),
         max_workers: get_count(fan_out, "max_workers"),
         max_items: get_count(fan_out, "max_items"),
@@ -830,24 +832,12 @@ fn fan_out_view(fan_out: &dyn TableLike) -> FanOutView {
     }
 }
 
-/// What a `worker` table names. A blueprint reads as `name` or
-/// `name@digest`, a blueprint directory as its path.
+/// What a `workers_available` entry runs: its `stage`, `query` or
+/// `blueprint`, as written.
 fn worker_of(worker: &dyn TableLike) -> Option<(WorkerKind, String)> {
-    if let Some(stage) = get_str(worker, "stage") {
-        return Some((WorkerKind::Stage, stage.to_string()));
-    }
-    if let Some(query) = get_str(worker, "query") {
-        return Some((WorkerKind::Query, query.to_string()));
-    }
-    if let Some(path) = get_str(worker, "blueprint_file") {
-        return Some((WorkerKind::Agent, path.to_string()));
-    }
-    let blueprint = sub(worker, "blueprint")?;
-    let name = get_str(blueprint, "name")?;
-    Some(match get_str(blueprint, "digest") {
-        Some(digest) => (WorkerKind::Agent, format!("{name}@{digest}")),
-        None => (WorkerKind::Agent, name.to_string()),
-    })
+    [WorkerKind::Stage, WorkerKind::Query, WorkerKind::Agent]
+        .into_iter()
+        .find_map(|kind| get_str(worker, kind.key()).map(|v| (kind, v.to_string())))
 }
 
 /// The model chain a stage's `model` value stands for, each entry rendered as

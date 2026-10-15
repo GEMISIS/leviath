@@ -243,13 +243,23 @@ fn a_choice_names_its_edges_as_the_graph_does() {
     );
 }
 
+/// The one worker of [`fan_out`]'s fan-out.
+fn worker() -> crate::spec::names::WorkerName {
+    crate::spec::names::WorkerName::new("plan").unwrap()
+}
+
 fn fan_out(world: &mut World, e: Entity) {
     let state = crate::fanout::FanOutState {
-        config: serde_json::from_value(json!({"worker": {"stage": "plan"}})).unwrap(),
+        config: serde_json::from_value(json!({
+            "stage": "plan",
+            "workers_available": [{"name": "plan", "stage": "plan", "use_for": "Planning"}]
+        }))
+        .unwrap(),
         max_workers: Some(2),
         pending: vec![
             crate::fanout::WorkItem {
                 id: "i1".into(),
+                worker: worker(),
                 inputs: [
                     ("topic".to_string(), RawInput::Text("x".into())),
                     ("bad key".to_string(), RawInput::Int(1)),
@@ -258,14 +268,19 @@ fn fan_out(world: &mut World, e: Entity) {
             },
             crate::fanout::WorkItem {
                 id: "i2".into(),
+                worker: worker(),
                 inputs: Default::default(),
             },
             crate::fanout::WorkItem {
                 id: "i3".into(),
+                worker: worker(),
                 inputs: [("task".to_string(), RawInput::Text("plain".into()))].into(),
             },
         ],
-        active: vec![("i0".into(), "w-1".into()), ("i9".into(), "bad id".into())],
+        active: vec![
+            ("i0".into(), worker(), "w-1".into()),
+            ("i9".into(), worker(), "bad id".into()),
+        ],
         summaries: vec![("i4".into(), "fine".into())],
         failures: vec![("i5".into(), "bad".into())],
         parts: vec![],
@@ -297,7 +312,11 @@ fn a_fan_out_reads_with_its_items_as_typed_inputs() {
         f.queued[2].inputs.get("task"),
         Some(&InputValue::Text("plain".into()))
     );
-    assert_eq!(f.active, vec![("i0".into(), RunId::new("w-1").unwrap())]);
+    assert_eq!(f.queued[0].worker, worker());
+    assert_eq!(
+        f.active,
+        vec![("i0".into(), worker(), RunId::new("w-1").unwrap())]
+    );
     assert_eq!(f.done, vec![("i4".into(), "fine".into())]);
     assert_eq!(f.failed, vec![("i5".into(), "bad".into())]);
     assert_eq!(s.wait_reason, Some(WaitState::FanOutWorkers(5)));

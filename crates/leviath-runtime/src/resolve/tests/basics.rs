@@ -74,16 +74,14 @@ fn installed(graph: RunGraph) -> LoadedBlueprint {
 async fn a_fan_out_worker_blueprint_is_pinned_to_the_installed_revision() {
     use crate::spec::graph::{FanOutDef, StageMode, WorkerFailure, WorkerSource};
     let fan = |worker: &str| {
-        StageMode::FanOut(FanOutDef {
-            worker: WorkerSource::Blueprint(BlueprintRef::parse(worker).unwrap()),
-            merge_stage: None,
+        let mut def = FanOutDef {
             max_workers: Some(2),
             on_worker_failure: WorkerFailure::Continue,
-            split_prompt: String::new(),
-            results_region: None,
-            max_items: None,
-            max_attempts: None,
-        })
+            ..crate::test_graph::fan_out_to("plan", "plan")
+        };
+        def.workers_available[0].runs =
+            WorkerSource::Blueprint(BlueprintRef::parse(worker).unwrap());
+        StageMode::FanOut(def)
     };
     let pinned = format!("coder@{}", Digest::of(b"v0"));
     let mut g = graph();
@@ -99,7 +97,7 @@ async fn a_fan_out_worker_blueprint_is_pinned_to_the_installed_revision() {
     let worker = |g: RunGraph| async {
         let spec = spawn(&raw(g), &env).await.unwrap().spec;
         match &spec.graph.stages[0].mode {
-            StageMode::FanOut(fan) => fan.worker.clone(),
+            StageMode::FanOut(fan) => fan.workers_available[0].runs.clone(),
             other => panic!("{other:?}"),
         }
     };
@@ -111,7 +109,10 @@ async fn a_fan_out_worker_blueprint_is_pinned_to_the_installed_revision() {
     );
     let issues = spawn(&raw(ghost), &env).await.expect_err("refused");
     let paths: Vec<String> = issues.iter().map(|i| i.path.to_string()).collect();
-    assert_eq!(paths, ["source.raw.stages.plan.mode.fan_out.worker.name"]);
+    assert_eq!(
+        paths,
+        ["source.raw.stages.plan.mode.fan_out.workers_available[0].name"]
+    );
     assert_eq!(
         worker(kept).await,
         WorkerSource::Blueprint(BlueprintRef::parse(&pinned).unwrap())

@@ -221,10 +221,12 @@ impl LintEnv {
             .stages
             .iter()
             .filter_map(|stage| match &stage.mode {
-                StageMode::FanOut(fan) => match &fan.worker {
-                    WorkerSource::Blueprint(reference) => Some(reference),
-                    _ => None,
-                },
+                StageMode::FanOut(fan) => Some(&fan.workers_available),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|worker| match &worker.runs {
+                WorkerSource::Blueprint(reference) => Some(reference),
                 _ => None,
             })
             .filter_map(|reference| {

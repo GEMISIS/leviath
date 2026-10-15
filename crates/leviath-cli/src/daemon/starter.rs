@@ -155,16 +155,19 @@ impl DaemonStarter {
         }
     }
 
-    /// The MCP servers declared by the blueprints `graph`'s fan-outs start,
-    /// so the first worker of each already has their tools.
+    /// The MCP servers declared by the blueprints `graph`'s fan-outs may
+    /// start, every declared worker of each, so the first worker of each
+    /// already has their tools.
     fn worker_servers(&self, graph: &RunGraph) -> Vec<MCPServerConfig> {
         graph
             .stages
             .iter()
             .filter_map(|s| match &s.mode {
-                StageMode::FanOut(fan) => Some(&fan.worker),
+                StageMode::FanOut(fan) => Some(&fan.workers_available),
                 _ => None,
             })
+            .flatten()
+            .map(|worker| &worker.runs)
             .filter_map(|worker| {
                 let installed = |reference: &_| {
                     crate::daemon::resolve_env::load_installed(

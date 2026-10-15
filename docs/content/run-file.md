@@ -265,11 +265,12 @@ origin is `recorded`, and its graph holds the stages it entered, the models they
 it took and its regions. That is enough for `lev ps`, `lev run show`, `lev stages`, `lev timeline`
 and `lev result`, but not to run it, so it never resumes.
 
-Alpha builds wrote run files in an earlier binary layout, which this build refuses by its
-fingerprint. The daemon upgrades each one in place in the same pass at start: the spec's stage
-plans are rewritten in this build's shape, and every other frame is copied as it was, so the run
-reads back exactly as it did. The file as it was stays in the run's `legacy/` folder as
-`run.v2.lvr`, and the directory is saved in the home's backup first. A run file in any other
+Alpha builds wrote run files in earlier binary layouts, which this build refuses by their
+fingerprints. The daemon upgrades each one in place in the same pass at start. Layout 2's stage
+plans and layout 3's fan-outs are rewritten in this build's shape, and the rest is copied as it
+was, so the run reads back as it did. A layout-3 fan-out becomes one of its stage with its one
+worker, which takes every item. The file as it was stays in the run's `legacy/` folder as
+`run.v2.lvr` or `run.v3.lvr`, and the directory is saved in the home's backup first. A run file in any other
 layout this build does not know is listed as failed, saying so, and left as it is.
 
 An old run never recorded a machine fingerprint, so its resume does not compare one. It comes back

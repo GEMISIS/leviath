@@ -3776,16 +3776,8 @@ fn dispatch_persistence_reads_a_parent_parked_on_its_fan_out() {
             origin: crate::fanout::FanOutOrigin::Stage,
             parts: Vec::new(),
             config: crate::spec::graph::FanOutDef {
-                worker: crate::spec::graph::WorkerSource::Stage(
-                    crate::spec::names::StageName::new("w").unwrap(),
-                ),
-                merge_stage: None,
                 max_workers: Some(1),
-                on_worker_failure: Default::default(),
-                split_prompt: String::new(),
-                results_region: None,
-                max_items: None,
-                max_attempts: None,
+                ..crate::test_graph::fan_out_to("fan", "w")
             },
             max_workers: Some(1),
             pending: vec![],
@@ -10698,7 +10690,7 @@ fn stage_setup_from_folds_fanout_split_prompt() {
     let fanout = |split: &str| {
         StageMode::FanOut(FanOutDef {
             split_prompt: split.to_string(),
-            ..FanOutDef::same_graph(crate::spec::names::StageName::new("w").unwrap())
+            ..crate::test_graph::fan_out_to("fan", "w")
         })
     };
 
@@ -11687,16 +11679,16 @@ fn enforce_max_iterations_leaves_a_fan_out_stage_alone() {
     let mut spec = world.get::<RunSpecC>(e).unwrap().clone();
     graph_mut(&mut spec).stages[0].mode =
         crate::spec::graph::StageMode::FanOut(crate::spec::graph::FanOutDef {
-            worker: crate::spec::graph::WorkerSource::Blueprint(
-                crate::spec::names::BlueprintRef::parse("w").unwrap(),
-            ),
-            merge_stage: None,
+            workers_available: vec![crate::spec::graph::WorkerOption::named_after(
+                crate::spec::graph::WorkerSource::Blueprint(
+                    crate::spec::names::BlueprintRef::parse("w").unwrap(),
+                ),
+                "Doing one item",
+            )],
             max_workers: Some(4),
             on_worker_failure: crate::spec::graph::WorkerFailure::Continue,
             split_prompt: "split".to_string(),
-            results_region: None,
-            max_items: None,
-            max_attempts: None,
+            ..crate::test_graph::fan_out_to("fan", "w")
         });
     world.entity_mut(e).insert(spec);
 
@@ -16927,14 +16919,15 @@ fn fanning_bp() -> RunSpecC {
 fn fanning_bp_with(max_attempts: Option<u32>) -> RunSpecC {
     let mut stage = stage_named("investigate", None, false, None);
     stage.mode = crate::spec::graph::StageMode::FanOut(crate::spec::graph::FanOutDef {
-        worker: crate::spec::graph::WorkerSource::Blueprint(
-            crate::spec::names::BlueprintRef::parse("researcher").unwrap(),
-        ),
+        workers_available: vec![crate::spec::graph::WorkerOption::named_after(
+            crate::spec::graph::WorkerSource::Blueprint(
+                crate::spec::names::BlueprintRef::parse("researcher").unwrap(),
+            ),
+            "Researching one question",
+        )],
         split_prompt: "split it".to_string(),
         max_attempts,
-        ..crate::spec::graph::FanOutDef::same_graph(
-            crate::spec::names::StageName::new("x").unwrap(),
-        )
+        ..crate::test_graph::fan_out_to("investigate", "x")
     });
     spec_of(blueprint(vec![stage]))
 }

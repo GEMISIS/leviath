@@ -41,20 +41,20 @@ mod worker_sources;
 pub use adopt::{UnrecordedWorker, settle_unrecorded_worker};
 pub(crate) use io::{FanOutIo, ReadingWorkerInputs};
 pub use items::WorkItem;
-pub(crate) use items::{FanOutRequest, config_for, is_fan_out_tool, parse_fan_out_call};
+pub(crate) use items::{FanOutRequest, is_fan_out_tool, parse_fan_out_call};
 use report::*;
 pub(crate) use starts::WorkerStarts;
 pub use starts::{PlaceWorker, WorkerPrep};
 use worker_sources::merge_worker_sources;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use crate::insert::RunSpecC;
 use crate::spec::env::Caller;
 use crate::spec::graph::{FanOutDef, StageMode, WorkerFailure, WorkerSource};
 use crate::spec::inputs::InputDecl;
-use crate::spec::names::BlueprintRef;
+use crate::spec::names::{BlueprintRef, WorkerName};
 use crate::spec::request::{SpawnRequest, SpawnSource};
 use bevy_ecs::prelude::*;
 
@@ -86,10 +86,12 @@ pub trait FanOutSpawner: Send + Sync {
     fn find_worker(&self, query: &str) -> Result<BlueprintRef, String>;
 
     /// The inputs the blueprint `source` names declares, so a fan-out's items
-    /// are checked against them before any worker starts. `None` when this
-    /// spawner cannot read it; each worker's own spawn checks them then.
-    fn worker_inputs(&self, _source: &SpawnSource) -> Option<Vec<InputDecl>> {
-        None
+    /// are checked against them before any worker starts. `Ok(None)` when
+    /// this spawner cannot read it, and each worker's own spawn checks them
+    /// then; `Err` with why when the blueprint does not load, which refuses
+    /// the `fan_out` call before any worker starts.
+    fn worker_inputs(&self, _source: &SpawnSource) -> Result<Option<Vec<InputDecl>>, String> {
+        Ok(None)
     }
 }
 
@@ -98,11 +100,12 @@ pub trait FanOutSpawner: Send + Sync {
 #[derive(Resource, Clone)]
 pub struct FanOutSpawnerRes(pub Arc<dyn FanOutSpawner>);
 
-/// A currently-running fan-out worker: its work-item id, its live entity, and
-/// its run-id (kept so the waiting state can be persisted/restored without a
-/// cross-entity lookup - see [`FanOutState`]).
+/// A currently-running fan-out worker: its work-item id, the declared worker
+/// it is, its live entity, and its run-id (kept so the waiting state can be
+/// persisted/restored without a cross-entity lookup - see [`FanOutState`]).
 struct ActiveWorker {
     item_id: String,
+    worker: WorkerName,
     entity: Entity,
     run_id: String,
 }
@@ -173,8 +176,8 @@ pub struct FanOutState {
     pub max_workers: Option<usize>,
     /// Work items not yet started.
     pub pending: Vec<WorkItem>,
-    /// In-flight workers as `(item_id, run_id)`.
-    pub active: Vec<(String, String)>,
+    /// In-flight workers as `(item_id, worker, run_id)`.
+    pub active: Vec<(String, WorkerName, String)>,
     /// Completed worker results as `(item_id, summary)`.
     pub summaries: Vec<(String, String)>,
     /// Failed worker results as `(item_id, message)`.
@@ -223,6 +226,11 @@ impl FanOutWaiting {
         self.paused
     }
 
+    /// What the report calls one of this fan-out's items; see [`label`].
+    fn label(&self, item_id: &str, worker: &WorkerName) -> String {
+        label(&self.config, item_id, worker)
+    }
+
     /// Latch or release the fan-out. Returns whether this changed anything, so
     /// a caller can tell a real pause from a repeat.
     pub(crate) fn set_paused(&mut self, paused: bool) -> bool {
@@ -248,13 +256,22 @@ impl FanOutWaiting {
             active: self
                 .active
                 .iter()
-                .map(|w| (w.item_id.clone(), w.run_id.clone()))
+                .map(|w| (w.item_id.clone(), w.worker.clone(), w.run_id.clone()))
                 .collect(),
             summaries: self.summaries.clone(),
             failures: self.failures.clone(),
             parts: self.parts.clone(),
             paused: self.paused,
         }
+    }
+}
+
+/// What the report calls an item: its id, and the worker that took it when
+/// the fan-out declares more than one, so the merge can tell them apart.
+pub(crate) fn label(config: &FanOutDef, item_id: &str, worker: &WorkerName) -> String {
+    match config.sole_worker() {
+        Some(_) => item_id.to_string(),
+        None => format!("{item_id} ({worker})"),
     }
 }
 
@@ -271,14 +288,18 @@ pub fn restore_fan_out_waiting(
 ) {
     let mut active = Vec::new();
     let mut failures = state.failures;
-    for (item_id, run_id) in state.active {
+    for (item_id, worker, run_id) in state.active {
         match resolve(&run_id) {
             Some(entity) => active.push(ActiveWorker {
                 item_id,
+                worker,
                 entity,
                 run_id,
             }),
-            None => failures.push((item_id, "worker did not reload after restart".to_string())),
+            None => failures.push((
+                label(&state.config, &item_id, &worker),
+                "worker did not reload after restart".to_string(),
+            )),
         }
     }
     world.entity_mut(parent).insert(FanOutWaiting {
@@ -497,19 +518,32 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
         let mut agent = world.entity_mut(entity);
         agent.remove::<PendingFanOut>();
         let read = agent.take::<io::WorkerInputs>();
-        // A fan-out stage's own keys when there are any, so a stage that set
-        // `max_items` or `on_worker_failure` still gets them; nothing when an
-        // ordinary stage called the tool.
-        let spec = world.get::<RunSpecC>(entity).map(|s| s.0.clone());
-        let stage_config = world
-            .get::<StageCursor>(entity)
-            .zip(spec.as_ref())
-            .and_then(
-                |(cursor, spec)| match &spec.graph.stages[cursor.index].mode {
-                    StageMode::FanOut(def) => Some(def.clone()),
-                    _ => None,
-                },
+        // The stage that made the call: a fan-out stage's own settings when it
+        // is one, so a stage that set `max_items` or `on_worker_failure` still
+        // gets them, and its declared workers are the only ones there are.
+        let Some((spec, stage)) = world
+            .get::<RunSpecC>(entity)
+            .zip(world.get::<StageCursor>(entity))
+            .map(|(spec, cursor)| (spec.0.clone(), cursor.index))
+            .and_then(|(spec, index)| {
+                let stage = spec.graph.stages.get(index)?.clone();
+                Some((spec, stage))
+            })
+        else {
+            answer_call(
+                world,
+                entity,
+                &call_id,
+                "[error] fan_out refused: this agent has no stage to fan out from. Nothing was \
+                 started."
+                    .to_string(),
             );
+            continue;
+        };
+        let stage_config = match &stage.mode {
+            StageMode::FanOut(def) => Some(def.clone()),
+            _ => None,
+        };
         // Which door this came through, and so how its report is delivered. A
         // `mode = "fan_out"` stage answers with the same tool call as anybody
         // else, so the call cannot tell us - only the stage can.
@@ -526,45 +560,83 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
                 call_id: call_id.clone(),
             },
         };
-        let workdir = spec.as_ref().map(|s| s.placement.workdir.clone());
-        let mut config = match config_for(&request, stage_config.as_ref(), workdir.as_deref()) {
-            Ok(config) => config,
+        let workdir = spec.placement.workdir.clone();
+        let (mut config, items) = match items::settle(
+            &request,
+            stage_config.as_ref(),
+            &stage.name,
+            Some(workdir.as_path()),
+        ) {
+            Ok(settled) => settled,
             Err(why) => {
                 answer_call(world, entity, &call_id, format!("[error] {why}"));
                 continue;
             }
         };
-        // A worker takes the inputs of the graph it runs, so its items are
-        // checked here against them, before any worker starts, each at its
-        // item's path: this run's own graph for a worker stage, the named
-        // blueprint's when the spawner can read it. Reading a blueprint is
-        // I/O, so it is done off the tick and the call waits for it.
-        let known = match (io::WorkerBlueprint::of(&config.worker), read) {
-            (None, _) => Ok(spec.as_ref().map(|s| s.graph.inputs.clone())),
-            (Some(_), Some(io::WorkerInputs(decls))) => Ok(decls),
-            (Some(blueprint), None) => Err(blueprint),
+        // Each worker blueprint the items use is read for its inputs, before
+        // any worker starts: one that does not load refuses the call, and the
+        // rest check their items. Reading a blueprint is I/O, so it is done
+        // off the tick and the call waits for it.
+        let blueprints: Vec<(WorkerName, io::WorkerBlueprint)> = config
+            .workers_available
+            .iter()
+            .filter(|w| items.iter().any(|item| item.worker == w.name))
+            .filter_map(|w| io::WorkerBlueprint::of(&w.runs).map(|b| (w.name.clone(), b)))
+            .collect();
+        let read = match (read, blueprints.is_empty()) {
+            (Some(io::WorkerInputs(read)), _) => read,
+            (None, true) => BTreeMap::new(),
+            (None, false) => match io::read_inputs(world, entity, blueprints) {
+                Some(read) => read,
+                None => {
+                    world
+                        .entity_mut(entity)
+                        .insert((PendingFanOut { call_id, request }, ReadingWorkerInputs));
+                    continue;
+                }
+            },
         };
-        let decls = match known.map_err(|blueprint| io::read_inputs(world, entity, blueprint)) {
-            Ok(decls) | Err(Some(decls)) => decls,
-            Err(None) => {
-                world
-                    .entity_mut(entity)
-                    .insert((PendingFanOut { call_id, request }, ReadingWorkerInputs));
-                continue;
+        let failed: Vec<(WorkerName, String)> = read
+            .iter()
+            .filter_map(|(name, inputs)| Some((name.clone(), inputs.as_ref().err()?.clone())))
+            .collect();
+        if !failed.is_empty() {
+            let agent = request.agent.as_deref().filter(|_| stage_config.is_none());
+            let why = items::unloadable(&config, &items, &failed, agent);
+            answer_call(world, entity, &call_id, format!("[error] {why}"));
+            continue;
+        }
+        // A worker takes the inputs of the graph it runs, so each item is
+        // checked against its own worker's, each at its item's path: this
+        // run's own graph for a worker stage, the blueprint's when the spawner
+        // could read it.
+        let decls_of = |name: &WorkerName| {
+            let worker = config.worker(name.as_str())?;
+            match &worker.runs {
+                WorkerSource::Stage(_) => Some(items::WorkerDecls {
+                    decls: &spec.graph.inputs,
+                    same_graph: true,
+                }),
+                _ => read
+                    .get(name)?
+                    .as_ref()
+                    .ok()?
+                    .as_deref()
+                    .map(|decls| items::WorkerDecls {
+                        decls,
+                        same_graph: false,
+                    }),
             }
         };
-        if let Some(decls) = decls
-            && let Err(issues) = items::check_items(
-                &decls,
-                &request.items,
-                matches!(config.worker, WorkerSource::Stage(_)),
-            )
-        {
+        if let Err(issues) = items::check_items(&items, decls_of) {
             answer_call(
                 world,
                 entity,
                 &call_id,
-                format!("[error] fan_out items do not fit the worker's inputs:\n{issues}"),
+                format!(
+                    "[error] fan_out refused: the items do not fit their workers' inputs:\n\
+                     {issues}\nNothing was started."
+                ),
             );
             continue;
         }
@@ -576,13 +648,13 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
         // `max_items = 3` produced six-way splits through this door, and one run
         // reached 34 sub-agents where an earlier one reached 7.
         //
-        // Only the ceiling is inherited. `worker_agent`, `merge_stage` and
-        // `results_region` describe how a *stage* delivers its report, and
-        // taking those would change where this call's result goes.
+        // Only the ceiling is inherited. `merge_stage` and `results_region`
+        // describe how a *stage* delivers its report, and taking those would
+        // change where this call's result goes.
         if config.max_items.is_none() {
             config.max_items = graph_fan_out_max_items(world, entity);
         }
-        begin_fan_out(world, entity, config, request.items, origin);
+        begin_fan_out(world, entity, config, items, origin);
     }
 }
 
@@ -711,6 +783,7 @@ pub(crate) fn fan_out_collect(world: &mut World) {
                     // `slim_merged_workers`, which drops its context window:
                     // after that its bibliography is only on disk.
                     merge_worker_sources(world, parent, aw.entity, &aw.item_id);
+                    let label = w.label(&aw.item_id, &aw.worker);
                     match result {
                         Ok(content) => {
                             // The copy is I/O: off the tick, landing on a
@@ -722,9 +795,9 @@ pub(crate) fn fan_out_collect(world: &mut World) {
                                 Some(None) => w.handing_up += 1,
                                 None => {}
                             }
-                            w.summaries.push((aw.item_id, content));
+                            w.summaries.push((label, content));
                         }
-                        Err(message) => w.failures.push((aw.item_id, message)),
+                        Err(message) => w.failures.push((label, message)),
                     }
                     world.entity_mut(aw.entity).insert(MergedWorker);
                 }
@@ -754,9 +827,9 @@ pub(crate) fn fan_out_collect(world: &mut World) {
                 Ok(start) => {
                     started_this_pass += 1;
                     w.starting.push(item.clone());
-                    in_place.extend(starts::launch(world, parent, item.id, start));
+                    in_place.extend(starts::launch(world, parent, item.id, item.worker, start));
                 }
-                Err(message) => w.failures.push((item.id, message)),
+                Err(message) => w.failures.push((w.label(&item.id, &item.worker), message)),
             }
         }
         // A world with no runtime ran its starts in place: they land now.
@@ -1118,7 +1191,11 @@ mod tests {
 
     pub(super) fn cfg(merge: Option<&str>, max_workers: u32, policy: WorkerFailure) -> FanOutDef {
         FanOutDef {
-            worker: WorkerSource::Stage(StageName::new("w").unwrap()),
+            stage: StageName::new("fan").unwrap(),
+            workers_available: vec![crate::spec::graph::WorkerOption::named_after(
+                WorkerSource::Stage(StageName::new("w").unwrap()),
+                "Doing one item",
+            )],
             merge_stage: merge.map(|m| StageName::new(m).unwrap()),
             max_workers: (max_workers > 0).then_some(max_workers),
             on_worker_failure: policy,
@@ -1210,7 +1287,7 @@ mod tests {
         item: &WorkItem,
     ) -> Result<Entity, String> {
         let start = starts::begin(world, parent, config, item, 0)?;
-        let landed = starts::launch(world, parent, item.id.clone(), start)
+        let landed = starts::launch(world, parent, item.id.clone(), item.worker.clone(), start)
             .expect("a world with no runtime runs a start in place");
         starts::place(world, parent, landed).1
     }
@@ -1317,10 +1394,14 @@ mod tests {
     /// call does. Lets the collector's tests state their items as JSON, which is
     /// how a model states them.
     fn split(world: &mut World, e: Entity) {
-        let items: Vec<WorkItem> =
+        let items: serde_json::Value =
             serde_json::from_str(&world.get::<InferenceResult>(e).unwrap().response)
                 .expect("the fixture's response is a work-item array");
         let config = stage_config(world, e);
+        let request = parse_fan_out_call(&serde_json::json!({ "items": items }))
+            .expect("the fixture's items read");
+        let (_, items) = items::settle(&request, Some(&config), &config.stage, None)
+            .expect("the fixture's items go to the stage's worker");
         world
             .entity_mut(e)
             .remove::<ProcessResponse>()
@@ -1349,10 +1430,11 @@ mod tests {
             .expect("the fixture has a fan-out stage")
     }
 
-    /// A work item with the given id and no inputs.
+    /// A work item with the given id and no inputs, for [`cfg`]'s worker `w`.
     pub(super) fn item(id: &str) -> WorkItem {
         WorkItem {
             id: id.to_string(),
+            worker: WorkerName::new("w").unwrap(),
             inputs: Default::default(),
         }
     }
@@ -1577,7 +1659,7 @@ mod tests {
             (serde_json::json!({"items": "all"}), "must be an array"),
             (
                 serde_json::json!({"items": [{"id": 4}]}),
-                "not {id, inputs}",
+                "not {id, worker, inputs}",
             ),
         ];
         for (args, expected) in cases {
@@ -1696,10 +1778,13 @@ mod tests {
             }
         );
         assert_eq!(
-            w.config.worker,
-            WorkerSource::Blueprint(BlueprintRef::parse("researcher").unwrap()),
+            w.config.sole_worker().map(|w| &w.runs),
+            Some(&WorkerSource::Blueprint(
+                BlueprintRef::parse("researcher").unwrap()
+            )),
             "the call named its worker"
         );
+        assert_eq!(w.config.stage.as_str(), "fan", "the stage that called");
     }
 
     /// A `mode = "fan_out"` stage's call comes back through the STAGE door, not
@@ -1828,8 +1913,10 @@ mod tests {
 
         let w = world.get::<FanOutWaiting>(e).expect("parked");
         assert_eq!(
-            w.config.worker,
-            WorkerSource::Blueprint(BlueprintRef::parse("researcher").unwrap())
+            w.config.sole_worker().map(|w| &w.runs),
+            Some(&WorkerSource::Blueprint(
+                BlueprintRef::parse("researcher").unwrap()
+            ))
         );
         assert_eq!(w.max_workers, Some(3));
         assert_eq!(
@@ -2399,7 +2486,12 @@ mod tests {
         // Projecting to the serializable state captures each worker's run-id.
         let state = world.get::<FanOutWaiting>(e).unwrap().to_state();
         assert_eq!(state.active.len(), 2);
-        assert!(state.active.iter().all(|(_id, run_id)| !run_id.is_empty()));
+        assert!(
+            state
+                .active
+                .iter()
+                .all(|(_id, worker, run_id)| !run_id.is_empty() && worker.as_str() == "w")
+        );
 
         // Restore onto a fresh parent, resolving run-ids back to entities.
         let by_run: std::collections::HashMap<String, Entity> = world
@@ -3348,6 +3440,7 @@ mod tests {
             .id();
         let aw = ActiveWorker {
             item_id: "w1".to_string(),
+            worker: WorkerName::new("w").unwrap(),
             entity: worker,
             run_id: "run-w".to_string(),
         };
@@ -3386,6 +3479,7 @@ mod tests {
             .id();
         let bare = ActiveWorker {
             item_id: "w2".to_string(),
+            worker: WorkerName::new("w").unwrap(),
             entity: bare,
             run_id: "run-b".to_string(),
         };
@@ -3395,6 +3489,7 @@ mod tests {
         let silent = world.spawn(parent_state()).id();
         let silent = ActiveWorker {
             item_id: "w3".to_string(),
+            worker: WorkerName::new("w").unwrap(),
             entity: silent,
             run_id: "run-s".to_string(),
         };
@@ -3598,7 +3693,7 @@ mod tests {
         assert!(world.get::<crate::pipeline::ReadyToInfer>(e).is_some());
         let convo = conversation_text(&world, e);
         assert!(
-            convo.contains("[error] fan_out items do not fit"),
+            convo.contains("[error] fan_out refused: the items do not fit their workers"),
             "{convo}"
         );
         assert!(convo.contains("items[1].inputs.topic"), "{convo}");
@@ -3629,8 +3724,10 @@ mod tests {
             self.0.find_worker(query)
         }
 
-        fn worker_inputs(&self, _source: &SpawnSource) -> Option<Vec<InputDecl>> {
-            Some(topic_blueprint(cfg(None, 1, WorkerFailure::Continue)).inputs)
+        fn worker_inputs(&self, _source: &SpawnSource) -> Result<Option<Vec<InputDecl>>, String> {
+            Ok(Some(
+                topic_blueprint(cfg(None, 1, WorkerFailure::Continue)).inputs,
+            ))
         }
     }
 
@@ -3665,8 +3762,9 @@ mod tests {
     }
 
     /// Which inputs a named, pathed or queried worker blueprint is held to
-    /// before it starts: the spawner's reading of it, and none when nothing
-    /// can say. A world with no runtime reads them in place.
+    /// before it starts: the spawner's reading of it, none when nothing can
+    /// say, and why not when a query finds no blueprint. A world with no
+    /// runtime reads them in place.
     #[test]
     fn a_workers_inputs_come_from_the_spawner() {
         use io::WorkerBlueprint as B;
@@ -3685,15 +3783,22 @@ mod tests {
         };
         let e = Entity::PLACEHOLDER;
         let mut world = World::new();
-        let read = |world: &World, b| io::read_inputs(world, e, b).expect("read in place");
-        assert!(read(&world, blueprint()).is_none(), "no spawner");
+        let name = WorkerName::new("x").unwrap();
+        let read = |world: &World, b| {
+            io::read_inputs(world, e, vec![(name.clone(), b)])
+                .expect("read in place")
+                .remove(&name)
+                .expect("one read per worker")
+        };
+        assert_eq!(read(&world, blueprint()), Ok(None), "no spawner");
         install(&mut world, Arc::new(Typed(TestSpawner::ok())));
         for worker in [blueprint(), file(), B::Query("tests".into())] {
-            assert!(read(&world, worker).is_some());
+            assert!(read(&world, worker).is_ok_and(|decls| decls.is_some()));
         }
-        assert!(read(&world, B::Query("nobody".into())).is_none());
+        let nobody = read(&world, B::Query("nobody".into())).unwrap_err();
+        assert!(nobody.contains("nobody"), "{nobody}");
         install(&mut world, TestSpawner::ok());
-        assert!(read(&world, blueprint()).is_none(), "unread");
+        assert_eq!(read(&world, blueprint()), Ok(None), "unread");
     }
 
     /// An ordinary stage has no worker to fall back on, so a call that names
@@ -3711,7 +3816,7 @@ mod tests {
 
         assert!(world.get::<FanOutWaiting>(e).is_none());
         let convo = conversation_text(&world, e);
-        assert!(convo.contains("needs an `agent`"), "{convo}");
+        assert!(convo.contains("\"agent\" is missing"), "{convo}");
     }
 
     /// Each worker source reaches the spawner as the request it means: an
@@ -3725,18 +3830,26 @@ mod tests {
             .spawn((parent_state(), spec_c("t", fanout_graph())))
             .id();
         let mut config = cfg(None, 3, WorkerFailure::Continue);
-        config.worker = WorkerSource::Blueprint(BlueprintRef::parse("fixer").unwrap());
+        config.workers_available[0].runs =
+            WorkerSource::Blueprint(BlueprintRef::parse("fixer").unwrap());
         assert!(start_worker(&mut world, parent, &config, &item("a")).is_ok());
-        config.worker = WorkerSource::Query("tests".into());
+        config.workers_available[0].runs = WorkerSource::Query("tests".into());
         assert!(start_worker(&mut world, parent, &config, &item("b")).is_ok());
         let dir = std::env::temp_dir().join("fixer");
-        config.worker = WorkerSource::BlueprintFile(
+        config.workers_available[0].runs = WorkerSource::BlueprintFile(
             crate::spec::names::BlueprintPath::new(dir.to_string_lossy()).unwrap(),
         );
         assert!(start_worker(&mut world, parent, &config, &item("e")).is_ok());
-        config.worker = WorkerSource::Query("nobody".into());
+        config.workers_available[0].runs = WorkerSource::Query("nobody".into());
         let err = start_worker(&mut world, parent, &config, &item("c")).unwrap_err();
         assert!(err.contains("no installed agent"), "{err}");
+        // An item whose worker the fan-out does not declare is not started.
+        let stray = WorkItem {
+            worker: WorkerName::new("gone").unwrap(),
+            ..item("f")
+        };
+        let err = start_worker(&mut world, parent, &config, &stray).unwrap_err();
+        assert!(err.contains("no worker named 'gone'"), "{err}");
 
         // A parent with no spec has nothing to start a worker from.
         let bare = world.spawn(parent_state()).id();

@@ -560,7 +560,7 @@ mod tests {
         let mut n = node(
             "split",
             NodeKind::Stage(StageKind::FanOut {
-                worker: WorkerRef::Agent("researcher".into()),
+                workers: vec![WorkerRef::Agent("researcher".into())],
                 merge: None,
                 max_workers: Some(4),
             }),

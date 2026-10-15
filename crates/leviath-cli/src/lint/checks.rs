@@ -577,20 +577,22 @@ pub(super) fn lint_graph(graph: &RunGraph) -> Vec<LintFinding> {
         // A fan_out stage reaches its worker and merge stages through its own
         // settings rather than an edge, so following only edges would report a
         // perfectly wired worker as an orphan.
-        let fan_out = match &stage.mode {
-            StageMode::FanOut(config) => [
-                match &config.worker {
+        let fan_out: Vec<&str> = match &stage.mode {
+            StageMode::FanOut(config) => config
+                .workers_available
+                .iter()
+                .filter_map(|w| match &w.runs {
                     WorkerSource::Stage(worker) => Some(worker.as_str()),
                     _ => None,
-                },
-                config.merge_stage.as_ref().map(|s| s.as_str()),
-            ],
-            _ => [None, None],
+                })
+                .chain(config.merge_stage.as_ref().map(|s| s.as_str()))
+                .collect(),
+            _ => Vec::new(),
         };
         let targets = graph
             .edges_from(stage.name.as_str())
             .map(|e| e.to.as_str())
-            .chain(fan_out.into_iter().flatten());
+            .chain(fan_out);
         for target in targets {
             if !reachable.contains(target) && graph.stage(target).is_some() {
                 queue.push_back(target.to_string());

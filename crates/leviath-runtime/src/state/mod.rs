@@ -21,7 +21,7 @@ pub use context::{ContextDiff, ContextState, EntryKind, EntryMeta, EntryState, R
 pub use delta::{Change, RunEvent, StateDelta, TransitionReason, TransitionRecord};
 pub use files::{BlobFile, FileRef, RunFiles, StageFile, StageFiles, under};
 
-use crate::spec::names::{EdgeName, ModelRef, RunId, StageName};
+use crate::spec::names::{EdgeName, ModelRef, RunId, StageName, WorkerName};
 use context::ToolCallState;
 use journal::ArtifactState;
 
@@ -525,8 +525,9 @@ pub struct FanOutState {
     pub max_workers: Option<u32>,
     /// Items not yet started.
     pub queued: Vec<WorkItemState>,
-    /// Items running, with the run working on each.
-    pub active: Vec<(String, RunId)>,
+    /// Items running: each item's id, the declared worker that took it, and
+    /// the run working on it.
+    pub active: Vec<(String, WorkerName, RunId)>,
     /// Items done, with each worker's summary.
     pub done: Vec<(String, String)>,
     /// Items that failed, with why.
@@ -545,6 +546,8 @@ pub struct FanOutState {
 pub struct WorkItemState {
     /// The item's id.
     pub id: String,
+    /// The fan-out's declared worker that takes it.
+    pub worker: WorkerName,
     /// The worker's inputs.
     pub inputs: crate::spec::inputs::InputValues,
 }

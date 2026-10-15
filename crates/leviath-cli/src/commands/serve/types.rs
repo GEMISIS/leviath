@@ -351,14 +351,18 @@ pub(super) struct RegionInfo {
 pub(super) struct FanOutInfo {
     /// The stage's name.
     pub(super) stage: String,
-    /// A separate installed blueprint the workers run as, when that is how the
-    /// stage picks its worker.
+    /// Every worker the stage may hand items to.
+    pub(super) workers_available: Vec<FanOutWorkerInfo>,
+    /// A separate installed blueprint the workers run as, when the stage has
+    /// one worker and that is what it runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) worker_agent: Option<String>,
-    /// A stage of this blueprint the workers run as, when that is how.
+    /// A stage of this blueprint the workers run as, when the stage has one
+    /// worker and that is what it runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) worker_stage: Option<String>,
-    /// A discovery query matched against installed agents, when that is how.
+    /// A discovery query matched against installed agents, when the stage has
+    /// one worker and that is how it is found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) worker_query: Option<String>,
     /// The stage that reconciles the workers' results, when there is one.
@@ -376,6 +380,26 @@ pub(super) struct FanOutInfo {
     /// stage names one; `null` means the conversation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) results_region: Option<String>,
+}
+
+/// One worker a fan-out stage declares, as the API reports it: exactly one
+/// of `stage`, `blueprint` and `query` is present.
+#[derive(Debug, Serialize)]
+pub(super) struct FanOutWorkerInfo {
+    /// What the model names it by when it hands it an item.
+    pub(super) name: String,
+    /// The stage of this blueprint it runs, when that is what it runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) stage: Option<String>,
+    /// The installed blueprint, or a blueprint's directory, it runs, when
+    /// that is what it runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) blueprint: Option<String>,
+    /// The description an installed blueprint is found by, when that is how.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) query: Option<String>,
+    /// When to pick it, as the model reads it.
+    pub(super) use_for: String,
 }
 
 /// Query for `GET /api/blueprints`.

@@ -728,13 +728,21 @@
           "description": "The prompt that asks the model to split the work.",
           "type": "string"
         },
-        "worker": {
-          "$ref": "#/$defs/WorkerSource",
-          "description": "What each worker runs."
+        "stage": {
+          "description": "The stage this fan-out belongs to. In a blueprint it is the stage the\nfan-out sits under, named again so the declaration says on its own\nwhich stage hands the work out.",
+          "type": "string"
+        },
+        "workers_available": {
+          "description": "The workers this fan-out may hand items to, at least one. With more\nthan one, the model names the worker for each item, and a name not on\nthis list is refused before anything starts.",
+          "items": {
+            "$ref": "#/$defs/WorkerOption"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "worker"
+        "stage",
+        "workers_available"
       ],
       "type": "object"
     },
@@ -3754,64 +3762,48 @@
         }
       ]
     },
-    "WorkerSource": {
-      "description": "What a fan-out worker runs.",
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "description": "An installed blueprint.",
-          "properties": {
-            "blueprint": {
-              "$ref": "#/$defs/BlueprintRef"
-            }
-          },
-          "required": [
-            "blueprint"
-          ],
-          "type": "object"
+    "WorkerOption": {
+      "additionalProperties": false,
+      "description": "One worker a fan-out may hand items to: what the model calls it, what it\nruns, and when to pick it.",
+      "properties": {
+        "blueprint": {
+          "default": null,
+          "description": "A blueprint: an installed one's name (`name` or `name@digest`), or the\nabsolute directory of one.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        {
-          "additionalProperties": false,
-          "description": "A stage of this same graph.",
-          "properties": {
-            "stage": {
-              "description": "A stage name.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "stage"
-          ],
-          "type": "object"
+        "name": {
+          "description": "What the model writes to hand this worker an item.",
+          "type": "string"
         },
-        {
-          "additionalProperties": false,
-          "description": "An installed blueprint picked at run time by a query the model answers.",
-          "properties": {
-            "query": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "query"
-          ],
-          "type": "object"
+        "query": {
+          "default": null,
+          "description": "A description an installed blueprint is found by when the worker\nstarts.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        {
-          "additionalProperties": false,
-          "description": "A blueprint that is not installed, read from its directory on this\nmachine. A request from a remote caller may not name one; see\n[`SpawnRequest::check_remote`](crate::spec::request::SpawnRequest::check_remote).",
-          "properties": {
-            "blueprint_file": {
-              "description": "A blueprint path.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "blueprint_file"
-          ],
-          "type": "object"
+        "stage": {
+          "default": null,
+          "description": "A stage of this same graph, one that sets `allow_as_worker`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "use_for": {
+          "description": "When to pick this worker, written for the model.",
+          "type": "string"
         }
-      ]
+      },
+      "required": [
+        "name",
+        "use_for"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

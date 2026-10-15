@@ -52,8 +52,8 @@ fn coder(dir: &Path) -> PathBuf {
 }
 
 /// A blueprint in `dir` whose `parallel` stage fans out to `worker`, a
-/// `WorkerSource` as TOML: `{ blueprint_file = "/path" }`,
-/// `{ blueprint = { name = "x" } }`, `{ query = "x" }` or `{ stage = "w" }`.
+/// What its one worker runs, as TOML keys: `blueprint = '/path'`,
+/// `blueprint = "x"`, `query = "x"` or `stage = "w"`.
 fn fanning_out(dir: &Path, worker: &str) -> PathBuf {
     let model = "model = { models = [{ provider = \"fake\", model = \"m\" }] }";
     manifest_in(
@@ -64,7 +64,7 @@ fn fanning_out(dir: &Path, worker: &str) -> PathBuf {
              inputs = [{{ name = \"task\", type = \"text\", binds = [{{ region = \"task\" }}] }}]\n\
              edges = [{{ name = \"parallel\", from = \"main\", to = \"parallel\" }}]\n\n\
              [[graph.stages]]\nname = \"main\"\n{model}\n\n\
-             [[graph.stages]]\nname = \"parallel\"\n{model}\nmode = {{ fan_out = {{ worker = {worker}, split_prompt = \"go\" }} }}\n\n\
+             [[graph.stages]]\nname = \"parallel\"\n{model}\nmode = {{ fan_out = {{ stage = \"parallel\", workers_available = [{{ name = \"w\", {worker}, use_for = \"go\" }}], split_prompt = \"go\" }} }}\n\n\
              [[graph.stages]]\nname = \"w\"\nallow_as_worker = true\n{model}\n"
         ),
     )
@@ -178,14 +178,14 @@ async fn a_fan_outs_worker_servers_are_found_by_path_or_query() {
             .map(|s| s.name)
             .collect::<Vec<_>>()
     };
-    let by_path = format!("{{ blueprint_file = '{}' }}", worker.display());
+    let by_path = format!("blueprint = '{}'", worker.display());
     assert_eq!(names(&by_path), ["search"]);
-    assert_eq!(names("{ blueprint = { name = \"mcpagent\" } }"), ["search"]);
-    assert_eq!(names("{ query = \"mcpagent\" }"), ["search"]);
-    assert!(names("{ query = \"nothing-matches\" }").is_empty());
-    assert!(names("{ stage = \"w\" }").is_empty());
+    assert_eq!(names("blueprint = \"mcpagent\""), ["search"]);
+    assert_eq!(names("query = \"mcpagent\""), ["search"]);
+    assert!(names("query = \"nothing-matches\"").is_empty());
+    assert!(names("stage = \"w\"").is_empty());
     let missing = format!(
-        "{{ blueprint_file = '{}' }}",
+        "blueprint = '{}'",
         agents.path().join("no-such-worker").display()
     );
     assert!(names(&missing).is_empty());
@@ -201,7 +201,7 @@ async fn warming_connects_the_runs_servers_and_its_workers() {
     let parent = tempfile::tempdir().unwrap();
     let manifest = fanning_out(
         parent.path(),
-        &format!("{{ blueprint_file = '{}' }}", worker.path().display()),
+        &format!("blueprint = '{}'", worker.path().display()),
     );
     let runs = tempfile::tempdir().unwrap();
     let starter = starter(Config::default(), registry(), runs.path());

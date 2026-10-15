@@ -1,16 +1,17 @@
 //! The spec frame of a run file in binary layout 2, which alpha builds wrote.
 //!
-//! Layout 2 and this build's layout differ in one type: a stage's plan. In
-//! layout 2 it named its provider, model, window, reply cap and fallbacks one
-//! after another; this build keeps the model as one [`ChosenModel`] and the
-//! cap as the stage's `reply_cap`. Every other frame (code, states, deltas,
-//! owners) and every other field of the spec has the same binary shape in
-//! both, so only the spec is read here, into the two types below, which use
-//! the runtime's own types for everything that did not change.
+//! Layout 2 and layout 3 differ in one type: a stage's plan. In layout 2 it
+//! named its provider, model, window, reply cap and fallbacks one after
+//! another; layout 3 keeps the model as one [`ChosenModel`] and the cap as the
+//! stage's `reply_cap`. Every other frame (code, states, deltas, owners) and
+//! every other field of the spec has the same binary shape in both, so only
+//! the spec is read here, into the two types below. Its graph is read as
+//! layout 3 has it (see [`crate::layout3`]), and everything else is the
+//! runtime's own type.
 
 use std::collections::BTreeMap;
 
-use leviath_runtime::spec::graph::{CodeRef, OutputDef, RunGraph};
+use leviath_runtime::spec::graph::{CodeRef, OutputDef};
 use leviath_runtime::spec::inputs::InputValues;
 use leviath_runtime::spec::launch::{DeliveryPlan, LaunchPolicy, Placement};
 use leviath_runtime::spec::names::{
@@ -68,7 +69,7 @@ impl From<StagePlan> for run_spec::StagePlan {
 pub(crate) struct RunSpec {
     run_id: RunId,
     origin: SpecOrigin,
-    graph: RunGraph,
+    graph: crate::layout3::RunGraph,
     inputs: InputValues,
     stages: Vec<StagePlan>,
     seeded: BTreeMap<RegionName, SeededContent>,
@@ -89,7 +90,7 @@ impl From<RunSpec> for run_spec::RunSpec {
         Self {
             run_id: spec.run_id,
             origin: spec.origin,
-            graph: spec.graph,
+            graph: spec.graph.into(),
             inputs: spec.inputs,
             stages: spec.stages.into_iter().map(Into::into).collect(),
             seeded: spec.seeded,

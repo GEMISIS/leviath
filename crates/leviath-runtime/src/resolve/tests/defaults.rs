@@ -400,8 +400,8 @@ async fn a_seed_sees_the_run_it_seeds() {
 /// tool is left as written.
 #[tokio::test]
 async fn a_stages_mode_grants_the_tool_it_works_through() {
-    use crate::spec::graph::{FanOutDef, StageMode, ToolSelector};
-    use crate::spec::names::{StageName, ToolName};
+    use crate::spec::graph::{StageMode, ToolSelector};
+    use crate::spec::names::ToolName;
     let tool = |name: &str| ToolSelector::Tool(ToolName::new(name).unwrap());
     let names = |tools: &[ToolSelector]| -> Vec<String> {
         tools
@@ -436,7 +436,7 @@ async fn a_stages_mode_grants_the_tool_it_works_through() {
 
     let mut g = graph();
     g.stages[1].allow_as_worker = true;
-    g.stages[0].mode = StageMode::FanOut(FanOutDef::same_graph(StageName::new("build").unwrap()));
+    g.stages[0].mode = StageMode::FanOut(crate::test_graph::fan_out_to("plan", "build"));
     let spec = spawn(&raw(g), &Fake::default()).await.unwrap().spec;
     assert_eq!(names(&spec.graph.stages[0].tools), ["fan_out"]);
     assert!(

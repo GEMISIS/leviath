@@ -75,7 +75,8 @@ name = "build"
 description = "split the work"
 
 [graph.stages.mode.fan_out]
-worker = { stage = "worker" }
+stage = "build"
+workers_available = [{ name = "worker", stage = "worker", use_for = "Doing one file" }]
 merge_stage = "merge"
 max_workers = 4
 on_worker_failure = "fail_all"
@@ -636,7 +637,7 @@ layout = { total_budget_tokens = 1000, regions = [] }
 
 [[graph.stages]]
 name = "build"
-mode = { fan_out = { worker = { blueprint = { name = "helper" } }, split_prompt = "one item per file" } }
+mode = { fan_out = { stage = "build", workers_available = [{ name = "helper", blueprint = "helper", use_for = "Doing one file" }], split_prompt = "one item per file" } }
 "#;
     let schema = Schema::build(
         StageProbe {
@@ -676,7 +677,8 @@ async fn a_fan_out_names_a_worker_directory_or_a_query() {
         format!(
             "[blueprint]\nname = \"spread\"\nversion = \"1.0.0\"\n\n[graph]\n\
              layout = {{ total_budget_tokens = 1000, regions = [] }}\n\
-             stages = [{{ name = \"build\", mode = {{ fan_out = {{ worker = {worker} }} }} }}]\n"
+             stages = [{{ name = \"build\", mode = {{ fan_out = {{ stage = \"build\", \
+             workers_available = [{worker}] }} }} }}]\n"
         )
     };
     let query =
@@ -686,15 +688,43 @@ async fn a_fan_out_names_a_worker_directory_or_a_query() {
     // TOML literal string so a Windows path's `\` stays a `\`.
     let helper = std::env::temp_dir().join("agents").join("helper");
     let helper = helper.to_string_lossy();
-    let worker = format!("{{ blueprint_file = '{helper}' }}");
+    let worker = format!("{{ name = \"helper\", blueprint = '{helper}', use_for = \"x\" }}");
     let from_dir = ask_about(&fanned(&worker), query).await;
     let fan = &from_dir["stage"]["fanOut"];
     assert_eq!(fan["workerAgent"], helper.as_ref());
     assert!(fan["workerQuery"].is_null());
 
-    let by_query = ask_about(&fanned(r#"{ query = "a code reviewer" }"#), query).await;
+    let by_query = ask_about(
+        &fanned(r#"{ name = "reviewer", query = "a code reviewer", use_for = "x" }"#),
+        query,
+    )
+    .await;
     let fan = &by_query["stage"]["fanOut"];
     assert_eq!(fan["workerQuery"], "a code reviewer");
     assert!(fan["workerAgent"].is_null());
     assert!(fan["workerStageName"].is_null());
+
+    // A fan-out with several workers lists them all, and names no single one.
+    let several = fanned(
+        r#"{ name = "reviewer", query = "a code reviewer", use_for = "Reviewing" },
+           { name = "part", stage = "build", use_for = "Doing one part" }"#,
+    );
+    let answer = ask_about(
+        &several,
+        r#"{ stage(name: "build") { fanOut { workerAgent workerStageName workerQuery
+             workersAvailable { name stageName blueprint query useFor } } } }"#,
+    )
+    .await;
+    let fan = &answer["stage"]["fanOut"];
+    assert!(fan["workerQuery"].is_null());
+    assert!(fan["workerStageName"].is_null());
+    assert_eq!(
+        fan["workersAvailable"],
+        serde_json::json!([
+            {"name": "reviewer", "stageName": null, "blueprint": null,
+             "query": "a code reviewer", "useFor": "Reviewing"},
+            {"name": "part", "stageName": "build", "blueprint": null,
+             "query": null, "useFor": "Doing one part"},
+        ])
+    );
 }

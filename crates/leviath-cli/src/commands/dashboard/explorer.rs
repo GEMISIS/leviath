@@ -381,7 +381,8 @@ name = "implement"
 tools = ["fan_out"]
 
 [graph.stages.mode.fan_out]
-worker = { blueprint = { name = "researcher" } }
+stage = "implement"
+workers_available = [{ name = "researcher", blueprint = "researcher", use_for = "Researching one part" }]
 max_workers = 30
 
 [[graph.stages]]

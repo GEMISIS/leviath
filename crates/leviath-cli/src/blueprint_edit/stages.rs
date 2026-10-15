@@ -1,13 +1,14 @@
 //! Mutators for `[blueprint]`, the graph's entry, and the stages.
 
 use leviath_runtime::spec::graph::stage::looks_like_a_path;
+use leviath_runtime::spec::graph::{EVERY_ITEM, worker_name_from};
 use toml_edit::{Array, InlineTable, Item, TableLike, Value};
 
 use super::doc::{ManifestDoc, StageModeView, WorkerKind, fan_out_table};
 use super::order::{self, Spot};
 use super::tables::{
-    get_str, inline_item, insert_table, list_tables_mut, remove_table, retain_tables, set_bool,
-    set_or_remove_int, set_or_remove_str, set_str, set_strings, set_value, sub_mut,
+    get_str, inline_item, insert_table, list_tables, list_tables_mut, remove_table, retain_tables,
+    set_bool, set_or_remove_int, set_or_remove_str, set_str, set_strings, set_value, sub_mut,
 };
 use super::{EditError, require_name};
 
@@ -35,7 +36,9 @@ impl StageText {
 /// One setting of a fan-out stage. `None` deletes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FanOutField {
-    /// What the workers run, and its value: replaces the whole `worker`.
+    /// What the first of `workers_available` runs, and its value: replaces
+    /// that worker's target and keeps its name and `use_for`. `None` removes
+    /// that worker.
     Worker(Option<(WorkerKind, String)>),
     /// `merge_stage`.
     MergeStage(Option<String>),
@@ -159,13 +162,18 @@ impl ManifestDoc {
             let Some(fan_out) = sub_mut(stage, "mode").and_then(|m| sub_mut(m, "fan_out")) else {
                 continue;
             };
-            if get_str(&*fan_out, "merge_stage") == Some(from) {
-                set_str(fan_out, "merge_stage", to);
+            for key in ["merge_stage", "stage"] {
+                if get_str(&*fan_out, key) == Some(from) {
+                    set_str(fan_out, key, to);
+                }
             }
-            if let Some(worker) = sub_mut(fan_out, "worker")
-                && get_str(&*worker, "stage") == Some(from)
-            {
-                set_str(worker, "stage", to);
+            let Some(workers) = fan_out.get_mut("workers_available") else {
+                continue;
+            };
+            for worker in list_tables_mut(workers) {
+                if get_str(&*worker, "stage") == Some(from) {
+                    set_str(worker, "stage", to);
+                }
             }
         }
         self.each_binding(&mut |bind| {
@@ -202,9 +210,9 @@ impl ManifestDoc {
     }
 
     /// Set a stage's `mode`. A fan-out needs a worker to read at all, so it
-    /// starts with the first other stage as its worker (itself when it is
-    /// the only one); interaction points start as `{ interactive_points = []
-    /// }`. Picking the mode a stage already has keeps its settings, and
+    /// starts as a fan-out of this stage with one worker, the first other
+    /// stage (itself when it is the only one); interaction points start as
+    /// `{ interactive_points = [] }`. Picking the mode a stage already has keeps its settings, and
     /// picking another drops them.
     pub(crate) fn set_stage_mode(
         &mut self,
@@ -224,10 +232,10 @@ impl ManifestDoc {
         let value = match mode {
             StageModeView::FanOut => {
                 let mut fan_out = InlineTable::new();
-                fan_out.insert(
-                    "worker",
-                    Value::InlineTable(worker_table(WorkerKind::Stage, &worker)),
-                );
+                fan_out.insert("stage", Value::from(name));
+                let mut workers = Array::new();
+                workers.push(Value::InlineTable(worker_entry(WorkerKind::Stage, &worker)));
+                fan_out.insert("workers_available", Value::Array(workers));
                 let mut t = InlineTable::new();
                 t.insert("fan_out", Value::InlineTable(fan_out));
                 Value::InlineTable(t)
@@ -357,14 +365,31 @@ impl ManifestDoc {
             .expect("checked just above");
         match field {
             FanOutField::Worker(None) => {
-                fan_out.remove("worker");
+                let empty = fan_out.get_mut("workers_available").is_some_and(|workers| {
+                    remove_table(workers, 0);
+                    list_tables(workers).is_empty()
+                });
+                if empty {
+                    fan_out.remove("workers_available");
+                }
             }
             FanOutField::Worker(Some((kind, value))) => {
-                set_value(
-                    fan_out,
-                    "worker",
-                    Value::InlineTable(worker_table(kind, &value)),
-                );
+                let first = fan_out
+                    .get_mut("workers_available")
+                    .and_then(|workers| list_tables_mut(workers).into_iter().next());
+                match first {
+                    Some(worker) => {
+                        for other in [WorkerKind::Stage, WorkerKind::Agent, WorkerKind::Query] {
+                            worker.remove(other.key());
+                        }
+                        set_str(worker, kind.key(), &value);
+                    }
+                    None => {
+                        let mut workers = Array::new();
+                        workers.push(Value::InlineTable(worker_entry(kind, &value)));
+                        set_value(fan_out, "workers_available", Value::Array(workers));
+                    }
+                }
             }
             FanOutField::MergeStage(v) => {
                 set_or_remove_str(fan_out, "merge_stage", v.as_deref().unwrap_or(""))
@@ -408,32 +433,24 @@ impl ManifestDoc {
     }
 }
 
-/// A `worker` table for what the editor's worker field holds: a stage, a
-/// query, or a blueprint by name (`name` or `name@digest`) or, when the text
-/// is a path, by directory.
-fn worker_table(kind: WorkerKind, value: &str) -> InlineTable {
+/// A `workers_available` entry for what the editor's worker field holds: a
+/// stage, a query, or a blueprint (`name`, `name@digest` or a directory),
+/// named after it and taking every item.
+fn worker_entry(kind: WorkerKind, value: &str) -> InlineTable {
+    let named = match kind {
+        WorkerKind::Stage => value,
+        WorkerKind::Agent if looks_like_a_path(value) => value
+            .trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default(),
+        WorkerKind::Agent => value.split('@').next().unwrap_or_default(),
+        WorkerKind::Query => "",
+    };
     let mut worker = InlineTable::new();
-    match kind {
-        WorkerKind::Stage | WorkerKind::Query => {
-            worker.insert(kind.key(), Value::from(value));
-        }
-        WorkerKind::Agent if looks_like_a_path(value) => {
-            worker.insert("blueprint_file", Value::from(value));
-        }
-        WorkerKind::Agent => {
-            let mut blueprint = InlineTable::new();
-            match value.rsplit_once('@') {
-                Some((name, digest)) => {
-                    blueprint.insert("name", Value::from(name));
-                    blueprint.insert("digest", Value::from(digest));
-                }
-                None => {
-                    blueprint.insert("name", Value::from(value));
-                }
-            }
-            worker.insert(kind.key(), Value::InlineTable(blueprint));
-        }
-    }
+    worker.insert("name", Value::from(worker_name_from(named).as_str()));
+    worker.insert(kind.key(), Value::from(value));
+    worker.insert("use_for", Value::from(EVERY_ITEM));
     worker
 }
 

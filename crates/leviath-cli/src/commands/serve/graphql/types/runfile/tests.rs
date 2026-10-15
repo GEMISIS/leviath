@@ -535,8 +535,14 @@ fn pending() -> PendingBatch {
 }
 
 fn fan_out(worker: WorkerSource, failure: WorkerFailure) -> FanOutState {
-    let mut config = FanOutDef::same_graph(stage("analyze"));
-    config.worker = worker;
+    let mut config = FanOutDef::with_worker(
+        stage("analyze"),
+        leviath_runtime::spec::graph::WorkerOption::named_after(
+            worker,
+            leviath_runtime::spec::graph::EVERY_ITEM,
+        ),
+    );
+    let name = config.workers_available[0].name.clone();
     config.on_worker_failure = failure;
     config.merge_stage = Some(stage("review"));
     FanOutState {
@@ -545,9 +551,10 @@ fn fan_out(worker: WorkerSource, failure: WorkerFailure) -> FanOutState {
         max_workers: Some(4),
         queued: vec![WorkItemState {
             id: "item-1".into(),
+            worker: name.clone(),
             inputs: input_values(),
         }],
-        active: vec![("item-2".into(), named!(RunId, "worker-2"))],
+        active: vec![("item-2".into(), name, named!(RunId, "worker-2"))],
         done: vec![("item-3".into(), "summary".into())],
         failed: vec![("item-4".into(), "it broke".into())],
         paused: true,
@@ -1186,8 +1193,12 @@ async fn every_field_of_every_converted_type_resolves() {
     let entry = &full["context"]["regions"][0]["entries"][2];
     assert_eq!(entry["kind"], "ASSISTANT_TURN");
     assert_eq!(entry["toolCalls"][0]["arguments"]["path"], "a.rs");
-    assert_eq!(full["fanOut"]["workerKind"], "BLUEPRINT");
+    assert_eq!(full["fanOut"]["workers"][0]["kind"], "BLUEPRINT");
+    let worker = full["fanOut"]["workers"][0]["name"].clone();
+    assert_eq!(full["fanOut"]["queued"][0]["worker"], worker);
+    assert_eq!(full["fanOut"]["active"][0]["worker"], worker);
     assert_eq!(full["fanOut"]["active"][0]["detail"], "worker-2");
+    assert!(full["fanOut"]["done"][0]["worker"].is_null());
     assert_eq!(full["answer"]["bytes"], 4);
     assert_eq!(full["files"]["finalOutput"]["path"], "final_output");
     assert_eq!(

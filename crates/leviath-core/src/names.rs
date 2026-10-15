@@ -344,6 +344,11 @@ name_type!(
     ChoiceName, "choice option", ident
 );
 name_type!(
+    /// One of the workers a fan-out stage declares, as the model names it
+    /// when it hands that worker an item.
+    WorkerName, "worker name", ident
+);
+name_type!(
     /// A configured provider.
     ProviderName, "provider name", opaque
 );
@@ -714,6 +719,7 @@ mod tests {
             schema_of::<ToolName>(),
             schema_of::<InputName>(),
             schema_of::<ChoiceName>(),
+            schema_of::<WorkerName>(),
             schema_of::<ProviderName>(),
             schema_of::<ModelId>(),
             schema_of::<ProfileName>(),
