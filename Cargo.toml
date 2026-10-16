@@ -238,7 +238,7 @@ tar = "0.4"
 # and a zip opens with a double-click on every desktop and attaches to an
 # issue as it is. Deflate only, through the zlib-rs backend flate2 already
 # pulls in, so this adds one crate and no encryption or exotic codecs.
-zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 dirs = "7.0"
 dotenvy = "0.15"
 # "socket" is for the control socket's peer-credential check (SO_PEERCRED on
