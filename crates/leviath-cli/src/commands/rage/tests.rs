@@ -415,7 +415,7 @@ fn unzip(path: &Path) -> Vec<(String, Vec<u8>)> {
             let mut entry = zip.by_index(i).expect("an entry");
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes).expect("readable");
-            (entry.name().to_string(), bytes)
+            (entry.name().expect("a utf-8 name").into_owned(), bytes)
         })
         .collect()
 }
