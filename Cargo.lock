@@ -614,10 +614,10 @@ checksum = "a350b2e4c2e47f7903d688affb8a723b31bca63af9789f1da88703f1ba04e354"
 dependencies = [
  "arrayvec",
  "bevy_ecs_macros",
- "bevy_platform",
+ "bevy_platform 0.19.1",
  "bevy_ptr",
  "bevy_reflect",
- "bevy_tasks",
+ "bevy_tasks 0.19.1",
  "bevy_utils",
  "bitflags 2.13.1",
  "bumpalo",
@@ -693,6 +693,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_platform"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "000bc467d1b344b6609fcf217a9b08d349d49c8e85dc4179fb7656f2b6e3db47"
+dependencies = [
+ "critical-section",
+ "foldhash",
+ "futures-channel",
+ "futures-lite",
+ "hashbrown 0.16.1",
+ "js-sys",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde",
+ "spin 0.12.3",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "bevy_ptr"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -705,7 +726,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b76c3d056da3e299b84652ccf914c487b786857225d8ffbc8fc9509441a9e6b"
 dependencies = [
  "assert_type_match",
- "bevy_platform",
+ "bevy_platform 0.19.1",
  "bevy_ptr",
  "bevy_reflect_derive",
  "bevy_utils",
@@ -749,8 +770,25 @@ dependencies = [
  "async-executor",
  "async-task",
  "atomic-waker",
- "bevy_platform",
+ "bevy_platform 0.19.1",
  "concurrent-queue",
+ "crossbeam-queue",
+ "derive_more",
+ "futures-lite",
+ "heapless",
+ "web-task",
+]
+
+[[package]]
+name = "bevy_tasks"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbd8116f12dc50bde3758a72fba85e1f4c00e6c66d0ad58bdc46c0c0690829a8"
+dependencies = [
+ "async-executor",
+ "async-task",
+ "atomic-waker",
+ "bevy_platform 0.20.0",
  "crossbeam-queue",
  "derive_more",
  "futures-lite",
@@ -764,7 +802,7 @@ version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de51fa7ea2e95d4c2d1278c5629285d59eec951cc60c992964c03f30910ef5a1"
 dependencies = [
- "bevy_platform",
+ "bevy_platform 0.19.1",
  "disqualified",
  "indexmap",
  "thread_local",
@@ -2932,7 +2970,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bevy_ecs",
- "bevy_tasks",
+ "bevy_tasks 0.20.0",
  "chrono",
  "crc32fast",
  "futures-core",
@@ -4862,6 +4900,15 @@ name = "spin"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
+dependencies = [
+ "portable-atomic",
+]
+
+[[package]]
+name = "spin"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0134f9043ed38b087ac4f7d4af44c79e2c9e5094421fe3164f435ce585953b10"
 dependencies = [
  "portable-atomic",
 ]
