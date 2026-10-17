@@ -120,7 +120,7 @@ leviath-telemetry = { path = "crates/leviath-telemetry", version = "0.6.4" }
 leviath-testkit = { path = "crates/leviath-testkit" }
 
 # External dependencies
-bevy_ecs = { version = "0.19", features = ["multi_threaded"] }
+bevy_ecs = { version = "0.20", features = ["multi_threaded"] }
 bevy_tasks = "0.19"
 tokio = { version = "1.53", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
