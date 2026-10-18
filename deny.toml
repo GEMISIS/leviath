@@ -47,6 +47,18 @@ ignore = [
     # archived repo, and that is the part that would actually matter to us.
     # Revisit when rhai ships a release without smartstring.
     { id = "RUSTSEC-2026-0249", reason = "unmaintained; transitive via rhai, no upgrade path, tracked in rhaiscript/rhai#816" },
+    # zvariant, zbus_names and zvariant_derive are flagged unmaintained because
+    # zbus 6.0.0 folded them in as its `wire` and `names` modules
+    # (z-galaxy/zbus#2043). The code is the same, so this is a packaging move,
+    # not a vulnerability.
+    #
+    # Accepted 2026-10-18. They reach us only on Linux, through keyring 4 ->
+    # zbus-secret-service-keyring-store -> secret-service -> zbus 5, and the
+    # latest secret-service (5.2.0) is still on zbus 5. Revisit when
+    # secret-service moves to zbus 6; these ignores go away with that bump.
+    { id = "RUSTSEC-2026-0370", reason = "unmaintained; zvariant merged into zbus 6, transitive via keyring/secret-service on zbus 5" },
+    { id = "RUSTSEC-2026-0371", reason = "unmaintained; zbus_names merged into zbus 6, transitive via keyring/secret-service on zbus 5" },
+    { id = "RUSTSEC-2026-0372", reason = "unmaintained; zvariant_derive merged into zbus 6, transitive via keyring/secret-service on zbus 5" },
 ]
 
 [licenses]
