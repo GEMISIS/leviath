@@ -18,6 +18,12 @@ pub(crate) fn configure_detached(cmd: &mut Command) {
     cmd.process_group(0);
 }
 
+/// A new process group is all detaching takes here, and nothing can refuse it.
+pub(crate) fn spawn_detached(cmd: &mut Command) -> io::Result<std::process::Child> {
+    configure_detached(cmd);
+    cmd.spawn()
+}
+
 /// Nothing to hide: a Unix process has no console of its own to be given, so
 /// there is no window for a child to pop. Windows is the only platform where
 /// this does anything.
@@ -291,5 +297,11 @@ mod tests {
         // callers apply it unconditionally and must not have to ask which
         // platform they are on.
         hide_console_window(&mut cmd);
+    }
+
+    #[test]
+    fn spawn_detached_starts_the_child_in_its_own_group() {
+        let mut child = spawn_detached(&mut Command::new("true")).expect("true starts");
+        assert!(child.wait().expect("waitable").success());
     }
 }

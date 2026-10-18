@@ -662,6 +662,7 @@ mod tests {
     fn state_at(opener: impl Fn(&str) -> bool + Send + Sync + 'static) -> AppState {
         let (tx, _) = broadcast::channel(16);
         AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),
@@ -1237,6 +1238,7 @@ for line in sys.stdin:
         std::fs::create_dir(&store).unwrap();
         let (tx, _) = broadcast::channel(16);
         AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),
@@ -1314,6 +1316,7 @@ for line in sys.stdin:
         std::fs::write(&file, b"x").unwrap();
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),

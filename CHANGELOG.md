@@ -21,6 +21,16 @@ same list.
   running, so a crates.io `lev` and a git-built one no longer restart the
   daemon back and forth. To have a rebuild restart the daemon as before, run
   `lev daemon restart` or pass `--daemon replace`.
+- `lev serve` stops cleanly on Ctrl-C and SIGTERM, and on Ctrl-Break or a
+  console close on Windows. It stops accepting, closes every `/ws`,
+  `/ws/agents/{id}` and `/ws/graphql` socket with 1001 (going away), gives
+  requests in flight up to `--shutdown-grace-secs` (default 10) and exits 0.
+  The daemon is left running. For the old immediate stop, send SIGKILL.
+- On Windows, a daemon that `lev serve` (or any client) starts leaves the
+  starter's job object, so a host's kill-on-close job no longer takes it
+  down. Where the job forbids that, the daemon starts inside it and the log
+  warns. To keep the daemon in the job, start it yourself inside the job
+  first.
 
 - **Breaking.** A fan-out stage declares the workers it may hand items to.
   `[graph.stages.mode.fan_out]` names its `stage` and lists
@@ -699,6 +709,14 @@ same list.
 - The daemon reports its executable path in its handshake. GraphQL
   `DaemonStatus.exe` and `DaemonIdentity.exe` carry it, null from an older
   daemon.
+- `lev serve --exit-on-stdin-eof`: the server stops, as on SIGTERM, when
+  its stdin reaches its end. A host that runs it with a piped stdin no longer
+  leaves an orphaned server behind when it crashes. Off by default; without
+  it stdin is never read.
+- `lev serve --shutdown-grace-secs <SECS>`: how long requests in flight may
+  take to finish once the server is asked to stop. Default 10.
+- `leviath_sys::spawn_detached`: `configure_detached` and spawn, retrying
+  inside the starter's job on Windows when breakaway is refused.
 - Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 on Anthropic
   (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`), Bedrock
   (`us.anthropic.claude-haiku-5-5` and the other profiles) and OpenRouter

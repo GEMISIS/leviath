@@ -171,6 +171,7 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
         ControlClient::for_home(id, dir.path()).with_build(crate::test_support::TEST_BUILD);
     let (event_tx, _) = broadcast::channel(256);
     let state = AppState {
+        shutdown: Default::default(),
         caches: Default::default(),
         signer: Default::default(),
         update_check: Default::default(),

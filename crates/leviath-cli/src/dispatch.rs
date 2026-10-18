@@ -994,6 +994,8 @@ mod tests {
     fn serve_args(print_graphql_schema: bool) -> commands::serve::ServeArgs {
         commands::serve::ServeArgs {
             daemon: Default::default(),
+            exit_on_stdin_eof: false,
+            shutdown_grace_secs: 10,
             port: 0,
             name: None,
             host: "127.0.0.1".to_string(),

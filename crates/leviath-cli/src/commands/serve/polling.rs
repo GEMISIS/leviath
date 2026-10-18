@@ -834,6 +834,7 @@ mod tests {
         let (tx, rx) = broadcast::channel(64);
         (
             AppState {
+                shutdown: Default::default(),
                 caches: Default::default(),
                 signer: Default::default(),
                 update_check: Default::default(),

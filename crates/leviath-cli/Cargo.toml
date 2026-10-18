@@ -112,7 +112,8 @@ ratatui = { workspace = true }
 unicode-width = { workspace = true }
 futures-util = { workspace = true }
 tokio-stream = { workspace = true }
-tokio-util = { workspace = true }
+# `rt` for the task tracker `lev serve` waits on its WebSockets with.
+tokio-util = { workspace = true, features = ["rt"] }
 dotenvy = { workspace = true }
 leviath-tools = { workspace = true }
 # The `#[mirror]` attribute behind every filter input in the GraphQL schema:

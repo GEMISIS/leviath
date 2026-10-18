@@ -704,6 +704,7 @@ mod tests {
     fn state() -> AppState {
         let (tx, _) = broadcast::channel(4);
         AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),

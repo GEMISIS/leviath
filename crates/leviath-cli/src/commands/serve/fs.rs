@@ -340,6 +340,7 @@ mod tests {
     fn app_with_root(workdir_root: Option<PathBuf>) -> Router {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),

@@ -131,4 +131,20 @@ pub struct ServeArgs {
     /// Whether this server may start or replace the daemon it serves.
     #[command(flatten)]
     pub daemon: crate::daemon::mode::DaemonModeArg,
+
+    /// Stop when stdin reaches its end, as it does when the process that
+    /// started this server exits with the pipe still open.
+    ///
+    /// For a host that runs `lev serve` as a child with piped stdio: if the
+    /// host crashes, the server stops instead of holding its port and token
+    /// with nobody to serve. Off by default, and without it stdin is never
+    /// read. The server stops the same way it does on Ctrl-C or SIGTERM, and
+    /// exits 0.
+    #[arg(long)]
+    pub exit_on_stdin_eof: bool,
+
+    /// Seconds requests already in flight may take to finish once the server
+    /// is asked to stop. WebSockets are closed straight away.
+    #[arg(long, value_name = "SECS", default_value = "10")]
+    pub shutdown_grace_secs: u64,
 }

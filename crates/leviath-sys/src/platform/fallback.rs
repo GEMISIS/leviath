@@ -38,6 +38,13 @@ pub(crate) fn ensure_private(_path: &Path, _mode: u32) -> io::Result<Option<u32>
 
 pub(crate) fn configure_detached(_cmd: &mut std::process::Command) {}
 
+/// Nothing to detach from on such a target, so this is a plain spawn.
+pub(crate) fn spawn_detached(
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    cmd.spawn()
+}
+
 /// No consoles to suppress on such a target; Windows is the only platform where
 /// a child process can be handed a window.
 pub(crate) fn hide_console_window(_cmd: &mut std::process::Command) {}

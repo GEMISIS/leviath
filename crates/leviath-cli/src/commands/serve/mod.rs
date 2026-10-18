@@ -38,6 +38,7 @@ mod scripts;
 mod scripts_address;
 mod scripts_mime;
 mod search;
+mod shutdown;
 mod signed_url;
 #[cfg(test)]
 mod testutil;
@@ -57,10 +58,15 @@ mod yolo;
 #[path = "event_seam_tests.rs"]
 mod event_seam_tests;
 
+#[cfg(test)]
+#[path = "shutdown_serve_tests.rs"]
+mod shutdown_serve_tests;
+
 pub use args::ServeArgs;
 pub(crate) use config::list_model_ids;
 pub(crate) use events::Stamped;
 pub(crate) use mcp::list_mcp_tools;
+pub use shutdown::StopFuture;
 pub(crate) use types::AppState;
 use types::ServeLimits;
 
@@ -111,19 +117,22 @@ pub fn parse_log_name(value: &str) -> Result<String, String> {
 /// the one part of an update with nothing to unit-test it against, so it lives
 /// in the binary's composition root and everything that decides *whether* and
 /// *what* to spawn is testable without one.
+///
+/// `stop` resolves when the operating system asks the server to stop (the
+/// composition root waits on the signals). With `--exit-on-stdin-eof`, stdin
+/// reaching its end stops it too; without it, stdin is never read.
 pub async fn execute(
     args: ServeArgs,
     control: leviath_runtime::control_socket::ControlClient,
     upgrade: crate::commands::update::CommandRunner,
+    stop: StopFuture,
 ) -> anyhow::Result<()> {
-    execute_with_shutdown(
-        args,
-        control,
-        upgrade,
-        Box::pin(std::future::pending()),
-        None,
-    )
-    .await
+    let stdin = args
+        .exit_on_stdin_eof
+        .then_some(Box::new(std::io::stdin()) as Box<dyn std::io::Read + Send>)
+        .map(shutdown::closed);
+    let shutdown = shutdown::either(stop, stdin);
+    execute_with_shutdown(args, control, upgrade, shutdown, None).await
 }
 
 /// The GraphQL schema this build serves, as SDL.
@@ -437,12 +446,12 @@ fn routes_in(source: &str) -> Vec<(String, String)> {
     routes
 }
 
-/// Core of [`execute`], with an optional shutdown signal so tests can stop
-/// the server gracefully and cover the `Ok(())` return path.
+/// Core of [`execute`]: serve until `shutdown` resolves, then stop as the
+/// `shutdown` module describes and return `Ok(())`.
 ///
 /// Takes `shutdown` as a boxed trait object (`Pin<Box<dyn Future<...>>>`)
-/// rather than `impl Future<...>` so every caller - production's
-/// `std::future::pending()` and tests' various `async move { ... }` blocks
+/// rather than `impl Future<...>` so every caller - production's signal and
+/// stdin wait and tests' various `async move { ... }` blocks
 /// awaiting a `oneshot::Receiver` - shares exactly ONE monomorphization of
 /// this (large, multi-branch) function instead of one per concrete future
 /// type. Confirmed via HTML/JSON segment inspection that every source
@@ -494,6 +503,7 @@ async fn execute_with_shutdown(
     let state = AppState {
         caches: Default::default(),
         signer: Default::default(),
+        shutdown: Default::default(),
         update_check: Default::default(),
         update_jobs: update_job::UpdateJobs::with_runner(upgrade),
         config: Arc::new(crate::daemon::config_reload::ConfigReloader::new(
@@ -656,6 +666,9 @@ async fn execute_with_shutdown(
         state.clone(),
         args.allow_admin,
     )));
+    // Kept back before the state moves into the router: the stop is begun from
+    // the signal below and waited on after the server returns.
+    let stopping = state.shutdown.clone();
 
     let app = app
         .layer(body_limit)
@@ -746,16 +759,26 @@ async fn execute_with_shutdown(
         let _ = ready.send(bound);
     }
 
-    match tls_config {
+    // When the stop is asked for, the server stops accepting and every
+    // WebSocket is told to close, at the same moment.
+    let begin = stopping.clone();
+    let signal: StopFuture = Box::pin(async move {
+        shutdown.await;
+        tracing::info!("stopping: no new connections, closing WebSockets");
+        begin.begin();
+    });
+    let grace = std::time::Duration::from_secs(args.shutdown_grace_secs);
+    let serving: StopFuture = match tls_config {
         // axum::serve with graceful shutdown always returns Ok(()) - discard the
         // infallible Result so LLVM-cov does not instrument an unreachable Err branch.
-        None => {
+        None => Box::pin(async move {
             let _ = axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown)
+                .with_graceful_shutdown(signal)
                 .await;
-        }
-        Some(config) => serve_tls(listener, app, config, shutdown).await,
-    }
+        }),
+        Some(config) => Box::pin(serve_tls(listener, app, config, signal, grace)),
+    };
+    shutdown::drain(serving, stopping, grace).await;
 
     Ok(())
 }
@@ -843,16 +866,16 @@ async fn serve_tls(
     listener: tokio::net::TcpListener,
     app: Router,
     config: axum_server::tls_rustls::RustlsConfig,
-    shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    shutdown: StopFuture,
+    grace: std::time::Duration,
 ) {
     let handle = axum_server::Handle::new();
     let signal = handle.clone();
     tokio::spawn(async move {
         shutdown.await;
         // Some(..) rather than None: a connection that never closes would
-        // otherwise hold the process open for ever, and a WebSocket subscriber
-        // is exactly such a connection.
-        signal.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+        // otherwise hold the process open for ever.
+        signal.graceful_shutdown(Some(grace));
     });
     // Handed over still non-blocking, which is how tokio left it. Setting it
     // back to blocking looks tidier and *panics*: `from_tcp` re-registers the
@@ -1715,6 +1738,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),
@@ -2569,6 +2593,8 @@ mod tests {
                 // of execute()'s bootstrap logic.
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -2650,6 +2676,8 @@ mod tests {
 
             let args = ServeArgs {
                 daemon: Default::default(),
+                exit_on_stdin_eof: false,
+                shutdown_grace_secs: 10,
                 port: 0,
                 name: None,
                 host: "127.0.0.1".to_string(),
@@ -2733,6 +2761,8 @@ mod tests {
 
                 let base = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -2810,6 +2840,8 @@ mod tests {
 
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -2865,6 +2897,8 @@ mod tests {
                 with_tracing(|| {});
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -2961,6 +2995,8 @@ mod tests {
                 with_tracing(|| {});
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     name: None,
                     port: 0,
                     host: "127.0.0.1".to_string(),
@@ -3039,6 +3075,8 @@ mod tests {
             |_fake_dir| async move {
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3108,6 +3146,8 @@ mod tests {
             // fail, exercising execute()'s `?` on the SocketAddr parse.
             let args = ServeArgs {
                 daemon: Default::default(),
+                exit_on_stdin_eof: false,
+                shutdown_grace_secs: 10,
                 port: 0,
                 name: None,
                 host: "not a valid host".to_string(),
@@ -3123,7 +3163,13 @@ mod tests {
                 max_concurrent_requests: None,
                 request_timeout_secs: None,
             };
-            let result = execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
+            let result = execute(
+                args,
+                no_daemon_control(),
+                Arc::new(no_upgrade_in_tests),
+                Box::pin(std::future::pending()),
+            )
+            .await;
             assert!(result.is_err());
         })
         .await;
@@ -3152,6 +3198,8 @@ mod tests {
 
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3167,8 +3215,13 @@ mod tests {
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
                 };
-                let result =
-                    execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
+                let result = execute(
+                    args,
+                    no_daemon_control(),
+                    Arc::new(no_upgrade_in_tests),
+                    Box::pin(std::future::pending()),
+                )
+                .await;
                 assert_execute_failed_on_malformed_config(&result);
             },
         )
@@ -3191,6 +3244,8 @@ mod tests {
 
         let args = ServeArgs {
             daemon: Default::default(),
+            exit_on_stdin_eof: false,
+            shutdown_grace_secs: 10,
             port: 0,
             name: None,
             host: "127.0.0.1".to_string(),
@@ -3251,6 +3306,8 @@ mod tests {
             |_fake_dir| async move {
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 8080,
                     name: None,
                     host: "192.0.2.1".to_string(),
@@ -3266,8 +3323,13 @@ mod tests {
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
                 };
-                let result =
-                    execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
+                let result = execute(
+                    args,
+                    no_daemon_control(),
+                    Arc::new(no_upgrade_in_tests),
+                    Box::pin(std::future::pending()),
+                )
+                .await;
                 assert_execute_failed_on_port_in_use(&result);
                 // Names the address it could not have, rather than leaving the
                 // reader with a bare errno.
@@ -3295,6 +3357,8 @@ mod tests {
             |_fake_dir| async move {
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3310,8 +3374,13 @@ mod tests {
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
                 };
-                let result =
-                    execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
+                let result = execute(
+                    args,
+                    no_daemon_control(),
+                    Arc::new(no_upgrade_in_tests),
+                    Box::pin(std::future::pending()),
+                )
+                .await;
                 assert_execute_failed_on_port_in_use(&result);
                 assert_error_says(
                     &result,
@@ -3330,6 +3399,8 @@ mod tests {
         temp_env::async_with_vars([("LEVIATH_API_TOKEN", None::<&str>)], async {
             let args = ServeArgs {
                 daemon: Default::default(),
+                exit_on_stdin_eof: false,
+                shutdown_grace_secs: 10,
                 port: 0,
                 name: None,
                 host: "127.0.0.1".to_string(),
@@ -3345,7 +3416,13 @@ mod tests {
                 max_concurrent_requests: None,
                 request_timeout_secs: None,
             };
-            let result = execute(args, no_daemon_control(), Arc::new(no_upgrade_in_tests)).await;
+            let result = execute(
+                args,
+                no_daemon_control(),
+                Arc::new(no_upgrade_in_tests),
+                Box::pin(std::future::pending()),
+            )
+            .await;
             assert!(result.is_err(), "must refuse to start unauthenticated");
         })
         .await;
@@ -3360,6 +3437,8 @@ mod tests {
             |_fake_dir| async move {
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3416,6 +3495,8 @@ mod tests {
             |_fake_dir| async move {
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3469,6 +3550,8 @@ mod tests {
             fn args_with(cors: Option<&str>) -> ServeArgs {
                 ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3544,6 +3627,8 @@ mod tests {
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3622,6 +3707,8 @@ mod tests {
                     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
                     let args = ServeArgs {
                         daemon: Default::default(),
+                        exit_on_stdin_eof: false,
+                        shutdown_grace_secs: 10,
                         port: 0,
                         name: None,
                         host: "127.0.0.1".to_string(),
@@ -3727,6 +3814,8 @@ mod tests {
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3787,6 +3876,8 @@ mod tests {
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
                 let args = ServeArgs {
                     daemon: Default::default(),
+                    exit_on_stdin_eof: false,
+                    shutdown_grace_secs: 10,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3855,6 +3946,8 @@ mod tests {
     fn limits_args() -> ServeArgs {
         ServeArgs {
             daemon: Default::default(),
+            exit_on_stdin_eof: false,
+            shutdown_grace_secs: 10,
             port: 0,
             name: None,
             host: "127.0.0.1".to_string(),

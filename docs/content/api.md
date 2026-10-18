@@ -108,6 +108,42 @@ spawns; the route answers as soon as the daemon has accepted it. `GET /api/confi
 values in force under `limits.max_concurrent_requests` and `limits.request_timeout_secs`, so a
 client sees what this server resolved rather than the default it would guess.
 
+## Running `lev serve` under a supervisor
+
+`lev serve` stops cleanly when it is asked to. Ctrl-C works everywhere, and so does SIGTERM on
+macOS and Linux, which is how `kill`, launchd and systemd stop a process. On Windows, Ctrl-Break
+and closing the console window stop it too. The stop goes like this:
+
+1. The server stops accepting new connections.
+2. Every open WebSocket on `/ws`, `/ws/agents/{id}` and `/ws/graphql` gets a close frame with
+   code 1001 (going away). A client can tell a shutdown from a dropped network that way.
+3. Requests already in flight get up to `--shutdown-grace-secs` to answer (default 10). A spawn
+   the daemon is already handling still gets its reply.
+4. The process exits 0, because a clean stop is not a crash.
+
+The daemon is never stopped or signalled. It keeps running for every other client, and the runs
+it holds carry on.
+
+### Stopping when the parent goes away
+
+An app that starts `lev serve` as a child process can pass `--exit-on-stdin-eof` and give it a
+pipe for stdin. When the app exits, even in a crash, the operating system closes the pipe. The
+server sees its stdin end and stops exactly as it does on SIGTERM. Anything written to that pipe
+is read and thrown away.
+
+```bash
+lev serve --port 0 --exit-on-stdin-eof --shutdown-grace-secs 5
+```
+
+The flag is off by default, and without it stdin is never read. A server started from a terminal
+or a service manager behaves as before. On Windows, a child started with `CREATE_NO_WINDOW` has
+no console its parent can send Ctrl-Break to, so closing stdin is its only graceful stop.
+
+When `lev serve` has to start the daemon itself, the daemon detaches from it. On Windows it also
+leaves the server's job object, so a host that kills its job on exit leaves the daemon running.
+If the job does not allow that, the daemon starts inside it anyway, and the log warns that it
+will end when the job closes. Start the daemon yourself first (`lev daemon start`) to avoid that.
+
 ## Reaching a Leviath on another machine
 
 The short version: **`http://` only works on loopback.** Everything else needs HTTPS or a tunnel.
