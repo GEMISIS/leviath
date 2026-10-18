@@ -422,6 +422,7 @@ mod tests {
     fn state_without_a_reachable_ollama() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
@@ -472,6 +473,7 @@ mod tests {
         }
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
@@ -532,6 +534,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
@@ -548,6 +551,7 @@ mod tests {
     fn test_state_with_keys() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
@@ -763,6 +767,7 @@ mod tests {
     async fn get_config_agent_paths_included() {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
@@ -804,6 +809,7 @@ mod tests {
     fn test_state_listing_models() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
@@ -1038,6 +1044,7 @@ mod tests {
     fn state_with_config_path(path: std::path::PathBuf) -> (AppState, AdminPaths) {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
@@ -1068,6 +1075,7 @@ mod tests {
     fn state_watching_config_path(path: std::path::PathBuf) -> (AppState, AdminPaths) {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             update_check: Default::default(),
             update_jobs: Default::default(),
@@ -2192,6 +2200,7 @@ mod tests {
         // passes while exercising none of what it is named for.
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
+            shutdown: Default::default(),
             caches: crate::commands::serve::caches::ServeCaches {
                 model_catalog: crate::commands::serve::model_catalog::ModelCatalog::with_builder(
                     Arc::new(|config| {

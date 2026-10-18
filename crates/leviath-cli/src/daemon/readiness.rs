@@ -10,10 +10,10 @@ use std::time::Duration;
 
 /// How long to keep asking before giving up.
 ///
-/// Windows gets longer. Starting the daemon there has to bind a named pipe and
-/// detach into a job object, and under a supervisor opening many sessions at
-/// once those serialise: the 5s that is generous on Unix is regularly missed
-/// there, leaving sessions `runtime-missing` and the control pipe reporting
+/// Windows gets longer. Starting the daemon there has to bind a named pipe,
+/// and under a supervisor opening many sessions at once those binds
+/// serialise: the 5s that is generous on Unix is regularly missed there,
+/// leaving sessions `runtime-missing` and the control pipe reporting
 /// "All pipe instances are busy" (os error 231). The longer window is paid for
 /// only by a start that would otherwise have failed - the poll returns as soon
 /// as the daemon answers, and a healthy one answers in ~20ms on either

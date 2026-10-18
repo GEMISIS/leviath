@@ -198,6 +198,7 @@ mod tests {
     fn app_with(control: ControlClient) -> Router {
         let (tx, _) = broadcast::channel(16);
         let state = AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),

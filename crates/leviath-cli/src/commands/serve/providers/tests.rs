@@ -64,6 +64,7 @@ fn state_with_quota(
 ) -> AppState {
     let (tx, _) = broadcast::channel(16);
     AppState {
+        shutdown: Default::default(),
         caches: crate::commands::serve::caches::ServeCaches {
             provider_quota: quota,
             ..Default::default()

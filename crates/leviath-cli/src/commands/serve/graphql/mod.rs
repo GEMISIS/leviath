@@ -23,8 +23,10 @@
 use async_graphql::http::ALL_WEBSOCKET_PROTOCOLS;
 use async_graphql::{SDLExportOptions, Schema};
 use async_graphql_axum::{GraphQLProtocol, GraphQLRequest, GraphQLResponse, GraphQLWebSocket};
-use axum::extract::{Extension, WebSocketUpgrade};
+use axum::extract::ws::WebSocket;
+use axum::extract::{Extension, State, WebSocketUpgrade};
 use axum::response::Response;
+use futures_util::{SinkExt, StreamExt};
 
 use super::types::AppState;
 
@@ -120,16 +122,44 @@ pub(super) async fn http(
 /// accepts a `?token=` on, because a browser cannot put a header on a
 /// WebSocket, and what the request-limit layer exempts from the per-request
 /// deadline, because a subscription is meant to stay open.
+///
+/// When the server begins to stop, the client's half of the stream is ended,
+/// which ends the subscription, and the socket is closed with 1001 (going
+/// away).
 pub(super) async fn ws(
+    State(state): State<AppState>,
     Extension(schema): Extension<LeviathSchema>,
     protocol: GraphQLProtocol,
     upgrade: WebSocketUpgrade,
 ) -> Response {
     // Upgraded by hand rather than with the ready-made service, so this stays a
     // handler in the one route table the spec is held to.
+    let shutdown = state.shutdown;
     upgrade
         .protocols(ALL_WEBSOCKET_PROTOCOLS)
-        .on_upgrade(move |socket| GraphQLWebSocket::new(socket, schema, protocol).serve())
+        .on_upgrade(move |socket| {
+            shutdown
+                .clone()
+                .track(subscribe(socket, schema, protocol, shutdown))
+        })
+}
+
+/// Serve one subscription socket until the client leaves or the server stops.
+async fn subscribe(
+    socket: WebSocket,
+    schema: LeviathSchema,
+    protocol: GraphQLProtocol,
+    shutdown: super::shutdown::Shutdown,
+) {
+    let (mut sink, stream) = socket.split();
+    let stopping = shutdown.clone();
+    let stream = stream.take_until(Box::pin(async move { stopping.requested().await }));
+    GraphQLWebSocket::new_with_pair(&mut sink, stream, schema, protocol)
+        .serve()
+        .await;
+    if shutdown.is_requested() {
+        let _ = sink.send(super::shutdown::going_away()).await;
+    }
 }
 
 /// The SDL for this schema, for the lockstep test and

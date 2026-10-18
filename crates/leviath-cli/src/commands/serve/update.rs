@@ -169,6 +169,7 @@ mod tests {
     fn test_state() -> super::super::types::AppState {
         let (tx, _) = tokio::sync::broadcast::channel(64);
         super::super::types::AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: super::super::update_cache::UpdateCheckCache::with_fetcher(
@@ -220,6 +221,7 @@ mod tests {
 
         let (tx, _) = tokio::sync::broadcast::channel(64);
         let state = super::super::types::AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: super::super::update_cache::UpdateCheckCache::with_fetcher(counting),

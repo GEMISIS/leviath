@@ -917,10 +917,11 @@ async fn a_subscription_runs_over_a_real_websocket() {
     let dir = tempfile::tempdir().expect("an agents dir");
     let state = test_state(dir.path());
     let tx = state.event_tx.clone();
-    let schema = crate::commands::serve::graphql::build_schema(state, false);
+    let schema = crate::commands::serve::graphql::build_schema(state.clone(), false);
     let app = Router::new()
         .route("/ws/graphql", get(crate::commands::serve::graphql::ws))
-        .layer(axum::extract::Extension(schema));
+        .layer(axum::extract::Extension(schema))
+        .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("a port");

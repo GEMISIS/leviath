@@ -61,8 +61,9 @@ async fn bring_up_daemon(mode: DaemonMode, may_start: bool) -> anyhow::Result<()
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    leviath_sys::process::configure_detached(&mut cmd);
-    cmd.spawn()?;
+    // Detached from this process, and on Windows out of its job too, so a host
+    // that kills `lev serve`'s job on close leaves the daemon running.
+    leviath_sys::process::spawn_detached(&mut cmd)?;
     if poll_until(&mut || is_daemon_running(&id)).await {
         control_client()?.wait_until_started().await?;
         return Ok(());
@@ -263,30 +264,6 @@ fn remove_legacy_services() -> Vec<std::path::PathBuf> {
     Vec::new()
 }
 
-/// Resolves when the daemon is asked to stop: Ctrl-C, or SIGTERM, which is
-/// how launchd, systemd and `kill` stop a process.
-#[cfg(unix)]
-async fn stop_requested() {
-    use tokio::signal::unix::{SignalKind, signal};
-    match signal(SignalKind::terminate()) {
-        Ok(mut terminate) => {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = terminate.recv() => {}
-            }
-        }
-        Err(_) => {
-            let _ = tokio::signal::ctrl_c().await;
-        }
-    }
-}
-
-/// Resolves on Ctrl-C, which is how a console stops a process here.
-#[cfg(not(unix))]
-async fn stop_requested() {
-    let _ = tokio::signal::ctrl_c().await;
-}
-
 /// Real `lev daemon`: bind the platform control socket and drive the shared world
 /// until Ctrl-C or SIGTERM. Wiring only - the world, host, tool service, and spawner it
 /// composes (`daemon::setup`) plus the control transport (`control_socket`:
@@ -368,7 +345,7 @@ pub(super) async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::R
     // manager or `kill` stops a daemon with.
     let shutdown = host.world_mut().shutdown_handle();
     tokio::spawn(async move {
-        stop_requested().await;
+        super::signals::stop_requested().await;
         shutdown.notify_one();
     });
 

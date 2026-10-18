@@ -6,6 +6,7 @@ use axum::response::IntoResponse;
 use tokio::sync::broadcast;
 
 use super::events::{ServerEvent, Stamped};
+use super::shutdown::{Shutdown, going_away};
 use super::types::*;
 
 /// How often the server pings an idle-or-not connection. Browsers answer pings
@@ -60,8 +61,9 @@ pub(super) async fn ws_global(
     // making that match arm reachable in tests.
     let rx = state.event_tx.subscribe();
     let greeting = link_greeting(&state);
+    let shutdown = state.shutdown.clone();
     ws.max_write_buffer_size(WS_MAX_WRITE_BUFFER)
-        .on_upgrade(move |socket| handle_ws(socket, rx, None, greeting))
+        .on_upgrade(move |socket| handle_ws(socket, rx, None, greeting, shutdown))
 }
 
 pub(super) async fn ws_agent(
@@ -71,8 +73,9 @@ pub(super) async fn ws_agent(
 ) -> impl IntoResponse {
     let rx = state.event_tx.subscribe();
     let greeting = link_greeting(&state);
+    let shutdown = state.shutdown.clone();
     ws.max_write_buffer_size(WS_MAX_WRITE_BUFFER)
-        .on_upgrade(move |socket| handle_ws(socket, rx, Some(id), greeting))
+        .on_upgrade(move |socket| handle_ws(socket, rx, Some(id), greeting, shutdown))
 }
 
 /// What a subscriber that connects right now is told first about the daemon:
@@ -96,27 +99,48 @@ fn link_greeting(state: &AppState) -> Option<ServerEvent> {
     }
 }
 
+/// The ping cadence, pong deadline and send deadline of one connection.
+#[derive(Clone, Copy)]
+struct WsTiming {
+    ping_every: std::time::Duration,
+    pong_timeout: std::time::Duration,
+    send_timeout: std::time::Duration,
+}
+
+/// What every real connection runs with.
+const WS_TIMING: WsTiming = WsTiming {
+    ping_every: WS_PING_INTERVAL,
+    pong_timeout: WS_PONG_TIMEOUT,
+    send_timeout: WS_SEND_TIMEOUT,
+};
+
+/// Relay one connection, as a connection the server waits for on its way out.
 async fn handle_ws(
     socket: WebSocket,
     rx: broadcast::Receiver<Stamped>,
     filter_run_id: Option<String>,
     greeting: Option<ServerEvent>,
+    shutdown: Shutdown,
 ) {
-    handle_ws_with(
-        socket,
-        rx,
-        filter_run_id,
-        WS_PING_INTERVAL,
-        WS_PONG_TIMEOUT,
-        WS_SEND_TIMEOUT,
-        greeting,
-    )
-    .await
+    shutdown
+        .clone()
+        .track(handle_ws_with(
+            socket,
+            rx,
+            filter_run_id,
+            WS_TIMING,
+            greeting,
+            shutdown,
+        ))
+        .await
 }
 
 /// Core of the WS relay, with the ping cadence, pong deadline and send
 /// deadline injected so tests can drive the dead-peer branches without real
 /// multi-second waits.
+///
+/// When the server begins to stop, the connection is sent a 1001 (going away)
+/// close frame and ends, so a client can tell a shutdown from a network fault.
 ///
 /// The `select!` is deliberately **unbiased**: a `biased;` here would poll the
 /// event branch first every iteration, so under a busy run the inbound half
@@ -126,11 +150,15 @@ async fn handle_ws_with(
     mut socket: WebSocket,
     mut rx: broadcast::Receiver<Stamped>,
     filter_run_id: Option<String>,
-    ping_every: std::time::Duration,
-    pong_timeout: std::time::Duration,
-    send_timeout: std::time::Duration,
+    timing: WsTiming,
     greeting: Option<ServerEvent>,
+    shutdown: Shutdown,
 ) {
+    let WsTiming {
+        ping_every,
+        pong_timeout,
+        send_timeout,
+    } = timing;
     // Something worth saying about the daemon before any run event: said
     // first. A peer that cannot take even that is a dead peer, and the ping
     // cadence below catches it the same as any other; nothing to do here.
@@ -185,6 +213,13 @@ async fn handle_ws_with(
                     break; // dead or wedged peer either way
                 }
             }
+            _ = shutdown.requested() => {
+                // Said once and not waited on: the client's own close reply
+                // changes nothing, and a peer that cannot take the frame is
+                // gone either way.
+                let _ = send_within(&mut socket, send_timeout, going_away()).await;
+                break;
+            }
             _ = ping.tick() => {
                 // A ping left unanswered past the deadline, and a ping that
                 // cannot be sent, both mean the peer is gone without a Close
@@ -235,6 +270,7 @@ mod tests {
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),
@@ -329,10 +365,13 @@ mod tests {
                                 socket,
                                 rx,
                                 None,
-                                ping_every,
-                                pong_timeout,
-                                send_timeout,
+                                WsTiming {
+                                    ping_every,
+                                    pong_timeout,
+                                    send_timeout,
+                                },
                                 greeting,
+                                state.shutdown.clone(),
                             )
                         })
                     },
@@ -739,6 +778,7 @@ mod tests {
         daemon.client.list().await.expect("served, and introduced");
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),
@@ -908,6 +948,7 @@ mod tests {
         // `handle_ws` without needing to fabricate the error directly.
         let (tx, _) = broadcast::channel::<Stamped>(2);
         let state = AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),
@@ -1049,6 +1090,7 @@ mod tests {
     async fn handle_ws_breaks_on_closed_channel_via_server_shutdown() {
         let (tx, _) = broadcast::channel::<Stamped>(16);
         let state = AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),

@@ -3,13 +3,27 @@
 use std::ffi::OsStr;
 use std::process::Command;
 
-/// Configure `cmd` so the spawned child detaches into its own process group,
-/// surviving the terminal that launched it.
+/// Configure `cmd` so the spawned child detaches from whatever started it.
 ///
-/// On Unix this uses the safe, stable `Command::process_group(0)`; on non-Unix
-/// platforms it is a no-op. Call this before `cmd.spawn()`.
+/// On Unix this puts the child in its own process group with the safe, stable
+/// `Command::process_group(0)`, so it survives the terminal that launched it.
+/// On Windows it starts the child with no console window and breaks it away
+/// from the starter's job object, so a host that kills its job on close does
+/// not take the child with it. Call this before `cmd.spawn()`, or use
+/// [`spawn_detached`], which also copes with a job that forbids breakaway.
 pub fn configure_detached(cmd: &mut Command) {
     crate::platform::configure_detached(cmd);
+}
+
+/// Spawn `cmd` detached, as [`configure_detached`] describes.
+///
+/// On Windows a job object may forbid its processes to break away, and then
+/// `CreateProcess` refuses the request outright. That is no reason to fail the
+/// spawn: the child is started again inside the job, still without a window,
+/// and a warning says it now ends when the job does. Elsewhere this is
+/// [`configure_detached`] followed by `spawn`.
+pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    crate::platform::spawn_detached(cmd)
 }
 
 /// Configure `cmd` so the spawned child gets no console window.
@@ -29,9 +43,11 @@ pub fn configure_detached(cmd: &mut Command) {
 ///
 /// One sharp edge worth knowing: `Command::creation_flags` *assigns* the flag
 /// word rather than OR-ing into it, so two callers setting different flags on
-/// one command would silently clobber each other. This function is deliberately
-/// the only writer of creation flags in the workspace. Add any future flag
-/// here, alongside `CREATE_NO_WINDOW`, rather than at a call site.
+/// one command would silently clobber each other. The Windows platform module
+/// writes the flag word in exactly one function, which this and
+/// [`configure_detached`] both go through. Add any future flag there, alongside
+/// `CREATE_NO_WINDOW` and `CREATE_BREAKAWAY_FROM_JOB`, rather than at a call
+/// site.
 pub fn hide_console_window(cmd: &mut Command) {
     crate::platform::hide_console_window(cmd);
 }
@@ -164,6 +180,22 @@ mod tests {
         // must not fork/exec or panic.
         let mut cmd = Command::new("true");
         configure_detached(&mut cmd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_detached_public_wrapper_starts_the_child() {
+        let mut child = spawn_detached(&mut Command::new("true")).expect("the child starts");
+        assert!(child.wait().expect("waitable").success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawn_detached_public_wrapper_starts_the_child() {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "exit 0"]);
+        let mut child = spawn_detached(&mut cmd).expect("the child starts");
+        assert!(child.wait().expect("waitable").success());
     }
 
     #[test]

@@ -79,6 +79,9 @@ pub(crate) struct AppState {
     /// The key this process signs byte URLs with. Random per process, so a
     /// restart invalidates every URL it handed out.
     pub(super) signer: Arc<super::signed_url::UrlSigner>,
+    /// How the WebSockets learn the server is stopping, so each can close
+    /// with 1001 rather than be cut off.
+    pub(super) shutdown: super::shutdown::Shutdown,
 }
 
 impl AppState {

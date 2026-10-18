@@ -642,6 +642,7 @@ layout = {{ total_budget_tokens = 1000, regions = [] }}
     async fn page(dir: &tempfile::TempDir, extra: &str) -> (StatusCode, serde_json::Value) {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),
@@ -922,6 +923,7 @@ mod tests {
     fn test_state_with_path(path: PathBuf) -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
+            shutdown: Default::default(),
             caches: Default::default(),
             signer: Default::default(),
             update_check: Default::default(),

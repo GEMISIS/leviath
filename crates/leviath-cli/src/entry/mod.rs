@@ -25,6 +25,7 @@ use crate::daemon::startup_view::StartupView;
 use crate::dispatch::{Commands, RiskyExecutors, apply_region_flags, dispatch};
 
 mod daemon;
+mod signals;
 mod terminal;
 
 /// The target on this module's log lines, so stderr and `daemon.log` show
@@ -253,10 +254,13 @@ impl RiskyExecutors for RealExecutors {
         // The HTTP API is a gateway to the shared-world daemon: ensure it's
         // running, then serve, routing agent actions through its control socket.
         ensure_daemon_running(args.daemon.resolve_here()?).await?;
+        // Stopped the way the daemon is: Ctrl-C, SIGTERM, or a Windows console
+        // close. `execute` adds stdin closing when `--exit-on-stdin-eof` asks.
         commands::serve::execute(
             args,
             long_lived_control_client()?,
             std::sync::Arc::new(run_upgrade_captured),
+            Box::pin(signals::stop_requested()),
         )
         .await
     }

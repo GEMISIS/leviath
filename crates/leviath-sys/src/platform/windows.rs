@@ -108,13 +108,68 @@ pub(crate) fn ensure_private(path: &Path, _mode: u32) -> io::Result<Option<u32>>
     Ok(None)
 }
 
+// <https://learn.microsoft.com/windows/win32/procthread/process-creation-flags>
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+/// What `CreateProcess` answers when the starter's job forbids breakaway.
+const ERROR_ACCESS_DENIED: i32 = 5;
+
+/// The creation flags for a child: always no console window, and out of the
+/// starter's job when `breakaway` is set.
+fn creation_flags(breakaway: bool) -> u32 {
+    match breakaway {
+        true => CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB,
+        false => CREATE_NO_WINDOW,
+    }
+}
+
+/// The one place the creation flag word is written.
+///
+/// `Command::creation_flags` assigns rather than ORs, so a second writer would
+/// silently undo the first. Every flag goes through here together.
+fn set_creation_flags(cmd: &mut std::process::Command, breakaway: bool) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(creation_flags(breakaway));
+}
+
 /// No process groups on Windows, but detaching still means something here: a
 /// child launched with no console of its own is the Windows equivalent of
 /// escaping the launching terminal, so it neither inherits Ctrl+C nor pops a
 /// window when the parent has no console to share. The caller kills the direct
 /// child.
+///
+/// It also breaks away from the starter's job. A host that ties its children
+/// to itself with a kill-on-close job would otherwise take a daemon started
+/// from inside it down too, when the daemon is meant to outlive every client.
 pub(crate) fn configure_detached(cmd: &mut std::process::Command) {
-    hide_console_window(cmd);
+    set_creation_flags(cmd, true);
+}
+
+/// [`configure_detached`], then spawn, falling back to staying in the job when
+/// the job forbids breakaway.
+pub(crate) fn spawn_detached(cmd: &mut std::process::Command) -> io::Result<std::process::Child> {
+    spawn_breaking_away(cmd, &mut |cmd| cmd.spawn())
+}
+
+/// [`spawn_detached`] with the spawn itself injected, so the refusal a
+/// breakaway-forbidding job gives can be tested without building such a job.
+fn spawn_breaking_away(
+    cmd: &mut std::process::Command,
+    spawn: &mut dyn FnMut(&mut std::process::Command) -> io::Result<std::process::Child>,
+) -> io::Result<std::process::Child> {
+    configure_detached(cmd);
+    match spawn(cmd) {
+        Err(err) if err.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+            tracing::warn!(
+                "this process's job does not allow breakaway, so the child process \
+                 stays in it and ends when the job closes"
+            );
+            set_creation_flags(cmd, false);
+            spawn(cmd)
+        }
+        spawned => spawned,
+    }
 }
 
 /// Start `cmd` without a console window.
@@ -131,10 +186,7 @@ pub(crate) fn configure_detached(cmd: &mut std::process::Command) {
 /// or nulled, which is every caller here; a child meant to share the user's
 /// terminal (the editor) must not get it, or it opens with nowhere to draw.
 pub(crate) fn hide_console_window(cmd: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-    // <https://learn.microsoft.com/windows/win32/procthread/process-creation-flags>
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    set_creation_flags(cmd, false);
 }
 
 /// Windows has no POSIX uid; the value only addresses a per-user
@@ -436,6 +488,55 @@ mod tests {
         let _env = ENV_LOCK.lock().expect("env lock");
         let dir = tempfile::tempdir().unwrap();
         assert!(set_mode(&dir.path().join("nope"), 0o600).is_err());
+    }
+
+    #[test]
+    fn a_detached_child_breaks_away_and_every_child_hides_its_window() {
+        assert_eq!(creation_flags(true), 0x0900_0000);
+        assert_eq!(creation_flags(false), 0x0800_0000);
+    }
+
+    fn exit_zero() -> std::process::Command {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "exit 0"]);
+        cmd
+    }
+
+    /// Whether the runner's own job allows breakaway or not, the child starts.
+    #[test]
+    fn spawn_detached_starts_the_child() {
+        let mut child = spawn_detached(&mut exit_zero()).expect("cmd starts");
+        assert!(child.wait().expect("waitable").success());
+    }
+
+    /// A job that forbids breakaway makes `CreateProcess` answer access denied;
+    /// the child is started again inside the job rather than not at all.
+    #[test]
+    fn a_refused_breakaway_spawns_again_inside_the_job() {
+        let mut attempts = 0;
+        let mut child = spawn_breaking_away(&mut exit_zero(), &mut |cmd| {
+            attempts += 1;
+            match attempts {
+                1 => Err(io::Error::from_raw_os_error(ERROR_ACCESS_DENIED)),
+                _ => cmd.spawn(),
+            }
+        })
+        .expect("the second attempt starts");
+        assert!(child.wait().expect("waitable").success());
+        assert_eq!(attempts, 2);
+    }
+
+    /// Any other failure is the spawn's answer, not a cue to try again.
+    #[test]
+    fn another_spawn_failure_is_reported_as_is() {
+        let mut attempts = 0;
+        let err = spawn_breaking_away(&mut exit_zero(), &mut |_| {
+            attempts += 1;
+            Err(io::Error::from_raw_os_error(2))
+        })
+        .expect_err("the failure is passed on");
+        assert_eq!(err.raw_os_error(), Some(2));
+        assert_eq!(attempts, 1);
     }
 
     #[test]

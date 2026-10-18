@@ -44,6 +44,7 @@ where
 pub(super) fn state_with_agent_paths(paths: Vec<std::path::PathBuf>) -> super::types::AppState {
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
     super::types::AppState {
+        shutdown: Default::default(),
         caches: Default::default(),
         signer: Default::default(),
         update_check: Default::default(),
@@ -66,6 +67,7 @@ pub(super) fn state_with_agent_paths(paths: Vec<std::path::PathBuf>) -> super::t
 pub(super) fn state_with_config_at(path: &std::path::Path) -> super::types::AppState {
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
     super::types::AppState {
+        shutdown: Default::default(),
         caches: Default::default(),
         signer: Default::default(),
         update_check: Default::default(),

@@ -25,6 +25,7 @@ fn no_daemon() -> ControlClient {
 fn test_state() -> AppState {
     let (tx, _) = broadcast::channel(64);
     AppState {
+        shutdown: Default::default(),
         caches: Default::default(),
         signer: Default::default(),
         update_check: Default::default(),
@@ -1287,6 +1288,7 @@ async fn run_result_nonexistent_run_returns_404() {
 async fn cancel(control: ControlClient, id: &str) -> StatusCode {
     let (tx, _) = broadcast::channel(16);
     let state = AppState {
+        shutdown: Default::default(),
         caches: Default::default(),
         signer: Default::default(),
         update_check: Default::default(),
@@ -1349,6 +1351,7 @@ async fn post_run_action(control: ControlClient, id: &str, action: &str) -> Stat
     use axum::routing::post;
     let (tx, _) = broadcast::channel(16);
     let state = AppState {
+        shutdown: Default::default(),
         caches: Default::default(),
         signer: Default::default(),
         update_check: Default::default(),

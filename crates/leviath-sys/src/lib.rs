@@ -50,7 +50,7 @@ pub use perms::{
 pub use process::peer_uid;
 pub use process::{
     child_command, child_command_async, configure_detached, current_uid, hide_console_window,
-    kill_process_group, terminal_command,
+    kill_process_group, spawn_detached, terminal_command,
 };
 pub use sandbox::{
     ContainerRunSpec, container_exec_argv, container_rm_argv, container_run_argv,
