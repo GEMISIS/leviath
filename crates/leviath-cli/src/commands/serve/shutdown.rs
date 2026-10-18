@@ -112,6 +112,9 @@ pub(super) fn closed(mut input: Box<dyn Read + Send>) -> StopFuture {
 pub(super) async fn drain(serving: StopFuture, shutdown: Shutdown, grace: Duration) {
     let finished = Box::pin(async {
         serving.await;
+        // Begun here too, so the deadline runs and the sockets are told even
+        // if the server ever returned without being asked to stop.
+        shutdown.begin();
         shutdown.sockets_closed().await;
     });
     let deadline = Box::pin(async {

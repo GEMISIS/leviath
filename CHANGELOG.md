@@ -26,6 +26,10 @@ same list.
   `/ws/agents/{id}` and `/ws/graphql` socket with 1001 (going away), gives
   requests in flight up to `--shutdown-grace-secs` (default 10) and exits 0.
   The daemon is left running. For the old immediate stop, send SIGKILL.
+- On Windows, `lev daemon` now also stops cleanly on Ctrl-Break, the console
+  window closing and system shutdown, not only Ctrl-C. It shares the signal
+  wait `lev serve` uses. To stop it without a clean shutdown, end the
+  process from Task Manager.
 - On Windows, a daemon that `lev serve` (or any client) starts leaves the
   starter's job object, so a host's kill-on-close job no longer takes it
   down. Where the job forbids that, the daemon starts inside it and the log

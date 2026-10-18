@@ -190,7 +190,11 @@ async fn a_request_that_never_finishes_is_abandoned_after_the_grace_period() {
         let started = std::time::Instant::now();
         stop_tx.send(()).expect("the server is listening");
         stops_cleanly(server).await;
-        assert!(started.elapsed() >= Duration::from_millis(900));
+        // At least the grace period, and not much more: a server that ignored
+        // it would sit on the stuck request until the 20 s test timeout.
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(900), "stopped after {took:?}");
+        assert!(took < Duration::from_secs(5), "stopped after {took:?}");
     })
     .await;
 }

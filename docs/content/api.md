@@ -124,6 +124,11 @@ and closing the console window stop it too. The stop goes like this:
 The daemon is never stopped or signalled. It keeps running for every other client, and the runs
 it holds carry on.
 
+Two things can hold the exit past the grace period. An update started by `POST /api/update` is
+allowed to finish installing, and so is a check for a newer version already under way. Cutting a
+rewrite of the agents directory in half would be worse than a late exit. A second Ctrl-C during
+the grace period does not cut it short either; send SIGKILL to stop at once.
+
 ### Stopping when the parent goes away
 
 An app that starts `lev serve` as a child process can pass `--exit-on-stdin-eof` and give it a
