@@ -27,6 +27,9 @@ pub struct Observed {
     pub supervised: Option<(bool, std::path::PathBuf)>,
     /// The path of the `lev` executable asking.
     pub cli_exe: Option<String>,
+    /// The `--daemon` mode this host's next spawn command would run in:
+    /// `LEVIATH_DAEMON` when it is set, else the default.
+    pub mode: DaemonMode,
 }
 
 /// The object `lev daemon status --json` prints.
@@ -54,8 +57,9 @@ pub struct StatusReport {
     /// How the daemon's build stands to this `lev`'s. Null when no daemon
     /// runs.
     pub standing: Option<Standing>,
-    /// Whether a command that needs the daemon, run from this `lev` in the
-    /// default `--daemon` mode, would replace the running one.
+    /// Whether a command that needs the daemon, run from this `lev` with no
+    /// `--daemon` flag, would replace the running one: in the mode
+    /// `LEVIATH_DAEMON` names when it is set, else in the default.
     pub spawn_would_replace: bool,
 }
 
@@ -111,8 +115,7 @@ pub fn report(observed: Observed, cli: &Build) -> StatusReport {
             committed_at: cli.committed_at,
         },
         standing,
-        spawn_would_replace: standing
-            .is_some_and(|standing| DaemonMode::default().replaces(standing)),
+        spawn_would_replace: standing.is_some_and(|standing| observed.mode.replaces(standing)),
     }
 }
 

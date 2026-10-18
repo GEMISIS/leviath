@@ -528,15 +528,15 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
 /// socket connect are the un-unit-testable slivers kept here.
 async fn real_doctor(args: commands::doctor::DoctorArgs) -> anyhow::Result<()> {
     use commands::doctor::DaemonTarget;
+    // Read first, so a mistyped LEVIATH_DAEMON is refused whatever else was
+    // asked, as `lev run` refuses it.
+    let mode = args.daemon.resolve_here()?;
     if args.no_daemon || args.offline {
         return commands::doctor::execute(args, DaemonTarget::Skip).await;
     }
-    let started = match args.daemon.resolve_here() {
-        Ok(mode) => ensure_daemon_running(mode)
-            .await
-            .and_then(|()| control_client()),
-        Err(e) => Err(e),
-    };
+    let started = ensure_daemon_running(mode)
+        .await
+        .and_then(|()| control_client());
     match started {
         Ok(client) => commands::doctor::execute(args, DaemonTarget::Client(&client)).await,
         Err(e) => commands::doctor::execute(args, DaemonTarget::Unavailable(e.to_string())).await,
