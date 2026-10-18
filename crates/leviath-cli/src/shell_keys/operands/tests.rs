@@ -122,7 +122,7 @@ fn home_expands_before_the_check() {
 #[test]
 fn a_granted_root_counts_as_inside() {
     let (_dir, wd) = workdir();
-    let granted = |p: &Path| p.starts_with("/granted") || fence(&wd)(p);
+    let granted = |p: &Path| p.ends_with("granted/doc.md") || fence(&wd)(p);
     let found = outside_workdir_for("cat /granted/doc.md", true, &wd, None, &granted);
     assert!(found.is_empty(), "{found:?}");
 }
