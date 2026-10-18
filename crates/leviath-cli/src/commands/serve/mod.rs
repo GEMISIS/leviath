@@ -2568,6 +2568,7 @@ mod tests {
                 // call with `ready: None`), so this remains a real end-to-end test
                 // of execute()'s bootstrap logic.
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -2648,6 +2649,7 @@ mod tests {
             std::fs::write(&key, tls::tests::TEST_KEY).expect("write key");
 
             let args = ServeArgs {
+                daemon: Default::default(),
                 port: 0,
                 name: None,
                 host: "127.0.0.1".to_string(),
@@ -2730,6 +2732,7 @@ mod tests {
                 std::fs::write(&cert, "not a certificate").expect("write");
 
                 let base = ServeArgs {
+                    daemon: Default::default(),
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -2806,6 +2809,7 @@ mod tests {
                 std::fs::write(&key, tls::tests::TEST_KEY).expect("write key");
 
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -2860,6 +2864,7 @@ mod tests {
             |_fake_dir| async move {
                 with_tracing(|| {});
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -2955,6 +2960,7 @@ mod tests {
             |_fake_dir| async move {
                 with_tracing(|| {});
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     name: None,
                     port: 0,
                     host: "127.0.0.1".to_string(),
@@ -3032,6 +3038,7 @@ mod tests {
             "serve-mod-specific-cors",
             |_fake_dir| async move {
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3100,6 +3107,7 @@ mod tests {
             // An invalid host string makes `format!("{host}:{port}").parse()`
             // fail, exercising execute()'s `?` on the SocketAddr parse.
             let args = ServeArgs {
+                daemon: Default::default(),
                 port: 0,
                 name: None,
                 host: "not a valid host".to_string(),
@@ -3143,6 +3151,7 @@ mod tests {
                 std::fs::write(Config::config_path(), "not valid toml [[[").unwrap();
 
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3181,6 +3190,7 @@ mod tests {
         .unwrap();
 
         let args = ServeArgs {
+            daemon: Default::default(),
             port: 0,
             name: None,
             host: "127.0.0.1".to_string(),
@@ -3240,6 +3250,7 @@ mod tests {
             "serve-unbindable",
             |_fake_dir| async move {
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     port: 8080,
                     name: None,
                     host: "192.0.2.1".to_string(),
@@ -3283,6 +3294,7 @@ mod tests {
             "serve-port-taken",
             |_fake_dir| async move {
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     port,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3317,6 +3329,7 @@ mod tests {
         // No --token and no LEVIATH_API_TOKEN ⇒ the server won't start.
         temp_env::async_with_vars([("LEVIATH_API_TOKEN", None::<&str>)], async {
             let args = ServeArgs {
+                daemon: Default::default(),
                 port: 0,
                 name: None,
                 host: "127.0.0.1".to_string(),
@@ -3346,6 +3359,7 @@ mod tests {
             "serve-mod-shutdown-signal",
             |_fake_dir| async move {
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3401,6 +3415,7 @@ mod tests {
             "serve-mod-no-ready",
             |_fake_dir| async move {
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3453,6 +3468,7 @@ mod tests {
         crate::config::with_isolated_config_path_async("serve-mod-cors", |_fake_dir| async move {
             fn args_with(cors: Option<&str>) -> ServeArgs {
                 ServeArgs {
+                    daemon: Default::default(),
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3527,6 +3543,7 @@ mod tests {
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3604,6 +3621,7 @@ mod tests {
                     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
                     let args = ServeArgs {
+                        daemon: Default::default(),
                         port: 0,
                         name: None,
                         host: "127.0.0.1".to_string(),
@@ -3708,6 +3726,7 @@ mod tests {
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3767,6 +3786,7 @@ mod tests {
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
                 let args = ServeArgs {
+                    daemon: Default::default(),
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3834,6 +3854,7 @@ mod tests {
     /// test token, no TLS, nothing admin.
     fn limits_args() -> ServeArgs {
         ServeArgs {
+            daemon: Default::default(),
             port: 0,
             name: None,
             host: "127.0.0.1".to_string(),

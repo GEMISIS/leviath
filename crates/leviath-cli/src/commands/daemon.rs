@@ -26,11 +26,11 @@ pub struct DaemonArgs {
 #[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum DaemonAction {
     /// Start the daemon in the background (a no-op if one is already running).
-    Start,
+    Start(StartArgs),
     /// Shut the running daemon down.
     Stop,
     /// Report whether the daemon is running and how many agents it hosts.
-    Status,
+    Status(StatusArgs),
     /// Restart the daemon (stop, then start) - reloading persisted agents.
     Restart,
     /// Register the daemon with the OS supervisor (launchd / systemd --user) so
@@ -42,6 +42,25 @@ pub enum DaemonAction {
     /// process. The daemon runs it at its first start after an upgrade.
     #[command(hide = true)]
     ConvertRuns(ConvertRunsArgs),
+}
+
+/// Arguments for `lev daemon start`.
+#[derive(clap::Args, Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartArgs {
+    /// Whether a running daemon of another build is replaced. `attach` here
+    /// still starts one when none runs, since starting one is what was asked.
+    #[command(flatten)]
+    pub daemon: crate::daemon::mode::DaemonModeArg,
+}
+
+/// Arguments for `lev daemon status`.
+#[derive(clap::Args, Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatusArgs {
+    /// Print one JSON object instead of prose: the daemon's pid, executable
+    /// and build, this `lev`'s, how they stand, and whether a command that
+    /// needs the daemon would replace it.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for the internal `lev daemon convert-runs`, which only a daemon

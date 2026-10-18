@@ -80,6 +80,10 @@ const RESUBSCRIBE_PAUSE: std::time::Duration = std::time::Duration::from_millis(
 /// Arguments for `lev agent-client`.
 #[derive(Args, Debug, Clone, Default)]
 pub struct AgentClientArgs {
+    /// Whether this bridge may start or replace the daemon it talks to.
+    #[command(flatten)]
+    pub daemon: crate::daemon::mode::DaemonModeArg,
+
     /// Blueprint to serve: an installed agent name, or a path to one. When
     /// omitted, each session's working directory is searched for an
     /// `agent.toml`.

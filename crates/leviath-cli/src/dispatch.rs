@@ -823,7 +823,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_dashboard_variant_is_routed_through_the_executor() {
-        let args = commands::dashboard::DashboardArgs {};
+        let args = commands::dashboard::DashboardArgs::default();
         let result = dispatch(Commands::Dashboard(args), &MockRisky::default()).await;
         assert!(result.is_ok());
     }
@@ -993,6 +993,7 @@ mod tests {
     /// Arguments for `lev serve`, printing the schema or not.
     fn serve_args(print_graphql_schema: bool) -> commands::serve::ServeArgs {
         commands::serve::ServeArgs {
+            daemon: Default::default(),
             port: 0,
             name: None,
             host: "127.0.0.1".to_string(),

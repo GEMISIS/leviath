@@ -151,6 +151,7 @@ layout = {{ total_budget_tokens = 1000, regions = [{{ name = "task", kind = "pin
         write_blueprint(&dir, "coder");
         let resolved = resolve_blueprint(None, &dir.to_string_lossy()).unwrap();
         let args = AgentClientArgs {
+            daemon: Default::default(),
             agent: None,
             yolo: Some(String::new()),
             no_seed_commands: false,
@@ -204,6 +205,7 @@ layout = {{ total_budget_tokens = 1000, regions = [{{ name = "task", kind = "pin
         write_blueprint(&dir, "coder");
         let resolved = resolve_blueprint(None, &dir.to_string_lossy()).unwrap();
         let args = AgentClientArgs {
+            daemon: Default::default(),
             agent: None,
             yolo: None,
             no_seed_commands: false,
@@ -230,6 +232,7 @@ layout = {{ total_budget_tokens = 1000, regions = [{{ name = "task", kind = "pin
         write_blueprint(&dir, "coder");
         let resolved = resolve_blueprint(None, &dir.to_string_lossy()).unwrap();
         let mut args = AgentClientArgs {
+            daemon: Default::default(),
             agent: None,
             yolo: Some("careful".to_string()),
             no_seed_commands: false,

@@ -23,8 +23,28 @@ for a person. Warnings go to stderr, so stdout parses on its own. A service that
 speak HTTP should use [`lev serve`](/docs/api) instead.
 
 Most commands talk to the [shared-world daemon](/docs/daemon). `lev run`, `lev dash`, `lev serve`,
-and `lev agent-client` start one automatically if none is running, and restart it if it is running
-an older build.
+`lev agent-client` and `lev doctor` start one automatically if none is running. They replace a
+running one only when it is an older build.
+
+### `--daemon <MODE>`
+
+Every command that needs the daemon takes `--daemon`, which says whether it may start one or
+replace the one running. A host that cannot add flags sets `LEVIATH_DAEMON` to the same values.
+The flag wins over the variable.
+
+| Mode | No daemon running | A daemon is running |
+|---|---|---|
+| `attach` | Exits non-zero, starting nothing | Uses it, whatever its build |
+| `ensure` (default) | Starts one | Replaces it only when it is strictly older |
+| `replace` | Starts one | Replaces it unless it is the same build or newer |
+
+Strictly older means a lower version, or the same version built from an earlier commit. A build of
+the same commit, or one made without git, has no commit time to compare. `ensure` leaves those
+running, and `replace` replaces them. So after rebuilding `lev` from an edited working tree, run
+`lev daemon restart` or pass `--daemon replace` to put the daemon on the new build.
+
+`lev daemon start` takes `--daemon` too. There it only decides what happens to a running daemon,
+since starting one is what was asked.
 
 ## Running agents
 
@@ -1157,12 +1177,42 @@ With no action, runs the [daemon](/docs/daemon) in the foreground.
 |---|---|
 | `start` | Start it in the background. A no-op if one is already running |
 | `stop` | Shut it down |
-| `status` | Report whether it is running and how many agents it hosts |
+| `status` | Report whether it is running and how many agents it hosts. `--json` prints one object |
 | `restart` | Stop, then start, reloading persisted agents |
 | `install` | Register with the OS supervisor (launchd, or `systemd --user`) so it starts at login and restarts if it dies |
 | `uninstall` | Deregister it |
 
 `--socket <ID>` overrides the control socket path and works on every action.
+
+`lev daemon status --json` is for programs that embed `lev`. It never prints a token:
+
+```json
+{
+  "running": true,
+  "pid": 41230,
+  "exe": "/Users/me/.cargo/bin/lev",
+  "version": "0.6.4",
+  "build": "87296d6e",
+  "committed_at": 1791951523,
+  "runs": 3,
+  "supervised": { "installed": false, "path": "/Users/me/Library/LaunchAgents/dev.leviath.daemon.plist" },
+  "cli": { "exe": "/usr/local/bin/lev", "version": "0.6.4", "build": "93edfd0c", "committed_at": 1792050483 },
+  "standing": "older",
+  "spawn_would_replace": true
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `pid`, `exe` | The daemon's process and executable, as it reports them. `exe` is null from an older daemon |
+| `version`, `build`, `committed_at` | The daemon's build, from its build marker |
+| `cli` | The same for the `lev` that ran the command |
+| `standing` | `same`, `older`, `newer` or `unordered`, comparing the daemon with this `lev`. Null with no daemon |
+| `spawn_would_replace` | Whether a command in the default `--daemon ensure` mode would replace the daemon |
+| `supervised` | Whether the service file is installed, and where. Null where no supervisor is supported |
+
+`unordered` is another build of the same version that cannot be put in order, such as a build made
+without git. Fields are only ever added, never renamed.
 
 ### `lev serve`
 

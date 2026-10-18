@@ -108,6 +108,10 @@ pub struct DoctorArgs {
     /// Print the checks as JSON instead of a table.
     #[arg(long)]
     pub json: bool,
+
+    /// Whether the daemon check may start or replace the daemon.
+    #[command(flatten)]
+    pub daemon: crate::daemon::mode::DaemonModeArg,
 }
 
 /// How long the daemon check waits for its throwaway run to reach a terminal

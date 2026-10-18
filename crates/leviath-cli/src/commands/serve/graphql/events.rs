@@ -524,6 +524,9 @@ pub(crate) struct DaemonIdentity {
     pub(crate) build: String,
     /// Its process id.
     pub(crate) pid: i32,
+    /// The path of the executable it is running. Null from a daemon too old
+    /// to report it.
+    pub(crate) exe: Option<String>,
     /// Which tool credentials it can see, by name. Names only: no value ever
     /// crosses the wire.
     ///
@@ -636,6 +639,7 @@ fn daemon_link_changed(
             version: identity.version,
             build: identity.build,
             pid: i32::try_from(identity.pid).unwrap_or(i32::MAX),
+            exe: identity.exe,
             tool_env: identity.tool_env,
         }),
         restarted,

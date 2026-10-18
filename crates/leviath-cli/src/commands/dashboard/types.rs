@@ -13,9 +13,14 @@ use leviath_core::interaction;
 
 use ratatui::style::Color;
 
-/// Arguments for `lev dash`. It takes none; the dashboard is interactive.
-#[derive(Args)]
-pub struct DashboardArgs {}
+/// Arguments for `lev dash`. The dashboard is interactive, so the only one is
+/// what it may do about the daemon it watches.
+#[derive(Args, Default)]
+pub struct DashboardArgs {
+    /// Whether the dashboard may start or replace the daemon it watches.
+    #[command(flatten)]
+    pub daemon: crate::daemon::mode::DaemonModeArg,
+}
 
 /// What the detail content pane shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -48,6 +48,25 @@ fn a_shutdown_is_never_ordered_without_a_spawn() {
     }
 }
 
+/// A command that may not start a daemon is refused when none runs, and uses
+/// a running one like any other; one that may start one behaves as
+/// `start_steps` does.
+#[test]
+fn a_command_that_may_not_start_one_is_refused_only_when_none_runs() {
+    assert_eq!(
+        start_steps_for(false, false, false),
+        Err(crate::daemon::mode::NO_DAEMON)
+    );
+    assert_eq!(
+        start_steps_for(true, false, false),
+        Ok(StartSteps::SATISFIED)
+    );
+    assert_eq!(
+        start_steps_for(false, false, true),
+        Ok(start_steps(false, false))
+    );
+}
+
 #[test]
 fn a_recorded_pid_is_signalled_and_a_missing_one_propagates() {
     assert_eq!(stop_fallback(Some(4321)), StopFallback::Signal(4321));

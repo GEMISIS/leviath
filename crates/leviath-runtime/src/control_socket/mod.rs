@@ -480,6 +480,13 @@ pub struct DaemonIdentity {
     /// become a way to enumerate a daemon's secrets.
     #[serde(default)]
     pub tool_env: Option<Vec<String>>,
+    /// The path of the executable the daemon is running.
+    ///
+    /// A program that embeds `lev` can use it to run the daemon's own build
+    /// instead of whichever `lev` its `PATH` finds first. `None` from a
+    /// daemon too old to report it, or when the process could not tell.
+    #[serde(default)]
+    pub exe: Option<String>,
 }
 
 impl DaemonIdentity {
@@ -499,6 +506,9 @@ impl DaemonIdentity {
             build: build.into(),
             pid: std::process::id(),
             tool_env: None,
+            exe: std::env::current_exe()
+                .ok()
+                .map(|path| path.display().to_string()),
         }
     }
 
@@ -2553,6 +2563,8 @@ mod tests {
         assert_eq!(me.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(me.build, "abc123");
         assert_eq!(me.pid, std::process::id());
+        let exe = std::env::current_exe().expect("a test knows its own executable");
+        assert_eq!(me.exe, Some(exe.display().to_string()));
         assert_eq!(
             me.to_string(),
             format!(
@@ -2608,6 +2620,8 @@ mod tests {
         );
         let parsed: DaemonIdentity = serde_json::from_str(&older).expect("an older reply parses");
         assert_eq!(parsed.sees_tool_env("BRAVE_API_KEY"), None);
+        assert_eq!(parsed.exe, None, "an older daemon reports no executable");
+        assert!(json.contains(r#""exe":"#), "{json}");
     }
 
     /// Which credentials a process can see says nothing about which code it

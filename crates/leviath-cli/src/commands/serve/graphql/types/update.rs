@@ -34,6 +34,9 @@ pub(crate) struct DaemonStatus {
     pub(crate) build: Option<String>,
     /// Its process id.
     pub(crate) pid: Option<i32>,
+    /// The path of the executable it is running. Null before any daemon has
+    /// introduced itself, or from a daemon too old to report it.
+    pub(crate) exe: Option<String>,
     /// Which tool credentials the daemon can see, by name. Names only: no
     /// value crosses the wire.
     ///
@@ -68,6 +71,7 @@ impl DaemonStatus {
                 .daemon
                 .as_ref()
                 .map(|daemon| i32::try_from(daemon.pid).unwrap_or(i32::MAX)),
+            exe: link.daemon.as_ref().and_then(|daemon| daemon.exe.clone()),
             tool_env: link
                 .daemon
                 .as_ref()

@@ -405,6 +405,7 @@ fn every_machine_frame_converts_with_its_fields() {
                 assert_eq!(daemon.build, "test-build");
                 assert!(daemon.pid > 0);
                 assert!(daemon.version.len() > 1);
+                assert!(daemon.exe.is_some(), "the daemon names its executable");
             }
             (
                 MachineEventType::ConfigHealthChanged,
