@@ -30,13 +30,13 @@ impl StartSteps {
     };
 }
 
-/// What `lev` must do to reach "a daemon on the current build is running".
+/// What `lev` must do to reach "a daemon this command can use is running".
 ///
-/// A daemon on an older build is restarted rather than reused. It cannot pick
-/// up new code, and the alternative - talking to it anyway - means a `lev` that
-/// was just rebuilt silently drives the previous build's engine. The restart is
-/// safe because the daemon reloads its persisted agents on startup, so
-/// in-flight runs survive the swap.
+/// `stale` is whether the running daemon is to be replaced, which the
+/// command's [`DaemonMode`](super::mode::DaemonMode) decides from how its
+/// build stands to this one. A replacement is safe because the daemon reloads
+/// its persisted agents on startup, so in-flight runs survive the swap, but it
+/// is not free: a model call in flight is asked again.
 ///
 /// `stale` is only meaningful when `running`; a build marker left by a daemon
 /// that has since exited says nothing about what is about to be spawned.
@@ -51,6 +51,20 @@ pub fn start_steps(running: bool, stale: bool) -> StartSteps {
             shutdown_first: false,
             spawn: true,
         },
+    }
+}
+
+/// [`start_steps`] for a command that may or may not start a daemon of its
+/// own. One that may not (`--daemon attach`) is refused with
+/// [`NO_DAEMON`](super::mode::NO_DAEMON) when none runs, and starts nothing.
+pub fn start_steps_for(
+    running: bool,
+    stale: bool,
+    may_start: bool,
+) -> Result<StartSteps, &'static str> {
+    match (running, may_start) {
+        (false, false) => Err(super::mode::NO_DAEMON),
+        _ => Ok(start_steps(running, stale)),
     }
 }
 

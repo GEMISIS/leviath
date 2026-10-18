@@ -242,6 +242,30 @@ newer one running: use the newer `lev`, or run `lev daemon restart` with the one
 A `lev` from 0.6.4 or earlier cannot tell the two apart. It replaces any daemon that is not its own
 build, newer or not, and shows its own view of the home without a warning.
 
+### Attach, ensure or replace
+
+Older means strictly older: a lower version, or the same version built from an earlier commit. Two
+builds of one version that cannot be put in order are left alone. That covers a rebuild of the same
+commit, and a build made without git, which has no commit time. A `lev` from crates.io and one built
+from a checkout therefore share the daemon instead of restarting it back and forth.
+
+Every command that needs the daemon takes `--daemon <attach|ensure|replace>`, or reads
+`LEVIATH_DAEMON` when the flag is not given:
+
+| Mode | No daemon running | A daemon is running |
+|---|---|---|
+| `attach` | Fails with `no leviath daemon is running; start one with lev daemon start` | Uses it, whatever its build |
+| `ensure` (default) | Starts one | Replaces it only when it is strictly older |
+| `replace` | Starts one | Replaces it unless it is the same build or newer |
+
+A program that embeds `lev`, such as an editor or a desktop app, should use `attach`. It then never
+interrupts runs it did not start. A mismatch is still reported, on stderr and as
+`restartAdvised` on the GraphQL `DaemonStatus`. After rebuilding `lev` from an edited working tree,
+run `lev daemon restart` or pass `--daemon replace` to move the daemon onto the new build.
+
+`lev daemon status --json` says which daemon is running, which executable it is, how it stands to
+this `lev`, and whether a command would replace it. See [the CLI reference](/docs/cli).
+
 ### Going back
 
 To return to the release you upgraded from:

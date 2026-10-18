@@ -15,6 +15,13 @@ same list.
 
 ### Changed
 
+- A command that needs the daemon replaces a running one only when it is
+  strictly older: a lower version, or the same version from an earlier
+  commit. A rebuild of the same commit, or a build made without git, is left
+  running, so a crates.io `lev` and a git-built one no longer restart the
+  daemon back and forth. To have a rebuild restart the daemon as before, run
+  `lev daemon restart` or pass `--daemon replace`.
+
 - **Breaking.** A fan-out stage declares the workers it may hand items to.
   `[graph.stages.mode.fan_out]` names its `stage` and lists
   `workers_available`, each with a `name`, one of `stage`, `blueprint` or
@@ -253,6 +260,9 @@ same list.
 
 ### Fixed
 
+- Daemon builds compare versions the way semver does: `0.7.0-beta.1` is
+  older than `0.7.0`, so a release replaces a beta daemon instead of
+  deferring to it.
 - A fan-out stage runs only the worker its blueprint declares. A reviewer
   run's `fan_out` call named `"agent": "review"`, which replaced the stage's
   `review_worker`, and ten workers were queued for a blueprint that does not
@@ -678,6 +688,17 @@ same list.
 
 ### Added
 
+- `--daemon <attach|ensure|replace>` on `lev serve`, `lev agent-client`,
+  `lev run`, `lev doctor`, `lev dash` and `lev daemon start`, with
+  `LEVIATH_DAEMON` as the fallback for hosts that cannot add flags. `attach`
+  uses a running daemon whatever its build and never starts or replaces
+  one; with none running it exits non-zero and starts nothing.
+- `lev daemon status --json` prints the daemon's pid, executable and build,
+  this `lev`'s build, how the two stand, and whether a command would replace
+  the daemon. It never prints a token.
+- The daemon reports its executable path in its handshake. GraphQL
+  `DaemonStatus.exe` and `DaemonIdentity.exe` carry it, null from an older
+  daemon.
 - Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 on Anthropic
   (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`), Bedrock
   (`us.anthropic.claude-haiku-5-5` and the other profiles) and OpenRouter

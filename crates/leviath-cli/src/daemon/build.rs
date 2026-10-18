@@ -2,8 +2,8 @@
 //!
 //! A daemon writes its build to `daemon.build` when it starts (see
 //! [`super::setup::write_build_marker`]). A `lev` from another build reads it
-//! to decide two things: whether a spawn command may replace the daemon (only
-//! when it is older than this `lev`), and what to tell the person on every
+//! to decide two things: whether a spawn command may replace the daemon (see
+//! [`super::mode::DaemonMode`]), and what to tell the person on every
 //! command while the two differ, since each build reads the home its own way
 //! and a `lev` talking to the other build's daemon shows that build's view of
 //! it.
@@ -33,15 +33,35 @@ pub struct Build {
 }
 
 /// How a running daemon's build stands to this `lev`'s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Standing {
     /// The same build.
     Same,
-    /// The daemon is the older build, or one that cannot be told apart by
-    /// age: replacing it with this build's is what a spawn command does.
+    /// The daemon is the older build: a lower version, or the same version
+    /// built from an earlier commit. One that did not record its version is
+    /// from before markers carried one, so it is older too.
     Older,
     /// The daemon is newer than this `lev`, which must not replace it.
     Newer,
+    /// Another build of the same version that cannot be put in order: both
+    /// built from one commit (a working tree edited between them), or one
+    /// side does not know when its commit was made, as a build made without
+    /// git does not.
+    Unordered,
+}
+
+impl Standing {
+    /// How the daemon relates to this `lev`, in the words a message uses:
+    /// `older than`, `newer than`, and so on.
+    fn relation(self) -> &'static str {
+        match self {
+            Self::Same => "the same build as",
+            Self::Older => "older than",
+            Self::Newer => "newer than",
+            Self::Unordered => "another build of the same version as",
+        }
+    }
 }
 
 impl Build {
@@ -93,35 +113,83 @@ impl Build {
     ///
     /// Versions decide first, then commit times. A daemon that did not say
     /// its version is from before markers carried one, so it is older. Two
-    /// builds of one commit (a working tree edited between them) cannot be
-    /// told apart by age and count as older, so a rebuilt `lev` replaces the
-    /// daemon it rebuilt.
+    /// builds of one version whose commit times tie, or where either side
+    /// lacks one, are [`Standing::Unordered`]: neither is known to be older.
     pub fn standing(&self, cli: &Build) -> Standing {
         if self.id == cli.id {
             return Standing::Same;
         }
-        let by_version = match (&self.version, &cli.version) {
-            (Some(daemon), Some(cli)) => release(daemon).cmp(&release(cli)),
-            _ => Ordering::Less,
+        let (Some(daemon), Some(ours)) = (&self.version, &cli.version) else {
+            return Standing::Older;
         };
         let by_time = match (self.committed_at, cli.committed_at) {
             (Some(daemon), Some(cli)) => daemon.cmp(&cli),
-            _ => Ordering::Less,
+            _ => Ordering::Equal,
         };
-        match by_version.then(by_time) {
+        match Release::parse(daemon)
+            .cmp(&Release::parse(ours))
+            .then(by_time)
+        {
+            Ordering::Less => Standing::Older,
             Ordering::Greater => Standing::Newer,
-            _ => Standing::Older,
+            Ordering::Equal => Standing::Unordered,
         }
     }
 }
 
-/// A version's numbers, for comparing releases: `0.6.10` after `0.6.9`. A
-/// part that is not a number counts as 0.
-fn release(version: &str) -> Vec<u64> {
-    version
-        .split(['.', '-', '+'])
-        .map(|part| part.parse().unwrap_or(0))
-        .collect()
+/// A version, ordered the way semver orders releases: `0.6.10` after
+/// `0.6.9`, and a pre-release before its release, so `0.7.0-beta.1` comes
+/// before `0.7.0`. Build metadata after a `+` is ignored.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Release {
+    /// The major, minor and patch numbers. A part that is missing or is not
+    /// a number counts as 0.
+    core: [u64; 3],
+    /// Whether this is a release rather than a pre-release, which sorts it
+    /// after every pre-release of the same numbers.
+    released: bool,
+    /// The pre-release's dot-separated parts.
+    pre: Vec<PreReleasePart>,
+}
+
+/// One dot-separated part of a pre-release. A number sorts before a word,
+/// numbers by value and words by their text, as semver says.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PreReleasePart {
+    /// A part made only of digits.
+    Number(u64),
+    /// Any other part.
+    Word(String),
+}
+
+impl Release {
+    /// Read `version`. It never fails: what does not parse counts as 0.
+    fn parse(version: &str) -> Self {
+        let (version, _metadata) = version.split_once('+').unwrap_or((version, ""));
+        let (numbers, pre) = version.split_once('-').unwrap_or((version, ""));
+        let mut parts = numbers.split('.').map(|part| part.parse().unwrap_or(0));
+        let core = [(); 3].map(|()| parts.next().unwrap_or(0));
+        let pre: Vec<_> = pre
+            .split('.')
+            .filter(|part| !part.is_empty())
+            .map(PreReleasePart::parse)
+            .collect();
+        Self {
+            core,
+            released: pre.is_empty(),
+            pre,
+        }
+    }
+}
+
+impl PreReleasePart {
+    /// Read one part: digits are a number, anything else a word.
+    fn parse(part: &str) -> Self {
+        match part.parse() {
+            Ok(number) => Self::Number(number),
+            Err(_) => Self::Word(part.to_string()),
+        }
+    }
 }
 
 /// What a spawn command must do about the daemon whose marker reads
@@ -134,26 +202,24 @@ pub struct Replace {
     pub say: Option<String>,
 }
 
-/// Decide whether a spawn command replaces the running daemon, whose marker
-/// reads `marker` (`None` when it wrote none), with this build's: only one
-/// that is older. A newer one is left running; [`mixed_notice`], which every
-/// command but `lev daemon` prints first, has said what to do about it.
-pub fn replace(marker: Option<&str>, cli: &Build) -> Replace {
+/// Decide whether a spawn command in `mode` replaces the running daemon,
+/// whose marker reads `marker` (`None` when it wrote none), with this build's.
+/// A daemon left running while it is another build is reported by
+/// [`mixed_notice`], which every command but `lev daemon` prints first.
+pub fn replace(marker: Option<&str>, cli: &Build, mode: super::mode::DaemonMode) -> Replace {
     let daemon = Build::parse(marker.unwrap_or_default());
-    match daemon.standing(cli) {
-        Standing::Same | Standing::Newer => Replace {
-            replace: false,
-            say: None,
-        },
-        Standing::Older => Replace {
-            replace: true,
-            say: Some(format!(
-                "leviath daemon is {}, older than this lev ({}); restarting it on this \
-                 build...",
+    let standing = daemon.standing(cli);
+    let replace = mode.replaces(standing);
+    Replace {
+        replace,
+        say: replace.then(|| {
+            format!(
+                "leviath daemon is {}, {} this lev ({}); restarting it on this build...",
                 daemon.describe(),
+                standing.relation(),
                 cli.describe()
-            )),
-        },
+            )
+        }),
     }
 }
 
@@ -177,22 +243,21 @@ pub fn mixed_notice_here() -> Option<String> {
 }
 
 /// What `lev daemon status` says about the running daemon's build, whose
-/// marker reads `marker`, when it is not this `lev`'s: which is newer, and
+/// marker reads `marker`, when it is not this `lev`'s: how they stand, and
 /// what to do. `None` while they match or no daemon runs.
 pub fn status_line(running: bool, marker: Option<&str>, cli: &Build) -> Option<String> {
     let daemon = Build::parse(marker.unwrap_or_default());
-    let (newer, what_to_do) = match daemon.standing(cli) {
+    let standing = daemon.standing(cli);
+    let what_to_do = match standing {
         Standing::Same => return None,
-        Standing::Newer => (
-            "newer",
-            "use the newer lev, or `lev daemon restart` to run this one's build",
-        ),
-        Standing::Older => ("older", "`lev daemon restart` replaces it with this lev's"),
+        Standing::Newer => "use the newer lev, or `lev daemon restart` to run this one's build",
+        Standing::Older | Standing::Unordered => "`lev daemon restart` replaces it with this lev's",
     };
     running.then(|| {
         format!(
-            "build: {}, {newer} than this lev ({}); {what_to_do}",
+            "build: {}, {} this lev ({}); {what_to_do}",
             daemon.describe(),
+            standing.relation(),
             cli.describe()
         )
     })
@@ -207,23 +272,22 @@ pub fn status_line_here(running: bool) -> Option<String> {
 /// The warning for a daemon and a `lev` of different builds: which is which,
 /// what it means for what this command shows, and what to do.
 fn mixed_line(daemon: &Build, cli: &Build, standing: Standing) -> String {
-    let (daemon_is, what_to_do) = match standing {
-        Standing::Newer => (
-            "newer than",
-            "Use the newer lev, or run `lev daemon restart` with this one to replace the \
-             daemon with its own build",
-        ),
-        _ => (
-            "older than",
-            "Run `lev daemon restart` to replace it with this lev's build, or use the lev \
-             that matches it",
-        ),
+    let what_to_do = match standing {
+        Standing::Newer => {
+            "Use the newer lev, or run `lev daemon restart` with this one to replace the daemon \
+             with its own build"
+        }
+        _ => {
+            "Run `lev daemon restart` to replace it with this lev's build, or use the lev that \
+             matches it"
+        }
     };
     format!(
-        "warning: this daemon is {}, {daemon_is} this lev ({}). Each build reads the home its \
-         own way, so what this command shows may be the other build's view of it. {what_to_do}; \
-         run one version of lev and its daemon at a time.",
+        "warning: this daemon is {}, {} this lev ({}). Each build reads the home its own way, so \
+         what this command shows may be the other build's view of it. {what_to_do}; run one \
+         version of lev and its daemon at a time.",
         daemon.describe(),
+        standing.relation(),
         cli.describe()
     )
 }

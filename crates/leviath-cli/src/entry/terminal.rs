@@ -23,10 +23,10 @@ use crate::commands::dashboard::{CrosstermEventSource, DashboardArgs, TerminalSe
 /// source to the library's fully-tested `dashboard::execute_with`. Wiring
 /// only - the loop, rendering, input handling, and engine setup it composes
 /// are all exercised under `cargo test`.
-pub(super) async fn real_dashboard(_args: DashboardArgs) -> anyhow::Result<()> {
+pub(super) async fn real_dashboard(args: DashboardArgs) -> anyhow::Result<()> {
     // The dashboard is a client of the shared-world daemon: ensure it's running,
     // then observe/control it over the control socket.
-    ensure_daemon_running().await?;
+    ensure_daemon_running(args.daemon.resolve_here()?).await?;
     let control = long_lived_control_client()?;
     let mut setup = CrosstermSetup {
         viewport: Viewport::Fullscreen,

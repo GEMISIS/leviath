@@ -3261,6 +3261,11 @@ type DaemonIdentityOutput {
 	"Its process id."
 	pid: Int!
 	"""
+	The path of the executable it is running. Null from a daemon too old
+	to report it.
+	"""
+	exe: String
+	"""
 	Which tool credentials it can see, by name. Names only: no value ever
 	crosses the wire.
 	
@@ -3330,6 +3335,11 @@ type DaemonStatusOutput {
 	build: String
 	"Its process id."
 	pid: Int
+	"""
+	The path of the executable it is running. Null before any daemon has
+	introduced itself, or from a daemon too old to report it.
+	"""
+	exe: String
 	"""
 	Which tool credentials the daemon can see, by name. Names only: no
 	value crosses the wire.

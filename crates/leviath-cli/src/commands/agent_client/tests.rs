@@ -394,6 +394,7 @@ inputs = [{ name = "task", type = "text", required = true, binds = [{ region = "
     )
     .unwrap();
     let args = AgentClientArgs {
+        daemon: Default::default(),
         agent: Some(dir.to_string_lossy().to_string()),
         yolo: None,
         no_seed_commands: false,

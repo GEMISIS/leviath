@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn dashboard_args_can_be_constructed() {
-        let _args = DashboardArgs {};
+        let _args = DashboardArgs::default();
     }
 
     /// The poller publishes a round whether or not the daemon answered, and

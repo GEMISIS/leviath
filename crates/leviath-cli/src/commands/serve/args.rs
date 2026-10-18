@@ -127,4 +127,8 @@ pub struct ServeArgs {
     /// timeout. The websocket routes are never timed.
     #[arg(long, value_name = "SECS")]
     pub request_timeout_secs: Option<u64>,
+
+    /// Whether this server may start or replace the daemon it serves.
+    #[command(flatten)]
+    pub daemon: crate::daemon::mode::DaemonModeArg,
 }

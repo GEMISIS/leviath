@@ -252,7 +252,7 @@ impl RiskyExecutors for RealExecutors {
         }
         // The HTTP API is a gateway to the shared-world daemon: ensure it's
         // running, then serve, routing agent actions through its control socket.
-        ensure_daemon_running().await?;
+        ensure_daemon_running(args.daemon.resolve_here()?).await?;
         commands::serve::execute(
             args,
             long_lived_control_client()?,
@@ -270,7 +270,7 @@ impl RiskyExecutors for RealExecutors {
         // agent actions through its control socket. The protocol loop
         // (`agent_client::serve_over`) is fully unit-tested over an in-memory
         // duplex; only the real stdio + socket wiring lives here.
-        ensure_daemon_running().await?;
+        ensure_daemon_running(args.daemon.resolve_here()?).await?;
         // The directory `lev agent-client` was launched from is the default
         // working dir for sessions whose `session/new` omits `cwd`.
         let default_cwd = std::env::current_dir()
@@ -291,9 +291,11 @@ impl RiskyExecutors for RealExecutors {
         use commands::daemon::DaemonAction;
         match args.action {
             None => real_daemon(args).await,
-            Some(DaemonAction::Start) => real_daemon_start().await,
+            Some(DaemonAction::Start(start)) => {
+                real_daemon_start(start.daemon.resolve_here()?).await
+            }
             Some(DaemonAction::Stop) => real_daemon_stop().await,
-            Some(DaemonAction::Status) => real_daemon_status().await,
+            Some(DaemonAction::Status(status)) => real_daemon_status(status).await,
             Some(DaemonAction::Restart) => real_daemon_restart().await,
             Some(DaemonAction::Install) => real_daemon_install(),
             Some(DaemonAction::Uninstall) => real_daemon_uninstall(),
@@ -447,6 +449,9 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     // No PATH means the current directory, which is what `find_manifest`'s
     // directory branch already handles and what the docs have always promised.
     let path = args.path.as_deref().unwrap_or(".");
+    // Read first, so a mistyped LEVIATH_DAEMON stops the run before anything
+    // else happens.
+    let mode = args.daemon.resolve_here()?;
     let workdir = commands::run::effective_workdir(args.workdir, std::env::current_dir()?)?;
     // Confirm a workdir an agent probably should not be pointed at. Before
     // resolving the task, so a cancelled run has not opened an editor first;
@@ -480,7 +485,7 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     // The daemon upgrades an installed blueprint of an earlier release as it
     // starts, so that one starts it, and waits, before it is read.
     if commands::run::installed_old_format(path) {
-        ensure_daemon_running().await?;
+        ensure_daemon_running(mode).await?;
     }
     // Read here, where the paths the user typed still mean what they meant.
     let parts = commands::run::attach::attach_all(&args.attach, &std::env::current_dir()?)?;
@@ -505,7 +510,7 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     // After the resolve: no `--task` opens an editor a person can sit in for
     // twenty minutes, and a run that was never going to happen (a bad path,
     // a typo'd region) should not start a daemon.
-    ensure_daemon_running().await?;
+    ensure_daemon_running(mode).await?;
     crate::daemon::client::send_spawn_batch(&control_client()?, spawn_args, args.count, args.json)
         .await
 }
@@ -526,9 +531,12 @@ async fn real_doctor(args: commands::doctor::DoctorArgs) -> anyhow::Result<()> {
     if args.no_daemon || args.offline {
         return commands::doctor::execute(args, DaemonTarget::Skip).await;
     }
-    let started = ensure_daemon_running()
-        .await
-        .and_then(|()| control_client());
+    let started = match args.daemon.resolve_here() {
+        Ok(mode) => ensure_daemon_running(mode)
+            .await
+            .and_then(|()| control_client()),
+        Err(e) => Err(e),
+    };
     match started {
         Ok(client) => commands::doctor::execute(args, DaemonTarget::Client(&client)).await,
         Err(e) => commands::doctor::execute(args, DaemonTarget::Unavailable(e.to_string())).await,

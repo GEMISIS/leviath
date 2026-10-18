@@ -7,23 +7,35 @@ use tracing::info;
 
 use super::{LOG_TARGET, control_client};
 use crate::commands;
+use crate::daemon::mode::DaemonMode;
 use crate::daemon::readiness::poll_until;
 use crate::daemon::startup_view::StartupView;
 
-/// Ensure a daemon is listening on the control port, auto-starting a detached
-/// `lev daemon` process if none is. Best-effort with a bounded wait for the
-/// port to become reachable. The reachability check is the tested
+/// Ensure a daemon this command can use is listening on the control port, as
+/// `mode` allows: `attach` only uses a running one, and the other modes start a
+/// detached `lev daemon` process if none is. Best-effort with a bounded wait
+/// for the port to become reachable. The reachability check is the tested
 /// [`leviath_runtime::control_socket::is_daemon_running`]; only the real
 /// subprocess spawn + poll live here.
-pub(super) async fn ensure_daemon_running() -> anyhow::Result<()> {
+pub(super) async fn ensure_daemon_running(mode: DaemonMode) -> anyhow::Result<()> {
+    bring_up_daemon(mode, mode.starts()).await
+}
+
+/// [`ensure_daemon_running`], with whether it may start a daemon given apart
+/// from the mode, for `lev daemon start`, which always may.
+async fn bring_up_daemon(mode: DaemonMode, may_start: bool) -> anyhow::Result<()> {
     use crate::daemon::{build, setup::control_address, setup::read_build_marker};
     use leviath_runtime::control_socket::is_daemon_running;
     let id = control_address()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
     let running = is_daemon_running(&id);
-    // Only an older daemon is replaced; a newer one is left running.
-    let decision = build::replace(read_build_marker().as_deref(), &build::Build::current());
-    let steps = crate::daemon::lifecycle::start_steps(running, decision.replace);
+    let decision = build::replace(
+        read_build_marker().as_deref(),
+        &build::Build::current(),
+        mode,
+    );
+    let steps = crate::daemon::lifecycle::start_steps_for(running, decision.replace, may_start)
+        .map_err(anyhow::Error::msg)?;
     if !steps.spawn {
         control_client()?.wait_until_started().await?;
         return Ok(());
@@ -61,9 +73,10 @@ pub(super) async fn ensure_daemon_running() -> anyhow::Result<()> {
     );
 }
 
-/// `lev daemon start`: auto-start a detached daemon if none is running.
-pub(super) async fn real_daemon_start() -> anyhow::Result<()> {
-    ensure_daemon_running().await?;
+/// `lev daemon start`: auto-start a detached daemon if none is running. The
+/// mode decides only whether a running one of another build is replaced.
+pub(super) async fn real_daemon_start(mode: DaemonMode) -> anyhow::Result<()> {
+    bring_up_daemon(mode, true).await?;
     println!("leviath daemon is running");
     Ok(())
 }
@@ -103,14 +116,17 @@ pub(super) async fn real_daemon_stop() -> anyhow::Result<()> {
     }
 }
 
-/// `lev daemon status`: report whether the daemon is running and its agent count.
-pub(super) async fn real_daemon_status() -> anyhow::Result<()> {
+/// `lev daemon status`: report whether the daemon is running and its agent
+/// count, as prose or, with `--json`, as the tested
+/// [`crate::daemon::status_report`] object.
+pub(super) async fn real_daemon_status(args: commands::daemon::StatusArgs) -> anyhow::Result<()> {
     use leviath_runtime::control_socket::{ControlResponse, is_daemon_running};
     let id = crate::daemon::setup::control_address()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
     let running = is_daemon_running(&id);
+    let client = control_client()?;
     let count = if running {
-        match control_client()?.list().await {
+        match client.list().await {
             Ok(ControlResponse::List { runs, .. }) => runs.len(),
             _ => 0,
         }
@@ -119,8 +135,26 @@ pub(super) async fn real_daemon_status() -> anyhow::Result<()> {
     };
     // Supervision is best-effort information: on a platform with no supported
     // supervisor there is simply nothing to report.
-    let supervision = resolve_service_unit()
-        .ok()
+    let unit = resolve_service_unit().ok();
+    if args.json {
+        use crate::daemon::status_report::{Observed, report, to_json};
+        let observed = Observed {
+            running,
+            marker: crate::daemon::setup::read_build_marker(),
+            identity: client.link().daemon,
+            runs: count,
+            supervised: unit.map(|unit| (unit.path.exists(), unit.path)),
+            cli_exe: std::env::current_exe()
+                .ok()
+                .map(|path| path.display().to_string()),
+        };
+        println!(
+            "{}",
+            to_json(&report(observed, &crate::daemon::build::Build::current()))
+        );
+        return Ok(());
+    }
+    let supervision = unit
         .map(|unit| commands::daemon_service::format_supervision(unit.path.exists(), &unit.path));
     let build = crate::daemon::build::status_line_here(running);
     for line in crate::daemon::lifecycle::status_lines(running, count, supervision) {
@@ -134,7 +168,7 @@ pub(super) async fn real_daemon_status() -> anyhow::Result<()> {
 /// which reloads persisted agents on startup.
 pub(super) async fn real_daemon_restart() -> anyhow::Result<()> {
     real_daemon_stop().await?;
-    real_daemon_start().await
+    real_daemon_start(DaemonMode::Replace).await
 }
 
 /// Resolve the platform's service definition for this installation. Wiring only -

@@ -60,6 +60,10 @@ pub struct RunArgs {
     #[command(flatten)]
     pub regions: RunInputs,
 
+    /// Whether this run may start or replace the daemon it goes to.
+    #[command(flatten)]
+    pub daemon: crate::daemon::mode::DaemonModeArg,
+
     /// Model override (`provider/model` or a bare model name).
     #[arg(short, long)]
     pub model: Option<String>,
