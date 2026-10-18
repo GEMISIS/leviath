@@ -723,6 +723,12 @@
             "type": "string"
           },
           "description": "A program, optionally with the subcommand that narrows it: \"git status\", never \"git\" or \"cargo test --lib\"."
+        },
+        "outside_workdir": {
+          "type": "string",
+          "enum": ["ask", "deny"],
+          "default": "ask",
+          "description": "A safe-listed command naming a path outside the workdir and [read_paths] is not pre-approved: \"ask\" falls back to the shell's policy, \"deny\" refuses it, even under --yolo."
         }
       }
     },

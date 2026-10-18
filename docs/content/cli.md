@@ -1619,6 +1619,11 @@ to "why did it not ask me".
 |---|---|
 | `--agent <NAME>` | Include that agent's `[agent_safe_commands.<name>]` entries |
 | `--json` | Emit the inventory as JSON |
+| `--check <COMMAND>` | Explain, key by key, whether that shell line would run unprompted here |
+
+`--check` names the entry that covers each part of the line, or says why it asks. A part that
+names a path outside the current directory is reported as outside the workdir, with the path, and
+with what `[safe_commands] outside_workdir` does about it.
 
 There is no `list` or `clear`: nothing is persisted. A grant made at a prompt dies with the run that
 made it, so the only durable state is the config this reports. See

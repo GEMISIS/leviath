@@ -144,6 +144,8 @@ pub fn tool_required_capabilities(canonical_name: &str) -> &'static [ToolCapabil
         | "write_file"
         | "edit_file"
         | "list_dir"
+        | "search_files"
+        | "glob"
         | "install_self_tool"
         | "install_global_tool" => &[ToolCapability::FileSystem],
         _ => &[],

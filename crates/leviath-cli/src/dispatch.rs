@@ -1303,15 +1303,23 @@ mod tests {
             async {
                 // Both spellings: with an agent named, and without, which is
                 // the form that reports only what every agent gets.
-                let args = commands::approvals::ApprovalsArgs {
+                let args = |check: Option<&str>| commands::approvals::ApprovalsArgs {
                     command: commands::approvals::ApprovalsCommand::Safe(
                         commands::approvals::SafeArgs {
                             agent: Some("coder".to_string()),
                             json: true,
+                            check: check.map(str::to_string),
                         },
                     ),
                 };
-                dispatch(Commands::Approvals(args), &MockRisky::default()).await
+                let listed = dispatch(Commands::Approvals(args(None)), &MockRisky::default()).await;
+                assert!(listed.is_ok());
+                // `--check` explains one line instead of listing the inventory.
+                dispatch(
+                    Commands::Approvals(args(Some("cat /etc/hosts"))),
+                    &MockRisky::default(),
+                )
+                .await
             },
         )
         .await;
@@ -1337,6 +1345,7 @@ mod tests {
                         commands::approvals::SafeArgs {
                             agent: None,
                             json: false,
+                            check: None,
                         },
                     ),
                 };

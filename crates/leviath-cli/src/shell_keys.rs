@@ -145,6 +145,10 @@ struct Word {
 struct Segment {
     words: Vec<Word>,
     writes: Vec<Word>,
+    /// What a `<` redirect reads. Not a write, so no key names it, but a read
+    /// is a path operand like any other: `cat < /etc/hosts` reads the same
+    /// file `cat /etc/hosts` does. See [`operands`].
+    reads: Vec<Word>,
 }
 
 /// What a redirect writes to.
@@ -311,14 +315,20 @@ fn keys_from_segments(segments: &[Segment]) -> Vec<String> {
 /// pass against a fix that emitted the right key and still let it be covered,
 /// which is exactly how the safe-list escapes went unnoticed.
 ///
+/// `outside` is what [`outside_workdir`] found: keys whose segment names a path
+/// outside the workdir. The safe list does not cover those, however it reads:
+/// `cat` being safe means reading the project, not `/etc/hosts`. A grant still
+/// covers one, because a grant is a person approving exactly that key.
+///
 /// `&dyn Fn` rather than a generic: one instantiation, so the coverage gate sees
 /// one set of regions instead of one per call site.
 pub(crate) fn all_covered(
     keys: &[String],
+    outside: &[String],
     safe: &dyn Fn(&str) -> bool,
     granted: &dyn Fn(&str) -> bool,
 ) -> bool {
-    !keys.is_empty() && uncovered_keys(keys, safe, granted).is_empty()
+    !keys.is_empty() && uncovered_keys(keys, outside, safe, granted).is_empty()
 }
 
 /// The keys in `keys` that nothing covers yet, in order: what a prompt for the
@@ -331,11 +341,15 @@ pub(crate) fn all_covered(
 /// over again what the safe list already gives.
 pub(crate) fn uncovered_keys(
     keys: &[String],
+    outside: &[String],
     safe: &dyn Fn(&str) -> bool,
     granted: &dyn Fn(&str) -> bool,
 ) -> Vec<String> {
     keys.iter()
-        .filter(|k| !(safe(k) || safe(program_of(k)) || granted(k)))
+        .filter(|k| {
+            let safe_here = !outside.contains(k) && (safe(k) || safe(program_of(k)));
+            !(safe_here || granted(k))
+        })
         .cloned()
         .collect()
 }
@@ -612,7 +626,7 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
                 lex.swallow = Some(match (c, dup, read_write) {
                     (_, true, _) => Swallow::Other,
                     ('>', _, _) | (_, _, true) => Swallow::Write,
-                    _ => Swallow::Other,
+                    _ => Swallow::Read,
                 });
             }
             '&' if chars.peek() == Some(&'>') => {
@@ -777,6 +791,8 @@ struct Lexer {
     current: Vec<Word>,
     /// Write targets seen in the segment being accumulated.
     writes: Vec<Word>,
+    /// Read targets seen in the segment being accumulated.
+    reads: Vec<Word>,
     word: String,
     in_word: bool,
     literal: bool,
@@ -791,12 +807,13 @@ struct Lexer {
 
 /// What the word a redirect claimed is going to be used for.
 ///
-/// Only a write needs naming. A read redirect grants nothing a program could
-/// not already do - `cat` reads any file the user can - and a descriptor
-/// duplication names no file at all.
+/// Only a write needs a key. A read redirect is kept apart so the workdir
+/// check sees the file it opens, and a descriptor duplication names no file
+/// at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Swallow {
     Write,
+    Read,
     Other,
 }
 
@@ -821,6 +838,7 @@ impl Lexer {
             };
             match self.swallow.take() {
                 Some(Swallow::Write) => self.writes.push(word),
+                Some(Swallow::Read) => self.reads.push(word),
                 Some(Swallow::Other) => {}
                 None => self.current.push(word),
             }
@@ -845,6 +863,7 @@ impl Lexer {
         self.segments.push(Segment {
             words: std::mem::take(&mut self.current),
             writes: std::mem::take(&mut self.writes),
+            reads: std::mem::take(&mut self.reads),
         });
     }
 
@@ -907,11 +926,17 @@ fn take_substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option
 /// is what made `PATH=/tmp/evil ls` read as a plain `ls` and ride the safe list
 /// into an unprompted execution of somebody else's binary.
 fn segment_key(words: &[Word]) -> SegmentKey {
-    let (mut keys, rest) = match strip_to_program(words) {
-        Stripped::NothingRuns(keys) => return SegmentKey::from_keys(keys),
-        Stripped::Unreadable => return SegmentKey::Unreadable,
-        Stripped::Program { env_keys, words } => (env_keys, words),
-    };
+    match strip_to_program(words) {
+        Stripped::NothingRuns(keys) => SegmentKey::from_keys(keys),
+        Stripped::Unreadable => SegmentKey::Unreadable,
+        Stripped::Program { env_keys, words } => SegmentKey::Keys(program_keys(env_keys, words)),
+    }
+}
+
+/// The keys of a segment that runs a program: what it bound in front of the
+/// program (`env_keys`), then the program, folded with its second word when
+/// that word narrows it.
+fn program_keys(mut keys: Vec<String>, rest: &[Word]) -> Vec<String> {
     let program = &rest[0];
     match rest.get(1) {
         Some(arg) if folds_into_key(&program.text, arg) => {
@@ -919,7 +944,7 @@ fn segment_key(words: &[Word]) -> SegmentKey {
         }
         _ => keys.push(program.text.clone()),
     }
-    SegmentKey::Keys(keys)
+    keys
 }
 
 /// A segment with its leading keywords and assignments taken off, down to the
@@ -1117,6 +1142,9 @@ fn folds_into_key(program: &str, arg: &Word) -> bool {
         && !arg.text.starts_with('-')
         && !arg.text.starts_with(|c: char| c.is_ascii_digit())
 }
+
+mod operands;
+pub(crate) use operands::{Outside, outside_workdir};
 
 #[cfg(test)]
 mod tests;

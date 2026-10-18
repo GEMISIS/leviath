@@ -1,6 +1,6 @@
 [blueprint]
 name = "coder"
-version = "0.3.0"
+version = "0.3.1"
 description = "Coding agent: discover the repo, plan with your sign-off, optionally spike, implement, and review, with stuck detection and graph-based recovery"
 
 # discover -> plan -> (prototype) -> implement -> review -> summary
@@ -114,12 +114,12 @@ regions = [
 name = "discover"
 description = "Map the codebase and synthesize a verification workflow"
 model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
-tools = ["read_file", "list_dir", "bash", "context_write", "context_read"]
+tools = ["read_file", "list_dir", "search_files", "glob", "bash", "context_write", "context_read"]
 max_iterations = 8
 max_revisits = 2
 # Scan output is bulky and read once, so it goes to clearable scratch, not
 # the knowledge regions the later stages read.
-tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase", bash = "scratch" }, keep_results = true }
+tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase", search_files = "codebase", glob = "codebase", bash = "scratch" }, keep_results = true }
 system_prompt = """
 Before any planning, answer two questions about THIS repository: what is it, and
 how do I verify work in it? Do not plan or edit here.
@@ -132,8 +132,9 @@ Start from what you already have - do not rediscover it:
   `.github/copilot-instructions.md` exist, read them and treat them as
   authoritative - they were written for exactly this purpose.
 
-Then fill the gaps with list_dir/read_file, and use bash ONLY to interrogate the
-build/test tooling read-only (e.g. `pytest --collect-only -q`, `cargo test
+Then fill the gaps with glob, search_files, list_dir and read_file. Prefer
+search_files and glob to grep and find in bash: they stay inside the project and
+need no approval. Use bash ONLY to interrogate the build/test tooling read-only (e.g. `pytest --collect-only -q`, `cargo test
 --list`, `npm run`). Do not modify anything. You have few iterations - spend
 them on the area the task touches, not a full tour.
 
@@ -204,13 +205,13 @@ model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" },
 # unattended run drops them with the rest of the blocking tools, so `--yolo`
 # plans and proceeds instead of parking on a question nobody is there to
 # answer. Require them if you would rather an unattended run stop and wait.
-tools = ["read_file", "list_dir", "ask_user_text", "ask_user_choice", "edit_document", "context_read"]
+tools = ["read_file", "list_dir", "search_files", "glob", "ask_user_text", "ask_user_choice", "edit_document", "context_read"]
 max_iterations = 20
 max_revisits = 6
 tool_permissions = { read_file = "allow", list_dir = "allow", ask_user_text = "allow", ask_user_choice = "allow", edit_document = "allow" }
 # Only passive reads feed the persistent codebase region; everything else
 # stays in the conversation.
-tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase" }, keep_results = true }
+tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase", search_files = "codebase", glob = "codebase" }, keep_results = true }
 # `allow_complete` stays off. "Abort" is handled by the engine (see
 # `abort_options` on the plan_approval point below), and letting the model end
 # the run from here is how a model that had created a file during `discover`
@@ -242,7 +243,8 @@ Your job:
 1. Read `discovery` and `workflow` first - the discover stage already mapped this
    codebase and chose how the work will be verified. `architecture` holds design
    docs and `constraints` any caller-supplied limits (tech stack, timeline,
-   budget). Explore with list_dir/read_file only to fill real gaps left by those.
+   budget). Explore with glob, search_files, list_dir and read_file only to fill
+   real gaps left by those.
 2. Think through the implementation approach, respecting the constraints.
 3. Produce a concise, numbered plan:
    - Files to create or modify
@@ -348,10 +350,10 @@ when = "dead_end"
 name = "prototype"
 description = "Spike the riskiest assumption in the approved plan before executing it"
 model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
-tools = ["read_file", "list_dir", "write_file", "edit_file", "bash", "context_write", "context_append", "context_read"]
+tools = ["read_file", "list_dir", "search_files", "glob", "write_file", "edit_file", "bash", "context_write", "context_append", "context_read"]
 max_iterations = 15
 max_revisits = 2
-tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase", bash = "test_results", write_file = "implementation", edit_file = "implementation" }, keep_results = true }
+tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase", search_files = "codebase", glob = "codebase", bash = "test_results", write_file = "implementation", edit_file = "implementation" }, keep_results = true }
 transition_prompt = """
 Spike complete. Based on what you actually observed:
 - Respond with `implement` if a hypothesis held up - you now know where the
@@ -367,7 +369,7 @@ the smallest thing that actually runs.
 
 1. State the assumption in a sentence.
 2. Prove or disprove it: a throwaway script, a failing test that reproduces the
-   bug, a bash one-liner that greps for where the behavior really lives. Use the
+   bug, a search_files call that finds where the behavior really lives. Use the
    VERIFY command from `workflow` - do not invent your own. For a BUGFIX the
    spike IS the reproduction; do not move on without one.
 3. Append the result to the `prototypes` region (context_append): the
@@ -423,7 +425,7 @@ when = "dead_end"
 name = "implement"
 description = "Write code according to the approved plan"
 model = { models = [{ model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
-tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_text", "ask_user_confirm", "context_append", "context_read"]
+tools = ["write_file", "read_file", "edit_file", "list_dir", "search_files", "glob", "bash", "ask_user_text", "ask_user_confirm", "context_append", "context_read"]
 max_iterations = 50
 max_revisits = 5
 # The ask_user_* tools suspend the run until a person answers, which is
@@ -438,7 +440,7 @@ allow_blocking_tools = true
 # write_file and edit_file confirmations persist in `implementation`, beside
 # the hand-written `changelog`: a mechanical record of every file touched that
 # survives `conversation` eviction and satisfies the edge gates below.
-tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase", bash = "test_results", write_file = "implementation", edit_file = "implementation" }, keep_results = true }
+tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase", search_files = "codebase", glob = "codebase", bash = "test_results", write_file = "implementation", edit_file = "implementation" }, keep_results = true }
 system_prompt = """
 You are the implementation stage. The plan in the `plan` region has been approved.
 Execute it step by step:
@@ -548,13 +550,13 @@ when = "dead_end"
 name = "review"
 description = "Review the implementation and evaluate code quality"
 model = { models = [{ model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
-tools = ["read_file", "list_dir", "bash", "context_read"]
+tools = ["read_file", "list_dir", "search_files", "glob", "bash", "context_read"]
 max_iterations = 20
 max_revisits = 3
 tool_permissions = { read_file = "allow", list_dir = "allow", bash = "ask" }
 # Test re-runs persist to `test_results`; a pointer and a preview stay in the
 # conversation.
-tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase", bash = "test_results" }, keep_results = true }
+tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase", search_files = "codebase", glob = "codebase", bash = "test_results" }, keep_results = true }
 transition_prompt = """
 Review complete. Based on your findings:
 - If there are issues that need fixing, respond with: implement
@@ -628,13 +630,13 @@ hint = "The work is done and reviewed"
 name = "reassess"
 description = "Step back after no progress: diagnose the dead end and re-plan"
 model = { models = [{ model = "claude-opus-5-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "devstral:24b" }, { provider = "ollama", model = "qwen3.5:9b" }] }
-tools = ["read_file", "list_dir", "bash", "context_write", "context_append", "context_read"]
+tools = ["read_file", "list_dir", "search_files", "glob", "bash", "context_write", "context_append", "context_read"]
 max_iterations = 8
 max_revisits = 2
 tool_permissions = { read_file = "allow", list_dir = "allow", bash = "ask" }
 # Diagnostic bash output (git diff, greps, test re-runs) persists to
 # test_results.
-tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase", bash = "test_results" }, keep_results = true }
+tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase", search_files = "codebase", glob = "codebase", bash = "test_results" }, keep_results = true }
 system_prompt = """
 You are NOT here to write code - you have no write tools on purpose. You were
 pulled out of implementation because you stopped making progress. The
@@ -649,7 +651,7 @@ Work through this in order:
    `implementation` are your evidence. The bug is almost always in the assumed
    column.
 3. Find the wrong assumption. The most common one by far is that you have been
-   editing the wrong file. Use list_dir/read_file and bash (grep) to confirm
+   editing the wrong file. Use search_files, glob and read_file to confirm
    WHERE the behavior under test actually lives before changing anything else.
 4. If an earlier version worked and a later edit broke it, say so explicitly and
    make reverting to that state step 1 of the new plan. Use bash (git diff /
@@ -694,7 +696,7 @@ when = "dead_end"
 name = "error_recovery"
 description = "Diagnose and resolve errors encountered during implementation"
 model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
-tools = ["read_file", "bash", "context_append"]
+tools = ["read_file", "search_files", "glob", "bash", "context_append"]
 max_iterations = 10
 max_revisits = 2
 system_prompt = """

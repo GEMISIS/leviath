@@ -47,6 +47,30 @@ tool's name. See [installing a tool from a run](/docs/rhai-tools#installing-a-to
 > `read_files` is cheaper than repeated `read_file` calls; reach for it after `list_dir` when you
 > already know several paths you need.
 
+## Search
+
+Find code without a shell. Both tools run inside the daemon, so nothing is executed.
+
+| Tool | Purpose | Arguments |
+| --- | --- | --- |
+| `search_files` | Search file contents and return `path:line: text` lines. | `pattern`, plus optional `path`, `glob`, `regex`, `case_insensitive`, `context_lines`, `max_results`, `include_ignored` |
+| `glob` | List paths matching a pattern such as `src/**/mod.rs`, sorted. | `pattern`, plus optional `path`, `max_results`, `include_ignored` |
+
+Paths come back relative to the working directory. `pattern` is a regular expression unless
+`regex` is `false`. In `search_files`, a `glob` with no `/` (`*.rs`) matches file names at any
+depth, and one with a `/` matches the path under `path`.
+
+Both tools skip what `.gitignore`, `.ignore` or a leading dot hides, and never enter `.git`. Set
+`include_ignored` to search the rest. `search_files` skips binary files and reads at most 1 MiB of
+each file. It returns at most 64 KiB and 200 matching lines by default. Whenever a cap cuts the
+answer short, a note at the end says so.
+
+They read exactly what `read_file` may read. Every root, and every file the walk meets, must
+resolve inside the working directory or a granted [`[read_paths]`](/docs/security#reading-outside-the-workdir)
+root. A symlink pointing anywhere else is skipped. Both default to `allow` and count as reads for
+taint tracking, like `list_dir`. That makes them the way to give a read-only stage search without
+giving it `shell`.
+
 ## Shell
 
 | Tool | Purpose | Arguments |
@@ -129,6 +153,48 @@ never reaches its delimiter. The other is an **unquoted** heredoc (`<<EOF`, not 
 body contains a `$(...)` or backtick the shell would expand and run. Quoting the delimiter makes
 the body pure data. On Windows there are no heredocs, so the construct stays unreadable there and
 is refused.
+
+### Where a safe-listed read may look
+
+The default [safe list](/docs/configuration) lets `cat`, `head`, `grep`, `ls`
+and the read-only `git` commands run without a prompt. That holds only while every path they are
+handed stays inside the working directory or a granted `[read_paths]` root. It is the check
+`read_file` makes, applied to each word that could name a file.
+
+| Command | Pre-approved? |
+| --- | --- |
+| `cat src/main.rs`, `grep -rn foo .`, `git log -- src` | Yes |
+| `cat /etc/hosts`, `grep -r key ~`, `head ../other/secret` | No |
+| `cd / && cat etc/passwd`, `git -C /elsewhere log` | No |
+| `cat link`, where `link` is a symlink pointing outside | No |
+
+A word counts as a path when it contains `/`, starts with `~` or `..`, names a symlink, or is a
+`cd` or `git -C` target. Flag values count too (`--git-dir=/x`, `-f/etc/list`). A `cd` that leaves
+the working directory makes everything after it on the line uncovered. A `$VAR` cannot be checked,
+so it counts as outside. Programs that open no file named in their arguments, such as `echo`, are
+not checked.
+
+A command that fails the check is not refused. It falls back to the shell's own policy, which asks
+by default. To refuse it instead, even under `--yolo`, set `outside_workdir = "deny"`:
+
+```toml
+# config.toml
+[safe_commands]
+outside_workdir = "deny"
+```
+
+A blueprint or a single stage can set the same thing as a permission, which may only tighten:
+
+```toml
+[[graph.stages]]
+name = "investigate"
+tools = ["read_file", "search_files", "glob", "shell"]
+tool_permissions = { outside_workdir = "deny" }
+```
+
+The check reads words, not the shell's mind. A program that takes paths from a file (`grep -f
+list`) is held only to where that list lives. Every case it cannot place counts as outside, so a
+miss costs a prompt, never a silent read.
 
 ### How much output comes back
 
@@ -449,7 +515,7 @@ With nothing configured, tools fall back to these:
 
 | Tool | Default |
 |---|---|
-| `read_file`, `read_files`, `list_dir` | `allow` |
+| `read_file`, `read_files`, `list_dir`, `search_files`, `glob` | `allow` |
 | `write_file`, `edit_file`, `shell` (and its `bash` alias) | `ask` |
 | `install_self_tool` | `ask` |
 | `install_global_tool` | `ask` |

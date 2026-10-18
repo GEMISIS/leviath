@@ -35,6 +35,19 @@ same list.
   down. Where the job forbids that, the daemon starts inside it and the log
   warns. To keep the daemon in the job, start it yourself inside the job
   first.
+- A safe-listed shell command (`DEFAULT_SAFE_SHELL` or `[safe_commands]`)
+  now runs without a prompt only when every path it is handed stays inside
+  the workdir or a granted `[read_paths]` root. `cat src/main.rs` and
+  `git log -- src` still run. `cat /etc/hosts`, `grep -r key ~`,
+  `cd / && cat etc/passwd`, `git -C /elsewhere log`, a `$VAR` operand, or a
+  symlink pointing outside fall back to the shell's policy, which asks by
+  default. A `cd` out of the workdir uncovers the rest of the line, and
+  command seeds follow the same rule. New `[safe_commands] outside_workdir =
+  "deny"` refuses such a command instead, even under `--yolo`. A blueprint
+  or stage can set it as the `outside_workdir` permission in
+  `tool_permissions`. To read a directory outside the workdir without a
+  prompt, grant it under `[read_paths]`. Approving the prompt for the run
+  also works.
 
 - **Breaking.** A fan-out stage declares the workers it may hand items to.
   `[graph.stages.mode.fan_out]` names its `stage` and lists
@@ -721,6 +734,20 @@ same list.
   take to finish once the server is asked to stop. Default 10.
 - `leviath_sys::spawn_detached`: `configure_detached` and spawn, retrying
   inside the starter's job on Windows when breakaway is refused.
+- Two built-in search tools that run in-process, so nothing is executed.
+  `search_files` searches file contents and returns `path:line: text`
+  lines, with optional `glob`, `regex`, `case_insensitive`,
+  `context_lines` and `max_results`. `glob` lists the paths matching a
+  pattern such as `src/**/mod.rs`. Both skip what `.gitignore`, `.ignore`
+  or a leading dot hides unless `include_ignored` is set. `search_files`
+  skips binary files, and both cap their output with a note saying so.
+  Every root and every file goes through the fence `read_file` has, so
+  `[read_paths]` grants apply and a symlink pointing outside is skipped.
+  Both default to `allow` and count as inbound reads for taint tracking.
+  The bundled coder (0.3.1) and researcher (0.6.2) grant them, and the
+  coder's prompts prefer them to `grep`.
+- `lev approvals safe --check "<command>"` explains, key by key, whether a
+  shell line runs without a prompt, and names any path outside the workdir.
 - Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 on Anthropic
   (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`), Bedrock
   (`us.anthropic.claude-haiku-5-5` and the other profiles) and OpenRouter

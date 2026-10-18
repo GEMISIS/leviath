@@ -144,7 +144,9 @@ pub(super) fn lint_tools(stage: &StageDef, env: &LintEnv) -> Vec<LintFinding> {
 
     let granted: HashSet<&str> = named_tools(stage).collect();
     for tool in stage.tool_permissions.keys().map(|t| t.as_str()) {
-        if granted.contains(tool) {
+        // `outside_workdir` is a permission, not a tool: it tightens `shell`,
+        // and a deny of it never reads as a grant of anything.
+        if granted.contains(tool) || tool == leviath_tools::OUTSIDE_WORKDIR_PERMISSION {
             continue;
         }
         // A group is a grant too, of a set only the install can spell out.

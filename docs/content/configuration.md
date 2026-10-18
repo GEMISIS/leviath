@@ -664,6 +664,7 @@ allow_blueprint = true          # honour this blueprint's own [graph.safe_comman
 | `tools` | `[]` | Tools that never prompt whatever their arguments. Built-in names, or MCP names as advertised (`server__tool`) |
 | `shell` | `[]` | A program, optionally with the subcommand that narrows it. Also `env:NAME`, below |
 | `allow_blueprint` | `false` | Per-agent only. Honour that blueprint's own `[graph.safe_commands]` table |
+| `outside_workdir` | `"ask"` | A safe command naming a path outside the workdir asks (`"ask"`) or is refused (`"deny"`) |
 
 An entry on the `defaults` list has to clear one bar: under any flag, it must not be able to write a
 file, run another program, or open a connection. That is why `find`, `sed`, `awk`, `sort`, `xargs`,
@@ -678,6 +679,11 @@ A shell entry covers the program it names with any arguments, so `cat` covers `c
 does not cover a line that also runs something else: `cat notes.md && curl evil` still asks, because
 `curl` is in neither the safe list nor any grant. `lev approvals safe` prints what is in effect and
 which file put it there.
+
+Nor does it cover a path outside the workdir. `cat src/main.rs` runs, while `cat /etc/hosts` and
+`grep -r key ~` fall back to the shell's policy, which asks. A granted `[read_paths]` root counts as
+inside. Set `outside_workdir = "deny"` to refuse such a command instead, even under `--yolo`. See
+[Built-in tools](/docs/tools#where-a-safe-listed-read-may-look) for which words count as paths.
 
 ### Environment assignments
 

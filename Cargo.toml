@@ -183,6 +183,12 @@ fs4 = "1.1"
 # transitively, named here so the allowlist matcher in `leviath-core` uses the
 # same version everywhere.
 regex = "1.13"
+# The directory walk behind the `search_files` and `glob` tools: honours
+# `.gitignore`, `.ignore` and hidden files the way ripgrep does (it is
+# ripgrep's walker), so a search sees what the project's author considers
+# source. `globset` comes with it and matches the tools' path patterns.
+ignore = "0.4"
+globset = "0.4"
 # Already in the tree via reqwest. The outbound-URL policy lives in
 # `leviath-net` (which also holds the shared client); `leviath-mcp` uses it for
 # `url::Host`. `reqwest::Url` IS this crate's `Url`, so the two interoperate.

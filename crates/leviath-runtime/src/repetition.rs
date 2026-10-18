@@ -48,6 +48,7 @@ const READONLY_TOOLS: &[&str] = &[
     "list_dir",
     "list_files",
     "glob",
+    "search_files",
     "grep",
     "search",
     "context_read",

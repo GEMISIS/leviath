@@ -108,7 +108,7 @@ impl SeedCommandPolicy {
         // runner already says so, and "not pre-approved" would be a less
         // specific answer to a question that is already settled.
         if self.allowed {
-            self.check_covered(command)?;
+            self.check_covered(command, workdir)?;
         }
         (self.runner)(command, workdir, self.timeout)
     }
@@ -118,7 +118,11 @@ impl SeedCommandPolicy {
     /// Mirrors `AgentToolState::covers`: all keys, not any, and a command with
     /// no reusable key is never covered - a line this cannot characterize is
     /// one nobody can have pre-approved.
-    fn check_covered(&self, command: &str) -> Result<(), String> {
+    ///
+    /// A safe-listed read that names a path outside `workdir` is not covered,
+    /// as for the `shell` tool: a seed runs with nobody to ask, so a manifest's
+    /// `cat ~/.ssh/id_rsa` must not ride `cat` into a region.
+    fn check_covered(&self, command: &str, workdir: &Path) -> Result<(), String> {
         let keys = crate::shell_keys::command_keys(command);
         if keys.is_empty() {
             return Err(format!(
@@ -127,14 +131,23 @@ impl SeedCommandPolicy {
                  as a tool call where it can be approved."
             ));
         }
-        let uncovered: Vec<&str> = keys
-            .iter()
-            .filter(|k| {
-                !self.safe_keys.contains(*k)
-                    && !self.safe_keys.contains(crate::shell_keys::program_of(k))
-            })
-            .map(String::as_str)
-            .collect();
+        let inside = |p: &Path| {
+            let requested = p.to_string_lossy();
+            leviath_tools::resolve_within(&requested, workdir, leviath_core::resolves_within)
+                .is_ok()
+        };
+        let outside = crate::shell_keys::outside_workdir(
+            command,
+            workdir,
+            crate::yolo::home().as_deref(),
+            &inside,
+        );
+        let uncovered = crate::shell_keys::uncovered_keys(
+            &keys,
+            &outside.keys,
+            &|k| self.safe_keys.contains(k),
+            &|_| false,
+        );
         if uncovered.is_empty() {
             return Ok(());
         }
@@ -329,7 +342,9 @@ mod tests {
             Default::default(),
         );
         assert!(
-            policy.check_covered("git ls-files").is_ok(),
+            policy
+                .check_covered("git ls-files", &std::env::temp_dir())
+                .is_ok(),
             "the shipped agents' seed must keep running unattended"
         );
     }

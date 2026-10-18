@@ -180,7 +180,8 @@ over a path you had not granted yet.
 
 The rules that keep this safe:
 
-- **Read-only.** Only `read_file`, `read_files`, and `list_dir` can leave the workdir.
+- **Read-only.** Only `read_file`, `read_files`, `list_dir`, `search_files` and `glob` can leave
+  the workdir.
   `write_file` and `edit_file` are confined to the workdir no matter what is granted.
 - **Symlinks cannot widen a grant.** Every access is resolved to its real path first, and the
   real path must match a declared and granted entry. A symlink planted inside a granted
@@ -208,6 +209,34 @@ The rules that keep this safe:
 
 Pick the run's workdir itself with `lev run <agent> --workdir <dir>` (defaults to the directory
 you ran the command from).
+
+### Safe-listed shell reads stay inside too
+
+`cat`, `head`, `grep` and the read-only `git` commands are on the default safe list, so they run
+without a prompt. They would otherwise be a way around everything above, since `cat ~/.ssh/id_rsa`
+needs no `read_paths` grant. So a safe-list entry covers a command only when every path it is
+handed passes the check `read_file` makes: inside the workdir or a granted `read_paths` root,
+symlinks resolved.
+
+`cat src/main.rs` runs. `cat /etc/hosts`, `grep -r key ~`, `cd / && cat etc/passwd` and
+`git -C /elsewhere log` fall back to the shell's own policy, which asks by default. A person can
+still approve one at the prompt. `lev approvals safe --check "<command>"` says which part of a line
+was outside the workdir.
+
+An unattended run approves an `ask`, so for a stage that must not read outside the project, make it
+a refusal:
+
+```toml
+# config.toml, for every run
+[safe_commands]
+outside_workdir = "deny"
+```
+
+A blueprint or a stage can set `outside_workdir = "deny"` in its `tool_permissions` as well. Like
+any configured deny, `--yolo` does not lift it. A stage that only reads is better off without
+`shell` altogether: `search_files` and `glob` search the project under the same fence. See
+[Built-in tools](/docs/tools#where-a-safe-listed-read-may-look) for exactly which words count as
+paths.
 
 ## Taint tracking (experimental)
 

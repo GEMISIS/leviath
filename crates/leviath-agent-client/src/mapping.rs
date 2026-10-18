@@ -239,6 +239,8 @@ const TOOL_KINDS: &[(&str, ToolKind)] = &[
     ("read_file", ToolKind::Read),
     ("read_files", ToolKind::Read),
     ("list_dir", ToolKind::Read),
+    ("search_files", ToolKind::Search),
+    ("glob", ToolKind::Search),
     // The environment tools read the host and the run rather than a file,
     // but `Read` is the closest kind the protocol has and is what a host
     // should show: a lookup that returns information and changes nothing.
@@ -586,6 +588,8 @@ mod tests {
             ("read_file", ToolKind::Read),
             ("read_files", ToolKind::Read),
             ("list_dir", ToolKind::Read),
+            ("search_files", ToolKind::Search),
+            ("glob", ToolKind::Search),
             // The environment tools read the host and the run rather than a
             // file, but a lookup that returns information and changes nothing
             // is what `Read` means to a host picking an icon.

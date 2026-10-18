@@ -4976,6 +4976,36 @@ input GatewayWrite {
 	models: [String!]
 }
 
+"Arguments for the `glob` tool."
+type GlobArgsOutput {
+	"The glob each path under `path` is matched against."
+	pattern: String!
+	"""
+	The directory to look under, relative to the working directory. Left
+	out means the working directory itself.
+	"""
+	path: String
+	"Most paths returned."
+	maxResults: Int
+	"Also return what `.gitignore`, `.ignore` or a leading dot hides."
+	includeIgnored: Boolean
+}
+
+"One `glob` call."
+type GlobCallOutput implements ToolCall {
+	"Tool name, exactly as the model called it."
+	toolName: String!
+	"What the tool does, as this build describes it."
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"The call's arguments."
+	args: GlobArgsOutput!
+}
+
 """
 A person approved a call for the run or its stage, or a stage grant
 ended.
@@ -13346,6 +13376,47 @@ type ScriptVerdictOutput {
 	valid: Boolean!
 	"The compiler's complaint, when it does not."
 	error: String
+}
+
+"Arguments for the `search_files` tool."
+type SearchFilesArgsOutput {
+	"""
+	What to look for: a regular expression, or plain text when `regex` is
+	false.
+	"""
+	pattern: String!
+	"""
+	The directory or file to search, relative to the working directory.
+	Left out means the working directory itself.
+	"""
+	path: String
+	"Only files whose path matches this glob are searched."
+	glob: String
+	"Read `pattern` as a regular expression. Left out means yes."
+	regex: Boolean
+	"Match regardless of case. Left out means no."
+	caseInsensitive: Boolean
+	"Lines shown before and after each match. Left out means none."
+	contextLines: Int
+	"Most matching lines returned."
+	maxResults: Int
+	"Also search what `.gitignore`, `.ignore` or a leading dot hides."
+	includeIgnored: Boolean
+}
+
+"One `search_files` call."
+type SearchFilesCallOutput implements ToolCall {
+	"Tool name, exactly as the model called it."
+	toolName: String!
+	"What the tool does, as this build describes it."
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"The call's arguments."
+	args: SearchFilesArgsOutput!
 }
 
 """

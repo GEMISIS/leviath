@@ -277,10 +277,22 @@ pub(super) fn lint_tool_seeds(graph: &RunGraph) -> Vec<LintFinding> {
 pub(super) fn default_safe_keys_cover(command: &str) -> bool {
     let safe = crate::approvals::resolve_safe_keys(&Default::default(), None, None, false);
     let keys = crate::shell_keys::command_keys(command);
+    // There is no workdir yet, so "inside" is judged on the text alone: a
+    // relative path that does not climb out stays in, anything absolute, home
+    // or climbing does not, as it would not at spawn.
+    let workdir = std::path::Path::new("/leviath-lint-workdir");
+    let inside = |p: &std::path::Path| {
+        leviath_core::paths::fold_dot_dot(p).is_some_and(|p| p.starts_with(workdir))
+    };
+    let outside = crate::shell_keys::outside_workdir(command, workdir, None, &inside);
     !keys.is_empty()
-        && keys
-            .iter()
-            .all(|k| safe.contains_key(k) || safe.contains_key(crate::shell_keys::program_of(k)))
+        && crate::shell_keys::uncovered_keys(
+            &keys,
+            &outside.keys,
+            &|k| safe.contains_key(k),
+            &|_| false,
+        )
+        .is_empty()
 }
 
 /// Checkpoints that hold a `--yolo` run for a person.
