@@ -18,6 +18,7 @@ mod context;
 mod defs;
 mod env;
 mod exec;
+mod search;
 mod subagent_defs;
 pub use exec::is_null_device;
 pub use exec::resolve_within;
@@ -28,8 +29,9 @@ mod platform;
 pub mod validate;
 pub use context::*;
 pub use defs::{
-    BUILTIN_TOOL_NAMES, SPAWN_RAW_GRAPH_PERMISSION, STAGE_CONTROL_TOOLS, SUBAGENT_TOOLS,
-    is_builtin_tool, is_subagent_tool, submit_output_description,
+    BUILTIN_TOOL_NAMES, OUTSIDE_WORKDIR_PERMISSION, SPAWN_RAW_GRAPH_PERMISSION,
+    STAGE_CONTROL_TOOLS, SUBAGENT_TOOLS, is_builtin_tool, is_subagent_tool,
+    submit_output_description,
 };
 pub use install::{
     InstallProbes, InstalledFor, InstalledTool, MAX_TOOL_SOURCE_BYTES, install_script_tool,
@@ -214,7 +216,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let defs = tools.tool_defs();
-        assert_eq!(defs.len(), 31);
+        assert_eq!(defs.len(), 33);
     }
 
     #[test]
@@ -537,7 +539,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         // Every def, plus every alias: `bash` and `install_tool`.
-        assert_eq!(tools.names().len(), 33);
+        assert_eq!(tools.names().len(), 35);
     }
 
     /// The taint gate's fallback arm is the third-party default: outbound,
@@ -2680,7 +2682,7 @@ mod tests {
         let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
         assert!(!names.contains(&"shell".to_string()));
         // The rest remain, both installers included: mobile has a filesystem.
-        assert_eq!(tools.tool_defs().len(), 30);
+        assert_eq!(tools.tool_defs().len(), 32);
         assert!(names.contains(&"read_file".to_string()));
         assert!(names.contains(&"install_self_tool".to_string()));
         assert!(names.contains(&"install_global_tool".to_string()));

@@ -146,7 +146,13 @@ pub(crate) fn bump_read_sensitivities(
     if !read_paths_granted {
         return;
     }
-    for tool in ["read_file", "read_files", "list_dir"] {
+    for tool in [
+        "read_file",
+        "read_files",
+        "list_dir",
+        "search_files",
+        "glob",
+    ] {
         if let Some(level) = map.get_mut(tool) {
             *level = (*level).max(leviath_core::TaintLevel::Private);
         }

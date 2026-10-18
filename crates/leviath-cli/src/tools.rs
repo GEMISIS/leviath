@@ -166,7 +166,7 @@ pub(crate) fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPoli
     // Matched on the canonical name, so the `shell` arm covers a call named
     // `bash` and vice versa.
     match leviath_tools::canonical_tool_name(tool_name) {
-        "read_file" | "read_files" | "list_dir" => ToolPolicy::Allow,
+        "read_file" | "read_files" | "list_dir" | "search_files" | "glob" => ToolPolicy::Allow,
         // The context tools write the agent's own context regions, not the
         // filesystem. Left to fall through to `Ask` below, a run that keeps
         // notes with them would pay a prompt per note, none of which a person
@@ -226,6 +226,9 @@ pub(crate) fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPoli
         // installed blueprint is one a person chose; a raw graph is not, so a
         // person is asked unless they said otherwise.
         leviath_tools::SPAWN_RAW_GRAPH_PERMISSION => ToolPolicy::Ask,
+        // A shell line naming a path outside the workdir is not pre-approved
+        // by the safe list; it asks, unless configured to be refused.
+        leviath_tools::OUTSIDE_WORKDIR_PERMISSION => ToolPolicy::Ask,
         // These tools ARE the human-in-the-loop mechanism - gating them behind
         // a separate tool-approval prompt would mean asking the user "may I
         // ask you something?" before actually asking them.
@@ -397,6 +400,52 @@ pub(crate) fn escaping_write_refusal_for(
          Write inside the workspace instead.",
         workdir.display()
     ))
+}
+
+/// What a `shell` call names outside the workdir, as far as the read fence
+/// `may_read` says (`BuiltinTools::may_read`: the workdir, then granted
+/// `[read_paths]`). Empty for any other tool.
+///
+/// The keys it returns are ones the safe list must not cover; the call as a
+/// whole answers to the `outside_workdir` permission too, which refuses it
+/// when set to `deny`.
+pub(crate) fn outside_workdir(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    workdir: &std::path::Path,
+    may_read: &dyn Fn(&std::path::Path) -> bool,
+) -> crate::shell_keys::Outside {
+    let command = match leviath_tools::canonical_tool_name(tool_name) {
+        "shell" => arguments.get("command").and_then(|v| v.as_str()),
+        _ => None,
+    };
+    match command {
+        Some(command) => crate::shell_keys::outside_workdir(
+            command,
+            workdir,
+            crate::yolo::home().as_deref(),
+            may_read,
+        ),
+        None => crate::shell_keys::Outside::default(),
+    }
+}
+
+/// The refusal for a shell call [`outside_workdir`] flagged while the
+/// `outside_workdir` permission is `deny`.
+///
+/// Says what was outside and what to do instead, so the model retries inside
+/// the workspace rather than hunting for another spelling.
+pub(crate) fn outside_workdir_refusal(
+    outside: &crate::shell_keys::Outside,
+    workdir: &std::path::Path,
+) -> String {
+    format!(
+        "[denied] This shell line reads outside the working directory ({}): {}. Outside-workdir \
+         reads are refused for this stage (`outside_workdir = \"deny\"`). Use paths inside the \
+         workspace, or the read_file, search_files and glob tools.",
+        workdir.display(),
+        outside.operands.join(", ")
+    )
 }
 
 /// A file or directory a run may not change: one of the places that decide
@@ -2441,9 +2490,11 @@ mod policy_tests {
         assert_eq!(default_tool_policy("search", true), ToolPolicy::Ask);
     }
 
+    /// `glob` is the built-in path matcher now, a read like `list_dir`.
     #[test]
-    fn test_default_policy_glob_is_ask() {
-        assert_eq!(default_tool_policy("glob", true), ToolPolicy::Ask);
+    fn test_default_policy_glob_is_allow() {
+        assert_eq!(default_tool_policy("glob", true), ToolPolicy::Allow);
+        assert_eq!(default_tool_policy("search_files", true), ToolPolicy::Allow);
     }
 
     #[test]
@@ -2725,9 +2776,9 @@ mod policy_tests {
     ///
     /// The four groups, and why each is defensible:
     ///
-    /// - **Reads.** `read_file`/`read_files`/`list_dir` are already bounded by
-    ///   `[read_paths]`, so the prompt would be asking about a capability the
-    ///   confinement has already decided.
+    /// - **Reads.** `read_file`/`read_files`/`list_dir`/`search_files`/`glob`
+    ///   are already bounded by `[read_paths]`, so the prompt would be asking
+    ///   about a capability the confinement has already decided.
     /// - **Context.** The `context_*` tools write the agent's own context
     ///   regions, not the filesystem. A prompt per note is a prompt nobody can
     ///   act on.
@@ -2740,6 +2791,8 @@ mod policy_tests {
         "read_file",
         "read_files",
         "list_dir",
+        "search_files",
+        "glob",
         "context_write",
         "context_append",
         "context_read",

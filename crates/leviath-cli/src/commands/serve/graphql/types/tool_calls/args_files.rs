@@ -104,3 +104,52 @@ pub(crate) struct InstallGlobalToolArgs {
     #[serde(default)]
     pub(crate) overwrite: Option<bool>,
 }
+
+/// Arguments for the `search_files` tool.
+#[mirror(no_filter)]
+#[derive(Debug, Deserialize, SimpleObject)]
+pub(crate) struct SearchFilesArgs {
+    /// What to look for: a regular expression, or plain text when `regex` is
+    /// false.
+    pub(crate) pattern: String,
+    /// The directory or file to search, relative to the working directory.
+    /// Left out means the working directory itself.
+    #[serde(default)]
+    pub(crate) path: Option<String>,
+    /// Only files whose path matches this glob are searched.
+    #[serde(default)]
+    pub(crate) glob: Option<String>,
+    /// Read `pattern` as a regular expression. Left out means yes.
+    #[serde(default)]
+    pub(crate) regex: Option<bool>,
+    /// Match regardless of case. Left out means no.
+    #[serde(default)]
+    pub(crate) case_insensitive: Option<bool>,
+    /// Lines shown before and after each match. Left out means none.
+    #[serde(default)]
+    pub(crate) context_lines: Option<i32>,
+    /// Most matching lines returned.
+    #[serde(default)]
+    pub(crate) max_results: Option<i32>,
+    /// Also search what `.gitignore`, `.ignore` or a leading dot hides.
+    #[serde(default)]
+    pub(crate) include_ignored: Option<bool>,
+}
+
+/// Arguments for the `glob` tool.
+#[mirror(no_filter)]
+#[derive(Debug, Deserialize, SimpleObject)]
+pub(crate) struct GlobArgs {
+    /// The glob each path under `path` is matched against.
+    pub(crate) pattern: String,
+    /// The directory to look under, relative to the working directory. Left
+    /// out means the working directory itself.
+    #[serde(default)]
+    pub(crate) path: Option<String>,
+    /// Most paths returned.
+    #[serde(default)]
+    pub(crate) max_results: Option<i32>,
+    /// Also return what `.gitignore`, `.ignore` or a leading dot hides.
+    #[serde(default)]
+    pub(crate) include_ignored: Option<bool>,
+}

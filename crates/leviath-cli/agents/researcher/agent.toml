@@ -1,6 +1,6 @@
 [blueprint]
 name = "researcher"
-version = "0.6.1"
+version = "0.6.2"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 
 # gather -> analyze -> summarize -> summary
@@ -115,7 +115,7 @@ name = "gather"
 description = "Gather relevant information on the topic"
 model = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 # web_search / web_fetch are provided by the agent's script tools.
-tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "context_read", "current_time", "fan_out"]
+tools = ["web_search", "web_fetch", "read_file", "list_dir", "search_files", "glob", "context_append", "context_read", "current_time", "fan_out"]
 max_iterations = 8
 max_revisits = 2
 tool_routing = { default_region = "raw_findings", keep_results = true }

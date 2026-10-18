@@ -5,7 +5,30 @@ fn safe(shell: &[&str], tools: &[&str]) -> SafeCommands {
         defaults: false,
         tools: tools.iter().map(|s| s.to_string()).collect(),
         shell: shell.iter().map(|s| s.to_string()).collect(),
+        outside_workdir: OutsideWorkdir::Ask,
     }
+}
+
+/// `[safe_commands] outside_workdir` reads as the two words the docs name and
+/// defaults to `ask`, and only `deny` reaches the permission merge.
+#[test]
+fn outside_workdir_reads_ask_or_deny_and_only_deny_is_a_ceiling() {
+    let parse = |toml: &str| toml::from_str::<SafeCommands>(toml).map(|s| s.outside_workdir);
+    assert_eq!(parse("").unwrap(), OutsideWorkdir::Ask);
+    assert_eq!(
+        parse("outside_workdir = \"deny\"").unwrap(),
+        OutsideWorkdir::Deny
+    );
+    assert!(parse("outside_workdir = \"allow\"").is_err());
+
+    let mut config = crate::config::Config::default();
+    let key = leviath_tools::OUTSIDE_WORKDIR_PERMISSION;
+    assert!(!config.permissions_for_agent(None).contains_key(key));
+    config.safe_commands.outside_workdir = OutsideWorkdir::Deny;
+    assert_eq!(
+        config.permissions_for_agent(None).get(key),
+        Some(&crate::config::ToolPolicy::Deny)
+    );
 }
 
 fn resolved(

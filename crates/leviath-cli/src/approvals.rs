@@ -53,10 +53,14 @@ use crate::shell_keys::{KEY_PREFIX, is_valid_prefix};
 /// pre-decided convenience inside it.
 ///
 /// Two consequences worth stating rather than burying. `cat`, `head` and `grep`
-/// being safe lets an agent read any file the user can, without the `read_paths`
-/// confinement `read_file` has - not a new capability, since approving the first
-/// `cat` for the run already granted it, but it is now pre-decided; set
-/// `defaults = false` to opt out. And the read-only `git` subcommands honour a
+/// being safe would let an agent read any file the user can, so an entry only
+/// covers a segment whose path operands all stay inside the workdir or a
+/// granted `[read_paths]` root: the fence `read_file` has, asked of every word
+/// that could name a file (see [`crate::shell_keys::outside_workdir`]).
+/// `cat src/main.rs` runs unprompted; `cat /etc/hosts`, `grep -r key ~` and
+/// `cd / && cat etc/passwd` fall back to the shell's policy, which asks by
+/// default, and [`OutsideWorkdir::Deny`] refuses them outright. And the
+/// read-only `git` subcommands honour a
 /// repository's `core.pager` and `diff.external`. A pager does not run without
 /// a tty, but `diff.external` does - reachable only via `git -c`, which keys as
 /// a bare `git` and so is not covered by any entry here.
@@ -152,6 +156,26 @@ pub struct SafeCommands {
     /// grant is keyed on, so `git status` can never cover `git push`.
     #[serde(default)]
     pub shell: Vec<String>,
+    /// What happens to a safe-listed command that names a path outside the
+    /// workdir and every granted `[read_paths]` root. It is never pre-approved;
+    /// this says whether it asks or is refused.
+    #[serde(default)]
+    pub outside_workdir: OutsideWorkdir,
+}
+
+/// The `[safe_commands] outside_workdir` setting.
+///
+/// Folded into the permission merge as the `outside_workdir` permission (see
+/// [`crate::config::Config::permissions_for_agent`]), so a blueprint or a stage
+/// can set it in `tool_permissions` too, and only ever tighten it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutsideWorkdir {
+    /// Fall back to the shell's own policy, which asks by default.
+    #[default]
+    Ask,
+    /// Refuse the call. No launch flag lifts it, `--yolo` included.
+    Deny,
 }
 
 /// Hand-written rather than derived, because `#[derive(Default)]` would give
@@ -166,6 +190,7 @@ impl Default for SafeCommands {
             defaults: leviath_core::default_true(),
             tools: Vec::new(),
             shell: Vec::new(),
+            outside_workdir: OutsideWorkdir::Ask,
         }
     }
 }

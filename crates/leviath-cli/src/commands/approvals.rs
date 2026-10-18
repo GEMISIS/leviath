@@ -11,7 +11,7 @@
 
 use clap::{Args, Subcommand};
 
-use crate::approvals::SafeSource;
+use crate::approvals::{OutsideWorkdir, SafeSource};
 use crate::config::Config;
 
 /// Arguments for `lev approvals`.
@@ -39,6 +39,10 @@ pub struct SafeArgs {
     /// Emit the inventory as JSON.
     #[arg(long)]
     pub json: bool,
+    /// Explain whether this shell line would run without a prompt in the
+    /// current directory, key by key, instead of listing the inventory.
+    #[arg(long, value_name = "COMMAND")]
+    pub check: Option<String>,
 }
 
 /// The label for a source, matching the config key that sets it.
@@ -55,7 +59,11 @@ fn source_label(source: SafeSource) -> &'static str {
 ///
 /// Split from the IO so the whole output is testable without a config file or a
 /// terminal, which is the same shape `lev tools` uses.
-fn render(keys: &std::collections::BTreeMap<String, SafeSource>, json: bool) -> String {
+fn render(
+    keys: &std::collections::BTreeMap<String, SafeSource>,
+    outside: OutsideWorkdir,
+    json: bool,
+) -> String {
     if json {
         let rows: Vec<_> = keys
             .iter()
@@ -89,6 +97,74 @@ fn render(keys: &std::collections::BTreeMap<String, SafeSource>, json: bool) -> 
          `cat notes.md`.\nIt does not cover a line that also runs something else: \
          `cat x && curl evil` still asks.\n",
     );
+    out.push_str(&format!(
+        "It does not cover a path outside the working directory or a granted [read_paths] \
+         root either:\n`cat /etc/hosts` is outside the workdir, so it {}.\n",
+        outside_verdict(outside)
+    ));
+    out
+}
+
+/// What happens to a safe-listed command that reads outside the workdir.
+fn outside_verdict(outside: OutsideWorkdir) -> &'static str {
+    match outside {
+        OutsideWorkdir::Ask => "asks (`[safe_commands] outside_workdir = \"ask\"`)",
+        OutsideWorkdir::Deny => "is refused (`[safe_commands] outside_workdir = \"deny\"`)",
+    }
+}
+
+/// Explain, key by key, whether `command` runs without a prompt in `workdir`.
+///
+/// Answers "why did this ask me" for one line: each key is covered by a named
+/// source, not on the list at all, or named a path outside the workdir. The
+/// workdir fence here is the workdir alone; a run's `[read_paths]` grants can
+/// widen it.
+fn explain(
+    command: &str,
+    keys: &std::collections::BTreeMap<String, SafeSource>,
+    outside_mode: OutsideWorkdir,
+    workdir: &std::path::Path,
+) -> String {
+    let line_keys = crate::shell_keys::command_keys(command);
+    if line_keys.is_empty() {
+        return format!(
+            "`{command}` always asks: nothing in it names what would run, so no entry can \
+             cover it.\n"
+        );
+    }
+    let inside = |p: &std::path::Path| {
+        let requested = p.to_string_lossy();
+        leviath_tools::resolve_within(&requested, workdir, leviath_core::resolves_within).is_ok()
+    };
+    let outside = crate::shell_keys::outside_workdir(
+        command,
+        workdir,
+        crate::yolo::home().as_deref(),
+        &inside,
+    );
+    let mut out = String::new();
+    for key in &line_keys {
+        let shown = key.strip_prefix("shell:").unwrap_or(key);
+        let source = keys
+            .get(key)
+            .or_else(|| keys.get(crate::shell_keys::program_of(key)));
+        let verdict = match (outside.keys.contains(key), source) {
+            (true, _) => format!(
+                "outside the workdir, so it {}",
+                outside_verdict(outside_mode)
+            ),
+            (false, Some(source)) => format!("runs ({})", source_label(*source)),
+            (false, None) => "asks: not on the safe list".to_string(),
+        };
+        out.push_str(&format!("  {shown}: {verdict}\n"));
+    }
+    if !outside.operands.is_empty() {
+        out.push_str(&format!(
+            "\nOutside {}: {}\n",
+            workdir.display(),
+            outside.operands.join(", ")
+        ));
+    }
     out
 }
 
@@ -106,7 +182,20 @@ pub(crate) async fn execute(args: ApprovalsArgs) -> anyhow::Result<()> {
     // is being run, and `lev validate <agent>` is where a blueprint's own
     // declarations are reported.
     let keys = config.safe_keys_for_agent(agent_name(&safe), None);
-    print!("{}", render(&keys, safe.json));
+    let outside = config.safe_commands.outside_workdir;
+    let text = match &safe.check {
+        // The directory the person is in is the workdir a run started here
+        // would get. With none to read, nothing is inside, which errs towards
+        // reporting a prompt.
+        Some(command) => explain(
+            command,
+            &keys,
+            outside,
+            &std::env::current_dir().unwrap_or_default(),
+        ),
+        None => render(&keys, outside, safe.json),
+    };
+    print!("{text}");
     Ok(())
 }
 
@@ -130,7 +219,12 @@ mod tests {
                 ("shell:./gradlew", SafeSource::Agent),
                 ("web_fetch", SafeSource::Blueprint),
             ]),
+            OutsideWorkdir::Deny,
             false,
+        );
+        assert!(
+            out.contains("outside the workdir, so it is refused"),
+            "{out}"
         );
         assert!(out.contains("shell  ls"), "{out}");
         assert!(out.contains("built-in"), "{out}");
@@ -149,6 +243,7 @@ mod tests {
         let args = |agent: Option<&str>| SafeArgs {
             agent: agent.map(str::to_string),
             json: false,
+            check: None,
         };
         assert_eq!(agent_name(&args(Some("coder"))), Some("coder"));
         assert_eq!(agent_name(&args(None)), None);
@@ -157,22 +252,49 @@ mod tests {
     /// An empty report says why it is empty rather than printing a bare header.
     #[test]
     fn an_empty_report_explains_itself() {
-        let out = render(&BTreeMap::new(), false);
+        let out = render(&BTreeMap::new(), OutsideWorkdir::Ask, false);
         assert!(out.contains("defaults` is off"), "{out}");
     }
 
     #[test]
     fn the_json_report_is_machine_readable() {
-        let out = render(&keys(&[("shell:ls", SafeSource::Default)]), true);
+        let out = render(
+            &keys(&[("shell:ls", SafeSource::Default)]),
+            OutsideWorkdir::Ask,
+            true,
+        );
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed[0]["key"], "shell:ls");
         assert_eq!(parsed[0]["source"], "default");
     }
 
+    /// `--check` says, per key, why a line runs or asks, and names what was
+    /// outside the workdir.
+    #[test]
+    fn a_check_explains_each_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = std::fs::canonicalize(dir.path()).unwrap();
+        let safe = keys(&[("shell:cat", SafeSource::Default)]);
+        let out = explain("cat notes.md && curl x", &safe, OutsideWorkdir::Ask, &wd);
+        assert!(out.contains("cat notes.md: runs (built-in)"), "{out}");
+        assert!(out.contains("curl x: asks: not on the safe list"), "{out}");
+        assert!(!out.contains("Outside"), "{out}");
+
+        let out = explain("cat /etc/hosts", &safe, OutsideWorkdir::Ask, &wd);
+        assert!(
+            out.contains("cat /etc/hosts: outside the workdir, so it asks"),
+            "{out}"
+        );
+        assert!(out.contains(": /etc/hosts"), "{out}");
+
+        let out = explain("$CMD", &safe, OutsideWorkdir::Ask, &wd);
+        assert!(out.contains("always asks"), "{out}");
+    }
+
     #[test]
     fn an_empty_json_report_is_an_empty_array() {
         let parsed: serde_json::Value =
-            serde_json::from_str(&render(&BTreeMap::new(), true)).unwrap();
+            serde_json::from_str(&render(&BTreeMap::new(), OutsideWorkdir::Ask, true)).unwrap();
         assert_eq!(parsed, serde_json::json!([]));
     }
 }

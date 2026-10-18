@@ -521,7 +521,10 @@ pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
             ToolDirection::Outbound,
             TaintLevel::Public,
         ),
-        "list_dir" => ToolClassification::new(
+        // The search tools read the workdir (and granted `[read_paths]`) the
+        // way `list_dir` and `read_file` do, in-process, so nothing they do is
+        // a channel out.
+        "list_dir" | "search_files" | "glob" => ToolClassification::new(
             TaintLevel::Internal,
             ToolDirection::Inbound,
             TaintLevel::Public,
@@ -1121,6 +1124,20 @@ mod tests {
         assert_eq!(tc.sensitivity, TaintLevel::Internal);
         assert_eq!(tc.direction, ToolDirection::Inbound);
         assert_eq!(tc.clearance, TaintLevel::Public);
+    }
+
+    /// The search tools are reads like `list_dir`: a stage that searches
+    /// with them is not sending anything out, which a `grep` through `shell`
+    /// (outbound) would be.
+    #[test]
+    fn the_search_tools_are_inbound_like_list_dir() {
+        for tool in ["search_files", "glob"] {
+            assert_eq!(
+                classified_builtin(tool),
+                classified_builtin("list_dir"),
+                "{tool}"
+            );
+        }
     }
 
     /// `read_files` is `read_file` over several paths, `fan_out` is many

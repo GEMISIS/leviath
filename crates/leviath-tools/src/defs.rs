@@ -24,6 +24,13 @@ pub const SUBAGENT_TOOLS: &[&str] = &[
 /// model wrote can declare its own seed commands and MCP servers.
 pub const SPAWN_RAW_GRAPH_PERMISSION: &str = "spawn_raw_graph";
 
+/// The permission a `shell` call naming a path outside the workdir (and every
+/// granted `[read_paths]` root) answers to, on top of `shell`'s own. Not a
+/// tool anyone calls: a name `[tool_permissions]` can set, and what
+/// `[safe_commands] outside_workdir` sets. `ask` (the default) only keeps the
+/// safe list from covering such a call; `deny` refuses it, `--yolo` or not.
+pub const OUTSIDE_WORKDIR_PERMISSION: &str = "outside_workdir";
+
 /// Whether `name` is a sub-agent tool.
 pub fn is_subagent_tool(name: &str) -> bool {
     SUBAGENT_TOOLS.contains(&name)
@@ -40,6 +47,8 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "write_file",
     "edit_file",
     "list_dir",
+    "search_files",
+    "glob",
     "shell",
     "present_for_review",
     "ask_user_text",
@@ -223,6 +232,74 @@ impl BuiltinTools {
                         }
                     },
                     "required": []
+                }),
+            },
+            Tool {
+                name: "search_files".to_string(),
+                description: "Search the contents of files for a pattern, like grep, without running a command. Returns matching lines as `path:line: text`, paths relative to the working directory. Skips binary files and whatever .gitignore, .ignore or a leading dot hides, unless include_ignored is set. Prefer this to grep in the shell.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "What to look for: a regular expression, or plain text when regex is false"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "The directory or file to search, relative to the working directory. Defaults to the working directory."
+                        },
+                        "glob": {
+                            "type": "string",
+                            "description": "Only search files whose path matches this glob, such as `*.rs` (matched against the file name) or `src/**/*.ts` (matched against the path under `path`)"
+                        },
+                        "regex": {
+                            "type": "boolean",
+                            "description": "Read pattern as a regular expression. Defaults to true; set false to search for the text exactly as written."
+                        },
+                        "case_insensitive": {
+                            "type": "boolean",
+                            "description": "Match regardless of case. Defaults to false."
+                        },
+                        "context_lines": {
+                            "type": "integer",
+                            "description": "Lines to show before and after each match, up to 10. Defaults to 0."
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Most matching lines to return, up to 2000. Defaults to 200."
+                        },
+                        "include_ignored": {
+                            "type": "boolean",
+                            "description": "Also search files that .gitignore, .ignore or a leading dot would hide. Defaults to false."
+                        }
+                    },
+                    "required": ["pattern"]
+                }),
+            },
+            Tool {
+                name: "glob".to_string(),
+                description: "Find files and directories whose path matches a glob pattern, such as `src/**/mod.rs`. Returns paths relative to the working directory, sorted, directories ending in `/`. Skips whatever .gitignore, .ignore or a leading dot hides, unless include_ignored is set.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "The glob, matched against each path under `path`: `*` stays within one directory, `**` crosses any number"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "The directory to look under, relative to the working directory. Defaults to the working directory."
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Most paths to return, up to 5000. Defaults to 500."
+                        },
+                        "include_ignored": {
+                            "type": "boolean",
+                            "description": "Also return paths that .gitignore, .ignore or a leading dot would hide. Defaults to false."
+                        }
+                    },
+                    "required": ["pattern"]
                 }),
             },
             Tool {

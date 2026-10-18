@@ -206,6 +206,8 @@ fn the_views_read_the_coder_the_way_the_lair_does() {
         [
             "read_file",
             "list_dir",
+            "search_files",
+            "glob",
             "bash",
             "context_write",
             "context_read"

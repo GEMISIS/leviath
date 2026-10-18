@@ -168,6 +168,9 @@ allow = ["~/reference", "glob:~/schemas/**/*.json"]
 defaults = true
 tools = ["read_files"]
 shell = ["cargo test", "rg"]
+# A safe command that names a path outside the workdir is never pre-approved.
+# "ask" (the default) prompts for it; "deny" refuses it, even under --yolo.
+outside_workdir = "ask"
 
 [agent_safe_commands.reviewer]
 shell = ["cargo clippy"]

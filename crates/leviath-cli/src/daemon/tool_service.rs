@@ -645,6 +645,20 @@ pub(crate) fn decide_call(
             state.blueprint_may_loosen(),
         )
     };
+    // What a shell line names outside the workdir. Refused outright where
+    // `outside_workdir` resolves to deny, which no launch flag lifts; under
+    // `ask` it only keeps the safe list from covering those keys below.
+    let may_read = |p: &std::path::Path| state.builtins.may_read(p);
+    let outside =
+        crate::tools::outside_workdir(&tc.name, &tc.arguments, state.builtins.workdir(), &may_read);
+    if !outside.is_empty()
+        && resolve(leviath_tools::OUTSIDE_WORKDIR_PERMISSION, false) == ToolPolicy::Deny
+    {
+        return ToolVerdict::Refuse(crate::tools::outside_workdir_refusal(
+            &outside,
+            state.builtins.workdir(),
+        ));
+    }
     let policy = resolve(&tc.name, is_builtin);
     // A shell redirect writes a file, and no tool name says so. Clamping by
     // the write tool's own policy is what stops `echo x > f` being a spelling
@@ -685,9 +699,15 @@ pub(crate) fn decide_call(
     let safe = state.safe_keys.get();
     let is_safe = |k: &str| safe.contains(k);
     let is_granted = |k: &str| ctx.grants.granted(k);
+    // A key that names a path outside the workdir is never safe-covered.
     let policy = match policy {
         ToolPolicy::Ask
-            if crate::shell_keys::all_covered(&approval_keys, &is_safe, &is_granted) =>
+            if crate::shell_keys::all_covered(
+                &approval_keys,
+                &outside.keys,
+                &is_safe,
+                &is_granted,
+            ) =>
         {
             ToolPolicy::Allow
         }
@@ -721,7 +741,12 @@ pub(crate) fn decide_call(
         // Only what is still uncovered: that is what the prompt names and
         // what a scoped approval records.
         ToolPolicy::Ask => ToolVerdict::Ask {
-            keys: crate::shell_keys::uncovered_keys(&approval_keys, &is_safe, &is_granted),
+            keys: crate::shell_keys::uncovered_keys(
+                &approval_keys,
+                &outside.keys,
+                &is_safe,
+                &is_granted,
+            ),
             charge,
         },
         ToolPolicy::Allow => ToolVerdict::Run { charge },
@@ -3458,7 +3483,7 @@ pub(crate) mod tests {
                 .into_iter()
                 .collect(),
         );
-        let line = "cd /tmp 2>/dev/null; pwd; ls target 2>/dev/null | head; echo '---'; \
+        let line = "cd target 2>/dev/null; pwd; ls target 2>/dev/null | head; echo '---'; \
                     cat rust-toolchain.toml; sed -n '1,50p' lib.rs 2>/dev/null";
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let seen_in = seen.clone();
@@ -3492,6 +3517,119 @@ pub(crate) mod tests {
         .await;
         let ran = out[0].1.clone();
         assert!(!ran.contains("[denied]"), "got: {ran}");
+    }
+
+    /// A safe-listed `cat` covers a read of the workdir and not a read of
+    /// `/etc/hosts`: the second falls back to the shell's `ask`, and the
+    /// prompt names what is outside.
+    #[tokio::test]
+    async fn a_safe_read_outside_the_workdir_asks() {
+        let hub = InteractionHub::new();
+        let state = asking_shell_state(&hub);
+        state
+            .safe_keys
+            .set(["shell:cat".to_string()].into_iter().collect());
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let seen_in = seen.clone();
+        let out = dispatch_answering(
+            state.clone(),
+            vec![call(
+                "c1",
+                "shell",
+                serde_json::json!({"command": "cat /etc/hosts"}),
+            )],
+            move |req| {
+                seen_in.lock().unwrap().clone_from(&req.options);
+                deny_it(req)
+            },
+            hub.clone(),
+        )
+        .await;
+        let asked = out[0].1.clone();
+        assert!(asked.contains("[denied]"), "got: {asked}");
+        let options = seen.lock().unwrap().clone();
+        assert_eq!(options[1], "Allow cat /etc/hosts for this stage");
+
+        // The control: the same program on a path inside runs with no prompt.
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c2",
+                "shell",
+                serde_json::json!({"command": "cat no-such-file-in-the-workdir"}),
+            )],
+            noop_progress(),
+        )
+        .await;
+        let ran = out[0].1.clone();
+        assert!(!ran.contains("[denied]"), "got: {ran}");
+    }
+
+    /// `outside_workdir = "deny"` refuses an outside read even when every
+    /// launch flag says allow, whether it comes from the config or the
+    /// stage, and leaves reads of the workdir alone.
+    #[tokio::test]
+    async fn outside_workdir_deny_holds_under_yolo() {
+        let hub = InteractionHub::new();
+        let yolo = |global: HashMap<String, ToolPolicy>, stage: HashMap<String, String>| {
+            let mut state = (*state_with(&hub, leviath_mcp::ToolExecutor::new(), global)).clone();
+            state.launch_overrides =
+                Arc::new(HashMap::from([("*".to_string(), ToolPolicy::Allow)]));
+            state.stage_perms_by_index = Arc::new(vec![stage]);
+            Arc::new(state)
+        };
+        let deny = leviath_tools::OUTSIDE_WORKDIR_PERMISSION.to_string();
+        for state in [
+            yolo(
+                HashMap::from([(deny.clone(), ToolPolicy::Deny)]),
+                HashMap::new(),
+            ),
+            yolo(
+                HashMap::new(),
+                HashMap::from([(deny.clone(), "deny".to_string())]),
+            ),
+        ] {
+            let out = dispatch_tools(
+                state.clone(),
+                vec![
+                    call(
+                        "c1",
+                        "shell",
+                        serde_json::json!({"command": "cat /etc/hosts"}),
+                    ),
+                    call(
+                        "c2",
+                        "shell",
+                        serde_json::json!({"command": "cat no-such-file-in-the-workdir"}),
+                    ),
+                ],
+                noop_progress(),
+            )
+            .await;
+            let refused = out[0].1.clone();
+            assert!(
+                refused.contains("reads outside the working directory")
+                    && refused.contains("/etc/hosts"),
+                "got: {refused}"
+            );
+            let inside = out[1].1.clone();
+            assert!(!inside.contains("[denied]"), "got: {inside}");
+        }
+
+        // Without the setting the same yolo run reads it: `ask` is lifted by
+        // the launch flag, as any `ask` is.
+        let out = dispatch_tools(
+            yolo(HashMap::new(), HashMap::new()),
+            vec![call(
+                "c1",
+                "shell",
+                serde_json::json!({"command": "cat /etc/hosts"}),
+            )],
+            noop_progress(),
+        )
+        .await;
+        let lifted = out[0].1.clone();
+        assert!(!lifted.contains("[denied]"), "got: {lifted}");
     }
 
     /// A line with no reusable key can never match a grant, however much is in

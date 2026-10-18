@@ -34,6 +34,11 @@ iana-time-zone = { workspace = true }
 # workspace's answer for "where does this platform put these", so the tool says
 # the same thing the rest of Leviath acts on.
 dirs = { workspace = true }
+# `search_files` and `glob`: an in-process walk and match, so searching never
+# means running a program.
+ignore = { workspace = true }
+globset = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

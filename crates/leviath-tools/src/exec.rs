@@ -130,6 +130,8 @@ impl BuiltinTools {
             "write_file" => self.write_file(&args).await,
             "edit_file" => self.edit_file(&args).await,
             "list_dir" => self.list_dir(&args).await,
+            "search_files" => self.search_files(&args).await,
+            "glob" => self.glob(&args).await,
             "shell" => self.shell(&args).await,
             // Synchronous like the environment tools: compile, then one
             // atomic write into the global tools directory (see `install.rs`).
@@ -217,21 +219,23 @@ impl BuiltinTools {
     /// [`resolve`](Self::resolve) so an allowlisted directory can be read but
     /// never written.
     pub(crate) fn resolve_read(&self, requested: &str) -> anyhow::Result<PathBuf> {
-        match resolve_within(requested, &self.ctx.workdir, resolves_within) {
-            Ok(path) => Ok(path),
-            Err(workdir_err) => {
-                let read_paths = self.ctx.read_paths();
-                if !read_paths.is_active() {
-                    return Err(workdir_err);
-                }
-                Self::resolve_outside(
-                    requested,
-                    &self.ctx.workdir,
-                    &read_paths,
-                    leviath_core::canonicalize_for_match,
-                )
-            }
-        }
+        crate::search::resolve_read_in(
+            requested,
+            &self.ctx.workdir,
+            &self.ctx.read_paths(),
+            resolves_within,
+        )
+    }
+
+    /// Whether a read-only tool could read `path`: the answer
+    /// `resolve_read` gives `read_file`, workdir first and
+    /// `[read_paths]` after.
+    ///
+    /// Exposed so the authorization layer can hold a safe-listed shell read
+    /// (`cat`, `grep`) to the fence `read_file` already has, rather than to a
+    /// second definition of "inside" that could drift from this one.
+    pub fn may_read(&self, path: &Path) -> bool {
+        self.resolve_read(&path.to_string_lossy()).is_ok()
     }
 
     /// The out-of-workdir arm of [`resolve_read`](Self::resolve_read), with
@@ -692,7 +696,7 @@ impl BuiltinTools {
 /// Run a file tool's filesystem work on the blocking pool, off the async
 /// workers: reading a large file or listing a large directory there stalls
 /// every other task on the runtime for as long as the disk takes.
-async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+pub(crate) async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     tokio::task::spawn_blocking(work)
         .await
         .expect("a file tool's filesystem work does not panic")

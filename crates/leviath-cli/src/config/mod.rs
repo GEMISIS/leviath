@@ -426,6 +426,15 @@ impl Config {
         if let Some(per_agent) = agent.and_then(|name| self.agent_tool_permissions.get(name)) {
             merged.extend(per_agent.iter().map(|(k, v)| (k.clone(), *v)));
         }
+        // `[safe_commands] outside_workdir = "deny"` is a ceiling like any
+        // configured deny: nothing below it, a blueprint or a launch flag,
+        // lifts it. `ask` is the built-in default and adds nothing.
+        if self.safe_commands.outside_workdir == crate::approvals::OutsideWorkdir::Deny {
+            merged.insert(
+                leviath_tools::OUTSIDE_WORKDIR_PERMISSION.to_string(),
+                ToolPolicy::Deny,
+            );
+        }
         merged
     }
 

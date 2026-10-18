@@ -39,8 +39,8 @@ use args_context::{
     ContextReadArgs, ContextWriteArgs, TodoAddArgs, TodoDoneArgs, TodoNoteArgs,
 };
 use args_files::{
-    EditFileArgs, InstallGlobalToolArgs, InstallSelfToolArgs, ListDirArgs, ReadFileArgs,
-    ReadFilesArgs, ShellArgs, WhichCommandArgs, WriteFileArgs,
+    EditFileArgs, GlobArgs, InstallGlobalToolArgs, InstallSelfToolArgs, ListDirArgs, ReadFileArgs,
+    ReadFilesArgs, SearchFilesArgs, ShellArgs, WhichCommandArgs, WriteFileArgs,
 };
 use args_rest::{
     AskUserChoiceArgs, AskUserConfirmArgs, AskUserTextArgs, CheckAgentArgs, DescribeBlueprintArgs,
@@ -212,6 +212,8 @@ tool_calls! {
         "One `write_file` call.", WriteFile, WriteFileCall, WriteFileArgs, "write_file";
         "One `edit_file` call.", EditFile, EditFileCall, EditFileArgs, "edit_file";
         "One `list_dir` call.", ListDir, ListDirCall, ListDirArgs, "list_dir";
+        "One `search_files` call.", SearchFiles, SearchFilesCall, SearchFilesArgs, "search_files";
+        "One `glob` call.", Glob, GlobCall, GlobArgs, "glob";
         "One `read_files` call.", ReadFiles, ReadFilesCall, ReadFilesArgs, "read_files";
         "One `shell` call.", Shell, ShellCall, ShellArgs, "shell";
         "One `which_command` call.", WhichCommand, WhichCommandCall, WhichCommandArgs, "which_command";
