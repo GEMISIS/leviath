@@ -26,7 +26,35 @@ fn running(marker: &str) -> Observed {
             std::path::PathBuf::from("/agents/dev.leviath.daemon.plist"),
         )),
         cli_exe: Some("/usr/local/bin/lev".to_string()),
+        mode: DaemonMode::default(),
     }
+}
+
+/// `spawn_would_replace` answers for the mode this host's next spawn runs
+/// in: `LEVIATH_DAEMON=attach` replaces nothing, and `replace` also replaces
+/// a build it cannot put in order.
+#[test]
+fn spawn_would_replace_follows_the_hosts_mode() {
+    let older = |mode| {
+        report(
+            Observed {
+                mode,
+                ..running("87296d6e 0.6.4 1791951523")
+            },
+            &cli(),
+        )
+        .spawn_would_replace
+    };
+    assert!(older(DaemonMode::Ensure));
+    assert!(!older(DaemonMode::Attach));
+    let unordered = report(
+        Observed {
+            mode: DaemonMode::Replace,
+            ..running("v0.6.4 0.6.4")
+        },
+        &cli(),
+    );
+    assert!(unordered.spawn_would_replace);
 }
 
 /// The object the issue asks for, field for field: the daemon's pid and

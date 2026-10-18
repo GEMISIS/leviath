@@ -147,6 +147,9 @@ pub(super) async fn real_daemon_status(args: commands::daemon::StatusArgs) -> an
             cli_exe: std::env::current_exe()
                 .ok()
                 .map(|path| path.display().to_string()),
+            // What this host's next spawn would do: a mistyped value is
+            // refused here as every spawn command would refuse it.
+            mode: crate::daemon::mode::DaemonModeArg::default().resolve_here()?,
         };
         println!(
             "{}",

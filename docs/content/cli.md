@@ -1208,7 +1208,7 @@ With no action, runs the [daemon](/docs/daemon) in the foreground.
 | `version`, `build`, `committed_at` | The daemon's build, from its build marker |
 | `cli` | The same for the `lev` that ran the command |
 | `standing` | `same`, `older`, `newer` or `unordered`, comparing the daemon with this `lev`. Null with no daemon |
-| `spawn_would_replace` | Whether a command in the default `--daemon ensure` mode would replace the daemon |
+| `spawn_would_replace` | Whether this host's next command without `--daemon` would replace the daemon, in the `LEVIATH_DAEMON` mode or `ensure` |
 | `supervised` | Whether the service file is installed, and where. Null where no supervisor is supported |
 
 `unordered` is another build of the same version that cannot be put in order, such as a build made
