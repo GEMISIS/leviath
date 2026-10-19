@@ -85,6 +85,25 @@ fn listed(args: &serde_json::Value) -> Result<Vec<Named>, String> {
     Ok(out)
 }
 
+/// Whether the `artifacts` argument names exactly the files of `recorded`, in
+/// order, each under its recorded path and name and still holding the bytes
+/// recorded for it. A file stored by hash alone, too large to have one, never
+/// counts as unchanged.
+pub(super) fn unchanged(
+    args: &serde_json::Value,
+    recorded: &[Artifact],
+    workdir: Option<&std::path::Path>,
+) -> bool {
+    let named = listed(args).unwrap_or_default();
+    named.len() == recorded.len()
+        && named.iter().zip(recorded).all(|(item, record)| {
+            let bytes = workdir.and_then(|w| std::fs::read(w.join(&item.path)).ok());
+            item.path == record.path
+                && item.name.as_ref().is_none_or(|name| *name == record.name)
+                && bytes.is_some_and(|b| sha256_hex(&b) == record.sha256)
+        })
+}
+
 /// The bytes and hash of the part this run produced that `name_or_sha` names,
 /// by the one rule every tool uses ([`Part::is_named`]), newest match first.
 /// `None` when no part is named or there is no store to read one from.

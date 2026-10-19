@@ -55,10 +55,12 @@ fn json_of<T: serde::Serialize>(value: T) -> Value {
 fn a_layout_4_run_reads_back_with_its_one_compaction_model_once_upgraded() {
     let run = Layout4::new();
     let before = run.bytes();
-    let expected: Value = serde_json::from_str(
-        &std::fs::read_to_string(fixtures_dir().join("layout-4.json")).unwrap(),
-    )
-    .unwrap();
+    let expected = crate::common::as_layout_8_reads(
+        serde_json::from_str(
+            &std::fs::read_to_string(fixtures_dir().join("layout-4.json")).unwrap(),
+        )
+        .unwrap(),
+    );
     let refused = RunFileReader::read(&run.file()).unwrap_err().to_string();
     assert!(refused.contains("different run types"), "{refused}");
     assert!(needs_upgrade(&run.dir));
@@ -88,12 +90,12 @@ fn a_layout_4_run_reads_back_with_its_one_compaction_model_once_upgraded() {
     assert_eq!(json_of(reader.state_at(0).unwrap()), expected["first"]);
     assert_eq!(json_of(reader.latest_state().unwrap()), expected["latest"]);
 
-    // Every frame after the spec is the one the old file held.
+    // Every frame the old file held is still there, in order: the steps and
+    // states are written again with each stage record's count, and read back
+    // as above.
     let after = run.bytes();
-    let old = codec::scan(&before).frames;
-    let new = codec::scan(&after).frames;
-    assert_eq!(old.len(), new.len());
-    for (o, n) in old.iter().zip(&new).skip(1) {
-        assert_eq!(before[o.offset..o.end()], after[n.offset..n.end()]);
-    }
+    let kinds = |bytes: &[u8]| -> Vec<codec::FrameKind> {
+        codec::scan(bytes).frames.iter().map(|f| f.kind).collect()
+    };
+    assert_eq!(kinds(&after), kinds(&before));
 }

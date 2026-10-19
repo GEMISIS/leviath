@@ -465,6 +465,7 @@ fn ledger(r: &OldStage, meta: &RunMeta) -> Option<StageRecord> {
         first_call_prompt_tokens: r.first_call_prompt_tokens.map(|n| n as u64),
         runaway_warned: r.runaway_warned,
         output_cap_raised: r.output_cap_raised,
+        resubmissions: u32::try_from(r.resubmissions).unwrap_or(u32::MAX),
         started_at: r.started_at,
         ended_at: r.ended_at,
         clock: clock(r.active, r.started_at, r.ended_at.unwrap_or(at)),

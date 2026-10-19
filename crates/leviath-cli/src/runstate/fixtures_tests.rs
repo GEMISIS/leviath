@@ -306,6 +306,7 @@ fn state_of(meta: &RunMeta, spec: &RunSpec, base: Option<RunState>) -> RunState 
             first_call_prompt_tokens: None,
             runaway_warned: false,
             output_cap_raised: false,
+            resubmissions: 0,
             started_at: None,
             ended_at: None,
             clock: Clock::default(),
@@ -630,6 +631,7 @@ pub(crate) fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow
             first_call_prompt_tokens: r.first_call_prompt_tokens.map(|t| t as u64),
             runaway_warned: r.runaway_warned,
             output_cap_raised: r.output_cap_raised,
+            resubmissions: r.resubmissions as u32,
             started_at: r.started_at,
             ended_at: r.ended_at,
             clock: r.active.map_or(Clock::default(), |a| Clock {

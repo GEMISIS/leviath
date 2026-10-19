@@ -135,6 +135,10 @@ pub(crate) mod tool_verdicts;
 pub use crate::approval_prompt::{declined_result, unanswered_approval_result};
 pub use tool_verdicts::{DecideCtx, DecidedCall, Decision, ToolGrants, ToolVerdict, WriteLedger};
 mod batch_record;
+mod submission;
+pub(crate) use submission::EndAfterBatch;
+#[cfg(test)]
+pub(crate) use submission::VisitSubmissions;
 mod tools;
 pub(crate) use tools::{
     AwaitingTools, ContextToolResults, LandedResults, RecoveredResults, ResumedExecutions,

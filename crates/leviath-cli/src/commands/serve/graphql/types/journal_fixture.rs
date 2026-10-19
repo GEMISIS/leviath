@@ -205,6 +205,7 @@ pub(crate) fn stay(id: &str, entered_at: i64) -> leviath_runtime::state::StageRe
         first_call_prompt_tokens: None,
         runaway_warned: false,
         output_cap_raised: false,
+        resubmissions: 0,
         started_at: Some(entered_at),
         ended_at: None,
         clock: Clock::default(),

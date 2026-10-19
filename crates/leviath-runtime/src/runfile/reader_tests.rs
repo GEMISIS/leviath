@@ -99,6 +99,7 @@ pub(crate) fn scripted_run(turns: usize) -> Vec<RunState> {
         first_call_prompt_tokens: None,
         runaway_warned: false,
         output_cap_raised: false,
+        resubmissions: 0,
         started_at: Some(1),
         ended_at: None,
         clock: Default::default(),

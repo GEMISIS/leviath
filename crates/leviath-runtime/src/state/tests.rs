@@ -93,6 +93,7 @@ pub(crate) fn busy() -> RunState {
         first_call_prompt_tokens: Some(10),
         runaway_warned: false,
         output_cap_raised: true,
+        resubmissions: 0,
         started_at: Some(1),
         ended_at: Some(2),
         clock: Clock::default(),

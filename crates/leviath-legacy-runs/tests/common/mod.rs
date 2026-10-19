@@ -311,3 +311,24 @@ pub fn as_layout_6_reads(spec: &mut serde_json::Value) {
         stage["routing"] = serde_json::Value::Null;
     }
 }
+
+/// What an older layout's build served, the way this build reads it once
+/// upgraded: every stage record with no resubmissions counted, since no older
+/// layout counted them.
+pub fn as_layout_8_reads(mut value: serde_json::Value) -> serde_json::Value {
+    count_no_resubmissions(&mut value);
+    value
+}
+
+fn count_no_resubmissions(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("output_cap_raised") {
+                map.insert("resubmissions".into(), 0.into());
+            }
+            map.values_mut().for_each(count_no_resubmissions);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(count_no_resubmissions),
+        _ => {}
+    }
+}

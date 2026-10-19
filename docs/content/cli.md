@@ -308,11 +308,11 @@ across stages, and per-stage models with different prices.
 | `--json` | Print the ledger as JSON |
 
 ```
-STAGE                STATUS            PROMPT     OUTPUT   CACHE RD   CACHE WR        COST
-ingest               complete           16832       2249          0          0    ~$0.0891
-report               complete           37644        493          0          0    ~$0.1932
-summary              complete          252848        648          0          0    ~$1.2812
-TOTAL                                  307324       3390          0          0    ~$1.5635
+STAGE                STATUS            PROMPT     OUTPUT   CACHE RD   CACHE WR        COST  RESUB
+ingest               complete           16832       2249          0          0    ~$0.0891      0
+report               complete           37644        493          0          0    ~$0.1932      0
+summary              complete          252848        648          0          0    ~$1.2812      2
+TOTAL                                  307324       3390          0          0    ~$1.5635      2
 ```
 
 `CACHE WR` is the write half of a cache decision. Without it a stage showing no reads might be
@@ -329,6 +329,11 @@ Every call a run bills counts against the stage it was made in, including the co
 summarize a full window and the routing call a stage makes at its own boundary. The exception is the
 run's title call, which happens once at spawn beside the run rather than inside any stage, so this
 column can sum to slightly less than the run's own figure.
+
+`RESUB` counts the `submit_output` calls a stage made after its answer was already in. A stage
+with nowhere else to go ends on its first accepted answer, so a count here is a stage with
+somewhere to go that kept submitting, or one a gate sent back to answer again. See
+[when an answer ends the stage](/docs/outputs#when-an-answer-ends-the-stage).
 
 `--visits` splits a stage by each stay in it. The row above is the sum across every visit, which is
 the right total for the stage. It is the wrong number to put on a graph of the path the run took,

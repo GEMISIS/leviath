@@ -20,7 +20,8 @@ fn json_of<T: serde::Serialize>(value: T) -> Value {
 
 /// The fixture's layout-6 run reads back as it did once upgraded, with no
 /// write paths anywhere: not on its graph, not on its stage, and none
-/// inherited. Every state and delta is unchanged.
+/// inherited. Every state and delta reads as it did, each stage record with
+/// no resubmissions counted.
 #[test]
 fn a_layout_6_run_reads_back_with_no_write_paths_once_upgraded() {
     let tmp = tempfile::tempdir().unwrap();
@@ -32,10 +33,12 @@ fn a_layout_6_run_reads_back_with_no_write_paths_once_upgraded() {
     let file = dir.join("run.lvr");
     std::fs::copy(fixtures_dir().join("layout-6/run.lvr"), &file).unwrap();
     let before = std::fs::read(&file).unwrap();
-    let expected: Value = serde_json::from_str(
-        &std::fs::read_to_string(fixtures_dir().join("layout-6.json")).unwrap(),
-    )
-    .unwrap();
+    let expected: Value = crate::common::as_layout_8_reads(
+        serde_json::from_str(
+            &std::fs::read_to_string(fixtures_dir().join("layout-6.json")).unwrap(),
+        )
+        .unwrap(),
+    );
     let refused = RunFileReader::read(&file).unwrap_err().to_string();
     assert!(refused.contains("different run types"), "{refused}");
     assert!(needs_upgrade(&dir));
@@ -59,12 +62,12 @@ fn a_layout_6_run_reads_back_with_no_write_paths_once_upgraded() {
     assert_eq!(json_of(reader.state_at(0).unwrap()), expected["first"]);
     assert_eq!(json_of(reader.latest_state().unwrap()), expected["latest"]);
 
-    // Every frame after the spec is the one the old file held.
+    // Every frame the old file held is still there, in order: the steps and
+    // states are written again with each stage record's count, and read back
+    // as above.
     let after = std::fs::read(&file).unwrap();
-    let old = codec::scan(&before).frames;
-    let new = codec::scan(&after).frames;
-    assert_eq!(old.len(), new.len());
-    for (o, n) in old.iter().zip(&new).skip(1) {
-        assert_eq!(before[o.offset..o.end()], after[n.offset..n.end()]);
-    }
+    let kinds = |bytes: &[u8]| -> Vec<codec::FrameKind> {
+        codec::scan(bytes).frames.iter().map(|f| f.kind).collect()
+    };
+    assert_eq!(kinds(&after), kinds(&before));
 }

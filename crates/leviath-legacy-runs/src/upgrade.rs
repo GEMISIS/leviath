@@ -1,12 +1,11 @@
-//! Upgrading a run file in binary layout 2 to 6 to this build's layout, in
+//! Upgrading a run file in binary layout 2 to 7 to this build's layout, in
 //! place.
 //!
 //! The upgraded file is the old one with each spec, state and delta frame read
 //! as its layout wrote it and written again as this build writes it, and the
 //! code and owner frames copied byte for byte, since they did not change shape
-//! (see [`crate::layout2`] through [`crate::layout6`]). A state and a delta
-//! in layout 4, 5 or 6 already have this
-//! build's shape, so they are copied byte for byte too. A frame torn by a
+//! (see [`crate::layout2`] through [`crate::layout7`]). A spec in layout 7
+//! already has this build's shape, so it is copied byte for byte too. A frame torn by a
 //! crash at the end of the old file is left out, as any reader of the file would cut it
 //! off. The old file is kept in the run's `legacy/` directory first, and the
 //! new one then replaces it in one step, so the run directory always holds one
@@ -23,7 +22,7 @@ use leviath_runtime::state::{RunState, StateDelta};
 
 use crate::ConvertError;
 use crate::write::LEGACY_DIR;
-use crate::{layout2, layout3, layout4, layout5, layout6};
+use crate::{layout2, layout3, layout4, layout5, layout6, layout7};
 
 /// What upgrading a run file did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +54,8 @@ enum Layout {
     Five,
     /// Builds before a run's write tools could be held to path globs.
     Six,
+    /// Builds before a stage record counted its resubmissions.
+    Seven,
 }
 
 impl Layout {
@@ -66,6 +67,7 @@ impl Layout {
             (Self::Four, &layout4::FINGERPRINT),
             (Self::Five, &layout5::FINGERPRINT),
             (Self::Six, &layout6::FINGERPRINT),
+            (Self::Seven, &layout7::FINGERPRINT),
         ]
         .into_iter()
         .find(|(_, fingerprint)| codec::check_header(head, fingerprint).is_ok())
@@ -80,6 +82,7 @@ impl Layout {
             Self::Four => 4,
             Self::Five => 5,
             Self::Six => 6,
+            Self::Seven => 7,
         }
     }
 }
@@ -161,37 +164,46 @@ fn rewrite(
     for frame in &frames {
         let read = |e: codec::CodecError| unreadable(format!("{e}"));
         match frame.kind {
+            // A spec in layout 7 is this build's.
+            FrameKind::Spec if layout == Layout::Seven => {
+                let spec: RunSpec = frame.decode(bytes).map_err(read)?;
+                run_id.get_or_insert_with(|| spec.run_id.clone());
+                out.extend_from_slice(&bytes[frame.offset..frame.end()]);
+            }
             FrameKind::Spec => {
                 let spec: RunSpec = match layout {
                     Layout::Two => frame.decode::<layout2::RunSpec>(bytes).map(Into::into),
                     Layout::Three => frame.decode::<layout3::RunSpec>(bytes).map(Into::into),
                     Layout::Four => frame.decode::<layout4::RunSpec>(bytes).map(Into::into),
                     Layout::Five => frame.decode::<layout5::RunSpec>(bytes).map(Into::into),
-                    Layout::Six => frame.decode::<layout6::RunSpec>(bytes).map(Into::into),
+                    Layout::Six | Layout::Seven => {
+                        frame.decode::<layout6::RunSpec>(bytes).map(Into::into)
+                    }
                 }
                 .map_err(read)?;
                 run_id.get_or_insert_with(|| spec.run_id.clone());
                 out.extend(crate::write::frame(FrameKind::Spec, &spec));
             }
-            // A state and a delta in layout 4, 5 or 6 are this build's.
-            FrameKind::State | FrameKind::Delta
-                if matches!(layout, Layout::Four | Layout::Five | Layout::Six) =>
-            {
-                out.extend_from_slice(&bytes[frame.offset..frame.end()])
-            }
-            // A state and a delta are the same shape in layouts 2 and 3.
+            // A state and a delta are the same shape in layouts 2 and 3, and
+            // in layouts 4 to 7, which hold this build's fan-out.
             FrameKind::State => {
-                let state: RunState = frame
-                    .decode::<layout3::RunState>(bytes)
-                    .map_err(read)?
-                    .into();
+                let state: RunState = match layout {
+                    Layout::Two | Layout::Three => {
+                        frame.decode::<layout3::RunState>(bytes).map(Into::into)
+                    }
+                    _ => frame.decode::<layout7::RunState>(bytes).map(Into::into),
+                }
+                .map_err(read)?;
                 out.extend(crate::write::frame(FrameKind::State, &state));
             }
             FrameKind::Delta => {
-                let delta: StateDelta = frame
-                    .decode::<layout3::StateDelta>(bytes)
-                    .map_err(read)?
-                    .into();
+                let delta: StateDelta = match layout {
+                    Layout::Two | Layout::Three => {
+                        frame.decode::<layout3::StateDelta>(bytes).map(Into::into)
+                    }
+                    _ => frame.decode::<layout7::StateDelta>(bytes).map(Into::into),
+                }
+                .map_err(read)?;
                 out.extend(crate::write::frame(FrameKind::Delta, &delta));
             }
             FrameKind::Code | FrameKind::Owner => {

@@ -61,6 +61,25 @@ lev result <run-id> --json   # the answer plus its shape and stage
 `mode = "output"` does three things for you. It grants the stage the `submit_output` tool, it
 requires the stage to call it, and it lets the run end there.
 
+### When an answer ends the stage
+
+An accepted answer ends a stage that has nowhere else to go: one that no `always` or
+`llm_choice` edge leaves, or the stage a fan-out worker was started to run. Leviath does not ask the
+model again. Some models call a tool on every turn and never send a plain reply, so without this
+they would hand back the same answer until the stage ran out of iterations.
+
+A stage with somewhere to go keeps working after it submits, so it can still revise its answer. A
+changed answer replaces the old one. The same answer again records nothing: the model is told its
+answer is already in and to reply without a tool call, and the stage moves on after the second
+repeat. A file the answer names counts as changed when its bytes changed, even under the same path.
+
+Either way the stage leaves through its ordinary transition. Its gates, review and required
+regions still apply, and one that sends the stage back gets a stage that can submit again. An
+interactive stage is left alone: its conversation decides when it ends, not its answer.
+
+`lev stages` counts each stage's `submit_output` calls after its answer was already in, in the
+`RESUB` column.
+
 ## Any shape you like
 
 You name a shape, and the model produces it. There is no fixed list: the label reaches the model, and

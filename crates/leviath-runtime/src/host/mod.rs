@@ -856,3 +856,7 @@ mod resume_tests;
 #[cfg(test)]
 #[path = "../host_conversation_tests.rs"]
 mod conversation_tests;
+
+#[cfg(test)]
+#[path = "../host_submission_tests.rs"]
+mod submission_tests;

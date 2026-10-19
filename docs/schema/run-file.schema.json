@@ -3587,6 +3587,12 @@
             "description": "Tokens per region at its first call.",
             "type": "object"
           },
+          "resubmissions": {
+            "description": "`submit_output` calls made once a visit to it already held an answer.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "runaway_warned": {
             "description": "Whether a runaway-cost warning was logged.",
             "type": "boolean"
@@ -3629,6 +3635,7 @@
           "region_tokens",
           "runaway_warned",
           "output_cap_raised",
+          "resubmissions",
           "clock"
         ],
         "type": "object"
@@ -10901,6 +10908,12 @@
             "description": "Tokens per region at its first call.",
             "type": "object"
           },
+          "resubmissions": {
+            "description": "`submit_output` calls made once a visit to it already held an answer.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "runaway_warned": {
             "description": "Whether a runaway-cost warning was logged.",
             "type": "boolean"
@@ -10943,6 +10956,7 @@
           "region_tokens",
           "runaway_warned",
           "output_cap_raised",
+          "resubmissions",
           "clock"
         ],
         "type": "object"

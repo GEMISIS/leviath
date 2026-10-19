@@ -6,8 +6,9 @@
 //! spawned under in, and a graph and each of its stages, which this build
 //! writes `routing` for. Layout 5 wrote nothing for `routing`, so the two
 //! types below leave the field out, and read exactly what layout 5 wrote.
-//! Every other type, and every other frame (code, states, deltas, owners),
-//! is the runtime's own, which did not change.
+//! Every other type, and the code and owner frames, are the runtime's own,
+//! which did not change. Its states and deltas are read as layout 7 still
+//! wrote them (see [`crate::layout7`]).
 //!
 //! A run written in layout 5 was spawned under no key, since nothing kept
 //! one, and its routing was not recorded, so it upgrades with neither: a

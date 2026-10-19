@@ -47,7 +47,7 @@ impl Layout5 {
 /// What the layout-5 build read back from the fixture.
 fn expected() -> Value {
     let text = std::fs::read_to_string(fixtures_dir().join("layout-5.json")).unwrap();
-    serde_json::from_str(&text).unwrap()
+    crate::common::as_layout_8_reads(serde_json::from_str(&text).unwrap())
 }
 
 /// `value` as JSON, through its text, as the layout-5 build served it.
@@ -57,9 +57,8 @@ fn json_of<T: serde::Serialize>(value: T) -> Value {
 
 /// The fixture reads back as it did once upgraded: the same spec with its
 /// webhook and labels, under no idempotency key and with no `routing`, which
-/// layout 5 never recorded, and every step and state as they were. The steps
-/// and states are copied byte for byte, since layout 5 wrote them in this
-/// build's shape.
+/// layout 5 never recorded, and every step and state as they were, each
+/// stage record with no resubmissions counted.
 #[test]
 fn a_layout_5_run_reads_back_with_no_key_and_no_routing_once_upgraded() {
     let run = Layout5::new();
@@ -91,16 +90,12 @@ fn a_layout_5_run_reads_back_with_no_key_and_no_routing_once_upgraded() {
     );
     assert_eq!(json_of(reader.latest_state().unwrap()), expected["latest"]);
 
-    let (old, new) = (codec::scan(&before), run.bytes());
-    let upgraded = codec::scan(&new);
-    let steps = |scan: &codec::Scan, bytes: &[u8]| -> Vec<Vec<u8>> {
-        scan.frames
-            .iter()
-            .filter(|f| f.kind != FrameKind::Spec)
-            .map(|f| bytes[f.offset..f.end()].to_vec())
-            .collect()
-    };
-    assert_eq!(steps(&upgraded, &new), steps(&old, &before));
+    assert_eq!(kinds(&run.bytes()), kinds(&before));
+}
+
+/// The kind of every frame in `bytes`, in order.
+fn kinds(bytes: &[u8]) -> Vec<FrameKind> {
+    codec::scan(bytes).frames.iter().map(|f| f.kind).collect()
 }
 
 /// A file upgraded once is in this build's layout: upgrading it again is
@@ -137,7 +132,7 @@ fn a_layout_5_file_whose_spec_does_not_read_is_refused() {
 /// A layout-5 run written by a later layout-5 build (dd98049e), parked in an
 /// interactive stage with `idle_timeout_secs` waiting for its next message,
 /// upgrades without losing any of it: the stage's interactive settings, the
-/// phase and wait it parked in, and every step, byte for byte.
+/// phase and wait it parked in, and every step.
 /// `fixtures/layout-5-parked.json` is what that build served for it.
 #[test]
 fn a_parked_interactive_layout_5_run_upgrades_without_loss() {
@@ -151,7 +146,7 @@ fn a_parked_interactive_layout_5_run_upgrades_without_loss() {
     std::fs::copy(fixtures_dir().join("layout-5-parked/run.lvr"), &file).unwrap();
     let before = std::fs::read(&file).unwrap();
     let text = std::fs::read_to_string(fixtures_dir().join("layout-5-parked.json")).unwrap();
-    let expected: Value = serde_json::from_str(&text).unwrap();
+    let expected = crate::common::as_layout_8_reads(serde_json::from_str(&text).unwrap());
     assert!(needs_upgrade(&dir));
 
     upgrade(&dir).unwrap();
@@ -176,14 +171,5 @@ fn a_parked_interactive_layout_5_run_upgrades_without_loss() {
     held["files"] = Value::Null;
     served["files"] = Value::Null;
     assert_eq!(held, served);
-    let after = std::fs::read(&file).unwrap();
-    let steps = |bytes: &[u8]| -> Vec<Vec<u8>> {
-        codec::scan(bytes)
-            .frames
-            .iter()
-            .filter(|f| f.kind != FrameKind::Spec)
-            .map(|f| bytes[f.offset..f.end()].to_vec())
-            .collect()
-    };
-    assert_eq!(steps(&after), steps(&before));
+    assert_eq!(kinds(&std::fs::read(&file).unwrap()), kinds(&before));
 }

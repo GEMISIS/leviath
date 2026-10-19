@@ -409,6 +409,13 @@ pub struct StageRecord {
     /// resumed run would otherwise retry at the cap that already failed.
     #[serde(default)]
     pub output_cap_raised: bool,
+    /// `submit_output` calls this stage made after a visit to it already held
+    /// an answer, whether each changed the answer or handed back the same one.
+    /// A stage ends on its first accepted answer when nothing else follows
+    /// it, so a count here is a model that kept submitting in a stage with
+    /// somewhere to go, or a stage sent back by a gate to answer again.
+    #[serde(default)]
+    pub resubmissions: usize,
     /// Unix timestamp (seconds); None until the stage starts.
     pub started_at: Option<i64>,
     /// Unix timestamp (seconds); None until the stage ends.
@@ -467,6 +474,7 @@ impl StageRecord {
             first_call_prompt_tokens: None,
             runaway_warned: false,
             output_cap_raised: false,
+            resubmissions: 0,
             started_at: None,
             ended_at: None,
             active: None,
