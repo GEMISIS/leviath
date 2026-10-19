@@ -72,7 +72,7 @@ fn state_with_quota(
         update_check: Default::default(),
         update_jobs: Default::default(),
         config: crate::commands::serve::testutil::fixed_config(config),
-        event_tx: tx,
+        event_tx: tx.into(),
         control: crate::commands::serve::testutil::no_daemon_client(),
         mcp: crate::commands::serve::mcp::McpAdmin::default(),
         providers: admin,

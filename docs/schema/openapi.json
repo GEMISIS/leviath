@@ -6492,12 +6492,23 @@
         "type": "object",
         "required": [
           "run_id",
-          "warnings"
+          "warnings",
+          "seq",
+          "server_instance"
         ],
         "properties": {
           "run_id": {
             "type": "string",
             "description": "The new run's id."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The event stream's number before the run started. Every frame of the run is numbered above it, so a GraphQL subscription with `since` set to it is handed the run from its first frame."
+          },
+          "server_instance": {
+            "type": "string",
+            "description": "The server process that numbered `seq`. Pass it as `serverInstance` beside `since`."
           },
           "warnings": {
             "type": "array",

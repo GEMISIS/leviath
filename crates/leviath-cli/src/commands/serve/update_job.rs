@@ -32,9 +32,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 
-use super::events::{ServerEvent, Stamped};
+use super::events::{EventBus, ServerEvent};
 use crate::bundled::install_bundled;
 use crate::commands::update::{
     BinaryStep, CommandRunner, ConfigState, UpdateArgs, UpdateEnv, UpdatePlan, plan,
@@ -340,14 +339,7 @@ impl UpdateJobs {
     /// A job that has been trimmed out from under a running task is left alone
     /// rather than re-inserted: it aged out because seven newer ones arrived,
     /// and resurrecting it would put a stale record back at the front.
-    fn step(
-        &self,
-        id: &str,
-        step: Step,
-        status: StepStatus,
-        detail: String,
-        events: &broadcast::Sender<Stamped>,
-    ) {
+    fn step(&self, id: &str, step: Step, status: StepStatus, detail: String, events: &EventBus) {
         {
             let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
             let Some(job) = jobs.iter_mut().find(|job| job.id == id) else {
@@ -381,7 +373,7 @@ impl UpdateJobs {
     /// The finish frame carries the record rather than a summary so a console
     /// that connected mid-run, or dropped a frame, needs no follow-up request
     /// to render the result.
-    fn finish(&self, id: &str, restart_required: bool, events: &broadcast::Sender<Stamped>) {
+    fn finish(&self, id: &str, restart_required: bool, events: &EventBus) {
         let finished = {
             let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
             let Some(job) = jobs.iter_mut().find(|job| job.id == id) else {
@@ -416,11 +408,7 @@ impl UpdateJobs {
     /// Returns the id the caller answers `202` with. The work is
     /// `spawn_blocking` because all of it is: a package manager subprocess, a
     /// directory rewrite, and a config save.
-    pub(super) fn spawn(
-        &self,
-        req: ApplyRequest,
-        events: &broadcast::Sender<Stamped>,
-    ) -> Result<UpdateJob, String> {
+    pub(super) fn spawn(&self, req: ApplyRequest, events: &EventBus) -> Result<UpdateJob, String> {
         let job = self.start()?;
         let (store, events, job_id) = (self.clone(), events.clone(), job.id.clone());
         tokio::task::spawn_blocking(move || store.apply(&job_id, req, &events));
@@ -432,7 +420,7 @@ impl UpdateJobs {
     /// The plan is built here rather than passed in: a caller that planned,
     /// waited for a queue, and then acted on the older answer is exactly the
     /// surprise `lev update` prints its plan to avoid.
-    fn apply(&self, id: &str, req: ApplyRequest, events: &broadcast::Sender<Stamped>) {
+    fn apply(&self, id: &str, req: ApplyRequest, events: &EventBus) {
         let env = (self.env)();
         let plan = plan(&UpdateArgs::default(), &env);
         let installed = self.binary_step(id, req, &plan, &env, events);
@@ -449,7 +437,7 @@ impl UpdateJobs {
         req: ApplyRequest,
         plan: &UpdatePlan,
         env: &UpdateEnv,
-        events: &broadcast::Sender<Stamped>,
+        events: &EventBus,
     ) -> Binary {
         let step = Step::Binary;
         if !req.binary {
@@ -499,7 +487,7 @@ impl UpdateJobs {
         req: ApplyRequest,
         plan: &UpdatePlan,
         env: &UpdateEnv,
-        events: &broadcast::Sender<Stamped>,
+        events: &EventBus,
         binary: Binary,
     ) {
         let step = Step::Agents;
@@ -569,13 +557,7 @@ impl UpdateJobs {
     /// An `agent.toml` refuses a key it does not know, so a blueprint never
     /// carries an old spelling to respell: the step is kept so a client that
     /// lists the steps sees the same four, and it always skips, saying why.
-    fn keys_step(
-        &self,
-        id: &str,
-        req: ApplyRequest,
-        events: &broadcast::Sender<Stamped>,
-        binary: Binary,
-    ) {
+    fn keys_step(&self, id: &str, req: ApplyRequest, events: &EventBus, binary: Binary) {
         let step = Step::Keys;
         let Some(()) = self.reached(id, step, req.keys, binary, events) else {
             return;
@@ -590,7 +572,7 @@ impl UpdateJobs {
         req: ApplyRequest,
         plan: &UpdatePlan,
         env: &UpdateEnv,
-        events: &broadcast::Sender<Stamped>,
+        events: &EventBus,
         binary: Binary,
     ) {
         let step = Step::Migrations;
@@ -648,7 +630,7 @@ impl UpdateJobs {
         step: Step,
         asked_for: bool,
         binary: Binary,
-        events: &broadcast::Sender<Stamped>,
+        events: &EventBus,
     ) -> Option<()> {
         let reason = match (asked_for, binary) {
             (false, _) => "not asked for",

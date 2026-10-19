@@ -497,6 +497,12 @@
           "minimum": 1,
           "default": 33554432,
           "description": "Bytes one request body may carry: the ceiling on a multipart upload to POST /api/runs or POST /api/runs/{id}/message. 32 MiB by default."
+        },
+        "event_replay_frames": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 4096,
+          "description": "Frames kept for a GraphQL subscription that resumes with `since`, shared by every subscriber. `0` keeps none, so every resume reports a gap."
         }
       }
     },

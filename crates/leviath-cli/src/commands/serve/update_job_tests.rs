@@ -7,6 +7,10 @@
 
 use super::*;
 
+use tokio::sync::broadcast;
+
+use super::super::events::Stamped;
+
 use std::sync::atomic::AtomicUsize;
 
 use crate::commands::update::{Channel, InstallMethod, MIGRATIONS, binary_step};
@@ -71,7 +75,7 @@ struct Fixture {
     config_path: std::path::PathBuf,
     recorder: Recorder,
     jobs: UpdateJobs,
-    events: broadcast::Sender<Stamped>,
+    events: EventBus,
     rx: broadcast::Receiver<Stamped>,
 }
 
@@ -108,6 +112,7 @@ impl Fixture {
             ..UpdateEnv::for_applying(Arc::clone(&runner))
         }));
         let (events, rx) = broadcast::channel(256);
+        let events = EventBus::from(events);
         Self {
             _dir: dir,
             agents_dir,

@@ -69,11 +69,12 @@ fn the_close_frame_says_going_away() {
 
 #[tokio::test]
 async fn a_shutdown_starts_out_not_requested() {
+    use futures_util::FutureExt;
+
     let shutdown = Shutdown::default();
-    assert!(!shutdown.is_requested());
+    assert!(shutdown.requested().now_or_never().is_none());
     shutdown.begin();
-    assert!(shutdown.is_requested());
-    shutdown.requested().await;
+    assert!(shutdown.requested().now_or_never().is_some());
 }
 
 /// The server finishing and every socket closing ends the drain well inside

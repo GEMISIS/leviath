@@ -14730,6 +14730,17 @@ type SpawnedOutput {
 	"""
 	warnings: [SpawnIssueOutput!]!
 	"""
+	The event stream's number before the run started. Every frame of the
+	run is numbered above it, so `runEvents(since:)` with this number and
+	the run's id hands over the run from its `RunSpawnedEvent` on.
+	"""
+	seq: BigInt!
+	"""
+	The server process that numbered `seq`: pass it as `serverInstance`
+	beside `since`.
+	"""
+	serverInstance: ID!
+	"""
 	The run as its record stands. Null in the moment between the daemon
 	starting it and writing its first record; read `runId` then, and ask
 	for the run again.
@@ -16577,8 +16588,10 @@ questions: what runs are doing, what the machine is doing, and how one
 update is going. Each opens with a `SubscriptionOpenedEvent` and then
 carries only the frames it is about.
 
-Delivery is at-most-once, so a stream is how a client stays current and not
-how it reconstructs the past: for that, read the run.
+Delivery is at-most-once. A client that was away resumes with `since` and
+the `serverInstance` it was numbered by, and is handed what the server
+still keeps; anything older is announced as a gap, and the run itself is
+how a client reconstructs that.
 """
 type Subscription {
 	"""
@@ -16600,7 +16613,19 @@ type Subscription {
 	
 	Only the filter's in-memory half decides those later checks. A
 	condition that would have to open a file reads as "not matching" for
-	now, and is asked again on that run's next frame.
+	now, and is asked again on that run's next status change.
+	
+	A run whose spawn frame arrives before the server has its record is
+	asked again on each of its frames, whatever the filter names, and its
+	frames are held meanwhile. Once the record is there the run joins with
+	those frames, spawn first, or is dropped with them.
+	
+	`since` resumes a stream: the frames this server still keeps that are
+	numbered above it arrive first, in order, and then the live ones, with
+	nothing missed or repeated between. Pass the `serverInstance` that
+	numbered `since`. When it names another process, or `since` is older
+	than what is kept, an `EventsDroppedEvent` follows the opening frame:
+	re-read what you show.
 	
 	Filter fields that describe a listing rather than a run - `query`,
 	`sort` and their neighbours - have nothing to describe on a stream and
@@ -16616,7 +16641,11 @@ type Subscription {
 		"Only these frame types; omitted or empty means all of them."
 		types: [RunEventType!],
 		"Include the sub-agents of the runs in scope, as they spawn."
-		includeDescendants: Boolean! = false
+		includeDescendants: Boolean! = false,
+		"Resume after this frame number: replay the kept frames above it first."
+		since: BigInt,
+		"The `serverInstance` that numbered `since`."
+		serverInstance: ID
 	): RunEventFrame!
 	"""
 	What is happening to the machine this server runs on.
@@ -16625,10 +16654,17 @@ type Subscription {
 	the config file, and the progress of a self-update. `/ws` mixes these
 	in with everything else; here they are their own stream, so a settings
 	screen subscribes to them without seeing a fleet's worth of log lines.
+	
+	`since` and `serverInstance` resume it the way they resume
+	`runEvents`.
 	"""
 	machineEvents(
 		"Only these frame types; omitted or empty means all of them."
-		types: [MachineEventType!]
+		types: [MachineEventType!],
+		"Resume after this frame number: replay the kept frames above it first."
+		since: BigInt,
+		"The `serverInstance` that numbered `since`."
+		serverInstance: ID
 	): MachineEventFrame!
 	"""
 	How one update started by `startUpdate` is going.
@@ -16654,8 +16690,10 @@ without a second request.
 type SubscriptionOpenedEvent implements Event {
 	"""
 	The number the last frame before this subscription carried, or zero on
-	a server that has sent none. Every frame on this subscription has a
-	number above it, though not every number above it arrives here.
+	a server that has sent none. A subscription resumed with `since` on
+	this server carries that number instead. Every frame on this
+	subscription has a number above it, though not every number above it
+	arrives here.
 	"""
 	seq: BigInt!
 	"When the subscription opened, in unix seconds."

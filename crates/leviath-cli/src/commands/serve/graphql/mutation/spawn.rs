@@ -14,6 +14,7 @@ use leviath_runtime::spec::issues::{
 use super::super::super::core::spawn::{self as spawn_core, Verdict};
 use super::super::super::types::AppState;
 use super::super::error::IntoGraphql;
+use super::super::scalars::BigInt;
 use super::super::types::run::Run;
 use super::super::types::runfile::spec::SpawnSummary;
 use super::spawn_request::{Policy, SpawnRunRequest};
@@ -208,6 +209,8 @@ pub(crate) struct Spawned {
     pub(crate) run_id: String,
     /// What may keep it from ever finishing.
     pub(crate) warnings: SpawnIssues,
+    /// The bus's number before the daemon was asked.
+    pub(crate) seq: u64,
 }
 
 /// A run that was started: its id, and the run itself once its record is
@@ -225,6 +228,19 @@ impl Spawned {
     /// Empty for most runs.
     async fn warnings(&self) -> Vec<SpawnIssue> {
         self.warnings.iter().map(SpawnIssue::from).collect()
+    }
+
+    /// The event stream's number before the run started. Every frame of the
+    /// run is numbered above it, so `runEvents(since:)` with this number and
+    /// the run's id hands over the run from its `RunSpawnedEvent` on.
+    async fn seq(&self) -> BigInt {
+        BigInt(i64::try_from(self.seq).unwrap_or(i64::MAX))
+    }
+
+    /// The server process that numbered `seq`: pass it as `serverInstance`
+    /// beside `since`.
+    async fn server_instance(&self) -> ID {
+        ID(crate::commands::serve::events::server_instance().to_string())
     }
 
     /// The run as its record stands. Null in the moment between the daemon
@@ -320,6 +336,7 @@ pub(crate) async fn spawn_run(
         Verdict::Accepted(started) => SpawnRunResult::Spawned(Spawned {
             run_id: started.run_id,
             warnings: started.warnings,
+            seq: started.seq,
         }),
         Verdict::Rejected(issues) => SpawnRunResult::Rejected(SpawnRejected::from(&issues)),
     })

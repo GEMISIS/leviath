@@ -42,6 +42,8 @@ pub(super) async fn spawn_run(
             Json(SpawnedResp {
                 run_id: started.run_id,
                 warnings: IssuesResp::from(started.warnings).issues,
+                seq: started.seq,
+                server_instance: super::events::server_instance().to_string(),
             }),
         )
             .into_response()),

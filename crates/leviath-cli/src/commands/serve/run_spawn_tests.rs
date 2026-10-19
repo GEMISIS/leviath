@@ -107,11 +107,17 @@ async fn a_spawn_request_starts_a_run() {
         run_id: "run-1".into(),
         warnings: Default::default(),
     });
+    let before = crate::commands::serve::events::latest_seq();
     let (status, body) = send(state, post("/api/runs", CODER)).await;
     assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["run_id"], "run-1");
+    assert_eq!(body["warnings"], serde_json::json!([]));
+    // Where the run's frames start, and which process numbered that.
+    let seq = body["seq"].as_u64().expect("a frame number");
+    assert!(seq >= before, "{seq} is the bus's number when it was asked");
     assert_eq!(
-        body,
-        serde_json::json!({ "run_id": "run-1", "warnings": [] })
+        body["server_instance"],
+        crate::commands::serve::events::server_instance()
     );
     assert!(carried(&seen).inputs.contains_key("task"));
 }

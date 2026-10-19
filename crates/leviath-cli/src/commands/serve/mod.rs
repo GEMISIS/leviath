@@ -23,6 +23,7 @@ mod events;
 mod fs;
 mod graphql;
 mod interactions;
+mod keepalive;
 mod mcp;
 mod mime;
 mod model_catalog;
@@ -527,6 +528,9 @@ async fn execute_with_shutdown(
     // Sized like the daemon's WorldEvent ring (see WorldHost): the ring never
     // shrinks, so its capacity is a permanent memory floor once filled.
     let (event_tx, _) = broadcast::channel::<Stamped>(256);
+    // Read before `cfg` moves into the shared state below.
+    let replay_frames = usize::try_from(cfg.serve.event_replay_frames).unwrap_or(usize::MAX);
+    let event_tx = events::EventBus::new(event_tx, replay_frames);
 
     let state = AppState {
         caches: Default::default(),
@@ -1787,7 +1791,7 @@ mod tests {
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
-            event_tx: tx,
+            event_tx: tx.into(),
             control: no_daemon_control(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),

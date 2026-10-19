@@ -375,6 +375,15 @@ same list.
 - `lev agent-client` no longer drops a session's second prompt without a
   word when the run has finished. An interactive blueprint's run takes it
   as its next message.
+- A GraphQL `runEvents` subscription filtered only on `metadata`, or on
+  anything else a status frame cannot change, no longer misses a run whose
+  spawn frame reaches `lev serve` before the run's record does. Such a run is
+  asked again on each of its frames, which wait meanwhile, and joins with
+  all of them, spawn first.
+- `/ws/graphql` now pings every 20 seconds, closes a peer that has not
+  answered for 60, and gives each frame 10 seconds to go out, the same
+  keepalive `/ws` has. A peer that stopped reading no longer holds its
+  subscriptions and their buffers until TCP gives up.
 - Multi-stage runs on Meta's Muse Spark (directly or as OpenRouter's
   `meta/*`) no longer loop between a finished stage and its error recovery
   until the revisit cap. The routing request sent `tool_choice: "none"`, which
@@ -837,6 +846,16 @@ same list.
   a run as your turn, with `[i]` to reply.
 - `lev msg <run> --end` ends an interactive stage's conversation, after the
   message when one is given.
+- GraphQL `runEvents` and `machineEvents` take `since` and `serverInstance`.
+  `lev serve` keeps its last 4096 frames (`[serve] event_replay_frames`), and
+  a resumed subscription replays the kept ones above `since` before going
+  live, with nothing missed or repeated between. A stale `serverInstance`, or
+  a `since` older than what is kept, opens with an `EventsDroppedEvent`.
+  `spawnRun` answers `seq` and `serverInstance`, and so does
+  `POST /api/runs` (`seq`, `server_instance`), so a client that spawns and
+  then subscribes gets the run from its first frame. Announced as the
+  capabilities `graphql.subscriptions.replay` and
+  `graphql.subscriptions.keepalive`.
 - `lev serve` announces the capability `spawn.request`: the typed spawn
   request on `POST /api/runs`, `POST /api/runs/validate`,
   `GET /api/schema/spawn-request` and GraphQL `spawnRun` and `validateSpawn`.

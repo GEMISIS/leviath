@@ -48,6 +48,10 @@ pub(crate) struct Started {
     pub(crate) run_id: String,
     /// What may keep it from ever finishing. Empty for most runs.
     pub(crate) warnings: SpawnIssues,
+    /// The bus's number as it stood before the daemon was asked, so every
+    /// frame of the new run is numbered above it. A subscription resumed from
+    /// here is handed the run whole.
+    pub(crate) seq: u64,
 }
 
 /// Start the run `request` asks for.
@@ -61,13 +65,20 @@ pub(crate) async fn start(
     if let Some(issues) = refused(state, &mut request).await? {
         return Ok(Verdict::Rejected(issues));
     }
+    // Read before the daemon is asked: its spawn frame can reach the bus
+    // before this call returns.
+    let seq = super::super::events::latest_seq();
     match state.control.spawn(request).await {
         Ok(ControlResponse::Spawned { run_id, warnings }) => {
             // No spawned frame from here. The daemon emits one for every run
             // the world gains, however it was launched, so a second one would
             // make exactly the runs that arrived over the network appear twice.
             tracing::info!(run_id = %run_id, "spawned a run via the API");
-            Ok(Verdict::Accepted(Started { run_id, warnings }))
+            Ok(Verdict::Accepted(Started {
+                run_id,
+                warnings,
+                seq,
+            }))
         }
         Ok(ControlResponse::Rejected { issues }) => Ok(Verdict::Rejected(issues)),
         Ok(other) => Err(daemon_refusal(&other)),

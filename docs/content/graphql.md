@@ -1068,14 +1068,15 @@ mutation Spawn($since: String!) {
     }
     output: { format: "markdown", instructions: "one page, no preamble" }
   }) {
-    ... on SpawnedOutput { runId warnings { path message } run { status } }
+    ... on SpawnedOutput { runId seq serverInstance warnings { path message } run { status } }
     ... on SpawnRejectedOutput { issues { path code message expected got hint known } }
   }
 }
 ```
 
 The answer is a union. `SpawnedOutput` carries the new run's id, and `warnings`: stages the run
-can reach and never leave, each with the code `MAY_NEVER_FINISH`. The run started anyway.
+can reach and never leave, each with the code `MAY_NEVER_FINISH`. The run started anyway. `seq` and
+`serverInstance` say where the run's frames start; see [resuming a stream](#resuming-a-stream).
 `SpawnRejectedOutput` carries
 every problem with the request at once, each at its own path, so one retry can fix them all. A
 refused request is an answer, not a GraphQL error. An issue's `path` names the runtime's request
@@ -1545,6 +1546,12 @@ browser's.
 `GET /ws/graphql` carries subscriptions over `graphql-transport-ws`. Authenticate with `?token=`,
 because a browser cannot put a header on a WebSocket handshake.
 
+The server pings every connection every 20 seconds, and closes one that has not answered a ping
+for 60. A frame that cannot be sent within 10 seconds closes the connection too, so a peer that
+stopped reading does not hold its subscriptions open. Browsers answer pings on their own, which is
+what lets a backgrounded tab's dead socket be noticed. This is the
+`graphql.subscriptions.keepalive` capability.
+
 Three streams rather than one, because they answer three different questions: what runs are doing,
 what the machine is doing, and how one update is going.
 
@@ -1580,7 +1587,12 @@ spawn. A run that stops matching keeps sending, because losing the frame that sa
 is worse than one extra row.
 
 Only the filter's in-memory half decides those later checks. A condition that would have to open a
-file reads as "not matching" for now, and is asked again on that run's next frame.
+file reads as "not matching" for now, and is asked again on that run's next status change.
+
+A run's spawn frame can reach the server a moment before the run's record does. Such a run is
+asked again on each of its frames, whatever the filter names, and its frames wait meanwhile. Once
+the record is there the run joins with every frame it sent, spawn first. A filter on `metadata`,
+which is how a client follows the runs it started, catches a run spawned after it subscribed.
 
 Every frame carries `seq` and `at`, and both come from `Event`, which every frame implements, the
 two transport ones included. `RunEvent` adds `runId`, `agentId` and the `run` itself, and only the
@@ -1675,8 +1687,50 @@ subscription Installing($id: ID!) {
 The frame that says the job finished is the last one it produces. The stream itself stays open
 until the client closes it.
 
-There is no replay. A stream is how a client stays current, not how it reconstructs the past, and
-for that it reads the run.
+### Resuming a stream
+
+A client that was away comes back with the last `seq` it saw and the `serverInstance` that
+numbered it. The server keeps its last 4096 frames, `[serve] event_replay_frames`, shared by every
+subscriber.
+
+```graphql
+subscription Resume($since: BigInt!, $instance: ID!) {
+  runEvents(since: $since, serverInstance: $instance) {
+    __typename
+    ... on SubscriptionOpenedEvent { seq serverInstance }
+    ... on EventsDroppedEvent { seq count }
+    ... on LogLineWrittenEvent { seq runId line }
+  }
+}
+```
+
+The opening frame comes first, carrying `since` as its `seq`. Then every kept frame numbered above
+`since` that passes `filter` and `types`, in order, and then the live frames. Nothing is missed or
+repeated between the two. `machineEvents` takes the same two arguments.
+
+When the server cannot hand you everything, the frame after the opening one is an
+`EventsDroppedEvent`. That happens when `serverInstance` names another process, because a
+restart starts the numbering again, and when `since` is older than the oldest frame kept. Its
+`count` is an upper bound on what you missed. Re-read whatever you show, and carry on from the
+stream.
+
+A spawn says where its frames start. `spawnRun` answers `seq` and `serverInstance` on
+`SpawnedOutput`, and every frame of the new run is numbered above that `seq`. Subscribe with
+`since` set to it and the run's id, and you get the run from its `RunSpawnedEvent`, even when the
+daemon sent that frame before you subscribed.
+
+```graphql
+subscription Follow($run: ID!, $since: BigInt!, $instance: ID!) {
+  runEvents(filter: { id: { eq: $run } }, since: $since, serverInstance: $instance) {
+    __typename
+    ... on RunSpawnedEvent { seq runId }
+    ... on RunStatusChangedEvent { seq status }
+  }
+}
+```
+
+This is the `graphql.subscriptions.replay` capability. Without it, a stream is how a client stays
+current and not how it reconstructs the past; for that it reads the run.
 
 ## Failures
 
