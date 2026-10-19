@@ -29,6 +29,9 @@ use anyhow::{Context, Result};
 
 use crate::coverage::{Runner, UNGATED};
 
+#[path = "bump_level.rs"]
+mod bump_level;
+
 /// Path of the manifest holding every version declaration, relative to the
 /// workspace root.
 const MANIFEST: &str = "Cargo.toml";
@@ -770,7 +773,7 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
             let to = workspace_version(&manifest)?;
             let changelog = std::fs::read_to_string(CHANGELOG)
                 .with_context(|| format!("reading {CHANGELOG}"))?;
-            crate::bump_level::ensure_bump_level(&changelog, &from, &to)?;
+            bump_level::ensure_bump_level(&changelog, &from, &to)?;
             println!("{from} -> {to} is big enough for the changelog entries it ships.");
             Ok(())
         }
@@ -780,7 +783,7 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
             // tree as it was.
             let changelog = std::fs::read_to_string(CHANGELOG)
                 .with_context(|| format!("reading {CHANGELOG}"))?;
-            crate::bump_level::ensure_bump_level(&changelog, &previous, &new)?;
+            bump_level::ensure_bump_level(&changelog, &previous, &new)?;
             std::fs::write(MANIFEST, set_versions(&manifest, &new)?)
                 .with_context(|| format!("writing {MANIFEST}"))?;
             std::fs::write(CLI_MANIFEST, set_pins(&cli_manifest, &new)?)
