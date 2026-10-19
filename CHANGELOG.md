@@ -37,7 +37,12 @@ same list.
   daemon reads `~/.leviath/.env` instead of the `.env` wherever it happened
   to be started. To keep a project's keys, copy them into `~/.leviath/.env`
   or export them before the daemon starts. Other commands still read
-  `./.env`.
+  `./.env`, but a daemon one of them starts is not handed what it loaded.
+  A relative `LEVIATH_HOME`, `LEVIATH_CONFIG_PATH`, `LEVIATH_RUNS_DIR` or
+  `LEVIATH_DUMP_REQUEST_DIR` is resolved against the starting command's
+  directory; `lev daemon` in the foreground refuses one, so give it an
+  absolute path.
+
 - A daemon that `lev` starts in the background no longer inherits
   `LEVIATH_API_TOKEN`, which only `lev serve` reads. Nothing else in its
   environment changes, `PATH` included.

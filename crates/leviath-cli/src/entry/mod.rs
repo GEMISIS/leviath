@@ -107,8 +107,14 @@ pub fn run_from(argv: impl IntoIterator<Item = String>) -> ExitCode {
     // The daemon itself moves to the data directory first, before the runtime
     // starts a thread and before anything reads its config, so where it was
     // started never changes what it reads (`daemon::launch` says why).
+    // A relative path variable is refused rather than read against the wrong
+    // directory once there.
     let entered = if crate::dispatch::hosts_daemon(&cli.command) {
-        crate::daemon::launch::daemon_dir(leviath_core::paths::data_dir())
+        crate::daemon::launch::refuse_relative_paths(|name| std::env::var_os(name))
+            .and_then(|()| std::env::current_dir().map_err(anyhow::Error::from))
+            .and_then(|cwd| {
+                crate::daemon::launch::daemon_dir(leviath_core::paths::data_dir(), &cwd)
+            })
             .and_then(|dir| std::env::set_current_dir(dir).map_err(anyhow::Error::from))
     } else {
         Ok(())

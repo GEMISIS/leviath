@@ -44,6 +44,7 @@ pub(crate) mod renamed;
 mod dotenv;
 mod perms;
 use dotenv::load_dotenv_filtered;
+pub use dotenv::loaded_names as dotenv_loaded_names;
 #[cfg(test)]
 use dotenv::requote;
 use perms::{check_permissions, create_config_dir};
@@ -1364,7 +1365,11 @@ mod dotenv_tests {
     #[test]
     fn an_ordinary_dot_env_warns_about_nothing() {
         let dir = make_fake_config_dir("dotenv-nothing-skipped");
-        std::fs::write(dir.join(".env"), "LEV_DOTENV_ORDINARY=fine\n").unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "LEV_DOTENV_ORDINARY=fine\nLEV_DOTENV_EXPORTED=from-file\n",
+        )
+        .unwrap();
 
         {
             let _cwd = isolate_cwd_for_test();
@@ -1378,6 +1383,10 @@ mod dotenv_tests {
                     ("LEVIATH_SKIP_DOTENV", None),
                     ("LEVIATH_LOAD_DOTENV", Some(std::ffi::OsString::from("1"))),
                     ("LEV_DOTENV_ORDINARY", None),
+                    (
+                        "LEV_DOTENV_EXPORTED",
+                        Some(std::ffi::OsString::from("exported")),
+                    ),
                 ],
                 || {
                     Config::load().expect("a missing config file is not an error");
@@ -1386,6 +1395,18 @@ mod dotenv_tests {
                     assert_eq!(
                         std::env::var("LEV_DOTENV_ORDINARY").ok().as_deref(),
                         Some("fine")
+                    );
+                    // What the file set is recorded, so a daemon this process
+                    // starts is not handed it. A variable the person had
+                    // already exported is theirs, kept, and not recorded.
+                    let loaded = dotenv_loaded_names();
+                    assert!(
+                        loaded.contains(&"LEV_DOTENV_ORDINARY".to_string()),
+                        "{loaded:?}"
+                    );
+                    assert!(
+                        !loaded.contains(&"LEV_DOTENV_EXPORTED".to_string()),
+                        "{loaded:?}"
                     );
                 },
             );

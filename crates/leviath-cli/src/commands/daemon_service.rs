@@ -281,7 +281,7 @@ pub(crate) fn systemd_unit(exe: &Path, home: &Path, log: &Path) -> Result<String
          Type=simple\n\
          ExecStart={exe} daemon\n\
          Environment=LEVIATH_HOME={home}\n\
-         WorkingDirectory={dir}\n\
+         WorkingDirectory=-{dir}\n\
          Restart=always\n\
          RestartSec=10\n\
          StandardOutput=append:{log}\n\
@@ -948,7 +948,7 @@ mod tests {
             assert!(unit.contains("Environment=LEVIATH_HOME=/home/u\n"));
             let dir = display(&Path::new("/home/u").join(".leviath"));
             assert!(
-                unit.contains(&format!("WorkingDirectory={dir}\n")),
+                unit.contains(&format!("WorkingDirectory=-{dir}\n")),
                 "{unit}"
             );
             assert!(unit.contains("Restart=always"));

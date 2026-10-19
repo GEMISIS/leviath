@@ -1329,7 +1329,7 @@ The daemon is the exception to "the directory you run `lev` in". It always runs 
 directory (`~/.leviath`), wherever it was started, so with `load_dotenv` on it reads
 `~/.leviath/.env` and never a project's. Runs execute in the daemon, so a key a run needs belongs
 in `~/.leviath/.env` or in the environment of whoever starts the daemon. Other commands still read
-`./.env` from where you run them.
+`./.env` from where you run them, but a daemon one of them starts is not handed what it loaded.
 
 | Variable | Effect |
 |---|---|
