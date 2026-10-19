@@ -15,6 +15,7 @@
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -50,6 +51,8 @@ pub enum ErrorCode {
     DaemonUnavailable,
     /// The `--ready-file` could not be written.
     ReadyFileFailed,
+    /// The server panicked before it was ready.
+    InternalError,
 }
 
 /// The daemon a server serves, once it has been brought up.
@@ -122,6 +125,11 @@ pub struct Announcer {
     /// Told the bound address once the server listens, for a test waiting on
     /// it.
     observer: Mutex<Option<tokio::sync::oneshot::Sender<SocketAddr>>>,
+    /// Whether the server has said it is ready.
+    ready: AtomicBool,
+    /// What this server wrote to the ready file, to tell its own file from
+    /// one something else put there since.
+    written: Mutex<Option<String>>,
 }
 
 impl Announcer {
@@ -134,7 +142,13 @@ impl Announcer {
     ) -> Arc<Self> {
         Arc::new(Self {
             json: args.json,
-            ready_file: args.ready_file.clone(),
+            // Absolute from the start, so the file written and the file
+            // removed on the way out are the same one, and a bare name has a
+            // directory to be written into.
+            ready_file: args
+                .ready_file
+                .as_ref()
+                .map(|path| std::path::absolute(path).unwrap_or(path.clone())),
             out: Mutex::new(out),
             prose,
             stage: Mutex::new(ErrorCode::ConfigInvalid),
@@ -142,6 +156,8 @@ impl Announcer {
             shown: Mutex::default(),
             every: PROGRESS_EVERY,
             observer: Mutex::default(),
+            ready: AtomicBool::new(false),
+            written: Mutex::default(),
         })
     }
 
@@ -183,7 +199,8 @@ impl Announcer {
 
     /// Where the daemon's start-up is now, as a `daemon_starting` line: at
     /// once for a new step or detail, and at most every `every` while one
-    /// step counts. A daemon that has not begun its first step says nothing.
+    /// step counts, though a step's last item is always shown. A daemon that
+    /// has not begun its first step says nothing.
     fn progress(&self, now: &StartupProgress) {
         if !self.json || now.step.is_empty() {
             return;
@@ -193,7 +210,8 @@ impl Announcer {
             last.progress.step != now.step
                 || last.progress.detail != now.detail
                 || last.progress.total != now.total
-                || (last.progress.done != now.done && last.at.elapsed() >= self.every)
+                || (last.progress.done != now.done
+                    && (last.at.elapsed() >= self.every || now.done == now.total))
         });
         if !due {
             return;
@@ -248,7 +266,9 @@ impl Announcer {
             leviath_sys::perms::write_private(path, text.as_bytes()).map_err(|e| {
                 anyhow::anyhow!("could not write the ready file {}: {e}", path.display())
             })?;
+            *leviath_core::sync::lock(&self.written) = Some(text.clone());
         }
+        self.ready.store(true, Ordering::SeqCst);
         match self.json {
             true => self.write(&text),
             false => self.write(&format!("Leviath API server listening on {url}\n")),
@@ -261,10 +281,36 @@ impl Announcer {
     }
 
     /// The server has stopped cleanly: remove the ready file, so a file that
-    /// is there names a server that is.
+    /// is there names a server that is. Only a plain file still holding what
+    /// this server wrote is removed; one replaced since, or a symlink, is
+    /// someone else's and left alone.
     pub(super) fn stopped(&self) {
-        if let Some(path) = &self.ready_file {
+        let ours = leviath_core::sync::lock(&self.written).clone();
+        if let Some(path) = &self.ready_file
+            && ours.is_some()
+            && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+            && std::fs::read_to_string(path).ok() == ours
+        {
             let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// The server panicked with `message`: before it was ready, that is the
+    /// `error` line a program waiting on it needs. Never waits on stdout, in
+    /// case the panic happened while it was being written.
+    pub fn panicked(&self, message: &str) {
+        if !self.json || self.ready.load(Ordering::SeqCst) {
+            return;
+        }
+        let line = ErrorLine {
+            event: "error",
+            code: ErrorCode::InternalError,
+            message: message.to_string(),
+        };
+        let mut text = serde_json::to_string(&line).expect("an event always serializes");
+        text.push('\n');
+        if let Ok(mut out) = self.out.try_lock() {
+            let _ = out.write_all(text.as_bytes()).and_then(|()| out.flush());
         }
     }
 

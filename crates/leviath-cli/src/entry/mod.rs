@@ -278,6 +278,16 @@ impl RiskyExecutors for RealExecutors {
             Box::new(io::stdout()),
             StartupView::on_stderr(true).watch(),
         );
+        // A panic before the server is ready still ends stdout with an
+        // `error` line, as every other failure does under `--json`.
+        if args.json {
+            let panicking = announce.clone();
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                panicking.panicked(&info.to_string());
+                previous(info);
+            }));
+        }
         // The HTTP API is a gateway to the shared-world daemon: ensure it's
         // running, then serve, routing agent actions through its control socket.
         let daemon = serve_daemon(args.daemon, announce.clone()).await;
@@ -583,6 +593,9 @@ async fn serve_daemon(
 ) -> anyhow::Result<commands::serve::Daemon> {
     use commands::serve::ErrorCode;
     announce.stage(ErrorCode::ConfigInvalid);
+    // Read before a daemon is started on it: a daemon refuses a broken
+    // config, and the server would only see one that never came up.
+    crate::config::Config::load()?;
     let mode = mode.resolve_here()?;
     announce.stage(ErrorCode::DaemonUnavailable);
     let identity = daemon::ensure_daemon_for(mode, announce).await?;
