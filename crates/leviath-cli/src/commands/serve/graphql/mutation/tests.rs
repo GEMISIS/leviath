@@ -19,7 +19,10 @@ use super::exports::StartRunExportRequest;
 use super::interactions::{
     AnswerInteractionRequest, ApproveWrite, DenyWrite, InteractionAnswerWrite,
 };
-use super::runs::{DeleteRunsRequest, PauseRunRequest, PauseRunsRequest, SendMessageRequest};
+use super::runs::{
+    DeleteRunsRequest, EndConversationRequest, PauseRunRequest, PauseRunsRequest,
+    SendMessageRequest,
+};
 use super::{Mutation, has_landed, settle};
 use crate::commands::serve::graphql::inputs::KeyValueWrite;
 use crate::commands::serve::graphql::mutation::attachments::AttachmentWrite;
@@ -856,6 +859,15 @@ async fn ending_a_conversation_answers_with_the_run() {
         .await;
         assert_eq!(code_of(&answer), "\"CONFLICT\"");
         assert!(answer.errors[0].message.contains("not interactive"));
+
+        // Ended, but with no record here to answer with.
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
+        let answer = mutate(
+            control,
+            r#"mutation { endConversation(request: { runId: "ghost" }) { run { id } } }"#,
+        )
+        .await;
+        assert!(answer.errors[0].message.contains("ghost"));
     })
     .await;
 }
@@ -1652,6 +1664,10 @@ fn every_input_object_refuses_what_it_cannot_read() {
         SendMessageRequest::parse(one("runId", text("run-a"))).is_err(),
         "no words"
     );
+
+    assert!(EndConversationRequest::parse(scalar()).is_err());
+    assert!(EndConversationRequest::parse(None).is_err());
+    assert!(EndConversationRequest::parse(one("runId", Value::List(Vec::new()))).is_err());
 
     assert!(ApproveWrite::parse(scalar()).is_err());
     assert!(ApproveWrite::parse(None).is_err());

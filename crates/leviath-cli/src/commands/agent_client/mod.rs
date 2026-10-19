@@ -254,8 +254,9 @@ enum RunStart {
     /// The prompt went to the session's live run, under this id, as a
     /// message; stream its answer. Carries where the run's record stood
     /// before the message, so a wait it was already in is not taken for its
-    /// answer.
-    Delivered(String, Option<Progress>),
+    /// answer, and a tail past what it had already written, so an earlier
+    /// turn's output is not shown again.
+    Delivered(String, Option<Progress>, StageTail),
     /// A follow-up message could not be delivered (the agent already
     /// finished); the prompt it carried comes back.
     MessageUndeliverable(String, Vec<leviath_core::mime::InboundPart>),
@@ -510,15 +511,14 @@ impl Server {
         // it as a message: a run that was waiting for its next message is
         // still waiting the moment the message is sent, and that is not its
         // answer.
-        let (run_id, before) = match start {
-            RunStart::Ready(run_id) => (run_id, None),
-            RunStart::Delivered(run_id, before) => (run_id, before),
+        let (run_id, before, mut tail) = match start {
+            RunStart::Ready(run_id) => (run_id, None, StageTail::new()),
+            RunStart::Delivered(run_id, before, tail) => (run_id, before, tail),
             RunStart::MessageUndeliverable(..) => return StopReason::EndTurn,
             // The daemon refused to create the run, or was unreachable.
             RunStart::SpawnFailed => return StopReason::Refusal,
         };
 
-        let mut tail = StageTail::new();
         // Consecutive stream drops with no event in between - see the `None`
         // arm below.
         let mut silent_drops = 0u32;
@@ -730,6 +730,8 @@ impl Server {
         parts: Vec<leviath_core::mime::InboundPart>,
     ) -> RunStart {
         let before = read_run_meta(&self.runs_dir, &run_id).map(|meta| Progress::of(&meta));
+        let mut tail = StageTail::new();
+        tail.pump(&self.runs_dir, &run_id);
         let delivered = matches!(
             self.control
                 .request(&ControlRequest::Message {
@@ -742,7 +744,7 @@ impl Server {
             Ok(ControlResponse::Ok { ok: true })
         );
         match delivered {
-            true => RunStart::Delivered(run_id, before),
+            true => RunStart::Delivered(run_id, before, tail),
             false => RunStart::MessageUndeliverable(content, parts),
         }
     }

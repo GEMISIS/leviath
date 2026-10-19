@@ -1007,6 +1007,7 @@ async fn a_message_to_an_interactive_run_ends_its_turn_once_answered() {
             meta.waiting_on = Some(WaitReason::AwaitingMessage);
             meta.iteration = 2;
             crate::runstate::write_meta_to(&dir, &meta).unwrap();
+            std::fs::write(dir.join("stages/0/output.log"), "first\nsecond\n").unwrap();
             ControlResponse::Ok { ok: true }
         }
         other => spawn_ok(other),
@@ -1020,12 +1021,23 @@ async fn a_message_to_an_interactive_run_ends_its_turn_once_answered() {
         h.recv_until(is_result).await.result.unwrap()["stopReason"],
         "end_turn"
     );
+    // The first answer was shown in its own turn, and is not shown again.
+    h.write_output(0, "first\n");
     h.send(r#"{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"and then?"}]}}"#)
         .await;
-    assert_eq!(
-        h.recv_until(is_result).await.result.unwrap()["stopReason"],
-        "end_turn"
-    );
+    let mut shown = String::new();
+    let end = loop {
+        let msg = h.recv().await;
+        if is_result(&msg) {
+            break msg;
+        }
+        if update_kind(&msg).as_deref() == Some("agent_message_chunk") {
+            let text = msg.params.unwrap()["update"]["content"]["text"].clone();
+            shown.push_str(text.as_str().unwrap_or_default());
+        }
+    };
+    assert_eq!(end.result.unwrap()["stopReason"], "end_turn");
+    assert_eq!(shown, "second\n");
     h.close_input().await;
 }
 
