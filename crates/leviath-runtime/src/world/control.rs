@@ -106,7 +106,17 @@ impl PipelineWorld {
                     .entity_mut(entity)
                     .remove::<crate::pipeline::PausedForSetup>();
                 self.replay_held_inference(entity);
-                self.set_status(agent, AgentStatus::Active)
+                // A stage that had parked on its next message goes back to
+                // waiting for it: there is nothing to ask its model yet.
+                let parked = self
+                    .world
+                    .entity(entity)
+                    .contains::<crate::pipeline::AwaitingMessage>();
+                let status = match parked {
+                    true => AgentStatus::Waiting,
+                    false => AgentStatus::Active,
+                };
+                self.set_status(agent, status)
             }
             _ => false,
         }

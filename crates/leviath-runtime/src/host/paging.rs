@@ -38,7 +38,9 @@ impl Deferred {
                 Some((agent_id, PageIn::Address))
             }
             Deferred::Control(
-                ControlOp::Pause { run_id, .. } | ControlOp::Cancel { run_id, .. },
+                ControlOp::Pause { run_id, .. }
+                | ControlOp::Cancel { run_id, .. }
+                | ControlOp::EndConversation { run_id, .. },
             ) => Some((run_id, PageIn::Address)),
             Deferred::Control(ControlOp::Resume { run_id, .. }) => Some((run_id, PageIn::Resume)),
             Deferred::Sub(SubAgentOp::Send { run_id, .. } | SubAgentOp::Kill { run_id, .. }) => {

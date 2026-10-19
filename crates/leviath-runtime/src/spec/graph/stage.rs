@@ -361,14 +361,20 @@ impl ToolGroup {
 }
 
 /// How a stage runs.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
+///
+/// A blueprint writes a mode with no settings as its name (`"interactive"`)
+/// and one with settings as a table (`{ interactive = { idle_timeout_secs =
+/// 900 } }`); see `spec::readable` for both forms.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum StageMode {
     /// The model works on its own until it moves on.
     #[default]
     Autonomous,
-    /// The model and a person take turns.
-    Interactive,
+    /// The model and a person take turns. After a reply with no tool calls
+    /// the stage waits for the next message instead of moving on; it leaves
+    /// when the model calls `end_conversation`, a person ends the
+    /// conversation, or the idle limit runs out.
+    Interactive(InteractiveDef),
     /// The model works on its own, stopping at declared points for a person.
     InteractivePoints(Vec<InteractionPointDef>),
     /// The stage splits its work over worker runs. It is given the
@@ -378,6 +384,29 @@ pub enum StageMode {
     /// `submit_output` tool and must call it, whether or not its `tools` name
     /// it, and it may end the run when no edge leaves it.
     Output,
+}
+
+impl StageMode {
+    /// The settings of an interactive stage, or `None` for any other mode.
+    pub fn interactive(&self) -> Option<&InteractiveDef> {
+        match self {
+            Self::Interactive(def) => Some(def),
+            _ => None,
+        }
+    }
+}
+
+/// The settings of an interactive stage.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct InteractiveDef {
+    /// How long, in seconds, the stage waits for the next message before it
+    /// moves on as though the conversation had been ended. Left out, it waits
+    /// for as long as it takes, unless nobody is watching the run.
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
 }
 
 /// A point where a stage stops for a person.

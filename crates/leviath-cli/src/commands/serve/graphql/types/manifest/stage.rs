@@ -32,7 +32,8 @@ pub(crate) enum StageMode {
     /// The tight loop: infer, act on tool calls, repeat until a transition
     /// fires.
     Autonomous,
-    /// Pauses for a person at every step.
+    /// Takes turns with a person: after each reply it waits for the next
+    /// message, until the conversation is ended or its idle limit runs out.
     Interactive,
     /// Holds at each declared interaction point instead of at every step.
     InteractivePoints,
@@ -46,7 +47,7 @@ impl From<&Mode> for StageMode {
     fn from(mode: &Mode) -> Self {
         match mode {
             Mode::Autonomous => Self::Autonomous,
-            Mode::Interactive => Self::Interactive,
+            Mode::Interactive(_) => Self::Interactive,
             Mode::InteractivePoints(_) => Self::InteractivePoints,
             Mode::FanOut(_) => Self::FanOut,
             Mode::Output => Self::Output,

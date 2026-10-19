@@ -293,7 +293,7 @@ pub(crate) fn reflect_interaction_status(
 /// `stage_started_at` is stamped lazily by `detect_stuck_stage`, so a stage
 /// that parked before its first inference has no clock yet and nothing to
 /// credit. Only a wait that actually started (`waiting_since` set) counts.
-fn credit_wait_to_stage_clock(progress: &mut StageProgress, now: i64) {
+pub(super) fn credit_wait_to_stage_clock(progress: &mut StageProgress, now: i64) {
     let Some(since) = progress.waiting_since.take() else {
         return;
     };
@@ -432,6 +432,7 @@ type PersistenceQuery = (
         // fall back to wall-clock age when read.
         Option<&'static mut crate::persistence::RunClock>,
         Option<&'static crate::inference_call::RemoteJobs>,
+        Option<&'static super::AwaitingMessage>,
     ),
 );
 
@@ -522,6 +523,7 @@ fn build_snapshots(
             point_rounds,
             clock,
             remote_jobs,
+            awaiting_message,
         ),
     ) in agents.iter_mut()
     {
@@ -548,6 +550,7 @@ fn build_snapshots(
                 .map(|_| children.map(|c| c.children.len()).unwrap_or(0)),
             interaction: None,
             awaiting_interaction: awaiting_interaction.is_some(),
+            awaiting_message: awaiting_message.is_some(),
             needs_setup: paused_for_setup.map(|p| leviath_core::run_meta::SetupNeeded {
                 blocker: p.blocker,
                 remedy: p.remedy.clone(),

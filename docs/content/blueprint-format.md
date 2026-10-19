@@ -339,8 +339,25 @@ model = { models = [{ model = "gpt-5.5" }], params = { extra = { reasoning_effor
 region such as `"100% of claims"`. `extra` passes settings the provider understands straight
 through. Set `allow_user_default = false` to refuse the operator's default model as a stand-in.
 
-`mode` is `"autonomous"`, `"interactive"` or `"output"`, or a table for the two modes that carry
-settings. A stage that stops at checkpoints lists them:
+`mode` is `"autonomous"`, `"interactive"` or `"output"`, or a table for the modes that carry
+settings.
+
+An interactive stage takes turns with a person. After a reply with no tool calls it waits for the
+next message instead of moving on: the run shows `waiting_input`, waiting on `awaiting_message`.
+A message resumes the stage with its conversation intact. The stage moves on when the model calls
+`end_conversation`, which the mode grants, or when a person ends the conversation. It also moves on
+when its idle limit runs out:
+
+```toml
+mode = { interactive = { idle_timeout_secs = 900 } }
+```
+
+With no limit the stage waits for as long as it takes. In a run nobody is watching, such as one
+started with `--yolo`, it waits 120 seconds. The limit is checked at least every 30 seconds, so a
+stage can move on up to that much late. Each reply counts against the stage's `max_iterations`,
+which caps the whole conversation.
+
+A stage that stops at checkpoints lists them:
 
 ```toml
 [[graph.stages.mode.interactive_points]]

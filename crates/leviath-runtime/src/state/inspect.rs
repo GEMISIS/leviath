@@ -217,6 +217,9 @@ fn phase_of(world: &World, entity: Entity, agent: &AgentState) -> PipelinePhase 
     if asking_a_person(world, entity) {
         return PipelinePhase::AwaitingPerson;
     }
+    if world.get::<p::AwaitingMessage>(entity).is_some() {
+        return PipelinePhase::AwaitingMessage;
+    }
     if world.get::<crate::fanout::FanOutWaiting>(entity).is_some() {
         return PipelinePhase::FanOut;
     }
@@ -852,6 +855,9 @@ fn wait_reason_of(world: &World, entity: Entity, agent: &AgentState) -> Option<W
                 blocker: p.blocker,
                 remedy: p.remedy.clone(),
             }),
+        awaiting_message: world
+            .get::<crate::pipeline::AwaitingMessage>(entity)
+            .is_some(),
     };
     leviath_core::run_meta::wait_reason_from(parked, &markers).map(|r| WaitState::from(&r))
 }

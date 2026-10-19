@@ -87,6 +87,8 @@ pub(crate) enum PipelinePhaseKind {
     Paused,
     /// Finished.
     Done,
+    /// An interactive stage replied and waits for the next message.
+    AwaitingMessage,
 }
 
 /// What the engine is doing with a run, with what that phase carries.
@@ -128,6 +130,7 @@ impl From<&PipelinePhase> for RunPhase {
             },
             PipelinePhase::Paused => plain(PipelinePhaseKind::Paused),
             PipelinePhase::Done => plain(PipelinePhaseKind::Done),
+            PipelinePhase::AwaitingMessage => plain(PipelinePhaseKind::AwaitingMessage),
         }
     }
 }

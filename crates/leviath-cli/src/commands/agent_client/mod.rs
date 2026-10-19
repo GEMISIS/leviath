@@ -52,7 +52,6 @@ use leviath_agent_client::{
     is_permission_request, permission_request, prompt_parts,
 };
 use leviath_core::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
-use leviath_core::run_meta::RunStatus;
 use leviath_runtime::control_socket::{
     ControlClient, ControlRequest, ControlResponse, WorldEventStream,
 };
@@ -76,6 +75,16 @@ const MAX_SILENT_DROPS: u32 = 3;
 /// The pause before re-subscribing after a drop, so a daemon that keeps
 /// dropping the stream is not hammered in a tight loop.
 const RESUBSCRIBE_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// What the host is told when a prompt starts a new run because the
+/// session's run has finished and takes no more messages.
+const NEW_RUN_NOTICE: &str =
+    "[leviath: the session's run has finished, so this prompt starts a new run]\n";
+
+/// What the host is told when a prompt cannot go to the session's finished
+/// run and there is no blueprint to start again.
+const RUN_OVER_NOTICE: &str = "[leviath: the session's run has finished and takes no more \
+     messages; start a new session to go on]\n";
 
 /// Arguments for `lev agent-client`.
 #[derive(Args, Debug, Clone, Default)]
@@ -185,6 +194,10 @@ struct ActiveSession {
     cwd: String,
     /// The run this session drives.
     run: SessionRun,
+    /// The blueprint a prompt starts a new run of once the session's run has
+    /// finished. `None` for a session started from a whole spawn request
+    /// (`_leviath/spawn`), which has no blueprint of its own to run again.
+    blueprint: Option<ResolvedBlueprint>,
 }
 
 /// The run behind a session.
@@ -238,8 +251,14 @@ struct Server {
 enum RunStart {
     /// The run is live under this id; stream it.
     Ready(String),
-    /// A follow-up message could not be delivered (the agent already finished).
-    MessageUndeliverable,
+    /// The prompt went to the session's live run, under this id, as a
+    /// message; stream its answer. Carries where the run's record stood
+    /// before the message, so a wait it was already in is not taken for its
+    /// answer.
+    Delivered(String, Option<Progress>),
+    /// A follow-up message could not be delivered (the agent already
+    /// finished); the prompt it carried comes back.
+    MessageUndeliverable(String, Vec<leviath_core::mime::InboundPart>),
     /// The daemon refused to spawn the run, or was unreachable.
     SpawnFailed,
 }
@@ -368,7 +387,8 @@ impl Server {
                 self.session = Some(ActiveSession {
                     session_id: session_id.clone(),
                     cwd,
-                    run: SessionRun::Pending(blueprint),
+                    run: SessionRun::Pending(blueprint.clone()),
+                    blueprint: Some(blueprint),
                 });
                 self.write(&JsonRpcMessage::response(
                     id,
@@ -477,11 +497,23 @@ impl Server {
             .expect("session present")
             .session_id
             .clone();
-        let run_id = match self.start_run(task, parts).await {
-            RunStart::Ready(run_id) => run_id,
-            // The agent already finished and won't take another message - the
-            // turn is simply over, not a failure.
-            RunStart::MessageUndeliverable => return StopReason::EndTurn,
+        let start = match self.start_run(task, parts).await {
+            // The session's run has finished and takes no more messages: the
+            // prompt starts a new run of the session's blueprint, and says
+            // so, rather than being dropped without a word.
+            RunStart::MessageUndeliverable(task, parts) => {
+                self.start_again(&session_id, task, parts).await
+            }
+            start => start,
+        };
+        // Where the run's record stood before the prompt, for a prompt sent to
+        // it as a message: a run that was waiting for its next message is
+        // still waiting the moment the message is sent, and that is not its
+        // answer.
+        let (run_id, before) = match start {
+            RunStart::Ready(run_id) => (run_id, None),
+            RunStart::Delivered(run_id, before) => (run_id, before),
+            RunStart::MessageUndeliverable(..) => return StopReason::EndTurn,
             // The daemon refused to create the run, or was unreachable.
             RunStart::SpawnFailed => return StopReason::Refusal,
         };
@@ -517,7 +549,7 @@ impl Server {
                             None => return StopReason::EndTurn,
                         }
                         // The run may have finished while the stream was down.
-                        if let Some(reason) = self.run_finished(&run_id) {
+                        if let Some(reason) = self.run_finished(&run_id, before.as_ref()) {
                             return reason;
                         }
                         continue;
@@ -545,19 +577,21 @@ impl Server {
                         // that's needed.
                         _ => {}
                     }
-                    // A run can reach a done state without a `Completed` event -
-                    // `CompleteInteractive` stays live for follow-up, so it emits
-                    // no terminal event. Consult the persisted run status after
-                    // every event so the turn ends when (and only when) the run is
-                    // genuinely finished, never while it is merely `WaitingInput`
-                    // on an interaction Leviath is handling out of band.
-                    if let Some(reason) = self.run_finished(&run_id) {
+                    // A run can be done with its turn without a `Completed`
+                    // event: an interactive stage that has replied waits for
+                    // the next message, and the event that said so may have
+                    // gone by while the stream was down. Consult the persisted
+                    // run status after every event so the turn ends when (and
+                    // only when) the run has answered, never while it is merely
+                    // `WaitingInput` on an interaction Leviath is handling out
+                    // of band.
+                    if let Some(reason) = self.run_finished(&run_id, before.as_ref()) {
                         return reason;
                     }
                 }
                 _ = tokio::time::sleep(OUTPUT_POLL) => {
                     self.flush_output(&session_id, &mut tail, &run_id).await;
-                    if let Some(reason) = self.run_finished(&run_id) {
+                    if let Some(reason) = self.run_finished(&run_id, before.as_ref()) {
                         return reason;
                     }
                 }
@@ -607,9 +641,40 @@ impl Server {
     /// input (`WaitingInput`) - the latter must keep the turn in flight so a
     /// non-interactive client is never told "done" while the agent is actually
     /// waiting on an interaction Leviath is handling out of band.
-    fn run_finished(&self, run_id: &str) -> Option<StopReason> {
-        let status = read_run_status(&self.runs_dir, run_id)?;
-        leviath_agent_client::stop_reason_for(&status)
+    ///
+    /// A run waiting for the next message of an interactive stage has
+    /// answered, unless its record has not moved since the prompt went to it
+    /// (`before`): then the wait is the one the message found.
+    ///
+    /// Read from the record rather than the event stream on purpose. The
+    /// record is written with the run's output, so a turn ended on it has
+    /// that output to show; a status frame can arrive first.
+    fn run_finished(&self, run_id: &str, before: Option<&Progress>) -> Option<StopReason> {
+        let meta = read_run_meta(&self.runs_dir, run_id)?;
+        let parked = leviath_agent_client::awaits_message(&meta.status, meta.waiting_on.as_ref());
+        if parked && before != Some(&Progress::of(&meta)) {
+            return Some(StopReason::EndTurn);
+        }
+        leviath_agent_client::stop_reason_for(&meta.status)
+    }
+
+    /// Start a new run of the session's blueprint for a prompt its finished
+    /// run would not take, telling the host so in the conversation. A session
+    /// with no blueprint of its own says it has to be started again instead.
+    async fn start_again(
+        &mut self,
+        session_id: &str,
+        task: String,
+        parts: Vec<leviath_core::mime::InboundPart>,
+    ) -> RunStart {
+        let session = self.session.as_mut().expect("session present");
+        let Some(blueprint) = session.blueprint.clone() else {
+            self.emit_chunk(session_id, RUN_OVER_NOTICE).await;
+            return RunStart::MessageUndeliverable(task, parts);
+        };
+        session.run = SessionRun::Pending(blueprint);
+        self.emit_chunk(session_id, NEW_RUN_NOTICE).await;
+        self.start_run(task, parts).await
     }
 
     /// Spawn the agent on the first prompt, with `task` as its `task` input,
@@ -664,20 +729,21 @@ impl Server {
         content: String,
         parts: Vec<leviath_core::mime::InboundPart>,
     ) -> RunStart {
+        let before = read_run_meta(&self.runs_dir, &run_id).map(|meta| Progress::of(&meta));
         let delivered = matches!(
             self.control
                 .request(&ControlRequest::Message {
                     agent_id: run_id.clone(),
-                    content,
+                    content: content.clone(),
                     target_region: None,
-                    parts,
+                    parts: parts.clone(),
                 })
                 .await,
             Ok(ControlResponse::Ok { ok: true })
         );
         match delivered {
-            true => RunStart::Ready(run_id),
-            false => RunStart::MessageUndeliverable,
+            true => RunStart::Delivered(run_id, before),
+            false => RunStart::MessageUndeliverable(content, parts),
         }
     }
 
@@ -952,13 +1018,32 @@ fn artifact_location(
         .unwrap_or(in_workdir)
 }
 
-/// Read the persisted `RunStatus` for `run_id` from its run file under
-/// `runs_dir`. Returns `None` if the file is missing or unreadable (the run
-/// hasn't persisted yet).
-fn read_run_status(runs_dir: &std::path::Path, run_id: &str) -> Option<RunStatus> {
-    crate::runstate::read_meta_from(&runs_dir.join(run_id))
-        .ok()
-        .map(|meta| meta.status)
+/// The persisted record of `run_id` under `runs_dir`. `None` if the file is
+/// missing or unreadable (the run hasn't persisted yet).
+fn read_run_meta(
+    runs_dir: &std::path::Path,
+    run_id: &str,
+) -> Option<leviath_core::run_meta::RunMeta> {
+    crate::runstate::read_meta_from(&runs_dir.join(run_id)).ok()
+}
+
+/// How far a run has got, as its record says: the stage, the turn in it, and
+/// the tokens spent. Any model call moves at least one of them.
+#[derive(Debug, PartialEq)]
+struct Progress {
+    stage: String,
+    iteration: usize,
+    tokens: (usize, usize),
+}
+
+impl Progress {
+    fn of(meta: &leviath_core::run_meta::RunMeta) -> Self {
+        Self {
+            stage: meta.current_stage.clone(),
+            iteration: meta.iteration,
+            tokens: (meta.prompt_tokens, meta.completion_tokens),
+        }
+    }
 }
 
 /// Mint a session id from the agent name - reuses the run-id generator's

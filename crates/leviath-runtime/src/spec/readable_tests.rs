@@ -1,5 +1,5 @@
 use super::*;
-use crate::spec::graph::WorkerSource;
+use crate::spec::graph::{InteractiveDef, StageMode, WorkerSource};
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 
@@ -494,4 +494,87 @@ fn the_short_forms_publish_their_own_schema() {
     // A worker source is not a short-form type; it keeps its tagged form.
     let w = serde_json::to_value(WorkerSource::Stage(stage("plan"))).unwrap();
     assert_eq!(w, serde_json::json!({"stage": "plan"}));
+}
+
+fn interactive(idle: Option<u64>) -> StageMode {
+    StageMode::Interactive(InteractiveDef {
+        idle_timeout_secs: idle,
+    })
+}
+
+/// A mode with no settings is its name; one with settings is a table under
+/// its name. Both forms of an interactive stage read, and one with no
+/// settings is written as the plain name it always was.
+#[test]
+fn stage_modes_are_a_name_or_a_table() {
+    use serde_json::json;
+    same(json!("autonomous"), StageMode::Autonomous);
+    same(json!("output"), StageMode::Output);
+    same(json!("interactive"), interactive(None));
+    same(
+        json!({"interactive": {"idle_timeout_secs": 900}}),
+        interactive(Some(900)),
+    );
+    let table: StageMode = serde_json::from_value(json!({"interactive": {}})).unwrap();
+    assert_eq!(table, interactive(None));
+    let points: StageMode = serde_json::from_value(json!({"interactive_points": []})).unwrap();
+    assert_eq!(points, StageMode::InteractivePoints(Vec::new()));
+    // The way a blueprint writes them.
+    #[derive(Deserialize)]
+    struct Holder {
+        mode: StageMode,
+    }
+    let toml_mode = |text: &str| toml::from_str::<Holder>(text).unwrap().mode;
+    assert_eq!(toml_mode("mode = \"interactive\""), interactive(None));
+    assert_eq!(
+        toml_mode("mode = { interactive = { idle_timeout_secs = 900 } }"),
+        interactive(Some(900))
+    );
+    assert_eq!(
+        toml_mode("[mode.interactive]\nidle_timeout_secs = 60"),
+        interactive(Some(60))
+    );
+}
+
+/// The run file keeps the binary shape modes always had: an interactive
+/// stage with no settings is the bare variant at its old place, so a file
+/// written before the mode took settings reads the same. One with settings
+/// is the variant added at the end.
+#[test]
+fn an_interactive_mode_keeps_its_binary_shape() {
+    assert_eq!(postcard::to_stdvec(&interactive(None)).unwrap(), vec![1]);
+    assert_eq!(
+        postcard::from_bytes::<StageMode>(&[1]).unwrap(),
+        interactive(None)
+    );
+    let set = postcard::to_stdvec(&interactive(Some(900))).unwrap();
+    assert_eq!(set[0], 5);
+    assert_eq!(
+        postcard::from_bytes::<StageMode>(&set).unwrap(),
+        interactive(Some(900))
+    );
+    let points = StageMode::InteractivePoints(Vec::new());
+    let fan = StageMode::FanOut(crate::test_graph::fan_out_to("split", "work"));
+    for mode in [StageMode::Autonomous, StageMode::Output, points, fan] {
+        let bin = postcard::to_stdvec(&mode).unwrap();
+        assert_eq!(postcard::from_bytes::<StageMode>(&bin).unwrap(), mode);
+        let text = serde_json::to_value(&mode).unwrap();
+        assert_eq!(serde_json::from_value::<StageMode>(text).unwrap(), mode);
+    }
+}
+
+#[test]
+fn a_mistyped_stage_mode_says_what_is_wrong() {
+    use serde_json::json;
+    refused::<StageMode>(json!("chatty"), "\"chatty\" is not a stage mode");
+    refused::<StageMode>(json!(3), "\"3\" is not a stage mode");
+    refused::<StageMode>(json!("fan_out"), "needs its settings");
+    refused::<StageMode>(
+        json!({"interactive": {"idle_timeout": 9}}),
+        "unknown field `idle_timeout`",
+    );
+    let schema =
+        serde_json::to_value(schemars::schema_for!(crate::spec::request::SpawnRequest)).unwrap();
+    let modes = &schema["$defs"]["StageMode"]["anyOf"][0]["enum"];
+    assert_eq!(modes, &json!(["autonomous", "interactive", "output"]));
 }

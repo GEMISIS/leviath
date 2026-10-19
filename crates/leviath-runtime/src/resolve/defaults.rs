@@ -6,7 +6,7 @@
 //! carries every setting the run will use and nothing at run time goes back to
 //! the machine's config to finish the answer.
 
-use leviath_tools::{FAN_OUT_TOOL, SUBMIT_OUTPUT_TOOL};
+use leviath_tools::{END_CONVERSATION_TOOL, FAN_OUT_TOOL, SUBMIT_OUTPUT_TOOL};
 
 use crate::spec::env::{ResolveEnv, SpawnLimits};
 use crate::spec::graph::{NudgeDef, RunGraph, StageMode, ToolSelector};
@@ -20,6 +20,9 @@ use crate::spec::names::ToolName;
 ///   the tool and must call it, and it may end the run when no edge leaves
 ///   it.
 /// - A fan-out stage starts its workers with `fan_out`, so it gets that.
+/// - An interactive stage waits for the next message after each reply, and
+///   its model closes the conversation with `end_conversation`, so it gets
+///   that.
 ///
 /// A tool list that already names the tool is left as it is.
 pub(super) fn grant_mode_tools(graph: &mut RunGraph) {
@@ -36,6 +39,7 @@ pub(super) fn grant_mode_tools(graph: &mut RunGraph) {
                 SUBMIT_OUTPUT_TOOL
             }
             StageMode::FanOut(_) => FAN_OUT_TOOL,
+            StageMode::Interactive(_) => END_CONVERSATION_TOOL,
             _ => continue,
         };
         let tool = ToolName::new(tool).expect("a stage tool's name is a valid tool name");

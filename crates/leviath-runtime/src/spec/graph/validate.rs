@@ -260,7 +260,19 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            StageMode::Autonomous | StageMode::Interactive | StageMode::Output => {}
+            StageMode::Interactive(def) => {
+                if def.idle_timeout_secs == Some(0) {
+                    self.issue(
+                        path.field("mode")
+                            .field("interactive")
+                            .field("idle_timeout_secs"),
+                        IssueCode::OutOfRange,
+                        "an idle limit of 0 seconds would end the conversation before anyone answers",
+                    )
+                    .hint = Some("leave idle_timeout_secs out to wait for as long as it takes".into());
+                }
+            }
+            StageMode::Autonomous | StageMode::Output => {}
         }
     }
 

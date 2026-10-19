@@ -461,4 +461,10 @@ async fn a_stages_mode_grants_the_tool_it_works_through() {
         spec.graph.stages[1].tools.is_empty(),
         "other modes grant nothing"
     );
+
+    // An interactive stage closes its conversation with `end_conversation`.
+    let mut g = graph();
+    g.stages[1].mode = StageMode::Interactive(Default::default());
+    let spec = spawn(&raw(g), &Fake::default()).await.unwrap().spec;
+    assert_eq!(names(&spec.graph.stages[1].tools), ["end_conversation"]);
 }

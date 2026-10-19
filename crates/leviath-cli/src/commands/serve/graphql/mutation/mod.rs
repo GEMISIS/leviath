@@ -28,9 +28,9 @@ use exports::{StartRunExportRequest, StartRunExportResult};
 use interactions::{AnswerInteractionRequest, AnswerInteractionResult};
 use runs::{
     CancelRunRequest, CancelRunResult, CancelRunsRequest, CancelRunsResult, DeleteRunsRequest,
-    DeleteRunsResult, PauseRunRequest, PauseRunResult, PauseRunsRequest, PauseRunsResult,
-    ResumeRunRequest, ResumeRunResult, ResumeRunsRequest, ResumeRunsResult, SendMessageRequest,
-    SendMessageResult,
+    DeleteRunsResult, EndConversationRequest, EndConversationResult, PauseRunRequest,
+    PauseRunResult, PauseRunsRequest, PauseRunsResult, ResumeRunRequest, ResumeRunResult,
+    ResumeRunsRequest, ResumeRunsResult, SendMessageRequest, SendMessageResult,
 };
 use spawn::{SpawnRunResult, ValidateSpawnResult};
 use spawn_request::SpawnRunRequest;
@@ -172,6 +172,22 @@ impl RunMutation {
         request: SendMessageRequest,
     ) -> async_graphql::Result<SendMessageResult> {
         runs::send_message(ctx, request).await
+    }
+
+    /// End the conversation of the interactive stage a run is in.
+    ///
+    /// An interactive stage waits for the next message after each reply
+    /// (`WAITING_INPUT`, `waitReason` `AWAITING_MESSAGE`). Ending its
+    /// conversation moves it on through its ordinary transition, and a final
+    /// stage completes the run. A stage mid-turn moves on once it has
+    /// replied. A run that is not in an interactive stage, or has stopped, is
+    /// a `CONFLICT`.
+    async fn end_conversation(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The run whose conversation ends.")] request: EndConversationRequest,
+    ) -> async_graphql::Result<EndConversationResult> {
+        runs::end_conversation(ctx, request).await
     }
 
     /// Delete run records.

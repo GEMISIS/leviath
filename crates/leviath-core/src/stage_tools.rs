@@ -15,3 +15,7 @@ pub const SUBMIT_OUTPUT_TOOL: &str = "submit_output";
 /// middle of its own work, as many times as it needs. A structured tool call
 /// carries the work items, so they are never parsed out of prose.
 pub const FAN_OUT_TOOL: &str = "fan_out";
+
+/// The tool an interactive stage's model calls to close the conversation, so
+/// the stage moves on instead of waiting for the next message.
+pub const END_CONVERSATION_TOOL: &str = "end_conversation";

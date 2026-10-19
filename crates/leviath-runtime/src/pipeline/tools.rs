@@ -589,6 +589,9 @@ pub(crate) fn dispatch_tools(
         // A `fan_out` call in this batch, started after the loop for the same
         // reason: it parks the agent, which is a `commands` write.
         let mut fan_out: Option<(String, crate::fanout::FanOutRequest)> = None;
+        // Whether this batch closed the stage's conversation
+        // (`end_conversation`), marked on the entity after the loop.
+        let mut ended = false;
         // (tool_id, name, taint, clearance) for blocked calls awaiting a prompt.
         let mut pending_prompts: Vec<(
             String,
@@ -718,6 +721,12 @@ pub(crate) fn dispatch_tools(
                     workdir: metadata.map(|m| m.workdir.as_str()),
                 };
                 let text = crate::runtime_info_tool::handle_runtime_info(&facts, &window);
+                context_results.push((c.tool_id.clone(), text));
+                continue;
+            }
+            if c.name == leviath_core::stage_tools::END_CONVERSATION_TOOL {
+                let (text, closed) = super::conversation::end_conversation_call(routing_stage);
+                ended |= closed;
                 context_results.push((c.tool_id.clone(), text));
                 continue;
             }
@@ -917,6 +926,11 @@ pub(crate) fn dispatch_tools(
                 .entity(entity)
                 .insert(crate::persistence::FinalOutput(output.clone()));
         }
+        if ended {
+            commands
+                .entity(entity)
+                .insert(super::conversation::ConversationEnded);
+        }
 
         // Hold the batch and ask the user about each blocked call. A call
         // asked about before a restart is asked again under the same id.
@@ -1088,15 +1102,18 @@ pub(crate) fn dispatch_tools(
                 sensitivities.map(|s| &s.0),
                 result.reasoning.clone(),
             );
-            commands
-                .entity(entity)
-                .remove::<ReadyForTools>()
-                .remove::<(
-                    RecoveredResults,
-                    ResumedExecutions,
-                    super::lane_batch::ResumedHold,
-                )>()
-                .insert(ReadyToInfer);
+            // A batch that closed the conversation has nothing left to ask
+            // the model: the stage moves on with the call as its last word.
+            let mut agent = commands.entity(entity);
+            agent.remove::<ReadyForTools>().remove::<(
+                RecoveredResults,
+                ResumedExecutions,
+                super::lane_batch::ResumedHold,
+            )>();
+            match ended {
+                true => agent.insert(ResolveTransition),
+                false => agent.insert(ReadyToInfer),
+            };
             continue;
         }
         // Lane work: decided call by call in the world, journaled and sent by

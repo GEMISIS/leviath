@@ -91,6 +91,12 @@ pub(crate) use tool_stages::{
 };
 mod messaging;
 pub(crate) use messaging::{MessageIntake, deliver_messages};
+mod conversation;
+pub(crate) use conversation::{
+    AwaitingMessage, ConversationEnded, end_conversation, expire_idle_conversations,
+    forget_ended_conversations,
+};
+pub use conversation::{DEFAULT_UNATTENDED_IDLE_SECS, EndConversation};
 mod journal_health;
 pub(crate) use journal_health::{PersistLaneHealth, fail_runs_with_unwritable_journals};
 pub(crate) mod journal;
@@ -141,15 +147,16 @@ pub(crate) use cut_off::{
     MAX_CUT_OFF_NUDGES, cut_off_arguments_refusal, cut_off_nudge, cut_off_stage_error,
     malformed_arguments_refusal,
 };
+mod media_nudge;
 mod park;
 mod part_routing;
+pub(crate) use media_nudge::{
+    MAX_NO_IMAGE_NUDGES, media_part_count, no_media_nudge, stage_expected_media,
+};
 mod response;
 pub use response::StageLedger;
 #[cfg(test)]
-pub(crate) use response::{
-    GlobalNudge, MAX_NO_IMAGE_NUDGES, edited_path, no_media_nudge, stage_expected_media,
-    to_inference_result,
-};
+pub(crate) use response::{GlobalNudge, edited_path, to_inference_result};
 pub(crate) use response::{
     InferenceResults, ProcessResponse, ReadyForTools, ReadyForTransition, ResolveTransition,
     StageIoBuffer, StageOutcome, StageProgress, collect_inference, handle_empty_response,

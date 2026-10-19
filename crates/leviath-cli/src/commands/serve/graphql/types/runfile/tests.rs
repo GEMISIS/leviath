@@ -977,6 +977,7 @@ fn phases() -> Vec<PipelinePhase> {
         PipelinePhase::Wedged("no way out".into()),
         PipelinePhase::Paused,
         PipelinePhase::Done,
+        PipelinePhase::AwaitingMessage,
     ]
 }
 

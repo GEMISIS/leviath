@@ -164,6 +164,37 @@ async fn a_spawn_opens_a_session_bound_to_its_run() {
     h.close_input().await;
 }
 
+/// A session opened from a whole request has no blueprint to start again: a
+/// prompt its finished run will not take ends the turn saying so.
+#[tokio::test]
+async fn a_spawned_session_says_its_finished_run_takes_no_more() {
+    let (daemon, seen) = recording(vec![completed("complete")], |req| match req {
+        ControlRequest::Message { .. } => ControlResponse::Ok { ok: false },
+        other => spawn_ok(other.clone()),
+    });
+    let mut h = Harness::start(daemon, AgentClientArgs::default());
+    h.send(&call(1, extensions::SPAWN, coder(serde_json::json!({}))))
+        .await;
+    let opened = h.recv().await.result.expect("spawned")["sessionId"].clone();
+    h.send(&call(
+        2,
+        "session/prompt",
+        serde_json::json!({"sessionId": opened, "prompt": [{"type": "text", "text": "more"}]}),
+    ))
+    .await;
+    let notice = h
+        .recv_until(|m| update_kind(m).as_deref() == Some("agent_message_chunk"))
+        .await;
+    assert_eq!(
+        notice.params.unwrap()["update"]["content"]["text"],
+        RUN_OVER_NOTICE
+    );
+    let end = h.recv_until(is_result).await;
+    assert_eq!(end.result.unwrap()["stopReason"], "end_turn");
+    assert_eq!(spawn_requests(&seen).len(), 1, "nothing new is started");
+    h.close_input().await;
+}
+
 /// A run that may never finish still starts, and the spawn's answer carries
 /// why, in the shape a refusal's issues take.
 #[tokio::test]

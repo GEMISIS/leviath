@@ -258,6 +258,8 @@ pub enum PipelinePhase {
     Paused,
     /// Finished, failed or cancelled.
     Done,
+    /// An interactive stage replied and waits for the next message.
+    AwaitingMessage,
 }
 
 /// The current stage's counters.
@@ -597,6 +599,8 @@ pub enum WaitState {
         /// What to do about it.
         remedy: String,
     },
+    /// An interactive stage replied and waits for the next message.
+    AwaitingMessage,
 }
 
 impl From<&leviath_core::run_meta::WaitReason> for WaitState {
@@ -608,6 +612,7 @@ impl From<&leviath_core::run_meta::WaitReason> for WaitState {
             W::UserPrompt => Self::UserPrompt,
             W::TaintGate => Self::TaintGate,
             W::InteractionPoint => Self::InteractionPoint,
+            W::AwaitingMessage => Self::AwaitingMessage,
             W::FanOutWorkers { outstanding } => Self::FanOutWorkers(count(*outstanding)),
             W::Children { outstanding } => Self::Children(count(*outstanding)),
             W::NeedsSetup { blocker, remedy } => Self::NeedsSetup {
@@ -625,6 +630,7 @@ impl From<&WaitState> for leviath_core::run_meta::WaitReason {
             WaitState::UserPrompt => Self::UserPrompt,
             WaitState::TaintGate => Self::TaintGate,
             WaitState::InteractionPoint => Self::InteractionPoint,
+            WaitState::AwaitingMessage => Self::AwaitingMessage,
             WaitState::FanOutWorkers(n) => Self::FanOutWorkers {
                 outstanding: *n as usize,
             },

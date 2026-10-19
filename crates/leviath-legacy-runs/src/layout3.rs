@@ -90,7 +90,7 @@ impl StageMode {
     fn upgraded(self, stage: &StageName) -> graph::StageMode {
         match self {
             Self::Autonomous => graph::StageMode::Autonomous,
-            Self::Interactive => graph::StageMode::Interactive,
+            Self::Interactive => graph::StageMode::Interactive(graph::InteractiveDef::default()),
             Self::InteractivePoints(points) => graph::StageMode::InteractivePoints(points),
             Self::FanOut(fan) => graph::StageMode::FanOut(fan.upgraded(stage)),
             Self::Output => graph::StageMode::Output,
@@ -539,7 +539,10 @@ mod tests {
         // Compared as text: a match would leave an arm only a failure reaches.
         let shown = |mode: StageMode| format!("{:?}", mode.upgraded(&stage));
         assert_eq!(shown(StageMode::Autonomous), "Autonomous");
-        assert_eq!(shown(StageMode::Interactive), "Interactive");
+        assert_eq!(
+            shown(StageMode::Interactive),
+            "Interactive(InteractiveDef { idle_timeout_secs: None })"
+        );
         assert_eq!(shown(StageMode::Output), "Output");
         assert_eq!(
             shown(StageMode::InteractivePoints(Vec::new())),

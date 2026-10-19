@@ -175,7 +175,7 @@ One set, shared by every filter input in the schema.
     startedAt: { gte: 1758326400, lt: 1758412800 }
     cost: { costUsd: { gte: "1.00" } }
     title: { contains: "parser" }
-    status: { in: [COMPLETE, COMPLETE_INTERACTIVE] }
+    status: { in: [COMPLETE, WAITING_INPUT] }
   }) {
     results { id title status cost { costUsd costIsExact } }
     total
@@ -430,6 +430,25 @@ Everything else reads a file in the run's directory, and only when you ask for i
 healthy and resolves on its own. A run waiting on an answer is a row somebody has to act on.
 `NEEDS_SETUP` also carries a `blocker` and a `remedy`, so a client can offer the right fix rather
 than parse a sentence.
+
+`AWAITING_MESSAGE` is an interactive stage that has replied and waits for the next message.
+`sendMessage` resumes it in the same stage, with its conversation intact, and it waits again after
+its next reply. `endConversation` moves it on through its ordinary transition, and on a final stage
+the run completes:
+
+```graphql
+mutation {
+  endConversation(request: { runId: "helper-1788924523-abc123" }) {
+    run { id status }
+  }
+}
+```
+
+The stage also moves on when its model calls `end_conversation` or its idle limit runs out. A run
+that is not in an interactive stage is a `CONFLICT`.
+
+`COMPLETE_INTERACTIVE` is deprecated. No run reaches it, and it goes away in 0.8.0. A run waiting
+for a message is `WAITING_INPUT` with `waitReason` `AWAITING_MESSAGE`.
 
 ### What each stage ran on
 

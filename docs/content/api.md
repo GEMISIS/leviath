@@ -360,6 +360,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/runs/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
 | `POST /api/runs/{id}/pause` · `/resume` | Pause a run · resume it |
 | `POST /api/runs/{id}/message` | Steer a running run. Takes files too; see [attaching files](#attaching-files) |
+| `POST /api/runs/{id}/end-conversation` | End an interactive stage's conversation so it moves on. See [Statuses](#statuses) |
 | `GET/POST /api/runs/{id}/interaction` | Read / answer a pending question. See [below](#answering-a-question) |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation, paginated and searchable with `q` |
 | `GET /api/blueprints/{name}/inputs` | The inputs a blueprint declares, with each one's type, default and destination |
@@ -782,12 +783,20 @@ exception is the raw state on `/state` and `/deltas`, which carries the engine's
 | `waiting_input` | Parked. `wait_reason` says on what, and only some of those want a person |
 | `paused` | Paused, by somebody or by Leviath. Resumes on request |
 | `complete` | Finished, with nothing further to accept |
-| `complete_interactive` | Every required stage is done and the run still takes follow-up input |
+| `complete_interactive` | Deprecated: no run reaches it. Removed in 0.8.0 |
 | `error` | Stopped by a failure. The run's `error` carries what went wrong |
 | `cancelled` | Stopped from outside. Nothing went wrong, somebody decided |
 
 Leviath pauses a run itself when something outside the run has to change first, and `wait_reason`
 is then `needs_setup`. A paused run comes back paused after a daemon restart.
+
+An interactive stage that has replied is `waiting_input` with `wait_reason` `awaiting_message`,
+and `accepts_messages` is `true`. `POST /api/runs/{id}/message` resumes it in the same stage, and
+it waits again after its next reply. `POST /api/runs/{id}/end-conversation` moves it on through
+its ordinary transition, and a final stage then completes the run. The stage also moves on when its
+model calls `end_conversation`, or when its idle limit runs out. A run waiting this way holds no
+model or tool slot, and comes back waiting after a daemon restart without a new model call. Ending
+the conversation of a run that is not in an interactive stage is a `409`.
 
 The engine keeps its own vocabulary inside the daemon, where a run that is going is `idle` or
 `active` and a parked one is `waiting`. The socket and the routes above translate those words on
@@ -2384,7 +2393,8 @@ you fetch the run to find out. A run Leviath paused carries
 `{"reason":"needs_setup","blocker":"...","remedy":"..."}`, where `remedy` is a sentence with the
 provider's own error in it and `blocker` is one of `provider_missing`, `credits_exhausted`,
 `auth_failed`, `forbidden`, `provider_unreachable`, `provider_timed_out`, `provider_failed` or
-`providers_unavailable`. [Troubleshooting](/docs/troubleshooting#a-run-says-paused-and-i-did-not-pause-it)
+`providers_unavailable`. An interactive stage waiting for the next message carries
+`{"reason":"awaiting_message"}`. [Troubleshooting](/docs/troubleshooting#a-run-says-paused-and-i-did-not-pause-it)
 says what each one asks of you. `ok` on `tool_call_finished` is `false` for a result the engine
 refused or could not run, so a client should not read a finish frame as a success on its own.
 

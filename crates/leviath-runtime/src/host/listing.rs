@@ -68,6 +68,9 @@ impl WorldHost {
                     .find(|(agent_id, _)| *agent_id == state.agent_id)
                     .map(|(_, req)| req.kind),
                 awaiting_interaction: world.get::<AwaitingInteraction>(entity).is_some(),
+                awaiting_message: world
+                    .get::<crate::pipeline::AwaitingMessage>(entity)
+                    .is_some(),
                 needs_setup: world
                     .get::<crate::pipeline::PausedForSetup>(entity)
                     .map(|p| leviath_core::run_meta::SetupNeeded {

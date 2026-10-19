@@ -212,6 +212,9 @@ fn every_phase_marker_exempts_its_agent() {
         ("InFlightWork", |w, e| {
             w.entity_mut(e).insert(InFlightWork(vec![]));
         }),
+        ("AwaitingMessage", |w, e| {
+            w.entity_mut(e).insert(crate::pipeline::AwaitingMessage);
+        }),
         ("PanickedInParallel", |w, e| {
             w.entity_mut(e)
                 .insert(crate::tick_scope::PanickedInParallel {

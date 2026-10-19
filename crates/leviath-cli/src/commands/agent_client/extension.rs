@@ -65,6 +65,7 @@ impl Server {
                     session_id: session_id.clone(),
                     cwd,
                     run: SessionRun::Running(run_id.clone()),
+                    blueprint: None,
                 });
                 let result = SpawnResult {
                     session_id,

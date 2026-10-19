@@ -16,6 +16,7 @@
 //! | `InputSlot` | `"output_format"`, `{ region = "task", template = "..." }`, `{ stage_model = "plan" }` |
 //! | `InputType` | `"text"`, `{ kind = "int", min = 1, max = 5 }`, `{ kind = "choice", options = ["a"] }` |
 //! | `RegionKind` | `"pinned"`, `{ kind = "sliding_window", max_items = 20 }` |
+//! | `StageMode` | `"interactive"`, `{ interactive = { idle_timeout_secs = 900 } }` |
 
 use serde::{Deserialize, Serialize};
 
@@ -851,6 +852,11 @@ short_schema!(KindTable, "KindTable", |g| vec![
 ]);
 
 readable!(RegionKind, KindText);
+
+// ── StageMode ───────────────────────────────────────────────────────────────
+
+#[path = "readable_mode.rs"]
+mod mode;
 
 #[cfg(test)]
 #[path = "readable_tests.rs"]

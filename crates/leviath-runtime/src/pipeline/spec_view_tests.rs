@@ -758,4 +758,19 @@ fn a_stages_nudge_cascades_from_the_stage_to_the_graph_to_the_operator() {
         stage_nudge(&graph, Some(&graph.stages[0]), None).enabled,
         "a stage with no points is not reviewed"
     );
+
+    // An interactive stage's reply is its turn in a conversation: not nudged.
+    graph.stages[0].mode = StageMode::Interactive(Default::default());
+    assert!(!stage_nudge(&graph, Some(&graph.stages[0]), None).enabled);
+}
+
+/// A stage that takes turns with a person reads what they send, whatever its
+/// `accepts_messages` says; any other stage keeps its own say.
+#[test]
+fn an_interactive_stage_always_accepts_messages() {
+    let mut spec = crate::spec::run_spec::tests::spec();
+    spec.graph.stages[0].accepts_messages = false;
+    assert!(!stage_setup(&spec, 0).accepts_messages);
+    spec.graph.stages[0].mode = StageMode::Interactive(Default::default());
+    assert!(stage_setup(&spec, 0).accepts_messages);
 }

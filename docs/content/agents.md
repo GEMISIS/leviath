@@ -132,32 +132,31 @@ report on:
 stateDiagram-v2
   [*] --> Starting
   Starting --> Running
-  Running --> WaitingInput: prompt, or holding for children
-  WaitingInput --> Running: answered, or children done
+  Running --> WaitingInput: prompt, reply, or holding for children
+  WaitingInput --> Running: answered, message, or children done
   Running --> Paused: lev pause
   WaitingInput --> Paused: lev pause, on a prompt
   Paused --> Running: lev resume
   Running --> Complete
-  Running --> CompleteInteractive: done, still accepting messages
   Running --> Error: unrecoverable error
   Running --> Cancelled: lev cancel
   Cancelled --> Running: lev resume
   Complete --> [*]
-  CompleteInteractive --> [*]
   Error --> [*]
 ```
 
 These are the exact `RunStatus` values the [dashboard](/docs/dashboard) and [API](/docs/api)
-report. `CompleteInteractive` means every required stage finished but the run is still
-accepting [messages](/docs/interaction).
+report.
 
 `Cancelled` is not the end of a run. A cancelled run stops where it is and keeps everything it
-had, and `lev resume` brings it back to carry on from there. `Complete`, `CompleteInteractive`
-and `Error` are where a run ends.
+had, and `lev resume` brings it back to carry on from there. `Complete` and `Error` are where a
+run ends.
 
-`WaitingInput` covers two very different situations: a run stopped on a prompt somebody has
-to answer, and a run parked while its own [sub-agents](/docs/sub-agents) or
-[fan-out](/docs/stages) workers get on with it. The second needs nothing from you.
+`WaitingInput` covers three different situations. A run can be stopped on a prompt somebody has
+to answer. An interactive stage can have replied and be waiting for your next message, which
+[`lev msg`](/docs/interaction) sends. Or a run can be parked while its own
+[sub-agents](/docs/sub-agents) or [fan-out](/docs/stages) workers get on with it, which needs
+nothing from you.
 [`lev ps`](/docs/cli#reading-lev-ps) tells them apart, so reach for it before concluding a
 run is stuck.
 

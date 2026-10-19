@@ -177,9 +177,20 @@ pub(super) async fn send_message(
         .map(|()| StatusCode::ACCEPTED)
 }
 
+/// `POST /api/runs/{id}/end-conversation`: end the conversation of the
+/// interactive stage a run is in, so it moves on.
+pub(super) async fn end_conversation(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, ServeError> {
+    super::core::spawn::end_conversation(&state, &id)
+        .await
+        .map(|()| StatusCode::ACCEPTED)
+}
+
 #[cfg(test)]
 mod tests {
-    use leviath_runtime::control_socket::ControlResponse;
+    use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
 
     use super::*;
     use crate::commands::serve::AppState;
@@ -220,6 +231,7 @@ mod tests {
                 get(get_interaction).post(submit_interaction),
             )
             .route("/api/runs/{id}/message", post(send_message))
+            .route("/api/runs/{id}/end-conversation", post(end_conversation))
             .with_state(state)
     }
 
@@ -926,6 +938,69 @@ mod tests {
             )
             .await,
             StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    // ─── end_conversation ────────────────────────────────────────────────────
+
+    /// What `POST /api/runs/{id}/end-conversation` answers when the daemon
+    /// says `reply`, and the request the daemon was sent.
+    async fn ended_with(reply: ControlResponse) -> (StatusCode, Option<ControlRequest>) {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&captured);
+        let (control, _dir, _srv) = fake_daemon(move |req| {
+            *sink.lock().unwrap() = Some(req);
+            reply.clone()
+        });
+        let status = status_of(
+            app_with(control),
+            "POST",
+            "/api/runs/chat-1/end-conversation",
+            Body::empty(),
+        )
+        .await;
+        let seen = captured.lock().unwrap().take();
+        (status, seen)
+    }
+
+    /// Ending a conversation names the run to the daemon and is accepted; a
+    /// run with none to end is refused with the daemon's reason.
+    #[tokio::test]
+    async fn end_conversation_answers_as_the_daemon_does() {
+        let (status, seen) = ended_with(ControlResponse::Ok { ok: true }).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            seen,
+            Some(ControlRequest::EndConversation {
+                run_id: "chat-1".to_string()
+            })
+        );
+        let (status, _) = ended_with(ControlResponse::Ok { ok: false }).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        crate::runstate::with_isolated_runs_dir_async("end_conversation_refused", |_| async {
+            let (status, _) = ended_with(ControlResponse::Error {
+                message: "run 'chat-1' is in stage 's', which is not interactive".to_string(),
+            })
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        })
+        .await;
+        let (status, _) = ended_with(ControlResponse::List {
+            runs: vec![],
+            finished: vec![],
+            health: Default::default(),
+        })
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            status_of(
+                app_with(no_daemon()),
+                "POST",
+                "/api/runs/a/end-conversation",
+                Body::empty(),
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE
         );
     }
 

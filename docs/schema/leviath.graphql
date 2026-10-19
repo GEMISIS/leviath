@@ -3924,6 +3924,35 @@ type EffectiveStageSettingsOutput {
 	tracksTaint: Boolean!
 }
 
+"One `end_conversation` call, which takes nothing."
+type EndConversationCallOutput implements ToolCall {
+	"Tool name, exactly as the model called it."
+	toolName: String!
+	"What the tool does, as this build describes it."
+	toolDescription: String
+	"""
+	The arguments as the model sent them, which for this tool is
+	an empty object unless the model sent something it should not
+	have.
+	"""
+	rawArguments: JSON!
+}
+
+"Which run's conversation to end."
+input EndConversationRequest {
+	"The run in the interactive stage."
+	runId: ID!
+}
+
+"What ending a conversation answers with."
+type EndConversationResult {
+	"""
+	The run, as its record stands. The record can lag the daemon by a
+	moment, so it may still read `WAITING_INPUT` while the stage moves on.
+	"""
+	run: RunOutput!
+}
+
 "Whether a step added entries to a region or replaced them all."
 enum EntriesChangeMode {
 	"`entries` were added after the ones the region held."
@@ -8210,6 +8239,20 @@ type Mutation {
 		request: SendMessageRequest!
 	): SendMessageResult!
 	"""
+	End the conversation of the interactive stage a run is in.
+	
+	An interactive stage waits for the next message after each reply
+	(`WAITING_INPUT`, `waitReason` `AWAITING_MESSAGE`). Ending its
+	conversation moves it on through its ordinary transition, and a final
+	stage completes the run. A stage mid-turn moves on once it has
+	replied. A run that is not in an interactive stage, or has stopped, is
+	a `CONFLICT`.
+	"""
+	endConversation(
+		"The run whose conversation ends."
+		request: EndConversationRequest!
+	): EndConversationResult!
+	"""
 	Delete run records.
 	
 	Deleting a run takes its sub-agents with it: their records only mean
@@ -9312,6 +9355,8 @@ enum PipelinePhaseKind {
 	PAUSED
 	"Finished."
 	DONE
+	"An interactive stage replied and waits for the next message."
+	AWAITING_MESSAGE
 }
 
 "Arguments for the `present_for_review` tool."
@@ -12894,14 +12939,22 @@ enum RunStatus {
 	STARTING
 	"Moving: inferring, calling tools, transitioning."
 	RUNNING
-	"Parked: on a prompt somebody has to answer, or holding for children."
+	"""
+	Parked: on a prompt somebody has to answer, on the next message of an
+	interactive stage (`waitReason` `AWAITING_MESSAGE`), or holding for
+	children.
+	"""
 	WAITING_INPUT
 	"Paused by `lev pause`; resumes with `lev resume`."
 	PAUSED
 	"Finished with an answer or a terminal state."
 	COMPLETE
-	"Every required stage finished but the run still accepts messages."
-	COMPLETE_INTERACTIVE
+	"""
+	No run reaches this state. A run waiting for the next message of an
+	interactive stage is `WAITING_INPUT` with `waitReason`
+	`AWAITING_MESSAGE`.
+	"""
+	COMPLETE_INTERACTIVE @deprecated(reason: "No run reaches this state; an interactive stage waiting for a message is WAITING_INPUT with waitReason AWAITING_MESSAGE. Removed in 0.8.0.")
 	"Unrecoverable failure; `Run.error` carries what went wrong."
 	ERROR
 	"Stopped from outside. Nothing went wrong; somebody decided."
@@ -15191,7 +15244,10 @@ enum StageMode {
 	fires.
 	"""
 	AUTONOMOUS
-	"Pauses for a person at every step."
+	"""
+	Takes turns with a person: after each reply it waits for the next
+	message, until the conversation is ended or its idle limit runs out.
+	"""
 	INTERACTIVE
 	"Holds at each declared interaction point instead of at every step."
 	INTERACTIVE_POINTS
@@ -19404,6 +19460,11 @@ enum WaitReasonKind {
 	TAINT_GATE
 	"Waiting at a blueprint interaction point."
 	INTERACTION_POINT
+	"""
+	An interactive stage replied and waits for the next message:
+	`sendMessage` resumes it, `endConversation` moves it on.
+	"""
+	AWAITING_MESSAGE
 	"Fan-out workers are still running. Healthy; it resolves on its own."
 	FAN_OUT_WORKERS
 	"Child runs are still running. Healthy; it resolves on its own."
@@ -19412,7 +19473,7 @@ enum WaitReasonKind {
 	NEEDS_SETUP
 }
 
-"Exact and set tests on `WaitReasonKind` (TOOL_APPROVAL, USER_PROMPT, TAINT_GATE, INTERACTION_POINT, FAN_OUT_WORKERS, CHILDREN, NEEDS_SETUP)."
+"Exact and set tests on `WaitReasonKind` (TOOL_APPROVAL, USER_PROMPT, TAINT_GATE, INTERACTION_POINT, AWAITING_MESSAGE, FAN_OUT_WORKERS, CHILDREN, NEEDS_SETUP)."
 input WaitReasonKindFilter {
 	"Exactly this value."
 	eq: WaitReasonKind
@@ -19947,6 +20008,8 @@ input YoloWaiverFilter {
 	isNull: Boolean
 }
 
+"Marks an element of a GraphQL schema as no longer supported."
+directive @deprecated(reason: String = "No longer supported") on FIELD_DEFINITION | ARGUMENT_DEFINITION | INPUT_FIELD_DEFINITION | ENUM_VALUE
 "Directs the executor to include this field or fragment only when the `if` argument is true."
 directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 "Indicates that an Input Object is a OneOf Input Object (and thus requires exactly one of its field be provided)"

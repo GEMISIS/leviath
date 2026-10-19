@@ -560,6 +560,16 @@ pub enum ControlOp {
         /// Reply channel.
         reply: oneshot::Sender<Result<bool, String>>,
     },
+    /// End the conversation of the interactive stage a run is in: a stage
+    /// waiting for its next message moves on now, through its ordinary
+    /// transition, and one mid-turn moves on after its reply. Reply is `Err`
+    /// with the reason for a run that has no conversation to end.
+    EndConversation {
+        /// The run whose conversation ends.
+        run_id: String,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
     /// List every open interaction awaiting an answer, as `(agent_id, request)`.
     ListInteractions {
         /// Reply channel.

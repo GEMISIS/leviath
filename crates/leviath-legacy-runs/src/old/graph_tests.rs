@@ -366,7 +366,10 @@ fn every_setting_a_blueprint_holds_converts() {
     assert!(main.nudge.is_some() && main.sandbox.is_some() && main.tool_routing.is_some());
     assert_eq!(main.output_routing.len(), 1);
     assert_eq!(main.tool_accepts.len(), 1);
-    assert_eq!(g.stage("ask").unwrap().mode, StageMode::Interactive);
+    assert_eq!(
+        g.stage("ask").unwrap().mode,
+        StageMode::Interactive(Default::default())
+    );
     // Main's declared edge, and ask's fall-through to fan.
     assert_eq!(g.edges.len(), 2);
 

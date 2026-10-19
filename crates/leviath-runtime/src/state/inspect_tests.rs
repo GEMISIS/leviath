@@ -797,6 +797,7 @@ fn every_wait_reason_survives_the_run_file() {
         WaitReason::UserPrompt,
         WaitReason::TaintGate,
         WaitReason::InteractionPoint,
+        WaitReason::AwaitingMessage,
         WaitReason::FanOutWorkers { outstanding: 3 },
         WaitReason::Children { outstanding: 2 },
         WaitReason::NeedsSetup {

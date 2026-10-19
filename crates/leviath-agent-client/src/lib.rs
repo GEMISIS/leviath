@@ -33,8 +33,8 @@ pub mod mapping;
 pub mod protocol;
 
 pub use mapping::{
-    flatten_prompt, flatten_prompt_with, is_permission_request, permission_request, prompt_parts,
-    stop_reason_for, stop_reason_for_label,
+    awaits_message, flatten_prompt, flatten_prompt_with, is_permission_request, permission_request,
+    prompt_parts, stop_reason_for, stop_reason_for_label,
 };
 pub use protocol::{
     AgentCapabilities, AgentInfo, ContentBlock, EmbeddedResource, InitializeParams,

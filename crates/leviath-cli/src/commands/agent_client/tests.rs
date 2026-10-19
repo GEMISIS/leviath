@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use leviath_agent_client::PROTOCOL_VERSION;
 use leviath_core::interaction::{InteractionKind, InteractionRequest};
+use leviath_core::run_meta::{RunStatus, WaitReason};
 use leviath_runtime::control_socket::{ControlClient, bind_control_listener, control_id};
 use leviath_runtime::host::WorldEvent;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
@@ -185,6 +186,16 @@ impl Harness {
         let dir = self.runs_dir.path().join(RUN_ID);
         let mut meta = crate::test_fixtures::fixtures::run_meta(RUN_ID);
         meta.status = serde_json::from_value(serde_json::json!(status)).unwrap();
+        crate::runstate::write_meta_to(&dir, &meta).unwrap();
+    }
+
+    /// Record `RUN_ID` as waiting for the next message of an interactive
+    /// stage.
+    fn write_meta_waiting(&self) {
+        let dir = self.runs_dir.path().join(RUN_ID);
+        let mut meta = crate::test_fixtures::fixtures::run_meta(RUN_ID);
+        meta.status = RunStatus::WaitingInput;
+        meta.waiting_on = Some(WaitReason::AwaitingMessage);
         crate::runstate::write_meta_to(&dir, &meta).unwrap();
     }
 
@@ -939,14 +950,22 @@ async fn a_second_prompt_is_delivered_as_a_message() {
     h.close_input().await;
 }
 
+/// A prompt the session's finished run will not take is not dropped: it
+/// starts a new run of the session's blueprint, and the turn says so.
 #[tokio::test]
-async fn a_second_prompt_that_cannot_be_delivered_ends_the_turn() {
-    // Spawn succeeds; Message is rejected (agent not accepting).
-    let daemon = ScriptedDaemon::new(vec![completed("complete")], |req| match req {
-        ControlRequest::Spawn { .. } => ControlResponse::Spawned {
-            run_id: RUN_ID.to_string(),
-            warnings: Default::default(),
-        },
+async fn a_second_prompt_a_finished_run_will_not_take_starts_a_new_run() {
+    let spawns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = spawns.clone();
+    let daemon = ScriptedDaemon::new(vec![completed("complete")], move |req| match req {
+        ControlRequest::Spawn { request } => {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let task = format!("{:?}", request.inputs.get("task"));
+            assert!(task.contains("one") || task.contains("two"), "{task}");
+            ControlResponse::Spawned {
+                run_id: RUN_ID.to_string(),
+                warnings: Default::default(),
+            }
+        }
         ControlRequest::Message { .. } => ControlResponse::Ok { ok: false },
         _ => ControlResponse::Ok { ok: true },
     });
@@ -958,6 +977,89 @@ async fn a_second_prompt_that_cannot_be_delivered_ends_the_turn() {
         "end_turn"
     );
     h.send(r#"{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"two"}]}}"#)
+        .await;
+    let notice = h
+        .recv_until(|m| update_kind(m).as_deref() == Some("agent_message_chunk"))
+        .await;
+    let text = notice.params.unwrap()["update"]["content"]["text"].clone();
+    assert_eq!(text, NEW_RUN_NOTICE);
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "end_turn"
+    );
+    assert_eq!(spawns.load(std::sync::atomic::Ordering::SeqCst), 2);
+    h.close_input().await;
+}
+
+/// The next prompt to an interactive run is its next message, and the turn
+/// ends once the run has answered it: its record waits again, having moved.
+#[tokio::test]
+async fn a_message_to_an_interactive_run_ends_its_turn_once_answered() {
+    let runs: Arc<std::sync::Mutex<Option<std::path::PathBuf>>> = Arc::default();
+    let seen = runs.clone();
+    let daemon = ScriptedDaemon::new(vec![], move |req| match req {
+        // The run answers the message as it is delivered: its record waits
+        // again, a turn further on.
+        ControlRequest::Message { .. } => {
+            let dir = seen.lock().unwrap().clone().unwrap().join(RUN_ID);
+            let mut meta = crate::test_fixtures::fixtures::run_meta(RUN_ID);
+            meta.status = RunStatus::WaitingInput;
+            meta.waiting_on = Some(WaitReason::AwaitingMessage);
+            meta.iteration = 2;
+            crate::runstate::write_meta_to(&dir, &meta).unwrap();
+            ControlResponse::Ok { ok: true }
+        }
+        other => spawn_ok(other),
+    });
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    *runs.lock().unwrap() = Some(h.runs_dir.path().to_path_buf());
+    h.write_meta_waiting();
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"hi"}]}}"#)
+        .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "end_turn"
+    );
+    h.send(r#"{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"and then?"}]}}"#)
+        .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "end_turn"
+    );
+    h.close_input().await;
+}
+
+/// The wait a message found is not its answer: a record that has not moved
+/// since the prompt keeps the turn going until something does end it.
+#[tokio::test]
+async fn the_wait_a_message_found_is_not_its_answer() {
+    let daemon = ScriptedDaemon::new(vec![status_event(), completed("complete")], spawn_ok);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"hi"}]}}"#)
+        .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "end_turn"
+    );
+    h.write_meta_waiting();
+    h.send(r#"{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"more"}]}}"#)
+        .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "end_turn",
+        "ended by the completion, not by the old wait"
+    );
+    h.close_input().await;
+}
+
+/// The run file says the same when the stream has nothing: a new run that
+/// is waiting for a message has answered.
+#[tokio::test]
+async fn a_run_file_waiting_for_a_message_ends_a_new_runs_turn() {
+    let daemon = ScriptedDaemon::new(vec![], spawn_ok);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.write_meta_waiting();
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"hi"}]}}"#)
         .await;
     assert_eq!(
         h.recv_until(is_result).await.result.unwrap()["stopReason"],
@@ -1691,12 +1793,15 @@ mod run_status_helpers {
     use leviath_core::run_meta::RunStatus;
 
     #[test]
-    fn read_run_status_reads_the_persisted_status() {
+    fn read_run_meta_reads_the_persisted_status() {
         let dir = tempfile::tempdir().unwrap();
         let mut meta = crate::test_fixtures::fixtures::run_meta("r1");
         meta.status = RunStatus::Complete;
         crate::runstate::create_run_in(&dir.path().join("r1"), &meta).unwrap();
-        assert_eq!(read_run_status(dir.path(), "r1"), Some(RunStatus::Complete));
+        assert_eq!(
+            read_run_meta(dir.path(), "r1").map(|m| m.status),
+            Some(RunStatus::Complete)
+        );
     }
 
     #[test]
@@ -1750,15 +1855,15 @@ mod run_status_helpers {
     }
 
     #[test]
-    fn read_run_status_is_none_when_missing_or_malformed() {
+    fn read_run_meta_is_none_when_missing_or_malformed() {
         let dir = tempfile::tempdir().unwrap();
         // Missing file.
-        assert_eq!(read_run_status(dir.path(), "nope"), None);
+        assert_eq!(read_run_meta(dir.path(), "nope"), None);
         // Present but not a run file.
         let run = dir.path().join("bad");
         std::fs::create_dir_all(&run).unwrap();
         std::fs::write(run.join(leviath_core::files::RUN_FILE), "not a run file").unwrap();
-        assert_eq!(read_run_status(dir.path(), "bad"), None);
+        assert_eq!(read_run_meta(dir.path(), "bad"), None);
     }
 }
 

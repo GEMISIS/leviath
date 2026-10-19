@@ -297,24 +297,50 @@ pub(crate) async fn send_message(
         Ok(ControlResponse::Error { message }) if says_nothing => {
             Err(ServeError::BadRequest(message))
         }
-        // Refused because of the run it names: a run held off this machine
-        // says what to put back, one with a record here (finished, failed or
-        // cancelled) is there and refuses it, and no record is a miss. The
-        // daemon's words, which say what to do, are kept as they are.
-        Ok(ControlResponse::Error { message }) => {
-            if held::is_held(&state.control, run_id).await {
-                return Err(ServeError::Held(message));
-            }
-            // The record is looked for on the blocking pool.
-            let id = run_id.to_string();
-            let recorded =
-                super::super::blocking::blocking(move || crate::runstate::read_meta(&id).is_ok())
-                    .await;
-            Err(match recorded {
-                true => ServeError::Conflict(message),
-                false => ServeError::NotFound(message),
-            })
-        }
+        Ok(ControlResponse::Error { message }) => Err(run_refusal(state, run_id, message).await),
+        Ok(other) => Err(ServeError::unexpected_reply(&other)),
+        Err(e) => Err(ServeError::from_daemon_io(&e)),
+    }
+}
+
+/// A refusal because of the run a request names: a run held off this
+/// machine says what to put back, one with a record here (finished, failed,
+/// cancelled, or not in a state that takes the request) is there and refuses
+/// it, and no record is a miss. The daemon's words, which say what to do, are
+/// kept as they are.
+async fn run_refusal(state: &AppState, run_id: &str, message: String) -> ServeError {
+    if held::is_held(&state.control, run_id).await {
+        return ServeError::Held(message);
+    }
+    // The record is looked for on the blocking pool.
+    let id = run_id.to_string();
+    let recorded =
+        super::super::blocking::blocking(move || crate::runstate::read_meta(&id).is_ok()).await;
+    match recorded {
+        true => ServeError::Conflict(message),
+        false => ServeError::NotFound(message),
+    }
+}
+
+/// End the conversation of the interactive stage a run is in.
+///
+/// A stage waiting for its next message moves on now, through its ordinary
+/// transition; one mid-turn moves on once it has replied. A run that is not
+/// in an interactive stage, or has stopped, is refused with the daemon's
+/// reason.
+pub(crate) async fn end_conversation(state: &AppState, run_id: &str) -> Result<(), ServeError> {
+    let reply = state
+        .control
+        .request(&ControlRequest::EndConversation {
+            run_id: run_id.to_string(),
+        })
+        .await;
+    match reply {
+        Ok(ControlResponse::Ok { ok: true }) => Ok(()),
+        Ok(ControlResponse::Ok { ok: false }) => Err(ServeError::NotFound(format!(
+            "Run '{run_id}' has no conversation to end"
+        ))),
+        Ok(ControlResponse::Error { message }) => Err(run_refusal(state, run_id, message).await),
         Ok(other) => Err(ServeError::unexpected_reply(&other)),
         Err(e) => Err(ServeError::from_daemon_io(&e)),
     }

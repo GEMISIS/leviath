@@ -460,7 +460,10 @@ impl PipelineWorld {
                     crate::title_bridge::fire_due_titles,
                 )
                     .chain(),
-                deliver_messages,
+                // A message wakes an interactive stage parked on it; then a
+                // parked stage whose idle limit ran out moves on. Delivery
+                // first, so a message that lands as the limit runs out wins.
+                (deliver_messages, crate::pipeline::expire_idle_conversations).chain(),
                 collect_compaction,
                 // Apply any completed Summarize context-transform summaries into
                 // the child's regions, then dispatch newly-queued ones.
@@ -603,6 +606,7 @@ impl PipelineWorld {
                 // else writes to it.
                 (
                     crate::pipeline::track_stage_progress,
+                    crate::pipeline::forget_ended_conversations,
                     run_stage_enter_hooks,
                     crate::stage_seeds::start_stage_seeds,
                     crate::fanout::frame_split_round,

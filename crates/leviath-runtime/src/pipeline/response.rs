@@ -909,13 +909,14 @@ pub(crate) struct GlobalNudge(pub crate::spec::graph::NudgeDef);
 /// lifetimes: the borrow is bound when the query is fetched.
 type EmptyResponseQuery = (
     Entity,
-    Option<&'static crate::components::AgentState>,
+    Option<&'static mut crate::components::AgentState>,
     &'static mut ContextWindow,
     &'static crate::components::InferenceResult,
     &'static mut StageProgress,
     &'static crate::insert::RunSpecC,
     &'static StageCursor,
     Option<&'static GlobalNudge>,
+    Option<&'static super::ConversationEnded>,
 );
 
 /// Empty-response system: for each `ReadyForTransition` agent decide whether the
@@ -924,6 +925,10 @@ type EmptyResponseQuery = (
 /// response is accepted and the agent advances to `ResolveTransition`.
 /// Otherwise (text only, no work yet) the response + the stage's nudge are
 /// added to context and the agent loops back to `ReadyToInfer`.
+///
+/// An interactive stage whose reply is accepted parks instead, waiting for the
+/// next message (see `pipeline::conversation`), until its conversation has
+/// been ended.
 ///
 /// The nudge is programmable per stage (`[stages.<name>.nudge]`), per agent
 /// (`[agent.nudge]`), and globally (config `[nudge]`), each field cascading
@@ -938,7 +943,8 @@ pub(crate) fn handle_empty_response(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, mut window, infer, mut progress, spec, cursor, global) in agents.iter_mut()
+    for (entity, mut state, mut window, infer, mut progress, spec, cursor, global, ended) in
+        agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
         let graph = &spec.0.graph;
@@ -946,9 +952,10 @@ pub(crate) fn handle_empty_response(
         // Where a long reply is stored, when the world has a store and this
         // run is known by id.
         let (sources, _) = mime.hydration_inputs(entity);
-        let sink = state.and_then(|state| {
-            crate::context_setup::PartSink::over(&sources, &state.agent_id, &mime)
-        });
+        let run_id = state.as_ref().map(|state| state.agent_id.clone());
+        let sink = run_id
+            .as_deref()
+            .and_then(|run_id| crate::context_setup::PartSink::over(&sources, run_id, &mime));
         let nudge = super::spec_view::stage_nudge(graph, stage, global.map(|g| &g.0));
 
         // A reply the output cap cut off is not the stage's answer, however
@@ -1033,6 +1040,17 @@ pub(crate) fn handle_empty_response(
                 stage,
                 sink.as_ref(),
             );
+            if super::conversation::parks_after_reply(stage, ended.is_some()) {
+                let now = chrono::Utc::now().timestamp();
+                super::conversation::park(
+                    &mut commands,
+                    entity,
+                    state.as_deref_mut(),
+                    &mut progress,
+                    now,
+                );
+                continue;
+            }
             commands
                 .entity(entity)
                 .remove::<ReadyForTransition>()
@@ -1067,66 +1085,6 @@ pub(crate) fn handle_empty_response(
                 .insert(ReadyToInfer);
         }
     }
-}
-
-/// How many text-only replies an image stage is nudged back before it is let
-/// go. Small on purpose: an image model that returns text three times running
-/// is refusing or erroring, not warming up, and the stage's own
-/// `require_output`/`max_iterations` then ends it rather than looping.
-pub(crate) const MAX_NO_IMAGE_NUDGES: usize = 3;
-
-/// The media family a stage declares it makes (`image`, `video` or `audio`),
-/// from a `format` or an `output_routing` target: `None` for a stage that
-/// makes text. A plain prefix check, because both are opaque labels the
-/// manifest already validated as mime patterns. Image first, then video, then
-/// audio, when a stage names more than one.
-pub(crate) fn stage_expected_media(
-    stage: Option<&crate::spec::graph::StageDef>,
-) -> Option<&'static str> {
-    let stage = stage?;
-    let format = stage.output.as_ref().and_then(|o| o.format.as_deref());
-    ["image", "video", "audio"].into_iter().find(|family| {
-        let prefix = format!("{family}/");
-        format.is_some_and(|f| f.starts_with(&prefix))
-            || stage.output_routing.keys().any(|k| k.starts_with(&prefix))
-    })
-}
-
-/// Parts of `family` among a reply's produced parts.
-fn media_part_count(parts: &[leviath_core::mime::Part], family: &str) -> usize {
-    let pattern = format!("{family}/*");
-    parts
-        .iter()
-        .filter(|p| p.mime_type.matches(&pattern))
-        .count()
-}
-
-/// The `[System]` line sent back when a media stage returned text and nothing
-/// of the `family` it makes. It quotes the model's own words, because a
-/// refusal or a filtered request states its reason there, so the retry is
-/// informed rather than blind.
-pub(crate) fn no_media_nudge(reply_text: &str, family: &str) -> String {
-    let what = match family {
-        "image" => "an image",
-        "video" => "a video",
-        _ => "audio",
-    };
-    let trimmed = reply_text.trim();
-    if trimmed.is_empty() {
-        return format!(
-            "This stage produces {what}, but your last reply contained none. The \
-             generation may have failed. Generate {what} and try again."
-        );
-    }
-    let mut quoted = leviath_core::text::truncate_chars(trimmed, 500);
-    if trimmed.chars().count() > 500 {
-        quoted.push_str("...");
-    }
-    format!(
-        "This stage produces {what}, but your last reply contained none, only text: \
-         \"{quoted}\". That usually means the generation failed or was refused. If that \
-         text names a problem, address it; then generate {what} and try again."
-    )
 }
 
 /// Record a reply with no tool calls in the conversation as the model's

@@ -1648,6 +1648,40 @@
         }
       }
     },
+    "/api/runs/{id}/end-conversation": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "End the conversation of the interactive stage a run is in",
+        "responses": {
+          "202": {
+            "description": "Accepted: the daemon holds it, and the work happens after the response."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "description": "A stage waiting for its next message (status waiting_input, wait reason awaiting_message) moves on now, through its ordinary transition; a final stage completes the run. A stage mid-turn moves on once it has replied. A run that is not in an interactive stage, or has stopped, answers 409."
+      }
+    },
     "/api/runs/{id}/interaction": {
       "parameters": [
         {

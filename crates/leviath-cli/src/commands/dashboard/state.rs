@@ -836,7 +836,8 @@ impl Dashboard {
             Some(a) => a,
             None => return false,
         };
-        matches!(agent.status, AgentDisplayStatus::Active) && agent.accepts_messages
+        (matches!(agent.status, AgentDisplayStatus::Active) && agent.accepts_messages)
+            || agent.awaits_message()
     }
 
     pub(super) fn selected_stage_can_respond(&self) -> bool {
@@ -847,7 +848,10 @@ impl Dashboard {
         if matches!(agent.status, AgentDisplayStatus::Cancelled) {
             return false;
         }
-        if agent.waiting_prompt.is_none() && agent.pending_request.is_none() {
+        if agent.waiting_prompt.is_none()
+            && agent.pending_request.is_none()
+            && !agent.awaits_message()
+        {
             return false;
         }
         // Gate on the selected stage matching the stage currently requiring input.
@@ -1723,6 +1727,21 @@ mod tests {
         dash.update_display_indices();
         // Waiting agents don't accept messages (only Active do)
         assert!(!dash.selected_agent_accepts_messages());
+    }
+
+    /// A run that has replied in an interactive stage is waiting for exactly
+    /// that: a message, and the input pane is where it goes.
+    #[test]
+    fn a_run_awaiting_a_message_takes_one() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.wait_reason = Some(leviath_core::run_meta::WaitReason::AwaitingMessage);
+        agent.waiting_prompt = None;
+        agent.pending_request = None;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        assert!(dash.selected_agent_accepts_messages());
+        assert!(dash.selected_stage_can_respond());
     }
 
     #[test]

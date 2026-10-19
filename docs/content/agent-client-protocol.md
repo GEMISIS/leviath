@@ -80,6 +80,18 @@ Flags (run `lev agent-client --help` for the authoritative list):
 An `--output-format` label that differs from the blueprint's retires the validator and schema the
 blueprint declared.
 
+## Follow-up prompts
+
+A blueprint whose stage has `mode = "interactive"` holds a conversation. Its turn ends once the
+stage replies, and the run waits for the next message. The session's next `session/prompt` is that
+message: the run picks up in the same stage, with everything said so far, and the turn ends at its
+next reply.
+
+A run that has finished takes no more messages. Its session's next prompt starts a new run of the
+same blueprint, with the prompt as its `task`, and the turn opens with a line saying so. A session
+opened with `_leviath/spawn` has no blueprint of its own to start again, so the turn says the run
+has finished and ends there.
+
 ## Typed inputs and other blueprints
 
 A `session/new` session runs the blueprint the operator chose, with the prompt as its `task`

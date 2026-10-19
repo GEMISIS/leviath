@@ -335,7 +335,7 @@ impl StageGraph {
 
             let kind = match &stage.mode {
                 StageMode::Autonomous => StageKind::Autonomous,
-                StageMode::Interactive => StageKind::Interactive,
+                StageMode::Interactive(_) => StageKind::Interactive,
                 StageMode::InteractivePoints(_) => StageKind::InteractivePoints,
                 StageMode::Output => StageKind::Output,
                 StageMode::FanOut(config) => {

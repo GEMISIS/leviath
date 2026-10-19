@@ -15,6 +15,24 @@ same list.
 
 ### Changed
 
+- A stage with `mode = "interactive"` now takes turns with a person. After a
+  reply with no tool calls it waits for the next message instead of moving
+  on: `waiting_input`, wait reason `awaiting_message` (GraphQL
+  `AWAITING_MESSAGE`). A message resumes it in the same stage with its
+  conversation intact. It moves on when the model calls the new
+  `end_conversation` tool, which the mode grants, when a person ends the
+  conversation, or when its idle limit runs out. A waiting run holds no
+  model or tool slot and comes back waiting after a daemon restart without a
+  new model call. Interactive stages are not nudged by default and always
+  accept messages. To keep the old behaviour, where the stage moved on after
+  one reply, use `mode = "autonomous"`.
+- `COMPLETE_INTERACTIVE` (REST `complete_interactive`) is deprecated in
+  GraphQL and the docs. No run reaches it; a run waiting for a message is
+  `WAITING_INPUT` with `AWAITING_MESSAGE`. It is removed in 0.8.0.
+- In `lev agent-client`, a prompt to a session whose run has finished starts
+  a new run of the session's blueprint, and says so in the turn. A session
+  opened with `_leviath/spawn` says the run has finished. To keep a
+  conversation going in one run, give the blueprint an interactive stage.
 - A failed routing call (the "which stage next?" question asked once a stage
   with several edges is done) now fails the run with an error naming the
   routing call, and keeps the stage's finished work. It used to fail the stage
@@ -346,6 +364,12 @@ same list.
 
 ### Fixed
 
+- `mode = "interactive"` did nothing: the stage moved on after its first
+  reply like an autonomous one. It now waits for the next message, as the
+  docs said.
+- `lev agent-client` no longer drops a session's second prompt without a
+  word when the run has finished. An interactive blueprint's run takes it
+  as its next message.
 - Multi-stage runs on Meta's Muse Spark (directly or as OpenRouter's
   `meta/*`) no longer loop between a finished stage and its error recovery
   until the revisit cap. The routing request sent `tool_choice: "none"`, which
@@ -796,6 +820,15 @@ same list.
 
 ### Added
 
+- `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
+  interactive stage waits for the next message before it moves on. With no
+  limit it waits for as long as it takes, except in a run nobody is
+  watching, which waits 120 seconds.
+- `endConversation` (GraphQL) and `POST /api/runs/{id}/end-conversation`
+  end an interactive stage's conversation, so it moves on through its
+  ordinary transition and a final stage completes the run.
+- `lev ps` says how many runs wait for a message, and `lev dash` shows such
+  a run as your turn, with `[i]` to reply.
 - `lev serve` announces the capability `spawn.request`: the typed spawn
   request on `POST /api/runs`, `POST /api/runs/validate`,
   `GET /api/schema/spawn-request` and GraphQL `spawnRun` and `validateSpawn`.

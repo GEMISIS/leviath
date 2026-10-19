@@ -500,6 +500,21 @@ fn format_runs_calls_out_only_the_runs_needing_an_answer() {
         two.ends_with("2 runs need an answer: lev interactions"),
         "{two}"
     );
+
+    // A run waiting for a message is asking nothing `lev interactions` can
+    // answer: a message resumes it.
+    let chat = |id: &str| prompt(id, WaitReason::AwaitingMessage);
+    let one = format_runs(&[chat("run-e")], &[], &healthy_daemon(), 0);
+    assert!(!one.contains("needs an answer"), "{one}");
+    assert!(
+        one.ends_with("1 run waits for a message: lev msg <run> <text>"),
+        "{one}"
+    );
+    let two = format_runs(&[chat("run-e"), chat("run-f")], &[], &healthy_daemon(), 0);
+    assert!(
+        two.ends_with("2 runs wait for a message: lev msg <run> <text>"),
+        "{two}"
+    );
 }
 
 /// Everything from a given column onwards, by character (never by byte - a run

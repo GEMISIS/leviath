@@ -15,13 +15,20 @@ pub(crate) enum RunStatus {
     Starting,
     /// Moving: inferring, calling tools, transitioning.
     Running,
-    /// Parked: on a prompt somebody has to answer, or holding for children.
+    /// Parked: on a prompt somebody has to answer, on the next message of an
+    /// interactive stage (`waitReason` `AWAITING_MESSAGE`), or holding for
+    /// children.
     WaitingInput,
     /// Paused by `lev pause`; resumes with `lev resume`.
     Paused,
     /// Finished with an answer or a terminal state.
     Complete,
-    /// Every required stage finished but the run still accepts messages.
+    /// No run reaches this state. A run waiting for the next message of an
+    /// interactive stage is `WAITING_INPUT` with `waitReason`
+    /// `AWAITING_MESSAGE`.
+    #[graphql(
+        deprecation = "No run reaches this state; an interactive stage waiting for a message is WAITING_INPUT with waitReason AWAITING_MESSAGE. Removed in 0.8.0."
+    )]
     CompleteInteractive,
     /// Unrecoverable failure; `Run.error` carries what went wrong.
     Error,
