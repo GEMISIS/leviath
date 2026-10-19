@@ -191,7 +191,8 @@ async fn a_profile_the_machine_lacks_is_refused_with_the_ones_it_has() {
 async fn a_compaction_model_the_machine_will_not_send_context_to_is_refused() {
     let mut g = graph();
     g.compaction = Some(CompactionDef {
-        model: model("openai/gpt-5.5"),
+        model: Some(model("openai/gpt-5.5")),
+        models: Vec::new(),
         system_prompt: None,
         user_prompt_template: None,
         max_summary_tokens: 500,
@@ -203,12 +204,8 @@ async fn a_compaction_model_the_machine_will_not_send_context_to_is_refused() {
         ..Fake::default()
     };
     let issues = spawn(&raw(g), &env).await.unwrap_err();
-    assert_eq!(found(&issues), ["source.raw.compaction.model NotAllowed"]);
-    assert!(
-        issues.0[0]
-            .message
-            .starts_with("the compaction model is openai/gpt-5.5")
-    );
+    assert_eq!(found(&issues), ["source.raw.compaction Unresolvable"]);
+    assert!(issues.0[0].message.starts_with("openai/gpt-5.5"));
     assert_eq!(issues.0[0].got.as_deref(), Some("openai/gpt-5.5"));
 }
 

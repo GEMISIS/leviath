@@ -99,6 +99,7 @@ async fn every_mirrored_function_runs() {
     exercise(&[CompactionConfig {
         provider: "anthropic".to_string(),
         model: "claude-haiku-4-5".to_string(),
+        models: vec!["anthropic/claude-haiku-4-5".to_string()],
         system_prompt: None,
         user_prompt_template: None,
         max_summary_tokens: 800,
@@ -107,6 +108,27 @@ async fn every_mirrored_function_runs() {
     .await;
 
     exercise_enum(&[WorkerFailurePolicy::Continue, WorkerFailurePolicy::FailAll]).await;
+}
+
+/// A compaction that names no model summarizes on each stage's own model,
+/// and says so with nothing named; one that names several lists them all.
+#[test]
+fn compaction_names_every_model_or_none() {
+    let read = |text: &str| {
+        let def: leviath_runtime::spec::graph::CompactionDef = toml::from_str(text).unwrap();
+        CompactionConfig::from(&def)
+    };
+    let stage = read("");
+    assert_eq!((stage.provider.as_str(), stage.model.as_str()), ("", ""));
+    assert!(stage.models.is_empty());
+    assert_eq!(stage.max_summary_tokens, 2000);
+    assert_eq!(stage.temperature, 0.2);
+    let listed = read(r#"models = [{ model = "small" }, { provider = "ollama", model = "q" }]"#);
+    assert_eq!(
+        (listed.provider.as_str(), listed.model.as_str()),
+        ("", "small")
+    );
+    assert_eq!(listed.models, ["small", "ollama/q"]);
 }
 
 /// The nudge policy's three states read back from what a blueprint can write:

@@ -10932,8 +10932,7 @@ fn compacting_window() -> ContextWindow {
 
 fn compaction_settings(provider: &str, model: &str) -> CompactionSettings {
     CompactionSettings(leviath_core::CompactionConfig {
-        provider: provider.to_string(),
-        model: model.to_string(),
+        routes: vec![crate::spec::names::ModelRef::parse(&format!("{provider}/{model}")).unwrap()],
         system_prompt: None,
         user_prompt_template: None,
         max_summary_tokens: 200,

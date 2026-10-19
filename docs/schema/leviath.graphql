@@ -1842,16 +1842,25 @@ input CompactionConfigInput {
 	"""
 	Filter on `CompactionConfigOutput.provider`.
 	
-	The provider that serves the summarizer. Empty when the blueprint
-	names the model alone and the machine's provider order picks one.
+	The provider of the first model it names. Empty when that model is
+	named alone and the machine's provider order picks one, or when it
+	names none.
 	"""
 	provider: StringFilter
 	"""
 	Filter on `CompactionConfigOutput.model`.
 	
-	The model it runs on.
+	The first model it names. Empty when it names none and summarizes on
+	each stage's own model.
 	"""
 	model: StringFilter
+	"""
+	Filter on `CompactionConfigOutput.models`.
+	
+	Every model it names, best first, each written `provider/model` or as
+	a bare model name. Empty when it summarizes on each stage's own model.
+	"""
+	models: StringListFilter
 	"""
 	Filter on `CompactionConfigOutput.systemPrompt`.
 	
@@ -1893,17 +1902,27 @@ input CompactionConfigInput {
 """
 The model that summarizes a region when it fills.
 
-Its own model on purpose: compaction is cheap, frequent and not the work, so
-a run on an expensive model usually summarizes on a small one.
+Usually its own model: compaction is cheap, frequent and not the work, so a
+run on an expensive model usually summarizes on a small one. A blueprint
+that names none summarizes on each stage's own model.
 """
 type CompactionConfigOutput {
 	"""
-	The provider that serves the summarizer. Empty when the blueprint
-	names the model alone and the machine's provider order picks one.
+	The provider of the first model it names. Empty when that model is
+	named alone and the machine's provider order picks one, or when it
+	names none.
 	"""
 	provider: String!
-	"The model it runs on."
+	"""
+	The first model it names. Empty when it names none and summarizes on
+	each stage's own model.
+	"""
 	model: String!
+	"""
+	Every model it names, best first, each written `provider/model` or as
+	a bare model name. Empty when it summarizes on each stage's own model.
+	"""
+	models: [String!]!
 	"What the summarizer is told it is for."
 	systemPrompt: String
 	"The template the region's content is wrapped in."

@@ -465,13 +465,7 @@ pub(crate) fn spec_components(
     if let Some(c) = &graph.compaction {
         entity.insert(crate::pipeline::CompactionSettings(
             leviath_core::CompactionConfig {
-                provider: c
-                    .model
-                    .provider
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_default(),
-                model: c.model.model.to_string(),
+                routes: c.named(),
                 system_prompt: c.system_prompt.clone(),
                 user_prompt_template: c.user_prompt_template.clone(),
                 max_summary_tokens: c.max_summary_tokens as usize,

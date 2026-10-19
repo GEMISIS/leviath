@@ -26,11 +26,12 @@ compare it.
 
 Alpha builds wrote run files in earlier binary layouts. Layout 2 differs
 from this build's in how the spec holds each stage's model and reply cap,
-and layout 3 in how a fan-out names its worker. `upgrade` rewrites such a
+layout 3 in how a fan-out names its worker, and layout 4 in how a graph
+names its compaction model. `upgrade` rewrites such a
 file in place: the spec, the states and the deltas are read in the old shape
 and written in the new one, the code and owner frames are copied byte for
-byte, and the file as it was is kept as `legacy/run.v2.lvr` or
-`legacy/run.v3.lvr`. `needs_upgrade` tells one from its header alone.
+byte, and the file as it was is kept as `legacy/run.v2.lvr`,
+`legacy/run.v3.lvr` or `legacy/run.v4.lvr`. `needs_upgrade` tells one from its header alone.
 
 It also holds the only reader left for the old `agent.leviath` blueprint
 format. `migrate` turns one into an `agent.toml` describing the same run,

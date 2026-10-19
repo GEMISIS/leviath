@@ -358,16 +358,22 @@ impl FileTrackingConfig {
 
 /// The model that summarizes a region when it fills.
 ///
-/// Its own model on purpose: compaction is cheap, frequent and not the work, so
-/// a run on an expensive model usually summarizes on a small one.
+/// Usually its own model: compaction is cheap, frequent and not the work, so a
+/// run on an expensive model usually summarizes on a small one. A blueprint
+/// that names none summarizes on each stage's own model.
 #[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct CompactionConfig {
-    /// The provider that serves the summarizer. Empty when the blueprint
-    /// names the model alone and the machine's provider order picks one.
+    /// The provider of the first model it names. Empty when that model is
+    /// named alone and the machine's provider order picks one, or when it
+    /// names none.
     pub(crate) provider: String,
-    /// The model it runs on.
+    /// The first model it names. Empty when it names none and summarizes on
+    /// each stage's own model.
     pub(crate) model: String,
+    /// Every model it names, best first, each written `provider/model` or as
+    /// a bare model name. Empty when it summarizes on each stage's own model.
+    pub(crate) models: Vec<String>,
     /// What the summarizer is told it is for.
     pub(crate) system_prompt: Option<String>,
     /// The template the region's content is wrapped in.
@@ -380,14 +386,14 @@ pub(crate) struct CompactionConfig {
 
 impl From<&leviath_runtime::spec::graph::CompactionDef> for CompactionConfig {
     fn from(compaction: &leviath_runtime::spec::graph::CompactionDef) -> Self {
+        let named = compaction.named();
+        let first = named.first();
         Self {
-            provider: compaction
-                .model
-                .provider
-                .as_ref()
-                .map(ToString::to_string)
+            provider: first
+                .map(|m| m.provider_or_empty().to_string())
                 .unwrap_or_default(),
-            model: compaction.model.model.to_string(),
+            model: first.map(|m| m.model.to_string()).unwrap_or_default(),
+            models: named.iter().map(ToString::to_string).collect(),
             system_prompt: compaction.system_prompt.clone(),
             user_prompt_template: compaction.user_prompt_template.clone(),
             max_summary_tokens: count(compaction.max_summary_tokens),

@@ -21,9 +21,12 @@ use crate::spec::run_spec::RunSpec;
 use bevy_ecs::prelude::*;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::compaction_bridge::{CompactionJob, CompactionOutcome};
+use crate::compaction_bridge::CompactionOutcome;
 use crate::components::{AgentState, AgentStatus, ContextWindow};
-use crate::pipeline::{CompactionSettings, InferenceStage, Providers};
+use crate::pipeline::{
+    CompactionSettings, Declined, InferenceStage, Providers, StageInference, start_summary,
+    summary_routes,
+};
 
 /// Seed `child`'s context from `parent`'s per a declared blueprint transform.
 /// No-op unless both runs came from blueprints with different names and a
@@ -106,6 +109,18 @@ pub(crate) struct AwaitingContentSummary;
 #[derive(Resource)]
 pub(crate) struct ContentSummaryResults(pub UnboundedReceiver<CompactionOutcome>);
 
+/// What `dispatch_content_summary` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type ContentSummaryQuery = (
+    Entity,
+    &'static AgentState,
+    &'static PendingContentSummary,
+    Option<&'static CompactionSettings>,
+    Option<&'static StageInference>,
+);
+
 /// Dispatch: for each child with queued [`PendingContentSummary`] regions, build
 /// one summarize request per region and run it on the summary lane. Mirrors
 /// [`dispatch_compaction`](crate::pipeline::dispatch_compaction), reusing the
@@ -113,18 +128,13 @@ pub(crate) struct ContentSummaryResults(pub UnboundedReceiver<CompactionOutcome>
 /// registered provider can't summarize, so it keeps its raw content; a full pool
 /// just retries next tick.
 pub(crate) fn dispatch_content_summary(
-    agents: Query<(
-        Entity,
-        &AgentState,
-        &PendingContentSummary,
-        Option<&CompactionSettings>,
-    )>,
+    agents: Query<ContentSummaryQuery>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, pending, settings) in agents.iter() {
+    for (entity, state, pending, settings, inference) in agents.iter() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / cancelled - don't start new work
@@ -135,57 +145,42 @@ pub(crate) fn dispatch_content_summary(
             continue;
         };
         let config = &settings.0;
-        let Some(provider) = providers.0.get(&config.provider) else {
-            // Provider not registered ⇒ keep the raw content.
-            commands.entity(entity).remove::<PendingContentSummary>();
-            continue;
-        };
-        // The content is the run's own; a model zero retention refuses is not
-        // sent it, and the raw content stays.
-        if let Some(refusal) = providers
-            .0
-            .retention_refusal(&config.provider, &config.model)
-        {
-            tracing::warn!("content summary skipped: its model is {refusal}");
-            commands.entity(entity).remove::<PendingContentSummary>();
-            continue;
-        }
-        let Some(permit) = stage.pools.try_acquire(&config.provider, &config.model) else {
-            continue; // pool full - retry next tick (keep the pending marker)
-        };
         let requests = pending
             .0
             .iter()
             .map(|(region, content)| {
-                let mut request = crate::pipeline::compaction_request(config, content, region);
-                // The summary carries the run's content, so the zero-retention
-                // fields ride it the way they ride a stage's own request.
-                providers
-                    .0
-                    .apply_retention_knobs(&config.provider, &mut request.extra);
-                (region.clone(), request)
+                (
+                    region.clone(),
+                    crate::pipeline::compaction_request(config, content, region),
+                )
             })
             .collect();
+        // The content is the run's own, so it goes only where a summary of
+        // the run's own context may go: a route zero retention refuses is
+        // left out, and with no route left the raw content stays.
+        let routes = summary_routes(config, inference, &providers.0);
         // Supervised: the child waits `AwaitingContentSummary` until an
         // outcome lands, so a job that died without one would hold it there.
-        crate::pipeline::spawn_summary_job(
+        match start_summary(
             &stage,
             &stage.content_summary_outcomes,
             "content-summary",
             entity,
-            CompactionJob {
-                entity,
-                provider,
-                provider_name: config.provider.clone(),
-                model: config.model.clone(),
-                requests,
-                permit,
-            },
-        );
-        commands
-            .entity(entity)
-            .remove::<PendingContentSummary>()
-            .insert(AwaitingContentSummary);
+            routes,
+            requests,
+        ) {
+            Ok(()) => {
+                commands
+                    .entity(entity)
+                    .remove::<PendingContentSummary>()
+                    .insert(AwaitingContentSummary);
+            }
+            // Pool full: retry next tick, keeping the pending marker.
+            Err(Declined::PoolFull) => {}
+            Err(Declined::NoRoute) => {
+                commands.entity(entity).remove::<PendingContentSummary>();
+            }
+        }
     }
 }
 
@@ -623,8 +618,7 @@ mod tests {
 
     fn settings() -> CompactionSettings {
         CompactionSettings(leviath_core::CompactionConfig {
-            provider: "p".to_string(),
-            model: "m".to_string(),
+            routes: vec![crate::spec::names::ModelRef::parse("p/m").unwrap()],
             system_prompt: None,
             user_prompt_template: None,
             max_summary_tokens: 200,

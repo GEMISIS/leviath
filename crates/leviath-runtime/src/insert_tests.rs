@@ -167,7 +167,12 @@ fn placement(world: &World, e: Entity) -> String {
                 .collect::<std::collections::BTreeMap<_, _>>()),
         world
             .get::<crate::pipeline::CompactionSettings>(e)
-            .map(|c| c.0.model.clone()),
+            .map(|c| c
+                .0
+                .routes
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()),
         world
             .get::<crate::repetition::RepetitionDetector>(e)
             .is_some(),
@@ -239,7 +244,8 @@ fn coding_graph() -> crate::spec::graph::RunGraph {
         .collect();
     let compaction = leviath_core::lifecycle::CompactionConfig::default();
     graph.compaction = Some(CompactionDef {
-        model: ModelRef::parse(&format!("{}/{}", compaction.provider, compaction.model)).unwrap(),
+        model: Some(ModelRef::parse("anthropic/claude-sonnet-5-5").unwrap()),
+        models: Vec::new(),
         system_prompt: compaction.system_prompt,
         user_prompt_template: compaction.user_prompt_template,
         max_summary_tokens: u32::try_from(compaction.max_summary_tokens).unwrap(),
@@ -1063,7 +1069,8 @@ fn the_spec_decides_compaction_loops_capture_rescans_and_the_record() {
     use crate::spec::launch::{CallbackPlan, Unattended};
     let mut spec = two_stage_spec();
     spec.graph.compaction = Some(crate::spec::graph::CompactionDef {
-        model: crate::spec::names::ModelRef::parse("p/summarizer").unwrap(),
+        model: Some(crate::spec::names::ModelRef::parse("p/summarizer").unwrap()),
+        models: Vec::new(),
         system_prompt: Some("sum".into()),
         user_prompt_template: None,
         max_summary_tokens: 300,
@@ -1100,8 +1107,12 @@ fn the_spec_decides_compaction_loops_capture_rescans_and_the_record() {
         .unwrap()
         .0;
     assert_eq!(
-        (c.provider.as_str(), c.model.as_str(), c.max_summary_tokens),
-        ("p", "summarizer", 300)
+        (
+            c.routes[0].to_string(),
+            c.routes.len(),
+            c.max_summary_tokens
+        ),
+        ("p/summarizer".to_string(), 1, 300)
     );
     assert!(
         world

@@ -1,0 +1,2837 @@
+{
+  "deltas": [
+    {
+      "at": 1792366371,
+      "changes": [
+        {
+          "Phase": "AwaitingInference"
+        },
+        {
+          "LedgerRecord": [
+            0,
+            {
+              "clock": {
+                "banked_secs": 0,
+                "since": 1792366371
+              },
+              "ended_at": null,
+              "entered": true,
+              "first_call_prompt_tokens": null,
+              "models": [],
+              "output_cap_raised": false,
+              "region_tokens": {},
+              "runaway_warned": false,
+              "spend": {
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "completion_tokens": 0,
+                "computed_calls": 0,
+                "cost_unknown": false,
+                "priced_usd": 0.0,
+                "prompt_tokens": 0,
+                "reported_calls": 0,
+                "unpriced_calls": 0
+              },
+              "stage": "work",
+              "started_at": 1792366371,
+              "status": "Active",
+              "visits": [
+                {
+                  "clock": {
+                    "banked_secs": 0,
+                    "since": 1792366371
+                  },
+                  "entered_at": 1792366371,
+                  "id": "v18dfc3b7ebe9e6e8-00000000",
+                  "left_at": null,
+                  "spend": {
+                    "cache_write_tokens": 0,
+                    "cached_tokens": 0,
+                    "completion_tokens": 0,
+                    "computed_calls": 0,
+                    "cost_unknown": false,
+                    "priced_usd": 0.0,
+                    "prompt_tokens": 0,
+                    "reported_calls": 0,
+                    "unpriced_calls": 0
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Clock": {
+            "banked_secs": 0,
+            "since": 1792366371
+          }
+        }
+      ],
+      "events": [],
+      "seq": 1
+    },
+    {
+      "at": 1792366371,
+      "changes": [
+        {
+          "Totals": {
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 3,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 12,
+              "reported_calls": 0,
+              "unpriced_calls": 1
+            },
+            "tool_calls": 0
+          }
+        },
+        {
+          "TitleError": "openai/gpt-mock replied with nothing usable as a title"
+        }
+      ],
+      "events": [
+        {
+          "Inference": {
+            "attempt": "",
+            "finish_reason": null,
+            "iteration": 0,
+            "kind": "title",
+            "model": {
+              "model": "gpt-mock",
+              "provider": "openai"
+            },
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 3,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 12,
+              "reported_calls": 0,
+              "unpriced_calls": 1
+            },
+            "stage": null
+          }
+        }
+      ],
+      "seq": 2
+    },
+    {
+      "at": 1792366371,
+      "changes": [
+        {
+          "Cursor": {
+            "iteration": 1,
+            "stage": "work",
+            "visit": "v18dfc3b7ebe9e6e8-00000000"
+          }
+        },
+        {
+          "Phase": "AwaitingTools"
+        },
+        {
+          "Progress": {
+            "blocked_modification_calls": 0,
+            "cut_off_nudges": 0,
+            "edits_by_path": {},
+            "entry_region_digests": {},
+            "gate_reentries": 0,
+            "images_produced": 0,
+            "iterations": 1,
+            "modifying_tool_calls": 0,
+            "no_image_nudges": 0,
+            "raise_output_cap": false,
+            "stage_started_at": null,
+            "stuck_fired": false,
+            "text_only_nudges": 0,
+            "total_tool_calls": 1,
+            "waiting_since": null
+          }
+        },
+        {
+          "LedgerRecord": [
+            0,
+            {
+              "clock": {
+                "banked_secs": 0,
+                "since": 1792366371
+              },
+              "ended_at": null,
+              "entered": true,
+              "first_call_prompt_tokens": 12,
+              "models": [
+                {
+                  "model": "gpt-mock",
+                  "provider": "openai"
+                }
+              ],
+              "output_cap_raised": false,
+              "region_tokens": {
+                "conversation": 0,
+                "final_output": 0,
+                "notes": 0,
+                "notes_history": 0,
+                "stage_instructions": 14,
+                "task": 3,
+                "tool_results": 0
+              },
+              "runaway_warned": false,
+              "spend": {
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "completion_tokens": 3,
+                "computed_calls": 0,
+                "cost_unknown": false,
+                "priced_usd": 0.0,
+                "prompt_tokens": 12,
+                "reported_calls": 0,
+                "unpriced_calls": 1
+              },
+              "stage": "work",
+              "started_at": 1792366371,
+              "status": "Active",
+              "visits": [
+                {
+                  "clock": {
+                    "banked_secs": 0,
+                    "since": 1792366371
+                  },
+                  "entered_at": 1792366371,
+                  "id": "v18dfc3b7ebe9e6e8-00000000",
+                  "left_at": null,
+                  "spend": {
+                    "cache_write_tokens": 0,
+                    "cached_tokens": 0,
+                    "completion_tokens": 3,
+                    "computed_calls": 0,
+                    "cost_unknown": false,
+                    "priced_usd": 0.0,
+                    "prompt_tokens": 12,
+                    "reported_calls": 0,
+                    "unpriced_calls": 1
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Pending": {
+            "calls": [
+              {
+                "args": {
+                  "path": "big.txt"
+                },
+                "id": "call_1",
+                "name": "read_file",
+                "thought_signature": null
+              }
+            ],
+            "done": {},
+            "executions": {
+              "call_1": "x18dfc3b7edc2dd08-00000002"
+            },
+            "held": null,
+            "requested_by": "a18dfc3b7edb7b590-00000001"
+          }
+        },
+        {
+          "Totals": {
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 6,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 24,
+              "reported_calls": 0,
+              "unpriced_calls": 2
+            },
+            "tool_calls": 1
+          }
+        },
+        {
+          "Files": {
+            "final_output": null,
+            "stages": [
+              {
+                "index": 0,
+                "logs": {
+                  "bytes": 23,
+                  "path": "stages/0/logs.log",
+                  "sha256": null
+                },
+                "output": null,
+                "taint_audit": null
+              }
+            ]
+          }
+        }
+      ],
+      "events": [
+        {
+          "Attempt": {
+            "backoff_ms": 0,
+            "digest": {
+              "max_tokens": 4096,
+              "messages": 1,
+              "system_hash": 17068875836912648352,
+              "temperature": 0.7,
+              "tools": 1
+            },
+            "duration_ms": 0,
+            "finish_reason": "tool_call",
+            "id": "a18dfc3b7edb7b590-00000001",
+            "model": "gpt-mock",
+            "model_input": {
+              "assembly_version": "1",
+              "bytes": 0,
+              "capture": "NotCaptured",
+              "parameters": {
+                "max_output_tokens": 4096,
+                "temperature": 0.699999988079071
+              },
+              "request": null,
+              "source_context_digest": "",
+              "tool_catalog_version": "ffd5a06f568c1156"
+            },
+            "number": 1,
+            "outcome": "Succeeded",
+            "provider": "openai",
+            "stopped_for": null
+          }
+        },
+        {
+          "Inference": {
+            "attempt": "a18dfc3b7edb7b590-00000001",
+            "finish_reason": "tool_call",
+            "iteration": 1,
+            "kind": "stage",
+            "model": {
+              "model": "gpt-mock",
+              "provider": "openai"
+            },
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 3,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 12,
+              "reported_calls": 0,
+              "unpriced_calls": 1
+            },
+            "stage": "work"
+          }
+        },
+        {
+          "ToolStarted": {
+            "args": {
+              "path": "big.txt"
+            },
+            "id": "call_1",
+            "name": "read_file",
+            "thought_signature": null
+          }
+        },
+        {
+          "Dispatched": {
+            "call_id": "call_1",
+            "execution_id": "x18dfc3b7edc2dd08-00000002",
+            "requested_by": "a18dfc3b7edb7b590-00000001"
+          }
+        }
+      ],
+      "seq": 3
+    },
+    {
+      "at": 1792366371,
+      "changes": [
+        {
+          "Phase": "ReadyToInfer"
+        },
+        {
+          "Context": {
+            "hidden": null,
+            "max_tokens": null,
+            "order": null,
+            "regions": [
+              [
+                "notes",
+                {
+                  "current_tokens": 1637,
+                  "max_tokens": 1638,
+                  "needs_message_compaction": false,
+                  "taint": null
+                },
+                {
+                  "Append": [
+                    {
+                      "key": null,
+                      "kind": "Text",
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "line of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nl... [truncated, 288 chars omitted]",
+                      "timestamp": 1792366371,
+                      "tokens": 1637
+                    }
+                  ]
+                }
+              ],
+              [
+                "conversation",
+                {
+                  "current_tokens": 99,
+                  "max_tokens": 1638,
+                  "needs_message_compaction": false,
+                  "taint": null
+                },
+                {
+                  "Append": [
+                    {
+                      "key": null,
+                      "kind": {
+                        "AssistantTurn": [
+                          {
+                            "args": {
+                              "path": "big.txt"
+                            },
+                            "id": "call_1",
+                            "name": "read_file",
+                            "thought_signature": null
+                          }
+                        ]
+                      },
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "",
+                      "timestamp": 1792366371,
+                      "tokens": 0
+                    },
+                    {
+                      "key": null,
+                      "kind": {
+                        "ToolResult": {
+                          "call_id": "call_1",
+                          "is_error": false,
+                          "tool": "read_file"
+                        }
+                      },
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "[output was too large for context region 'notes': the start of it is in this prompt under that heading and 288 characters were dropped. Release what you are finished with (context_delete) before fetching more this size. Preview: line of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of…]",
+                      "timestamp": 1792366371,
+                      "tokens": 99
+                    }
+                  ]
+                }
+              ]
+            ],
+            "removed": []
+          }
+        },
+        {
+          "Pending": null
+        },
+        {
+          "Files": {
+            "final_output": null,
+            "stages": [
+              {
+                "index": 0,
+                "logs": {
+                  "bytes": 245,
+                  "path": "stages/0/logs.log",
+                  "sha256": null
+                },
+                "output": null,
+                "taint_audit": null
+              }
+            ]
+          }
+        }
+      ],
+      "events": [
+        {
+          "ToolFinished": {
+            "call_id": "call_1",
+            "millis": 0,
+            "result": {
+              "is_error": false,
+              "text": "line of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\n"
+            }
+          }
+        },
+        {
+          "Completed": {
+            "call_id": "call_1",
+            "execution_id": "x18dfc3b7edc2dd08-00000002",
+            "outcome": "Succeeded",
+            "parts": []
+          }
+        },
+        {
+          "ContextCommitted": {
+            "cause": "ModelReply",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-4d8cbd39da825b5ad723bd7914a8007a",
+                "digest_before": "rg1-e3b0c44298fc1c149afbf4c8996fb924",
+                "entries_added": 1,
+                "entries_after": 1,
+                "entries_before": 0,
+                "region": "conversation",
+                "tokens_after": 0,
+                "tokens_before": 0
+              }
+            ],
+            "revision_after": "cw1-117231586374c1aa52a33290592de4a9",
+            "revision_before": "cw1-692361a343b86897a22401b805a73943"
+          }
+        },
+        {
+          "ContextCommitted": {
+            "cause": "ToolResult",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-cb4b9ee1dceda1737b1a3e9672228d0c",
+                "digest_before": "rg1-e3b0c44298fc1c149afbf4c8996fb924",
+                "entries_added": 1,
+                "entries_after": 1,
+                "entries_before": 0,
+                "region": "notes",
+                "tokens_after": 1637,
+                "tokens_before": 0
+              }
+            ],
+            "revision_after": "cw1-a052a9d06e78221004286a9cc0719cb4",
+            "revision_before": "cw1-117231586374c1aa52a33290592de4a9"
+          }
+        },
+        {
+          "ContextCommitted": {
+            "cause": "ToolResult",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-04a37d25b99796680b8a359d10c674ff",
+                "digest_before": "rg1-4d8cbd39da825b5ad723bd7914a8007a",
+                "entries_added": 1,
+                "entries_after": 2,
+                "entries_before": 1,
+                "region": "conversation",
+                "tokens_after": 99,
+                "tokens_before": 0
+              }
+            ],
+            "revision_after": "cw1-a47d8b2005c3c4b5ff104b2fcb4b7272",
+            "revision_before": "cw1-a052a9d06e78221004286a9cc0719cb4"
+          }
+        }
+      ],
+      "seq": 4
+    },
+    {
+      "at": 1792366371,
+      "changes": [
+        {
+          "Cursor": {
+            "iteration": 2,
+            "stage": "wrap",
+            "visit": "v18dfc3b7ee332338-00000004"
+          }
+        },
+        {
+          "Visits": {
+            "work": 1,
+            "wrap": 1
+          }
+        },
+        {
+          "Progress": {
+            "blocked_modification_calls": 0,
+            "cut_off_nudges": 0,
+            "edits_by_path": {},
+            "entry_region_digests": {},
+            "gate_reentries": 0,
+            "images_produced": 0,
+            "iterations": 0,
+            "modifying_tool_calls": 0,
+            "no_image_nudges": 0,
+            "raise_output_cap": false,
+            "stage_started_at": null,
+            "stuck_fired": false,
+            "text_only_nudges": 0,
+            "total_tool_calls": 0,
+            "waiting_since": null
+          }
+        },
+        {
+          "LedgerRecord": [
+            0,
+            {
+              "clock": {
+                "banked_secs": 0,
+                "since": null
+              },
+              "ended_at": 1792366371,
+              "entered": true,
+              "first_call_prompt_tokens": 12,
+              "models": [
+                {
+                  "model": "gpt-mock",
+                  "provider": "openai"
+                }
+              ],
+              "output_cap_raised": false,
+              "region_tokens": {
+                "conversation": 99,
+                "final_output": 0,
+                "notes": 1637,
+                "notes_history": 0,
+                "stage_instructions": 14,
+                "task": 3,
+                "tool_results": 0
+              },
+              "runaway_warned": false,
+              "spend": {
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "completion_tokens": 6,
+                "computed_calls": 0,
+                "cost_unknown": false,
+                "priced_usd": 0.0,
+                "prompt_tokens": 24,
+                "reported_calls": 0,
+                "unpriced_calls": 2
+              },
+              "stage": "work",
+              "started_at": 1792366371,
+              "status": "Complete",
+              "visits": [
+                {
+                  "clock": {
+                    "banked_secs": 0,
+                    "since": null
+                  },
+                  "entered_at": 1792366371,
+                  "id": "v18dfc3b7ebe9e6e8-00000000",
+                  "left_at": 1792366371,
+                  "spend": {
+                    "cache_write_tokens": 0,
+                    "cached_tokens": 0,
+                    "completion_tokens": 6,
+                    "computed_calls": 0,
+                    "cost_unknown": false,
+                    "priced_usd": 0.0,
+                    "prompt_tokens": 24,
+                    "reported_calls": 0,
+                    "unpriced_calls": 2
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "LedgerRecord": [
+            1,
+            {
+              "clock": {
+                "banked_secs": 0,
+                "since": 1792366371
+              },
+              "ended_at": null,
+              "entered": true,
+              "first_call_prompt_tokens": null,
+              "models": [],
+              "output_cap_raised": false,
+              "region_tokens": {},
+              "runaway_warned": false,
+              "spend": {
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "completion_tokens": 0,
+                "computed_calls": 0,
+                "cost_unknown": false,
+                "priced_usd": 0.0,
+                "prompt_tokens": 0,
+                "reported_calls": 0,
+                "unpriced_calls": 0
+              },
+              "stage": "wrap",
+              "started_at": 1792366371,
+              "status": "Active",
+              "visits": [
+                {
+                  "clock": {
+                    "banked_secs": 0,
+                    "since": 1792366371
+                  },
+                  "entered_at": 1792366371,
+                  "id": "v18dfc3b7ee332338-00000004",
+                  "left_at": null,
+                  "spend": {
+                    "cache_write_tokens": 0,
+                    "cached_tokens": 0,
+                    "completion_tokens": 0,
+                    "computed_calls": 0,
+                    "cost_unknown": false,
+                    "priced_usd": 0.0,
+                    "prompt_tokens": 0,
+                    "reported_calls": 0,
+                    "unpriced_calls": 0
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Context": {
+            "hidden": null,
+            "max_tokens": null,
+            "order": null,
+            "regions": [
+              [
+                "conversation",
+                {
+                  "current_tokens": 100,
+                  "max_tokens": 1638,
+                  "needs_message_compaction": false,
+                  "taint": null
+                },
+                {
+                  "Append": [
+                    {
+                      "key": null,
+                      "kind": {
+                        "AssistantTurn": []
+                      },
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "done",
+                      "timestamp": 1792366371,
+                      "tokens": 1
+                    }
+                  ]
+                }
+              ],
+              [
+                "stage_instructions",
+                {
+                  "current_tokens": 8,
+                  "max_tokens": 14,
+                  "needs_message_compaction": false,
+                  "taint": null
+                },
+                {
+                  "Replace": [
+                    {
+                      "key": null,
+                      "kind": "Text",
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "[Stage instructions: Finish.]",
+                      "timestamp": 1792366371,
+                      "tokens": 8
+                    }
+                  ]
+                }
+              ]
+            ],
+            "removed": []
+          }
+        },
+        {
+          "Totals": {
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 9,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 36,
+              "reported_calls": 0,
+              "unpriced_calls": 3
+            },
+            "tool_calls": 1
+          }
+        },
+        {
+          "LastTransition": {
+            "edge": "wrap",
+            "from": "work",
+            "reason": "Condition",
+            "to": "wrap",
+            "visit": "v18dfc3b7ee332338-00000004"
+          }
+        },
+        {
+          "Files": {
+            "final_output": null,
+            "stages": [
+              {
+                "index": 0,
+                "logs": {
+                  "bytes": 268,
+                  "path": "stages/0/logs.log",
+                  "sha256": null
+                },
+                "output": {
+                  "bytes": 5,
+                  "path": "stages/0/output.log",
+                  "sha256": null
+                },
+                "taint_audit": null
+              }
+            ]
+          }
+        },
+        {
+          "Grants": {
+            "cleared": [],
+            "run": [],
+            "stage": [],
+            "stage_index": 1
+          }
+        }
+      ],
+      "events": [
+        {
+          "Attempt": {
+            "backoff_ms": 0,
+            "digest": {
+              "max_tokens": 4096,
+              "messages": 2,
+              "system_hash": 2481076664659085398,
+              "temperature": 0.7,
+              "tools": 1
+            },
+            "duration_ms": 0,
+            "finish_reason": "complete",
+            "id": "a18dfc3b7ee299200-00000003",
+            "model": "gpt-mock",
+            "model_input": {
+              "assembly_version": "1",
+              "bytes": 0,
+              "capture": "NotCaptured",
+              "parameters": {
+                "max_output_tokens": 4096,
+                "temperature": 0.699999988079071
+              },
+              "request": null,
+              "source_context_digest": "",
+              "tool_catalog_version": "ffd5a06f568c1156"
+            },
+            "number": 1,
+            "outcome": "Succeeded",
+            "provider": "openai",
+            "stopped_for": null
+          }
+        },
+        {
+          "Inference": {
+            "attempt": "a18dfc3b7ee299200-00000003",
+            "finish_reason": "complete",
+            "iteration": 2,
+            "kind": "stage",
+            "model": {
+              "model": "gpt-mock",
+              "provider": "openai"
+            },
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 3,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 12,
+              "reported_calls": 0,
+              "unpriced_calls": 1
+            },
+            "stage": "work"
+          }
+        },
+        {
+          "ContextCommitted": {
+            "cause": "ModelReply",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-18e42ff09ae4889da707c7ca27b22e25",
+                "digest_before": "rg1-04a37d25b99796680b8a359d10c674ff",
+                "entries_added": 1,
+                "entries_after": 3,
+                "entries_before": 2,
+                "region": "conversation",
+                "tokens_after": 100,
+                "tokens_before": 99
+              }
+            ],
+            "revision_after": "cw1-4ef35eaf6188b8943130091f3d412aeb",
+            "revision_before": "cw1-a47d8b2005c3c4b5ff104b2fcb4b7272"
+          }
+        },
+        {
+          "ContextCommitted": {
+            "cause": "Transform",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-d2abe6943aa3b78dcecfc64c8f73b064",
+                "digest_before": "rg1-e3b0c44298fc1c149afbf4c8996fb924",
+                "entries_added": 1,
+                "entries_after": 1,
+                "entries_before": 0,
+                "region": "stage_instructions",
+                "tokens_after": 8,
+                "tokens_before": 0
+              }
+            ],
+            "revision_after": "cw1-bf13f14987b1a5ec4a9e8c87a987ed0d",
+            "revision_before": "cw1-2506b03cfa8a912c2fa3d9eee0e4dcb8"
+          }
+        },
+        {
+          "Transition": {
+            "edge": "wrap",
+            "from": "work",
+            "reason": "Condition",
+            "to": "wrap",
+            "visit": "v18dfc3b7ee332338-00000004"
+          }
+        }
+      ],
+      "seq": 5
+    },
+    {
+      "at": 1792366371,
+      "changes": [],
+      "events": [
+        {
+          "Inference": {
+            "attempt": "",
+            "finish_reason": null,
+            "iteration": 2,
+            "kind": "compaction",
+            "model": {
+              "model": "gpt-mock",
+              "provider": "openai"
+            },
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 3,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 12,
+              "reported_calls": 0,
+              "unpriced_calls": 1
+            },
+            "stage": "wrap"
+          }
+        },
+        {
+          "Inference": {
+            "attempt": "",
+            "finish_reason": null,
+            "iteration": 2,
+            "kind": "compaction",
+            "model": {
+              "model": "gpt-mock",
+              "provider": "openai"
+            },
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 3,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 12,
+              "reported_calls": 0,
+              "unpriced_calls": 1
+            },
+            "stage": "wrap"
+          }
+        }
+      ],
+      "seq": 6
+    },
+    {
+      "at": 1792366371,
+      "changes": [
+        {
+          "Cursor": {
+            "iteration": 3,
+            "stage": "wrap",
+            "visit": "v18dfc3b7ee332338-00000004"
+          }
+        },
+        {
+          "Progress": {
+            "blocked_modification_calls": 0,
+            "cut_off_nudges": 0,
+            "edits_by_path": {},
+            "entry_region_digests": {},
+            "gate_reentries": 0,
+            "images_produced": 0,
+            "iterations": 1,
+            "modifying_tool_calls": 0,
+            "no_image_nudges": 0,
+            "raise_output_cap": false,
+            "stage_started_at": null,
+            "stuck_fired": false,
+            "text_only_nudges": 1,
+            "total_tool_calls": 0,
+            "waiting_since": null
+          }
+        },
+        {
+          "LedgerRecord": [
+            1,
+            {
+              "clock": {
+                "banked_secs": 0,
+                "since": 1792366371
+              },
+              "ended_at": null,
+              "entered": true,
+              "first_call_prompt_tokens": 12,
+              "models": [
+                {
+                  "model": "gpt-mock",
+                  "provider": "openai"
+                }
+              ],
+              "output_cap_raised": false,
+              "region_tokens": {
+                "conversation": 100,
+                "final_output": 0,
+                "notes": 1637,
+                "notes_history": 0,
+                "stage_instructions": 8,
+                "task": 3,
+                "tool_results": 0
+              },
+              "runaway_warned": false,
+              "spend": {
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "completion_tokens": 9,
+                "computed_calls": 0,
+                "cost_unknown": false,
+                "priced_usd": 0.0,
+                "prompt_tokens": 36,
+                "reported_calls": 0,
+                "unpriced_calls": 3
+              },
+              "stage": "wrap",
+              "started_at": 1792366371,
+              "status": "Active",
+              "visits": [
+                {
+                  "clock": {
+                    "banked_secs": 0,
+                    "since": 1792366371
+                  },
+                  "entered_at": 1792366371,
+                  "id": "v18dfc3b7ee332338-00000004",
+                  "left_at": null,
+                  "spend": {
+                    "cache_write_tokens": 0,
+                    "cached_tokens": 0,
+                    "completion_tokens": 9,
+                    "computed_calls": 0,
+                    "cost_unknown": false,
+                    "priced_usd": 0.0,
+                    "prompt_tokens": 36,
+                    "reported_calls": 0,
+                    "unpriced_calls": 3
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Context": {
+            "hidden": null,
+            "max_tokens": null,
+            "order": null,
+            "regions": [
+              [
+                "conversation",
+                {
+                  "current_tokens": 135,
+                  "max_tokens": 1638,
+                  "needs_message_compaction": false,
+                  "taint": null
+                },
+                {
+                  "Append": [
+                    {
+                      "key": null,
+                      "kind": {
+                        "AssistantTurn": []
+                      },
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "done",
+                      "timestamp": 1792366371,
+                      "tokens": 1
+                    },
+                    {
+                      "key": null,
+                      "kind": "Text",
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "[System] You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.",
+                      "timestamp": 1792366371,
+                      "tokens": 34
+                    }
+                  ]
+                }
+              ]
+            ],
+            "removed": []
+          }
+        },
+        {
+          "Totals": {
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 18,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 72,
+              "reported_calls": 0,
+              "unpriced_calls": 6
+            },
+            "tool_calls": 1
+          }
+        },
+        {
+          "Files": {
+            "final_output": null,
+            "stages": [
+              {
+                "index": 0,
+                "logs": {
+                  "bytes": 268,
+                  "path": "stages/0/logs.log",
+                  "sha256": null
+                },
+                "output": {
+                  "bytes": 5,
+                  "path": "stages/0/output.log",
+                  "sha256": null
+                },
+                "taint_audit": null
+              },
+              {
+                "index": 1,
+                "logs": {
+                  "bytes": 23,
+                  "path": "stages/1/logs.log",
+                  "sha256": null
+                },
+                "output": {
+                  "bytes": 5,
+                  "path": "stages/1/output.log",
+                  "sha256": null
+                },
+                "taint_audit": null
+              }
+            ]
+          }
+        }
+      ],
+      "events": [
+        {
+          "Attempt": {
+            "backoff_ms": 0,
+            "digest": {
+              "max_tokens": 4096,
+              "messages": 4,
+              "system_hash": 9068737539516627941,
+              "temperature": 0.7,
+              "tools": 0
+            },
+            "duration_ms": 3,
+            "finish_reason": "complete",
+            "id": "a18dfc3b7ee473008-00000005",
+            "model": "gpt-mock",
+            "model_input": {
+              "assembly_version": "1",
+              "bytes": 0,
+              "capture": "NotCaptured",
+              "parameters": {
+                "max_output_tokens": 4096,
+                "temperature": 0.699999988079071
+              },
+              "request": null,
+              "source_context_digest": "",
+              "tool_catalog_version": "d1fba762150c532c"
+            },
+            "number": 1,
+            "outcome": "Succeeded",
+            "provider": "openai",
+            "stopped_for": null
+          }
+        },
+        {
+          "Inference": {
+            "attempt": "a18dfc3b7ee473008-00000005",
+            "finish_reason": "complete",
+            "iteration": 3,
+            "kind": "stage",
+            "model": {
+              "model": "gpt-mock",
+              "provider": "openai"
+            },
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 3,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 12,
+              "reported_calls": 0,
+              "unpriced_calls": 1
+            },
+            "stage": "wrap"
+          }
+        },
+        {
+          "ContextCommitted": {
+            "cause": "ModelReply",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-2b90e41dca7876d89d7375d4bd5ffe25",
+                "digest_before": "rg1-18e42ff09ae4889da707c7ca27b22e25",
+                "entries_added": 1,
+                "entries_after": 4,
+                "entries_before": 3,
+                "region": "conversation",
+                "tokens_after": 101,
+                "tokens_before": 100
+              }
+            ],
+            "revision_after": "cw1-e935ffb8735b0c5387488d035c19aeac",
+            "revision_before": "cw1-bf13f14987b1a5ec4a9e8c87a987ed0d"
+          }
+        },
+        {
+          "ContextCommitted": {
+            "cause": "Framework",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-ede2cfb873c1cea72b373f627b367602",
+                "digest_before": "rg1-2b90e41dca7876d89d7375d4bd5ffe25",
+                "entries_added": 1,
+                "entries_after": 5,
+                "entries_before": 4,
+                "region": "conversation",
+                "tokens_after": 135,
+                "tokens_before": 101
+              }
+            ],
+            "revision_after": "cw1-391bad8d104e8bafe2faf3b8a3754639",
+            "revision_before": "cw1-e935ffb8735b0c5387488d035c19aeac"
+          }
+        }
+      ],
+      "seq": 7
+    },
+    {
+      "at": 1792366371,
+      "changes": [
+        {
+          "Cursor": {
+            "iteration": 4,
+            "stage": "wrap",
+            "visit": "v18dfc3b7ee332338-00000004"
+          }
+        },
+        {
+          "Progress": {
+            "blocked_modification_calls": 0,
+            "cut_off_nudges": 0,
+            "edits_by_path": {},
+            "entry_region_digests": {},
+            "gate_reentries": 0,
+            "images_produced": 0,
+            "iterations": 2,
+            "modifying_tool_calls": 0,
+            "no_image_nudges": 0,
+            "raise_output_cap": false,
+            "stage_started_at": null,
+            "stuck_fired": false,
+            "text_only_nudges": 2,
+            "total_tool_calls": 0,
+            "waiting_since": null
+          }
+        },
+        {
+          "LedgerRecord": [
+            1,
+            {
+              "clock": {
+                "banked_secs": 0,
+                "since": 1792366371
+              },
+              "ended_at": null,
+              "entered": true,
+              "first_call_prompt_tokens": 12,
+              "models": [
+                {
+                  "model": "gpt-mock",
+                  "provider": "openai"
+                }
+              ],
+              "output_cap_raised": false,
+              "region_tokens": {
+                "conversation": 135,
+                "final_output": 0,
+                "notes": 1637,
+                "notes_history": 0,
+                "stage_instructions": 8,
+                "task": 3,
+                "tool_results": 0
+              },
+              "runaway_warned": false,
+              "spend": {
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "completion_tokens": 12,
+                "computed_calls": 0,
+                "cost_unknown": false,
+                "priced_usd": 0.0,
+                "prompt_tokens": 48,
+                "reported_calls": 0,
+                "unpriced_calls": 4
+              },
+              "stage": "wrap",
+              "started_at": 1792366371,
+              "status": "Active",
+              "visits": [
+                {
+                  "clock": {
+                    "banked_secs": 0,
+                    "since": 1792366371
+                  },
+                  "entered_at": 1792366371,
+                  "id": "v18dfc3b7ee332338-00000004",
+                  "left_at": null,
+                  "spend": {
+                    "cache_write_tokens": 0,
+                    "cached_tokens": 0,
+                    "completion_tokens": 12,
+                    "computed_calls": 0,
+                    "cost_unknown": false,
+                    "priced_usd": 0.0,
+                    "prompt_tokens": 48,
+                    "reported_calls": 0,
+                    "unpriced_calls": 4
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Context": {
+            "hidden": null,
+            "max_tokens": null,
+            "order": null,
+            "regions": [
+              [
+                "conversation",
+                {
+                  "current_tokens": 170,
+                  "max_tokens": 1638,
+                  "needs_message_compaction": false,
+                  "taint": null
+                },
+                {
+                  "Append": [
+                    {
+                      "key": null,
+                      "kind": {
+                        "AssistantTurn": []
+                      },
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "done",
+                      "timestamp": 1792366371,
+                      "tokens": 1
+                    },
+                    {
+                      "key": null,
+                      "kind": "Text",
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "[System] You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.",
+                      "timestamp": 1792366371,
+                      "tokens": 34
+                    }
+                  ]
+                }
+              ]
+            ],
+            "removed": []
+          }
+        },
+        {
+          "Totals": {
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 21,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 84,
+              "reported_calls": 0,
+              "unpriced_calls": 7
+            },
+            "tool_calls": 1
+          }
+        },
+        {
+          "Files": {
+            "final_output": null,
+            "stages": [
+              {
+                "index": 0,
+                "logs": {
+                  "bytes": 268,
+                  "path": "stages/0/logs.log",
+                  "sha256": null
+                },
+                "output": {
+                  "bytes": 5,
+                  "path": "stages/0/output.log",
+                  "sha256": null
+                },
+                "taint_audit": null
+              },
+              {
+                "index": 1,
+                "logs": {
+                  "bytes": 46,
+                  "path": "stages/1/logs.log",
+                  "sha256": null
+                },
+                "output": {
+                  "bytes": 10,
+                  "path": "stages/1/output.log",
+                  "sha256": null
+                },
+                "taint_audit": null
+              }
+            ]
+          }
+        }
+      ],
+      "events": [
+        {
+          "Attempt": {
+            "backoff_ms": 0,
+            "digest": {
+              "max_tokens": 4096,
+              "messages": 5,
+              "system_hash": 9068737539516627941,
+              "temperature": 0.7,
+              "tools": 0
+            },
+            "duration_ms": 0,
+            "finish_reason": "complete",
+            "id": "a18dfc3b7ee81a0f8-00000006",
+            "model": "gpt-mock",
+            "model_input": {
+              "assembly_version": "1",
+              "bytes": 0,
+              "capture": "NotCaptured",
+              "parameters": {
+                "max_output_tokens": 4096,
+                "temperature": 0.699999988079071
+              },
+              "request": null,
+              "source_context_digest": "",
+              "tool_catalog_version": "d1fba762150c532c"
+            },
+            "number": 1,
+            "outcome": "Succeeded",
+            "provider": "openai",
+            "stopped_for": null
+          }
+        },
+        {
+          "Inference": {
+            "attempt": "a18dfc3b7ee81a0f8-00000006",
+            "finish_reason": "complete",
+            "iteration": 4,
+            "kind": "stage",
+            "model": {
+              "model": "gpt-mock",
+              "provider": "openai"
+            },
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 3,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 12,
+              "reported_calls": 0,
+              "unpriced_calls": 1
+            },
+            "stage": "wrap"
+          }
+        },
+        {
+          "ContextCommitted": {
+            "cause": "ModelReply",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-608b19669ed2f5cee55bcdf40e51db6d",
+                "digest_before": "rg1-ede2cfb873c1cea72b373f627b367602",
+                "entries_added": 1,
+                "entries_after": 6,
+                "entries_before": 5,
+                "region": "conversation",
+                "tokens_after": 136,
+                "tokens_before": 135
+              }
+            ],
+            "revision_after": "cw1-e2309d8e52abecc3badce89bc5e69ff4",
+            "revision_before": "cw1-391bad8d104e8bafe2faf3b8a3754639"
+          }
+        },
+        {
+          "ContextCommitted": {
+            "cause": "Framework",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-2fcd92812e714c841ec115c3c120d09a",
+                "digest_before": "rg1-608b19669ed2f5cee55bcdf40e51db6d",
+                "entries_added": 1,
+                "entries_after": 7,
+                "entries_before": 6,
+                "region": "conversation",
+                "tokens_after": 170,
+                "tokens_before": 136
+              }
+            ],
+            "revision_after": "cw1-30ca477670b7d2ec2af5db5a1cb9c7f4",
+            "revision_before": "cw1-e2309d8e52abecc3badce89bc5e69ff4"
+          }
+        }
+      ],
+      "seq": 8
+    },
+    {
+      "at": 1792366371,
+      "changes": [
+        {
+          "Status": "Complete"
+        },
+        {
+          "Phase": "Done"
+        },
+        {
+          "LedgerRecord": [
+            1,
+            {
+              "clock": {
+                "banked_secs": 0,
+                "since": null
+              },
+              "ended_at": 1792366371,
+              "entered": true,
+              "first_call_prompt_tokens": 12,
+              "models": [
+                {
+                  "model": "gpt-mock",
+                  "provider": "openai"
+                }
+              ],
+              "output_cap_raised": false,
+              "region_tokens": {
+                "conversation": 135,
+                "final_output": 0,
+                "notes": 1637,
+                "notes_history": 0,
+                "stage_instructions": 8,
+                "task": 3,
+                "tool_results": 0
+              },
+              "runaway_warned": false,
+              "spend": {
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "completion_tokens": 12,
+                "computed_calls": 0,
+                "cost_unknown": false,
+                "priced_usd": 0.0,
+                "prompt_tokens": 48,
+                "reported_calls": 0,
+                "unpriced_calls": 4
+              },
+              "stage": "wrap",
+              "started_at": 1792366371,
+              "status": "Complete",
+              "visits": [
+                {
+                  "clock": {
+                    "banked_secs": 0,
+                    "since": null
+                  },
+                  "entered_at": 1792366371,
+                  "id": "v18dfc3b7ee332338-00000004",
+                  "left_at": 1792366371,
+                  "spend": {
+                    "cache_write_tokens": 0,
+                    "cached_tokens": 0,
+                    "completion_tokens": 12,
+                    "computed_calls": 0,
+                    "cost_unknown": false,
+                    "priced_usd": 0.0,
+                    "prompt_tokens": 48,
+                    "reported_calls": 0,
+                    "unpriced_calls": 4
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Context": {
+            "hidden": null,
+            "max_tokens": null,
+            "order": null,
+            "regions": [
+              [
+                "conversation",
+                {
+                  "current_tokens": 213,
+                  "max_tokens": 1638,
+                  "needs_message_compaction": false,
+                  "taint": null
+                },
+                {
+                  "Append": [
+                    {
+                      "key": null,
+                      "kind": "Text",
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "[Stage 'wrap' hit its iteration cap (2)] The stage was cut off before it declared completion - treat its output as possibly incomplete and verify it before building on it.",
+                      "timestamp": 1792366371,
+                      "tokens": 43
+                    }
+                  ]
+                }
+              ]
+            ],
+            "removed": []
+          }
+        },
+        {
+          "Clock": {
+            "banked_secs": 0,
+            "since": null
+          }
+        },
+        {
+          "Flags": {
+            "broken_scripts": [],
+            "empty_output": false,
+            "gates_forced": 0,
+            "max_iterations_hit": 1,
+            "modified_file_count": 0,
+            "modified_files": [],
+            "no_output_tools": true,
+            "output_forced": 0,
+            "produced_output": false,
+            "required_regions_abandoned": [],
+            "searches_empty": 0,
+            "searches_run": 0,
+            "splits_degraded": 0,
+            "workspace_lost": false
+          }
+        }
+      ],
+      "events": [
+        {
+          "ContextCommitted": {
+            "cause": "Framework",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-378e7f555e798e5fce2aed98d330ce93",
+                "digest_before": "rg1-2fcd92812e714c841ec115c3c120d09a",
+                "entries_added": 1,
+                "entries_after": 8,
+                "entries_before": 7,
+                "region": "conversation",
+                "tokens_after": 213,
+                "tokens_before": 170
+              }
+            ],
+            "revision_after": "cw1-e9d44d5aba0c1b7bbfe5c9ddef4c30e3",
+            "revision_before": "cw1-30ca477670b7d2ec2af5db5a1cb9c7f4"
+          }
+        }
+      ],
+      "seq": 9
+    }
+  ],
+  "first": {
+    "accepts_messages": true,
+    "blobs": [],
+    "children": [],
+    "clock": {
+      "banked_secs": 0,
+      "since": null
+    },
+    "context": {
+      "hidden": [],
+      "max_tokens": 8192,
+      "regions": [
+        {
+          "current_tokens": 3,
+          "entries": [
+            {
+              "key": null,
+              "kind": "Text",
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "read big.txt",
+              "timestamp": 1792366371,
+              "tokens": 3
+            }
+          ],
+          "max_tokens": 410,
+          "name": "task",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 1638,
+          "name": "notes",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 410,
+          "name": "notes_history",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 1638,
+          "name": "conversation",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 5000,
+          "name": "tool_results",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 2000,
+          "name": "final_output",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 14,
+          "entries": [
+            {
+              "key": null,
+              "kind": "Text",
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "[Stage instructions: Read the file named in the task.]",
+              "timestamp": 1792366371,
+              "tokens": 14
+            }
+          ],
+          "max_tokens": 14,
+          "name": "stage_instructions",
+          "needs_message_compaction": false,
+          "taint": null
+        }
+      ]
+    },
+    "cursor": {
+      "iteration": 0,
+      "stage": "work",
+      "visit": "v18dfc3b7ebe9e6e8-00000000"
+    },
+    "fan_out": null,
+    "files": {
+      "final_output": null,
+      "stages": []
+    },
+    "final_output": null,
+    "flags": {
+      "broken_scripts": [],
+      "empty_output": false,
+      "gates_forced": 0,
+      "max_iterations_hit": 0,
+      "modified_file_count": 0,
+      "modified_files": [],
+      "no_output_tools": true,
+      "output_forced": 0,
+      "produced_output": false,
+      "required_regions_abandoned": [],
+      "searches_empty": 0,
+      "searches_run": 0,
+      "splits_degraded": 0,
+      "workspace_lost": false
+    },
+    "grants": {
+      "cleared": [],
+      "run": [],
+      "stage": [],
+      "stage_index": null
+    },
+    "held": null,
+    "inbox": [],
+    "interactions": [],
+    "last_progress_at": null,
+    "last_transition": null,
+    "ledger": [
+      {
+        "clock": {
+          "banked_secs": 0,
+          "since": null
+        },
+        "ended_at": null,
+        "entered": false,
+        "first_call_prompt_tokens": null,
+        "models": [],
+        "output_cap_raised": false,
+        "region_tokens": {},
+        "runaway_warned": false,
+        "spend": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0,
+          "completion_tokens": 0,
+          "computed_calls": 0,
+          "cost_unknown": false,
+          "priced_usd": 0.0,
+          "prompt_tokens": 0,
+          "reported_calls": 0,
+          "unpriced_calls": 0
+        },
+        "stage": "work",
+        "started_at": null,
+        "status": "Pending",
+        "visits": [
+          {
+            "clock": {
+              "banked_secs": 0,
+              "since": null
+            },
+            "entered_at": 1792366371,
+            "id": "v18dfc3b7ebe9e6e8-00000000",
+            "left_at": null,
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 0,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 0,
+              "reported_calls": 0,
+              "unpriced_calls": 0
+            }
+          }
+        ]
+      },
+      {
+        "clock": {
+          "banked_secs": 0,
+          "since": null
+        },
+        "ended_at": null,
+        "entered": false,
+        "first_call_prompt_tokens": null,
+        "models": [],
+        "output_cap_raised": false,
+        "region_tokens": {},
+        "runaway_warned": false,
+        "spend": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0,
+          "completion_tokens": 0,
+          "computed_calls": 0,
+          "cost_unknown": false,
+          "priced_usd": 0.0,
+          "prompt_tokens": 0,
+          "reported_calls": 0,
+          "unpriced_calls": 0
+        },
+        "stage": "wrap",
+        "started_at": null,
+        "status": "Pending",
+        "visits": []
+      }
+    ],
+    "pending": null,
+    "phase": "ReadyToInfer",
+    "point": {
+      "asking": null,
+      "cursor": 0,
+      "round": 0
+    },
+    "progress": {
+      "blocked_modification_calls": 0,
+      "cut_off_nudges": 0,
+      "edits_by_path": {},
+      "entry_region_digests": {},
+      "gate_reentries": 0,
+      "images_produced": 0,
+      "iterations": 0,
+      "modifying_tool_calls": 0,
+      "no_image_nudges": 0,
+      "raise_output_cap": false,
+      "stage_started_at": null,
+      "stuck_fired": false,
+      "text_only_nudges": 0,
+      "total_tool_calls": 0,
+      "waiting_since": null
+    },
+    "read_paths": null,
+    "remote_jobs": {},
+    "seq": 0,
+    "status": "Active",
+    "title": null,
+    "title_error": null,
+    "totals": {
+      "spend": {
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "completion_tokens": 0,
+        "computed_calls": 0,
+        "cost_unknown": false,
+        "priced_usd": 0.0,
+        "prompt_tokens": 0,
+        "reported_calls": 0,
+        "unpriced_calls": 0
+      },
+      "tool_calls": 0
+    },
+    "visits": {
+      "work": 1
+    },
+    "wait_reason": null,
+    "written": 0
+  },
+  "latest": {
+    "accepts_messages": true,
+    "blobs": [],
+    "children": [],
+    "clock": {
+      "banked_secs": 0,
+      "since": null
+    },
+    "context": {
+      "hidden": [],
+      "max_tokens": 8192,
+      "regions": [
+        {
+          "current_tokens": 3,
+          "entries": [
+            {
+              "key": null,
+              "kind": "Text",
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "read big.txt",
+              "timestamp": 1792366371,
+              "tokens": 3
+            }
+          ],
+          "max_tokens": 410,
+          "name": "task",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 1637,
+          "entries": [
+            {
+              "key": null,
+              "kind": "Text",
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "line of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nl... [truncated, 288 chars omitted]",
+              "timestamp": 1792366371,
+              "tokens": 1637
+            }
+          ],
+          "max_tokens": 1638,
+          "name": "notes",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 410,
+          "name": "notes_history",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 213,
+          "entries": [
+            {
+              "key": null,
+              "kind": {
+                "AssistantTurn": [
+                  {
+                    "args": {
+                      "path": "big.txt"
+                    },
+                    "id": "call_1",
+                    "name": "read_file",
+                    "thought_signature": null
+                  }
+                ]
+              },
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "",
+              "timestamp": 1792366371,
+              "tokens": 0
+            },
+            {
+              "key": null,
+              "kind": {
+                "ToolResult": {
+                  "call_id": "call_1",
+                  "is_error": false,
+                  "tool": "read_file"
+                }
+              },
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "[output was too large for context region 'notes': the start of it is in this prompt under that heading and 288 characters were dropped. Release what you are finished with (context_delete) before fetching more this size. Preview: line of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of log text\nline of…]",
+              "timestamp": 1792366371,
+              "tokens": 99
+            },
+            {
+              "key": null,
+              "kind": {
+                "AssistantTurn": []
+              },
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "done",
+              "timestamp": 1792366371,
+              "tokens": 1
+            },
+            {
+              "key": null,
+              "kind": {
+                "AssistantTurn": []
+              },
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "done",
+              "timestamp": 1792366371,
+              "tokens": 1
+            },
+            {
+              "key": null,
+              "kind": "Text",
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "[System] You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.",
+              "timestamp": 1792366371,
+              "tokens": 34
+            },
+            {
+              "key": null,
+              "kind": {
+                "AssistantTurn": []
+              },
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "done",
+              "timestamp": 1792366371,
+              "tokens": 1
+            },
+            {
+              "key": null,
+              "kind": "Text",
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "[System] You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.",
+              "timestamp": 1792366371,
+              "tokens": 34
+            },
+            {
+              "key": null,
+              "kind": "Text",
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "[Stage 'wrap' hit its iteration cap (2)] The stage was cut off before it declared completion - treat its output as possibly incomplete and verify it before building on it.",
+              "timestamp": 1792366371,
+              "tokens": 43
+            }
+          ],
+          "max_tokens": 1638,
+          "name": "conversation",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 5000,
+          "name": "tool_results",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 2000,
+          "name": "final_output",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 8,
+          "entries": [
+            {
+              "key": null,
+              "kind": "Text",
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "[Stage instructions: Finish.]",
+              "timestamp": 1792366371,
+              "tokens": 8
+            }
+          ],
+          "max_tokens": 14,
+          "name": "stage_instructions",
+          "needs_message_compaction": false,
+          "taint": null
+        }
+      ]
+    },
+    "cursor": {
+      "iteration": 4,
+      "stage": "wrap",
+      "visit": "v18dfc3b7ee332338-00000004"
+    },
+    "fan_out": null,
+    "files": {
+      "final_output": null,
+      "stages": [
+        {
+          "index": 0,
+          "logs": {
+            "bytes": 268,
+            "path": "stages/0/logs.log",
+            "sha256": null
+          },
+          "output": {
+            "bytes": 5,
+            "path": "stages/0/output.log",
+            "sha256": null
+          },
+          "taint_audit": null
+        },
+        {
+          "index": 1,
+          "logs": {
+            "bytes": 46,
+            "path": "stages/1/logs.log",
+            "sha256": null
+          },
+          "output": {
+            "bytes": 10,
+            "path": "stages/1/output.log",
+            "sha256": null
+          },
+          "taint_audit": null
+        }
+      ]
+    },
+    "final_output": null,
+    "flags": {
+      "broken_scripts": [],
+      "empty_output": false,
+      "gates_forced": 0,
+      "max_iterations_hit": 1,
+      "modified_file_count": 0,
+      "modified_files": [],
+      "no_output_tools": true,
+      "output_forced": 0,
+      "produced_output": false,
+      "required_regions_abandoned": [],
+      "searches_empty": 0,
+      "searches_run": 0,
+      "splits_degraded": 0,
+      "workspace_lost": false
+    },
+    "grants": {
+      "cleared": [],
+      "run": [],
+      "stage": [],
+      "stage_index": 1
+    },
+    "held": null,
+    "inbox": [],
+    "interactions": [],
+    "last_progress_at": null,
+    "last_transition": {
+      "edge": "wrap",
+      "from": "work",
+      "reason": "Condition",
+      "to": "wrap",
+      "visit": "v18dfc3b7ee332338-00000004"
+    },
+    "ledger": [
+      {
+        "clock": {
+          "banked_secs": 0,
+          "since": null
+        },
+        "ended_at": 1792366371,
+        "entered": true,
+        "first_call_prompt_tokens": 12,
+        "models": [
+          {
+            "model": "gpt-mock",
+            "provider": "openai"
+          }
+        ],
+        "output_cap_raised": false,
+        "region_tokens": {
+          "conversation": 99,
+          "final_output": 0,
+          "notes": 1637,
+          "notes_history": 0,
+          "stage_instructions": 14,
+          "task": 3,
+          "tool_results": 0
+        },
+        "runaway_warned": false,
+        "spend": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0,
+          "completion_tokens": 6,
+          "computed_calls": 0,
+          "cost_unknown": false,
+          "priced_usd": 0.0,
+          "prompt_tokens": 24,
+          "reported_calls": 0,
+          "unpriced_calls": 2
+        },
+        "stage": "work",
+        "started_at": 1792366371,
+        "status": "Complete",
+        "visits": [
+          {
+            "clock": {
+              "banked_secs": 0,
+              "since": null
+            },
+            "entered_at": 1792366371,
+            "id": "v18dfc3b7ebe9e6e8-00000000",
+            "left_at": 1792366371,
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 6,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 24,
+              "reported_calls": 0,
+              "unpriced_calls": 2
+            }
+          }
+        ]
+      },
+      {
+        "clock": {
+          "banked_secs": 0,
+          "since": null
+        },
+        "ended_at": 1792366371,
+        "entered": true,
+        "first_call_prompt_tokens": 12,
+        "models": [
+          {
+            "model": "gpt-mock",
+            "provider": "openai"
+          }
+        ],
+        "output_cap_raised": false,
+        "region_tokens": {
+          "conversation": 135,
+          "final_output": 0,
+          "notes": 1637,
+          "notes_history": 0,
+          "stage_instructions": 8,
+          "task": 3,
+          "tool_results": 0
+        },
+        "runaway_warned": false,
+        "spend": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0,
+          "completion_tokens": 12,
+          "computed_calls": 0,
+          "cost_unknown": false,
+          "priced_usd": 0.0,
+          "prompt_tokens": 48,
+          "reported_calls": 0,
+          "unpriced_calls": 4
+        },
+        "stage": "wrap",
+        "started_at": 1792366371,
+        "status": "Complete",
+        "visits": [
+          {
+            "clock": {
+              "banked_secs": 0,
+              "since": null
+            },
+            "entered_at": 1792366371,
+            "id": "v18dfc3b7ee332338-00000004",
+            "left_at": 1792366371,
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 12,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 48,
+              "reported_calls": 0,
+              "unpriced_calls": 4
+            }
+          }
+        ]
+      }
+    ],
+    "pending": null,
+    "phase": "Done",
+    "point": {
+      "asking": null,
+      "cursor": 0,
+      "round": 0
+    },
+    "progress": {
+      "blocked_modification_calls": 0,
+      "cut_off_nudges": 0,
+      "edits_by_path": {},
+      "entry_region_digests": {},
+      "gate_reentries": 0,
+      "images_produced": 0,
+      "iterations": 2,
+      "modifying_tool_calls": 0,
+      "no_image_nudges": 0,
+      "raise_output_cap": false,
+      "stage_started_at": null,
+      "stuck_fired": false,
+      "text_only_nudges": 2,
+      "total_tool_calls": 0,
+      "waiting_since": null
+    },
+    "read_paths": null,
+    "remote_jobs": {},
+    "seq": 9,
+    "status": "Complete",
+    "title": null,
+    "title_error": "openai/gpt-mock replied with nothing usable as a title",
+    "totals": {
+      "spend": {
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "completion_tokens": 21,
+        "computed_calls": 0,
+        "cost_unknown": false,
+        "priced_usd": 0.0,
+        "prompt_tokens": 84,
+        "reported_calls": 0,
+        "unpriced_calls": 7
+      },
+      "tool_calls": 1
+    },
+    "visits": {
+      "work": 1,
+      "wrap": 1
+    },
+    "wait_reason": null,
+    "written": 0
+  },
+  "spec": {
+    "auto_answers": {
+      "checkpoints": true,
+      "gate": true,
+      "questions": true
+    },
+    "code": [],
+    "created_at": 1792366371,
+    "delivery": {
+      "callback": null,
+      "metadata": {}
+    },
+    "env": {
+      "leviath_version": "0.6.4",
+      "mcp_servers": {},
+      "providers": {
+        "openai": "7461ad68aa0002bda2e3b9ba7a380026dbb8e1407dd58e0bfb1547d28e7a04fd"
+      },
+      "sandbox": {
+        "work": "none",
+        "wrap": "none"
+      }
+    },
+    "graph": {
+      "batch_tool_hint": true,
+      "compaction": {
+        "max_summary_tokens": 200,
+        "model": {
+          "model": "gpt-mock",
+          "provider": "openai"
+        },
+        "system_prompt": null,
+        "temperature": 0.2,
+        "user_prompt_template": null
+      },
+      "dependencies": [],
+      "description": "compaction probe",
+      "edges": [
+        {
+          "carry": {
+            "compact": {
+              "prompt": null
+            }
+          },
+          "from": "work",
+          "gate": null,
+          "hint": null,
+          "name": "wrap",
+          "stuck": null,
+          "to": "wrap",
+          "when": "always"
+        }
+      ],
+      "entry": "work",
+      "file_tracking": null,
+      "inputs": [
+        {
+          "binds": [
+            {
+              "region": "task"
+            }
+          ],
+          "default": null,
+          "description": null,
+          "name": "task",
+          "required": true,
+          "type": {
+            "kind": "text",
+            "multiline": true
+          }
+        }
+      ],
+      "layout": {
+        "eviction_order": [],
+        "regions": [
+          {
+            "accepts": [],
+            "admission": "evict",
+            "budget": "5%",
+            "compact_at": null,
+            "describe_in_prompt": false,
+            "description": null,
+            "kind": "pinned",
+            "name": "task",
+            "required": false,
+            "required_message": null,
+            "seed": null,
+            "summarizable": true,
+            "volatility": "rewritten"
+          },
+          {
+            "accepts": [],
+            "admission": "evict",
+            "budget": "20%",
+            "compact_at": 0.01,
+            "describe_in_prompt": false,
+            "description": null,
+            "kind": "compacting",
+            "name": "notes",
+            "required": false,
+            "required_message": null,
+            "seed": null,
+            "summarizable": true,
+            "volatility": "rewritten"
+          },
+          {
+            "accepts": [],
+            "admission": "evict",
+            "budget": "5%",
+            "compact_at": null,
+            "describe_in_prompt": false,
+            "description": null,
+            "kind": {
+              "kind": "compact_history",
+              "source": "notes"
+            },
+            "name": "notes_history",
+            "required": false,
+            "required_message": null,
+            "seed": null,
+            "summarizable": true,
+            "volatility": "rewritten"
+          },
+          {
+            "accepts": [],
+            "admission": "evict",
+            "budget": "20%",
+            "compact_at": null,
+            "describe_in_prompt": false,
+            "description": null,
+            "kind": {
+              "kind": "sliding_window",
+              "max_items": 30
+            },
+            "name": "conversation",
+            "required": false,
+            "required_message": null,
+            "seed": null,
+            "summarizable": true,
+            "volatility": "rewritten"
+          }
+        ],
+        "total_budget_tokens": 0
+      },
+      "max_child_depth": null,
+      "mcp_servers": [],
+      "mime_types": {},
+      "nudge": {
+        "enabled": null,
+        "max": null,
+        "text": null
+      },
+      "output": null,
+      "read_paths": [],
+      "repetition": null,
+      "safe_commands": {
+        "shell": [],
+        "tools": []
+      },
+      "sandbox": null,
+      "script_permissions": {
+        "env_var": null,
+        "http_get": null,
+        "http_post": null,
+        "read_file": null,
+        "shell": null,
+        "write_file": null
+      },
+      "shell_hint": true,
+      "stages": [
+        {
+          "accepts_messages": true,
+          "allow_as_worker": false,
+          "allow_blocking_tools": false,
+          "allow_complete": false,
+          "batch_tool_hint": null,
+          "connectors": [],
+          "description": "read a file",
+          "hide": [],
+          "hooks": {
+            "after_inference": null,
+            "before_inference": null,
+            "on_completion": null,
+            "on_error": null,
+            "on_stage_enter": null,
+            "on_stage_exit": null,
+            "on_tool_call": null
+          },
+          "input_accepts": [],
+          "input_as_text": [],
+          "layout": null,
+          "max_iterations": 4,
+          "max_revisits": null,
+          "mode": "autonomous",
+          "model": {
+            "allow_user_default": true,
+            "models": [
+              {
+                "model": "gpt-mock",
+                "provider": null
+              }
+            ],
+            "params": {
+              "extra": {},
+              "max_output_tokens": null,
+              "temperature": null
+            },
+            "request_timeout_secs": null
+          },
+          "name": "work",
+          "nudge": null,
+          "output": null,
+          "output_routing": {},
+          "require_output": false,
+          "required_tools": [],
+          "requires_children": false,
+          "reset": [],
+          "sandbox": null,
+          "shell_hint": null,
+          "system_prompt": "Read the file named in the task.",
+          "taint_tracking": null,
+          "tool_accepts": {},
+          "tool_permissions": {},
+          "tool_routing": {
+            "default_region": "notes",
+            "keep_results": true,
+            "max_result_tokens": null,
+            "tool_max_result_tokens": {},
+            "tool_regions": {}
+          },
+          "tools": [
+            "read_file"
+          ],
+          "transition_prompt": null
+        },
+        {
+          "accepts_messages": true,
+          "allow_as_worker": false,
+          "allow_blocking_tools": false,
+          "allow_complete": true,
+          "batch_tool_hint": null,
+          "connectors": [],
+          "description": "finish",
+          "hide": [],
+          "hooks": {
+            "after_inference": null,
+            "before_inference": null,
+            "on_completion": null,
+            "on_error": null,
+            "on_stage_enter": null,
+            "on_stage_exit": null,
+            "on_tool_call": null
+          },
+          "input_accepts": [],
+          "input_as_text": [],
+          "layout": null,
+          "max_iterations": 2,
+          "max_revisits": null,
+          "mode": "autonomous",
+          "model": {
+            "allow_user_default": true,
+            "models": [
+              {
+                "model": "gpt-mock",
+                "provider": null
+              }
+            ],
+            "params": {
+              "extra": {},
+              "max_output_tokens": null,
+              "temperature": null
+            },
+            "request_timeout_secs": null
+          },
+          "name": "wrap",
+          "nudge": null,
+          "output": null,
+          "output_routing": {},
+          "require_output": false,
+          "required_tools": [],
+          "requires_children": false,
+          "reset": [],
+          "sandbox": null,
+          "shell_hint": null,
+          "system_prompt": "Finish.",
+          "taint_tracking": null,
+          "tool_accepts": {},
+          "tool_permissions": {},
+          "tool_routing": null,
+          "tools": [],
+          "transition_prompt": null
+        }
+      ],
+      "taint_tracking": false,
+      "title": "cpinned",
+      "tool_permissions": {},
+      "tool_rescan": "at_spawn",
+      "transforms": []
+    },
+    "inputs": {
+      "task": {
+        "text": "read big.txt"
+      }
+    },
+    "launch": {
+      "allow": [],
+      "capture_model_input": false,
+      "max_depth": 3,
+      "seed_commands": true,
+      "unattended": "all"
+    },
+    "listed": null,
+    "origin": {
+      "Blueprint": {
+        "blueprint": {
+          "digest": "a1a7f4f17407393ad3b06a8cc0a3988679377471b82c56b90a18d622ff97a4c5",
+          "name": "cpinned"
+        },
+        "manifest": "/tmp/lv967/.leviath/agents/cpinned/agent.toml",
+        "version": "0.1.0"
+      }
+    },
+    "placement": {
+      "depth": 0,
+      "parent": null,
+      "work_item": null,
+      "workdir": "/private/tmp/lv967/work",
+      "worker_stage": null
+    },
+    "requested_model": null,
+    "requested_output": null,
+    "run_id": "cpinned-1792366371-f4ca717ddd56",
+    "seeded": {
+      "task": {
+        "parts": [],
+        "text": "read big.txt"
+      }
+    },
+    "stages": [
+      {
+        "model": {
+          "context_window": 8192,
+          "fallbacks": [],
+          "id": "gpt-mock",
+          "provider": "openai"
+        },
+        "notes": [],
+        "output": null,
+        "region_budgets": {
+          "conversation": 1638,
+          "notes": 1638,
+          "notes_history": 410,
+          "task": 410
+        },
+        "reply_cap": null,
+        "stage": "work",
+        "tools": [
+          {
+            "description": "Read the complete contents of a file. Use this to examine existing code, configurations, or data files before making changes.",
+            "name": "read_file",
+            "schema": {
+              "properties": {
+                "path": {
+                  "description": "Path to the file, relative to the working directory",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "source": "Builtin"
+          }
+        ]
+      },
+      {
+        "model": {
+          "context_window": 8192,
+          "fallbacks": [],
+          "id": "gpt-mock",
+          "provider": "openai"
+        },
+        "notes": [],
+        "output": null,
+        "region_budgets": {
+          "conversation": 1638,
+          "notes": 1638,
+          "notes_history": 410,
+          "task": 410
+        },
+        "reply_cap": null,
+        "stage": "wrap",
+        "tools": []
+      }
+    ]
+  }
+}

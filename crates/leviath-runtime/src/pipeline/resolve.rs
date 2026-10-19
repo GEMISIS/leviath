@@ -957,8 +957,8 @@ pub(crate) struct StageRoute {
     pub notes: Vec<String>,
 }
 
-/// Decide the model of the stage called `name`, whose model choice is
-/// `choice` and which takes the mime types `needs` beyond text, or say why
+/// Decide the model of `subject` (`stage 'plan'`, or the compaction model),
+/// whose model choice is `choice` and which takes the mime types `needs` beyond text, or say why
 /// it has no usable one.
 ///
 /// The last fallback in [`resolve_stage_model`] is unchecked: it hands back
@@ -969,7 +969,7 @@ pub(crate) struct StageRoute {
 /// Catching it here turns a silently wedged run into an error the caller
 /// sees.
 pub(crate) fn resolve_stage_route(
-    name: &str,
+    subject: &str,
     choice: &ModelChoice,
     needs: &[String],
     model_override: Option<&str>,
@@ -981,7 +981,7 @@ pub(crate) fn resolve_stage_route(
     // which is the silent downgrade this exists to stop.
     if let Some((model, unread)) = unknown_open_route(choice, model_override, defaults, registry) {
         return Err(format!(
-            "stage '{name}' names {model}, and whether any provider serves it \
+            "{subject} names {model}, and whether any provider serves it \
              {UNREAD_REFUSAL} {} has not been read (see daemon.log for why). \
              Refusing rather than starting the stage on a model further down its list \
              or on fallback_model. The list is read again on the next run.",
@@ -995,7 +995,7 @@ pub(crate) fn resolve_stage_route(
     // sitting on disk counts as usable and is never false-rejected here.
     if !registry.has(&head.provider) {
         return Err(format!(
-            "stage '{name}' has no usable provider (tried: {}). Configure one \
+            "{subject} has no usable provider (tried: {}). Configure one \
              with `lev setup`, or add it to config.toml; the next run \
              picks it up, with no daemon restart.",
             providers_tried(choice, model_override, defaults)
@@ -1018,12 +1018,9 @@ pub(crate) fn resolve_stage_route(
         // cannot reach - and those two send a reader to different places, one
         // to check the spelling and one to change the stage or the plan.
         return Err(match registry.refusal_reason(&head.provider, &head.model) {
-            Some(reason) => format!(
-                "stage '{name}' names {}/{}: {reason}",
-                head.provider, head.model
-            ),
+            Some(reason) => format!("{subject} names {}/{}: {reason}", head.provider, head.model),
             None => format!(
-                "stage '{name}' names {}/{}, which provider '{}' does not serve. \
+                "{subject} names {}/{}, which provider '{}' does not serve. \
                  Run `lev models list --provider {}` to see what it carries, \
                  then name one of those in the stage's models list.",
                 head.provider, head.model, head.provider, head.provider,
@@ -1040,7 +1037,7 @@ pub(crate) fn resolve_stage_route(
         if let Some(refusal) =
             registry.retention_refusal_with(&defaults.retention, &head.provider, &head.model)
         {
-            return Err(format!("stage '{name}' names {refusal}"));
+            return Err(format!("{subject} names {refusal}"));
         }
         // The fallbacks are held to the same bar. A failover is the one place
         // a request could otherwise reach a model that keeps something after
@@ -1053,7 +1050,7 @@ pub(crate) fn resolve_stage_route(
                 return true;
             }
             dropped.push(format!(
-                "[model] stage '{name}' will not fail over to {}/{}: it does not run \
+                "[model] {subject} will not fail over to {}/{}: it does not run \
                  with zero data retention (retention {}: {})",
                 entry.provider,
                 entry.model,
@@ -1070,13 +1067,13 @@ pub(crate) fn resolve_stage_route(
     let mut notes = match head_source(choice, model_override, defaults, registry, &head) {
         HeadSource::Blueprint => Vec::new(),
         HeadSource::Override => vec![format!(
-            "[model] stage '{name}' starts on {}/{} (override_model); blueprint asked for {}",
+            "[model] {subject} starts on {}/{} (override_model); blueprint asked for {}",
             head.provider,
             head.model,
             blueprint_choice(choice)
         )],
         HeadSource::Fallback => vec![format!(
-            "[model] stage '{name}' starts on {}/{} (fallback_model); nothing the blueprint \
+            "[model] {subject} starts on {}/{} (fallback_model); nothing the blueprint \
              named is configured here ({})",
             head.provider,
             head.model,

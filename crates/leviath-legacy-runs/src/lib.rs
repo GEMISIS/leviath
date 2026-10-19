@@ -49,6 +49,7 @@ mod history;
 pub mod journal;
 mod layout2;
 mod layout3;
+mod layout4;
 mod legacy;
 mod manifest;
 mod migrate;

@@ -1,6 +1,6 @@
 [blueprint]
 name = "wide-researcher"
-version = "0.6.1"
+version = "0.6.2"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 
 # survey -> investigate (fan out) -> compare -> deep_dive -> challenge -> summarize -> polish -> summary
@@ -15,7 +15,10 @@ max_child_depth = 2
 
 tool_permissions = { read_file = "allow", list_dir = "allow", web_search = "allow", web_fetch = "allow", current_time = "allow", write_file = "ask", bash = "ask" }
 
-compaction = { model = { provider = "anthropic", model = "claude-sonnet-5-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+# Summaries run on whichever of these this machine serves, the way a stage's
+# models do: no provider is named, so `default_provider` and `provider_order`
+# decide where the run's context is sent.
+compaction = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }], max_summary_tokens = 2000, temperature = 0.2 }
 
 [[graph.inputs]]
 name = "task"

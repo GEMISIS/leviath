@@ -556,23 +556,21 @@ max_readonly_streak = 10     # default; read-only calls with no modification in 
 ## Who does the summarizing
 
 A [`compacting` region](/docs/context) summarizes rather than evicting, and something has to write
-that summary. By default it is `claude-sonnet-5-5` on Anthropic, whatever the stage itself runs on,
-because a summary is cheap work that does not need the stage's model. `[graph.compaction]`
-replaces that default, and then names all three of `model`, `max_summary_tokens` and
-`temperature`:
+that summary: the graph's `[graph.compaction]`. A blueprint without one never summarizes, and its
+compacting regions are left as they are.
 
 ```toml
 [graph.compaction]
-model              = { provider = "openai", model = "gpt-5.4-mini" }
-max_summary_tokens = 2000
-temperature        = 0.2
+models             = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }]
+max_summary_tokens = 2000    # default
+temperature        = 0.2     # default
 system_prompt      = "..."   # optional; replaces the built-in summarizer prompt
 ```
 
-Point it at a provider you have configured if you do not use Anthropic. A run whose compaction
-provider is not registered loses compaction rather than failing, so a blueprint with no
-`[graph.compaction]` on an OpenAI-only machine quietly stops summarizing. `lev doctor` reports
-which providers are registered.
+The models are resolved the way a stage's are. Leave the provider off and the run's summaries go
+to whichever provider the user prefers that serves the model. Name no model at all and each summary
+runs on the current stage's model. [Providers](/docs/providers#the-compaction-model) has the
+details, and `lev validate` prints the compaction model a run would use.
 
 ## Discovering tools mid-run
 

@@ -480,6 +480,9 @@ fn model_resolution_lines(
             ));
         }
     }
+    if let Some(compaction) = &graph.compaction {
+        lines.extend(compaction_lines(compaction, &defaults, registry));
+    }
     if !config.default_provider.is_empty() {
         let over = config.override_model.as_deref().unwrap_or("(unset)");
         let fall = config.fallback_model.as_deref().unwrap_or("(unset)");
@@ -487,6 +490,43 @@ fn model_resolution_lines(
             "  default_provider = {}, override_model = {over}, fallback_model = {fall}",
             config.default_provider
         ));
+    }
+    lines
+}
+
+/// Where this install would send the graph's summaries: the compaction
+/// models resolved exactly as a spawn resolves them, or each stage's own model
+/// when the graph names none.
+fn compaction_lines(
+    compaction: &leviath_runtime::spec::graph::CompactionDef,
+    defaults: &leviath_runtime::pipeline::ModelDefaults,
+    registry: &leviath_runtime::ProviderRegistry,
+) -> Vec<String> {
+    let label = format!("  {:<16}", "(compaction)");
+    let named = compaction.named();
+    if named.is_empty() {
+        return vec![format!("{label} each stage's own model, and its fallbacks")];
+    }
+    let routes = match leviath_runtime::bind::host::compaction_routes(&named, defaults, registry) {
+        Ok(routes) => routes,
+        Err(reason) => return vec![format!("{label} cannot run here: {reason}")],
+    };
+    // A head with no registered provider means nothing here serves any of
+    // the names, which leaves them as written and the regions unsummarized.
+    let head = routes
+        .first()
+        .filter(|r| registry.has(r.provider_or_empty()));
+    let Some(head) = head else {
+        let listed: Vec<String> = named.iter().map(ToString::to_string).collect();
+        return vec![format!(
+            "{label} no configured provider serves {}; compacting regions are not summarized",
+            listed.join(", ")
+        )];
+    };
+    let mut lines = vec![format!("{label} {head}")];
+    let rest: Vec<String> = routes.iter().skip(1).map(ToString::to_string).collect();
+    if !rest.is_empty() {
+        lines.push(format!("  {:<16}   falls back to: {}", "", rest.join(", ")));
     }
     lines
 }
@@ -674,10 +714,16 @@ async fn primed_registry(
 /// the ones this blueprint mentions costs a compile of a script the author is
 /// already using.
 fn pinned_providers(graph: &RunGraph) -> Vec<String> {
+    let compaction = graph
+        .compaction
+        .iter()
+        .flat_map(|c| c.named())
+        .collect::<Vec<_>>();
     let mut names: Vec<String> = graph
         .stages
         .iter()
         .flat_map(|s| s.model.models.iter())
+        .chain(&compaction)
         .filter_map(|e| e.provider.as_ref().map(ToString::to_string))
         .collect();
     names.sort_unstable();
@@ -1006,6 +1052,76 @@ system_prompt = "hi"
             lines
                 .iter()
                 .any(|l| l.contains("one") && l.contains("cannot run here")),
+            "{lines:#?}"
+        );
+    }
+
+    /// The compaction model is listed under the stages, resolved exactly as a
+    /// spawn resolves it: an open route on the provider this install
+    /// prefers, its failover after it, and each stage's own model when the
+    /// graph names none.
+    #[test]
+    fn model_resolution_lists_the_compaction_model_a_run_would_use() {
+        let with = |compaction: &str| {
+            let manifest = model_manifest("{ model = \"claude-sonnet-5\" }").replace(
+                "entry = \"one\"",
+                &format!("entry = \"one\"\ncompaction = {compaction}"),
+            );
+            let graph = checked_graph(&manifest);
+            let config = keyed_config("anthropic");
+            model_resolution_lines(&graph, &config, &registry_for(&config))
+        };
+        let compaction = |lines: Vec<String>| -> Vec<String> {
+            let at = lines
+                .iter()
+                .position(|l| l.contains("(compaction)"))
+                .expect("a compaction line");
+            lines[at..]
+                .iter()
+                .take_while(|l| !l.contains("default_provider"))
+                .cloned()
+                .collect()
+        };
+        let bare = compaction(with(r#"{ model = { model = "claude-sonnet-5" } }"#));
+        assert!(bare[0].ends_with(" anthropic/claude-sonnet-5"), "{bare:#?}");
+        let listed = compaction(with(
+            r#"{ models = [{ model = "claude-sonnet-5" }, { provider = "openrouter", model = "x/y" }] }"#,
+        ));
+        assert!(
+            listed[0].ends_with(" anthropic/claude-sonnet-5"),
+            "{listed:#?}"
+        );
+        assert!(
+            listed[1].ends_with("falls back to: openrouter/x/y"),
+            "{listed:#?}"
+        );
+        let stage = compaction(with("{}"));
+        assert!(stage[0].contains("each stage's own model"), "{stage:#?}");
+        let nobody = compaction(with(r#"{ model = { provider = "nowhere", model = "m" } }"#));
+        assert!(
+            nobody[0].contains("no configured provider serves nowhere/m"),
+            "{nobody:#?}"
+        );
+    }
+
+    /// A compaction model the resolver refuses is named with the reason.
+    #[test]
+    fn a_refused_compaction_model_says_why() {
+        let def: leviath_runtime::spec::graph::CompactionDef =
+            toml::from_str(r#"model = { provider = "anthropic", model = "claude-sonnet-5" }"#)
+                .unwrap();
+        let config = keyed_config("anthropic");
+        let defaults = leviath_runtime::pipeline::ModelDefaults {
+            retention: leviath_providers::retention::RetentionSettings {
+                zero_requested: true,
+                ..Default::default()
+            },
+            ..crate::daemon::spawn::model_defaults(&config)
+        };
+        let lines = compaction_lines(&def, &defaults, &registry_for(&config));
+        assert!(
+            lines[0]
+                .contains("cannot run here: the compaction model names anthropic/claude-sonnet-5"),
             "{lines:#?}"
         );
     }

@@ -6,8 +6,9 @@
 //! to and its `workers_available`, and a fan-out in progress kept its items
 //! without the worker each one went to. Everything that holds one of those
 //! is read here as layout 3 wrote it: the spec (through its graph, its
-//! stages and their modes), the state, and the delta. Every other type is the
-//! runtime's own, which did not change.
+//! stages and their modes), the state, and the delta. The graph's compaction
+//! settings are read as layout 4 still wrote them (see [`crate::layout4`]).
+//! Every other type is the runtime's own, which did not change.
 //!
 //! An old fan-out had one worker, which took every item, so each converts to
 //! a fan-out of its stage with that one worker, named after what it runs.
@@ -17,10 +18,10 @@ use std::collections::BTreeMap;
 use leviath_core::policy::ToolPolicy;
 use leviath_runtime::fanout::FanOutOrigin;
 use leviath_runtime::spec::graph::{
-    self, CodeRef, CompactionDef, ContextTransformDef, DependencyDef, EVERY_ITEM, EdgeDef,
-    FileTrackingDef, InteractionPointDef, McpServerDef, MimeRows, ModelChoice, NudgeDef, OutputDef,
-    RegionLayoutDef, RepetitionDef, SafeCommandsDef, SandboxDef, ScriptPermissionsDef, StageHooks,
-    ToolRescan, ToolRoutingDef, ToolSelector, WorkerFailure, WorkerOption, WorkerSource,
+    self, CodeRef, ContextTransformDef, DependencyDef, EVERY_ITEM, EdgeDef, FileTrackingDef,
+    InteractionPointDef, McpServerDef, MimeRows, ModelChoice, NudgeDef, OutputDef, RegionLayoutDef,
+    RepetitionDef, SafeCommandsDef, SandboxDef, ScriptPermissionsDef, StageHooks, ToolRescan,
+    ToolRoutingDef, ToolSelector, WorkerFailure, WorkerOption, WorkerSource,
 };
 use leviath_runtime::spec::inputs::{InputDecl, InputValues};
 use leviath_runtime::spec::launch::{DeliveryPlan, LaunchPolicy, Placement};
@@ -187,7 +188,7 @@ pub(crate) struct RunGraph {
     layout: RegionLayoutDef,
     inputs: Vec<InputDecl>,
     output: Option<OutputDef>,
-    compaction: Option<CompactionDef>,
+    compaction: Option<crate::layout4::CompactionDef>,
     max_child_depth: Option<u8>,
     taint_tracking: Option<bool>,
     tool_permissions: BTreeMap<ToolName, ToolPolicy>,
@@ -219,7 +220,7 @@ impl From<RunGraph> for graph::RunGraph {
             layout: g.layout,
             inputs: g.inputs,
             output: g.output,
-            compaction: g.compaction,
+            compaction: g.compaction.map(Into::into),
             max_child_depth: g.max_child_depth,
             taint_tracking: g.taint_tracking,
             tool_permissions: g.tool_permissions,

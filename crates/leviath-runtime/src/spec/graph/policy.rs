@@ -116,8 +116,16 @@ pub struct ArtifactDef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CompactionDef {
-    /// The model that writes the summary.
-    pub model: ModelRef,
+    /// The model that writes the summary: a one-entry `models`, ahead of
+    /// any `models` lists. With no provider it is an open route, resolved
+    /// as a stage's model is.
+    #[serde(default)]
+    pub model: Option<ModelRef>,
+    /// The models that may write the summary, best first, resolved as a
+    /// stage's models are. With neither this nor `model`, a summary runs on
+    /// the model the current stage runs on.
+    #[serde(default)]
+    pub models: Vec<ModelRef>,
     /// Its system prompt, over the default.
     #[serde(default)]
     pub system_prompt: Option<String>,
@@ -125,10 +133,30 @@ pub struct CompactionDef {
     #[serde(default)]
     pub user_prompt_template: Option<String>,
     /// The longest summary, in tokens.
+    #[serde(default = "default_max_summary_tokens")]
     pub max_summary_tokens: u32,
     /// Its sampling temperature. Kept as the number written, so a `0.2`
     /// reads back as `0.2`.
+    #[serde(default = "default_summary_temperature")]
     pub temperature: f64,
+}
+
+impl CompactionDef {
+    /// The models it names, best first: `model`, then `models`. Empty when
+    /// a summary runs on the current stage's model.
+    pub fn named(&self) -> Vec<ModelRef> {
+        self.model.iter().chain(&self.models).cloned().collect()
+    }
+}
+
+/// `max_summary_tokens` when a graph leaves it out.
+fn default_max_summary_tokens() -> u32 {
+    leviath_core::lifecycle::DEFAULT_MAX_SUMMARY_TOKENS as u32
+}
+
+/// `temperature` when a graph leaves it out.
+fn default_summary_temperature() -> f64 {
+    0.2
 }
 
 /// Where tools run.

@@ -86,7 +86,22 @@ same list.
 - `search_files` and `glob` are built-in tool names now, so a Rhai script
   tool of either name is dropped at discovery, as for any built-in. Rename
   the script to keep it.
-
+- The bundled agents (`coder`, `data-analyst`, `deep-researcher`,
+  `log-analyzer`, `researcher`, `reviewer`, `wide-researcher`) summarize on
+  the same models their light stages list, with no provider named, so their
+  summaries follow `default_provider` and `provider_order` rather than always
+  going to Anthropic. To keep the old behaviour, copy the agent and set
+  `compaction = { model = { provider = "anthropic", model = "claude-sonnet-5-5" } }`.
+- **Breaking.** Run files move to binary layout 5: a graph's compaction may
+  name several models, or none. The daemon upgrades layout-4 files at start,
+  the original kept as `legacy/run.v4.lvr`; the one compaction model of an
+  old run becomes its `compaction.model`, so it summarizes where it did.
+- **Breaking, library.** `CompactionDef.model` is an `Option` beside a new
+  `models` list, and `max_summary_tokens` and `temperature` default to 2000
+  and 0.2. `CompactionConfig` holds the resolved `routes` in place of
+  `provider` and `model`. `ResolveEnv::compaction_model` is
+  `compaction_routes`, which answers with the resolved routes, and
+  `bind::host::compaction_model` is `compaction_routes`.
 - **Breaking.** A fan-out stage declares the workers it may hand items to.
   `[graph.stages.mode.fan_out]` names its `stage` and lists
   `workers_available`, each with a `name`, one of `stage`, `blueprint` or
@@ -340,6 +355,16 @@ same list.
 - Daemon builds compare versions the way semver does: `0.7.0-beta.1` is
   older than `0.7.0`, so a release replaces a beta daemon instead of
   deferring to it.
+- A graph's compaction model is resolved the way a stage's model is
+  (#967). An entry with no provider is an open route that `provider_order`
+  and `default_provider` answer, `override_model` and the fallbacks apply,
+  and `models = [...]` lists several with failover. Before, a bare name never
+  summarized anything, and a named provider sent the run's context there even
+  when the user preferred another. `compaction` with no model runs each
+  summary on the current stage's model. Memory-pressure, edge and child
+  content summaries all walk the resolved routes, moving on when a provider
+  turns out to be unusable, and `lev validate` prints the compaction model a
+  run would use.
 - A fan-out stage runs only the worker its blueprint declares. A reviewer
   run's `fan_out` call named `"agent": "review"`, which replaced the stage's
   `review_worker`, and ten workers were queued for a blueprint that does not

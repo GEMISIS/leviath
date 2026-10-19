@@ -1,6 +1,6 @@
 [blueprint]
 name = "data-analyst"
-version = "0.3.1"
+version = "0.3.2"
 description = "Data analyst - searches the web for data on a subject, builds a clean CSV of it, and hands back a ready-to-use summary of what the numbers say"
 
 [graph]
@@ -11,7 +11,10 @@ entry = "scope"
 # creation is worth a person seeing once.
 tool_permissions = { read_file = "allow", read_files = "allow", list_dir = "allow", web_search = "allow", web_fetch = "allow", write_file = "ask", bash = "ask" }
 
-compaction = { model = { provider = "anthropic", model = "claude-sonnet-5-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+# Summaries run on whichever of these this machine serves, the way a stage's
+# models do: no provider is named, so `default_provider` and `provider_order`
+# decide where the run's context is sent.
+compaction = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }], max_summary_tokens = 2000, temperature = 0.2 }
 
 # The subject, what to gather data on.
 [[graph.inputs]]

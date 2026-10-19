@@ -91,13 +91,13 @@ fn an_embedded_world_has_no_yolo_profiles() {
 #[test]
 fn a_compaction_model_is_judged_by_the_operators_retention_rules() {
     let model = |m: &str| ModelRef::parse(m).unwrap();
-    assert!(env().compaction_model(&model("mock/m")).is_ok());
+    assert!(env().compaction_routes(&[model("mock/m")]).is_ok());
     assert!(
-        env().compaction_model(&model("gone/m")).is_ok(),
+        env().compaction_routes(&[model("gone/m")]).is_ok(),
         "never called"
     );
     assert!(
-        env().compaction_model(&model("m")).is_ok(),
+        env().compaction_routes(&[model("m")]).is_ok(),
         "no provider named"
     );
 }

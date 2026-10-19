@@ -5,8 +5,9 @@
 //! run, an errored one, a fan-out parent parked on its workers, one of those
 //! workers parked at an interaction point, and a run whose daemon died with a
 //! tool batch in flight). Personal paths in them were replaced with
-//! `/home/user`. `layout-2` and `layout-3` are run files alpha builds
-//! wrote, which `convert/upgrade.rs` and `convert/upgrade_layout3.rs` upgrade.
+//! `/home/user`. `layout-2`, `layout-3` and `layout-4` are run files alpha
+//! builds wrote, which `convert/upgrade.rs`, `convert/upgrade_layout3.rs` and
+//! `convert/upgrade_layout4.rs` upgrade.
 
 #[path = "convert/as_listed.rs"]
 mod as_listed;
@@ -27,6 +28,8 @@ mod steps;
 mod upgrade;
 #[path = "convert/upgrade_layout3.rs"]
 mod upgrade_layout3;
+#[path = "convert/upgrade_layout4.rs"]
+mod upgrade_layout4;
 
 use common::{FIXTURES, Run, RunFile};
 use leviath_legacy_runs::{BlueprintSource, ConvertError, is_legacy, meta};

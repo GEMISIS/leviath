@@ -157,7 +157,7 @@ The graph-wide settings sit directly under `[graph]`. Everything has a default e
 | `read_paths` | none | Paths outside the workdir the run may read. |
 | `safe_commands` | none | `{ tools = [...], shell = [...] }` that run without approval. |
 | `output` | none | The shape of the run's final answer. See [Outputs](/docs/outputs). |
-| `compaction` | none | The model and prompts that summarize compacting regions. |
+| `compaction` | none | The models and prompts that summarize compacting regions. See below. |
 | `taint_tracking` | off | Track where sensitive data flows. See [Security](/docs/security). |
 | `sandbox` | the operator's | Where tools run. See [Containers](/docs/containers). |
 | `nudge`, `repetition` | the operator's | The empty-reply nudge and loop detection. |
@@ -171,7 +171,13 @@ The graph-wide settings sit directly under `[graph]`. Everything has a default e
 | `transforms` | none | How a child run's context is built from this one's. |
 | `batch_tool_hint`, `shell_hint` | the operator's | Two prompt hints, on or off. |
 
-`tool_rescan` takes `"at_spawn"`, `"after_writes"` or `"before_dispatch"`. The [agent blueprint
+`tool_rescan` takes `"at_spawn"`, `"after_writes"` or `"before_dispatch"`.
+
+`compaction` takes `model` (one entry) or `models` (a list, best first), each written like a
+stage's entry: `{ model = "..." }` for an open route, `{ provider = "...", model = "..." }` to pin
+one. Neither runs each summary on the current stage's model. `max_summary_tokens` defaults to 2000
+and `temperature` to 0.2, and `system_prompt` and `user_prompt_template` replace the built-in
+prompts. [Providers](/docs/providers#the-compaction-model) explains how the models are resolved. The [agent blueprint
 guide](/docs/agents) explains the settings above in context.
 
 ## Inputs

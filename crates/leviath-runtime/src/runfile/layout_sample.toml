@@ -1280,6 +1280,9 @@ temperature = 0.2
 provider = "anthropic"
 model = "claude-sonnet-5"
 
+[[compaction.models]]
+model = "gpt-5.4-mini"
+
 [tool_permissions]
 bash = "ask"
 edit_file = "ask"

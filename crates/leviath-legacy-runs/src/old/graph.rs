@@ -799,15 +799,16 @@ impl Conv {
         OutputDef::read(o, p, &mut self.issues)
     }
 
-    fn compaction(&mut self, c: &leviath_core::lifecycle::CompactionConfig) -> CompactionDef {
+    fn compaction(&mut self, c: &bp::CompactionConfig) -> CompactionDef {
         let p = at().field("compaction");
         let provider = self.name::<ProviderName>(p.field("provider"), &c.provider);
         let model = self.name::<ModelId>(p.field("model"), &c.model);
         CompactionDef {
-            model: ModelRef {
+            model: Some(ModelRef {
                 provider,
                 model: model.unwrap_or_else(|| ModelId::new("unknown").expect("a valid id")),
-            },
+            }),
+            models: Vec::new(),
             system_prompt: c.system_prompt.clone(),
             user_prompt_template: c.user_prompt_template.clone(),
             max_summary_tokens: self.small(p.field("max_summary_tokens"), c.max_summary_tokens),

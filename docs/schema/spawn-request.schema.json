@@ -264,14 +264,31 @@
       "description": "How the conversation is summarized when the context fills.",
       "properties": {
         "max_summary_tokens": {
+          "default": 2000,
           "description": "The longest summary, in tokens.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         },
         "model": {
-          "$ref": "#/$defs/ModelRef",
-          "description": "The model that writes the summary."
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The model that writes the summary: a one-entry `models`, ahead of\nany `models` lists. With no provider it is an open route, resolved\nas a stage's model is."
+        },
+        "models": {
+          "default": [],
+          "description": "The models that may write the summary, best first, resolved as a\nstage's models are. With neither this nor `model`, a summary runs on\nthe model the current stage runs on.",
+          "items": {
+            "$ref": "#/$defs/ModelRef"
+          },
+          "type": "array"
         },
         "system_prompt": {
           "default": null,
@@ -282,6 +299,7 @@
           ]
         },
         "temperature": {
+          "default": 0.2,
           "description": "Its sampling temperature. Kept as the number written, so a `0.2`\nreads back as `0.2`.",
           "format": "double",
           "type": "number"
@@ -295,11 +313,6 @@
           ]
         }
       },
-      "required": [
-        "model",
-        "max_summary_tokens",
-        "temperature"
-      ],
       "type": "object"
     },
     "ContentTransform": {
