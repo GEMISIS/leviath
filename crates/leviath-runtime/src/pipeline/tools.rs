@@ -470,6 +470,28 @@ pub(crate) struct DaemonServices<'w> {
     pub gate_stage: Option<Res<'w, crate::gate_prompt::GatePromptStage>>,
     /// Where what a run does is recorded, for its run file.
     pub persist: Option<Res<'w, super::JournalSender>>,
+    /// Where subscribers hear about what a run does as it does it.
+    pub sink: Option<Res<'w, crate::host::WorldEventSink>>,
+}
+
+/// Tell subscribers that a run's `submit_output` call was accepted.
+///
+/// Nothing for a batch that submitted nothing or had its submission refused,
+/// and nothing in a world with no subscribers or no run behind the agent.
+fn announce_submission(
+    sink: Option<&crate::host::WorldEventSink>,
+    metadata: Option<&RunMetadata>,
+    agent_id: &str,
+    submitted: Option<leviath_core::output::FinalOutput>,
+) {
+    if let (Some(sink), Some(md), Some(output)) = (sink, metadata, submitted) {
+        let _ = sink.0.send(crate::host::WorldEvent::OutputSubmitted {
+            run_id: md.run_id.clone(),
+            agent_id: agent_id.to_string(),
+            stage: output.stage.clone(),
+            output,
+        });
+    }
 }
 
 /// Tool-dispatch system: for each `ReadyForTools` agent, apply its `context_*`
@@ -503,6 +525,7 @@ pub(crate) fn dispatch_tools(
         hub,
         gate_stage,
         persist,
+        sink,
     } = daemon;
     crate::tick_scope::clear();
     let default_policy = leviath_core::PolicyConfig::default();
@@ -887,10 +910,10 @@ pub(crate) fn dispatch_tools(
         // dispatches, holds for a gate prompt, or turns out to be empty.
         // Re-applying it on a gate-prompt re-run is harmless: the same
         // submission produces the same component.
-        if let Some(output) = submitted {
+        if let Some(output) = &submitted {
             commands
                 .entity(entity)
-                .insert(crate::persistence::FinalOutput(output));
+                .insert(crate::persistence::FinalOutput(output.clone()));
         }
 
         // Hold the batch and ask the user about each blocked call. A call
@@ -929,6 +952,12 @@ pub(crate) fn dispatch_tools(
         commands
             .entity(entity)
             .remove::<crate::gate_prompt::GateResolved>();
+
+        // Announced here, past the hold above rather than where it was
+        // committed: a batch held for a gate prompt runs again once the
+        // prompts resolve, and announcing on both passes would tell
+        // subscribers about one submission twice.
+        announce_submission(sink.as_deref(), metadata, &state.agent_id, submitted);
 
         // A fan-out parks this agent, so it cannot share a batch with lane calls
         // that would still be running when it does. Refused rather than

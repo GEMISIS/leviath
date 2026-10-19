@@ -755,6 +755,19 @@ same list.
   `## Unreleased` holds a `**Breaking` entry. Below 1.0 the minor number has to
   move. CI runs the same check on a PR that moves the version, as
   `cargo xtask version --check-bump <previous>`.
+- Tool-call start frames carry the call's arguments, cut to fit 4 KiB, with
+  `arguments_truncated` saying when they were cut: `tool_call_started` on
+  `/ws`, `ToolCallStartedEvent.arguments` on GraphQL, and
+  `WorldEvent::ToolCallStarted` for embedders. Capability
+  `events.tool_arguments`.
+- An `output_submitted` frame (`OutputSubmittedEvent`,
+  `WorldEvent::OutputSubmitted`) when a `submit_output` call is accepted, so
+  the answer shows before the run ends. Capability `events.output_submitted`.
+- An `interaction_settled` frame (`InteractionSettledEvent`,
+  `WorldEvent::InteractionSettled`) when an ask is answered, times out, is
+  cancelled or is refused. Capability `events.interaction_settled`.
+- `edge` and `reason` on GraphQL's `StageTransitionedEvent`, as `/ws` already
+  sends them.
 - `--daemon <attach|ensure|replace>` on `lev serve`, `lev agent-client`,
   `lev run`, `lev doctor`, `lev dash` and `lev daemon start`, with
   `LEVIATH_DAEMON` as the fallback for hosts that cannot add flags. `attach`

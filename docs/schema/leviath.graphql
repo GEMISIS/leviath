@@ -6182,6 +6182,43 @@ input InteractionPointStyleFilter {
 }
 
 """
+An ask the run raised was settled: answered, timed out, cancelled,
+or refused before it opened.
+
+A status frame cannot stand in for this, because a run with two
+open asks stays waiting after one is answered.
+"""
+type InteractionSettledEvent implements Event & RunEvent {
+	"""
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
+	
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
+	"""
+	seq: BigInt!
+	"When the server sent it, in unix seconds."
+	at: Timestamp!
+	"The run this is about."
+	runId: ID!
+	"The agent's live id in the world, which a run outlives."
+	agentId: ID!
+	"""
+	The ask in the shape every listing serves it in, with
+	`settlement` set to how it ended.
+	"""
+	interaction: InteractionOutput!
+	"""
+	The run this frame is about, as the rest of the API reads
+	it. Null once the run has been deleted.
+	"""
+	run: RunOutput
+}
+
+"""
 Arbitrary JSON, for the few places where the shape is the caller's rather
 than ours: a model's provider-specific parameters, a tool call's arguments,
 an output schema. A typed field is better wherever the type is ours to
@@ -8924,6 +8961,43 @@ type OutputSpecOutput {
 	artifacts: [OutputArtifactOutput!]!
 }
 
+"""
+A `submit_output` call was accepted.
+
+The call is answered inline, so it sends no tool-call frames, and
+without this the answer first shows on `RunCompletedEvent`. A
+refused submission sends nothing; each accepted one sends a frame,
+and the last one is the run's answer.
+"""
+type OutputSubmittedEvent implements Event & RunEvent {
+	"""
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
+	
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
+	"""
+	seq: BigInt!
+	"When the server sent it, in unix seconds."
+	at: Timestamp!
+	"The run this is about."
+	runId: ID!
+	"The agent's live id in the world, which a run outlives."
+	agentId: ID!
+	"The stage that submitted it."
+	stage: String!
+	"What was submitted."
+	finalOutput: FinalOutputOutput!
+	"""
+	The run this frame is about, as the rest of the API reads
+	it. Null once the run has been deleted.
+	"""
+	run: RunOutput
+}
+
 "A `path` input: a path inside the run's working directory."
 type PathInputTypeOutput {
 	"What the path must name."
@@ -11350,7 +11424,7 @@ The run frames, plus the link frame - a scoped subscriber has to
 learn why its run's frames stopped - plus the two this server
 produces about the subscription itself.
 """
-union RunEventFrame = RunSpawnedEvent | RunStatusChangedEvent | RunRenamedEvent | TokensUpdatedEvent | ContextUpdatedEvent | StageTransitionedEvent | ToolCallStartedEvent | ToolCallFinishedEvent | LogLineWrittenEvent | SpendThresholdCrossedEvent | InteractionOpenedEvent | RunCompletedEvent | DaemonLinkChangedEvent | SubscriptionOpenedEvent | EventsDroppedEvent
+union RunEventFrame = RunSpawnedEvent | RunStatusChangedEvent | RunRenamedEvent | TokensUpdatedEvent | ContextUpdatedEvent | StageTransitionedEvent | ToolCallStartedEvent | ToolCallFinishedEvent | LogLineWrittenEvent | SpendThresholdCrossedEvent | InteractionOpenedEvent | InteractionSettledEvent | OutputSubmittedEvent | RunCompletedEvent | DaemonLinkChangedEvent | SubscriptionOpenedEvent | EventsDroppedEvent
 
 """
 One frame type a run subscription can ask for.
@@ -11384,6 +11458,23 @@ enum RunEventType {
 	SPEND_THRESHOLD_CROSSED
 	"A run parked on a prompt somebody has to answer."
 	INTERACTION_OPENED
+	"""
+	An ask the run raised was settled: answered, timed out, cancelled,
+	or refused before it opened.
+	
+	A status frame cannot stand in for this, because a run with two
+	open asks stays waiting after one is answered.
+	"""
+	INTERACTION_SETTLED
+	"""
+	A `submit_output` call was accepted.
+	
+	The call is answered inline, so it sends no tool-call frames, and
+	without this the answer first shows on `RunCompletedEvent`. A
+	refused submission sends nothing; each accepted one sends a frame,
+	and the last one is the run's answer.
+	"""
+	OUTPUT_SUBMITTED
 	"A run reached a terminal status."
 	RUN_COMPLETED
 }
@@ -15823,6 +15914,17 @@ type StageTransitionedEvent implements Event & RunEvent {
 	"""
 	iteration: BigInt!
 	"""
+	The edge it took, by name. Null when the move took no declared
+	edge: a person moved the run, or a fan-out handed it on.
+	"""
+	edge: String
+	"""
+	Why it took that edge: its condition held, a gate let it
+	through, the model chose it, and so on. Null from a daemon that
+	does not say.
+	"""
+	reason: TransitionReason
+	"""
 	The run this frame is about, as the rest of the API reads
 	it. Null once the run has been deleted.
 	"""
@@ -16940,6 +17042,15 @@ type ToolCallStartedEvent implements Event & RunEvent {
 	executionId: ID!
 	"The tool called."
 	tool: String!
+	"""
+	The arguments the model sent, cut to fit 4 KiB serialized. Long
+	strings are shortened first, so a path beside a large file's
+	content stays whole. The journal keeps them uncut, on
+	`Run.executions`.
+	"""
+	arguments: JSON!
+	"Whether `arguments` was cut to fit."
+	argumentsTruncated: Boolean!
 	"""
 	The run this frame is about, as the rest of the API reads
 	it. Null once the run has been deleted.

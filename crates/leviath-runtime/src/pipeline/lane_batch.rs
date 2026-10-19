@@ -454,12 +454,15 @@ fn journal_batch(
     // blocks) never reach the lane and are deliberately not announced.
     if let (Some(sink), Some(md)) = (lane.sink.as_ref(), metadata) {
         for call in &batch.lane_calls {
+            let (arguments, arguments_truncated) = crate::host::capped_arguments(&call.arguments);
             let _ = sink.0.send(crate::host::WorldEvent::ToolCallStarted {
                 run_id: md.run_id.clone(),
                 agent_id: state.agent_id.clone(),
                 call_id: call.id.clone(),
                 execution_id: batch.executions.get(&call.id).cloned().unwrap_or_default(),
                 tool: call.name.clone(),
+                arguments,
+                arguments_truncated,
             });
         }
     }

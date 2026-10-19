@@ -5086,6 +5086,14 @@ fn every_world_event_variant_carries_its_run_id() {
             agent_id: aid.clone(),
             call_id: "c".to_string(),
             tool: "t".to_string(),
+            arguments: serde_json::Value::Null,
+            arguments_truncated: false,
+        },
+        WorldEvent::OutputSubmitted {
+            run_id: rid.clone(),
+            agent_id: aid.clone(),
+            stage: "s".to_string(),
+            output: leviath_core::output::FinalOutput::new("o", None, "s".to_string(), 1),
         },
         WorldEvent::ToolCallFinished {
             execution_id: "x1".to_string(),

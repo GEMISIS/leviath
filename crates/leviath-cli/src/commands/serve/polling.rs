@@ -498,12 +498,36 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             call_id,
             execution_id,
             tool,
+            arguments,
+            arguments_truncated,
         } => ServerEvent::ToolCallStarted {
             agent_id,
             run_id,
             call_id,
             execution_id,
             tool,
+            arguments,
+            arguments_truncated,
+        },
+        WorldEvent::OutputSubmitted {
+            run_id,
+            agent_id,
+            stage,
+            output,
+        } => ServerEvent::OutputSubmitted {
+            agent_id,
+            run_id,
+            stage,
+            final_output: output.into(),
+        },
+        WorldEvent::InteractionSettled {
+            run_id,
+            agent_id,
+            interaction,
+        } => ServerEvent::InteractionSettled {
+            agent_id,
+            run_id,
+            interaction: *interaction,
         },
         WorldEvent::ToolCallFinished {
             run_id,
@@ -893,6 +917,20 @@ mod tests {
             .to_string()
     }
 
+    /// One ask settled by a cancel, as the journal records it.
+    fn settled_record() -> leviath_runtime::runfile::record::InteractionRecord {
+        leviath_runtime::runfile::record::InteractionRecord {
+            request_id: "run-9-ask-1".into(),
+            kind: leviath_core::interaction::InteractionKind::FreeText,
+            tool: None,
+            prompt: "Which?".into(),
+            stage: "plan".into(),
+            settlement: leviath_core::interaction::Settlement::Cancelled,
+            asked_at: 1,
+            at: 2,
+        }
+    }
+
     fn mapped_tag(event: WorldEvent) -> String {
         serde_json::to_value(to_server_event(event)).unwrap()["type"]
             .as_str()
@@ -1009,9 +1047,28 @@ mod tests {
                 run_id: "r".into(),
                 agent_id: "a".into(),
                 call_id: "c1".into(),
-                tool: "read_file".into()
+                tool: "read_file".into(),
+                arguments: serde_json::Value::Null,
+                arguments_truncated: false,
             }),
             "tool_call_started"
+        );
+        assert_eq!(
+            mapped_tag(WorldEvent::OutputSubmitted {
+                run_id: "r".into(),
+                agent_id: "a".into(),
+                stage: "answer".into(),
+                output: leviath_core::output::FinalOutput::new("done", None, "answer".into(), 1),
+            }),
+            "output_submitted"
+        );
+        assert_eq!(
+            mapped_tag(WorldEvent::InteractionSettled {
+                run_id: "r".into(),
+                agent_id: "r".into(),
+                interaction: Box::new(settled_record()),
+            }),
+            "interaction_settled"
         );
         assert_eq!(
             mapped_tag(WorldEvent::ToolCallFinished {
@@ -1160,12 +1217,40 @@ mod tests {
             agent_id: "a".into(),
             call_id: "c1".into(),
             tool: "read_file".into(),
+            arguments: serde_json::json!({ "path": "src/lib.rs" }),
+            arguments_truncated: false,
         }))
         .unwrap();
         assert_eq!(json["type"], "tool_call_started");
         assert_eq!(json["run_id"], "run-9");
         assert_eq!(json["call_id"], "c1");
         assert_eq!(json["tool"], "read_file");
+        assert_eq!(json["arguments"]["path"], "src/lib.rs");
+        assert_eq!(json["arguments_truncated"], false);
+
+        // The answer, as `agent_completed` would carry it, before the run ends.
+        let json = serde_json::to_value(to_server_event(WorldEvent::OutputSubmitted {
+            run_id: "run-9".into(),
+            agent_id: "a".into(),
+            stage: "review".into(),
+            output: leviath_core::output::FinalOutput::new("a draft", None, "review".into(), 5),
+        }))
+        .unwrap();
+        assert_eq!(json["type"], "output_submitted");
+        assert_eq!(json["stage"], "review");
+        assert_eq!(json["final_output"]["content"], "a draft");
+
+        // The journal's record, flat on the frame.
+        let json = serde_json::to_value(to_server_event(WorldEvent::InteractionSettled {
+            run_id: "run-9".into(),
+            agent_id: "run-9".into(),
+            interaction: Box::new(settled_record()),
+        }))
+        .unwrap();
+        assert_eq!(json["type"], "interaction_settled");
+        assert_eq!(json["run_id"], "run-9");
+        assert_eq!(json["request_id"], "run-9-ask-1");
+        assert_eq!(json["settlement"], "cancelled");
 
         // `ok` and `summary` are the pair that says whether the call did
         // anything; a client showing a green tick off the finish frame alone

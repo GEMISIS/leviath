@@ -1588,6 +1588,39 @@ whatever you render.
 `DaemonLinkChangedEvent` arrives whatever `types` says and whatever the scope is, because a run's
 frames stopping looks exactly like a quiet run without it.
 
+A few frames say what a run is doing, not just that it moved, so an activity view needs no extra
+query per frame:
+
+```graphql
+subscription Activity($filter: RunInput) {
+  runEvents(
+    filter: $filter
+    types: [TOOL_CALL_STARTED, OUTPUT_SUBMITTED, INTERACTION_SETTLED, STAGE_TRANSITIONED]
+  ) {
+    __typename
+    ... on ToolCallStartedEvent { seq runId tool arguments argumentsTruncated }
+    ... on OutputSubmittedEvent { seq runId stage finalOutput { content format } }
+    ... on InteractionSettledEvent {
+      seq runId
+      interaction { id prompt settlement { outcome approved text } settledAt }
+    }
+    ... on StageTransitionedEvent { seq runId from to edge reason }
+  }
+}
+```
+
+`arguments` is what the model sent, cut to fit 4 KiB serialized. Long strings are shortened first,
+so `arguments.path` survives a large `write_file`, and `argumentsTruncated` says when anything was
+cut. `Run.executions` keeps them whole. `OutputSubmittedEvent` arrives each time a `submit_output`
+call is accepted, never for a refused one, and the last one is the run's answer.
+`InteractionSettledEvent` arrives when an ask is answered, times out, is cancelled or is refused,
+with `settlement.outcome` saying which. `edge` and `reason` on `StageTransitionedEvent` are null
+when the move took no declared edge.
+
+These are the `events.tool_arguments`, `events.output_submitted` and `events.interaction_settled`
+capabilities in `config.server.capabilities`. A run brought back after a daemon restart does not
+send them again for work it finished before the restart.
+
 The machine's own frames are their own stream, so a settings screen subscribes without seeing a
 fleet's worth of log lines.
 

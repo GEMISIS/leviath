@@ -8,9 +8,10 @@ use super::{
     FRAME_VOCABULARY, MachineEventFrame, MachineEventType, RunEventFrame, RunEventType,
     UpdateJobEventFrame, machine_frame, run_frame, update_job_frame,
 };
-use crate::commands::serve::graphql::types::interaction::InteractionKind;
+use crate::commands::serve::graphql::types::interaction::{InteractionKind, SettlementOutcome};
 use crate::commands::serve::graphql::types::machine::ConfigErrorKind;
 use crate::commands::serve::graphql::types::run::RunStatus;
+use crate::commands::serve::graphql::types::runfile::state::TransitionReason;
 use crate::commands::serve::graphql::types::update::{
     UpdateJobStatus, UpdateStep, UpdateStepStatus,
 };
@@ -81,7 +82,7 @@ fn every_frame() -> Vec<ServerEvent> {
             to: "build".to_string(),
             iteration: 2,
             edge: Some("build".to_string()),
-            reason: None,
+            reason: Some(leviath_runtime::state::TransitionReason::ModelChoice),
         },
         ServerEvent::ToolCallStarted {
             execution_id: "x1".to_string(),
@@ -89,6 +90,35 @@ fn every_frame() -> Vec<ServerEvent> {
             run_id: "run-a".to_string(),
             call_id: "call-1".to_string(),
             tool: "read_file".to_string(),
+            arguments: serde_json::json!({ "path": "src/lib.rs" }),
+            arguments_truncated: true,
+        },
+        ServerEvent::OutputSubmitted {
+            agent_id: "a".to_string(),
+            run_id: "run-a".to_string(),
+            stage: "review".to_string(),
+            final_output: crate::commands::serve::types::FinalOutputResp {
+                content: "a draft".to_string(),
+                format: None,
+                stage: "review".to_string(),
+                submitted_at: 1_788_000_001,
+                truncated: false,
+                artifacts: Vec::new(),
+            },
+        },
+        ServerEvent::InteractionSettled {
+            agent_id: "a".to_string(),
+            run_id: "run-a".to_string(),
+            interaction: leviath_runtime::runfile::record::InteractionRecord {
+                request_id: "ask-1".to_string(),
+                kind: leviath_core::interaction::InteractionKind::Confirm,
+                tool: None,
+                prompt: "Go on?".to_string(),
+                stage: "plan".to_string(),
+                settlement: leviath_core::interaction::Settlement::Cancelled,
+                asked_at: 1_788_000_002,
+                at: 1_788_000_003,
+            },
         },
         ServerEvent::ToolCallFinished {
             execution_id: "x1".to_string(),
@@ -193,7 +223,7 @@ fn every_frame_belongs_to_exactly_one_vocabulary() {
             (run, machine) => panic!("{run:?} and {machine:?} for one frame"),
         }
     }
-    assert_eq!(run, 12, "one type per run frame");
+    assert_eq!(run, 14, "one type per run frame");
     assert_eq!(machine, 4, "one type per machine frame");
 }
 
@@ -333,11 +363,29 @@ fn every_run_frame_converts_with_its_fields() {
                 assert_eq!(moved.from, "plan");
                 assert_eq!(moved.to, "build");
                 assert_eq!(moved.iteration.0, 2);
+                assert_eq!(moved.edge.as_deref(), Some("build"));
+                assert_eq!(moved.reason, Some(TransitionReason::ModelChoice));
             }
             (RunEventType::ToolCallStarted, RunEventFrame::ToolCallStarted(started)) => {
                 assert_eq!(started.call_id, "call-1");
                 assert_eq!(started.execution_id.as_str(), "x1");
                 assert_eq!(started.tool, "read_file");
+                assert_eq!(started.arguments.0["path"], "src/lib.rs");
+                assert!(started.arguments_truncated);
+            }
+            (RunEventType::OutputSubmitted, RunEventFrame::OutputSubmitted(submitted)) => {
+                assert_eq!(submitted.stage, "review");
+                assert_eq!(submitted.final_output.content, "a draft");
+                assert_eq!(submitted.final_output.submitted_at.0, 1_788_000_001);
+            }
+            (RunEventType::InteractionSettled, RunEventFrame::InteractionSettled(settled)) => {
+                let ask = settled.interaction;
+                assert_eq!(ask.id, "ask-1");
+                assert_eq!(ask.prompt, "Go on?");
+                assert_eq!(ask.stage_name, "plan");
+                let settlement = ask.settlement.expect("it settled");
+                assert_eq!(settlement.outcome, SettlementOutcome::Cancelled);
+                assert_eq!(ask.settled_at.map(|at| at.0), Some(1_788_000_003));
             }
             (RunEventType::ToolCallFinished, RunEventFrame::ToolCallFinished(finished)) => {
                 // A finish is not a success on its own, which is why `ok` is

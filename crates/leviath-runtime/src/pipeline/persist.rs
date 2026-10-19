@@ -147,13 +147,26 @@ pub(crate) struct PersistenceStage(pub UnboundedSender<PersistMsg>);
 ///
 /// The record carries the run it belongs to, so this needs no per-agent query
 /// and works for an agent that has already gone.
+///
+/// Each record is also announced to subscribers as it is journaled, which is
+/// the one place every way of settling meets. A run brought back after a
+/// restart announces nothing here for what settled before it: the buffer lives
+/// in memory and the journal is not read back into it.
 pub(crate) fn journal_interactions(
     hub: Option<Res<InteractionHub>>,
     journal: Res<super::JournalSender>,
+    sink: Option<Res<crate::host::WorldEventSink>>,
 ) {
     crate::tick_scope::clear();
     let Some(hub) = hub else { return };
     for (run_id, record) in hub.take_settled() {
+        sink.iter().for_each(|sink| {
+            let _ = sink.0.send(crate::host::WorldEvent::InteractionSettled {
+                run_id: run_id.clone(),
+                agent_id: run_id.clone(),
+                interaction: Box::new(record.clone()),
+            });
+        });
         journal.record(
             &run_id,
             crate::runfile::record::RunRecord::Interaction {

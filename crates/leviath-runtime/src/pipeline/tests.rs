@@ -16789,6 +16789,8 @@ async fn dispatch_tools_announces_lane_calls() {
             agent_id: "a".to_string(),
             call_id: "t".to_string(),
             tool: "n".to_string(),
+            arguments: serde_json::Value::Null,
+            arguments_truncated: false,
         }
     );
     assert!(sink_rx.try_recv().is_err(), "one event per lane call");
@@ -22448,4 +22450,217 @@ fn a_blueprint_spawn_seeds_by_region_and_takes_the_operators_nudge() {
     );
     let config = world.get::<InferenceConfig>(e).unwrap();
     assert!(!config.batch_tool_hint && !config.shell_hint);
+}
+
+/// Every `OutputSubmitted` frame the sink has received so far, as the run, the
+/// stage and the content.
+fn submitted_frames(
+    rx: &mut tokio::sync::broadcast::Receiver<crate::host::WorldEvent>,
+) -> Vec<(String, String, String)> {
+    let mut seen = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let crate::host::WorldEvent::OutputSubmitted {
+            run_id,
+            stage,
+            output,
+            ..
+        } = event
+        {
+            seen.push((run_id, stage, output.content));
+        }
+    }
+    seen
+}
+
+/// What `announcing_world` hands back: the world, its event stream, and the
+/// lane's receiving end, held so the lane stays open.
+type Announcing = (
+    World,
+    tokio::sync::broadcast::Receiver<crate::host::WorldEvent>,
+    mpsc::UnboundedReceiver<crate::pipeline::ToolJob>,
+);
+
+/// A world that announces, with the dispatcher and the lane wired.
+fn announcing_world() -> Announcing {
+    let (jtx, jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let (sink_tx, sink_rx) = tokio::sync::broadcast::channel(64);
+    world.insert_resource(crate::host::WorldEventSink(sink_tx));
+    (world, sink_rx, jrx)
+}
+
+/// Run the dispatcher and the lane once.
+fn dispatch_once(world: &mut World) {
+    let mut s = Schedule::default();
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
+    s.run(world);
+}
+
+/// An accepted `submit_output` is announced once, with the stage that
+/// submitted it and what it submitted. It is answered inline, so no tool-call
+/// frame would otherwise say anything about it.
+#[tokio::test]
+async fn an_accepted_submission_is_announced_once() {
+    let (mut world, mut rx, _lane) = announcing_world();
+    world.spawn((
+        agent_state(),
+        infer_with(vec![submit_call("o1", "the answer")]),
+        output_window(),
+        ReadyForTools,
+        run_metadata(),
+    ));
+    dispatch_once(&mut world);
+    assert_eq!(
+        submitted_frames(&mut rx),
+        vec![(
+            "run-1".to_string(),
+            agent_state().current_stage,
+            "the answer".to_string()
+        )]
+    );
+}
+
+/// A refused submission sends nothing: the run's answer did not change.
+#[tokio::test]
+async fn a_refused_submission_is_not_announced() {
+    let (mut world, mut rx, _lane) = announcing_world();
+    world.spawn((
+        agent_state(),
+        infer_with(vec![submit_call("o1", "   ")]),
+        output_window(),
+        ReadyForTools,
+        run_metadata(),
+    ));
+    dispatch_once(&mut world);
+    assert_eq!(submitted_frames(&mut rx), Vec::new());
+}
+
+/// A batch held for a gate prompt runs twice, and its submission is applied on
+/// both passes. It is announced once, on the pass that goes on.
+#[tokio::test]
+async fn a_submission_in_a_held_batch_is_announced_once() {
+    let (mut world, mut rx, _lane) = announcing_world();
+    let (gtx, _grx) = mpsc::unbounded_channel();
+    world.insert_resource(crate::interaction_hub::InteractionHub::new());
+    world.insert_resource(crate::gate_prompt::GatePromptStage {
+        outcomes: gtx,
+        wake: Arc::new(tokio::sync::Notify::new()),
+        runtime: tokio::runtime::Handle::current(),
+    });
+    // The submission was already cleared; the shell call beside it was not.
+    let mut cleared = crate::gate_prompt::GateResolved::default();
+    cleared.approved.insert("o1".to_string());
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![
+                submit_call("o1", "the secret"),
+                tc("c_shell", "shell"),
+            ]),
+            tainted_output_window(),
+            ReadyForTools,
+            enabled_gate(),
+            run_metadata(),
+            cleared,
+        ))
+        .id();
+    dispatch_once(&mut world);
+    assert!(
+        world
+            .get::<crate::gate_prompt::AwaitingGatePrompt>(e)
+            .is_some()
+    );
+    assert_eq!(submitted_frames(&mut rx), Vec::new(), "held, not announced");
+
+    let mut resolved = crate::gate_prompt::GateResolved::default();
+    resolved.approved.insert("o1".to_string());
+    resolved.approved.insert("c_shell".to_string());
+    world
+        .entity_mut(e)
+        .remove::<crate::gate_prompt::AwaitingGatePrompt>()
+        .insert((resolved, ReadyForTools));
+    dispatch_once(&mut world);
+    assert_eq!(submitted_frames(&mut rx).len(), 1);
+}
+
+/// A batch brought back after a restart does not announce a submission it made
+/// before the restart: that call is recovered, not run again.
+#[tokio::test]
+async fn a_recovered_submission_is_not_announced_again() {
+    let (mut world, mut rx, _lane) = announcing_world();
+    world.spawn((
+        agent_state(),
+        infer_with(vec![submit_call("o1", "the answer"), tc("c_read", "n")]),
+        output_window(),
+        ReadyForTools,
+        run_metadata(),
+        crate::pipeline::RecoveredResults(vec![("o1".to_string(), "Recorded".into())]),
+    ));
+    dispatch_once(&mut world);
+    assert_eq!(submitted_frames(&mut rx), Vec::new());
+}
+
+/// Every way an ask settles is announced as it is journaled, once, with the
+/// settlement it had: an answer, a timeout and a cancel. The buffer is drained,
+/// so the next tick announces nothing again.
+#[tokio::test(start_paused = true)]
+async fn each_settled_interaction_is_announced_once() {
+    use crate::dynamic_interaction::InteractionBackend;
+    use leviath_core::interaction::{InteractionRequest, InteractionResponse, Settlement};
+    let hub = crate::interaction_hub::InteractionHub::new();
+    hub.set_timeout_secs(Some(5));
+    let mut asks = Vec::new();
+    for id in ["run-1-ask-1", "run-1-ask-2", "run-1-ask-3"] {
+        let backend = hub.backend_for("run-1");
+        asks.push(tokio::spawn(async move {
+            backend
+                .ask(InteractionRequest::free_text(id, "Which?", "plan", true))
+                .await
+        }));
+    }
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(hub.answer(InteractionResponse::text("run-1-ask-1", "this one")));
+    assert!(hub.cancel("run-1-ask-2"));
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    for ask in asks {
+        ask.await.expect("each ask completes");
+    }
+
+    let mut world = World::new();
+    let (lane, _journal) = mpsc::unbounded_channel();
+    world.insert_resource(crate::pipeline::JournalSender::new(lane, None));
+    world.insert_resource(hub);
+    let (sink_tx, mut rx) = tokio::sync::broadcast::channel(16);
+    world.insert_resource(crate::host::WorldEventSink(sink_tx));
+    let mut s = Schedule::default();
+    s.add_systems(crate::pipeline::journal_interactions);
+    s.run(&mut world);
+    s.run(&mut world);
+
+    let mut seen = Vec::new();
+    while let Ok(crate::host::WorldEvent::InteractionSettled {
+        run_id,
+        agent_id,
+        interaction,
+    }) = rx.try_recv()
+    {
+        assert_eq!((run_id.as_str(), agent_id.as_str()), ("run-1", "run-1"));
+        seen.push((interaction.request_id, interaction.settlement));
+    }
+    seen.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        seen,
+        vec![
+            (
+                "run-1-ask-1".to_string(),
+                Settlement::of(&InteractionResponse::text("run-1-ask-1", "this one"))
+            ),
+            ("run-1-ask-2".to_string(), Settlement::Cancelled),
+            ("run-1-ask-3".to_string(), Settlement::TimedOut),
+        ]
+    );
 }

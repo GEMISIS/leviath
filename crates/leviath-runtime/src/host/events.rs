@@ -214,6 +214,52 @@ pub enum WorldEvent {
         execution_id: String,
         /// The tool name.
         tool: String,
+        /// The arguments the model sent, cut to fit
+        /// [`MAX_EVENT_ARGUMENT_BYTES`] serialized. The journal keeps them
+        /// whole; this is what a live viewer needs to say which file a call
+        /// read, without asking for the run.
+        ///
+        /// Defaulted so a frame from a daemon that sends none still reads.
+        #[serde(default)]
+        arguments: serde_json::Value,
+        /// Whether `arguments` was cut to fit.
+        #[serde(default)]
+        arguments_truncated: bool,
+    },
+    /// A run's `submit_output` call was accepted.
+    ///
+    /// The call is answered inline, never on the tool lane, so it has no
+    /// [`ToolCallStarted`](Self::ToolCallStarted). Without this the answer
+    /// first shows on [`Completed`](Self::Completed), and a run that submits
+    /// and then goes on to review says nothing about it until it ends. A
+    /// refused submission sends nothing; a later accepted one sends another,
+    /// and the last one wins, as it does on the run.
+    OutputSubmitted {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// The stage that submitted it.
+        stage: String,
+        /// What was submitted.
+        output: leviath_core::output::FinalOutput,
+    },
+    /// An interaction a run raised was settled: answered, timed out,
+    /// cancelled, or refused before it opened.
+    ///
+    /// The counterpart of [`Interaction`](Self::Interaction). A status frame
+    /// cannot stand in for it: a run with two open asks stays waiting after
+    /// one is answered.
+    InteractionSettled {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// The ask and how it ended, as the journal records it. Boxed: it is
+        /// the largest thing any frame carries, and every frame is the size
+        /// of the largest.
+        #[serde(flatten)]
+        interaction: Box<crate::runfile::record::InteractionRecord>,
     },
     /// A lane-executed tool call returned. Paired with
     /// [`WorldEvent::ToolCallStarted`] by `call_id`.
@@ -245,6 +291,59 @@ pub enum WorldEvent {
         /// The log line text.
         line: String,
     },
+}
+
+/// The most a [`WorldEvent::ToolCallStarted`] carries of a call's arguments,
+/// serialized.
+///
+/// Frames sit in the host's broadcast and in the daemon's event log, so an
+/// argument object is bounded here rather than copied whole: a `write_file`
+/// with a large file in it is the common case, and its path matters to a
+/// viewer far more than its content does.
+pub const MAX_EVENT_ARGUMENT_BYTES: usize = 4 * 1024;
+
+/// The lengths, in characters, every string in an oversized argument object is
+/// cut to in turn, longest first, until the object fits.
+const ARGUMENT_CLIP_STEPS: [usize; 5] = [1024, 256, 64, 16, 0];
+
+/// A call's arguments as a [`WorldEvent::ToolCallStarted`] carries them, and
+/// whether they had to be cut to fit [`MAX_EVENT_ARGUMENT_BYTES`].
+///
+/// Strings are cut rather than keys dropped, so the shape survives and a short
+/// value such as a path stays whole while a long one beside it is shortened.
+/// Each step cuts every string to one length, and the first that fits wins. An
+/// object too big even with every string emptied, which takes thousands of
+/// keys, is sent as an empty object: still JSON, and the flag says why.
+pub(crate) fn capped_arguments(arguments: &serde_json::Value) -> (serde_json::Value, bool) {
+    if fits_in_event(arguments) {
+        return (arguments.clone(), false);
+    }
+    let cut = ARGUMENT_CLIP_STEPS
+        .iter()
+        .map(|&keep| clip_strings(arguments, keep))
+        .find(fits_in_event)
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    (cut, true)
+}
+
+/// Whether `value` serializes within [`MAX_EVENT_ARGUMENT_BYTES`].
+fn fits_in_event(value: &serde_json::Value) -> bool {
+    value.to_string().len() <= MAX_EVENT_ARGUMENT_BYTES
+}
+
+/// `value` with every string in it cut to at most `keep` characters.
+fn clip_strings(value: &serde_json::Value, keep: usize) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => Value::String(text.chars().take(keep).collect()),
+        Value::Array(items) => Value::Array(items.iter().map(|v| clip_strings(v, keep)).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, v)| (key.clone(), clip_strings(v, keep)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// Dollars as millionths of a dollar, saturating.
@@ -283,6 +382,8 @@ impl WorldEvent {
             | WorldEvent::StageTransition { run_id, .. }
             | WorldEvent::ToolCallStarted { run_id, .. }
             | WorldEvent::ToolCallFinished { run_id, .. }
+            | WorldEvent::OutputSubmitted { run_id, .. }
+            | WorldEvent::InteractionSettled { run_id, .. }
             | WorldEvent::Spend { run_id, .. }
             | WorldEvent::Log { run_id, .. } => run_id,
         }
@@ -341,6 +442,10 @@ pub(super) struct Emitted {
     /// next status frame that fires on its own.
     pub(super) title: Option<String>,
 }
+
+#[cfg(test)]
+#[path = "events_tests.rs"]
+mod argument_tests;
 
 #[cfg(test)]
 mod spend_tests {
