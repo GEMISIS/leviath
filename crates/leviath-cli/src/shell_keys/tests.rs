@@ -544,24 +544,18 @@ fn runs_unprompted_by_default(command: &str) -> bool {
     // `all_covered` *is* what the daemon calls, so this cannot drift from it.
     // Nothing is granted: the question is what the shipped defaults allow on
     // their own, before anyone has approved anything.
-    all_covered(
-        &command_keys(command),
-        &[],
-        &|k| safe.contains_key(k),
-        &|_| false,
-    )
+    all_covered(&command_keys(command), &|k| safe.contains_key(k), &|_| {
+        false
+    })
 }
 
 /// What a prompt for `command` would ask for under the shipped defaults, with
 /// `granted` already approved.
 fn still_to_approve(command: &str, granted: &[&str]) -> Vec<String> {
     let safe = crate::approvals::resolve_safe_keys(&Default::default(), None, None, false);
-    uncovered_keys(
-        &command_keys(command),
-        &[],
-        &|k| safe.contains_key(k),
-        &|k| granted.contains(&k),
-    )
+    uncovered_keys(&command_keys(command), &|k| safe.contains_key(k), &|k| {
+        granted.contains(&k)
+    })
 }
 
 /// A prompt names the programs that need approving and leaves out the ones the

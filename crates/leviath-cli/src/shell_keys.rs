@@ -315,20 +315,17 @@ fn keys_from_segments(segments: &[Segment]) -> Vec<String> {
 /// pass against a fix that emitted the right key and still let it be covered,
 /// which is exactly how the safe-list escapes went unnoticed.
 ///
-/// `outside` is what [`outside_workdir`] found: keys whose segment names a path
-/// outside the workdir. The safe list does not cover those, however it reads:
-/// `cat` being safe means reading the project, not `/etc/hosts`. A grant still
-/// covers one, because a grant is a person approving exactly that key.
+/// A line that names a path outside the workdir is never covered, whatever
+/// this says: the callers check [`outside_workdir`] first.
 ///
 /// `&dyn Fn` rather than a generic: one instantiation, so the coverage gate sees
 /// one set of regions instead of one per call site.
 pub(crate) fn all_covered(
     keys: &[String],
-    outside: &[String],
     safe: &dyn Fn(&str) -> bool,
     granted: &dyn Fn(&str) -> bool,
 ) -> bool {
-    !keys.is_empty() && uncovered_keys(keys, outside, safe, granted).is_empty()
+    !keys.is_empty() && uncovered_keys(keys, safe, granted).is_empty()
 }
 
 /// The keys in `keys` that nothing covers yet, in order: what a prompt for the
@@ -341,15 +338,11 @@ pub(crate) fn all_covered(
 /// over again what the safe list already gives.
 pub(crate) fn uncovered_keys(
     keys: &[String],
-    outside: &[String],
     safe: &dyn Fn(&str) -> bool,
     granted: &dyn Fn(&str) -> bool,
 ) -> Vec<String> {
     keys.iter()
-        .filter(|k| {
-            let safe_here = !outside.contains(k) && (safe(k) || safe(program_of(k)));
-            !(safe_here || granted(k))
-        })
+        .filter(|k| !(safe(k) || safe(program_of(k)) || granted(k)))
         .cloned()
         .collect()
 }

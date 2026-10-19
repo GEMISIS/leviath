@@ -286,13 +286,9 @@ pub(super) fn default_safe_keys_cover(command: &str) -> bool {
     };
     let outside = crate::shell_keys::outside_workdir(command, workdir, None, &inside);
     !keys.is_empty()
-        && crate::shell_keys::uncovered_keys(
-            &keys,
-            &outside.keys,
-            &|k| safe.contains_key(k),
-            &|_| false,
-        )
-        .is_empty()
+        && outside.is_empty()
+        && crate::shell_keys::uncovered_keys(&keys, &|k| safe.contains_key(k), &|_| false)
+            .is_empty()
 }
 
 /// Checkpoints that hold a `--yolo` run for a person.

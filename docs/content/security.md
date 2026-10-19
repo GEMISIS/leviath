@@ -219,12 +219,19 @@ handed passes the check `read_file` makes: inside the workdir or a granted `read
 symlinks resolved.
 
 `cat src/main.rs` runs. `cat /etc/hosts`, `grep -r key ~`, `cd / && cat etc/passwd` and
-`git -C /elsewhere log` fall back to the shell's own policy, which asks by default. A person can
-still approve one at the prompt. `lev approvals safe --check "<command>"` says which part of a line
+`git -C /elsewhere log` fall back to the shell's own policy, which asks by default. The check fails
+closed: an expansion, a glob or brace it cannot check, or a `..` the shell might resolve through a
+symlink counts as outside. A person can still approve such a call once, but the prompt offers no
+grant that would cover the next one. `lev approvals safe --check "<command>"` says what in a line
 was outside the workdir.
 
-An unattended run approves an `ask`, so for a stage that must not read outside the project, make it
-a refusal:
+`git` reads the repository, and a repository can be bigger than the workdir. In a workdir inside a
+checkout, `git show HEAD:../x` and `git log -p` show files outside the workdir, with no path
+outside it on the line. Give such a stage `search_files` instead, or a workdir at the repository
+root.
+
+An unattended run approves an `ask`, so for a stage that should not read outside the project, make
+it a refusal:
 
 ```toml
 # config.toml, for every run
@@ -233,10 +240,15 @@ outside_workdir = "deny"
 ```
 
 A blueprint or a stage can set `outside_workdir = "deny"` in its `tool_permissions` as well. Like
-any configured deny, `--yolo` does not lift it. A stage that only reads is better off without
-`shell` altogether: `search_files` and `glob` search the project under the same fence. See
-[Built-in tools](/docs/tools#where-a-safe-listed-read-may-look) for exactly which words count as
-paths.
+any configured deny, `--yolo` does not lift it. It also refuses a line whose reads cannot be
+checked: one that does not parse, `eval`, a shell, an interpreter or a runner such as `xargs`.
+
+That is still a narrowing, not a boundary. `deny` confines what a line names, and a program the
+line runs legitimately (a build, a test) can read anything the user can. The guarantee is a stage
+without `shell`: `search_files` and `glob` search the project under the same fence `read_file`
+has. Or run the stage in a [sandbox](#sandboxes). See
+[Built-in tools](/docs/tools#where-a-safe-listed-read-may-look) for exactly what the check
+reads.
 
 ## Taint tracking (experimental)
 

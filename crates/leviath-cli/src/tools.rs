@@ -435,16 +435,13 @@ pub(crate) fn outside_workdir(
 ///
 /// Says what was outside and what to do instead, so the model retries inside
 /// the workspace rather than hunting for another spelling.
-pub(crate) fn outside_workdir_refusal(
-    outside: &crate::shell_keys::Outside,
-    workdir: &std::path::Path,
-) -> String {
+pub(crate) fn outside_workdir_refusal(why: &str, workdir: &std::path::Path) -> String {
     format!(
-        "[denied] This shell line reads outside the working directory ({}): {}. Outside-workdir \
-         reads are refused for this stage (`outside_workdir = \"deny\"`). Use paths inside the \
-         workspace, or the read_file, search_files and glob tools.",
+        "[denied] This shell line may read outside the working directory ({}): {why}. Reads \
+         outside the workdir are refused for this stage (`outside_workdir = \"deny\"`), and so \
+         is a line whose reads cannot be checked. Use plain paths inside the workspace, or the \
+         read_file, search_files and glob tools.",
         workdir.display(),
-        outside.operands.join(", ")
     )
 }
 

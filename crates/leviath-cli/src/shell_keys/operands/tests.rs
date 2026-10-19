@@ -22,27 +22,43 @@ fn outside(command: &str, workdir: &Path, home: Option<&Path>) -> Outside {
     outside_workdir_for(command, true, workdir, home, &fence(workdir))
 }
 
-/// The issue's three examples stay pre-approvable: nothing in them leaves.
+/// The lines in `commands` judged inside, so a failure names all of them.
+fn judged_inside<'a>(commands: &[&'a str], wd: &Path) -> Vec<&'a str> {
+    commands
+        .iter()
+        .copied()
+        .filter(|c| outside(c, wd, None).is_empty())
+        .collect()
+}
+
+/// The issue's three examples stay pre-approvable, as do the reads of the
+/// project an agent writes all day.
 #[test]
 fn reads_of_the_project_stay_inside() {
     let (_dir, wd) = workdir();
-    for command in [
+    let lines = [
         "cat src/main.rs",
         "grep -rn foo .",
         "git log -- src",
-        "grep -rn \"/api/v1\" src",
         "echo /etc/hosts",
         "cd src && cat main.rs",
         "cat -n src/main.rs | head -5",
         "ls",
-        "jq '.a/.b' data.json",
+        "jq '.a' data.json",
         "cut -d. -f1 src/main.rs",
-        "git log --format=%h/%s -- src",
+        "git log --format=%h -- src",
         "export FOO=1; cat src/main.rs",
-    ] {
-        let found = outside(command, &wd, None);
-        assert!(found.is_empty(), "{command}: {found:?}");
-    }
+        "cat src/*.rs",
+        "grep -rn foo src --include=*.rs",
+        "cat -- src/main.rs",
+        "for x in a b; do echo hi; done",
+    ];
+    let outside_ones: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|c| !outside(c, &wd, None).is_empty())
+        .collect();
+    assert_eq!(outside_ones, Vec::<&str>::new());
 }
 
 /// The issue's refusals, each naming what left.
@@ -50,34 +66,79 @@ fn reads_of_the_project_stay_inside() {
 fn reads_outside_the_project_are_flagged() {
     let (_dir, wd) = workdir();
     let home = wd.parent().unwrap().join("someone");
-    for (command, key, operand) in [
-        ("cat /etc/hosts", "shell:cat /etc/hosts", "/etc/hosts"),
-        ("grep -r key ~", "shell:grep", "~"),
-        (
-            "head ../other/secret",
-            "shell:head ../other/secret",
-            "../other/secret",
-        ),
-        ("git -C /elsewhere log", "shell:git", "/elsewhere"),
-        ("cat < /etc/hosts", "shell:cat", "/etc/hosts"),
+    for (command, operand) in [
+        ("cat /etc/hosts", "/etc/hosts"),
+        ("grep -r key ~", "~"),
+        ("head ../other/secret", "../other/secret"),
+        ("git -C /elsewhere log", "/elsewhere"),
+        ("cat < /etc/hosts", "/etc/hosts"),
         (
             "cat $HOME/.ssh/id_rsa",
-            "shell:cat",
             "HOME/.ssh/id_rsa (expanded at run time)",
         ),
-        ("cat ~other/x", "shell:cat ~other/x", "~other/x"),
-        ("grep -f/etc/list .", "shell:grep", "-f/etc/list"),
-        (
-            "git --git-dir=/x/.git log",
-            "shell:git",
-            "--git-dir=/x/.git",
-        ),
-        ("grep -e x /etc/passwd", "shell:grep", "/etc/passwd"),
+        ("cat ~other/x", "~other/x"),
+        ("grep -f/etc/list .", "-f/etc/list"),
+        ("git --git-dir=/x/.git log", "--git-dir=/x/.git"),
+        ("grep -e x /etc/passwd", "/etc/passwd"),
     ] {
         let found = outside(command, &wd, Some(&home));
-        assert_eq!(found.keys, [key], "{command}");
         assert_eq!(found.operands, [operand], "{command}");
+        assert!(found.unplaceable.is_none(), "{command}");
     }
+}
+
+/// The review of #970's bypasses: every one of these reads outside the
+/// workdir, so none may be pre-approved.
+#[test]
+fn review_bypasses_are_outside() {
+    let (_dir, wd) = workdir();
+    let lines = [
+        "{ cat; } < /etc/hosts",
+        "(cat) < /etc/hosts",
+        "for x in a; do cat; done < /etc/hosts",
+        "echo \"$(< /etc/hosts)\"",
+        "printf %s \"$(< /etc/hosts)\"",
+        "grep -ie. /etc/hosts",
+        "grep --regex=localhost /etc/hosts",
+        "grep -rf /etc/hosts .",
+        "jq -n -L /etc '.'",
+        "cat {/etc/hosts,src/main.rs}",
+        "cat .[.]/.[.]/.[.]/.[.]/.[.]/.[.]/.[.]/.[.]/.[.]/etc/hosts",
+        "cat -- --/../../x",
+        "echo $HOME",
+        "cat src/{a..z}",
+        "cat /etc/host*",
+        "grep -R key .",
+        "grep --dereference-recursive key .",
+    ];
+    assert_eq!(judged_inside(&lines, &wd), Vec::<&str>::new());
+    // A substitution with no text of its own is still named.
+    let found = outside("echo \"$(< /etc/hosts)\"", &wd, None);
+    assert_eq!(
+        found.operands,
+        ["/etc/hosts", "a substitution (expanded at run time)"]
+    );
+    assert!(outside("grep -r key .", &wd, None).is_empty());
+}
+
+/// A glob is expanded and every match checked; one too wide to check is
+/// outside.
+#[test]
+fn a_glob_is_checked_match_by_match() {
+    let (_dir, wd) = workdir();
+    // No match is passed on as written, which is inside.
+    assert!(outside("cat src/*.py", &wd, None).is_empty());
+    // A match the fence refuses is outside, whatever else matched.
+    let refuses_main = |p: &Path| !p.ends_with("src/main.rs") && fence(&wd)(p);
+    let found = outside_workdir_for("cat src/*", true, &wd, None, &refuses_main);
+    assert_eq!(found.operands, ["src/*"]);
+    // Past the cap, nothing is checked and the word is outside.
+    let many = wd.join("many");
+    std::fs::create_dir_all(&many).unwrap();
+    for n in 0..=MAX_GLOB_MATCHES {
+        std::fs::write(many.join(n.to_string()), "").unwrap();
+    }
+    assert_eq!(outside("cat many/*", &wd, None).operands, ["many/*"]);
 }
 
 /// A `cd` out of the workdir uncovers everything after it, and is itself
@@ -86,9 +147,11 @@ fn reads_outside_the_project_are_flagged() {
 fn a_cd_out_uncovers_the_rest_of_the_line() {
     let (_dir, wd) = workdir();
     let found = outside("cd / && cat etc/passwd", &wd, None);
-    assert_eq!(found.keys, ["shell:cat etc/passwd", "shell:cd"]);
+    assert_eq!(
+        found.operands,
+        ["/", "(after a cd out of the working directory)"]
+    );
     let found = outside("cd; ls", &wd, None);
-    assert_eq!(found.keys, ["shell:cd", "shell:ls"]);
     assert_eq!(found.operands[0], "cd");
 }
 
@@ -98,11 +161,8 @@ fn a_cd_out_uncovers_the_rest_of_the_line() {
 fn a_cd_inside_is_followed_from_every_base() {
     let (_dir, wd) = workdir();
     assert!(outside("cd src && cat main.rs", &wd, None).is_empty());
-    // Inside from `src`, outside from the workdir: which one the shell is in
-    // depends on whether the `cd` ran, so it asks.
     assert!(!outside("cd src || cat ../src/main.rs", &wd, None).is_empty());
-    let found = outside("cd src && cat ../../x", &wd, None);
-    assert_eq!(found.keys, ["shell:cat ../../x"]);
+    assert!(!outside("cd src && cat ../../x", &wd, None).is_empty());
 }
 
 /// `~` is the home it names: inside when the workdir is under it and the
@@ -113,8 +173,8 @@ fn home_expands_before_the_check() {
     let home = wd.parent().unwrap().to_path_buf();
     let name = wd.file_name().unwrap().to_string_lossy().to_string();
     assert!(outside(&format!("cat ~/{name}/src/main.rs"), &wd, Some(&home)).is_empty());
+    assert!(outside(&format!("cd ~/{name}/src && cat main.rs"), &wd, Some(&home)).is_empty());
     assert!(!outside("cat ~/x", &wd, None).is_empty());
-    assert!(!outside(&format!("cd ~/{name}/src && cat ../../x"), &wd, Some(&home)).is_empty());
 }
 
 /// A granted `[read_paths]` root is as good as the workdir: `may_read` is
@@ -127,13 +187,45 @@ fn a_granted_root_counts_as_inside() {
     assert!(found.is_empty(), "{found:?}");
 }
 
-/// A line that runs nothing, or cannot be read, names nothing.
+/// A line whose reads its words cannot show is unplaceable: what a `deny`
+/// refuses. A line that does not parse, `eval`, a shell or an interpreter.
 #[test]
-fn nothing_runs_nothing_is_outside() {
+fn a_line_that_runs_something_unseen_is_unplaceable() {
     let (_dir, wd) = workdir();
-    assert!(outside("for x in /etc/*; do", &wd, None).is_empty());
-    assert!(outside("cat `x`", &wd, None).is_empty());
-    assert!(outside("eval cat /etc/hosts", &wd, None).is_empty());
+    for (command, why) in [
+        ("cat `x`", "it cannot be read as commands"),
+        (
+            "eval cat /etc/hosts",
+            "it runs a command assembled at run time",
+        ),
+        (
+            "sh -c \"cat /etc/hosts\"",
+            "`sh` runs a command this cannot read",
+        ),
+        ("/bin/bash -c ls", "`bash` runs a command this cannot read"),
+        (
+            "python3 -c 'print(1)'",
+            "`python3` runs a command this cannot read",
+        ),
+        (
+            "git -c alias.x=!ls x",
+            "`git` runs a command this cannot read",
+        ),
+    ] {
+        let found = outside(command, &wd, None);
+        assert_eq!(found.unplaceable.as_deref(), Some(why), "{command}");
+        assert_eq!(found.refusal().as_deref(), Some(why), "{command}");
+    }
+    // Inside and readable: nothing to refuse.
+    assert_eq!(outside("cat src/main.rs", &wd, None).refusal(), None);
+    let named = outside("cat /etc/hosts", &wd, None).refusal();
+    assert_eq!(named.as_deref(), Some("it names /etc/hosts"));
+    // A line that runs nothing names nothing.
+    assert!(
+        outside("for x in /etc/*; do", &wd, None)
+            .refusal()
+            .is_none()
+    );
 }
 
 #[test]
@@ -143,33 +235,60 @@ fn the_platform_reading_is_the_default() {
     assert!(!found.is_empty());
 }
 
-/// A symlink in the workdir that points out is outside when named, because
-/// the fence checks where it really goes.
+/// On `cmd.exe` a `%VAR%` expands, and `type` prints the file it is named.
+#[test]
+fn cmd_expansions_and_type_are_outside() {
+    let (_dir, wd) = workdir();
+    let cmd = |c: &str| outside_workdir_for(c, false, &wd, None, &fence(&wd));
+    assert_eq!(
+        cmd("more %USERPROFILE%\\x").operands,
+        ["%USERPROFILE%\\x (expanded at run time)"]
+    );
+    assert_eq!(
+        cmd("echo %USERPROFILE%").operands,
+        ["%USERPROFILE% (expanded at run time)"]
+    );
+    assert!(!cmd("type /etc/hosts").is_empty());
+}
+
+/// A symlink in the workdir that points out is outside when named, a glob
+/// that reaches it is too, and so is a `..` after it, which the shell
+/// resolves beside the link's target rather than beside the link.
 #[cfg(unix)]
 #[test]
 fn a_symlink_out_is_outside() {
     let (_dir, wd) = workdir();
-    std::os::unix::fs::symlink("/etc", wd.join("link")).unwrap();
-    assert_eq!(outside("cat link", &wd, None).keys, ["shell:cat link"]);
-    assert_eq!(
-        outside("cat link/hosts", &wd, None).keys,
-        ["shell:cat link/hosts"]
-    );
+    let out = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(out.path().join("dir")).unwrap();
+    std::fs::write(out.path().join("secret.txt"), "TOP").unwrap();
+    std::os::unix::fs::symlink(out.path().join("dir"), wd.join("link")).unwrap();
+    std::os::unix::fs::symlink(out.path().join("secret.txt"), wd.join("leak.txt")).unwrap();
+    let lines = [
+        "cat link",
+        "cat link/x",
+        "cat leak.txt",
+        "cat lea*",
+        "cat link/../secret.txt",
+    ];
+    assert_eq!(judged_inside(&lines, &wd), Vec::<&str>::new());
 }
 
 #[cfg(windows)]
 #[test]
 fn a_symlink_out_is_outside() {
-    // Windows CI cannot create symlinks; the fence's canonical check is the
-    // same call either way, so hold the absolute spelling instead.
+    // Windows CI cannot create symlinks. The `..` check is the same call
+    // either way, so hold it through a directory that is really there.
     let (_dir, wd) = workdir();
-    let found = outside_workdir_for("type C:\\Windows\\win.ini", false, &wd, None, &fence(&wd));
+    let lines = ["type src\\..\\..\\x", "more ..\\x"];
+    let inside: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|c| outside_workdir_for(c, false, &wd, None, &fence(&wd)).is_empty())
+        .collect();
+    assert_eq!(inside, Vec::<&str>::new());
     assert!(
-        found.is_empty(),
-        "type opens no file it is named: {found:?}"
+        outside_workdir_for("more src\\..\\src\\main.rs", false, &wd, None, &fence(&wd)).is_empty()
     );
-    let found = outside_workdir_for("more C:\\Windows\\win.ini", false, &wd, None, &fence(&wd));
-    assert_eq!(found.keys, ["shell:more C:\\Windows\\win.ini"]);
 }
 
 #[test]
@@ -178,12 +297,11 @@ fn candidates_read_flags_the_way_a_program_might() {
         candidates(t).collect()
     }
     assert_eq!(all("src"), ["src"]);
+    assert_eq!(all("a=b"), ["a=b"]);
     assert_eq!(all("-"), ["-"]);
     assert_eq!(all("--file=x"), ["x"]);
-    assert!(all("--verbose").is_empty());
+    assert_eq!(all("--verbose"), ["--verbose"]);
     assert_eq!(all("-rn"), ["n"]);
     assert!(all("-r").is_empty());
-    assert_eq!(all("-rf/etc/x"), ["f/etc/x", "/etc/x", "/x"]);
-    assert_eq!(all("-f../x"), ["../x"]);
-    assert_eq!(all("-f./list"), ["./list"]);
+    assert_eq!(all("-f/x"), ["/x", "x"]);
 }

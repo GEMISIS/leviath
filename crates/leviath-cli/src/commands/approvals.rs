@@ -142,27 +142,31 @@ fn explain(
         crate::yolo::home().as_deref(),
         &inside,
     );
+    if !outside.is_empty() {
+        return format!(
+            "`{command}` reads outside the workdir ({}): {}. No entry or grant covers such a \
+             line, so it {}.\n",
+            workdir.display(),
+            outside.operands.join(", "),
+            outside_verdict(outside_mode)
+        );
+    }
     let mut out = String::new();
     for key in &line_keys {
         let shown = key.strip_prefix("shell:").unwrap_or(key);
-        let source = keys
+        let verdict = match keys
             .get(key)
-            .or_else(|| keys.get(crate::shell_keys::program_of(key)));
-        let verdict = match (outside.keys.contains(key), source) {
-            (true, _) => format!(
-                "outside the workdir, so it {}",
-                outside_verdict(outside_mode)
-            ),
-            (false, Some(source)) => format!("runs ({})", source_label(*source)),
-            (false, None) => "asks: not on the safe list".to_string(),
+            .or_else(|| keys.get(crate::shell_keys::program_of(key)))
+        {
+            Some(source) => format!("runs ({})", source_label(*source)),
+            None => "asks: not on the safe list".to_string(),
         };
         out.push_str(&format!("  {shown}: {verdict}\n"));
     }
-    if !outside.operands.is_empty() {
+    if let Some(why) = outside.unplaceable {
         out.push_str(&format!(
-            "\nOutside {}: {}\n",
-            workdir.display(),
-            outside.operands.join(", ")
+            "\nWhat it reads cannot be checked ({why}), so `outside_workdir = \"deny\"` would \
+             refuse it.\n"
         ));
     }
     out
@@ -281,11 +285,16 @@ mod tests {
         assert!(!out.contains("Outside"), "{out}");
 
         let out = explain("cat /etc/hosts", &safe, OutsideWorkdir::Ask, &wd);
+        assert!(out.contains("reads outside the workdir"), "{out}");
+        assert!(out.contains("): /etc/hosts. No entry"), "{out}");
+        assert!(out.ends_with("so it asks (`[safe_commands] outside_workdir = \"ask\"`).\n"));
+
+        let out = explain("bash -c ls", &safe, OutsideWorkdir::Deny, &wd);
+        assert!(out.contains("  bash: asks: not on the safe list"), "{out}");
         assert!(
-            out.contains("cat /etc/hosts: outside the workdir, so it asks"),
+            out.contains("`bash` runs a command this cannot read"),
             "{out}"
         );
-        assert!(out.contains(": /etc/hosts"), "{out}");
 
         let out = explain("$CMD", &safe, OutsideWorkdir::Ask, &wd);
         assert!(out.contains("always asks"), "{out}");
