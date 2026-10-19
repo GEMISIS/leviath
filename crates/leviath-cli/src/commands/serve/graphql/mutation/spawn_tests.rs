@@ -48,7 +48,7 @@ async fn run(state: AppState, query: &str, variables: serde_json::Value) -> serd
 const SPAWN: &str = "mutation Spawn($request: SpawnRunRequest!) {
   spawnRun(request: $request) {
     __typename
-    ... on SpawnedOutput { runId run { id task } }
+    ... on SpawnedOutput { runId deduplicated run { id task } }
     ... on SpawnRejectedOutput {
       issues { path code message expected got hint known segments { kind name index } }
     }
@@ -154,10 +154,19 @@ async fn a_spawn_carries_every_field_it_was_given() {
             assert_eq!(callback.url.as_str(), "https://1.1.1.1/hook");
             assert_eq!(callback.secret.as_ref().map(|s| s.expose()), Some("shh"));
             assert_eq!(request.delivery.metadata["ticket"], "42");
+            assert_eq!(
+                request
+                    .delivery
+                    .idempotency_key
+                    .as_ref()
+                    .map(|k| k.as_str()),
+                Some("pw:task-1")
+            );
             record("coder-1");
             ControlResponse::Spawned {
                 run_id: "coder-1".to_string(),
                 warnings: Default::default(),
+                deduplicated: true,
             }
         });
         let answer = run(
@@ -208,6 +217,7 @@ async fn a_spawn_carries_every_field_it_was_given() {
                 "delivery": {
                     "callback": { "url": "https://1.1.1.1/hook", "secret": "shh" },
                     "metadata": [{ "key": "ticket", "value": "42" }],
+                    "idempotencyKey": "pw:task-1",
                 },
             } }),
         )
@@ -216,6 +226,7 @@ async fn a_spawn_carries_every_field_it_was_given() {
         let spawned = &answer["data"]["spawnRun"];
         assert_eq!(spawned["__typename"], "SpawnedOutput");
         assert_eq!(spawned["runId"], "coder-1");
+        assert_eq!(spawned["deduplicated"], true);
         assert_eq!(spawned["run"]["task"], "fix it");
     })
     .await;
@@ -253,6 +264,7 @@ async fn a_raw_graph_is_sent_whole_and_a_run_not_yet_written_is_null() {
             ControlResponse::Spawned {
                 run_id: "raw-1".to_string(),
                 warnings: Default::default(),
+                deduplicated: false,
             }
         });
         let answer = run(
@@ -360,7 +372,7 @@ async fn every_problem_this_server_finds_is_answered_at_once() {
                 "allow": ["bad tool"],
                 "maxDepth": 300,
             },
-            "delivery": { "callback": { "url": "not a url" } },
+            "delivery": { "callback": { "url": "not a url" }, "idempotencyKey": "has space" },
         } }),
     )
     .await;
@@ -396,6 +408,7 @@ async fn every_problem_this_server_finds_is_answered_at_once() {
         ("launch.allow[0]", "INVALID"),
         ("launch.max_depth", "OUT_OF_RANGE"),
         ("delivery.callback.url", "INVALID"),
+        ("delivery.idempotency_key", "INVALID"),
     ];
     for (path, code) in wanted {
         assert!(
@@ -823,6 +836,7 @@ fn every_spawn_write_shape_round_trips() {
             key: "k".to_string(),
             value: "v".to_string(),
         }]),
+        idempotency_key: Some("pw:task-1".to_string()),
     });
     round_trip(&SpawnRunRequest {
         source: SpawnSourceWrite::Blueprint(BlueprintRef {

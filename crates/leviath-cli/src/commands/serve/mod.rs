@@ -517,8 +517,11 @@ async fn execute_with_shutdown(
     // Read before `cfg` moves into the shared state below.
     let allow_local_network = cfg.security.allow_local_network;
     let request_limits = request_limits::RequestLimits::resolve(
-        args.max_concurrent_requests,
-        args.request_timeout_secs,
+        request_limits::Flags {
+            max_concurrent_requests: args.max_concurrent_requests,
+            request_timeout_secs: args.request_timeout_secs,
+            spawn_timeout_secs: args.spawn_timeout_secs,
+        },
         &cfg.serve,
     );
     for warning in cfg.validate_keys() {
@@ -1049,6 +1052,7 @@ mod tests {
         let undocumented: Vec<&str> = types::API_CAPABILITIES
             .iter()
             .copied()
+            .chain([types::SPAWN_IDEMPOTENCY])
             .filter(|capability| !API_GUIDE.contains(*capability))
             .collect();
         assert!(
@@ -2658,6 +2662,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(serve_for_test(
@@ -2743,6 +2748,7 @@ mod tests {
                 no_remote_seed_commands: false,
                 max_concurrent_requests: None,
                 request_timeout_secs: None,
+                spawn_timeout_secs: None,
             };
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
             let handle = tokio::spawn(serve_for_test(
@@ -2830,6 +2836,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
 
                 // One flag without the other.
@@ -2911,6 +2918,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -2970,6 +2978,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(serve_for_test(
@@ -3070,6 +3079,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(serve_for_test(
@@ -3152,6 +3162,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(serve_for_test(
@@ -3225,6 +3236,7 @@ mod tests {
                 no_remote_seed_commands: false,
                 max_concurrent_requests: None,
                 request_timeout_secs: None,
+                spawn_timeout_secs: None,
             };
             let result = execute_quietly(args).await;
             assert!(result.is_err());
@@ -3273,6 +3285,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
                 let result = execute_quietly(args).await;
                 assert_execute_failed_on_malformed_config(&result);
@@ -3315,6 +3328,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -3379,6 +3393,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
                 let result = execute_quietly(args).await;
                 assert_execute_failed_on_port_in_use(&result);
@@ -3426,6 +3441,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
                 let result = execute_quietly(args).await;
                 assert_execute_failed_on_port_in_use(&result);
@@ -3464,6 +3480,7 @@ mod tests {
                 no_remote_seed_commands: false,
                 max_concurrent_requests: None,
                 request_timeout_secs: None,
+                spawn_timeout_secs: None,
             };
             let result = execute_quietly(args).await;
             assert!(result.is_err(), "must refuse to start unauthenticated");
@@ -3498,6 +3515,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
 
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -3558,6 +3576,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
 
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -3615,6 +3634,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 }
             }
 
@@ -3694,6 +3714,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
                 let server = tokio::spawn(serve_for_test(
                     args,
@@ -3776,6 +3797,7 @@ mod tests {
                         no_remote_seed_commands: false,
                         max_concurrent_requests: None,
                         request_timeout_secs: None,
+                        spawn_timeout_secs: None,
                     };
                     let server = tokio::spawn(serve_for_test(
                         args,
@@ -3885,6 +3907,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
                 let server = tokio::spawn(serve_for_test(
                     args,
@@ -3949,6 +3972,7 @@ mod tests {
                     no_remote_seed_commands: false,
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
+                    spawn_timeout_secs: None,
                 };
                 let server = tokio::spawn(serve_for_test(
                     args,
@@ -4021,6 +4045,7 @@ mod tests {
             no_remote_seed_commands: false,
             max_concurrent_requests: None,
             request_timeout_secs: None,
+            spawn_timeout_secs: None,
         }
     }
 

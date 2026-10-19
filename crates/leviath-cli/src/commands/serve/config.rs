@@ -40,7 +40,9 @@ fn gateways_of(c: &Config) -> Vec<GatewayInfo> {
 
 /// Redacted view of a config: booleans for keys, never their values.
 /// `requests` is what this server resolved at start-up, which no config
-/// file alone can say once a flag is involved.
+/// file alone can say once a flag is involved, and `idempotent_spawns`
+/// whether the daemon behind it keeps idempotency keys (see
+/// [`capabilities`]).
 ///
 /// `health` is the file behind `c`, which on a broken save is not the file on
 /// disk. Every other field here describes the config in force; without this
@@ -49,6 +51,7 @@ fn gateways_of(c: &Config) -> Vec<GatewayInfo> {
 pub(super) fn redact(
     c: &Config,
     requests: &super::request_limits::RequestLimits,
+    idempotent_spawns: bool,
     health: &crate::daemon::config_reload::ConfigHealth,
 ) -> RedactedConfig {
     let (config_error, config_mtime) = super::config_health::report(health);
@@ -82,7 +85,7 @@ pub(super) fn redact(
         mcp_server_count: c.mcp_servers.len(),
         api_version: API_VERSION.to_string(),
         build: crate::daemon::setup::CURRENT_BUILD.to_string(),
-        capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+        capabilities: capabilities(idempotent_spawns),
         limits: ApiLimits::current(requests),
     }
 }
@@ -97,7 +100,13 @@ pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedCo
     // save has been seen.
     let health = state.config_health().await;
     let config = health.config.clone();
-    Json(redact(&config, &state.limits.request_limits, &health))
+    let keeps_keys = state.daemon_keeps_keys() == Some(true);
+    Json(redact(
+        &config,
+        &state.limits.request_limits,
+        keeps_keys,
+        &health,
+    ))
 }
 
 /// `PUT /api/config` (admin-only). Loads the on-disk config, applies every
@@ -120,7 +129,13 @@ pub(super) async fn put_config(
         .caches
         .model_catalog
         .request_refresh(state.current_config().await, true);
-    Ok(Json(redact(&config, &state.limits.request_limits, &health)))
+    let keeps_keys = state.daemon_keeps_keys() == Some(true);
+    Ok(Json(redact(
+        &config,
+        &state.limits.request_limits,
+        keeps_keys,
+        &health,
+    )))
 }
 
 /// `POST /api/models/probe` (admin-only): what an OpenAI-compatible server
@@ -2066,7 +2081,7 @@ mod tests {
             },
         );
 
-        let redacted = redact(&config, &Default::default(), &healthy());
+        let redacted = redact(&config, &Default::default(), false, &healthy());
         let gateway = &redacted.gateways[0];
         assert_eq!(gateway.name, "groq");
         assert_eq!(gateway.kind, "script");

@@ -5645,3 +5645,6 @@ async fn a_held_run_is_listed_refuses_messages_and_can_be_cancelled() {
     .await;
     assert!(!missing);
 }
+
+#[path = "host_keys_tests.rs"]
+mod keys;

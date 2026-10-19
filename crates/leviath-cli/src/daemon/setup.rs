@@ -271,13 +271,19 @@ pub(crate) async fn setup_daemon_host_with(
     // A secret whose run has no directory any more (one deleted by hand, or
     // a spawn stopped before its run file) is not kept for nothing.
     leviath_runtime::secret_store::SecretStore::of_runs(&runs_dir).sweep(&runs_dir);
+    // The idempotency keys the runs hold, read from their records on the
+    // blocking pool while the MCP servers warm. Every run file is in this
+    // build's layout by now.
+    let keys_dir = runs_dir.clone();
+    let held_keys =
+        tokio::task::spawn_blocking(move || leviath_runtime::host::held_keys(&keys_dir));
     board.begin("bringing back unfinished runs", 0);
     mcp_pool.warm_recovered(&runs_dir).await;
     // The index `lev ps` and the dashboard list runs from follows the runs
     // as they change.
     crate::run_index::keep_fresh(&runtime, runs_dir.clone());
     let refresher_runtime = runtime.clone();
-    let host = build_host(HostParts {
+    let mut host = build_host(HostParts {
         config,
         providers,
         runs_dir,
@@ -290,6 +296,9 @@ pub(crate) async fn setup_daemon_host_with(
         reloader: Some(reloader),
         provider_reload: Some(provider_reload),
     });
+    // A spawn sent again after a restart is answered with the run the first
+    // one started, for as long as that run's record exists.
+    host.recall_keys(held_keys.await.unwrap_or_default());
     // Every list not read live at start is asked for until it answers, and
     // then every list now and then.
     crate::daemon::catalog_refresh::spawn(
@@ -1792,6 +1801,38 @@ binds = [{{ region = "task" }}]
                     status_of(&mut host, run_id.as_str()).await,
                     Some(AgentStatus::Active)
                 );
+            },
+        )
+        .await;
+    }
+
+    /// A spawn sent again under its idempotency key, through the daemon's own
+    /// starter, starts one run; and a daemon started over the same runs reads
+    /// the key back from the run's record and answers the same way.
+    #[tokio::test]
+    async fn a_keyed_spawn_starts_once_and_its_key_survives_a_restart() {
+        crate::config::with_isolated_config_path_async(
+            "a_keyed_spawn_starts_once_and_its_key_survives_a_restart",
+            |_| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let manifest = dir.path().join("agent.toml");
+                std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
+                let runs = tempfile::tempdir().unwrap();
+                let mut request = task_request(&manifest, "do it");
+                request.delivery.idempotency_key =
+                    Some(leviath_runtime::spec::names::IdempotencyKey::new("pw:task-1").unwrap());
+
+                let mut host = fake_host(runs.path());
+                let first = spawn_through(&mut host, request.clone()).await.unwrap();
+                let again = spawn_through(&mut host, request.clone()).await.unwrap();
+                assert_eq!(again, first);
+                assert_eq!(run_ids_in(runs.path()).len(), 1);
+
+                let mut restarted = fake_host(runs.path());
+                restarted.recall_keys(leviath_runtime::host::held_keys(runs.path()));
+                let after = spawn_through(&mut restarted, request).await.unwrap();
+                assert_eq!(after, first);
+                assert_eq!(run_ids_in(runs.path()).len(), 1);
             },
         )
         .await;

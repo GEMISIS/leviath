@@ -83,7 +83,7 @@ impl Extension for SelectionOrder {
 }
 
 /// The operation this request ran, by name where the document holds several.
-fn operation_of<'a>(
+pub(super) fn operation_of<'a>(
     document: &'a ExecutableDocument,
     name: Option<&str>,
 ) -> Option<&'a Positioned<async_graphql::parser::types::OperationDefinition>> {
@@ -97,7 +97,7 @@ fn operation_of<'a>(
 }
 
 /// The fragments a document defines, by name.
-type Fragments = std::collections::HashMap<Name, Positioned<FragmentDefinition>>;
+pub(super) type Fragments = std::collections::HashMap<Name, Positioned<FragmentDefinition>>;
 
 /// Rewrite `value` so each object's keys follow `selection`, recursively.
 ///

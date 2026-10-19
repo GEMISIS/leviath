@@ -580,3 +580,39 @@ fn a_session_left_marked_was_one_that_died() {
     end_session(&dir);
     assert!(!begin_session(&dir), "the last one ended cleanly");
 }
+
+/// A run resumed from its file keeps its graph's and its stages' `routing`,
+/// so it retries and fails its routing calls the way its blueprint asked
+/// rather than the way the operator's `[limits]` would.
+#[test]
+fn a_resumed_run_keeps_its_blueprints_routing() {
+    use crate::spec::graph::{OnRoutingError, RoutingDef};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(leviath_core::files::RUN_FILE);
+    let mut routed = spec();
+    routed.graph.routing = Some(RoutingDef {
+        retry_attempts: std::num::NonZeroU32::new(5),
+        on_error: Some(OnRoutingError::ErrorEdge),
+    });
+    routed.graph.stages[0].routing = Some(RoutingDef {
+        retry_attempts: None,
+        on_error: Some(OnRoutingError::Fail),
+    });
+    crate::runfile::RunFileWriter::create(
+        &path,
+        &routed,
+        &crate::runfile::reader_tests::code(),
+        &scripted_run(1)[0],
+        Default::default(),
+    )
+    .unwrap();
+    let run = read_for_resume(dir.path()).unwrap().expect("a run file");
+    let graph = &run.spec.graph;
+    let stage = graph.stages[0].routing.as_ref();
+    assert_eq!(graph.routing, routed.graph.routing);
+    assert_eq!(RoutingDef::attempts(graph.routing.as_ref(), stage, 3), 5);
+    assert_eq!(
+        RoutingDef::on_error(graph.routing.as_ref(), stage),
+        OnRoutingError::Fail
+    );
+}

@@ -115,6 +115,7 @@ fn a_layout_2_run_file_reads_back_as_it_did_once_upgraded() {
         .map(as_this_build_shows)
         .collect();
     want["stages"] = Value::Array(stages);
+    crate::common::as_layout_6_reads(&mut want);
     assert_eq!(json_of(spec), want);
     let main = spec.stage("main").unwrap();
     assert_eq!(main.reply_cap, Some(200));

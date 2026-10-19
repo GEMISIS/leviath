@@ -559,7 +559,8 @@ impl ControlClient {
     /// **No daemon answering** is retried with backoff for as long as the
     /// outage is younger than this clone's grace, but only when a retry cannot
     /// double an effect: a failure before the request was written, or after it
-    /// for a request that only reads. A spawn or a message that got no reply
+    /// for a request that only reads or a spawn under an idempotency key (see
+    /// [`ControlRequest::repeats_safely`]). Any other spawn, or a message, that got no reply
     /// may or may not have happened, and asking again is how a run gets started
     /// twice; that failure is reported instead. The one exception is a reply
     /// saying the daemon was already shutting down, which means the request was
@@ -605,7 +606,7 @@ impl ControlClient {
                 }
                 Err(AttemptError { stage, error })
                     if is_transient(&error)
-                        && (stage == Stage::Connect || req.is_read_only())
+                        && (stage == Stage::Connect || req.repeats_safely())
                         && self.worth_waiting() =>
                 {
                     tokio::time::sleep(backoff).await;

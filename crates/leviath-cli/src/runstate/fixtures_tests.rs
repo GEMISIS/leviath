@@ -192,6 +192,7 @@ fn spec_of(meta: &RunMeta, regions: Vec<RegionDef>) -> RunSpec {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            idempotency: None,
         },
         env: EnvFingerprint::default(),
         created_at: meta.started_at,

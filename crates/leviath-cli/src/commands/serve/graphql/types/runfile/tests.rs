@@ -24,9 +24,9 @@ use leviath_runtime::spec::launch::{
     CallbackPlan, DeliveryPlan, LaunchPolicy, Placement, Unattended,
 };
 use leviath_runtime::spec::names::{
-    BlueprintName, BlueprintPath, BlueprintRef, ChoiceName, Digest, EdgeName, HttpUrl, InputName,
-    McpServerName, MimePattern, ModelId, ModelRef, ProfileName, ProviderName, RegionName, RunId,
-    SecretRef, StageName, ToolName, WorkdirPath,
+    BlueprintName, BlueprintPath, BlueprintRef, ChoiceName, Digest, EdgeName, HttpUrl,
+    IdempotencyKey, InputName, McpServerName, MimePattern, ModelId, ModelRef, ProfileName,
+    ProviderName, RegionName, RunId, SecretRef, StageName, ToolName, WorkdirPath,
 };
 use leviath_runtime::spec::run_spec::{
     AutoAnswers, ChosenModel, EnvFingerprint, RunSpec as CoreSpec, SeededContent, SpecOrigin,
@@ -447,6 +447,10 @@ fn spec() -> CoreSpec {
                 signed_with: Some(named!(SecretRef, "run-1.secret")),
             }),
             metadata: [("ticket".to_string(), "42".to_string())].into(),
+            idempotency: Some(leviath_runtime::spec::launch::Idempotency {
+                key: named!(IdempotencyKey, "pw:task-1"),
+                request: Digest::of(b"request"),
+            }),
         },
         env: EnvFingerprint {
             providers: [(named!(ProviderName, "mock"), digest.clone())].into(),
@@ -1257,6 +1261,7 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(spec["origin"]["kind"], "BLUEPRINT");
     assert_eq!(spec["stages"][0]["tools"][4]["mcpTool"], "search");
     assert_eq!(spec["delivery"]["callbackSigned"], true);
+    assert_eq!(spec["delivery"]["idempotencyKey"], "pw:task-1");
     assert_eq!(spec["placement"]["parentId"], "parent-1");
     assert!(
         spec["graph"]["stages"]

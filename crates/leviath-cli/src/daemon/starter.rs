@@ -466,6 +466,11 @@ pub(crate) fn record_failed(
     state: &RunState,
     issues: &SpawnIssues,
 ) -> Result<(), leviath_runtime::runfile::RunFileError> {
+    // Its caller hears the run did not start, so it holds no idempotency
+    // key, after a restart as before one. Marked first: a refusal that then
+    // cannot be recorded is still a refusal. A marker that cannot be written
+    // costs only a key held for a run that failed.
+    let _ = leviath_runtime::host::mark_refused(path);
     let mut writer = leviath_runtime::runfile::RunFileWriter::open(path, Default::default())?;
     let mut failed = state.clone();
     failed.status = leviath_runtime::state::RunStatus::Error(issues.to_string());

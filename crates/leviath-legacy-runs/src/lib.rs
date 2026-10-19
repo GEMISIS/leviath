@@ -35,9 +35,11 @@
 //! reads that as the runtime's run graph.
 //!
 //! Alpha builds wrote run files in earlier binary layouts: layout 2, whose
-//! stage plans this build does not read, and layout 3, whose fan-outs named
-//! one worker. [`upgrade()`] rewrites one in this build's layout in place,
-//! and keeps the file as it was in the run's `legacy/` directory;
+//! stage plans this build does not read, layout 3, whose fan-outs named one
+//! worker, layout 4, whose compaction named one model, and layout 5, which
+//! kept neither an idempotency key nor `routing`. [`upgrade()`] rewrites one
+//! in this build's layout in place, and keeps the file as it was in the
+//! run's `legacy/` directory;
 //! [`needs_upgrade`] tells such a file from its header alone.
 //!
 //! This crate is temporary. It exists to carry runs and blueprints over to
@@ -50,6 +52,7 @@ pub mod journal;
 mod layout2;
 mod layout3;
 mod layout4;
+mod layout5;
 mod legacy;
 mod manifest;
 mod migrate;

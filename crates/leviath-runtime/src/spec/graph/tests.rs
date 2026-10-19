@@ -461,9 +461,10 @@ fn unknown_keys_are_refused() {
 }
 
 /// `routing` reads from a blueprint, refuses a value it has no meaning for,
-/// and is left out of the binary run file so its layout does not move.
+/// and is kept in both the readable and the binary form, so a run resumed
+/// from its file keeps it.
 #[test]
-fn routing_is_read_checked_and_kept_out_of_the_binary_form() {
+fn routing_is_read_checked_and_kept_in_every_form() {
     let graph = |extra: &str| {
         format!(
             "{extra}\nlayout = {{ regions = [], total_budget_tokens = 1 }}\n\
@@ -489,10 +490,9 @@ fn routing_is_read_checked_and_kept_out_of_the_binary_form() {
     // The readable forms keep it.
     let json = serde_json::to_string(&g).unwrap();
     assert_eq!(serde_json::from_str::<RunGraph>(&json).unwrap(), g);
-    // The binary form has no room for it, so it comes back unset.
+    // So does the binary form a run file holds.
     let bin = postcard::to_stdvec(&g).unwrap();
-    let back = postcard::from_bytes::<RunGraph>(&bin).unwrap();
-    assert_eq!((back.routing, back.stages[0].routing.clone()), (None, None));
+    assert_eq!(postcard::from_bytes::<RunGraph>(&bin).unwrap(), g);
 
     for bad in [
         "routing = { retry_attempts = 0 }",

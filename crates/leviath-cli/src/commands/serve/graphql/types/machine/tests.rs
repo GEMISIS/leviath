@@ -254,6 +254,7 @@ async fn every_mirrored_function_runs() {
             max_concurrent_requests: BigInt(16),
             max_upload_bytes: BigInt(10_000_000),
             request_timeout_secs: 30,
+            spawn_timeout_secs: 330,
         }
     }
     fn config_error() -> ConfigError {

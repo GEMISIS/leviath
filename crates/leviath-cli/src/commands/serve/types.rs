@@ -102,6 +102,14 @@ impl AppState {
     pub(super) async fn config_health(&self) -> ConfigHealth {
         self.config.clone().checked().await
     }
+
+    /// What the daemon behind this server last said about idempotency keys:
+    /// `Some(true)` when it starts one run per key, `Some(false)` when it
+    /// predates them and refuses a request carrying one, and `None` while no
+    /// daemon has said who it is.
+    pub(super) fn daemon_keeps_keys(&self) -> Option<bool> {
+        self.control.link().daemon.map(|d| d.idempotent_spawns)
+    }
 }
 
 /// What this server refuses regardless of who is asking.
@@ -517,6 +525,26 @@ pub(super) struct SpawnedResp {
     pub(super) seq: u64,
     /// The server process that numbered `seq`.
     pub(super) server_instance: String,
+    /// Whether the run is the one an earlier request under the same
+    /// `delivery.idempotency_key` started, so nothing new started. `seq` is
+    /// then where the stream stood when this request was asked, above that
+    /// run's spawn frame.
+    pub(super) deduplicated: bool,
+}
+
+/// The 408 a spawn answers when it runs past `spawn_timeout_secs`: the run
+/// may or may not have started, and the key to send the request again under
+/// to find out without starting it twice.
+#[derive(Serialize, Debug)]
+pub(super) struct SpawnTimeoutResp {
+    /// What happened, in words.
+    pub(super) error: String,
+    /// Always `unknown`: the daemon may have started the run after this
+    /// server stopped waiting.
+    pub(super) spawn_outcome: &'static str,
+    /// The request's `delivery.idempotency_key`, or `null` when it carried
+    /// none (or this server had not read that far).
+    pub(super) idempotency_key: Option<String>,
 }
 
 /// One problem with a spawn request, as the API serves it: the issue itself,

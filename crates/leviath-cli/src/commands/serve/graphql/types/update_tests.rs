@@ -291,6 +291,7 @@ async fn a_daemon_that_introduced_itself_is_named() {
         tool_env: Some(vec!["BRAVE_API_KEY".to_string()]),
         exe: Some("/opt/leviath/bin/lev".to_string()),
         cwd: Some("/home/me/.leviath".to_string()),
+        idempotent_spawns: false,
     };
     let client = leviath_runtime::control_socket::DaemonIdentity {
         version: "0.6.2".to_string(),
@@ -299,6 +300,7 @@ async fn a_daemon_that_introduced_itself_is_named() {
         tool_env: None,
         exe: None,
         cwd: None,
+        idempotent_spawns: false,
     };
     let status = DaemonStatus::of(
         LinkStatus {

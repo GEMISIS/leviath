@@ -389,6 +389,13 @@
           "default": null,
           "description": "The webhook to call when the run finishes."
         },
+        "idempotency_key": {
+          "description": "The caller's name for this spawn. A request sent again with the same\nkey and nothing else changed is answered with the run the first one\nstarted, for as long as that run's record exists, and starts no\nsecond run. The same key with a different request is refused.\nWritten only when set, so a daemon that predates the key reads a\nrequest without one exactly as before.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "metadata": {
           "additionalProperties": {
             "type": "string"
@@ -2507,6 +2514,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "How the call that picks each stage's next stage is retried, and what a\nfailure does."
         },
         "safe_commands": {
@@ -3238,6 +3246,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "How the call that picks the next edge is retried, and what a failure\ndoes. `None` takes the graph's."
         },
         "sandbox": {

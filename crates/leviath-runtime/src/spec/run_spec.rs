@@ -464,6 +464,7 @@ pub(crate) mod tests {
                     signed_with: Some(crate::spec::names::SecretRef::new("t-1.secret").unwrap()),
                 }),
                 metadata: [("team".to_string(), "a".to_string())].into(),
+                idempotency: None,
             },
             env: EnvFingerprint {
                 providers: [(ProviderName::new("mock").unwrap(), d.clone())].into(),

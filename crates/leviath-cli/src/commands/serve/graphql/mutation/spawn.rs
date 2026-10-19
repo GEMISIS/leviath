@@ -211,6 +211,8 @@ pub(crate) struct Spawned {
     pub(crate) warnings: SpawnIssues,
     /// The bus's number before the daemon was asked.
     pub(crate) seq: u64,
+    /// Whether an earlier request under the same key started it.
+    pub(crate) deduplicated: bool,
 }
 
 /// A run that was started: its id, and the run itself once its record is
@@ -243,6 +245,15 @@ impl Spawned {
     /// beside `since`.
     async fn server_instance(&self) -> ID {
         ID(crate::commands::serve::events::server_instance().to_string())
+    }
+
+    /// True when this answers a request sent again under its
+    /// `delivery.idempotencyKey`: the run is the one the first request
+    /// started, nothing new started, and `warnings` are the ones it started
+    /// with. `seq` is then where the stream stood when this request was
+    /// asked, above that run's `RunSpawnedEvent`.
+    async fn deduplicated(&self) -> bool {
+        self.deduplicated
     }
 
     /// The run as its record stands. Null in the moment between the daemon
@@ -339,6 +350,7 @@ pub(crate) async fn spawn_run(
             run_id: started.run_id,
             warnings: started.warnings,
             seq: started.seq,
+            deduplicated: started.deduplicated,
         }),
         Verdict::Rejected(issues) => SpawnRunResult::Rejected(SpawnRejected::from(&issues)),
     })

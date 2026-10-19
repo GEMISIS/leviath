@@ -4632,6 +4632,7 @@ enabled = false
             serve: ServeConfig {
                 max_concurrent_requests: 16,
                 request_timeout_secs: 5,
+                spawn_timeout_secs: 90,
                 max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
                 event_replay_frames: crate::config::DEFAULT_EVENT_REPLAY_FRAMES,
             },

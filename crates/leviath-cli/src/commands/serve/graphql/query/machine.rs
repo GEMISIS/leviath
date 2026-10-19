@@ -44,6 +44,7 @@ pub(crate) async fn config(ctx: &Context<'_>) -> Config {
     config_of(
         &health.config.clone(),
         &state.limits.request_limits,
+        state.daemon_keeps_keys() == Some(true),
         &health,
         super::super::admin::admin_visible(ctx),
         yolo_file().await,
@@ -377,11 +378,12 @@ pub(crate) async fn yolo_profile(name: &str) -> Option<YoloProfile> {
 pub(crate) fn config_of(
     config: &crate::config::Config,
     requests: &super::super::super::request_limits::RequestLimits,
+    idempotent_spawns: bool,
     health: &crate::daemon::config_reload::ConfigHealth,
     admin_enabled: bool,
     yolo_file: ConfigFileStatus,
 ) -> Config {
-    let redacted = super::super::super::config::redact(config, requests, health);
+    let redacted = super::super::super::config::redact(config, requests, idempotent_spawns, health);
     // Before the struct below, which takes the config's own fields by value.
     let providers = providers_of(&redacted);
     Config {
@@ -429,6 +431,7 @@ pub(crate) fn config_of(
                 max_upload_bytes: BigInt(requests.max_upload_bytes as i64),
                 request_timeout_secs: i32::try_from(requests.request_timeout_secs)
                     .unwrap_or(i32::MAX),
+                spawn_timeout_secs: i32::try_from(requests.spawn_timeout_secs).unwrap_or(i32::MAX),
             },
         },
         health: ConfigHealth {

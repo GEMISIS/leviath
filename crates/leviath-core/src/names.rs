@@ -15,13 +15,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NameError {
     /// The text was empty.
-    #[error("a {what} cannot be empty")]
+    #[error("{} {what} cannot be empty", article(what))]
     Empty {
         /// Which kind of name was being made.
         what: &'static str,
     },
     /// The text was longer than the kind allows.
-    #[error("a {what} is at most {max} bytes, and {got:?} is {len}")]
+    #[error(
+        "{} {what} is at most {max} bytes, and {got:?} is {len}",
+        article(what)
+    )]
     TooLong {
         /// Which kind of name was being made.
         what: &'static str,
@@ -33,7 +36,7 @@ pub enum NameError {
         got: String,
     },
     /// The text held a character the kind does not allow.
-    #[error("a {what} {rule}, and {got:?} does not")]
+    #[error("{} {what} {rule}, and {got:?} does not", article(what))]
     Shape {
         /// Which kind of name was being made.
         what: &'static str,
@@ -42,6 +45,22 @@ pub enum NameError {
         /// The text given.
         got: String,
     },
+}
+
+/// The article a kind of name takes: `an` before a vowel, `a` otherwise.
+fn article(what: &str) -> &'static str {
+    match what.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        true => "an",
+        false => "a",
+    }
+}
+
+/// How a schema describes a kind of name: "A stage name.", "An input name."
+fn described(what: &str) -> String {
+    match article(what) {
+        "an" => format!("An {what}."),
+        _ => format!("A {what}."),
+    }
 }
 
 fn check_len(what: &'static str, s: &str, max: usize) -> Result<(), NameError> {
@@ -204,6 +223,22 @@ fn http_url(what: &'static str, s: &str) -> Result<(), NameError> {
     shape(what, "is an http:// or https:// URL with a host", s, ok)
 }
 
+/// A key a caller sends so that a spawn it repeats starts one run: letters,
+/// digits, `.`, `_`, `:` and `-`, up to 128 of them. Room for a UUID, a
+/// ticket and a step, and nothing that needs escaping in a URL or a log.
+fn idempotency_key(what: &'static str, s: &str) -> Result<(), NameError> {
+    check_len(what, s, 128)?;
+    let ok = s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'));
+    shape(
+        what,
+        "uses only letters, digits, `.`, `_`, `:` and `-`",
+        s,
+        ok,
+    )
+}
+
 /// An MCP server name, by the same rule the MCP config uses.
 fn mcp_server(what: &'static str, s: &str) -> Result<(), NameError> {
     shape(
@@ -229,7 +264,7 @@ macro_rules! name_type {
                 stringify!($name).into()
             }
             fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-                schemars::json_schema!({ "type": "string", "description": concat!("A ", $what, ".") })
+                schemars::json_schema!({ "type": "string", "description": described($what) })
             }
         }
 
@@ -379,6 +414,12 @@ name_type!(
 name_type!(
     /// A configured MCP server.
     McpServerName, "MCP server name", mcp_server
+);
+
+name_type!(
+    /// What a caller names a spawn by, so that sending it again starts no
+    /// second run.
+    IdempotencyKey, "idempotency key", idempotency_key
 );
 
 name_type!(
@@ -697,6 +738,33 @@ mod tests {
     }
 
     #[test]
+    fn idempotency_keys_take_a_uuid_and_refuse_what_needs_escaping() {
+        let long = "k".repeat(128);
+        for good in [
+            "polywright:task-12:step.3",
+            "0b9f6c2e-5d1a-4f2e-9a43-7c1d2e3f4a5b",
+            "a",
+            long.as_str(),
+        ] {
+            assert!(IdempotencyKey::new(good).is_ok(), "{good}");
+        }
+        let too_long = "k".repeat(129);
+        for bad in ["", "has space", "slash/key", "quote\"", too_long.as_str()] {
+            assert!(IdempotencyKey::new(bad).is_err(), "{bad}");
+        }
+        let err = IdempotencyKey::new("a b").unwrap_err().to_string();
+        assert!(err.contains("`.`, `_`, `:` and `-`"), "{err}");
+        assert!(err.starts_with("an idempotency key "), "{err}");
+        let err = IdempotencyKey::new("").unwrap_err().to_string();
+        assert_eq!(err, "an idempotency key cannot be empty");
+        let schema = serde_json::to_value(
+            schemars::SchemaGenerator::default().into_root_schema_for::<IdempotencyKey>(),
+        )
+        .unwrap();
+        assert_eq!(schema["description"], "An idempotency key.");
+    }
+
+    #[test]
     fn mcp_server_names_follow_the_mcp_config() {
         assert!(McpServerName::new("github").is_ok());
         assert!(McpServerName::new("git.hub").is_err());
@@ -728,10 +796,12 @@ mod tests {
             schema_of::<WorkdirPath>(),
             schema_of::<HttpUrl>(),
             schema_of::<McpServerName>(),
+            schema_of::<IdempotencyKey>(),
         ];
         for schema in schemas {
             assert_eq!(schema["type"], "string", "{schema}");
-            assert!(schema["description"].as_str().unwrap().starts_with("A "));
+            let described = schema["description"].as_str().unwrap();
+            assert!(described.starts_with("A ") || described.starts_with("An "));
         }
         assert_eq!(
             <ProfileName as schemars::JsonSchema>::schema_name(),

@@ -13,12 +13,14 @@
 //! - a webhook URL has to pass the same outbound policy a model-supplied URL
 //!   does;
 //! - seed commands are refused on a server started with
-//!   `--no-remote-seed-commands`.
+//!   `--no-remote-seed-commands`;
+//! - an idempotency key is refused when the daemon behind this server
+//!   predates them, since it would refuse the whole request unread.
 //!
-//! The first four are [`SpawnIssue`]s like the daemon's own, so a caller with
+//! All but the seed commands are [`SpawnIssue`]s like the daemon's own, so a caller with
 //! a refused workdir and a misspelled input hears about both in one answer:
-//! this server asks the daemon for its issues too before it answers. The last
-//! is not a refusal: such a run starts with its seed commands off.
+//! this server asks the daemon for its issues too before it answers. The seed
+//! commands are not a refusal: such a run starts with its seed commands off.
 
 use leviath_core::mime::InboundPart;
 use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
@@ -52,6 +54,9 @@ pub(crate) struct Started {
     /// frame of the new run is numbered above it. A subscription resumed from
     /// here is handed the run whole.
     pub(crate) seq: u64,
+    /// Whether the run is the one an earlier request under the same
+    /// idempotency key started, so nothing new started.
+    pub(crate) deduplicated: bool,
 }
 
 /// Start the run `request` asks for.
@@ -69,15 +74,20 @@ pub(crate) async fn start(
     // before this call returns.
     let seq = super::super::events::latest_seq();
     match state.control.spawn(request).await {
-        Ok(ControlResponse::Spawned { run_id, warnings }) => {
+        Ok(ControlResponse::Spawned {
+            run_id,
+            warnings,
+            deduplicated,
+        }) => {
             // No spawned frame from here. The daemon emits one for every run
             // the world gains, however it was launched, so a second one would
             // make exactly the runs that arrived over the network appear twice.
-            tracing::info!(run_id = %run_id, "spawned a run via the API");
+            tracing::info!(run_id = %run_id, deduplicated, "spawned a run via the API");
             Ok(Verdict::Accepted(Started {
                 run_id,
                 warnings,
                 seq,
+                deduplicated,
             }))
         }
         Ok(ControlResponse::Rejected { issues }) => Ok(Verdict::Rejected(issues)),
@@ -182,6 +192,16 @@ async fn server_issues(state: &AppState, request: &mut Request) -> SpawnIssues {
     }
     if limits.no_remote_seed_commands {
         launch.seed_commands = false;
+    }
+    if request.delivery.idempotency_key.is_some() && state.daemon_keeps_keys() == Some(false) {
+        issues.push(
+            SpawnIssue::new(
+                SpecPath::root().field("delivery").field("idempotency_key"),
+                IssueCode::NotAllowed,
+                "the daemon behind this server predates idempotency keys, so it cannot keep this one",
+            )
+            .hint("restart the daemon on this build (`lev daemon restart`), or send the request without a key"),
+        );
     }
     if let Some(callback) = &request.delivery.callback {
         // On the blocking pool: the check resolves the callback's host, and a

@@ -513,6 +513,10 @@ pub(crate) struct RunDelivery {
     pub(crate) callback_signed: bool,
     /// The caller's labels, carried through untouched.
     pub(crate) metadata: Vec<MetadataEntry>,
+    /// The `delivery.idempotencyKey` the run was spawned under, which it
+    /// holds for as long as its record exists. Null for a run spawned
+    /// without one.
+    pub(crate) idempotency_key: Option<String>,
 }
 
 impl From<&DeliveryPlan> for RunDelivery {
@@ -528,6 +532,10 @@ impl From<&DeliveryPlan> for RunDelivery {
                     value: value.clone(),
                 })
                 .collect(),
+            idempotency_key: delivery
+                .idempotency
+                .as_ref()
+                .map(|kept| kept.key.to_string()),
         }
     }
 }

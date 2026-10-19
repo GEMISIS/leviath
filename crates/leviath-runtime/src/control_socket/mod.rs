@@ -34,16 +34,13 @@ use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 mod client;
 pub use client::{
-    CodeMismatch, ControlClient, LinkStatus, RESTART_GRACE, StartupEvent, StartupWatch, Streamed,
-    WorldEventStream,
+    CodeMismatch, ControlClient, LinkStatus, RESTART_GRACE, SPAWN_CONTROL_TIMEOUT_SECS,
+    StartupEvent, StartupWatch, Streamed, WorldEventStream,
 };
 mod startup;
 mod stream;
 #[cfg(test)]
-use client::{
-    DEFAULT_CONTROL_TIMEOUT_SECS, SPAWN_CONTROL_TIMEOUT_SECS, is_transient, request_timeout,
-    timeout_for,
-};
+use client::{DEFAULT_CONTROL_TIMEOUT_SECS, is_transient, request_timeout, timeout_for};
 pub use startup::{ControlGate, StartupBoard, StartupProgress};
 pub use stream::{EventCursor, EventLog, KEPT};
 
@@ -333,24 +330,30 @@ impl ControlRequest {
     /// Whether repeating this request can never do more than the first send
     /// did. Decides what a client may retry after a request was written and
     /// the daemon vanished before replying: a `List` asked twice is a `List`,
-    /// while a `Spawn` asked twice may be two runs.
+    /// while a `Spawn` asked twice may be two runs. A `Spawn` under an
+    /// idempotency key is the exception: the daemon answers it the second
+    /// time with the run the first one started, and a daemon too old to do
+    /// that refuses a request carrying a key outright.
     ///
     /// The mutating ops that *are* idempotent in effect - a second `Cancel`
     /// of the same run does nothing - are still excluded, because their
     /// second reply says `ok: false`, and the caller would report a cancel
     /// that worked as "no such run".
-    pub(crate) fn is_read_only(&self) -> bool {
-        matches!(
-            self,
-            Self::Authenticate { .. }
-                | Self::Status { .. }
-                | Self::ValidateSpawn { .. }
-                | Self::Inspect { .. }
-                | Self::List
-                | Self::ListInteractions
-                | Self::Subscribe
-                | Self::Resubscribe { .. }
-        )
+    pub(crate) fn repeats_safely(&self) -> bool {
+        match self {
+            Self::Spawn { request } => request.delivery.idempotency_key.is_some(),
+            _ => matches!(
+                self,
+                Self::Authenticate { .. }
+                    | Self::Status { .. }
+                    | Self::ValidateSpawn { .. }
+                    | Self::Inspect { .. }
+                    | Self::List
+                    | Self::ListInteractions
+                    | Self::Subscribe
+                    | Self::Resubscribe { .. }
+            ),
+        }
     }
 }
 
@@ -366,6 +369,11 @@ pub enum ControlResponse {
         /// anyway; a caller shows these loudly.
         #[serde(default, skip_serializing_if = "SpawnIssues::is_empty")]
         warnings: SpawnIssues,
+        /// Whether the run is the one an earlier request under the same
+        /// idempotency key started, so nothing new started. Written only
+        /// when true, so a client that predates it reads the reply as before.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        deduplicated: bool,
     },
     /// A spawn or a dry run was refused: every problem with the request, each
     /// with its path and how to fix it.
@@ -500,6 +508,12 @@ pub struct DaemonIdentity {
     /// process could not tell.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Whether this daemon starts one run per idempotency key: a spawn sent
+    /// again under its key is answered with the first one's run. `false`
+    /// from a daemon that predates keys, which refuses a request carrying
+    /// one, so a front end announces the key only when this is set.
+    #[serde(default)]
+    pub idempotent_spawns: bool,
 }
 
 impl DaemonIdentity {
@@ -525,6 +539,7 @@ impl DaemonIdentity {
             cwd: std::env::current_dir()
                 .ok()
                 .map(|path| path.display().to_string()),
+            idempotent_spawns: true,
         }
     }
 
@@ -603,6 +618,7 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
                 Ok(Ok(spawned)) => ControlResponse::Spawned {
                     run_id: spawned.run_id.to_string(),
                     warnings: spawned.warnings,
+                    deduplicated: spawned.deduplicated,
                 },
                 Ok(Err(issues)) => ControlResponse::Rejected { issues },
                 Err(_) => ControlResponse::Error {
@@ -1162,6 +1178,7 @@ mod tests {
                                     "loops" => looping(),
                                     _ => SpawnIssues::default(),
                                 },
+                                deduplicated: false,
                             }),
                         };
                         let _ = reply.send(result);
@@ -1563,6 +1580,7 @@ mod tests {
             ControlResponse::Spawned {
                 run_id: "run-9".to_string(),
                 warnings: SpawnIssues::default(),
+                deduplicated: false,
             }
         );
     }
@@ -1580,16 +1598,31 @@ mod tests {
             ControlResponse::Spawned {
                 run_id: "loops".to_string(),
                 warnings: looping(),
+                deduplicated: false,
             }
         );
         let quiet = serde_json::to_value(ControlResponse::Spawned {
             run_id: "r".to_string(),
             warnings: SpawnIssues::default(),
+            deduplicated: false,
         })
         .unwrap();
         assert_eq!(
             quiet,
             serde_json::json!({"result": "spawned", "run_id": "r"})
+        );
+        // A repeat says so; a reply from a daemon that predates the field
+        // reads as no repeat.
+        let repeat = ControlResponse::Spawned {
+            run_id: "r".to_string(),
+            warnings: SpawnIssues::default(),
+            deduplicated: true,
+        };
+        let wire = serde_json::to_value(&repeat).unwrap();
+        assert_eq!(wire["deduplicated"], true);
+        assert_eq!(
+            serde_json::from_value::<ControlResponse>(wire).unwrap(),
+            repeat
         );
     }
 
@@ -2257,6 +2290,7 @@ mod tests {
             ControlResponse::Spawned {
                 run_id: "r-c".to_string(),
                 warnings: SpawnIssues::default(),
+                deduplicated: false,
             }
         );
 
@@ -2716,7 +2750,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_reading_requests_are_read_only() {
+    fn only_the_reading_requests_and_a_keyed_spawn_repeat_safely() {
         let run = || "r".to_string();
         let read_only = [
             ControlRequest::Authenticate {
@@ -2756,8 +2790,19 @@ mod tests {
             ControlRequest::EndConversation { run_id: run() },
             ControlRequest::Shutdown,
         ];
-        assert!(read_only.iter().all(ControlRequest::is_read_only));
-        assert!(!mutating.iter().any(ControlRequest::is_read_only));
+        assert!(read_only.iter().all(ControlRequest::repeats_safely));
+        assert!(!mutating.iter().any(ControlRequest::repeats_safely));
+        // A spawn under a key is answered the second time with the first
+        // one's run, so it may be sent again.
+        let mut keyed = request("r");
+        keyed.delivery.idempotency_key =
+            Some(crate::spec::names::IdempotencyKey::new("k").unwrap());
+        assert!(
+            ControlRequest::Spawn {
+                request: Box::new(keyed)
+            }
+            .repeats_safely()
+        );
     }
 
     /// The reasons a connect can fail that mean "no daemon answered", versus
@@ -3047,6 +3092,7 @@ mod tests {
             ControlResponse::Spawned {
                 run_id: "run-x".to_string(),
                 warnings: SpawnIssues::default(),
+                deduplicated: false,
             }
         );
         late.await.unwrap();

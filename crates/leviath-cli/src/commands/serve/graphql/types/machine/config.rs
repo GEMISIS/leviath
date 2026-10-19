@@ -38,6 +38,9 @@ pub(crate) struct ServeLimits {
     pub(crate) max_upload_bytes: BigInt,
     /// The per-request deadline, in seconds.
     pub(crate) request_timeout_secs: i32,
+    /// The deadline for `spawnRun` and `validateSpawn`, in seconds, in place
+    /// of `requestTimeoutSecs`. `0` is none.
+    pub(crate) spawn_timeout_secs: i32,
 }
 
 /// Which step refused the config file.

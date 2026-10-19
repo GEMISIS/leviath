@@ -13,60 +13,129 @@
 //! at once, each with its path, what was expected, what arrived and how to fix
 //! it. A body that is not a request at all (the wrong JSON shape, an unknown
 //! key) is a refusal too, with the one problem the decoder could name.
+//!
+//! Both routes run under `[serve] spawn_timeout_secs` rather than the ordinary
+//! request deadline, since starting a run connects its MCP servers and runs
+//! its seeds before the daemon answers.
 
 use axum::extract::multipart::Multipart;
 use axum::extract::{FromRequest, Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
-use leviath_runtime::spec::names::MimePattern;
+use leviath_runtime::spec::names::{IdempotencyKey, MimePattern};
 use leviath_runtime::spec::request::{Attachment, Bytes, SpawnRequest};
 
 use super::core::error::ServeError;
 use super::core::spawn::{self as spawn_core, Verdict};
+use super::request_limits::within;
 use super::types::*;
 
 /// `POST /api/runs`: start a run. 201 with its id, or 422 with every reason
 /// it cannot start.
+///
+/// The request-limit layer leaves this route's deadline to it. The body has
+/// the ordinary deadline to arrive in, and the daemon `spawn_timeout_secs` to
+/// answer. A spawn past that answers 408 with `spawn_outcome: "unknown"` and
+/// the request's idempotency key: the daemon may have started the run after
+/// this server stopped waiting, and sending the request again under the same
+/// key is how a caller finds out without starting it twice.
 pub(super) async fn spawn_run(
     State(state): State<AppState>,
     request: axum::extract::Request,
 ) -> Result<Response, ServeError> {
-    let request = match read_request(&state, request).await? {
+    let limits = state.limits.request_limits;
+    let request = match read_in_time(&state, request).await? {
         Ok(request) => request,
-        Err(issues) => return Ok(refusal(issues)),
+        Err(answer) => return Ok(answer),
     };
-    match spawn_core::start(&state, request).await {
-        Ok(Verdict::Accepted(started)) => Ok((
+    let key = request
+        .delivery
+        .idempotency_key
+        .as_ref()
+        .map(ToString::to_string);
+    match within(limits.spawn_timeout(), spawn_core::start(&state, request)).await {
+        Some(Ok(Verdict::Accepted(started))) => Ok((
             StatusCode::CREATED,
             Json(SpawnedResp {
                 run_id: started.run_id,
                 warnings: IssuesResp::from(started.warnings).issues,
                 seq: started.seq,
                 server_instance: super::events::server_instance().to_string(),
+                deduplicated: started.deduplicated,
             }),
         )
             .into_response()),
-        Ok(Verdict::Rejected(issues)) => Ok(refusal(issues)),
-        Err(e) => Err(e),
+        Some(Ok(Verdict::Rejected(issues))) => Ok(refusal(issues)),
+        Some(Err(e)) => Err(e),
+        None => Ok(spawn_timed_out(limits.spawn_timeout_secs, key)),
     }
+}
+
+/// The request `request`'s body carries, read under the ordinary deadline:
+/// `Ok(Err)` with the answer for a body that did not arrive in time or is
+/// not a request, and `Err` for one that could not be read at all.
+async fn read_in_time(
+    state: &AppState,
+    request: axum::extract::Request,
+) -> Result<Result<SpawnRequest, Response>, ServeError> {
+    let limits = state.limits.request_limits;
+    match within(limits.timeout(), read_request(state, request)).await {
+        None => Ok(Err(late(limits.request_timeout_secs))),
+        Some(read) => Ok(read?.map_err(refusal)),
+    }
+}
+
+/// The ordinary 408, for a request that ran past `secs`.
+fn late(secs: u64) -> Response {
+    err(
+        StatusCode::REQUEST_TIMEOUT,
+        format!("request took longer than {secs} s"),
+    )
+    .into_response()
+}
+
+/// The 408 for a spawn that ran past its deadline of `secs`.
+fn spawn_timed_out(secs: u64, idempotency_key: Option<String>) -> Response {
+    let error = format!(
+        "the spawn took longer than {secs} s, so whether its run started is not known; send it \
+         again with the same delivery.idempotency_key to find out without starting it twice"
+    );
+    (
+        StatusCode::REQUEST_TIMEOUT,
+        Json(SpawnTimeoutResp {
+            error,
+            spawn_outcome: "unknown",
+            idempotency_key,
+        }),
+    )
+        .into_response()
 }
 
 /// `POST /api/runs/validate`: resolve a run without starting it. 200 with a
 /// summary of the run it would be, or 422 with every reason it would be
-/// refused.
+/// refused. The body has the ordinary deadline to arrive in, and the daemon
+/// `spawn_timeout_secs` to answer, as for the spawn it checks: checking
+/// connects the graph's MCP servers just as starting it does.
 pub(super) async fn validate_run(
     State(state): State<AppState>,
     request: axum::extract::Request,
 ) -> Result<Response, ServeError> {
-    let request = match read_request(&state, request).await? {
+    let limits = state.limits.request_limits;
+    let request = match read_in_time(&state, request).await? {
         Ok(request) => request,
-        Err(issues) => return Ok(refusal(issues)),
+        Err(answer) => return Ok(answer),
     };
-    match spawn_core::validate(&state, request).await {
-        Ok(Verdict::Accepted(summary)) => Ok((StatusCode::OK, Json(summary)).into_response()),
-        Ok(Verdict::Rejected(issues)) => Ok(refusal(issues)),
-        Err(e) => Err(e),
+    match within(
+        limits.spawn_timeout(),
+        spawn_core::validate(&state, request),
+    )
+    .await
+    {
+        Some(Ok(Verdict::Accepted(summary))) => Ok((StatusCode::OK, Json(summary)).into_response()),
+        Some(Ok(Verdict::Rejected(issues))) => Ok(refusal(issues)),
+        Some(Err(e)) => Err(e),
+        None => Ok(late(limits.spawn_timeout_secs)),
     }
 }
 
@@ -151,13 +220,37 @@ async fn read_request(
 }
 
 /// A JSON value as a request, or the one issue that says why it is not one.
+/// An idempotency key that is not one is named at its own path, where the
+/// decoder would only say it failed somewhere in the body.
 fn decode(value: serde_json::Value) -> Result<SpawnRequest, SpawnIssues> {
+    if let Some(refused) = value
+        .pointer("/delivery/idempotency_key")
+        .and_then(key_refusal)
+    {
+        return Err(refused.into());
+    }
     serde_json::from_value(value).map_err(|e| {
         SpawnIssues::from(
             SpawnIssue::new(SpecPath::root(), IssueCode::Invalid, e.to_string())
                 .hint("GET /api/schema/spawn-request for the request's shape"),
         )
     })
+}
+
+/// Why `key`, as a request body wrote it, is not an idempotency key, when it
+/// is not one. A `null` is no key at all.
+fn key_refusal(key: &serde_json::Value) -> Option<SpawnIssue> {
+    let path = SpecPath::root().field("delivery").field("idempotency_key");
+    match key {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => IdempotencyKey::new(text.as_str())
+            .err()
+            .map(|e| SpawnIssue::new(path, IssueCode::Invalid, e.to_string()).got(text)),
+        other => Some(
+            SpawnIssue::new(path, IssueCode::WrongType, "an idempotency key is text")
+                .got(other.to_string()),
+        ),
+    }
 }
 
 /// A multipart body: the `request` field's JSON, and every other field as an

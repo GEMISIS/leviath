@@ -160,4 +160,12 @@ pub struct ServeArgs {
     /// or without `--json`.
     #[arg(long, value_name = "PATH")]
     pub ready_file: Option<PathBuf>,
+    /// Seconds one spawn may take before it is answered 408.
+    ///
+    /// Overrides `[serve] spawn_timeout_secs` (default 330). Applies to
+    /// `POST /api/runs`, `POST /api/runs/validate` and the GraphQL `spawnRun`
+    /// and `validateSpawn` mutations, in place of `--request-timeout-secs`.
+    /// `0` disables the timeout.
+    #[arg(long, value_name = "SECS")]
+    pub spawn_timeout_secs: Option<u64>,
 }

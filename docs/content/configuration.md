@@ -561,7 +561,7 @@ a relative entry resolves against the run's workdir. Full walkthrough in
 
 ## `[serve]`
 
-What `lev serve` takes on at once and how long it gives each request. Every key has a default,
+What `lev serve` takes on at once and how long it gives each request and each spawn. Every key has a default,
 so the whole section can be omitted; the `lev serve` flags of the same name win over it, and `0`
 switches a limit off. See [Limits](/docs/api#limits) for what a client sees.
 
@@ -569,12 +569,15 @@ switches a limit off. See [Limits](/docs/api#limits) for what a client sees.
 [serve]
 max_concurrent_requests = 64   # in flight at once; the next is answered 503
 request_timeout_secs    = 30   # per request; over it the client gets 408
+spawn_timeout_secs      = 330  # per spawn, in place of request_timeout_secs
 max_upload_bytes        = 33554432   # one request body; bounds a multipart upload
 event_replay_frames     = 4096       # frames kept for a GraphQL subscription that resumes
 ```
 
-The websocket routes are outside both limits. Neither is a ceiling on the runs behind the API:
-a spawn the daemon takes a minute to accept still spawns.
+`spawn_timeout_secs` covers `POST /api/runs`, `POST /api/runs/validate`, and the GraphQL
+`spawnRun` and `validateSpawn` mutations. Starting a run connects its MCP servers and runs its seed
+commands first, which the daemon gives 300 s. The websocket routes are outside every limit. None is
+a ceiling on the runs behind the API: a run that works for an hour still works.
 
 `event_replay_frames` is how many recent frames the server keeps for a subscription that comes
 back with `since`. Every subscriber shares the one ring. `0` keeps nothing, so every resume reports

@@ -46,6 +46,11 @@ pub struct Spawned {
     /// What may keep it from ever finishing, as [`SpawnSummary::warnings`].
     #[serde(default)]
     pub warnings: SpawnIssues,
+    /// Whether this answers a request sent again under an idempotency key:
+    /// the run is the one the first request started, and nothing new
+    /// started.
+    #[serde(default)]
+    pub deduplicated: bool,
 }
 
 /// One stage of a resolved run, in brief.

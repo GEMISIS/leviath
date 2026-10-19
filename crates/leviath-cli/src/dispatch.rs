@@ -1040,6 +1040,7 @@ mod tests {
             no_remote_seed_commands: false,
             max_concurrent_requests: None,
             request_timeout_secs: None,
+            spawn_timeout_secs: None,
         }
     }
 

@@ -59,7 +59,9 @@ impl Server {
             .map(|dir| dir.to_string_lossy().into_owned())
             .unwrap_or_default();
         match self.control.spawn(request).await {
-            Ok(ControlResponse::Spawned { run_id, warnings }) => {
+            Ok(ControlResponse::Spawned {
+                run_id, warnings, ..
+            }) => {
                 let session_id = new_session_id(&label);
                 self.session = Some(ActiveSession {
                     session_id: session_id.clone(),

@@ -348,6 +348,7 @@ pub(super) fn spawn_looping(req: ControlRequest) -> ControlResponse {
         ControlRequest::Spawn { .. } => ControlResponse::Spawned {
             run_id: RUN_ID.to_string(),
             warnings: looping(),
+            deduplicated: false,
         },
         _ => ControlResponse::Ok { ok: true },
     }
@@ -378,6 +379,7 @@ fn spawn_ok(req: ControlRequest) -> ControlResponse {
         ControlRequest::Spawn { .. } => ControlResponse::Spawned {
             run_id: RUN_ID.to_string(),
             warnings: Default::default(),
+            deduplicated: false,
         },
         _ => ControlResponse::Ok { ok: true },
     }
@@ -660,6 +662,7 @@ async fn empty_cwd_defaults_to_the_launch_directory() {
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
                 warnings: Default::default(),
+                deduplicated: false,
             }
         }
         _ => ControlResponse::Ok { ok: true },
@@ -964,6 +967,7 @@ async fn a_second_prompt_a_finished_run_will_not_take_starts_a_new_run() {
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
                 warnings: Default::default(),
+                deduplicated: false,
             }
         }
         ControlRequest::Message { .. } => ControlResponse::Ok { ok: false },
@@ -1388,6 +1392,7 @@ async fn a_cancel_notification_between_turns_cancels_the_run() {
         ControlRequest::Spawn { .. } => ControlResponse::Spawned {
             run_id: RUN_ID.to_string(),
             warnings: Default::default(),
+            deduplicated: false,
         },
         ControlRequest::Cancel { .. } => {
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1433,6 +1438,7 @@ async fn a_cancel_notification_mid_turn_cancels_the_run() {
         ControlRequest::Spawn { .. } => ControlResponse::Spawned {
             run_id: RUN_ID.to_string(),
             warnings: Default::default(),
+            deduplicated: false,
         },
         ControlRequest::Cancel { .. } => {
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1554,6 +1560,7 @@ async fn output_is_flushed_on_the_poll_tick_between_events() {
                         let mut out = serde_json::to_string(&ControlResponse::Spawned {
                             run_id: RUN_ID.to_string(),
                             warnings: Default::default(),
+                            deduplicated: false,
                         })
                         .unwrap();
                         out.push('\n');
@@ -1621,6 +1628,7 @@ async fn a_closed_event_stream_ends_the_turn() {
                     let mut out = serde_json::to_string(&ControlResponse::Spawned {
                         run_id: RUN_ID.to_string(),
                         warnings: Default::default(),
+                        deduplicated: false,
                     })
                     .unwrap();
                     out.push('\n');
@@ -1709,6 +1717,7 @@ fn restarting_daemon(
                         let out = say(ControlResponse::Spawned {
                             run_id: RUN_ID.to_string(),
                             warnings: Default::default(),
+                            deduplicated: false,
                         });
                         let _ = write_half.write_all(out.as_bytes()).await;
                     }
@@ -1781,6 +1790,7 @@ async fn a_daemon_that_never_comes_back_ends_the_turn() {
                     let mut out = serde_json::to_string(&ControlResponse::Spawned {
                         run_id: RUN_ID.to_string(),
                         warnings: Default::default(),
+                        deduplicated: false,
                     })
                     .unwrap();
                     out.push('\n');
@@ -2029,6 +2039,7 @@ async fn prompt_files_reach_the_daemon_as_parts() {
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
                 warnings: Default::default(),
+                deduplicated: false,
             }
         }
         ControlRequest::Message { content, parts, .. } => {
@@ -2069,6 +2080,7 @@ async fn linked_files_inside_the_working_directory_reach_the_daemon_as_parts() {
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
                 warnings: Default::default(),
+                deduplicated: false,
             }
         }
         _ => ControlResponse::Ok { ok: true },

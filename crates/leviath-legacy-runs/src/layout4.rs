@@ -6,8 +6,9 @@
 //! length and temperature; this build names a model, a list of models, or
 //! none (the current stage's). Only the spec holds a graph, so only the spec
 //! is read here, through the two types that hold the compaction settings:
-//! the graph and the spec itself. Every other type, and every other frame,
-//! is the runtime's own, which did not change.
+//! the graph and the spec itself. Its stages and its delivery are read as
+//! layout 5 still wrote them (see [`crate::layout5`]). Every other type, and
+//! every other frame, is the runtime's own, which did not change.
 //!
 //! The one model converts to `model`, with no `models`: a run converted from
 //! layout 4 summarizes exactly where it did.
@@ -18,10 +19,10 @@ use leviath_core::policy::ToolPolicy;
 use leviath_runtime::spec::graph::{
     self, CodeRef, ContextTransformDef, DependencyDef, EdgeDef, FileTrackingDef, McpServerDef,
     MimeRows, NudgeDef, OutputDef, RegionLayoutDef, RepetitionDef, SafeCommandsDef, SandboxDef,
-    ScriptPermissionsDef, StageDef, ToolRescan,
+    ScriptPermissionsDef, ToolRescan,
 };
 use leviath_runtime::spec::inputs::{InputDecl, InputValues};
-use leviath_runtime::spec::launch::{DeliveryPlan, LaunchPolicy, Placement};
+use leviath_runtime::spec::launch::{LaunchPolicy, Placement};
 use leviath_runtime::spec::names::{Digest, ModelRef, RegionName, RunId, StageName, ToolName};
 use leviath_runtime::spec::run_spec::{
     self, AutoAnswers, EnvFingerprint, ListedAs, SeededContent, SpecOrigin, StagePlan,
@@ -64,7 +65,7 @@ pub(crate) struct RunGraph {
     title: Option<String>,
     description: Option<String>,
     entry: Option<StageName>,
-    stages: Vec<StageDef>,
+    stages: Vec<crate::layout5::StageDef>,
     edges: Vec<EdgeDef>,
     layout: RegionLayoutDef,
     inputs: Vec<InputDecl>,
@@ -96,7 +97,7 @@ impl From<RunGraph> for graph::RunGraph {
             title: g.title,
             description: g.description,
             entry: g.entry,
-            stages: g.stages,
+            stages: g.stages.into_iter().map(Into::into).collect(),
             edges: g.edges,
             layout: g.layout,
             inputs: g.inputs,
@@ -138,7 +139,7 @@ pub(crate) struct RunSpec {
     launch: LaunchPolicy,
     auto_answers: AutoAnswers,
     placement: Placement,
-    delivery: DeliveryPlan,
+    delivery: crate::layout5::DeliveryPlan,
     env: EnvFingerprint,
     created_at: i64,
     listed: Option<ListedAs>,
@@ -159,7 +160,7 @@ impl From<RunSpec> for run_spec::RunSpec {
             launch: spec.launch,
             auto_answers: spec.auto_answers,
             placement: spec.placement,
-            delivery: spec.delivery,
+            delivery: spec.delivery.into(),
             env: spec.env,
             created_at: spec.created_at,
             listed: spec.listed,

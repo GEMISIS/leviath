@@ -116,6 +116,7 @@ async fn the_old_body_starts_a_run_and_answers_in_the_old_shape() {
     let (state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
         run_id: "compat-probe-1".into(),
         warnings: Default::default(),
+        deduplicated: false,
     }));
     let work = tempfile::tempdir().unwrap();
     std::fs::write(work.path().join("brief.txt"), "the brief").unwrap();
@@ -177,6 +178,7 @@ async fn a_plain_body_asks_for_nothing_it_did_not_name() {
     let (state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
         run_id: "r".into(),
         warnings: Default::default(),
+        deduplicated: false,
     }));
     let (status, _) = send(
         state,
@@ -258,6 +260,7 @@ async fn a_region_no_input_fills_is_left_out_with_a_warning() {
     let (state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
         run_id: "compat-probe-2".into(),
         warnings: Default::default(),
+        deduplicated: false,
     }));
     let work = tempfile::tempdir().unwrap();
     std::fs::write(work.path().join("notes.txt"), "a note").unwrap();
@@ -318,6 +321,7 @@ async fn two_texts_for_one_input_keep_the_same_one_every_time() {
             let (state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
                 run_id: "compat-probe-3".into(),
                 warnings: Default::default(),
+                deduplicated: false,
             }));
             let body = serde_json::json!({
                 "blueprint": "compat-probe",
@@ -380,6 +384,7 @@ async fn a_body_that_cannot_be_a_run_is_refused_before_the_daemon() {
         let (state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
             run_id: "never".into(),
             warnings: Default::default(),
+            deduplicated: false,
         }));
         let (status, answer) = send(state, spawn(body.clone())).await;
         assert_eq!(status, want, "{body} -> {answer}");
@@ -398,6 +403,7 @@ async fn a_refused_workdir_has_none_of_its_files_read() {
     let (mut state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
         run_id: "never".into(),
         warnings: Default::default(),
+        deduplicated: false,
     }));
     state.limits = Arc::new(ServeLimits {
         workdir_root: Some(root.path().to_path_buf()),
@@ -427,6 +433,7 @@ async fn a_file_over_the_ceiling_is_refused_wherever_it_is_named() {
         let (mut state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
             run_id: "never".into(),
             warnings: Default::default(),
+            deduplicated: false,
         }));
         let mut limits = ServeLimits::default();
         limits.request_limits.max_upload_bytes = 8;

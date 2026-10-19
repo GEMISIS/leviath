@@ -82,6 +82,7 @@ async fn a_spawn_reaches_the_daemon_with_this_servers_defaults() {
     let (client, seen, _dir, _task) = recording(ControlResponse::Spawned {
         run_id: "run-1".into(),
         warnings: Default::default(),
+        deduplicated: false,
     });
     let limits = ServeLimits {
         no_remote_seed_commands: true,
@@ -286,6 +287,7 @@ async fn a_dry_run_answers_with_the_run_or_every_reason_against_it() {
     let (client, _seen, _dir, _task) = recording(ControlResponse::Spawned {
         run_id: "x".into(),
         warnings: Default::default(),
+        deduplicated: false,
     });
     let failure = validate(&state(client, ServeLimits::default()), named("coder"))
         .await
@@ -321,6 +323,7 @@ async fn a_blueprint_from_a_configured_directory_is_sent_as_that_directory() {
             let (client, seen, _dir, _task) = recording(ControlResponse::Spawned {
                 run_id: "r".into(),
                 warnings: Default::default(),
+                deduplicated: false,
             });
             let mut app = state(client, ServeLimits::default());
             app.config = crate::commands::serve::testutil::fixed_config(crate::config::Config {
@@ -362,6 +365,7 @@ async fn a_whole_graph_is_sent_as_written() {
     let (client, seen, _dir, _task) = recording(ControlResponse::Spawned {
         run_id: "raw-1".into(),
         warnings: Default::default(),
+        deduplicated: false,
     });
     let request = Request::new(SpawnSource::Raw(Box::new(graph.clone())));
     let started = start(&state(client, ServeLimits::default()), request)
@@ -428,6 +432,7 @@ async fn the_write_paths_report_a_daemon_that_will_not_answer() {
     let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Spawned {
         run_id: "x".to_string(),
         warnings: Default::default(),
+        deduplicated: false,
     });
     state.control = control;
     let failure = send_message(&state, "run-a", "hi".to_string(), None, Vec::new())
@@ -438,6 +443,7 @@ async fn the_write_paths_report_a_daemon_that_will_not_answer() {
     let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Spawned {
         run_id: "x".to_string(),
         warnings: Default::default(),
+        deduplicated: false,
     });
     state.control = control;
     let failure = answer_interaction(
@@ -451,6 +457,7 @@ async fn the_write_paths_report_a_daemon_that_will_not_answer() {
     let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Spawned {
         run_id: "x".to_string(),
         warnings: Default::default(),
+        deduplicated: false,
     });
     state.control = control;
     let failure = open_interactions(&state)

@@ -58,6 +58,7 @@ fn args(json: bool, ready_file: Option<PathBuf>) -> ServeArgs {
         shutdown_grace_secs: 1,
         json,
         ready_file,
+        spawn_timeout_secs: None,
     }
 }
 

@@ -133,6 +133,7 @@ fn a_layout_3_fan_out_reads_back_with_its_one_worker_once_upgraded() {
     assert_eq!(worker.runs, WorkerSource::Stage("w".parse().unwrap()));
 
     let mut want = expected["spec"].clone();
+    crate::common::as_layout_6_reads(&mut want);
     for stage in want["graph"]["stages"].as_array_mut().unwrap() {
         let name = stage["name"].as_str().unwrap().to_string();
         if let Some(fan_out) = stage["mode"].get_mut("fan_out") {

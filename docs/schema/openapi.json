@@ -547,7 +547,7 @@
           "runs"
         ],
         "summary": "Start a run",
-        "description": "Takes a spawn request: a blueprint by name with its inputs, or a whole graph. Answers as soon as the daemon has started the run; poll GET /api/runs/{id} or subscribe to /ws for what happens next. A request this server or the daemon refuses answers 422 with every problem at once.",
+        "description": "Takes a spawn request: a blueprint by name with its inputs, or a whole graph. Answers as soon as the daemon has started the run; poll GET /api/runs/{id} or subscribe to /ws for what happens next. A request this server or the daemon refuses answers 422 with every problem at once. A request carrying `delivery.idempotency_key` that an earlier one already started a run under is answered with that run and `deduplicated: true`, and starts nothing; the same key with a different request is refused 422 with a `conflict` issue. The route answers within `[serve] spawn_timeout_secs`, not the ordinary request deadline.",
         "requestBody": {
           "required": true,
           "content": {
@@ -595,7 +595,7 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "408": {
-            "$ref": "#/components/responses/Timeout"
+            "$ref": "#/components/responses/SpawnTimeout"
           },
           "413": {
             "$ref": "#/components/responses/Error"
@@ -3940,7 +3940,7 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "408": {
-            "$ref": "#/components/responses/Timeout"
+            "$ref": "#/components/responses/ValidateTimeout"
           },
           "413": {
             "$ref": "#/components/responses/Error"
@@ -5560,6 +5560,26 @@
           }
         }
       },
+      "SpawnTimeout": {
+        "description": "The spawn ran past `[serve] spawn_timeout_secs`, and whether its run started is not known.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SpawnTimeoutResp"
+            }
+          }
+        }
+      },
+      "ValidateTimeout": {
+        "description": "The dry run ran past `[serve] spawn_timeout_secs`, which a dry run is held to in place of `request_timeout_secs`.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
       "Overloaded": {
         "description": "More requests in flight than `[serve] max_concurrent_requests` allows, or the daemon is not answering. Retry after a moment.",
         "content": {
@@ -6024,6 +6044,7 @@
           "max_tracked_modified_files",
           "max_concurrent_requests",
           "request_timeout_secs",
+          "spawn_timeout_secs",
           "max_upload_bytes"
         ],
         "properties": {
@@ -6066,6 +6087,10 @@
           "request_timeout_secs": {
             "type": "integer",
             "description": "Seconds before a request is dropped with a 408; 0 is no deadline."
+          },
+          "spawn_timeout_secs": {
+            "type": "integer",
+            "description": "Seconds a spawn may take before it is dropped with a 408, in place of request_timeout_secs; 0 is no deadline. `--spawn-timeout-secs` over `[serve] spawn_timeout_secs`."
           },
           "max_upload_bytes": {
             "type": "integer",
@@ -6494,7 +6519,8 @@
           "run_id",
           "warnings",
           "seq",
-          "server_instance"
+          "server_instance",
+          "deduplicated"
         ],
         "properties": {
           "run_id": {
@@ -6516,6 +6542,38 @@
             "items": {
               "$ref": "#/components/schemas/SpawnIssue"
             }
+          },
+          "deduplicated": {
+            "type": "boolean",
+            "description": "True when the request carried a `delivery.idempotency_key` an earlier request already started a run under: this is that run, and nothing new started. See spawn.idempotency."
+          }
+        }
+      },
+      "SpawnTimeoutResp": {
+        "type": "object",
+        "description": "A spawn that ran past `[serve] spawn_timeout_secs`. The daemon may have started the run after the server stopped waiting, so send the request again with the same `delivery.idempotency_key` to find out without starting it twice.",
+        "required": [
+          "error",
+          "spawn_outcome",
+          "idempotency_key"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "spawn_outcome": {
+            "type": "string",
+            "enum": [
+              "unknown"
+            ],
+            "description": "Always `unknown`: whether the run started is not known."
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The request's `delivery.idempotency_key`, or null when it carried none."
           }
         }
       },

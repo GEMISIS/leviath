@@ -478,7 +478,7 @@
     "serve": {
       "type": "object",
       "additionalProperties": false,
-      "description": "What `lev serve` takes on at once and how long it gives each request. The `lev serve` flags of the same name win over these; `0` switches a limit off.",
+      "description": "What `lev serve` takes on at once and how long it gives each request and each spawn. The `lev serve` flags of the same name win over these; `0` switches a limit off.",
       "properties": {
         "max_concurrent_requests": {
           "type": "integer",
@@ -491,6 +491,12 @@
           "minimum": 0,
           "default": 30,
           "description": "Seconds a request may take before it is answered 408. `0` disables the deadline. Websocket routes are not timed."
+        },
+        "spawn_timeout_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 330,
+          "description": "Seconds a spawn may take before it is answered 408, in place of request_timeout_secs: POST /api/runs, POST /api/runs/validate, and the GraphQL spawnRun and validateSpawn mutations. `0` disables the deadline."
         },
         "max_upload_bytes": {
           "type": "integer",

@@ -1065,10 +1065,11 @@ mutation Spawn($since: String!) {
     delivery: {
       callback: { url: "https://example.com/hooks/leviath", secret: "shared-secret" }
       metadata: [{ key: "ticket", value: "LEV-412" }]
+      idempotencyKey: "polywright:lev-412"
     }
     output: { format: "markdown", instructions: "one page, no preamble" }
   }) {
-    ... on SpawnedOutput { runId seq serverInstance warnings { path message } run { status } }
+    ... on SpawnedOutput { runId seq serverInstance deduplicated warnings { path message } run { status } }
     ... on SpawnRejectedOutput { issues { path code message expected got hint known } }
   }
 }
@@ -1081,6 +1082,18 @@ can reach and never leave, each with the code `MAY_NEVER_FINISH`. The run starte
 every problem with the request at once, each at its own path, so one retry can fix them all. A
 refused request is an answer, not a GraphQL error. An issue's `path` names the runtime's request
 field in snake case, such as `inputs.max_items` or `launch.max_depth`.
+
+`delivery.idempotencyKey` names the spawn, so sending it again starts no second run. The same
+request under the same key answers with the first run's id and `deduplicated: true`. A different
+request under it is refused with a `CONFLICT` issue naming the run that holds it.
+[Sending a spawn again](/docs/api#sending-a-spawn-again) has the rest, which is the same on both
+surfaces. `spawn.idempotency` in `config.server.capabilities` says the daemon keeps keys.
+
+`spawnRun` and `validateSpawn` run under `[serve] spawn_timeout_secs`, 330 s by default, rather
+than the ordinary request deadline, when the operation asks for nothing else but `__typename`.
+Beside any other field they run under the ordinary deadline. A `spawnRun` past it may still start its run, so it answers
+with an error coded `SPAWN_OUTCOME_UNKNOWN`. Send it again with the same `idempotencyKey` to find
+out. See [the spawn deadline](/docs/api#the-spawn-deadline).
 
 `BlueprintOutput.inputs` lists what a blueprint takes, with each input's type, default and the
 places its value goes. Read it to build a form.
@@ -1764,6 +1777,7 @@ before any resolver ran included: those are `BAD_USER_INPUT`.
 | `UPSTREAM` | Something this server depends on answered badly. Retrying may well work | `502` |
 | `DAEMON_INCOMPATIBLE` | The daemon was updated under a running server. Restart `lev serve` | `502` |
 | `DAEMON_UNAVAILABLE` | The daemon could not be reached. Get it back, then retry | `503` |
+| `SPAWN_OUTCOME_UNKNOWN` | A `spawnRun` ran past its deadline, and its run may have started. Send it again under its key | `408` |
 | `INTERNAL` | Something failed that you did nothing wrong to cause | `500` |
 
 `extensions.httpStatus` carries that same number, so a client that already knows the REST
@@ -1787,6 +1801,8 @@ The same situation answers the same way on both surfaces:
 | Read a run that does not exist | `run` is `null` | `404` |
 | Read a step past a run's last | `RANGE_NOT_SATISFIABLE` | `416` |
 | The daemon is not running | `DAEMON_UNAVAILABLE` | `503` |
+| A spawn runs past `spawn_timeout_secs` | `SPAWN_OUTCOME_UNKNOWN` | `408` with `spawn_outcome: "unknown"` |
+| Any other operation runs past its deadline | `408` with `{"error": ...}` | `408` |
 
 Two rows differ in shape and not in meaning. A second answer to one question is an outcome rather
 than an error, and a lookup by id answers `null` for a miss, as GraphQL lookups do.

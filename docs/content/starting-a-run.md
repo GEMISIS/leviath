@@ -326,6 +326,11 @@ ticket = "REL-12"
 team = "platform"
 ```
 
+```toml
+[delivery]
+idempotency_key = "polywright:task-12"
+```
+
 `callback` POSTs to `url` when the run finishes. With a `secret`, the body is signed with
 HMAC-SHA256 so the receiver can check it. [Spawning with a signed
 webhook](/docs/api#spawning-with-a-signed-webhook) shows how to verify it. The secret never
@@ -338,6 +343,12 @@ about it.
 
 `metadata` is a table of text labels: a ticket, a tenant, a batch. Nothing in the run reads them.
 They come back unchanged with the run, and the run search looks through them.
+
+`idempotency_key` is your name for the spawn: 1 to 128 letters, digits, `.`, `_`, `:` or `-`. Send
+the same request again under it and the daemon answers with the run the first one started, and
+starts nothing. A different request under the same key is refused with a `conflict`. The key is
+held for as long as the run's record exists. Use one whenever a spawn may be sent twice, such as
+after a timeout; see [sending a spawn again](/docs/api#sending-a-spawn-again).
 
 ## Check before you start
 

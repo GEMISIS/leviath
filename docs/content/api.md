@@ -67,20 +67,22 @@ a test, so a client generator or an agent can consume the contract directly.
 
 ## Limits
 
-The server holds a bounded number of requests in flight and gives each one a deadline. Both have
-a default, both can be set in the config file or on the command line, and `0` switches either
-off. A flag wins over the config file, and the config file over the default.
+The server holds a bounded number of requests in flight and gives each one a deadline. A spawn
+gets a longer deadline of its own. Each limit has a default, can be set in the config file or on
+the command line, and is switched off with `0`. A flag wins over the config file, and the config
+file over the default.
 
 | Limit | Default | Flag | Config key | Over it |
 |---|---|---|---|---|
 | Requests in flight | 64 | `--max-concurrent-requests <N>` | `[serve] max_concurrent_requests` | 503 at once, not queued |
 | Seconds per request | 30 | `--request-timeout-secs <SECS>` | `[serve] request_timeout_secs` | 408, and the handler is dropped |
+| Seconds per spawn | 330 | `--spawn-timeout-secs <SECS>` | `[serve] spawn_timeout_secs` | 408 saying whether the run started is not known |
 | Bytes per request body | 32 MiB | none | `[serve] max_upload_bytes` | 413; this is what bounds a multipart upload |
 
-Both answers carry the usual `{"error": "..."}` body. The websocket routes (`/ws`,
-`/ws/agents/{id}` and `/ws/graphql`) are outside both: a subscription is meant to stay open. An
-unauthenticated request takes a slot while it is being refused, so a flood without a token is
-refused at the cap like any other.
+The answers carry the usual `{"error": "..."}` body, apart from a spawn's 408 below. The websocket
+routes (`/ws`, `/ws/agents/{id}` and `/ws/graphql`) are outside every limit: a subscription is meant
+to stay open. An unauthenticated request takes a slot while it is being refused, so a flood
+without a token is refused at the cap like any other.
 
 The slot and the deadline both end when the route answers, not when its body has been sent. The
 byte routes (`files/raw`, `blobs`, `artifacts` and `exports`) send a file a block at a time
@@ -88,8 +90,7 @@ after answering. So a large download is not cut off at 30 s, and it does not hol
 it streams.
 
 A 408 does not undo what the request had already started. A file read finishes, and a spawn the
-daemon accepted is a run. If a spawn gets a 408, list the runs before sending it again, or it
-may start twice.
+daemon accepted is a run.
 
 Three routes take a slot but have no deadline, because each waits on something slower than the
 default by design. Dropping one partway does damage a late answer would not:
@@ -103,10 +104,43 @@ default by design. Dropping one partway does damage a late answer would not:
 Each is bounded by the deadline named in the table, so none can hold its slot forever. Dropping
 the login request closes the loopback listener the browser redirects to.
 
-Neither limit is a ceiling on the runs behind the API. A spawn whose daemon takes a minute still
-spawns; the route answers as soon as the daemon has accepted it. `GET /api/config` reports the
-values in force under `limits.max_concurrent_requests` and `limits.request_timeout_secs`, so a
-client sees what this server resolved rather than the default it would guess.
+None of these limits is a ceiling on the runs behind the API. A run that works for an hour still
+works; the route answers as soon as the daemon has started it. `GET /api/config` reports the values
+in force under `limits.max_concurrent_requests`, `limits.request_timeout_secs` and
+`limits.spawn_timeout_secs`. A client sees what this server resolved rather than the default it
+would guess.
+
+### The spawn deadline
+
+Starting a run can take minutes. The daemon connects the graph's MCP servers and runs its seed
+commands before it answers, and a spawn waits up to 300 s for that answer. So the spawns have their own
+deadline, 330 s by default, in place of the ordinary one:
+
+- `POST /api/runs` and `POST /api/runs/validate`;
+- the GraphQL `spawnRun` and `validateSpawn` mutations.
+
+Every GraphQL operation arrives on `POST /graphql`, so the server picks that route's deadline once
+the operation is parsed. One whose top-level fields are only `spawnRun`, `validateSpawn` and
+`__typename` gets the spawn deadline. A field `@skip` or `@include` leaves out does not count. Any
+other operation gets the ordinary deadline, even beside a spawn, and answers 408 past it like a
+REST route. Every operation still takes a slot under the in-flight cap.
+
+On every spawn route the request body has the ordinary deadline to arrive in; only the daemon's
+answer gets the spawn deadline. A multipart upload large enough to take longer than
+`request_timeout_secs` to send needs that deadline raised.
+
+A spawn past its deadline may still start: the daemon carries on after the server stops waiting. So
+`POST /api/runs` answers 408 with a body that says so, and names the request's
+[idempotency key](#sending-a-spawn-again):
+
+```json
+{"error": "the spawn took longer than 330 s, so whether its run started is not known; ...",
+ "spawn_outcome": "unknown", "idempotency_key": "polywright:task-12"}
+```
+
+`idempotency_key` is `null` for a request sent without one. Over GraphQL the same case is an error
+whose `extensions.code` is `SPAWN_OUTCOME_UNKNOWN`. Either way, send the request again with the same
+key rather than guess. A dry run past its deadline started nothing, so it is an ordinary 408.
 
 ## Running `lev serve` under a supervisor
 
@@ -592,7 +626,8 @@ curl -X POST http://localhost:3000/api/runs \
 A run that starts answers `201` with its id:
 
 ```json
-{"run_id": "coder-1790848889-ecc01e84ab94", "warnings": [], "seq": 4182, "server_instance": "9f3c2a71d04be6a8"}
+{"run_id": "coder-1790848889-ecc01e84ab94", "warnings": [], "seq": 4182, "server_instance": "9f3c2a71d04be6a8",
+ "deduplicated": false}
 ```
 
 `seq` is the event stream's number just before the run started, and `server_instance` is the
@@ -611,6 +646,42 @@ installed blueprint, optionally pinned with a `digest`, or `{"raw": {...}}` for 
 [blueprint or raw graph](/docs/starting-a-run#blueprint-or-raw-graph).
 
 Leave `workdir` out and the run works in the directory `lev serve` was started in.
+
+### Sending a spawn again
+
+A client that times out waiting for a spawn cannot tell whether the run started. Give the spawn a
+name, `delivery.idempotency_key`, and sending it again tells you without starting a second run:
+
+```json
+{"source": {"blueprint": {"name": "coder"}}, "inputs": {"task": "Fix the login bug"},
+ "delivery": {"idempotency_key": "polywright:task-12", "metadata": {"ticket": "REL-12"}}}
+```
+
+A key is 1 to 128 letters, digits, `.`, `_`, `:` or `-`. Anything else is an `invalid` issue at
+`delivery.idempotency_key`. The daemon keeps the keys, one set per machine, so two `lev serve`
+processes see each other's.
+
+| You send | You get |
+|---|---|
+| The same request again under the same key | `201` with the first run's id and `"deduplicated": true`. Nothing new starts |
+| A different request under the same key | `422` with one `conflict` issue at `delivery.idempotency_key` naming the run that holds it |
+| The same request while the first is still starting | The first one's answer, once it has one |
+
+A repeat's `seq` is where the event stream stands when it is asked, so the run's own
+`agent_spawned` frame is below it.
+
+"The same request" means every field but the key is the same. A field left at its default counts
+the same as one left out, so a later build that adds a field does not turn a retry into a
+conflict. A repeat starts no run, so the
+socket sends no second `agent_spawned` frame and no second webhook is posted. Its `warnings` are
+the ones the first spawn answered with.
+
+A request that is refused does not claim its key, so a corrected request can use it. A key is held
+for as long as its run's record exists: deleting the run frees it. The key is kept in the run's
+record, so a restarted daemon still knows it. `POST /api/runs/validate` checks a key's shape and
+nothing else. `spawn.idempotency` in the `capabilities` list says the daemon behind this server
+keeps keys. A daemon too old to keep them would refuse the request, so the server refuses a keyed
+one itself with a `not_allowed` issue.
 
 ### When a request is refused
 
@@ -658,6 +729,7 @@ input hears about both in one answer.
 | `launch.unattended` | The server runs with `--no-remote-yolo` and the value is anything but `"off"` |
 | `launch.allow` | The server runs with `--no-remote-yolo` and the list is not empty |
 | `delivery.callback.url` | The URL fails the outbound policy: loopback, private and link-local addresses are refused |
+| `delivery.idempotency_key` | The daemon behind this server predates idempotency keys. Restart it on this build |
 | `source.blueprint_file` | Always. A blueprint is read from a directory only for a caller on this machine |
 
 A request with no `workdir` runs in the directory `lev serve` was started in. Under
@@ -2161,6 +2233,7 @@ than that feature, not broken.
 | `models.mime_types` | `input_types` and `output_types` on every `GET /api/models` entry: the mime type patterns a model takes and hands back |
 | `models.cached` | `GET /api/models` answers from a catalogue the server keeps. See [the model catalogue](#the-model-catalogue) |
 | `spawn.parts` | `attachments`, and `multipart/form-data` file fields named after them, on `POST /api/runs`. See [attaching files](#attaching-files) |
+| `spawn.idempotency` | `delivery.idempotency_key` on a spawn, kept by the daemon. See [sending a spawn again](#sending-a-spawn-again) |
 | `messages.parts` | `parts`, `multipart/form-data` and `@path` tokens on `POST /api/runs/{id}/message` |
 | `spawn.request` | The typed spawn request on REST and GraphQL. See [detecting the spawn request](#detecting-the-spawn-request) |
 | `runs.blobs` | `GET /api/runs/{id}/blobs` and `/blobs/{sha256}`: the stored parts a run holds and their bytes. See [a run's parts](#a-runs-parts) |

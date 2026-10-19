@@ -287,3 +287,14 @@ pub fn journal_bytes(frames: &[Vec<u8>]) -> Vec<u8> {
     }
     out
 }
+
+/// A spec an older layout wrote, the way this build reads it once upgraded:
+/// spawned under no idempotency key, and with no `routing` of its own on the
+/// graph or any stage, since no older layout kept either.
+pub fn as_layout_6_reads(spec: &mut serde_json::Value) {
+    spec["delivery"]["idempotency"] = serde_json::Value::Null;
+    spec["graph"]["routing"] = serde_json::Value::Null;
+    for stage in spec["graph"]["stages"].as_array_mut().unwrap() {
+        stage["routing"] = serde_json::Value::Null;
+    }
+}
