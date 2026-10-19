@@ -814,6 +814,7 @@ type ToolQuery = (
         Option<&'static crate::components::AgentState>,
         Option<&'static crate::components::BatchExecutions>,
         Option<&'static super::tools::RecoveredResults>,
+        Option<&'static super::EndAfterBatch>,
     ),
 );
 
@@ -868,7 +869,7 @@ pub(crate) fn collect_tools(
             progress,
             mut flags,
             activity,
-            (metadata, agent_state, executions, recovered),
+            (metadata, agent_state, executions, recovered, end_after),
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -900,6 +901,14 @@ pub(crate) fn collect_tools(
                 });
             }
         }
+        // A stage that ends on this batch's answer does, unless a call on the
+        // lane failed: the model is shown that rather than having the stage
+        // end over it.
+        let stage_ends = end_after.is_some()
+            && !outcome
+                .results
+                .iter()
+                .any(|(_, result)| call_had_no_effect(result));
         // Merge the inline context-tool results (if any) with the lane results,
         // ordered by the original tool calls.
         let mut parts = outcome.results;
@@ -1006,14 +1015,18 @@ pub(crate) fn collect_tools(
                 );
             }
         }
-        commands
-            .entity(outcome.entity)
+        let mut agent = commands.entity(outcome.entity);
+        agent
             .remove::<AwaitingTools>()
             .remove::<ContextToolResults>()
             .remove::<super::tools::RecoveredResults>()
             .remove::<super::tools::LandedResults>()
-            .remove::<InFlightWork>()
-            .insert(ReadyToInfer);
+            .remove::<super::EndAfterBatch>()
+            .remove::<InFlightWork>();
+        match stage_ends {
+            true => agent.insert(super::ResolveTransition),
+            false => agent.insert(ReadyToInfer),
+        };
     }
 }
 

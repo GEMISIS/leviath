@@ -6748,6 +6748,11 @@ type LedgerStageOutput {
 	runawayWarned: Boolean!
 	"Whether its output cap was raised."
 	outputCapRaised: Boolean!
+	"""
+	`submit_output` calls it made once a visit to it already held an
+	answer.
+	"""
+	resubmissions: Int!
 	"When it started."
 	startedAt: Timestamp
 	"When it ended."

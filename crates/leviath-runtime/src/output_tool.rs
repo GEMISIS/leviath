@@ -292,6 +292,19 @@ pub(crate) fn handle_output_tool(
     (ack, Some(output))
 }
 
+/// Whether a `submit_output` call hands back `recorded` again: the same
+/// content, naming the same files, each still holding the bytes recorded for
+/// it. A file rewritten since is a new answer, even under the same path, so a
+/// stage sent back to fix one records the fix.
+pub(crate) fn repeats(
+    args: &serde_json::Value,
+    recorded: &FinalOutput,
+    workdir: Option<&std::path::Path>,
+) -> bool {
+    args.get("content").and_then(serde_json::Value::as_str) == Some(recorded.content.as_str())
+        && artifacts::unchanged(args, &recorded.artifacts, workdir)
+}
+
 /// Mirror the submission into the pinned `final_output` region, replacing
 /// whatever was there.
 ///

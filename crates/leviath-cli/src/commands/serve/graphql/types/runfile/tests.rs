@@ -496,6 +496,7 @@ fn record() -> StageRecord {
         first_call_prompt_tokens: Some(400),
         runaway_warned: true,
         output_cap_raised: true,
+        resubmissions: 0,
         started_at: Some(10),
         ended_at: Some(20),
         clock: clock(),

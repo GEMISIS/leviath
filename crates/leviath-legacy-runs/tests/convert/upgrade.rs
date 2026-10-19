@@ -56,7 +56,7 @@ impl Layout2 {
 /// What the layout-2 build read back from the fixture.
 fn expected() -> Value {
     let text = std::fs::read_to_string(fixtures_dir().join("layout-2.json")).unwrap();
-    serde_json::from_str(&text).unwrap()
+    crate::common::as_layout_8_reads(serde_json::from_str(&text).unwrap())
 }
 
 /// A stage plan as the layout-2 build showed it, the way this build shows

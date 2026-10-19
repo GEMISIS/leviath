@@ -44,6 +44,17 @@ same list.
   its table row, where they used to skip the model or assume 8192 tokens.
   There is no switch back, since the old figure was a guess; a
   `[model_capabilities]` entry still overrides it.
+- An accepted `submit_output` now ends a stage that has nowhere else to go,
+  without waiting for a reply with no tool call: a stage no `always` or
+  `llm_choice` edge leaves, or the stage a fan-out worker runs. A model that
+  calls a tool on every turn used to resubmit until the stage's iteration
+  cap, and one such worker held up its whole fan-out. Elsewhere, submitting
+  the answer already recorded records nothing again: the model is told its
+  answer is in, and the stage moves on after the second repeat. The stage
+  leaves through its ordinary transition, so gates, review and required
+  regions still apply. Interactive stages are unchanged. There is no switch
+  for the old behaviour; a stage that should keep working after it answers
+  can call `submit_output` last.
 - A stage with `mode = "interactive"` now takes turns with a person. After a
   reply with no tool calls it waits for the next message instead of moving
   on: `waiting_input`, wait reason `awaiting_message` (GraphQL
@@ -1009,6 +1020,11 @@ same list.
   (`write-paths-shell`) or call MCP tools (`write-paths-mcp`), which those do
   not cover. GraphQL `BlueprintOutput.writePaths`, a stage's `writePaths`
   and `LaunchPolicyOutput.writePaths` read them back.
+- `lev stages` has a `RESUB` column, and every stage record (`lev stages
+  --json`, the run file and GraphQL's run-file state) a `resubmissions`
+  count: the `submit_output` calls a stage made after a visit to it already
+  held an answer. Run files move to layout 8; layout 2 to 7 files are
+  upgraded at daemon start, with no resubmissions counted.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is

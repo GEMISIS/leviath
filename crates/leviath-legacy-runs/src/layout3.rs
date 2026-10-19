@@ -31,13 +31,8 @@ use leviath_runtime::spec::names::{
 use leviath_runtime::spec::run_spec::{
     self, AutoAnswers, EnvFingerprint, ListedAs, SeededContent, SpecOrigin, StagePlan,
 };
+use leviath_runtime::state;
 use leviath_runtime::state::context::PartState;
-use leviath_runtime::state::{
-    self as state, BlobFile, Clock, ContextDiff, ContextState, Cursor, FinalOutputState, Flags,
-    Grants, MessageState, OpenInteraction, PendingBatch, PipelinePhase, PointProgress,
-    ReadPathCounts, RunEvent, RunFiles, RunStatus, StageProgress, StageRecord, Totals,
-    TransitionRecord, WaitState,
-};
 use serde::Deserialize;
 
 /// The fingerprint in the header of every layout-3 run file.
@@ -342,179 +337,17 @@ impl From<FanOutState> for state::FanOutState {
     }
 }
 
-/// A run's state, with its fields in layout 3's order.
-#[derive(Debug, Deserialize)]
-pub(crate) struct RunState {
-    seq: u64,
-    status: RunStatus,
-    cursor: Cursor,
-    phase: PipelinePhase,
-    accepts_messages: bool,
-    visits: BTreeMap<StageName, u32>,
-    progress: StageProgress,
-    ledger: Vec<StageRecord>,
-    context: ContextState,
-    pending: Option<PendingBatch>,
-    fan_out: Option<FanOutState>,
-    inbox: Vec<MessageState>,
-    interactions: Vec<OpenInteraction>,
-    totals: Totals,
-    clock: Clock,
-    flags: Flags,
-    children: Vec<RunId>,
-    title: Option<String>,
-    final_output: Option<FinalOutputState>,
-    wait_reason: Option<WaitState>,
-    last_transition: Option<TransitionRecord>,
-    point: PointProgress,
-    title_error: Option<String>,
-    read_paths: Option<ReadPathCounts>,
-    held: Option<leviath_runtime::spec::issues::SpawnIssues>,
-    files: RunFiles,
-    blobs: Vec<BlobFile>,
-    grants: Grants,
-    written: u64,
-    last_progress_at: Option<i64>,
-    remote_jobs: BTreeMap<String, String>,
-}
+/// A run's state as layouts 2 and 3 wrote it: layout 7's, with this
+/// layout's fan-out in progress.
+pub(crate) type RunState = crate::layout7::RunState<FanOutState>;
 
-impl From<RunState> for state::RunState {
-    fn from(s: RunState) -> Self {
-        Self {
-            seq: s.seq,
-            status: s.status,
-            cursor: s.cursor,
-            phase: s.phase,
-            accepts_messages: s.accepts_messages,
-            visits: s.visits,
-            progress: s.progress,
-            ledger: s.ledger,
-            context: s.context,
-            pending: s.pending,
-            fan_out: s.fan_out.map(Into::into),
-            inbox: s.inbox,
-            interactions: s.interactions,
-            totals: s.totals,
-            clock: s.clock,
-            flags: s.flags,
-            children: s.children,
-            title: s.title,
-            final_output: s.final_output,
-            wait_reason: s.wait_reason,
-            last_transition: s.last_transition,
-            point: s.point,
-            title_error: s.title_error,
-            read_paths: s.read_paths,
-            held: s.held,
-            files: s.files,
-            blobs: s.blobs,
-            grants: s.grants,
-            written: s.written,
-            last_progress_at: s.last_progress_at,
-            remote_jobs: s.remote_jobs,
-        }
-    }
-}
-
-/// One changed field of a state, in layout 3's order of variants.
-#[derive(Debug, Deserialize)]
-pub(crate) enum Change {
-    Status(RunStatus),
-    Cursor(Cursor),
-    Phase(PipelinePhase),
-    AcceptsMessages(bool),
-    Visits(BTreeMap<StageName, u32>),
-    Progress(StageProgress),
-    LedgerRecord(u32, StageRecord),
-    LedgerTruncate(u32),
-    Context(ContextDiff),
-    Pending(Option<PendingBatch>),
-    FanOut(Option<FanOutState>),
-    Inbox(Vec<MessageState>),
-    Interactions(Vec<OpenInteraction>),
-    Totals(Totals),
-    Clock(Clock),
-    Flags(Flags),
-    Children(Vec<RunId>),
-    Title(Option<String>),
-    FinalOutput(Option<FinalOutputState>),
-    WaitReason(Option<WaitState>),
-    LastTransition(Option<TransitionRecord>),
-    TitleError(Option<String>),
-    ReadPaths(Option<ReadPathCounts>),
-    Point(PointProgress),
-    Held(Option<leviath_runtime::spec::issues::SpawnIssues>),
-    Files(RunFiles),
-    Blobs(Vec<BlobFile>),
-    Grants(Grants),
-    Written(u64),
-    LastProgressAt(Option<i64>),
-    RemoteJobs(BTreeMap<String, String>),
-}
-
-impl From<Change> for state::Change {
-    fn from(c: Change) -> Self {
-        use state::Change as C;
-        match c {
-            Change::Status(v) => C::Status(v),
-            Change::Cursor(v) => C::Cursor(v),
-            Change::Phase(v) => C::Phase(v),
-            Change::AcceptsMessages(v) => C::AcceptsMessages(v),
-            Change::Visits(v) => C::Visits(v),
-            Change::Progress(v) => C::Progress(v),
-            Change::LedgerRecord(at, v) => C::LedgerRecord(at, v),
-            Change::LedgerTruncate(v) => C::LedgerTruncate(v),
-            Change::Context(v) => C::Context(v),
-            Change::Pending(v) => C::Pending(v),
-            Change::FanOut(v) => C::FanOut(v.map(Into::into)),
-            Change::Inbox(v) => C::Inbox(v),
-            Change::Interactions(v) => C::Interactions(v),
-            Change::Totals(v) => C::Totals(v),
-            Change::Clock(v) => C::Clock(v),
-            Change::Flags(v) => C::Flags(v),
-            Change::Children(v) => C::Children(v),
-            Change::Title(v) => C::Title(v),
-            Change::FinalOutput(v) => C::FinalOutput(v),
-            Change::WaitReason(v) => C::WaitReason(v),
-            Change::LastTransition(v) => C::LastTransition(v),
-            Change::TitleError(v) => C::TitleError(v),
-            Change::ReadPaths(v) => C::ReadPaths(v),
-            Change::Point(v) => C::Point(v),
-            Change::Held(v) => C::Held(v),
-            Change::Files(v) => C::Files(v),
-            Change::Blobs(v) => C::Blobs(v),
-            Change::Grants(v) => C::Grants(v),
-            Change::Written(v) => C::Written(v),
-            Change::LastProgressAt(v) => C::LastProgressAt(v),
-            Change::RemoteJobs(v) => C::RemoteJobs(v),
-        }
-    }
-}
-
-/// One step of a run's history, in layout 3's shape.
-#[derive(Debug, Deserialize)]
-pub(crate) struct StateDelta {
-    seq: u64,
-    at: i64,
-    changes: Vec<Change>,
-    events: Vec<RunEvent>,
-}
-
-impl From<StateDelta> for state::StateDelta {
-    fn from(d: StateDelta) -> Self {
-        Self {
-            seq: d.seq,
-            at: d.at,
-            changes: d.changes.into_iter().map(Into::into).collect(),
-            events: d.events,
-        }
-    }
-}
+/// One step of a run's history as layouts 2 and 3 wrote it: layout 7's, with
+/// this layout's fan-out in progress.
+pub(crate) type StateDelta = crate::layout7::StateDelta<FanOutState>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_runtime::runfile::codec::{self, FrameKind};
     use leviath_runtime::spec::names::WorkerName;
 
     /// A fan-out to one stage worker, as layout 3 wrote it.
@@ -584,80 +417,5 @@ mod tests {
         );
         assert_eq!(upgraded.queued[0].worker, w);
         assert_eq!(upgraded.config.stage.as_str(), "split");
-    }
-
-    /// Every change but a fan-out's is the same in both layouts: written as
-    /// this build writes it, read as layout 3 and converted, it is the same
-    /// bytes. This is also what holds the mirror's variants in this build's
-    /// order.
-    #[test]
-    fn every_change_but_a_fan_outs_comes_through_unchanged() {
-        use state::Change as C;
-        let stage = StageName::new("s").unwrap();
-        let record = StageRecord {
-            stage: stage.clone(),
-            status: state::StageStatus::Complete,
-            entered: true,
-            spend: Default::default(),
-            models: Vec::new(),
-            visits: Vec::new(),
-            region_tokens: BTreeMap::new(),
-            first_call_prompt_tokens: None,
-            runaway_warned: false,
-            output_cap_raised: false,
-            started_at: Some(1),
-            ended_at: Some(2),
-            clock: Default::default(),
-        };
-        let changes: Vec<C> = vec![
-            C::Status(RunStatus::Complete),
-            C::Cursor(Cursor {
-                stage,
-                visit: "v".into(),
-                iteration: 1,
-            }),
-            C::Phase(PipelinePhase::Done),
-            C::AcceptsMessages(true),
-            C::Visits(BTreeMap::new()),
-            C::Progress(Default::default()),
-            C::LedgerRecord(1, record),
-            C::LedgerTruncate(2),
-            C::Context(Default::default()),
-            C::Pending(None),
-            C::Inbox(Vec::new()),
-            C::Interactions(Vec::new()),
-            C::Totals(Default::default()),
-            C::Clock(Default::default()),
-            C::Flags(Default::default()),
-            C::Children(vec![RunId::new("run-c").unwrap()]),
-            C::Title(Some("t".into())),
-            C::FinalOutput(None),
-            C::WaitReason(None),
-            C::LastTransition(None),
-            C::TitleError(Some("e".into())),
-            C::ReadPaths(None),
-            C::Point(Default::default()),
-            C::Held(None),
-            C::Files(Default::default()),
-            C::Blobs(Vec::new()),
-            C::Grants(Default::default()),
-            C::Written(3),
-            C::LastProgressAt(Some(4)),
-            C::RemoteJobs(BTreeMap::new()),
-            C::FanOut(None),
-        ];
-        for change in changes {
-            let written = codec::encode(FrameKind::Delta, &change).unwrap();
-            let read: Change = codec::frame_at(&written, 0)
-                .unwrap()
-                .decode(&written)
-                .unwrap();
-            let back = state::Change::from(read);
-            assert_eq!(
-                codec::encode(FrameKind::Delta, &back).unwrap(),
-                written,
-                "{back:?}"
-            );
-        }
     }
 }

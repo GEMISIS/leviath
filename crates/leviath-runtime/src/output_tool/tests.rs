@@ -1594,3 +1594,84 @@ fn a_file_already_holding_the_part_keeps_its_path() {
     assert_eq!(output.expect("recorded").artifacts[0].path, "image-1.png");
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
+
+/// A submission repeats the recorded answer when its content is the same and
+/// it names the same files, in order, under the same names, still holding the
+/// recorded bytes. Anything else is a new answer: other content, another
+/// file, a renamed one, a file rewritten since, or no workdir to look in.
+#[test]
+fn a_repeat_is_the_same_content_and_the_same_unchanged_files() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("panel.json"), "{\"a\":1}").expect("write");
+    std::fs::write(dir.path().join("notes.md"), "# notes").expect("write");
+    let ctx = OutputContext {
+        write_fence: None,
+        spec: None,
+        validators: None,
+        stage: "build",
+        stage_names: &[],
+        workdir: Some(dir.path()),
+        sink: None,
+        overwrite_artifacts: false,
+    };
+    let args = json!({
+        "content": "the panel",
+        "artifacts": ["panel.json", { "name": "notes", "path": "notes.md" }],
+    });
+    let (_, recorded) = handle_output_tool(&args, &ctx, 0, &mut win());
+    let recorded = recorded.expect("accepted");
+    let workdir = Some(dir.path());
+
+    assert!(repeats(&args, &recorded, workdir));
+    let other_content = json!({ "content": "another panel", "artifacts": args["artifacts"] });
+    assert!(!repeats(&other_content, &recorded, workdir));
+    assert!(!repeats(
+        &json!({ "artifacts": args["artifacts"] }),
+        &recorded,
+        workdir
+    ));
+    let fewer = json!({ "content": "the panel", "artifacts": ["panel.json"] });
+    assert!(!repeats(&fewer, &recorded, workdir));
+    let moved = json!({ "content": "the panel", "artifacts": ["notes.md", "panel.json"] });
+    assert!(!repeats(&moved, &recorded, workdir));
+    let renamed = json!({
+        "content": "the panel",
+        "artifacts": ["panel.json", { "name": "summary", "path": "notes.md" }],
+    });
+    assert!(!repeats(&renamed, &recorded, workdir));
+    assert!(
+        !repeats(&args, &recorded, None),
+        "nothing to compare the files with"
+    );
+
+    std::fs::write(dir.path().join("panel.json"), "{\"a\":2}").expect("rewrite");
+    assert!(
+        !repeats(&args, &recorded, workdir),
+        "a rewritten file is a new answer"
+    );
+    std::fs::remove_file(dir.path().join("panel.json")).expect("remove");
+    assert!(!repeats(&args, &recorded, workdir), "so is a missing one");
+}
+
+/// An answer with no files repeats on its content alone.
+#[test]
+fn an_answer_without_files_repeats_on_its_content() {
+    let (_, recorded) = handle_output_tool(
+        &json!({ "content": "42" }),
+        &OutputContext {
+            write_fence: None,
+            spec: None,
+            validators: None,
+            stage: "answer",
+            stage_names: &[],
+            workdir: None,
+            sink: None,
+            overwrite_artifacts: false,
+        },
+        0,
+        &mut win(),
+    );
+    let recorded = recorded.expect("accepted");
+    assert!(repeats(&json!({ "content": "42" }), &recorded, None));
+    assert!(!repeats(&json!({ "content": "43" }), &recorded, None));
+}

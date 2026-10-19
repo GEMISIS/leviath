@@ -50,7 +50,7 @@ impl Layout3 {
 /// What the layout-3 build read back from the fixture.
 fn expected() -> Value {
     let text = std::fs::read_to_string(fixtures_dir().join("layout-3.json")).unwrap();
-    serde_json::from_str(&text).unwrap()
+    crate::common::as_layout_8_reads(serde_json::from_str(&text).unwrap())
 }
 
 /// `value` as JSON, through its text: an `f32` reads back as the number it

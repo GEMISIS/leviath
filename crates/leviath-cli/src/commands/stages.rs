@@ -76,12 +76,12 @@ fn status_label(status: &leviath_core::run_meta::StageRunStatus) -> String {
 /// capturing stdout.
 fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
     println!(
-        "{:<20} {:<13} {:>10} {:>10} {:>10} {:>10} {:>11}",
-        "STAGE", "STATUS", "PROMPT", "OUTPUT", "CACHE RD", "CACHE WR", "COST"
+        "{:<20} {:<13} {:>10} {:>10} {:>10} {:>10} {:>11} {:>6}",
+        "STAGE", "STATUS", "PROMPT", "OUTPUT", "CACHE RD", "CACHE WR", "COST", "RESUB"
     );
     for stage in stages {
         println!(
-            "{:<20} {:<13} {:>10} {:>10} {:>10} {:>10} {:>11}",
+            "{:<20} {:<13} {:>10} {:>10} {:>10} {:>10} {:>11} {:>6}",
             leviath_core::truncate_chars(&stage.name, 20),
             status_label(&stage.status),
             stage.prompt_tokens,
@@ -89,6 +89,7 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
             stage.cached_tokens,
             stage.cache_write_tokens,
             cost_cell(stage.cost_usd, stage.cost_is_exact),
+            stage.resubmissions,
         );
         if with_visits {
             for (n, visit) in stage.visits.iter().enumerate() {
@@ -144,8 +145,9 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
         .iter()
         .try_fold(0.0, |acc, s| Some(acc + s.cost_usd?));
     let total_exact = stages.iter().all(|s| s.cost_is_exact);
+    let resubmissions: usize = stages.iter().map(|s| s.resubmissions).sum();
     println!(
-        "{:<20} {:<13} {:>10} {:>10} {:>10} {:>10} {:>11}",
+        "{:<20} {:<13} {:>10} {:>10} {:>10} {:>10} {:>11} {:>6}",
         "TOTAL",
         "",
         prompt,
@@ -153,6 +155,7 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
         read,
         written,
         cost_cell(total_cost, total_exact),
+        resubmissions,
     );
     // The title call is billed to the run and to no stage of it, so this column
     // can legitimately sum to less than `lev ps` reports for the same run.

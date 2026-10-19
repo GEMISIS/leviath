@@ -445,6 +445,11 @@ type DispatchToolsQuery = (
         // Only for the all-inline batch below, which returns before
         // `collect_tools` (the usual writer of `[tool]` lines) ever sees it.
         Option<&'static mut crate::pipeline::response::StageIoBuffer>,
+        // For `submit_output`: the answer this visit already holds, and the
+        // stage record its resubmissions are counted on.
+        Option<&'static crate::persistence::FinalOutput>,
+        Option<&'static super::submission::VisitSubmissions>,
+        Option<&'static mut StageLedger>,
     ),
     Option<&'static crate::components::OutputValidators>,
     // For the submit_output guard: a submission that is exactly the name of a
@@ -549,7 +554,7 @@ pub(crate) fn dispatch_tools(
         resolved,
         auto_gate,
         cursor,
-        (metadata, stage_progress, mut io_buffer),
+        (metadata, stage_progress, mut io_buffer, recorded, kept, mut ledger),
         validators,
         blueprint,
     ) in agents.iter_mut()
@@ -594,9 +599,16 @@ pub(crate) fn dispatch_tools(
         // as `[blocked]`, or (interactive) held for a user gate prompt.
         let mut context_results = Vec::new();
         let mut lane_calls = Vec::new();
-        // A final output submitted in this batch, committed to the entity after
-        // the loop (the loop holds borrows `commands` would conflict with).
-        let mut submitted: Option<leviath_core::output::FinalOutput> = None;
+        // What this batch's `submit_output` calls came to. A final output
+        // submitted here is committed to the entity after the loop (the loop
+        // holds borrows `commands` would conflict with).
+        let mut submissions = super::submission::BatchSubmissions::new(
+            routing_stage,
+            &state.current_visit,
+            recorded,
+            kept,
+            resolved.is_some(),
+        );
         // A `fan_out` call in this batch, started after the loop for the same
         // reason: it parks the agent, which is a `commands` write.
         let mut fan_out: Option<(String, crate::fanout::FanOutRequest)> = None;
@@ -631,10 +643,6 @@ pub(crate) fn dispatch_tools(
                 )
             })
             .collect();
-        // Files an accepted submission produced, by the execution that produced
-        // them. Journaled after the loop, which is also where the batch record
-        // that dispatched them goes.
-        let mut produced: Vec<(String, Vec<leviath_core::output::Artifact>)> = Vec::new();
         // What the batch had already finished before a restart. Checked before
         // anything else below, so a context write, a submission or a file tool
         // that already ran is never run again.
@@ -879,41 +887,21 @@ pub(crate) fn dispatch_tools(
                             .collect()
                     })
                     .unwrap_or_default();
-
-                let (text, output) = crate::output_tool::handle_output_tool(
-                    &c.arguments,
-                    &crate::output_tool::OutputContext {
-                        write_fence: Some(&write_fence),
-                        spec: stage_inf.output.as_ref(),
-                        validators,
-                        stage: &state.current_stage,
-                        stage_names: &stage_names,
-                        workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
-                        sink: part_sink.as_ref(),
-                        overwrite_artifacts: stage_inf
-                            .output
-                            .as_ref()
-                            .and_then(|s| s.overwrite_artifacts)
-                            .unwrap_or_else(|| mime.overwrite_artifacts()),
-                    },
-                    chrono::Utc::now().timestamp(),
-                    &mut window,
-                );
-                // A refused submission leaves any earlier one alone: a bad
-                // correction must not erase a good answer.
-                if let Some(output) = output {
-                    // Recorded against this call while it is still in hand.
-                    // `output.json` keeps only the latest answer's files and says
-                    // nothing about which call made any of them, so a submission
-                    // a later one replaces would otherwise leave no trace.
-                    if !output.artifacts.is_empty() {
-                        produced.push((
-                            executions.get(&c.tool_id).cloned().unwrap_or_default(),
-                            output.artifacts.clone(),
-                        ));
-                    }
-                    submitted = Some(output);
-                }
+                let ctx = crate::output_tool::OutputContext {
+                    write_fence: Some(&write_fence),
+                    spec: stage_inf.output.as_ref(),
+                    validators,
+                    stage: &state.current_stage,
+                    stage_names: &stage_names,
+                    workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
+                    sink: part_sink.as_ref(),
+                    overwrite_artifacts: stage_inf
+                        .output
+                        .as_ref()
+                        .and_then(|s| s.overwrite_artifacts)
+                        .unwrap_or_else(|| mime.overwrite_artifacts()),
+                };
+                let text = submissions.apply(c, executions.get(&c.tool_id), &ctx, &mut window);
                 context_results.push((c.tool_id.clone(), text));
                 continue;
             }
@@ -934,7 +922,7 @@ pub(crate) fn dispatch_tools(
         // dispatches, holds for a gate prompt, or turns out to be empty.
         // Re-applying it on a gate-prompt re-run is harmless: the same
         // submission produces the same component.
-        if let Some(output) = &submitted {
+        if let Some(output) = &submissions.submitted {
             commands
                 .entity(entity)
                 .insert(crate::persistence::FinalOutput(output.clone()));
@@ -986,6 +974,21 @@ pub(crate) fn dispatch_tools(
         // committed: a batch held for a gate prompt runs again once the
         // prompts resolve, and announcing on both passes would tell
         // subscribers about one submission twice.
+        // Settled here for the same reason: the batch held above is judged
+        // again once its prompts resolve, against what came before it.
+        let stage_ends = submissions.settle(
+            &mut commands.entity(entity),
+            state,
+            blueprint.zip(cursor).is_some_and(|(spec, cur)| {
+                super::submission::ends_on_submission(&spec.0, cur.index)
+            }),
+            ledger.as_deref_mut(),
+        );
+        let super::submission::BatchSubmissions {
+            submitted,
+            produced,
+            ..
+        } = submissions;
         announce_submission(sink.as_deref(), metadata, &state.agent_id, submitted);
 
         // A fan-out parks this agent, so it cannot share a batch with lane calls
@@ -1115,22 +1118,29 @@ pub(crate) fn dispatch_tools(
                 sensitivities.map(|s| &s.0),
                 result.reasoning.clone(),
             );
-            // A batch that closed the conversation has nothing left to ask
-            // the model: the stage moves on with the call as its last word.
+            // A batch that closed the conversation, or that ended the stage on
+            // its answer, has nothing left to ask the model: the stage moves on
+            // with the call as its last word.
             let mut agent = commands.entity(entity);
             agent.remove::<ReadyForTools>().remove::<(
                 RecoveredResults,
                 ResumedExecutions,
                 super::lane_batch::ResumedHold,
             )>();
-            match ended {
+            match ended || stage_ends {
                 true => agent.insert(ResolveTransition),
                 false => agent.insert(ReadyToInfer),
             };
             continue;
         }
         // Lane work: decided call by call in the world, journaled and sent by
-        // `dispatch_lane_batches`, which the batch is handed to here.
+        // `dispatch_lane_batches`, which the batch is handed to here. A stage
+        // that ends on this batch's answer ends once the lane's results land.
+        if stage_ends {
+            commands
+                .entity(entity)
+                .insert(super::submission::EndAfterBatch);
+        }
         commands
             .entity(entity)
             .remove::<(

@@ -320,6 +320,8 @@ pub struct StageRecord {
     pub runaway_warned: bool,
     /// Whether its output cap was raised.
     pub output_cap_raised: bool,
+    /// `submit_output` calls made once a visit to it already held an answer.
+    pub resubmissions: u32,
     /// When it first started, in unix seconds.
     pub started_at: Option<i64>,
     /// When it last ended, in unix seconds.

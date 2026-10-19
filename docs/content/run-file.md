@@ -271,8 +271,9 @@ plans, layout 3's fan-outs, layout 4's compaction settings and the graphs of lay
 rewritten in this build's shape, and the rest is copied as it was, so the run reads back as it
 did. A layout-3 fan-out becomes one of its stage with its one worker, which takes every item. A
 layout-4 compaction model becomes the graph's `compaction.model`, so the run summarizes where it
-did. A run from before layout 7 has no write paths, as before. The file as it was stays in the
-run's `legacy/` folder as `run.v2.lvr` through `run.v6.lvr`, and the directory is saved in the
+did. A run from before layout 7 has no write paths, as before, and a run from before layout 8
+counts no resubmissions on any stage. The file as it was stays in the
+run's `legacy/` folder as `run.v2.lvr` through `run.v7.lvr`, and the directory is saved in the
 home's backup first. A run file in any other
 layout this build does not know is listed as failed, saying so, and left as it is.
 

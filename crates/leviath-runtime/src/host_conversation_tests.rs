@@ -18,7 +18,7 @@ use tokio::sync::oneshot;
 
 /// A provider that answers from a script, and keeps what each request said.
 #[derive(Default)]
-struct Script {
+pub(super) struct Script {
     responses: Mutex<std::collections::VecDeque<InferenceResponse>>,
     seen: Mutex<Vec<String>>,
     /// When set, the next call waits for this before it answers: a reply
@@ -27,7 +27,7 @@ struct Script {
 }
 
 impl Script {
-    fn new(responses: Vec<InferenceResponse>) -> Arc<Self> {
+    pub(super) fn new(responses: Vec<InferenceResponse>) -> Arc<Self> {
         Arc::new(Self {
             responses: Mutex::new(responses.into()),
             seen: Mutex::default(),
@@ -43,12 +43,12 @@ impl Script {
     }
 
     /// How many requests it has been sent.
-    fn calls(&self) -> usize {
+    pub(super) fn calls(&self) -> usize {
         self.seen.lock().unwrap().len()
     }
 
     /// The last request it was sent, as text.
-    fn last(&self) -> String {
+    pub(super) fn last(&self) -> String {
         self.seen
             .lock()
             .unwrap()
@@ -89,7 +89,7 @@ impl Provider for Script {
     }
 }
 
-fn text(content: &str) -> InferenceResponse {
+pub(super) fn text(content: &str) -> InferenceResponse {
     InferenceResponse {
         parts: Vec::new(),
         content: content.to_string(),
@@ -120,7 +120,10 @@ fn goodbye() -> InferenceResponse {
     reply
 }
 
-fn host(script: Arc<Script>, pool: crate::inference_pool::InferencePoolConfig) -> WorldHost {
+pub(super) fn host(
+    script: Arc<Script>,
+    pool: crate::inference_pool::InferencePoolConfig,
+) -> WorldHost {
     let mut registry = crate::providers::ProviderRegistry::new();
     registry.register("script".to_string(), script);
     WorldHost::new(PipelineWorld::new(
@@ -172,7 +175,7 @@ fn interactive(idle: Option<u64>) -> StageMode {
 }
 
 /// Place `spec` in the host's world and register it under its run id.
-fn place(host: &mut WorldHost, spec: Arc<crate::spec::run_spec::RunSpec>) -> AgentId {
+pub(super) fn place(host: &mut WorldHost, spec: Arc<crate::spec::run_spec::RunSpec>) -> AgentId {
     let state = crate::insert::initial_state(&spec);
     let run_id = spec.run_id.to_string();
     let entity = crate::insert::insert(

@@ -9260,6 +9260,90 @@ fn collect_tools_applies_and_loops_back_to_infer() {
     assert!(world.get::<AwaitingTools>(e).is_none());
 }
 
+/// A batch that ended its stage on an answer ends it once the lane's results
+/// land, unless one of them failed: then the model is shown the failure.
+#[test]
+fn collect_tools_ends_the_stage_after_a_batch_that_answered() {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolResults(rx));
+    let spawn = |world: &mut World, result: &str| {
+        let e = world
+            .spawn((
+                ctx(&[("conversation", 10_000)]),
+                infer_result_only(true),
+                AwaitingTools,
+                crate::pipeline::EndAfterBatch,
+            ))
+            .id();
+        tx.send(ToolOutcome {
+            elapsed: std::time::Duration::ZERO,
+            entity: e,
+            results: vec![("t".to_string(), result.into())],
+        })
+        .unwrap();
+        e
+    };
+    let ran = spawn(&mut world, "wrote it");
+    let failed = spawn(&mut world, "[error] disk full");
+
+    run_collect_tools(&mut world);
+
+    assert!(world.get::<ResolveTransition>(ran).is_some());
+    assert!(world.get::<ReadyToInfer>(ran).is_none());
+    assert!(world.get::<ReadyToInfer>(failed).is_some());
+    for e in [ran, failed] {
+        assert!(world.get::<crate::pipeline::EndAfterBatch>(e).is_none());
+    }
+}
+
+/// A batch that answers in a stage with nowhere else to go ends the stage:
+/// at once when every call was answered inline, and once the lane's results
+/// land when some went to the lane. In a stage with somewhere to go, the same
+/// batch carries on.
+#[tokio::test]
+async fn an_answer_ends_a_stage_with_nowhere_else_to_go() {
+    let layout = tg::layout(vec![], 10_000);
+    let alone = tg::graph(vec![tg::stage("s")], layout.clone());
+    let onward = tg::graph(vec![tg::stage("s"), tg::stage("t")], layout);
+    let (mut world, _rx, _lane) = announcing_world();
+    let spawn = |world: &mut World, graph, calls| {
+        world
+            .spawn((
+                agent_state(),
+                infer_with(calls),
+                output_window(),
+                ReadyForTools,
+                run_metadata(),
+                spec_of(graph),
+                StageCursor { index: 0 },
+            ))
+            .id()
+    };
+    let inline = spawn(&mut world, alone.clone(), vec![submit_call("o1", "x")]);
+    let laned = spawn(
+        &mut world,
+        alone,
+        vec![submit_call("o1", "x"), tc("c_read", "n")],
+    );
+    let carries_on = spawn(&mut world, onward, vec![submit_call("o1", "x")]);
+    dispatch_once(&mut world);
+
+    assert!(world.get::<ResolveTransition>(inline).is_some());
+    assert!(world.get::<crate::pipeline::EndAfterBatch>(laned).is_some());
+    assert!(world.get::<ResolveTransition>(laned).is_none());
+    assert!(world.get::<ReadyToInfer>(carries_on).is_some());
+    assert!(
+        world
+            .get::<crate::pipeline::EndAfterBatch>(carries_on)
+            .is_none()
+    );
+    for e in [inline, laned, carries_on] {
+        let kept = world.get::<crate::pipeline::VisitSubmissions>(e).unwrap();
+        assert_eq!(kept.repeats, 0);
+    }
+}
+
 #[test]
 fn collect_tools_merges_stashed_context_results() {
     let (tx, rx) = mpsc::unbounded_channel();

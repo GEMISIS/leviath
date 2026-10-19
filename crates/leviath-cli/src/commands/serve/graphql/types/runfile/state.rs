@@ -398,6 +398,9 @@ pub(crate) struct LedgerStage {
     pub(crate) runaway_warned: bool,
     /// Whether its output cap was raised.
     pub(crate) output_cap_raised: bool,
+    /// `submit_output` calls it made once a visit to it already held an
+    /// answer.
+    pub(crate) resubmissions: u32,
     /// When it started.
     pub(crate) started_at: Option<Timestamp>,
     /// When it ended.
@@ -426,6 +429,7 @@ impl From<&CoreRecord> for LedgerStage {
             first_call_prompt_tokens: r.first_call_prompt_tokens.map(big),
             runaway_warned: r.runaway_warned,
             output_cap_raised: r.output_cap_raised,
+            resubmissions: r.resubmissions,
             started_at: r.started_at.map(Timestamp),
             ended_at: r.ended_at.map(Timestamp),
             clock: StateClock::from(&r.clock),
