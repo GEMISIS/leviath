@@ -26,6 +26,7 @@ impl RunGraph {
         v.layouts();
         v.inputs();
         v.graph_refs();
+        v.write_paths();
         v.issues.into_result(())
     }
 }
@@ -502,6 +503,24 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// Every write-path glob, the graph's and each stage's, stays inside the
+    /// workdir and compiles.
+    fn write_paths(&mut self) {
+        let graph = self.g();
+        let mut found = write_path_issues(&self.at.field("write_paths"), &graph.write_paths);
+        for stage in &graph.stages {
+            let at = self
+                .at
+                .field("stages")
+                .key(stage.name.as_str())
+                .field("write_paths");
+            found.extend(write_path_issues(&at, &stage.write_paths));
+        }
+        for issue in found {
+            self.issues.push(issue);
+        }
+    }
+
     fn graph_refs(&mut self) {
         let all = self.all_regions();
         if let Some(tracking) = &self.g().file_tracking {
@@ -512,4 +531,20 @@ impl<'a> Validator<'a> {
             );
         }
     }
+}
+
+/// An issue at `at[i]` for each glob in `globs` that cannot be a write path.
+pub(crate) fn write_path_issues(at: &SpecPath, globs: &[String]) -> Vec<SpawnIssue> {
+    globs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, glob)| {
+            let why = leviath_core::write_paths::check_glob(glob).err()?;
+            Some(
+                SpawnIssue::new(at.index(i), IssueCode::Invalid, why)
+                    .expected("a glob relative to the workdir, such as docs/**")
+                    .got(glob.clone()),
+            )
+        })
+        .collect()
 }

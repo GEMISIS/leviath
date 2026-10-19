@@ -250,6 +250,65 @@ has. Or run the stage in a [sandbox](#sandboxes). See
 [Built-in tools](/docs/tools#where-a-safe-listed-read-may-look) for exactly what the check
 reads.
 
+## Limiting where a stage writes
+
+The write tools never leave the workdir. `write_paths` narrows that further, to the files a stage
+is meant to touch. A panel designer that should write panel files and docs, and nothing else,
+says so:
+
+```toml
+[graph]
+write_paths = ["docs/**", ".polywright/panels/**"]
+
+[[graph.stages]]
+name = "build_panel"
+write_paths = [".polywright/panels/**"]   # optional: narrower for this stage
+```
+
+Globs are relative to the workdir and use `/` between folders. `*` stays inside one folder and
+`**` crosses any number of them, so `docs/**` is everything under `docs`. Matching is
+case-sensitive everywhere. A call outside them is refused as the model makes it, and the refusal
+names the globs, so the model can correct course on its next turn:
+
+```text
+[blocked] write_file refused: src/App.tsx is outside this stage's write paths (docs/**, .polywright/panels/**). Write inside them instead.
+```
+
+The refusal comes before any permission is looked at, so `--yolo` does not lift it. The run's
+events record the call as blocked, with that message as its result.
+
+Write paths come in layers, and a write has to match a glob in every one of them:
+
+- the `write_paths` of the spawn request's `launch`, when the caller sets some;
+- the graph's `write_paths`;
+- the stage's own `write_paths`, which can only narrow the graph's;
+- for a child run or a fan-out worker, every layer in force where the run that started it was.
+
+So a worker can never write where its parent could not, even when its own blueprint sets no
+write paths at all. Fan-out workers share their parent's workdir, which is why that matters.
+
+A path is checked twice, and has to pass both times. First as written, with `.` and `..` folded
+out. Then as the filesystem resolves it, so a symlink inside `docs/` that points at `src/` is
+judged by where it lands. A path that cannot be resolved is refused. `lev validate` refuses a glob
+that is absolute, starts with `~`, or has a `.` or `..` part, and so does a spawn.
+
+### What write paths cover, and what they do not
+
+| Write | Held to `write_paths` |
+|---|---|
+| `write_file` and `edit_file` | Yes. |
+| A `shell` redirect (`echo x > f`, `>> f`) | Yes. A redirect to a variable or an unparsed line is refused. |
+| A script tool's `write_file`, and redirects in its `shell()` | Yes. |
+| `cp`, `mv`, `tee`, `sed -i` and any other program `shell` runs | No. |
+| MCP tools | No. They write wherever their server lets them. |
+| `install_self_tool` and `install_global_tool` | No. They write outside the workdir by design. |
+
+`shell` stays governed by the shell's own permissions, and a program it runs can write anywhere
+in the workdir. `lev validate` warns about a stage that sets write paths and can still run shell
+(`write-paths-shell`) or call MCP tools (`write-paths-mcp`). For a hard limit, give such a stage
+no `shell`, or set `shell = "deny"` in its `tool_permissions`, and run it in a
+[sandbox](#sandboxes).
+
 ## Taint tracking (experimental)
 
 Sandboxes and read paths control what an agent can *reach*. Taint tracking controls what it can do

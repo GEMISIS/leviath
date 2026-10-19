@@ -595,6 +595,7 @@ fn launch(
         max_depth,
         seed_commands: false,
         capture_model_input: false,
+        write_paths: Vec::new(),
     }
 }
 

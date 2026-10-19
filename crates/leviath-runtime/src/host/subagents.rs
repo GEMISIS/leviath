@@ -121,9 +121,13 @@ impl WorldHost {
         let depth = world
             .get::<ParentRef>(parent)
             .map_or(usize::from(spec.placement.depth), |p| p.depth);
+        // The write paths in force where the parent is now bound the child.
+        let stage = world
+            .get::<crate::pipeline::StageCursor>(parent)
+            .map_or(0, |c| c.index);
         Ok(crate::spec::env::Caller::Child {
             parent: spec.run_id.clone(),
-            policy: spec.launch.clone(),
+            policy: spec.policy_for_children(stage),
             depth: u8::try_from(depth).unwrap_or(u8::MAX),
         })
     }

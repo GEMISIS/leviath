@@ -2030,6 +2030,19 @@ async fn subagent_spawn_links_child_and_registers() {
     let starter = TestStarter::new(Starts::Place);
     host.set_starter(starter.clone());
     let parent = spawn(&mut host, "parent", "parent");
+    // The parent's graph limits its writes, which bind the child too.
+    let mut fenced = (*host
+        .world
+        .world()
+        .get::<crate::insert::RunSpecC>(parent.entity())
+        .unwrap()
+        .0)
+        .clone();
+    fenced.graph.write_paths = vec!["docs/**".to_string()];
+    host.world
+        .world_mut()
+        .entity_mut(parent.entity())
+        .insert(crate::insert::RunSpecC(std::sync::Arc::new(fenced)));
 
     let result = ask_sub(&mut host, |reply| SubAgentOp::Spawn {
         request: named("child"),
@@ -2039,7 +2052,8 @@ async fn subagent_spawn_links_child_and_registers() {
     .await;
     assert_eq!(result.unwrap().run_id.as_str(), "child");
 
-    // The child was started as the parent's, under the parent's policy.
+    // The child was started as the parent's, under the parent's policy and
+    // the write paths in force where the parent is.
     let callers = starter.callers.lock().unwrap().clone();
     let parent_spec = host
         .world
@@ -2052,7 +2066,10 @@ async fn subagent_spawn_links_child_and_registers() {
         callers,
         vec![crate::spec::env::Caller::Child {
             parent: parent_spec.run_id.clone(),
-            policy: parent_spec.launch.clone(),
+            policy: crate::spec::launch::LaunchPolicy {
+                write_paths: vec![vec!["docs/**".to_string()]],
+                ..parent_spec.launch.clone()
+            },
             depth: 0,
         }]
     );

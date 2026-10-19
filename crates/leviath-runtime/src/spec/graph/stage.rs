@@ -118,6 +118,10 @@ pub struct StageDef {
     /// Mime types each tool's results may carry.
     #[serde(default)]
     pub tool_accepts: BTreeMap<ToolName, Vec<MimePattern>>,
+    /// Globs, relative to the workdir, that this stage's writes must match
+    /// as well as the graph's `write_paths`. Empty adds no limit.
+    #[serde(default)]
+    pub write_paths: Vec<String>,
     /// Code run at points of the stage's life.
     #[serde(default)]
     pub hooks: StageHooks,

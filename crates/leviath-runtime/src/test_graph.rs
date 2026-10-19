@@ -349,6 +349,7 @@ fn spec_from(graph: RunGraph, agent_id: &str, stages: &[StageInference], window:
             max_depth: graph.max_child_depth.unwrap_or(u8::MAX),
             seed_commands: true,
             capture_model_input: false,
+            write_paths: Vec::new(),
         },
         graph,
         inputs: InputValues::default(),

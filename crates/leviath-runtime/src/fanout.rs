@@ -1291,15 +1291,18 @@ mod tests {
         world.insert_resource(FanOutSpawnerRes(spawner));
     }
 
-    /// A spawner that records where each worker's graph comes from, then
-    /// spawns it as [`TestSpawner`] does.
+    /// A spawner that records where each worker's graph comes from and who
+    /// it was started for, then spawns it as [`TestSpawner`] does.
+    #[derive(Default)]
     struct Recording {
         sources: std::sync::Mutex<Vec<SpawnSource>>,
+        callers: std::sync::Mutex<Vec<String>>,
     }
 
     impl FanOutSpawner for Recording {
         fn prepare_worker(&self, request: SpawnRequest, caller: Caller) -> WorkerPrep {
             self.sources.lock().unwrap().push(request.source.clone());
+            self.callers.lock().unwrap().push(format!("{caller:?}"));
             TestSpawner {
                 fail: HashSet::new(),
             }
@@ -1317,9 +1320,7 @@ mod tests {
     #[test]
     fn a_same_graph_worker_runs_what_its_parent_ran() {
         let mut world = World::new();
-        let recording = Arc::new(Recording {
-            sources: std::sync::Mutex::new(Vec::new()),
-        });
+        let recording = Arc::new(Recording::default());
         install(&mut world, recording.clone());
         let config = cfg(None, 2, WorkerFailure::Continue);
         let parent = spawn_parent(&mut world, fanout_blueprint(config.clone()), "");
@@ -1354,6 +1355,29 @@ mod tests {
         assert_eq!(sources[2], SpawnSource::BlueprintFile(path));
         assert!(recording.find_worker("helper").is_ok());
         assert!(recording.find_worker("helper@not-a-digest").is_err());
+    }
+
+    /// A worker is held to the write paths in force at the stage that fanned
+    /// out: the graph's and that stage's own, not another stage's.
+    #[test]
+    fn a_worker_inherits_the_write_paths_of_the_stage_that_fanned_out() {
+        let mut world = World::new();
+        let recording = Arc::new(Recording::default());
+        install(&mut world, recording.clone());
+        let config = cfg(None, 2, WorkerFailure::Continue);
+        let mut bp = fanout_blueprint(config.clone());
+        bp.write_paths = vec!["docs/**".to_string()];
+        bp.stages[0].write_paths = vec!["docs/panels/**".to_string()];
+        bp.stages[1].write_paths = vec!["elsewhere/**".to_string()];
+        let parent = spawn_parent(&mut world, bp, "");
+
+        start_worker(&mut world, parent, &config, &item("a")).expect("the worker starts");
+        let callers = recording.callers.lock().unwrap();
+        assert!(
+            callers[0].contains(r#"write_paths: [["docs/**"], ["docs/panels/**"]]"#),
+            "{callers:?}"
+        );
+        assert!(!callers[0].contains("elsewhere"), "{callers:?}");
     }
 
     pub(super) fn status_of(world: &World, e: Entity) -> AgentStatus {

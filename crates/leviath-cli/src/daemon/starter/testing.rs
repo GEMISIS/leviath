@@ -194,6 +194,7 @@ pub(crate) fn caller_for(args: &TestLaunch) -> Caller {
         max_depth: 8,
         seed_commands: true,
         capture_model_input: false,
+        write_paths: Vec::new(),
     };
     Caller::Child {
         parent,

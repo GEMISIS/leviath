@@ -189,6 +189,14 @@ pub(crate) struct AgentToolState {
     pub stage_tool_accepts: Arc<StdMutex<HashMap<String, Vec<String>>>>,
     /// Every stage's `tool_accepts`, indexed by stage index.
     pub stage_tool_accepts_by_index: Arc<Vec<HashMap<String, Vec<String>>>>,
+    /// The write paths in force at each stage (inherited layers, the graph's
+    /// and the stage's own), indexed by stage index. A call is judged by the
+    /// stage the world says the run is in.
+    pub stage_write_fences: Arc<Vec<leviath_core::write_paths::WriteFence>>,
+    /// The write paths in force at the current stage, shared with the script
+    /// host so a script's `write_file` and `shell` redirects are held to them
+    /// too. Swapped by `sync_stage` as the agent changes stage.
+    pub write_fence: Arc<StdMutex<leviath_core::write_paths::WriteFence>>,
     /// Blueprint-level `[tool_permissions]`.
     pub agent_perms: Arc<HashMap<String, String>>,
     /// Config-level tool permissions, re-resolved when the run resumes.
@@ -568,11 +576,21 @@ fn script_tool_join_failed(e: tokio::task::JoinError) -> EntryContent {
 /// not get to be the spelling that works; the files that decide what agents
 /// may do are not a run's to change; and a full disk, or a run past its write
 /// ceiling (`written` is what it has written so far), is not a permission
-/// question, so no `--yolo` gets to fill one. Checked before policy, because
-/// no policy makes any of it allowed.
-fn fence(state: &AgentToolState, tc: &ToolCall, written: u64) -> Option<String> {
+/// question, so no `--yolo` gets to fill one. A write outside the write paths
+/// in force at `stage_index` is refused for the same reason. Checked before
+/// policy, because no policy makes any of it allowed.
+fn fence(
+    state: &AgentToolState,
+    tc: &ToolCall,
+    written: u64,
+    stage_index: usize,
+) -> Option<String> {
     let workdir = state.builtins.workdir();
     crate::tools::escaping_write_refusal(&tc.name, &tc.arguments, workdir)
+        .or_else(|| {
+            let paths = state.stage_write_fences.get(stage_index)?;
+            crate::write_fence::write_paths_refusal(&tc.name, &tc.arguments, workdir, paths)
+        })
         .or_else(|| {
             crate::tools::protected_path_refusal(
                 &tc.name,
@@ -620,7 +638,7 @@ pub(crate) fn decide_call(
             attended: !state.unattended || kept,
         };
     }
-    if let Some(refusal) = fence(state, tc, ctx.written) {
+    if let Some(refusal) = fence(state, tc, ctx.written, ctx.stage_index) {
         return ToolVerdict::Refuse(refusal);
     }
     let is_builtin = state.builtin_names.contains(&tc.name);
@@ -982,6 +1000,9 @@ impl ToolService for CliToolService {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) = limits.clone();
         }
+        if let Some(paths) = state.stage_write_fences.get(stage_index) {
+            *leviath_core::sync::lock(&state.write_fence) = paths.clone();
+        }
         *state
             .stage_name
             .lock()
@@ -1178,6 +1199,8 @@ pub(crate) mod tests {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         Arc::new(AgentToolState {
+            stage_write_fences: Arc::new(Vec::new()),
+            write_fence: Arc::default(),
             stage_tool_accepts_by_index: Arc::new(Vec::new()),
             stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(budget),
@@ -1253,6 +1276,8 @@ pub(crate) mod tests {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         Arc::new(AgentToolState {
+            stage_write_fences: Arc::new(Vec::new()),
+            write_fence: Arc::default(),
             stage_tool_accepts_by_index: Arc::new(Vec::new()),
             stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
@@ -1511,6 +1536,8 @@ pub(crate) mod tests {
         ));
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let state = Arc::new(AgentToolState {
+            stage_write_fences: Arc::new(Vec::new()),
+            write_fence: Arc::default(),
             stage_tool_accepts_by_index: Arc::new(Vec::new()),
             stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
@@ -1913,6 +1940,8 @@ pub(crate) mod tests {
         allow.insert("edit_file".to_string(), ToolPolicy::Allow);
         allow.insert("install_tool".to_string(), ToolPolicy::Allow);
         Arc::new(AgentToolState {
+            stage_write_fences: Arc::new(Vec::new()),
+            write_fence: Arc::default(),
             stage_tool_accepts_by_index: Arc::new(Vec::new()),
             stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
@@ -2250,6 +2279,8 @@ pub(crate) mod tests {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            stage_write_fences: Arc::new(Vec::new()),
+            write_fence: Arc::default(),
             stage_tool_accepts_by_index: Arc::new(Vec::new()),
             stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
@@ -2627,6 +2658,8 @@ pub(crate) mod tests {
         global.insert("write_file".to_string(), ToolPolicy::Deny);
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            stage_write_fences: Arc::new(Vec::new()),
+            write_fence: Arc::default(),
             stage_tool_accepts_by_index: Arc::new(Vec::new()),
             stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
@@ -2696,6 +2729,8 @@ pub(crate) mod tests {
         global.insert("write_file".to_string(), ToolPolicy::Allow);
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            stage_write_fences: Arc::new(Vec::new()),
+            write_fence: Arc::default(),
             stage_tool_accepts_by_index: Arc::new(Vec::new()),
             stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),
@@ -2756,6 +2791,62 @@ pub(crate) mod tests {
         // The control: the same permissions write happily inside the workdir.
         let wrote_inside = dir.path().join("inside.txt").exists();
         assert!(wrote_inside, "{allowed}");
+    }
+
+    /// A write outside the stage's write paths is refused before it runs,
+    /// even with every write tool allowed, while the same calls inside them
+    /// go ahead. A stage with no write paths of its own takes no limit.
+    #[tokio::test]
+    async fn a_write_outside_the_write_paths_is_refused_before_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let mut state = (*state_with_writes(&root, unlimited_writes())).clone();
+        state.stage_write_fences = Arc::new(vec![
+            leviath_core::write_paths::WriteFence::new(&[vec!["docs/**".to_string()]]),
+            leviath_core::write_paths::WriteFence::default(),
+        ]);
+        let state = Arc::new(state);
+        let write = |id: &str, path: &str| {
+            call(
+                id,
+                "write_file",
+                serde_json::json!({ "path": path, "content": "x" }),
+            )
+        };
+        let out = dispatch_tools(
+            state.clone(),
+            vec![
+                write("c1", "docs/panel.md"),
+                write("c2", "src/App.tsx"),
+                call(
+                    "c3",
+                    "shell",
+                    serde_json::json!({ "command": "echo x > src/main.rs" }),
+                ),
+            ],
+            noop_progress(),
+        )
+        .await;
+        let (inside, stray, redirect) = (out[0].1.clone(), out[1].1.clone(), out[2].1.clone());
+        let wrote_inside = root.join("docs/panel.md").exists();
+        assert!(wrote_inside, "{inside}");
+        assert!(
+            stray.contains("write_file refused: src/App.tsx is outside this stage's write paths"),
+            "{stray}"
+        );
+        assert!(
+            redirect.contains("shell refused: src/main.rs"),
+            "{redirect}"
+        );
+        let ran = root.join("src").exists();
+        assert!(!ran, "a refused write ran anyway");
+
+        enter_stage(&state, 1);
+        let out = dispatch_tools(state, vec![write("c4", "src/App.tsx")], noop_progress()).await;
+        let unlimited = out[0].1.clone();
+        let wrote = root.join("src/App.tsx").exists();
+        assert!(wrote, "{unlimited}");
     }
 
     // ─── Write ceilings ──────────────────────────────────────────────────────
@@ -3190,6 +3281,11 @@ pub(crate) mod tests {
                 HashSet::from(["ask_user_text".to_string()]),
             ]),
             stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
+            stage_write_fences: Arc::new(vec![
+                leviath_core::write_paths::WriteFence::default(),
+                leviath_core::write_paths::WriteFence::new(&[vec!["docs/**".to_string()]]),
+            ]),
+            write_fence: Arc::default(),
             stage_tool_accepts_by_index: Arc::new(vec![
                 HashMap::new(),
                 HashMap::from([("spawn_agent".to_string(), vec!["image/*".to_string()])]),
@@ -3213,9 +3309,11 @@ pub(crate) mod tests {
         });
         service.register(e, state.clone());
 
-        // Entering stage 1 swaps in that stage's name.
+        // Entering stage 1 swaps in that stage's name, and the write paths
+        // the script host holds scripts to.
         service.sync_stage(e, 1, "review");
         assert_eq!(*state.stage_name.lock().unwrap(), "review");
+        assert_eq!(state.write_fence.lock().unwrap().describe(), "docs/**");
         // A call is judged by the stage the world says the run is in: stage 1
         // denies `bash`, and stage 0 does not.
         let grants = leviath_runtime::pipeline::ToolGrants::default();
@@ -3231,6 +3329,20 @@ pub(crate) mod tests {
         ));
         assert!(!matches!(
             service.decide(e, &bash, &at(0)),
+            ToolVerdict::Refuse(_)
+        ));
+        // Stage 1 limits writes to `docs/**`; stage 0 does not.
+        let stray = call(
+            "c2",
+            "write_file",
+            serde_json::json!({"path": "src/App.tsx", "content": "x"}),
+        );
+        assert!(matches!(
+            service.decide(e, &stray, &at(1)),
+            ToolVerdict::Refuse(text) if text.contains("outside this stage's write paths (docs/**)")
+        ));
+        assert!(!matches!(
+            service.decide(e, &stray, &at(0)),
             ToolVerdict::Refuse(_)
         ));
         // And what the stage lets each tool be handed.
@@ -4003,6 +4115,8 @@ pub(crate) mod tests {
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
         let (script_tools, script_tool_names, script_host) = no_script_fields();
         let state = Arc::new(AgentToolState {
+            stage_write_fences: Arc::new(Vec::new()),
+            write_fence: Arc::default(),
             stage_tool_accepts_by_index: Arc::new(Vec::new()),
             stage_tool_accepts: Arc::new(StdMutex::new(HashMap::new())),
             writes: Arc::new(unlimited_writes()),

@@ -394,6 +394,7 @@ async fn the_tree_of_runs_is_linked_back_together() {
                 max_depth: 4,
                 seed_commands: true,
                 capture_model_input: false,
+                write_paths: Vec::new(),
             },
             depth: 0,
         };

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use leviath_runtime::spec::graph::{CodeRef, OutputDef};
 use leviath_runtime::spec::inputs::InputValues;
-use leviath_runtime::spec::launch::{LaunchPolicy, Placement};
+use leviath_runtime::spec::launch::Placement;
 use leviath_runtime::spec::names::{
     Digest, ModelId, ModelRef, ProviderName, RegionName, RunId, StageName,
 };
@@ -76,7 +76,7 @@ pub(crate) struct RunSpec {
     code: Vec<(CodeRef, Digest)>,
     requested_output: Option<OutputDef>,
     requested_model: Option<ModelRef>,
-    launch: LaunchPolicy,
+    launch: crate::layout6::LaunchPolicy,
     auto_answers: AutoAnswers,
     placement: Placement,
     delivery: crate::layout5::DeliveryPlan,
@@ -97,7 +97,7 @@ impl From<RunSpec> for run_spec::RunSpec {
             code: spec.code,
             requested_output: spec.requested_output,
             requested_model: spec.requested_model,
-            launch: spec.launch,
+            launch: spec.launch.into(),
             auto_answers: spec.auto_answers,
             placement: spec.placement,
             delivery: spec.delivery.into(),

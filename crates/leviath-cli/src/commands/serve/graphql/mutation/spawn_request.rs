@@ -208,6 +208,11 @@ pub(crate) struct LaunchWrite {
     /// attempt. Read it back on `InferenceAttempt.modelInput`.
     #[graphql(default = false)]
     pub(crate) capture_model_input: bool,
+    /// Globs, relative to the workdir, that every `write_file`, `edit_file`
+    /// and shell redirect of the run must match, on top of any the graph and
+    /// its stages set. Child runs and fan-out workers inherit them. A glob
+    /// that leaves the workdir is refused.
+    pub(crate) write_paths: Option<Vec<String>>,
 }
 
 /// Where a run posts its events, and what signs them.
@@ -556,6 +561,7 @@ fn launch(write: LaunchWrite, issues: &mut SpawnIssues) -> LaunchRequest {
         max_depth,
         seed_commands: write.seed_commands,
         capture_model_input: write.capture_model_input,
+        write_paths: write.write_paths.unwrap_or_default(),
     }
 }
 
@@ -657,6 +663,7 @@ impl SpawnRunRequest {
                 max_depth: None,
                 seed_commands: true,
                 capture_model_input: false,
+                write_paths: None,
             }),
             &mut issues,
         );

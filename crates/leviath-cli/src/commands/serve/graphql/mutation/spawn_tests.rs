@@ -64,7 +64,7 @@ const VALIDATE: &str = "mutation Check($request: SpawnRunRequest!) {
       origin { kind blueprintName digest version path }
       stages { stage provider model tools }
       inputs { name value { __typename ... on TextValueOutput { text asText } } }
-      launch { unattended profile allow maxDepth seedCommands captureModelInput }
+      launch { unattended profile allow maxDepth seedCommands captureModelInput writePaths }
     }
     ... on SpawnRejectedOutput { issues { path code message } }
   }
@@ -150,6 +150,7 @@ async fn a_spawn_carries_every_field_it_was_given() {
             assert_eq!(request.launch.allow.len(), 1);
             assert!(!request.launch.seed_commands);
             assert!(request.launch.capture_model_input);
+            assert_eq!(request.launch.write_paths, ["docs/**"]);
             let callback = request.delivery.callback.as_ref().expect("a callback");
             assert_eq!(callback.url.as_str(), "https://1.1.1.1/hook");
             assert_eq!(callback.secret.as_ref().map(|s| s.expose()), Some("shh"));
@@ -213,6 +214,7 @@ async fn a_spawn_carries_every_field_it_was_given() {
                     "maxDepth": 2,
                     "seedCommands": false,
                     "captureModelInput": true,
+                    "writePaths": ["docs/**"],
                 },
                 "delivery": {
                     "callback": { "url": "https://1.1.1.1/hook", "secret": "shh" },
@@ -608,6 +610,7 @@ fn brief() -> leviath_runtime::spec::summary::SpawnSummary {
             max_depth: 2,
             seed_commands: true,
             capture_model_input: false,
+            write_paths: vec![vec!["docs/**".to_string()]],
         },
         workdir: "/work".into(),
         warnings: Default::default(),
@@ -646,6 +649,10 @@ async fn a_dry_run_answers_with_the_run_in_brief() {
     assert_eq!(valid["launch"]["unattended"], "PROFILE");
     assert_eq!(valid["launch"]["profile"], "safe");
     assert_eq!(valid["launch"]["maxDepth"], 2);
+    assert_eq!(
+        valid["launch"]["writePaths"],
+        serde_json::json!([["docs/**"]])
+    );
 }
 
 /// A dry run the daemon refuses, and one this server refuses before asking,
@@ -825,6 +832,7 @@ fn every_spawn_write_shape_round_trips() {
         max_depth: Some(1),
         seed_commands: true,
         capture_model_input: false,
+        write_paths: Some(vec!["docs/**".to_string()]),
     });
     round_trip(&CallbackWrite {
         url: "https://example.com".to_string(),

@@ -506,3 +506,64 @@ pub(super) fn read_path_entry_is_broad(entry: &str) -> bool {
         || pattern.starts_with("/.*")
         || trimmed == "/.+"
 }
+
+/// A stage held to write paths that can still write past them. `shell` is
+/// checked only at its redirects, so `cp`, `mv`, `tee` or `sed -i` write
+/// anywhere in the workdir; an MCP tool writes wherever its server lets it.
+/// Either one makes the write paths a guide rather than a limit.
+pub(super) fn lint_write_paths(graph: &RunGraph) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    for stage in &graph.stages {
+        let fence = leviath_core::write_paths::WriteFence::new(&[
+            graph.write_paths.as_slice(),
+            stage.write_paths.as_slice(),
+        ]);
+        if fence.is_open() {
+            continue;
+        }
+        let globs = fence.describe();
+        let shell_named = named_tools(stage).any(|t| canonical_tool_name(t) == "shell");
+        let shell_denied = stage
+            .tool_permissions
+            .iter()
+            .chain(&graph.tool_permissions)
+            .any(|(tool, policy)| {
+                canonical_tool_name(tool.as_str()) == "shell" && *policy == ToolPolicy::Deny
+            });
+        if (shell_named || grants_all_builtins(stage)) && !shell_denied {
+            findings.push(
+                LintFinding::new(
+                    LintSeverity::Warning,
+                    "write-paths-shell",
+                    format!(
+                        "limits writes to {globs} but can run shell, which can write anywhere \
+                         in the workdir: only its redirects are held to write_paths, not cp, mv, \
+                         tee or sed -i"
+                    ),
+                )
+                .in_stage(stage.name.as_str())
+                .with_fix(
+                    "drop shell from this stage, or set shell = \"deny\" in its tool_permissions",
+                ),
+            );
+        }
+        let mcp_group = tool_groups(stage)
+            .into_iter()
+            .any(|g| covers(g, ToolGroup::Mcp));
+        if !stage.connectors.is_empty() || mcp_group {
+            findings.push(
+                LintFinding::new(
+                    LintSeverity::Warning,
+                    "write-paths-mcp",
+                    format!(
+                        "limits writes to {globs} but can call MCP tools, which write wherever \
+                         their server lets them"
+                    ),
+                )
+                .in_stage(stage.name.as_str())
+                .with_fix("drop the MCP tools from this stage, or limit the server itself"),
+            );
+        }
+    }
+    findings
+}

@@ -1,0 +1,1605 @@
+{
+  "deltas": [
+    {
+      "at": 1792455863,
+      "changes": [
+        {
+          "Phase": "AwaitingInference"
+        },
+        {
+          "LedgerRecord": [
+            0,
+            {
+              "clock": {
+                "banked_secs": 0,
+                "since": 1792455863
+              },
+              "ended_at": null,
+              "entered": true,
+              "first_call_prompt_tokens": null,
+              "models": [],
+              "output_cap_raised": false,
+              "region_tokens": {},
+              "runaway_warned": false,
+              "spend": {
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "completion_tokens": 0,
+                "computed_calls": 0,
+                "cost_unknown": false,
+                "priced_usd": 0.0,
+                "prompt_tokens": 0,
+                "reported_calls": 0,
+                "unpriced_calls": 0
+              },
+              "stage": "main",
+              "started_at": 1792455863,
+              "status": "Active",
+              "visits": [
+                {
+                  "clock": {
+                    "banked_secs": 0,
+                    "since": 1792455863
+                  },
+                  "entered_at": 1792455863,
+                  "id": "v18e0151c65a59f30-00000000",
+                  "left_at": null,
+                  "spend": {
+                    "cache_write_tokens": 0,
+                    "cached_tokens": 0,
+                    "completion_tokens": 0,
+                    "computed_calls": 0,
+                    "cost_unknown": false,
+                    "priced_usd": 0.0,
+                    "prompt_tokens": 0,
+                    "reported_calls": 0,
+                    "unpriced_calls": 0
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Clock": {
+            "banked_secs": 0,
+            "since": 1792455863
+          }
+        }
+      ],
+      "events": [],
+      "seq": 1
+    },
+    {
+      "at": 1792455863,
+      "changes": [
+        {
+          "Totals": {
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 3,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 12,
+              "reported_calls": 0,
+              "unpriced_calls": 1
+            },
+            "tool_calls": 0
+          }
+        },
+        {
+          "TitleError": "openai/gpt-mock replied with nothing usable as a title"
+        }
+      ],
+      "events": [
+        {
+          "Inference": {
+            "attempt": "",
+            "finish_reason": null,
+            "iteration": 0,
+            "kind": "title",
+            "model": {
+              "model": "gpt-mock",
+              "provider": "openai"
+            },
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 3,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 12,
+              "reported_calls": 0,
+              "unpriced_calls": 1
+            },
+            "stage": null
+          }
+        }
+      ],
+      "seq": 2
+    },
+    {
+      "at": 1792455863,
+      "changes": [
+        {
+          "Cursor": {
+            "iteration": 1,
+            "stage": "main",
+            "visit": "v18e0151c65a59f30-00000000"
+          }
+        },
+        {
+          "Phase": "AwaitingTools"
+        },
+        {
+          "Progress": {
+            "blocked_modification_calls": 0,
+            "cut_off_nudges": 0,
+            "edits_by_path": {
+              "docs/a.md": 1
+            },
+            "entry_region_digests": {},
+            "gate_reentries": 0,
+            "images_produced": 0,
+            "iterations": 1,
+            "modifying_tool_calls": 0,
+            "no_image_nudges": 0,
+            "raise_output_cap": false,
+            "stage_started_at": null,
+            "stuck_fired": false,
+            "text_only_nudges": 0,
+            "total_tool_calls": 1,
+            "waiting_since": null
+          }
+        },
+        {
+          "LedgerRecord": [
+            0,
+            {
+              "clock": {
+                "banked_secs": 0,
+                "since": 1792455863
+              },
+              "ended_at": null,
+              "entered": true,
+              "first_call_prompt_tokens": 12,
+              "models": [
+                {
+                  "model": "gpt-mock",
+                  "provider": "openai"
+                }
+              ],
+              "output_cap_raised": false,
+              "region_tokens": {
+                "conversation": 0,
+                "final_output": 0,
+                "stage_instructions": 23,
+                "task": 3,
+                "tool_results": 0
+              },
+              "runaway_warned": false,
+              "spend": {
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "completion_tokens": 3,
+                "computed_calls": 0,
+                "cost_unknown": false,
+                "priced_usd": 0.0,
+                "prompt_tokens": 12,
+                "reported_calls": 0,
+                "unpriced_calls": 1
+              },
+              "stage": "main",
+              "started_at": 1792455863,
+              "status": "Active",
+              "visits": [
+                {
+                  "clock": {
+                    "banked_secs": 0,
+                    "since": 1792455863
+                  },
+                  "entered_at": 1792455863,
+                  "id": "v18e0151c65a59f30-00000000",
+                  "left_at": null,
+                  "spend": {
+                    "cache_write_tokens": 0,
+                    "cached_tokens": 0,
+                    "completion_tokens": 3,
+                    "computed_calls": 0,
+                    "cost_unknown": false,
+                    "priced_usd": 0.0,
+                    "prompt_tokens": 12,
+                    "reported_calls": 0,
+                    "unpriced_calls": 1
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Pending": {
+            "calls": [
+              {
+                "args": {
+                  "content": "hello",
+                  "path": "docs/a.md"
+                },
+                "id": "call_1",
+                "name": "write_file",
+                "thought_signature": null
+              }
+            ],
+            "done": {},
+            "executions": {
+              "call_1": "x18e0151c715d7c08-00000002"
+            },
+            "held": null,
+            "requested_by": "a18e0151c713eebd0-00000001"
+          }
+        },
+        {
+          "Totals": {
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 6,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 24,
+              "reported_calls": 0,
+              "unpriced_calls": 2
+            },
+            "tool_calls": 1
+          }
+        },
+        {
+          "Files": {
+            "final_output": null,
+            "stages": [
+              {
+                "index": 0,
+                "logs": {
+                  "bytes": 23,
+                  "path": "stages/0/logs.log",
+                  "sha256": null
+                },
+                "output": null,
+                "taint_audit": null
+              }
+            ]
+          }
+        },
+        {
+          "Written": 5
+        }
+      ],
+      "events": [
+        {
+          "Attempt": {
+            "backoff_ms": 0,
+            "digest": {
+              "max_tokens": 4096,
+              "messages": 1,
+              "system_hash": 6030106804208939475,
+              "temperature": 0.7,
+              "tools": 2
+            },
+            "duration_ms": 1,
+            "finish_reason": "tool_call",
+            "id": "a18e0151c713eebd0-00000001",
+            "model": "gpt-mock",
+            "model_input": {
+              "assembly_version": "1",
+              "bytes": 0,
+              "capture": "NotCaptured",
+              "parameters": {
+                "max_output_tokens": 4096,
+                "temperature": 0.699999988079071
+              },
+              "request": null,
+              "source_context_digest": "",
+              "tool_catalog_version": "eb7226ec5ea8e385"
+            },
+            "number": 1,
+            "outcome": "Succeeded",
+            "provider": "openai",
+            "stopped_for": null
+          }
+        },
+        {
+          "Inference": {
+            "attempt": "a18e0151c713eebd0-00000001",
+            "finish_reason": "tool_call",
+            "iteration": 1,
+            "kind": "stage",
+            "model": {
+              "model": "gpt-mock",
+              "provider": "openai"
+            },
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 3,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 12,
+              "reported_calls": 0,
+              "unpriced_calls": 1
+            },
+            "stage": "main"
+          }
+        },
+        {
+          "ToolStarted": {
+            "args": {
+              "content": "hello",
+              "path": "docs/a.md"
+            },
+            "id": "call_1",
+            "name": "write_file",
+            "thought_signature": null
+          }
+        },
+        {
+          "Dispatched": {
+            "call_id": "call_1",
+            "execution_id": "x18e0151c715d7c08-00000002",
+            "requested_by": "a18e0151c713eebd0-00000001"
+          }
+        }
+      ],
+      "seq": 3
+    },
+    {
+      "at": 1792455863,
+      "changes": [
+        {
+          "Phase": "ReadyToInfer"
+        },
+        {
+          "Progress": {
+            "blocked_modification_calls": 0,
+            "cut_off_nudges": 0,
+            "edits_by_path": {
+              "docs/a.md": 1
+            },
+            "entry_region_digests": {},
+            "gate_reentries": 0,
+            "images_produced": 0,
+            "iterations": 1,
+            "modifying_tool_calls": 1,
+            "no_image_nudges": 0,
+            "raise_output_cap": false,
+            "stage_started_at": null,
+            "stuck_fired": false,
+            "text_only_nudges": 0,
+            "total_tool_calls": 1,
+            "waiting_since": null
+          }
+        },
+        {
+          "Context": {
+            "hidden": null,
+            "max_tokens": null,
+            "order": null,
+            "regions": [
+              [
+                "conversation",
+                {
+                  "current_tokens": 11,
+                  "max_tokens": 10000,
+                  "needs_message_compaction": false,
+                  "taint": null
+                },
+                {
+                  "Append": [
+                    {
+                      "key": null,
+                      "kind": {
+                        "AssistantTurn": [
+                          {
+                            "args": {
+                              "content": "hello",
+                              "path": "docs/a.md"
+                            },
+                            "id": "call_1",
+                            "name": "write_file",
+                            "thought_signature": null
+                          }
+                        ]
+                      },
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "",
+                      "timestamp": 1792455863,
+                      "tokens": 0
+                    },
+                    {
+                      "key": null,
+                      "kind": {
+                        "ToolResult": {
+                          "call_id": "call_1",
+                          "is_error": false,
+                          "tool": "write_file"
+                        }
+                      },
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "Successfully wrote 5 bytes to 'docs/a.md'",
+                      "timestamp": 1792455863,
+                      "tokens": 11
+                    }
+                  ]
+                }
+              ]
+            ],
+            "removed": []
+          }
+        },
+        {
+          "Pending": null
+        },
+        {
+          "Flags": {
+            "broken_scripts": [],
+            "empty_output": false,
+            "gates_forced": 0,
+            "max_iterations_hit": 0,
+            "modified_file_count": 1,
+            "modified_files": [
+              "docs/a.md"
+            ],
+            "no_output_tools": false,
+            "output_forced": 0,
+            "produced_output": false,
+            "required_regions_abandoned": [],
+            "searches_empty": 0,
+            "searches_run": 0,
+            "splits_degraded": 0,
+            "workspace_lost": false
+          }
+        },
+        {
+          "Files": {
+            "final_output": null,
+            "stages": [
+              {
+                "index": 0,
+                "logs": {
+                  "bytes": 84,
+                  "path": "stages/0/logs.log",
+                  "sha256": null
+                },
+                "output": null,
+                "taint_audit": null
+              }
+            ]
+          }
+        }
+      ],
+      "events": [
+        {
+          "ToolFinished": {
+            "call_id": "call_1",
+            "millis": 0,
+            "result": {
+              "is_error": false,
+              "text": "Successfully wrote 5 bytes to 'docs/a.md'"
+            }
+          }
+        },
+        {
+          "Completed": {
+            "call_id": "call_1",
+            "execution_id": "x18e0151c715d7c08-00000002",
+            "outcome": "Succeeded",
+            "parts": []
+          }
+        },
+        {
+          "ContextCommitted": {
+            "cause": "ModelReply",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-89d4589e5b5ffd3f2144cd4599d4ecbb",
+                "digest_before": "rg1-e3b0c44298fc1c149afbf4c8996fb924",
+                "entries_added": 1,
+                "entries_after": 1,
+                "entries_before": 0,
+                "region": "conversation",
+                "tokens_after": 0,
+                "tokens_before": 0
+              }
+            ],
+            "revision_after": "cw1-5d5a5fabc6369f2b7ef9a2446bdffbde",
+            "revision_before": "cw1-396b4765d26741aefa930df19d36fd92"
+          }
+        },
+        {
+          "ContextCommitted": {
+            "cause": "ToolResult",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-dbd6abebbf07af1d831cfca0b3714609",
+                "digest_before": "rg1-89d4589e5b5ffd3f2144cd4599d4ecbb",
+                "entries_added": 1,
+                "entries_after": 2,
+                "entries_before": 1,
+                "region": "conversation",
+                "tokens_after": 11,
+                "tokens_before": 0
+              }
+            ],
+            "revision_after": "cw1-145a09f5ba55a376f2ba31fa33112ee0",
+            "revision_before": "cw1-5d5a5fabc6369f2b7ef9a2446bdffbde"
+          }
+        }
+      ],
+      "seq": 4
+    },
+    {
+      "at": 1792455863,
+      "changes": [
+        {
+          "Status": "Complete"
+        },
+        {
+          "Cursor": {
+            "iteration": 2,
+            "stage": "main",
+            "visit": "v18e0151c65a59f30-00000000"
+          }
+        },
+        {
+          "Phase": "Done"
+        },
+        {
+          "Progress": {
+            "blocked_modification_calls": 0,
+            "cut_off_nudges": 0,
+            "edits_by_path": {
+              "docs/a.md": 1
+            },
+            "entry_region_digests": {},
+            "gate_reentries": 0,
+            "images_produced": 0,
+            "iterations": 2,
+            "modifying_tool_calls": 1,
+            "no_image_nudges": 0,
+            "raise_output_cap": false,
+            "stage_started_at": null,
+            "stuck_fired": false,
+            "text_only_nudges": 0,
+            "total_tool_calls": 1,
+            "waiting_since": null
+          }
+        },
+        {
+          "LedgerRecord": [
+            0,
+            {
+              "clock": {
+                "banked_secs": 0,
+                "since": null
+              },
+              "ended_at": 1792455863,
+              "entered": true,
+              "first_call_prompt_tokens": 12,
+              "models": [
+                {
+                  "model": "gpt-mock",
+                  "provider": "openai"
+                }
+              ],
+              "output_cap_raised": false,
+              "region_tokens": {
+                "conversation": 11,
+                "final_output": 0,
+                "stage_instructions": 23,
+                "task": 3,
+                "tool_results": 0
+              },
+              "runaway_warned": false,
+              "spend": {
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "completion_tokens": 6,
+                "computed_calls": 0,
+                "cost_unknown": false,
+                "priced_usd": 0.0,
+                "prompt_tokens": 24,
+                "reported_calls": 0,
+                "unpriced_calls": 2
+              },
+              "stage": "main",
+              "started_at": 1792455863,
+              "status": "Complete",
+              "visits": [
+                {
+                  "clock": {
+                    "banked_secs": 0,
+                    "since": null
+                  },
+                  "entered_at": 1792455863,
+                  "id": "v18e0151c65a59f30-00000000",
+                  "left_at": 1792455863,
+                  "spend": {
+                    "cache_write_tokens": 0,
+                    "cached_tokens": 0,
+                    "completion_tokens": 6,
+                    "computed_calls": 0,
+                    "cost_unknown": false,
+                    "priced_usd": 0.0,
+                    "prompt_tokens": 24,
+                    "reported_calls": 0,
+                    "unpriced_calls": 2
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Context": {
+            "hidden": null,
+            "max_tokens": null,
+            "order": null,
+            "regions": [
+              [
+                "conversation",
+                {
+                  "current_tokens": 12,
+                  "max_tokens": 10000,
+                  "needs_message_compaction": false,
+                  "taint": null
+                },
+                {
+                  "Append": [
+                    {
+                      "key": null,
+                      "kind": {
+                        "AssistantTurn": []
+                      },
+                      "meta": "None",
+                      "parts": [],
+                      "reasoning": null,
+                      "text": "done",
+                      "timestamp": 1792455863,
+                      "tokens": 1
+                    }
+                  ]
+                }
+              ]
+            ],
+            "removed": []
+          }
+        },
+        {
+          "Totals": {
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 9,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 36,
+              "reported_calls": 0,
+              "unpriced_calls": 3
+            },
+            "tool_calls": 1
+          }
+        },
+        {
+          "Clock": {
+            "banked_secs": 0,
+            "since": null
+          }
+        },
+        {
+          "Files": {
+            "final_output": null,
+            "stages": [
+              {
+                "index": 0,
+                "logs": {
+                  "bytes": 107,
+                  "path": "stages/0/logs.log",
+                  "sha256": null
+                },
+                "output": {
+                  "bytes": 5,
+                  "path": "stages/0/output.log",
+                  "sha256": null
+                },
+                "taint_audit": null
+              }
+            ]
+          }
+        }
+      ],
+      "events": [
+        {
+          "Attempt": {
+            "backoff_ms": 0,
+            "digest": {
+              "max_tokens": 4096,
+              "messages": 2,
+              "system_hash": 6030106804208939475,
+              "temperature": 0.7,
+              "tools": 2
+            },
+            "duration_ms": 0,
+            "finish_reason": "complete",
+            "id": "a18e0151c72532e78-00000003",
+            "model": "gpt-mock",
+            "model_input": {
+              "assembly_version": "1",
+              "bytes": 0,
+              "capture": "NotCaptured",
+              "parameters": {
+                "max_output_tokens": 4096,
+                "temperature": 0.699999988079071
+              },
+              "request": null,
+              "source_context_digest": "",
+              "tool_catalog_version": "eb7226ec5ea8e385"
+            },
+            "number": 1,
+            "outcome": "Succeeded",
+            "provider": "openai",
+            "stopped_for": null
+          }
+        },
+        {
+          "Inference": {
+            "attempt": "a18e0151c72532e78-00000003",
+            "finish_reason": "complete",
+            "iteration": 2,
+            "kind": "stage",
+            "model": {
+              "model": "gpt-mock",
+              "provider": "openai"
+            },
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 3,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 12,
+              "reported_calls": 0,
+              "unpriced_calls": 1
+            },
+            "stage": "main"
+          }
+        },
+        {
+          "ContextCommitted": {
+            "cause": "ModelReply",
+            "execution_id": null,
+            "regions": [
+              {
+                "digest_after": "rg1-6c37cd0780070a49976e52d960a28c98",
+                "digest_before": "rg1-dbd6abebbf07af1d831cfca0b3714609",
+                "entries_added": 1,
+                "entries_after": 3,
+                "entries_before": 2,
+                "region": "conversation",
+                "tokens_after": 12,
+                "tokens_before": 11
+              }
+            ],
+            "revision_after": "cw1-d109cc0389f78a101cb14b8f34f97402",
+            "revision_before": "cw1-145a09f5ba55a376f2ba31fa33112ee0"
+          }
+        }
+      ],
+      "seq": 5
+    }
+  ],
+  "first": {
+    "accepts_messages": true,
+    "blobs": [],
+    "children": [],
+    "clock": {
+      "banked_secs": 0,
+      "since": null
+    },
+    "context": {
+      "hidden": [],
+      "max_tokens": 12000,
+      "regions": [
+        {
+          "current_tokens": 3,
+          "entries": [
+            {
+              "key": null,
+              "kind": "Text",
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "write a file",
+              "timestamp": 1792455863,
+              "tokens": 3
+            }
+          ],
+          "max_tokens": 2000,
+          "name": "task",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 10000,
+          "name": "conversation",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 5000,
+          "name": "tool_results",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 2000,
+          "name": "final_output",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 23,
+          "entries": [
+            {
+              "key": null,
+              "kind": "Text",
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "[Stage instructions: You are a probe. Call the tool you are asked to call, then reply done.]",
+              "timestamp": 1792455863,
+              "tokens": 23
+            }
+          ],
+          "max_tokens": 23,
+          "name": "stage_instructions",
+          "needs_message_compaction": false,
+          "taint": null
+        }
+      ]
+    },
+    "cursor": {
+      "iteration": 0,
+      "stage": "main",
+      "visit": "v18e0151c65a59f30-00000000"
+    },
+    "fan_out": null,
+    "files": {
+      "final_output": null,
+      "stages": []
+    },
+    "final_output": null,
+    "flags": {
+      "broken_scripts": [],
+      "empty_output": false,
+      "gates_forced": 0,
+      "max_iterations_hit": 0,
+      "modified_file_count": 0,
+      "modified_files": [],
+      "no_output_tools": false,
+      "output_forced": 0,
+      "produced_output": false,
+      "required_regions_abandoned": [],
+      "searches_empty": 0,
+      "searches_run": 0,
+      "splits_degraded": 0,
+      "workspace_lost": false
+    },
+    "grants": {
+      "cleared": [],
+      "run": [],
+      "stage": [],
+      "stage_index": null
+    },
+    "held": null,
+    "inbox": [],
+    "interactions": [],
+    "last_progress_at": null,
+    "last_transition": null,
+    "ledger": [
+      {
+        "clock": {
+          "banked_secs": 0,
+          "since": null
+        },
+        "ended_at": null,
+        "entered": false,
+        "first_call_prompt_tokens": null,
+        "models": [],
+        "output_cap_raised": false,
+        "region_tokens": {},
+        "runaway_warned": false,
+        "spend": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0,
+          "completion_tokens": 0,
+          "computed_calls": 0,
+          "cost_unknown": false,
+          "priced_usd": 0.0,
+          "prompt_tokens": 0,
+          "reported_calls": 0,
+          "unpriced_calls": 0
+        },
+        "stage": "main",
+        "started_at": null,
+        "status": "Pending",
+        "visits": [
+          {
+            "clock": {
+              "banked_secs": 0,
+              "since": null
+            },
+            "entered_at": 1792455863,
+            "id": "v18e0151c65a59f30-00000000",
+            "left_at": null,
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 0,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 0,
+              "reported_calls": 0,
+              "unpriced_calls": 0
+            }
+          }
+        ]
+      }
+    ],
+    "pending": null,
+    "phase": "ReadyToInfer",
+    "point": {
+      "asking": null,
+      "cursor": 0,
+      "round": 0
+    },
+    "progress": {
+      "blocked_modification_calls": 0,
+      "cut_off_nudges": 0,
+      "edits_by_path": {},
+      "entry_region_digests": {},
+      "gate_reentries": 0,
+      "images_produced": 0,
+      "iterations": 0,
+      "modifying_tool_calls": 0,
+      "no_image_nudges": 0,
+      "raise_output_cap": false,
+      "stage_started_at": null,
+      "stuck_fired": false,
+      "text_only_nudges": 0,
+      "total_tool_calls": 0,
+      "waiting_since": null
+    },
+    "read_paths": null,
+    "remote_jobs": {},
+    "seq": 0,
+    "status": "Active",
+    "title": null,
+    "title_error": null,
+    "totals": {
+      "spend": {
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "completion_tokens": 0,
+        "computed_calls": 0,
+        "cost_unknown": false,
+        "priced_usd": 0.0,
+        "prompt_tokens": 0,
+        "reported_calls": 0,
+        "unpriced_calls": 0
+      },
+      "tool_calls": 0
+    },
+    "visits": {
+      "main": 1
+    },
+    "wait_reason": null,
+    "written": 0
+  },
+  "latest": {
+    "accepts_messages": true,
+    "blobs": [],
+    "children": [],
+    "clock": {
+      "banked_secs": 0,
+      "since": null
+    },
+    "context": {
+      "hidden": [],
+      "max_tokens": 12000,
+      "regions": [
+        {
+          "current_tokens": 3,
+          "entries": [
+            {
+              "key": null,
+              "kind": "Text",
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "write a file",
+              "timestamp": 1792455863,
+              "tokens": 3
+            }
+          ],
+          "max_tokens": 2000,
+          "name": "task",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 12,
+          "entries": [
+            {
+              "key": null,
+              "kind": {
+                "AssistantTurn": [
+                  {
+                    "args": {
+                      "content": "hello",
+                      "path": "docs/a.md"
+                    },
+                    "id": "call_1",
+                    "name": "write_file",
+                    "thought_signature": null
+                  }
+                ]
+              },
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "",
+              "timestamp": 1792455863,
+              "tokens": 0
+            },
+            {
+              "key": null,
+              "kind": {
+                "ToolResult": {
+                  "call_id": "call_1",
+                  "is_error": false,
+                  "tool": "write_file"
+                }
+              },
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "Successfully wrote 5 bytes to 'docs/a.md'",
+              "timestamp": 1792455863,
+              "tokens": 11
+            },
+            {
+              "key": null,
+              "kind": {
+                "AssistantTurn": []
+              },
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "done",
+              "timestamp": 1792455863,
+              "tokens": 1
+            }
+          ],
+          "max_tokens": 10000,
+          "name": "conversation",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 5000,
+          "name": "tool_results",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 0,
+          "entries": [],
+          "max_tokens": 2000,
+          "name": "final_output",
+          "needs_message_compaction": false,
+          "taint": null
+        },
+        {
+          "current_tokens": 23,
+          "entries": [
+            {
+              "key": null,
+              "kind": "Text",
+              "meta": "None",
+              "parts": [],
+              "reasoning": null,
+              "text": "[Stage instructions: You are a probe. Call the tool you are asked to call, then reply done.]",
+              "timestamp": 1792455863,
+              "tokens": 23
+            }
+          ],
+          "max_tokens": 23,
+          "name": "stage_instructions",
+          "needs_message_compaction": false,
+          "taint": null
+        }
+      ]
+    },
+    "cursor": {
+      "iteration": 2,
+      "stage": "main",
+      "visit": "v18e0151c65a59f30-00000000"
+    },
+    "fan_out": null,
+    "files": {
+      "final_output": null,
+      "stages": [
+        {
+          "index": 0,
+          "logs": {
+            "bytes": 107,
+            "path": "stages/0/logs.log",
+            "sha256": null
+          },
+          "output": {
+            "bytes": 5,
+            "path": "stages/0/output.log",
+            "sha256": null
+          },
+          "taint_audit": null
+        }
+      ]
+    },
+    "final_output": null,
+    "flags": {
+      "broken_scripts": [],
+      "empty_output": false,
+      "gates_forced": 0,
+      "max_iterations_hit": 0,
+      "modified_file_count": 1,
+      "modified_files": [
+        "docs/a.md"
+      ],
+      "no_output_tools": false,
+      "output_forced": 0,
+      "produced_output": false,
+      "required_regions_abandoned": [],
+      "searches_empty": 0,
+      "searches_run": 0,
+      "splits_degraded": 0,
+      "workspace_lost": false
+    },
+    "grants": {
+      "cleared": [],
+      "run": [],
+      "stage": [],
+      "stage_index": null
+    },
+    "held": null,
+    "inbox": [],
+    "interactions": [],
+    "last_progress_at": null,
+    "last_transition": null,
+    "ledger": [
+      {
+        "clock": {
+          "banked_secs": 0,
+          "since": null
+        },
+        "ended_at": 1792455863,
+        "entered": true,
+        "first_call_prompt_tokens": 12,
+        "models": [
+          {
+            "model": "gpt-mock",
+            "provider": "openai"
+          }
+        ],
+        "output_cap_raised": false,
+        "region_tokens": {
+          "conversation": 11,
+          "final_output": 0,
+          "stage_instructions": 23,
+          "task": 3,
+          "tool_results": 0
+        },
+        "runaway_warned": false,
+        "spend": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0,
+          "completion_tokens": 6,
+          "computed_calls": 0,
+          "cost_unknown": false,
+          "priced_usd": 0.0,
+          "prompt_tokens": 24,
+          "reported_calls": 0,
+          "unpriced_calls": 2
+        },
+        "stage": "main",
+        "started_at": 1792455863,
+        "status": "Complete",
+        "visits": [
+          {
+            "clock": {
+              "banked_secs": 0,
+              "since": null
+            },
+            "entered_at": 1792455863,
+            "id": "v18e0151c65a59f30-00000000",
+            "left_at": 1792455863,
+            "spend": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "completion_tokens": 6,
+              "computed_calls": 0,
+              "cost_unknown": false,
+              "priced_usd": 0.0,
+              "prompt_tokens": 24,
+              "reported_calls": 0,
+              "unpriced_calls": 2
+            }
+          }
+        ]
+      }
+    ],
+    "pending": null,
+    "phase": "Done",
+    "point": {
+      "asking": null,
+      "cursor": 0,
+      "round": 0
+    },
+    "progress": {
+      "blocked_modification_calls": 0,
+      "cut_off_nudges": 0,
+      "edits_by_path": {
+        "docs/a.md": 1
+      },
+      "entry_region_digests": {},
+      "gate_reentries": 0,
+      "images_produced": 0,
+      "iterations": 2,
+      "modifying_tool_calls": 1,
+      "no_image_nudges": 0,
+      "raise_output_cap": false,
+      "stage_started_at": null,
+      "stuck_fired": false,
+      "text_only_nudges": 0,
+      "total_tool_calls": 1,
+      "waiting_since": null
+    },
+    "read_paths": null,
+    "remote_jobs": {},
+    "seq": 5,
+    "status": "Complete",
+    "title": null,
+    "title_error": "openai/gpt-mock replied with nothing usable as a title",
+    "totals": {
+      "spend": {
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "completion_tokens": 9,
+        "computed_calls": 0,
+        "cost_unknown": false,
+        "priced_usd": 0.0,
+        "prompt_tokens": 36,
+        "reported_calls": 0,
+        "unpriced_calls": 3
+      },
+      "tool_calls": 1
+    },
+    "visits": {
+      "main": 1
+    },
+    "wait_reason": null,
+    "written": 5
+  },
+  "spec": {
+    "auto_answers": {
+      "checkpoints": true,
+      "gate": true,
+      "questions": true
+    },
+    "code": [],
+    "created_at": 1792455863,
+    "delivery": {
+      "callback": null,
+      "idempotency": null,
+      "metadata": {}
+    },
+    "env": {
+      "leviath_version": "0.6.4",
+      "mcp_servers": {},
+      "providers": {
+        "openai": "a85e6fa4ec827892ae2841748b143effbdad2f603e7a0562e0b5b96816206e79"
+      },
+      "sandbox": {
+        "main": "none"
+      }
+    },
+    "graph": {
+      "batch_tool_hint": true,
+      "compaction": null,
+      "dependencies": [],
+      "description": "One stage that writes what the mock asks, for a layout-5 run file",
+      "edges": [],
+      "entry": "main",
+      "file_tracking": null,
+      "inputs": [
+        {
+          "binds": [
+            {
+              "region": "task"
+            }
+          ],
+          "default": null,
+          "description": null,
+          "name": "task",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "layout": {
+        "eviction_order": [],
+        "regions": [
+          {
+            "accepts": [],
+            "admission": "evict",
+            "budget": 2000,
+            "compact_at": null,
+            "describe_in_prompt": false,
+            "description": null,
+            "kind": "pinned",
+            "name": "task",
+            "required": false,
+            "required_message": null,
+            "seed": null,
+            "summarizable": true,
+            "volatility": "rewritten"
+          },
+          {
+            "accepts": [],
+            "admission": "evict",
+            "budget": 10000,
+            "compact_at": null,
+            "describe_in_prompt": false,
+            "description": null,
+            "kind": {
+              "kind": "sliding_window",
+              "max_items": 50
+            },
+            "name": "conversation",
+            "required": false,
+            "required_message": null,
+            "seed": null,
+            "summarizable": true,
+            "volatility": "rewritten"
+          }
+        ],
+        "total_budget_tokens": 12000
+      },
+      "max_child_depth": null,
+      "mcp_servers": [],
+      "mime_types": {},
+      "nudge": {
+        "enabled": null,
+        "max": null,
+        "text": null
+      },
+      "output": null,
+      "read_paths": [],
+      "repetition": null,
+      "routing": null,
+      "safe_commands": {
+        "shell": [],
+        "tools": []
+      },
+      "sandbox": null,
+      "script_permissions": {
+        "env_var": null,
+        "http_get": null,
+        "http_post": null,
+        "read_file": null,
+        "shell": null,
+        "write_file": null
+      },
+      "shell_hint": true,
+      "stages": [
+        {
+          "accepts_messages": true,
+          "allow_as_worker": false,
+          "allow_blocking_tools": false,
+          "allow_complete": false,
+          "batch_tool_hint": null,
+          "connectors": [],
+          "description": "Write what the mock asks, then finish",
+          "hide": [],
+          "hooks": {
+            "after_inference": null,
+            "before_inference": null,
+            "on_completion": null,
+            "on_error": null,
+            "on_stage_enter": null,
+            "on_stage_exit": null,
+            "on_tool_call": null
+          },
+          "input_accepts": [],
+          "input_as_text": [],
+          "layout": null,
+          "max_iterations": 4,
+          "max_revisits": null,
+          "mode": "autonomous",
+          "model": {
+            "allow_user_default": true,
+            "models": [
+              {
+                "model": "gpt-mock",
+                "provider": "openai"
+              }
+            ],
+            "params": {
+              "extra": {},
+              "max_output_tokens": null,
+              "temperature": null
+            },
+            "request_timeout_secs": null
+          },
+          "name": "main",
+          "nudge": null,
+          "output": null,
+          "output_routing": {},
+          "require_output": false,
+          "required_tools": [],
+          "requires_children": false,
+          "reset": [],
+          "routing": null,
+          "sandbox": null,
+          "shell_hint": null,
+          "system_prompt": "You are a probe. Call the tool you are asked to call, then reply done.",
+          "taint_tracking": null,
+          "tool_accepts": {},
+          "tool_permissions": {},
+          "tool_routing": null,
+          "tools": [
+            "write_file",
+            "shell"
+          ],
+          "transition_prompt": null
+        }
+      ],
+      "taint_tracking": false,
+      "title": "probe5",
+      "tool_permissions": {},
+      "tool_rescan": "at_spawn",
+      "transforms": []
+    },
+    "inputs": {
+      "task": {
+        "text": "write a file"
+      }
+    },
+    "launch": {
+      "allow": [],
+      "capture_model_input": false,
+      "max_depth": 3,
+      "seed_commands": true,
+      "unattended": "all"
+    },
+    "listed": null,
+    "origin": {
+      "Blueprint": {
+        "blueprint": {
+          "digest": "e66f2311bd92740de4a9d95cd18a0e40d91284ec9df09aaca98ecbd9ac612bfc",
+          "name": "probe5"
+        },
+        "manifest": "/tmp/lv989a/.leviath/agents/probe5/agent.toml",
+        "version": "0.1.0"
+      }
+    },
+    "placement": {
+      "depth": 0,
+      "parent": null,
+      "work_item": null,
+      "workdir": "/private/tmp/lv989a/work",
+      "worker_stage": null
+    },
+    "requested_model": null,
+    "requested_output": null,
+    "run_id": "probe5-1792455863-d1819d4faf7c",
+    "seeded": {
+      "task": {
+        "parts": [],
+        "text": "write a file"
+      }
+    },
+    "stages": [
+      {
+        "model": {
+          "context_window": 8192,
+          "fallbacks": [],
+          "id": "gpt-mock",
+          "provider": "openai"
+        },
+        "notes": [],
+        "output": null,
+        "region_budgets": {
+          "conversation": 10000,
+          "task": 2000
+        },
+        "reply_cap": null,
+        "stage": "main",
+        "tools": [
+          {
+            "description": "Write content to a file, creating it (and any parent directories) if necessary. Use this to create new files or completely replace existing file content. Set append to add to the end of the file instead, which is how to write a file too large for one call: the first part without append, each later part with append.",
+            "name": "write_file",
+            "schema": {
+              "properties": {
+                "append": {
+                  "description": "Add content to the end of the file instead of replacing it, creating the file if it does not exist. Defaults to false.",
+                  "type": "boolean"
+                },
+                "content": {
+                  "description": "The content to write: the whole file, or with append the part to add",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Path to the file, relative to the working directory",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ],
+              "type": "object"
+            },
+            "source": "Builtin"
+          },
+          {
+            "description": "Execute a shell command in the working directory. On this machine commands run through `/bin/bash`, so write them in its syntax. Use this for build commands, running tests, installing dependencies, or other shell operations. Has a 60-second timeout.",
+            "name": "shell",
+            "schema": {
+              "properties": {
+                "command": {
+                  "description": "The shell command to execute",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "type": "object"
+            },
+            "source": "Builtin"
+          }
+        ]
+      }
+    ]
+  }
+}

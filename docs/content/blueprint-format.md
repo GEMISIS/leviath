@@ -155,6 +155,7 @@ The graph-wide settings sit directly under `[graph]`. Everything has a default e
 | `max_child_depth` | the operator's | How deep a tree of child runs may grow. |
 | `tool_permissions` | none | `allow`, `ask` or `deny` per tool, for every stage. |
 | `read_paths` | none | Paths outside the workdir the run may read. |
+| `write_paths` | none | Globs inside the workdir every write must match. See [Security](/docs/security#limiting-where-a-stage-writes). |
 | `safe_commands` | none | `{ tools = [...], shell = [...] }` that run without approval. |
 | `output` | none | The shape of the run's final answer. See [Outputs](/docs/outputs). |
 | `compaction` | none | The models and prompts that summarize compacting regions. See below. |
@@ -312,6 +313,7 @@ and the dashboard show, and the first stage is where a run starts unless `entry`
 | `output` | none | The shape of its final answer. |
 | `tool_routing` | none | Which region each tool's results land in. |
 | `tool_permissions` | none | `allow`, `ask` or `deny` per tool, for this stage. |
+| `write_paths` | none | Globs this stage's writes must match, on top of the graph's. |
 | `max_revisits` | none | How often a gate may send the run back here. |
 | `transition_prompt` | none | Extra guidance when the model picks the next edge. |
 | `routing` | the graph's | How that pick is retried, and what a failure does. See [Routing](#routing). |

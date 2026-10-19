@@ -387,6 +387,16 @@ impl DaemonEnv {
                     .collect()
             })
             .collect();
+        let stage_write_fences: Vec<leviath_core::write_paths::WriteFence> =
+            (0..graph.stages.len())
+                .map(|i| leviath_core::write_paths::WriteFence::new(&spec.write_layers(i)))
+                .collect();
+        let write_fence = Arc::new(std::sync::Mutex::new(
+            stage_write_fences
+                .get(layers.entry_index)
+                .cloned()
+                .unwrap_or_default(),
+        ));
         let script_allow =
             layers::script_allow(config, graph, &layers, profile.as_deref(), &workdir);
         let writes = Arc::new(crate::daemon::tool_service::WriteBudget::new(
@@ -402,6 +412,7 @@ impl DaemonEnv {
                     std::time::Duration::from_secs(config.limits.script_shell_timeout_secs),
                     shell_env,
                 )
+                .with_write_fence(write_fence.clone())
                 .with_local_network(config.security.allow_local_network)
                 .with_env_allowlist(config.security.allow_env_vars.clone())
                 .with_credentials(self.credentials.clone()),
@@ -440,6 +451,8 @@ impl DaemonEnv {
             stage_perms_by_index,
             stage_required_by_index,
             stage_tool_accepts_by_index,
+            stage_write_fences,
+            write_fence,
             agent_perms,
             agent_name: agent,
             launch_overrides,

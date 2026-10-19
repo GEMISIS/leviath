@@ -161,6 +161,14 @@ same list.
   as a stage naming it would. Before, the run started and never summarized
   anything. Name a model the provider carries (`lev models list --provider
   <name>`), or leave the provider off so the user's preference picks one.
+- **Breaking.** Run files move to binary layout 7: a graph and its stages
+  carry `write_paths`, and a run's launch policy the write-path layers it
+  inherited. The daemon upgrades layout-6 files at start, the original kept
+  as `legacy/run.v6.lvr`; an upgraded run has no write paths, which is what
+  it ran under. An older build reads the kept original.
+- **Breaking, library.** `RunGraph`, `StageDef` and `LaunchRequest` have
+  `write_paths: Vec<String>`, and `LaunchPolicy` has
+  `write_paths: Vec<Vec<String>>`, one list per layer.
 - **Breaking.** Run files move to binary layout 5: a graph's compaction may
   name several models, or none. The daemon upgrades layout-4 files at start,
   the original kept as `legacy/run.v4.lvr`; the one compaction model of an
@@ -969,6 +977,19 @@ same list.
   send it. Announced as `admin.token`. A server without an admin token
   behaves as before: `--allow-admin` alone still opens the admin routes to
   every holder of the API token, and without it they are not mounted.
+- `write_paths`: globs, relative to the workdir, that a stage's writes must
+  match. Set them under `[graph]`, on a stage (which only narrows the
+  graph's), or on a spawn request's `launch` (GraphQL `LaunchWrite.writePaths`).
+  `write_file`, `edit_file`, `shell` redirects and a script tool's
+  `write_file` and `shell()` redirects outside them are refused before they
+  run, whatever the permissions say, and the refusal names the globs. Paths
+  are judged as written and as symlinks resolve them. Child runs and fan-out
+  workers inherit the write paths in force where their parent was, under any
+  of their own. `lev validate` refuses a glob that leaves the workdir, and
+  warns when a stage with write paths can still run `shell`
+  (`write-paths-shell`) or call MCP tools (`write-paths-mcp`), which those do
+  not cover. GraphQL `BlueprintOutput.writePaths`, a stage's `writePaths`
+  and `LaunchPolicyOutput.writePaths` read them back.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is

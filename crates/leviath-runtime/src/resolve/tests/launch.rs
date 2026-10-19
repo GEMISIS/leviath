@@ -10,6 +10,7 @@ fn parent_policy(depth: u8) -> LaunchPolicy {
         max_depth: depth,
         seed_commands: true,
         capture_model_input: false,
+        write_paths: Vec::new(),
     }
 }
 
@@ -65,6 +66,36 @@ async fn a_child_is_narrowed_by_its_parent() {
     assert_eq!(spec.placement.parent, Some(n("parent-1")));
     assert_eq!(spec.placement.depth, 2);
     assert_eq!(spec.placement.worker_stage, None);
+}
+
+/// A request's write paths are checked like a graph's, and a child keeps the
+/// layers its parent's caller handed it under any it asks for itself.
+#[tokio::test]
+async fn write_paths_are_checked_and_a_child_inherits_them() {
+    let mut request = raw(graph());
+    request.launch.write_paths = vec!["docs/**".into(), "~/x/**".into()];
+    let issues = spawn(&request, &Fake::default()).await.unwrap_err();
+    assert_eq!(found(&issues), ["launch.write_paths[1] Invalid"]);
+
+    request.launch.write_paths = vec!["docs/panels/**".into()];
+    let fenced = Caller::Child {
+        parent: n("parent-1"),
+        policy: LaunchPolicy {
+            write_paths: vec![vec!["docs/**".into()]],
+            ..parent_policy(2)
+        },
+        depth: 1,
+    };
+    let resolved = resolve(&request, &fenced, &Fake::default(), ResolveMode::Spawn)
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved.spec.launch.write_paths,
+        vec![
+            vec!["docs/**".to_string()],
+            vec!["docs/panels/**".to_string()]
+        ]
+    );
 }
 
 #[tokio::test]

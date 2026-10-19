@@ -22,7 +22,7 @@ use leviath_runtime::spec::graph::{
     ScriptPermissionsDef, ToolRescan,
 };
 use leviath_runtime::spec::inputs::{InputDecl, InputValues};
-use leviath_runtime::spec::launch::{LaunchPolicy, Placement};
+use leviath_runtime::spec::launch::Placement;
 use leviath_runtime::spec::names::{Digest, ModelRef, RegionName, RunId, StageName, ToolName};
 use leviath_runtime::spec::run_spec::{
     self, AutoAnswers, EnvFingerprint, ListedAs, SeededContent, SpecOrigin, StagePlan,
@@ -108,6 +108,7 @@ impl From<RunGraph> for graph::RunGraph {
             tool_permissions: g.tool_permissions,
             sandbox: g.sandbox,
             read_paths: g.read_paths,
+            write_paths: Vec::new(),
             safe_commands: g.safe_commands,
             batch_tool_hint: g.batch_tool_hint,
             shell_hint: g.shell_hint,
@@ -136,7 +137,7 @@ pub(crate) struct RunSpec {
     code: Vec<(CodeRef, Digest)>,
     requested_output: Option<OutputDef>,
     requested_model: Option<ModelRef>,
-    launch: LaunchPolicy,
+    launch: crate::layout6::LaunchPolicy,
     auto_answers: AutoAnswers,
     placement: Placement,
     delivery: crate::layout5::DeliveryPlan,
@@ -157,7 +158,7 @@ impl From<RunSpec> for run_spec::RunSpec {
             code: spec.code,
             requested_output: spec.requested_output,
             requested_model: spec.requested_model,
-            launch: spec.launch,
+            launch: spec.launch.into(),
             auto_answers: spec.auto_answers,
             placement: spec.placement,
             delivery: spec.delivery.into(),

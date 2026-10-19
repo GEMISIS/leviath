@@ -28,6 +28,10 @@ pub(super) fn decide(
     limits: &SpawnLimits,
     issues: &mut SpawnIssues,
 ) -> (LaunchPolicy, Placement) {
+    let asked_paths = SpecPath::root().field("launch").field("write_paths");
+    for issue in crate::spec::graph::write_path_issues(&asked_paths, &request.launch.write_paths) {
+        issues.push(issue);
+    }
     let (parent, policy, depth, worker_stage) = match caller {
         Caller::TopLevel => {
             let depth = graph.max_child_depth.unwrap_or(limits.default_max_depth);

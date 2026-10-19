@@ -1412,6 +1412,14 @@
           "$ref": "#/$defs/Unattended",
           "default": "off",
           "description": "How much goes ahead without a person."
+        },
+        "write_paths": {
+          "default": [],
+          "description": "Globs, relative to the workdir, that every write tool call of the run\nmust match, on top of any its graph and stages set. Empty adds no\nlimit. A child run or fan-out worker of this run inherits them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -2600,6 +2608,14 @@
             "$ref": "#/$defs/ContextTransformDef"
           },
           "type": "array"
+        },
+        "write_paths": {
+          "default": [],
+          "description": "Globs, relative to the workdir, that `write_file`, `edit_file`, a\nshell redirect and a script's `write_file` must match in every stage.\nEmpty is no limit. A stage's own `write_paths` narrow these.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -3332,6 +3348,14 @@
             "string",
             "null"
           ]
+        },
+        "write_paths": {
+          "default": [],
+          "description": "Globs, relative to the workdir, that this stage's writes must match\nas well as the graph's `write_paths`. Empty adds no limit.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -3959,7 +3983,8 @@
         "capture_model_input": false,
         "max_depth": null,
         "seed_commands": true,
-        "unattended": "off"
+        "unattended": "off",
+        "write_paths": []
       },
       "description": "How much the run is trusted with."
     },

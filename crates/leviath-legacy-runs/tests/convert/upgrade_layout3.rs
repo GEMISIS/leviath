@@ -140,6 +140,7 @@ fn a_layout_3_fan_out_reads_back_with_its_one_worker_once_upgraded() {
             config_as_this_build_shows(fan_out, &name);
         }
     }
+    crate::common::with_no_write_paths(&mut want);
     assert_eq!(json_of(spec), want);
 
     let last = reader.last_seq();

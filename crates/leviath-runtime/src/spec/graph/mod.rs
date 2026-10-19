@@ -19,6 +19,8 @@ pub mod region;
 pub mod stage;
 mod validate;
 
+pub(crate) use validate::write_path_issues;
+
 pub use edge::{
     EdgeCarry, EdgeCondition, EdgeDef, FALL_THROUGH_EDGE, GateDef, MODIFYING_TOOLS, RegionCount,
     StuckDef,
@@ -88,6 +90,11 @@ pub struct RunGraph {
     /// Paths outside the workdir the run may read (globs and `re:` patterns).
     #[serde(default)]
     pub read_paths: Vec<String>,
+    /// Globs, relative to the workdir, that `write_file`, `edit_file`, a
+    /// shell redirect and a script's `write_file` must match in every stage.
+    /// Empty is no limit. A stage's own `write_paths` narrow these.
+    #[serde(default)]
+    pub write_paths: Vec<String>,
     /// Commands and tools that only read, so they run without approval.
     #[serde(default)]
     pub safe_commands: SafeCommandsDef,

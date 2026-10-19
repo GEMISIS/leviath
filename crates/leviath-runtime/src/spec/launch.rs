@@ -38,6 +38,11 @@ pub struct LaunchRequest {
     /// Whether to record every request sent to the model, for debugging.
     #[serde(default)]
     pub capture_model_input: bool,
+    /// Globs, relative to the workdir, that every write tool call of the run
+    /// must match, on top of any its graph and stages set. Empty adds no
+    /// limit. A child run or fan-out worker of this run inherits them.
+    #[serde(default)]
+    pub write_paths: Vec<String>,
 }
 
 impl Default for LaunchRequest {
@@ -48,6 +53,7 @@ impl Default for LaunchRequest {
             max_depth: None,
             seed_commands: true,
             capture_model_input: false,
+            write_paths: Vec::new(),
         }
     }
 }
@@ -65,6 +71,11 @@ pub struct LaunchPolicy {
     pub seed_commands: bool,
     /// Whether every model request is recorded.
     pub capture_model_input: bool,
+    /// Write-path layers imposed from outside the run's own graph: the
+    /// request's `write_paths`, and the limits in force where the run that
+    /// started this one was when it started it. A write must match a glob of
+    /// every layer (see [`leviath_core::write_paths`]).
+    pub write_paths: Vec<Vec<String>>,
 }
 
 impl LaunchPolicy {
@@ -82,6 +93,7 @@ impl LaunchPolicy {
             max_depth: request.max_depth.unwrap_or(default_depth),
             seed_commands: request.seed_commands && seed_commands_allowed,
             capture_model_input: request.capture_model_input,
+            write_paths: layers(Vec::new(), &request.write_paths),
         }
     }
 
@@ -94,6 +106,7 @@ impl LaunchPolicy {
     /// - Depth: at most one less than the parent's.
     /// - Seed commands: only when both allow them.
     /// - Capturing model input only records more; the child's own ask stands.
+    /// - Write paths: every layer the parent had, plus the child's own ask.
     pub fn narrow(request: &LaunchRequest, parent: &LaunchPolicy) -> Self {
         let unattended = request.unattended.at_most(&parent.unattended);
         let headroom = parent.max_depth.saturating_sub(1);
@@ -108,8 +121,17 @@ impl LaunchPolicy {
             max_depth: request.max_depth.map_or(headroom, |d| d.min(headroom)),
             seed_commands: request.seed_commands && parent.seed_commands,
             capture_model_input: request.capture_model_input,
+            write_paths: layers(parent.write_paths.clone(), &request.write_paths),
         }
     }
+}
+
+/// `outer` with `asked` added as one more layer, when it names any globs.
+fn layers(mut outer: Vec<Vec<String>>, asked: &[String]) -> Vec<Vec<String>> {
+    if !asked.is_empty() {
+        outer.push(asked.to_vec());
+    }
+    outer
 }
 
 /// Where a run sits: its workdir and its place in a tree of runs. Set by the
@@ -282,6 +304,7 @@ mod tests {
             max_depth: depth,
             seed_commands: seeds,
             capture_model_input: false,
+            write_paths: Vec::new(),
         }
     }
 
@@ -311,6 +334,7 @@ mod tests {
             max_depth: Some(9),
             seed_commands: true,
             capture_model_input: true,
+            write_paths: Vec::new(),
         };
         let child = LaunchPolicy::narrow(&greedy, &parent);
         assert_eq!(child.unattended, profile());
@@ -337,6 +361,36 @@ mod tests {
             &policy(Unattended::Off, &[], 0, true),
         );
         assert_eq!(open.max_depth, 0, "depth never goes below zero");
+    }
+
+    /// Write paths only ever add layers: a top-level run takes its request's
+    /// as one, and a child keeps every layer its parent had and adds its own.
+    #[test]
+    fn write_paths_only_ever_add_layers() {
+        let globs = |list: &[&str]| list.iter().map(|g| g.to_string()).collect::<Vec<_>>();
+        let asked = LaunchRequest {
+            write_paths: globs(&["docs/**"]),
+            ..LaunchRequest::default()
+        };
+        let top = LaunchPolicy::top_level(&asked, 3, true);
+        assert_eq!(top.write_paths, vec![globs(&["docs/**"])]);
+        let open = LaunchPolicy::top_level(&LaunchRequest::default(), 3, true);
+        assert!(open.write_paths.is_empty());
+
+        let narrower = LaunchRequest {
+            write_paths: globs(&["docs/panels/**"]),
+            ..LaunchRequest::default()
+        };
+        let child = LaunchPolicy::narrow(&narrower, &top);
+        assert_eq!(
+            child.write_paths,
+            vec![globs(&["docs/**"]), globs(&["docs/panels/**"])]
+        );
+        let silent = LaunchPolicy::narrow(&LaunchRequest::default(), &top);
+        assert_eq!(
+            silent.write_paths, top.write_paths,
+            "a child cannot drop one"
+        );
     }
 
     #[test]

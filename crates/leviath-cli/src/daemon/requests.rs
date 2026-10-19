@@ -164,6 +164,7 @@ impl TaskLaunch {
             max_depth: self.max_depth.map(|d| u8::try_from(d).unwrap_or(u8::MAX)),
             seed_commands: !self.no_seed_commands,
             capture_model_input: self.capture_model_input,
+            write_paths: Vec::new(),
         };
         let callback = self
             .callback_url
