@@ -124,6 +124,7 @@ impl Provider for StubProvider {
                 },
                 finish_reason: FinishReason::Complete,
                 reasoning: None,
+                content_is_reasoning: false,
             }),
             Err(e) => Err(ProviderError::ApiError(e.to_string())),
         }

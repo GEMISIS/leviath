@@ -783,7 +783,7 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
         .get("message")
         .ok_or_else(|| ProviderError::InvalidResponse("No message in choice".to_string()))?;
 
-    let mut content = message
+    let content = message
         .get("content")
         .and_then(|c| c.as_str())
         .unwrap_or("")
@@ -819,10 +819,13 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
     // response: the agent got nudged to use its tools, looped, and the run
     // finished having said nothing. Only used when the message is otherwise
     // empty - a response carrying tool calls is not empty, and its reasoning
-    // is working-out rather than output.
-    if content.trim().is_empty() && tool_calls.is_empty() {
-        content = reasoning_text(message).unwrap_or_default();
-    }
+    // is working-out rather than output. Marked, so a caller that needs one
+    // exact answer can tell the working-out from it.
+    let promoted = (content.trim().is_empty() && tool_calls.is_empty())
+        .then(|| reasoning_text(message))
+        .flatten();
+    let content_is_reasoning = promoted.is_some();
+    let content = promoted.unwrap_or(content);
 
     let usage = body.get("usage");
     let prompt_tokens = usage
@@ -888,6 +891,7 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
         .with_reported_cost(reported_cost_usd),
         finish_reason: parse_openai_finish_reason(finish_reason),
         reasoning: None,
+        content_is_reasoning,
     })
 }
 
@@ -1763,6 +1767,8 @@ mod tests {
         });
         let resp = parse_openai_response(&body).unwrap();
         assert_eq!(resp.content, "2 + 2 is 4.");
+        // Marked, so a caller that wants one exact answer can refuse it.
+        assert!(resp.content_is_reasoning);
     }
 
     #[test]
@@ -1782,6 +1788,7 @@ mod tests {
         });
         let resp = parse_openai_response(&body).unwrap();
         assert_eq!(resp.content, "first second");
+        assert!(resp.content_is_reasoning);
     }
 
     #[test]
@@ -1794,10 +1801,9 @@ mod tests {
                 "message": { "content": "the answer", "reasoning": "scratchpad" }
             }]
         });
-        assert_eq!(
-            parse_openai_response(&with_content).unwrap().content,
-            "the answer"
-        );
+        let resp = parse_openai_response(&with_content).unwrap();
+        assert_eq!(resp.content, "the answer");
+        assert!(!resp.content_is_reasoning);
 
         let with_tool_call = serde_json::json!({
             "choices": [{
@@ -1814,6 +1820,7 @@ mod tests {
         let resp = parse_openai_response(&with_tool_call).unwrap();
         assert_eq!(resp.content, "");
         assert_eq!(resp.tool_calls.len(), 1);
+        assert!(!resp.content_is_reasoning);
     }
 
     #[test]
@@ -1823,7 +1830,12 @@ mod tests {
                 "message": { "content": serde_json::Value::Null, "reasoning": "   " }
             }]
         });
-        assert_eq!(parse_openai_response(&body).unwrap().content, "");
+        let resp = parse_openai_response(&body).unwrap();
+        assert_eq!(resp.content, "");
+        assert!(
+            !resp.content_is_reasoning,
+            "nothing stood in for the answer"
+        );
 
         let empty_details = serde_json::json!({
             "choices": [{

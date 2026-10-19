@@ -125,6 +125,7 @@ impl Provider for Planner {
             finish_reason: FinishReason::Stop,
             reasoning: None,
             parts: Vec::new(),
+            content_is_reasoning: false,
         })
     }
 

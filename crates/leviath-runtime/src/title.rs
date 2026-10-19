@@ -298,18 +298,30 @@ fn no_thinking_extra(provider: &str) -> serde_json::Value {
         // vendor: on Bedrock the Claude 5 line thinks unless told not to, and
         // the field is a validation error on a model that has no such switch.
         "bedrock" => serde_json::json!({ "thinking": { "type": "disabled" } }),
-        // Every model on the Codex route is a reasoning model, so a title
-        // call left alone spends its whole 256-token budget thinking and
-        // returns nothing. This asks for the least of it instead.
+        // The routes whose every model reasons take the least of it.
+        _ => least_reasoning_extra(provider),
+    }
+}
+
+/// The least reasoning a route takes from every model on it, as request
+/// extras, or `Value::Null` where nothing is safe to send.
+///
+/// Only routes whose models all reason are named, each with a value every
+/// one of them accepts, because a refused field costs the whole call. A
+/// gateway decides per model instead (see `reasoning_floor`).
+pub(crate) fn least_reasoning_extra(provider: &str) -> serde_json::Value {
+    match provider {
+        // Every model on the Codex route is a reasoning model, so a short
+        // call left alone (a title, a routing answer) spends its whole
+        // budget thinking and returns nothing. This asks for the least of it
+        // instead.
         //
         // `"low"`, not `"minimal"` and not `"none"`: the accepted set is per
         // model, and both ends of it are unportable. `gpt-5.5` refuses
         // `minimal` and names its set - "Supported values are: 'none', 'low',
         // 'medium', 'high', and 'xhigh'" - while a model that must reason
         // refuses `none`. `low` is in every set this route has shown us, and
-        // a title that arrives beats a cheaper one that 400s. This shipped as
-        // `minimal`, and every `codex/gpt-5.5` run came out untitled with the
-        // reason visible only in the run record's `title_error`.
+        // an answer that arrives beats a cheaper one that 400s.
         "codex" => serde_json::json!({
             "reasoning": { "effort": "low" },
             "text": { "verbosity": "low" }
@@ -922,6 +934,7 @@ mod tests {
                     },
                     finish_reason: self.finish_reason.clone(),
                     reasoning: None,
+                    content_is_reasoning: false,
                 }),
                 Err(msg) => Err(ProviderError::Other(msg.to_string())),
             }
@@ -1257,6 +1270,7 @@ mod tests {
                 finish_reason: leviath_providers::FinishReason::Complete,
                 reasoning: None,
                 parts: Vec::new(),
+                content_is_reasoning: false,
             })
         }
         async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
@@ -1469,6 +1483,7 @@ mod tests {
                 finish_reason: leviath_providers::FinishReason::Complete,
                 reasoning: None,
                 parts: Vec::new(),
+                content_is_reasoning: false,
             })
         }
         async fn count_tokens(&self, _t: &str, _m: &str) -> usize {

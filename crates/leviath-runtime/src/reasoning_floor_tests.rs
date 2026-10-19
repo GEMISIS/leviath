@@ -271,6 +271,7 @@ impl Provider for AlwaysThinks {
             finish_reason: leviath_providers::FinishReason::Complete,
             reasoning: None,
             parts: Vec::new(),
+            content_is_reasoning: false,
         })
     }
     async fn count_tokens(&self, _t: &str, _m: &str) -> usize {

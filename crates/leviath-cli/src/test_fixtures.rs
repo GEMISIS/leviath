@@ -165,6 +165,7 @@ pub(crate) mod fixtures {
             tokens_used: token_usage(),
             finish_reason: FinishReason::Complete,
             reasoning: None,
+            content_is_reasoning: false,
         }
     }
 

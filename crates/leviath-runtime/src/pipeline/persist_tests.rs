@@ -64,6 +64,7 @@ fn text(content: &str) -> InferenceResponse {
         },
         finish_reason: FinishReason::Complete,
         reasoning: None,
+        content_is_reasoning: false,
     }
 }
 

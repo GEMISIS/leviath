@@ -92,6 +92,7 @@ pub fn parse_inference_dynamic(value: Dynamic) -> Result<InferenceResponse> {
         finish_reason: finish_reason_from_str(json.get("finish_reason").and_then(|v| v.as_str())),
         reasoning: None,
         parts: parse_parts(&json),
+        content_is_reasoning: false,
     })
 }
 

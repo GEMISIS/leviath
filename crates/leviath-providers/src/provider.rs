@@ -538,6 +538,17 @@ pub struct InferenceResponse {
     /// Whether the response was complete or truncated
     pub finish_reason: FinishReason,
 
+    /// Whether `content` is the model's reasoning standing in for an answer
+    /// it never wrote.
+    ///
+    /// An OpenAI-shaped reply from a reasoning model can carry an empty
+    /// `content` with the working-out beside it. An agent turn takes that
+    /// working-out as the reply rather than finish having said nothing. A
+    /// call that wants one exact answer, such as the "which stage next?"
+    /// question, reads this and treats the reply as no answer at all.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub content_is_reasoning: bool,
+
     /// An opaque provider token to replay with this turn, when the provider
     /// issued one.
     ///
@@ -2093,6 +2104,7 @@ mod tests {
                 finish_reason: FinishReason::Complete,
                 reasoning: None,
                 parts: Vec::new(),
+                content_is_reasoning: false,
             })
         }
 

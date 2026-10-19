@@ -596,6 +596,7 @@ mod tests {
             },
             finish_reason: FinishReason::Complete,
             reasoning: None,
+            content_is_reasoning: false,
         }
     }
 

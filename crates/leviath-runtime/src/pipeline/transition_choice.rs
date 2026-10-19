@@ -215,6 +215,66 @@ pub(crate) fn without_tool_choice(request: &InferenceRequest) -> InferenceReques
     request
 }
 
+/// The most a routing answer may spend.
+///
+/// The answer is one stage name, but a model that reasons spends output
+/// tokens thinking before it writes it, and at 256 the budget ran out first:
+/// what came back was the working-out, cut off. This only bounds the worst
+/// case. A one-word answer still costs one word.
+pub(crate) const ROUTING_ANSWER_TOKENS: usize = 2048;
+
+/// OpenRouter model id prefixes that Anthropic serves, whose cached messages
+/// a change to the thinking settings throws away.
+const ANTHROPIC_UPSTREAM: &[&str] = &["anthropic/", "~anthropic/"];
+
+/// The reasoning control a routing request carries, as request extras, or
+/// `Value::Null` for none.
+///
+/// On a route whose every model reasons, the least effort the route takes
+/// (see [`crate::title::least_reasoning_extra`]). On OpenRouter, the least
+/// effort a model that must reason takes, by the same rule the title call
+/// uses ([`crate::reasoning_floor::least_effort`]); a model that need not
+/// reason gets nothing, since `enabled: false` is refused by some models and
+/// a refused routing call stops the run.
+///
+/// The Responses routes cache the input alone, so the effort leaves the
+/// cached prefix as it was. Anthropic counts a change to the thinking
+/// settings against the cached messages, and the stage request the routing
+/// call follows sent none. So Anthropic's models get nothing here, directly,
+/// on Bedrock or through OpenRouter, even where the catalogue says they must
+/// reason. They rely on [`ROUTING_ANSWER_TOKENS`].
+fn routing_reasoning(
+    provider_name: &str,
+    provider: &dyn Provider,
+    model: &str,
+) -> serde_json::Value {
+    match provider_name {
+        "openrouter" => {
+            let id = crate::reasoning_floor::listed_model(provider, model)
+                .map_or_else(|| model.to_string(), |(id, _)| id);
+            let anthropic = ANTHROPIC_UPSTREAM.iter().any(|p| id.starts_with(p));
+            (!anthropic)
+                .then(|| crate::reasoning_floor::least_effort(provider, model))
+                .flatten()
+                .map_or(
+                    serde_json::Value::Null,
+                    |effort| serde_json::json!({ "reasoning": { "effort": effort } }),
+                )
+        }
+        _ => crate::title::least_reasoning_extra(provider_name),
+    }
+}
+
+/// The answer a routing reply gives, or `None` when it gives none.
+///
+/// A reply the output cap cut off is unfinished, and a reply whose text is
+/// the model's reasoning standing in for an empty answer is working-out.
+/// Either can name a stage in passing, so neither is read as a choice.
+pub(crate) fn routing_answer(response: &leviath_providers::InferenceResponse) -> Option<&str> {
+    let unfinished = response.finish_reason == leviath_providers::FinishReason::TokenLimit;
+    (!unfinished && !response.content_is_reasoning).then(|| response.content.trim())
+}
+
 /// Whether OpenRouter will forward `tool_choice: "none"` for `model`.
 ///
 /// A model in an [`AUTO_ONLY_TOOL_CHOICE`] family never does. Otherwise the
@@ -287,19 +347,27 @@ pub(crate) fn routing_request(
         prior,
     );
     let remaining = window.max_tokens.saturating_sub(window.current_tokens);
-    request.max_tokens = remaining.min(256); // short routing response
+    request.max_tokens = remaining.min(ROUTING_ANSWER_TOKENS);
     request.temperature = 0.0; // deterministic routing
+    let mut extra = match request.extra.take() {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
     match routing_tool_choice(&si.provider_name, provider.as_ref(), &request.model) {
         Some(choice) if !request.tools.is_empty() => {
-            let mut extra = match request.extra.take() {
-                serde_json::Value::Object(map) => map,
-                _ => serde_json::Map::new(),
-            };
             extra.insert("tool_choice".to_string(), choice);
-            request.extra = serde_json::Value::Object(extra);
         }
         _ => request.tools.clear(),
     }
+    if let serde_json::Value::Object(least) =
+        routing_reasoning(&si.provider_name, provider.as_ref(), &request.model)
+    {
+        extra.extend(least);
+    }
+    request.extra = match extra.is_empty() {
+        true => serde_json::Value::Null,
+        false => serde_json::Value::Object(extra),
+    };
     request
 }
 
@@ -386,15 +454,17 @@ pub(crate) fn dispatch_transition_choice(
             // The routing request is the stage's own request plus one question,
             // so it is guarded the way the stage's is, from the same correction.
             calibration: calibration.copied(),
-            // And buffered for the same reason: a stage name is one short
-            // answer that arrives in one piece. Streaming exists here to keep a
-            // long silent generation from being mistaken for a dead socket, and
-            // this call is never long enough for that to arise.
+            // Buffered: the answer is one stage name. A model that reasons may
+            // think for up to `ROUTING_ANSWER_TOKENS` first, which can take tens
+            // of seconds with nothing on the wire. The request keeps the
+            // stage's own timeout (900 seconds unless the stage sets one), and
+            // no idle-read limit applies, so that silence is not taken for a
+            // dead socket.
             stream: false,
             hydration: None,
             // The routing question's attempts are not journaled, and the stage
             // lane's are. A routing call is one deterministic sentence with a
-            // 256-token budget and no fallbacks to move to, so its retries are
+            // small budget and no fallbacks to move to, so its retries are
             // measured in seconds and the run's provider never changes under it.
             // An attempt record exists to explain a turn that took a long time
             // or ended up on a different model, and neither is a thing this call
@@ -631,7 +701,8 @@ pub(crate) fn collect_transition_choice(
             },
         );
 
-        let choice = response.content.trim().to_string();
+        // A reply that gives no answer is read as an empty one.
+        let choice = routing_answer(&response).unwrap_or_default().to_string();
         let tokens = leviath_core::estimate_tokens(&choice);
         // The framework's own phrasing of the decision, not the model's text:
         // the reply was a bare stage name.

@@ -417,6 +417,12 @@ graph's, key by key. The run file records `routing`, so a run resumed after the 
 keeps it. A run recorded before the run file kept it (layout 5 and older) has none, and uses the
 operator's settings.
 
+The answer may run to 2,048 tokens, which leaves a model that reasons room to finish thinking and
+still name a stage. On Meta, Codex, xAI and Grok, the call asks for `low` effort where the model
+takes one. On OpenRouter, a model that must reason is asked for the least effort it takes, except
+Anthropic's, which keep their cached context. A reply cut off by that limit, or one that holds only
+the model's reasoning, is read as naming no stage.
+
 With `"fail"`, the run stops with an error that names the routing call, and the stage's finished
 work is kept. With `"error_edge"`, the stage fails, so its `error` edge runs when it has one. Choose
 that only when the recovery stage can fix what made the routing call fail. Otherwise the run
