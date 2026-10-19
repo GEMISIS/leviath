@@ -250,6 +250,7 @@ pub async fn collect_stream(
         finish_reason,
         reasoning,
         parts,
+        content_is_reasoning: false,
     })
 }
 

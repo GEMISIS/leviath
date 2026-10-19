@@ -963,6 +963,7 @@ mod tests {
             },
             finish_reason: leviath_providers::FinishReason::Complete,
             reasoning: None,
+            content_is_reasoning: false,
         }
     }
 

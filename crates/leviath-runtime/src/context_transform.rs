@@ -587,6 +587,7 @@ mod tests {
                 finish_reason: FinishReason::Complete,
                 reasoning: None,
                 parts: Vec::new(),
+                content_is_reasoning: false,
             })
         }
         async fn count_tokens(&self, _t: &str, _m: &str) -> usize {

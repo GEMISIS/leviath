@@ -82,6 +82,7 @@ fn response(text: &str) -> InferenceResponse {
         tokens_used: leviath_providers::TokenUsage::new(1, 0, 0, 1),
         finish_reason: leviath_providers::FinishReason::Complete,
         reasoning: None,
+        content_is_reasoning: false,
     }
 }
 

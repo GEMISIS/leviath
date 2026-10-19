@@ -135,6 +135,7 @@ impl Provider for WritesThenAnswers {
             finish_reason: FinishReason::Stop,
             reasoning: None,
             parts: Vec::new(),
+            content_is_reasoning: false,
         })
     }
 
@@ -320,6 +321,7 @@ impl Provider for AlwaysDone {
             finish_reason: FinishReason::Stop,
             reasoning: None,
             parts: Vec::new(),
+            content_is_reasoning: false,
         })
     }
 

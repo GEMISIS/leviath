@@ -662,6 +662,7 @@ impl OllamaProvider {
             finish_reason,
             reasoning: None,
             parts: Vec::new(),
+            content_is_reasoning: false,
         })
     }
 }

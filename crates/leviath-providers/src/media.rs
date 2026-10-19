@@ -548,6 +548,7 @@ pub(crate) fn response(
         finish_reason: FinishReason::Complete,
         reasoning: None,
         parts,
+        content_is_reasoning: false,
     }
 }
 

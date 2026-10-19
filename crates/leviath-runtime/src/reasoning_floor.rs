@@ -75,7 +75,7 @@ pub(crate) fn listed_model(
 /// title call asks of every Responses route. A model whose levels leave `low`
 /// out gets the least of the ones it names: `openai/gpt-5-pro` takes only
 /// `high`.
-fn least_effort(provider: &dyn Provider, model: &str) -> Option<&'static str> {
+pub(crate) fn least_effort(provider: &dyn Provider, model: &str) -> Option<&'static str> {
     let listed = listed_model(provider, model);
     let id = listed.as_ref().map_or(model, |(id, _)| id.as_str());
     let mandatory = listed

@@ -252,6 +252,7 @@ impl Provider for Cfg {
             finish_reason: leviath_providers::FinishReason::Complete,
             reasoning: None,
             parts: Vec::new(),
+            content_is_reasoning: false,
         })
     }
     async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
@@ -1709,6 +1710,7 @@ fn resp(text: &str) -> leviath_providers::InferenceResponse {
         },
         finish_reason: leviath_providers::FinishReason::Complete,
         reasoning: None,
+        content_is_reasoning: false,
     }
 }
 
@@ -4690,6 +4692,7 @@ impl Provider for FixedWindow {
             finish_reason: leviath_providers::FinishReason::Complete,
             reasoning: None,
             parts: Vec::new(),
+            content_is_reasoning: false,
         })
     }
     async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
@@ -16753,6 +16756,68 @@ fn a_choice_that_names_no_edge_is_recorded_as_a_fallback() {
     }
 }
 
+/// A routing reply the output cap cut off, or whose text is the model's
+/// reasoning standing in for an empty answer, gives no answer, even when it
+/// names a stage. A reasoning model that ran out of budget sent its
+/// working-out back this way, and a stage named in it was taken as the choice.
+#[test]
+fn a_cut_off_or_reasoning_routing_reply_is_no_answer() {
+    use crate::host::{WorldEvent, WorldEventSink};
+    use crate::state::TransitionReason::{Fallback, ModelChoice};
+    use leviath_providers::FinishReason::{Complete, TokenLimit};
+    for (finish, from_reasoning, to, reason) in [
+        (TokenLimit, false, "b", Fallback),
+        (Complete, true, "b", Fallback),
+        // The control: the same text, finished and written as the answer.
+        (Complete, false, "c", ModelChoice),
+    ] {
+        let (mut world, tx) = world_with_transition_results();
+        let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+        world.insert_resource(WorldEventSink(sink_tx));
+        let bp = blueprint(vec![
+            stage_named("a", None, false, None),
+            stage_named("b", None, false, None),
+            stage_named("c", None, false, None),
+        ]);
+        let e = spawn_responding_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1"), si("m2")],
+            vec![plain_edge("b"), plain_edge("c")],
+        );
+        world.entity_mut(e).insert(run_metadata());
+        let mut response = resp("c");
+        response.finish_reason = finish;
+        response.content_is_reasoning = from_reasoning;
+        tx.send(InferenceOutcome {
+            latency: std::time::Duration::ZERO,
+            entity: e,
+            attempt_id: String::new(),
+            result: Ok(response),
+            pricing: None,
+            attempt: None,
+        })
+        .unwrap();
+
+        run_collect_transition(&mut world);
+
+        let ev = sink_rx.try_recv().expect("stage transition event");
+        let WorldEvent::StageTransition {
+            to: entered,
+            reason: got,
+            ..
+        } = ev
+        else {
+            panic!("a stage transition");
+        };
+        assert_eq!(
+            (entered.as_str(), got),
+            (to, Some(reason)),
+            "{from_reasoning}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn dispatch_tools_announces_lane_calls() {
     use crate::host::{WorldEvent, WorldEventSink};
@@ -21443,7 +21508,10 @@ fn routing_request_shares_the_stage_prefix_and_forbids_tool_use() {
         serde_json::to_value(&stage_req.messages).unwrap()
     );
     assert_eq!(routing.tools.len(), 2);
-    assert_eq!(routing.max_tokens, 256);
+    assert_eq!(
+        routing.max_tokens,
+        crate::pipeline::transition_choice::ROUTING_ANSWER_TOKENS
+    );
     assert_eq!(routing.temperature, 0.0);
     assert_eq!(routing.extra["tool_choice"], serde_json::json!("none"));
     assert_eq!(
@@ -21472,6 +21540,54 @@ fn routing_request_shares_the_stage_prefix_and_forbids_tool_use() {
     let routing = routing_request(&w, None, &si, &p, "analyze", 3, PriorCalls::default());
     assert!(routing.tools.is_empty());
     assert_eq!(routing.extra, serde_json::Value::Null);
+}
+
+/// A routing request to a route whose models always reason asks for the
+/// least reasoning that route takes, in place of whatever effort the stage
+/// asked for, and keeps the stage's prefix and its other extras.
+#[test]
+fn routing_request_turns_reasoning_down_where_every_model_reasons() {
+    use crate::pipeline::inference::{PriorCalls, build_request};
+    use crate::pipeline::transition_choice::routing_request;
+    let cfg = InferenceConfig {
+        temperature: None,
+        max_output_tokens: None,
+        extra_params: serde_json::json!({ "reasoning": { "effort": "high" }, "top_p": 0.9 })
+            .as_object()
+            .cloned()
+            .unwrap(),
+        batch_tool_hint: true,
+        shell_hint: false,
+        request_timeout_secs: None,
+        as_text: Vec::new(),
+    };
+    let w = ctx(&[("conversation", 10_000)]);
+    let mut si = stage("muse-spark-1.3", vec![tool("read_file")], None);
+    si.provider_name = "meta".to_string();
+    let p = provider(true, 4_000);
+
+    let (stage_req, _, _) =
+        build_request(&w, Some(&cfg), &si, &p, "verify", 1, PriorCalls::default());
+    let routing = routing_request(&w, Some(&cfg), &si, &p, "verify", 1, PriorCalls::default());
+    assert_eq!(
+        serde_json::to_value(&routing.messages).unwrap(),
+        serde_json::to_value(&stage_req.messages).unwrap()
+    );
+    // Meta takes only `tool_choice: "auto"`, so the tools go and the
+    // reasoning control is all that is added.
+    assert_eq!(
+        routing.extra,
+        serde_json::json!({ "reasoning": { "effort": "low" }, "top_p": 0.9 })
+    );
+
+    // OpenRouter's always-reasoning family gets the same `low`.
+    si.provider_name = "openrouter".to_string();
+    si.model = "meta/muse-spark-1.3".to_string();
+    let routing = routing_request(&w, None, &si, &p, "verify", 1, PriorCalls::default());
+    assert_eq!(
+        routing.extra,
+        serde_json::json!({ "reasoning": { "effort": "low" } })
+    );
 }
 
 /// The cut-off is written to the stage ledger as it lands, which is what a

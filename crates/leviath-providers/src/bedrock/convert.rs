@@ -531,6 +531,7 @@ pub(super) fn parse_response(body: &Value) -> Result<InferenceResponse> {
         finish_reason: parse_stop_reason(stop_reason),
         reasoning: reasoning_blob(&reasoning),
         parts: Vec::new(),
+        content_is_reasoning: false,
     })
 }
 

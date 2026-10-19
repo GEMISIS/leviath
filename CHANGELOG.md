@@ -32,6 +32,12 @@ same list.
   meanwhile never reads a half-written file. A newly created script file is
   owner-only on Unix; an existing one keeps its permissions. To get the old
   permissions on a new file, `chmod` it after the write.
+
+- `leviath-providers`: `InferenceResponse` has a new public field,
+  `content_is_reasoning`. Code outside the workspace that builds an
+  `InferenceResponse` with a struct literal must set it; `false` keeps the
+  old meaning.
+
 - A stage with `mode = "interactive"` now takes turns with a person. After a
   reply with no tool calls it waits for the next message instead of moving
   on: `waiting_input`, wait reason `awaiting_message` (GraphQL
@@ -449,6 +455,16 @@ same list.
   routing request whose `tool_choice` any provider refuses with a 400 is asked
   again once without tools, and that provider and model skip the `tool_choice`
   for the rest of the process.
+- On a model that always reasons, the "which stage next?" answer no longer
+  comes back as the model's working-out. The routing call capped the reply at
+  256 tokens and sent no reasoning control, so Muse Spark spent the budget
+  thinking, and OpenRouter handed back the reasoning as the answer. The cap is
+  now 2,048 tokens. Routing calls to Meta, Codex, xAI and Grok ask for `low`
+  reasoning effort, and an OpenRouter model that must reason gets the least
+  effort it takes, by the title call's rule. Anthropic's models get none on
+  any route, so the routing call keeps the stage's cached context. A reply
+  cut off by the cap, or one whose text is the model's reasoning, is read as
+  naming no stage.
 - `lev serve` reads `config.toml` before it starts a daemon, so a broken
   config is named in the error. With no daemon running it was reported as a
   daemon that did not start within 5 seconds.
@@ -915,6 +931,10 @@ same list.
   `GET /api/tools/bundled` list what can be installed and whether each copy
   is current, with no flag. `tools.install_bundled` in `capabilities` says
   the build serves them.
+
+- `InferenceResponse::content_is_reasoning` (`leviath-providers`): set when
+  an OpenAI-shaped reply's text is the model's reasoning standing in for an
+  empty answer, so a caller that needs one exact answer can refuse it.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is
