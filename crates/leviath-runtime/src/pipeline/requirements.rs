@@ -295,6 +295,7 @@ type FinalOutputQuery = (
     Option<&'static crate::persistence::FinalOutput>,
     Option<&'static mut crate::persistence::RunOutcomeFlags>,
     Option<&'static StageInference>,
+    Option<&'static RunMetadata>,
 );
 
 /// Required-output gate: hold a stage that owes a final output and has not
@@ -316,6 +317,7 @@ type FinalOutputQuery = (
 /// worker's answer.
 pub(crate) fn require_final_output(
     mut agents: Query<FinalOutputQuery, With<ResolveTransition>>,
+    sink: Option<Res<crate::host::WorldEventSink>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -330,6 +332,7 @@ pub(crate) fn require_final_output(
         submitted,
         mut flags,
         stage_inf,
+        metadata,
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -375,6 +378,14 @@ pub(crate) fn require_final_output(
             chrono::Utc::now().timestamp(),
             &mut window,
         ) {
+            // Announced like a submission: it is the run's answer, recorded
+            // before the run ends.
+            super::tools::announce_submission(
+                sink.as_deref(),
+                metadata,
+                &state.agent_id,
+                Some(output.clone()),
+            );
             commands
                 .entity(entity)
                 .insert(crate::persistence::FinalOutput(output));

@@ -1611,8 +1611,10 @@ subscription Activity($filter: RunInput) {
 
 `arguments` is what the model sent, cut to fit 4 KiB serialized. Long strings are shortened first,
 so `arguments.path` survives a large `write_file`, and `argumentsTruncated` says when anything was
-cut. `Run.executions` keeps them whole. `OutputSubmittedEvent` arrives each time a `submit_output`
-call is accepted, never for a refused one, and the last one is the run's answer.
+cut. `Run.executions` keeps them whole, and a daemon too old to send them gives `{}`.
+`OutputSubmittedEvent` arrives each time a `submit_output` call is accepted, never for a refused
+one, and the last one is the run's answer. An output stage whose produced files are taken as its
+answer sends one too. Its `content` is cut to 16 KiB, with `truncated` set when it was.
 `InteractionSettledEvent` arrives when an ask is answered, times out, is cancelled or is refused,
 with `settlement.outcome` saying which. `edge` and `reason` on `StageTransitionedEvent` are null
 when the move took no declared edge.

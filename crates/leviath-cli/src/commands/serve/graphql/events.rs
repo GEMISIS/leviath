@@ -399,7 +399,8 @@ frames! {
             /// The arguments the model sent, cut to fit 4 KiB serialized. Long
             /// strings are shortened first, so a path beside a large file's
             /// content stays whole. The journal keeps them uncut, on
-            /// `Run.executions`.
+            /// `Run.executions`. Always an object: a daemon too old to send
+            /// arguments gives `{}`.
             arguments: Json,
             /// Whether `arguments` was cut to fit.
             arguments_truncated: bool,
@@ -466,7 +467,9 @@ frames! {
             interaction: InteractionOutput,
         }
 
-        /// A `submit_output` call was accepted.
+        /// The run's answer was recorded: a `submit_output` call was
+        /// accepted, or an output stage's produced files were taken as its
+        /// answer.
         ///
         /// The call is answered inline, so it sends no tool-call frames, and
         /// without this the answer first shows on `RunCompletedEvent`. A
@@ -475,7 +478,8 @@ frames! {
         OutputSubmitted => OutputSubmitted => OutputSubmittedEvent {
             /// The stage that submitted it.
             stage: String,
-            /// What was submitted.
+            /// What was submitted. `content` is cut to 16 KiB here, with
+            /// `truncated` set when it was; the run keeps the whole answer.
             final_output: FinalOutput,
         }
 

@@ -2107,7 +2107,7 @@ than that feature, not broken.
 | `events.dropped` | The `events_dropped` frame, sent when a socket falls behind and loses events |
 | `events.tool_arguments` | `arguments` and `arguments_truncated` on `tool_call_started`, cut to 4 KiB |
 | `events.output_submitted` | The `output_submitted` frame, sent when a `submit_output` call is accepted |
-| `events.interaction_settled` | The `interaction_settled` frame, sent when an ask is answered, times out or is cancelled |
+| `events.interaction_settled` | The `interaction_settled` frame, sent when an ask is answered, times out, is cancelled or is refused |
 | `runs.cost` | `cost_usd` and `subtree_cost_usd` on the agent tree routes |
 | `blueprints.envelope` | The paginated envelope on the blueprint listing |
 | `blueprints.query` | `q=` on that listing |
@@ -2324,12 +2324,15 @@ refused or could not run, so a client should not read a finish frame as a succes
 `arguments` on `tool_call_started` is what the model sent, so a client can say which file a call
 reads without fetching the run. It is cut to fit 4 KiB serialized, and `arguments_truncated` says
 when it was. Long strings are shortened first, so the path of a large `write_file` survives while
-its content is cut. The journal keeps the arguments whole. Both fields are the
-`events.tool_arguments` capability.
+its content is cut. The journal keeps the arguments whole. `arguments` is always an object, and a
+daemon too old to send arguments gives `{}`. Both fields are the `events.tool_arguments`
+capability.
 
 `submit_output` is answered inline rather than on the tool lane, so it sends no tool-call frames.
 `output_submitted` is what says it happened, carrying the answer in the shape `agent_completed`
-uses. A refused submission sends nothing. Each accepted one sends a frame, and the last one is the
+uses. Its `content` is cut to 16 KiB, with `truncated` set when it was, and the run keeps the whole
+answer. An output stage whose produced files are taken as its answer, with no `submit_output` call,
+sends one too. A refused submission sends nothing. Each accepted one sends a frame, and the last one is the
 run's answer, so a run that submits and then goes on to review shows its draft straight away.
 
 `interaction_settled` is the other half of `interaction_needed`. `settlement` is `"timed_out"`,
@@ -2338,7 +2341,8 @@ cannot stand in for it, because a run with two open asks stays waiting after one
 client showing a prompt can take it down the moment someone answers it elsewhere.
 
 A run brought back after a daemon restart sends none of these three for work it finished before
-the restart. The capabilities are `events.output_submitted` and `events.interaction_settled`.
+the restart. The capabilities are `events.tool_arguments`, `events.output_submitted` and
+`events.interaction_settled`.
 
 `reason` on `stage_transition` says why the run took that edge, spelled as
 `GET /api/runs/{id}/graph` spells it: `Condition`, `Gate`, `ModelChoice`, `Fallback` (the model
