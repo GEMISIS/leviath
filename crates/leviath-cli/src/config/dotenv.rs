@@ -32,6 +32,22 @@ pub(super) fn requote(value: &str) -> String {
     out
 }
 
+/// The names a `.env` has set in this process: ones that were unset until it
+/// was read.
+static LOADED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The variables this process took from a `.env`, by name.
+///
+/// A daemon this process starts is not handed them (`daemon::launch`): a
+/// project's `.env` belongs to the command run in that project, and the
+/// daemon reads its own from the data directory.
+pub fn loaded_names() -> Vec<String> {
+    LOADED
+        .lock()
+        .map(|loaded| loaded.clone())
+        .unwrap_or_default()
+}
+
 /// Set every variable in `path` that a repository's `.env` is allowed to set,
 /// warning once about the rest.
 ///
@@ -64,7 +80,15 @@ pub(super) fn load_dotenv_filtered(path: &str) {
         .iter()
         .map(|(key, value)| format!("{key}={}\n", requote(value)))
         .collect();
+    // What this read will actually set: dotenvy leaves a variable already in
+    // the environment alone.
+    let fresh: Vec<String> = allowed
+        .iter()
+        .filter(|(key, _)| std::env::var_os(key).is_none())
+        .map(|(key, _)| key.clone())
+        .collect();
     let _ = dotenvy::from_read(doc.as_bytes());
+    let _ = LOADED.lock().map(|mut loaded| loaded.extend(fresh));
 
     // The common case is that a `.env` sets nothing sensitive, and warning then
     // printed "Ignoring  from .env" with an empty list where a name belonged.

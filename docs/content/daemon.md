@@ -61,8 +61,13 @@ for a command starting it in the background, for `lev daemon` in the foreground,
 service unit. A daemon started from inside a project therefore never reads that project's `.env`.
 On Windows it also never stops you deleting or renaming the project directory.
 
+A relative `LEVIATH_HOME`, `LEVIATH_CONFIG_PATH`, `LEVIATH_RUNS_DIR` or `LEVIATH_DUMP_REQUEST_DIR`
+is resolved against the directory of the command that starts the daemon, and handed to it as an
+absolute path. `lev daemon` in the foreground cannot do that for itself, so it refuses a relative
+one and asks for an absolute path.
+
 `lev serve`'s bearer token, `LEVIATH_API_TOKEN`, is removed from the environment of any daemon a
-`lev` command starts. A sidecar that mints a fresh token per window does not leave one behind in a
+`lev` command starts. So is anything that command loaded from a project's `.env`. A sidecar that mints a fresh token per window does not leave one behind in a
 process that outlives it. The service unit never sets it. `lev daemon` run by hand in a shell that
 exports it still has it, so unset it there first.
 

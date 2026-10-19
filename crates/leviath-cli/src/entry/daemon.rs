@@ -55,9 +55,16 @@ async fn bring_up_daemon(mode: DaemonMode, may_start: bool) -> anyhow::Result<()
     }
     // In the data directory and without the serve token, wherever this `lev`
     // runs and whatever it was handed: `daemon::launch` says why.
+    use crate::daemon::launch::{ChildEnv, daemon_command, daemon_dir};
     let exe = std::env::current_exe()?;
-    let dir = crate::daemon::launch::daemon_dir(leviath_core::paths::data_dir())?;
-    let mut cmd = crate::daemon::launch::daemon_command(&exe, &dir);
+    let cwd = std::env::current_dir()?;
+    let dir = daemon_dir(leviath_core::paths::data_dir(), &cwd)?;
+    let env = ChildEnv::of(
+        |name| std::env::var_os(name),
+        &cwd,
+        crate::config::dotenv_loaded_names(),
+    );
+    let mut cmd = daemon_command(&exe, &dir, &env);
     // Detached from this process, and on Windows out of its job too, so a host
     // that kills `lev serve`'s job on close leaves the daemon running.
     leviath_sys::process::spawn_detached(&mut cmd)?;
@@ -186,6 +193,8 @@ pub(super) fn resolve_service_unit() -> anyhow::Result<commands::daemon_service:
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the service file"))?;
     let leviath_home = crate::config::leviath_home_dir()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a leviath home directory"))?;
+    // A relative `LEVIATH_HOME` means relative to here; the unit runs elsewhere.
+    let leviath_home = std::env::current_dir()?.join(leviath_home);
     let exe = std::env::current_exe()?;
     commands::daemon_service::service_unit(
         &exe,
