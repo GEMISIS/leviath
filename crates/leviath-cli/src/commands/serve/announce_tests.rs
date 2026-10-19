@@ -130,6 +130,10 @@ fn starting_lines_carry_every_field_and_a_counting_step_is_rate_limited() {
         0,
         None,
     )));
+
+    // A step's last item is shown, whatever the interval.
+    watch(StartupEvent::Progress(&progress("backing up", 0, 2, None)));
+    watch(StartupEvent::Progress(&progress("backing up", 2, 2, None)));
     // Ready is announced by the server, not by the watch.
     watch(StartupEvent::Ready);
     let events = out.events();
@@ -140,10 +144,12 @@ fn starting_lines_carry_every_field_and_a_counting_step_is_rate_limited() {
             serde_json::json!({"event":"daemon_starting","step":"converting runs","done":1,"total":982,"detail":"/tmp/backup"}),
             serde_json::json!({"event":"daemon_starting","step":"converting runs","done":1,"total":990,"detail":"/tmp/backup"}),
             serde_json::json!({"event":"daemon_starting","step":"loading providers","done":0,"total":0,"detail":null}),
+            serde_json::json!({"event":"daemon_starting","step":"backing up","done":0,"total":2,"detail":null}),
+            serde_json::json!({"event":"daemon_starting","step":"backing up","done":2,"total":2,"detail":null}),
         ]
     );
     // The person on stderr is told everything.
-    assert_eq!(*leviath_core::sync::lock(&told), 8);
+    assert_eq!(*leviath_core::sync::lock(&told), 10);
 }
 
 #[test]
@@ -285,6 +291,61 @@ fn assert_ready_file_private(path: &std::path::Path) {
 fn assert_ready_file_private(path: &std::path::Path) {
     let text = std::fs::read_to_string(path).expect("the ready file");
     assert_eq!(text.lines().count(), 1);
+}
+
+#[test]
+fn a_bare_ready_file_name_is_written_in_the_working_directory_and_removed() {
+    let (announce, _, _) = announcer(&args(false, Some(PathBuf::from("ready-961-test.json"))));
+    let path = std::env::current_dir()
+        .expect("cwd")
+        .join("ready-961-test.json");
+    assert_eq!(announce.ready_file.as_deref(), Some(path.as_path()));
+    announce.listening("http", bound()).expect("announced");
+    assert!(path.is_file());
+    announce.stopped();
+    assert!(!path.exists());
+}
+
+#[test]
+fn a_ready_file_replaced_since_is_left_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ready.json");
+    let (announce, _, _) = announcer(&args(false, Some(path.clone())));
+    // Never ready: nothing of ours to remove.
+    std::fs::write(&path, "another server's").expect("write");
+    announce.stopped();
+    assert!(path.exists());
+    announce.listening("http", bound()).expect("announced");
+    // Something else wrote over it.
+    std::fs::write(&path, "another server's").expect("write");
+    announce.stopped();
+    assert!(path.exists());
+    // Or put a directory there.
+    std::fs::remove_file(&path).expect("remove");
+    std::fs::create_dir(&path).expect("mkdir");
+    announce.stopped();
+    assert!(path.is_dir());
+}
+
+#[test]
+fn a_panic_before_ready_is_one_error_line() {
+    let (announce, out, _) = announcer(&args(true, None));
+    announce.panicked("boom");
+    assert_eq!(
+        out.events(),
+        vec![serde_json::json!({"event":"error","code":"internal_error","message":"boom"})]
+    );
+    // While stdout is held, nothing waits on it.
+    let held = announce.out.lock().expect("lock");
+    announce.panicked("again");
+    drop(held);
+    // After ready, and without --json, a panic says nothing on stdout.
+    announce.listening("http", bound()).expect("announced");
+    announce.panicked("late");
+    assert_eq!(out.events().len(), 2);
+    let (prose, out, _) = announcer(&args(false, None));
+    prose.panicked("boom");
+    assert_eq!(out.text(), "");
 }
 
 #[test]

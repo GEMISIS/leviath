@@ -167,15 +167,16 @@ lev serve --port 0 --json --exit-on-stdin-eof
 
 | `event` | When | Fields |
 | --- | --- | --- |
-| `daemon_replacing` | A running daemon of an older build is about to be stopped | `message` |
+| `daemon_replacing` | A running daemon of another build is about to be replaced | `message` |
 | `daemon_spawned` | A daemon process was started for this server | `pid` |
 | `daemon_starting` | The daemon is still starting up | `step`, `done`, `total`, `detail` |
 | `daemon_ready` | The daemon answers, before the server binds | none |
 | `ready` | The server is listening | see below |
 | `error` | The server failed to start; always the last line | `code`, `message` |
 
-`daemon_starting` is printed when the step changes, and at most four times a second while one step
-counts through its items. `total` is 0 for a step that is not counted. `detail` is null unless the
+`daemon_replacing` comes for an older daemon, and with `--daemon replace` also for another build of
+the same version. `daemon_starting` is printed when the step changes, and at most four times a
+second while one step counts through its items. A step's last item is always printed. `total` is 0 for a step that is not counted. `detail` is null unless the
 step names where its work goes, such as the backup directory on the first start after an upgrade.
 
 The `ready` object has these fields. It never contains the token.
@@ -199,12 +200,19 @@ the `code`; the `message` is for people and its wording may change.
 | `tls_invalid` | The TLS flags, certificate or key cannot be used |
 | `daemon_unavailable` | No daemon could be reached, started or waited for |
 | `ready_file_failed` | The `--ready-file` could not be written |
+| `internal_error` | The server panicked before it was ready |
+
+The contract covers a server that starts. A command line clap refuses, `--help` and
+`--print-graphql-schema` print what they always do and exit before `--json` applies. Check the exit
+code for those.
 
 A host that cannot read the child's stdout can pass `--ready-file <PATH>` instead, with or
 without `--json`. Once the server listens, it writes the same `ready` object to that file. The
 file is written in one step, so a reader never sees half of it, and on macOS and Linux it is
 readable by its owner only. The server removes it when it stops cleanly, so a file that exists
-names a server that started. A server killed with SIGKILL leaves it behind.
+names a server that started. It leaves the file alone if something else has replaced it since, and
+never removes through a symlink. A relative path is taken from the directory `lev serve` started
+in. A server killed with SIGKILL leaves the file behind.
 
 Without either flag, stdout is one line, `Leviath API server listening on http://127.0.0.1:3000`.
 

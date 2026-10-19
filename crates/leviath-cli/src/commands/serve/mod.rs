@@ -1749,8 +1749,6 @@ mod tests {
         assert_response_ok("HTTP/1.1 404 Not Found\r\n\r\n");
     }
 
-    /// A control client pointing at an address with no daemon: agent-action
-    /// endpoints report "not reachable", and read/bootstrap paths don't touch it.
     /// [`execute`] over no daemon, saying nothing and never stopping.
     async fn execute_quietly(args: ServeArgs) -> anyhow::Result<()> {
         let announce = Announcer::silent(&args);
@@ -1768,6 +1766,8 @@ mod tests {
         .await
     }
 
+    /// A control client pointing at an address with no daemon: agent-action
+    /// endpoints report "not reachable", and read/bootstrap paths don't touch it.
     fn no_daemon_control() -> leviath_runtime::control_socket::ControlClient {
         leviath_runtime::control_socket::ControlClient::new(
             leviath_runtime::control_socket::control_id(std::path::Path::new("/no/such/leviath")),
@@ -3291,8 +3291,8 @@ mod tests {
             daemon: Default::default(),
             exit_on_stdin_eof: false,
             shutdown_grace_secs: 10,
-json: false,
-ready_file: None,
+                json: false,
+                ready_file: None,
             port: 0,
             name: None,
             host: "127.0.0.1".to_string(),

@@ -334,7 +334,9 @@ same list.
   routing request whose `tool_choice` any provider refuses with a 400 is asked
   again once without tools, and that provider and model skip the `tool_choice`
   for the rest of the process.
-
+- `lev serve` reads `config.toml` before it starts a daemon, so a broken
+  config is named in the error. With no daemon running it was reported as a
+  daemon that did not start within 5 seconds.
 - Daemon builds compare versions the way semver does: `0.7.0-beta.1` is
   older than `0.7.0`, so a release replaces a beta daemon instead of
   deferring to it.
@@ -815,8 +817,9 @@ same list.
   server's pid, version, build and `server_instance`, and the daemon's pid,
   version and build. A server that fails to start ends with an `error` line
   whose `code` is `config_invalid`, `token_missing`, `bind_failed`,
-  `tls_invalid`, `daemon_unavailable` or `ready_file_failed`. Without the
-  flag, stdout is the one line of prose it was.
+  `tls_invalid`, `daemon_unavailable`, `ready_file_failed` or
+  `internal_error`. Without the flag, stdout is the one line of prose it
+  was.
 - `lev serve --ready-file <PATH>`: the same `ready` object, written
   owner-only in one step once the server listens and removed when it stops
   cleanly. It works with or without `--json`.
