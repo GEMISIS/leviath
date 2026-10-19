@@ -39,8 +39,11 @@ fn the_daemon_starts_in_the_given_directory() {
 #[test]
 fn the_serve_token_and_dotenv_names_are_removed_and_nothing_else() {
     let dir = tempfile::tempdir().unwrap();
+    // An absolute home on every platform: `/home/me` has no drive on Windows,
+    // so it is relative there.
+    let home = starter_cwd().join("home").display().to_string();
     let env = ChildEnv::of(
-        vars(&[("PATH", "/usr/bin"), ("LEVIATH_HOME", "/home/me")]),
+        vars(&[("PATH", "/usr/bin"), ("LEVIATH_HOME", &home)]),
         &starter_cwd(),
         vec!["BRAVE_API_KEY".to_string()],
     );
