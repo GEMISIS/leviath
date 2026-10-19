@@ -126,7 +126,7 @@ fn the_binary_layout_matches_its_version() {
 /// The hash of [`structure`] over every frame type's schema, the frame kinds
 /// and the layout version. When it changes, a frame type changed shape: the
 /// message in [`the_frame_types_keep_their_structure`] says what to do.
-const STRUCTURE_HASH: &str = "1fa5b51f26a764ab2966ba564dbe0d0cdd04c505107d6bd00f2596b0d34f5176";
+const STRUCTURE_HASH: &str = "fa990e37ae67988e2c465bd7a7b188b08551b4e27e68b0b8150c5ae9c04b0f84";
 
 /// Keywords that only document a schema: how the readable form reads and what
 /// a field means. Postcard writes none of them.
