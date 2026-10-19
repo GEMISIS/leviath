@@ -136,6 +136,10 @@ pub(crate) struct DaemonScriptHost {
     /// before the batch, plus what scripts in it wrote. Shared with the tool
     /// state, which the runtime hands the offer to.
     parts: Arc<StdMutex<Vec<Part>>>,
+    /// The write paths in force at the stage the run is in, shared with the
+    /// tool state that swaps them as the stage changes. Open when this host
+    /// serves no run, or the run sets none.
+    write_fence: Arc<StdMutex<leviath_core::write_paths::WriteFence>>,
 }
 
 impl DaemonScriptHost {
@@ -156,7 +160,18 @@ impl DaemonScriptHost {
             writes: None,
             mime: None,
             parts: Arc::new(StdMutex::new(Vec::new())),
+            write_fence: Arc::default(),
         }
+    }
+
+    /// Hold scripts' writes to the write paths in `fence`, which the tool
+    /// state keeps at the current stage's. Consuming builder used at spawn.
+    pub(crate) fn with_write_fence(
+        mut self,
+        fence: Arc<StdMutex<leviath_core::write_paths::WriteFence>>,
+    ) -> Self {
+        self.write_fence = fence;
+        self
     }
 
     /// Give scripts the run's blob store and the parts they may name.
@@ -230,6 +245,20 @@ impl DaemonScriptHost {
     fn resolve_in_workdir(&self, requested: &str) -> Result<PathBuf, String> {
         leviath_tools::resolve_within(requested, &self.workdir, leviath_core::resolves_within)
             .map_err(|e| e.to_string())
+    }
+
+    /// `Err` with the refusal when a script's call to `function` with
+    /// `arguments` would write outside the current stage's write paths.
+    fn within_write_paths(
+        &self,
+        function: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<(), String> {
+        let fence = leviath_core::sync::lock(&self.write_fence).clone();
+        match crate::write_fence::write_paths_refusal(function, arguments, &self.workdir, &fence) {
+            Some(refusal) => Err(refusal),
+            None => Ok(()),
+        }
     }
 }
 
@@ -430,6 +459,7 @@ impl ScriptHost for DaemonScriptHost {
         ) {
             return Err(refusal);
         }
+        self.within_write_paths("shell", &serde_json::json!({ "command": command }))?;
         let (shell, flag) = default_shell();
         // With a sandbox, build the command that runs inside the current stage's
         // container / namespace; otherwise run the shell directly on the host
@@ -480,6 +510,9 @@ impl ScriptHost for DaemonScriptHost {
         if !self.allow.write_file {
             return Err(denied("write_file"));
         }
+        // The write paths in force at this stage, as the built-in write tools
+        // are held to them.
+        self.within_write_paths("write_file", &serde_json::json!({ "path": path }))?;
         // Same rule as the built-in write tools: never let `create_dir_all`
         // resurrect a workspace that disappeared mid-run.
         if !std::fs::metadata(&self.workdir).is_ok_and(|m| m.is_dir()) {
@@ -1513,6 +1546,39 @@ mod tests {
         // being refused rather than every redirect.
         host.shell("echo ok > inside.txt")
             .expect("a redirect inside the workdir runs");
+    }
+
+    /// A script is held to the write paths in force at the stage, as the
+    /// built-in write tools are: its `write_file` and its `shell` redirects
+    /// outside them are refused before the I/O layer runs, and the fence
+    /// follows the stage as the tool state swaps it.
+    #[test]
+    fn a_script_write_is_held_to_the_stages_write_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let io = RecordingIo::arc();
+        let fence = Arc::new(StdMutex::new(leviath_core::write_paths::WriteFence::new(
+            &[vec!["docs/**".to_string()]],
+        )));
+        let host = DaemonScriptHost::with_io(all_allowed(), root.clone(), io.clone())
+            .with_write_fence(fence.clone());
+
+        let err = host.write_file("src/App.tsx", "x").unwrap_err();
+        assert!(
+            err.contains("write_file refused: src/App.tsx"),
+            "got: {err}"
+        );
+        let err = host.shell("echo x > src/main.rs").unwrap_err();
+        assert!(err.contains("shell refused: src/main.rs"), "got: {err}");
+        let calls = io.calls.lock().unwrap().len();
+        assert_eq!(calls, 0, "the io layer never ran");
+
+        assert_eq!(host.write_file("docs/a.md", "x").unwrap(), "w");
+        host.shell("echo x > docs/b.md")
+            .expect("a redirect inside runs");
+
+        *fence.lock().unwrap() = leviath_core::write_paths::WriteFence::default();
+        assert_eq!(host.write_file("src/App.tsx", "x").unwrap(), "w");
     }
 
     #[test]

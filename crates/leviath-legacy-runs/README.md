@@ -27,11 +27,12 @@ compare it.
 Alpha builds wrote run files in earlier binary layouts. Layout 2 differs
 from this build's in how the spec holds each stage's model and reply cap,
 layout 3 in how a fan-out names its worker, layout 4 in how a graph names
-its compaction model, and layout 5 in keeping neither a spawn's idempotency
-key nor a graph's `routing`. `upgrade` rewrites such a file in place: the
+its compaction model, layout 5 in keeping neither a spawn's idempotency
+key nor a graph's `routing`, and layout 6 in having no write paths. `upgrade`
+rewrites such a file in place: the
 spec, the states and the deltas are read in the old shape and written in
 the new one, the code and owner frames are copied byte for byte, and the
-file as it was is kept as `legacy/run.v2.lvr` up to `legacy/run.v5.lvr`.
+file as it was is kept as `legacy/run.v2.lvr` up to `legacy/run.v6.lvr`.
 `needs_upgrade` tells one from its header alone.
 
 It also holds the only reader left for the old `agent.leviath` blueprint

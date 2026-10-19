@@ -42,6 +42,7 @@ pub mod text;
 pub mod tool;
 pub mod unattended;
 pub mod write_limits;
+pub mod write_paths;
 
 pub use cache::CacheHint;
 pub use context_cause::ContextCause;

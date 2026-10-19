@@ -451,6 +451,7 @@ pub(crate) fn lint_blueprint(file: &BlueprintFile, env: &LintEnv) -> Vec<LintFin
     findings.extend(lint_command_seeds(graph));
     findings.extend(lint_tool_seeds(graph));
     findings.extend(lint_read_paths(graph, env));
+    findings.extend(lint_write_paths(graph));
     findings.extend(lint_safe_commands(graph, file.blueprint.name.as_str(), env));
     findings.extend(lint_held_checkpoints(graph));
     findings.extend(lint_graph(graph));

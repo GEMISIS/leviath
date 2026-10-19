@@ -39,6 +39,7 @@ impl Run {
                 max_depth: 1,
                 seed_commands: true,
                 capture_model_input: false,
+                write_paths: Vec::new(),
             },
             code: CodeFiles::new(),
             refs: Vec::new(),

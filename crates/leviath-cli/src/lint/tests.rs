@@ -4388,3 +4388,60 @@ fn the_reachable_providers_come_from_the_config() {
     );
     assert_eq!(env.available_providers, Some(HashSet::new()));
 }
+
+/// The write-path findings for a one-stage blueprint with `graph_keys` on its
+/// graph and `stage_extra` on its stage.
+fn write_paths_fixture(graph_keys: &str, stage_extra: &str) -> Vec<LintFinding> {
+    let text = manifest(&format!(
+        "{graph_keys}\n\n[[graph.stages]]\nname = \"build_panel\"\n\
+         model = {{ models = [{{ provider = \"anthropic\", model = \"claude-sonnet-5\" }}] }}\n\
+         {stage_extra}\n"
+    ));
+    lint_write_paths(&graph_of(&text))
+}
+
+/// A stage held to write paths that can still run shell or call MCP tools is
+/// warned about: those write wherever they like. Denying shell, or setting no
+/// write paths at all, says nothing.
+#[test]
+fn write_paths_beside_shell_or_mcp_are_flagged() {
+    let fenced = "write_paths = [\"docs/**\"]";
+    let quiet = write_paths_fixture(fenced, "tools = [\"read_file\", \"write_file\"]");
+    assert_eq!(codes(&quiet), Vec::<&str>::new());
+
+    let shell = write_paths_fixture(fenced, "tools = [\"bash\"]");
+    assert_eq!(codes(&shell), ["write-paths-shell"]);
+    let message = shell[0].message.clone();
+    assert!(message.contains("limits writes to docs/**"), "{message}");
+    assert!(message.contains("cp, mv"), "{message}");
+
+    let narrowed = write_paths_fixture(
+        "",
+        "tools = [\"@builtin\"]\nwrite_paths = [\".polywright/panels/**\"]",
+    );
+    assert_eq!(codes(&narrowed), ["write-paths-shell"]);
+
+    let denied_here = write_paths_fixture(
+        fenced,
+        "tools = [\"@builtin\"]\ntool_permissions = { shell = \"deny\" }",
+    );
+    assert_eq!(codes(&denied_here), Vec::<&str>::new());
+    let denied_above = write_paths_fixture(
+        &format!("{fenced}\ntool_permissions = {{ bash = \"deny\" }}"),
+        "tools = [\"shell\"]",
+    );
+    assert_eq!(codes(&denied_above), Vec::<&str>::new());
+    let asked = write_paths_fixture(
+        &format!("{fenced}\ntool_permissions = {{ shell = \"ask\", read_file = \"deny\" }}"),
+        "tools = [\"shell\"]",
+    );
+    assert_eq!(codes(&asked), ["write-paths-shell"]);
+
+    let mcp = write_paths_fixture(fenced, "tools = [\"@mcp\"]");
+    assert_eq!(codes(&mcp), ["write-paths-mcp"]);
+    let connected = write_paths_fixture(fenced, "connectors = [\"files\"]");
+    assert_eq!(codes(&connected), ["write-paths-mcp"]);
+
+    let open = write_paths_fixture("", "tools = [\"shell\"]");
+    assert_eq!(codes(&open), Vec::<&str>::new());
+}

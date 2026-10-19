@@ -58,6 +58,7 @@ fn spec(workdir: &Path) -> RunSpec {
             max_depth: 2,
             seed_commands: true,
             capture_model_input: false,
+            write_paths: Vec::new(),
         },
         auto_answers: Default::default(),
         placement: Placement {
@@ -198,6 +199,34 @@ async fn an_unattended_run_with_its_own_entry_sandbox_and_grants_binds() {
         state.stage_tool_accepts_by_index[1].get("read_file"),
         Some(&vec!["text/*".to_string()])
     );
+}
+
+/// Each stage's write paths are what the run inherited, then its graph's,
+/// then its own; the script host starts on the entry stage's.
+#[tokio::test]
+async fn binding_builds_each_stages_write_paths() {
+    let (env, _agents) = env();
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = spec(dir.path());
+    s.launch.write_paths = vec![vec!["**".into()]];
+    s.graph.write_paths = vec!["docs/**".into()];
+    s.graph.stages[1].write_paths = vec!["docs/panels/**".into()];
+    let bindings = env.bind(&s, &CodeFiles::new()).await.unwrap();
+    let (_world, entity) = place(s, bindings);
+    let state = env.tool_service.state_for(entity).expect("registered");
+    let described: Vec<String> = state
+        .stage_write_fences
+        .iter()
+        .map(|f| f.describe())
+        .collect();
+    assert_eq!(
+        described,
+        [
+            "(**) and (docs/**)",
+            "(**) and (docs/**) and (docs/panels/**)"
+        ]
+    );
+    assert_eq!(state.write_fence.lock().unwrap().describe(), described[0]);
 }
 
 #[tokio::test]

@@ -31,7 +31,7 @@ fn the_published_schemas_match_this_build() {
 /// The hash of the binary samples below as this build encodes them. When it
 /// changes, the binary layout changed: bump `LAYOUT_VERSION`, then record
 /// the new hash here.
-const LAYOUT_HASH: &str = "e8c76bf2454494d5570e5c2d479b33a55bb0988798943fe9860fb54140155338";
+const LAYOUT_HASH: &str = "1d96fb5e599e1dd4c97e62b1b7427b1a820d9d05e914f4cafba64db0b743f765";
 
 /// A fully populated sample of every frame type, so a change to any type's
 /// binary encoding changes the bytes.
@@ -47,6 +47,7 @@ fn layout_samples() -> Vec<u8> {
     // multi-line strings keep a CRLF, and the bytes would move.
     let sample = include_str!("layout_sample.toml").replace("\r\n", "\n");
     spec.graph = toml::from_str::<RunGraph>(&sample).unwrap();
+    spec.launch.write_paths = vec![vec!["**".to_string()]];
     let routing = crate::spec::graph::RoutingDef {
         retry_attempts: std::num::NonZeroU32::new(4),
         on_error: Some(crate::spec::graph::OnRoutingError::ErrorEdge),
@@ -136,7 +137,7 @@ fn the_binary_layout_matches_its_version() {
 /// The hash of [`structure`] over every frame type's schema, the frame kinds
 /// and the layout version. When it changes, a frame type changed shape: the
 /// message in [`the_frame_types_keep_their_structure`] says what to do.
-const STRUCTURE_HASH: &str = "ca81753d6a2c96aad9a87f78af8e32e15bb0457e7843740f49b489155ac351d8";
+const STRUCTURE_HASH: &str = "bd94bd2a40cd42adbcf8bc880569453fa2454755f55c05028466ac527d622d69";
 
 /// Keywords that only document a schema: how the readable form reads and what
 /// a field means. Postcard writes none of them.
@@ -240,8 +241,8 @@ fn the_fingerprint_names_this_layout() {
     assert_eq!(
         (super::LAYOUT_VERSION, hex::encode(super::FINGERPRINT)),
         (
-            6,
-            "ca81753d6a2c96aad9a87f78af8e32e15bb0457e7843740f49b489155ac351d8".to_string()
+            7,
+            "bd94bd2a40cd42adbcf8bc880569453fa2454755f55c05028466ac527d622d69".to_string()
         ),
     );
 }

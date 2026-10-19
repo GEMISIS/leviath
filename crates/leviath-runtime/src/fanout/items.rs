@@ -440,13 +440,15 @@ pub(crate) fn check_items<'a>(
 /// [`WorkerSource`]. The worker inherits how unattended its parent is and the
 /// tools it may call without asking, runs no spawn-time shell seeds (its parent already scoped the work, so every
 /// worker re-running them is waste), and gets the parent's requested model
-/// and output shape.
+/// and output shape. It is held to the write paths in force at
+/// `fanning_stage`, the parent's stage that handed the work out.
 pub(crate) fn worker_request(
     parent: &RunSpec,
     worker: &WorkerOption,
     item: &WorkItem,
     source: SpawnSource,
     depth: usize,
+    fanning_stage: usize,
 ) -> (SpawnRequest, Caller) {
     let request = SpawnRequest {
         inputs: item.inputs.clone(),
@@ -463,7 +465,7 @@ pub(crate) fn worker_request(
     };
     let caller = Caller::Worker {
         parent: parent.run_id.clone(),
-        policy: parent.launch.clone(),
+        policy: parent.policy_for_children(fanning_stage),
         depth: u8::try_from(depth).unwrap_or(u8::MAX),
         stage: match &worker.runs {
             WorkerSource::Stage(stage) => Some(stage.clone()),
@@ -481,6 +483,7 @@ mod tests {
     use super::*;
     use crate::spec::graph::WorkerFailure;
     use crate::spec::inputs::InputType;
+    use crate::spec::launch::LaunchPolicy;
     use crate::spec::names::{BlueprintRef, InputName};
 
     fn name(text: &str) -> WorkerName {
@@ -1002,11 +1005,16 @@ mod tests {
 
     /// A worker inherits its parent's unattended setting, allowed tools,
     /// model and output request, runs no shell seeds, and names the stage it
-    /// enters when it runs the parent's own graph.
+    /// enters when it runs the parent's own graph. Its caller carries the
+    /// write paths in force at the stage that fanned out: the parent's
+    /// inherited layers, its graph's, and that stage's own.
     #[test]
     fn a_worker_request_carries_what_its_parent_decided() {
         let mut parent = crate::spec::run_spec::tests::spec();
         parent.launch.allow = vec![crate::spec::names::ToolName::new("shell").unwrap()];
+        parent.launch.write_paths = vec![vec!["**".to_string()]];
+        parent.graph.write_paths = vec!["docs/**".to_string()];
+        parent.graph.stages[0].write_paths = vec!["docs/panels/**".to_string()];
         let work = item("a", &[("topic", RawInput::Text("t".into()))]);
         let (req, caller) = worker_request(
             &parent,
@@ -1014,7 +1022,13 @@ mod tests {
             &work,
             SpawnSource::Raw(Box::new(parent.graph.clone())),
             1,
+            0,
         );
+        let layers = |list: &[&[&str]]| -> Vec<Vec<String>> {
+            list.iter()
+                .map(|l| l.iter().map(|g| g.to_string()).collect())
+                .collect()
+        };
         assert_eq!(req.inputs, work.inputs);
         assert!(
             req.delivery.metadata.is_empty(),
@@ -1032,7 +1046,10 @@ mod tests {
             caller,
             Caller::Worker {
                 parent: parent.run_id.clone(),
-                policy: parent.launch.clone(),
+                policy: LaunchPolicy {
+                    write_paths: layers(&[&["**"], &["docs/**"], &["docs/panels/**"]]),
+                    ..parent.launch.clone()
+                },
                 depth: 1,
                 stage: Some(stage_name("w")),
                 item: "a".to_string(),
@@ -1044,12 +1061,16 @@ mod tests {
             &work,
             SpawnSource::Blueprint(BlueprintRef::parse("fixer").unwrap()),
             300,
+            1,
         );
         assert_eq!(
             caller,
             Caller::Worker {
                 parent: parent.run_id.clone(),
-                policy: parent.launch.clone(),
+                policy: LaunchPolicy {
+                    write_paths: layers(&[&["**"], &["docs/**"]]),
+                    ..parent.launch.clone()
+                },
                 depth: u8::MAX,
                 stage: None,
                 item: "a".to_string(),

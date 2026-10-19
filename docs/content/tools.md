@@ -39,6 +39,10 @@ bytes, and one that does not sees a one-line stand-in.
 beside it and renamed over it, keeping its permissions. A run stopped mid-write leaves the old file
 whole. `edit_file` refuses an empty `old_str`, which names no place in the file.
 
+A blueprint can hold both to a few folders of the workdir with
+[`write_paths`](/docs/security#limiting-where-a-stage-writes), on the graph or on one stage. A
+path outside them is refused before it is written, and the refusal names the globs.
+
 `write_file` with `append` lets a file too large for one reply be written in parts. Both installers
 refuse a script that does not compile, lacks `// @tool` or `// @description`, or takes an existing
 tool's name. See [installing a tool from a run](/docs/rhai-tools#installing-a-tool-from-a-run).
@@ -129,6 +133,11 @@ nowhere anyone can read back, so they are neither clamped nor confined.
 Some targets the parser cannot name at all, such as `> $OUT` or bash's `/dev/tcp/host/port`. Those
 have no path to check, so they are ungrantable: they prompt every time, and no approval makes them
 reusable.
+
+In a stage with [`write_paths`](/docs/security#limiting-where-a-stage-writes), every redirect
+target has to match them as well. A target the parser cannot name is refused there, since there is
+no path to hold to the globs. Only redirects are checked: `cp`, `mv` and `tee` write wherever the
+shell lets them.
 
 A line the parser cannot read as commands at all is different again. A backtick, an unterminated
 quote or an unbalanced `$(` could put a redirect anywhere, so a line carrying one is refused

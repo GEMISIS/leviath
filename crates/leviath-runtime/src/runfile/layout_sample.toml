@@ -2,6 +2,7 @@ title = "coder"
 description = "Coding agent: discover the repo, plan with your sign-off, optionally spike, implement, and review, with stuck detection and graph-based recovery"
 entry = "discover"
 read_paths = []
+write_paths = ["docs/**", ".leviath/**"]
 tool_rescan = "at_spawn"
 transforms = []
 dependencies = []
@@ -10,6 +11,7 @@ routing = { retry_attempts = 4, on_error = "error_edge" }
 [[stages]]
 name = "discover"
 description = "Map the codebase and synthesize a verification workflow"
+write_paths = [".leviath/**"]
 system_prompt = """
 Before any planning, answer two questions about THIS repository: what is it, and
 how do I verify work in it? Do not plan or edit here.

@@ -19,6 +19,7 @@ description = "writes code"
 entry = "plan"
 max_child_depth = 4
 read_paths = ["~/designs"]
+write_paths = ["docs/**"]
 batch_tool_hint = false
 tool_rescan = "before_dispatch"
 stages = [
@@ -135,7 +136,7 @@ async fn a_blueprint_carries_its_agent_block() {
         &manifest(),
         CoreSource::Snapshot,
         "{ blueprint { name version description maxChildDepth toolRescan readPaths
-                       entryStage { name mode } } }",
+                       writePaths entryStage { name mode } } }",
     )
     .await;
     let bp = &json["blueprint"];
@@ -147,6 +148,7 @@ async fn a_blueprint_carries_its_agent_block() {
     // install one, so it is named for that.
     assert_eq!(bp["toolRescan"], "RESCAN_BEFORE_DISPATCH");
     assert_eq!(bp["readPaths"][0], "~/designs");
+    assert_eq!(bp["writePaths"], serde_json::json!(["docs/**"]));
     // `entry_stage` names a stage rather than taking the first declared one.
     assert_eq!(bp["entryStage"]["name"], "plan");
     assert_eq!(bp["entryStage"]["mode"], "INTERACTIVE_POINTS");

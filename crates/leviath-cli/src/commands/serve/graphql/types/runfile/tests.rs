@@ -432,6 +432,7 @@ fn spec() -> CoreSpec {
             max_depth: 2,
             seed_commands: false,
             capture_model_input: true,
+            write_paths: Vec::new(),
         },
         auto_answers: AutoAnswers::all(),
         placement: Placement {

@@ -43,6 +43,7 @@ tool_permissions = { read_file = "allow", shell = "ask" }
 transition_prompt = "pick the next step"
 output_routing = { "image/*" = "notes" }
 tool_accepts = { spawn_agent = ["image/*"] }
+write_paths = ["docs/**"]
 hooks = { on_stage_enter = { file = "hooks/enter.rhai" } }
 
 [graph.stages.model]
@@ -266,6 +267,7 @@ async fn a_stage_carries_what_its_tools_may_do() {
     let json = ask(r#"{ stage(name: "plan") {
              toolPermissions { tool policy }
              toolAccepts { tool patterns }
+             writePaths
              outputRouting { pattern region { name } regionName }
              toolRouting {
                defaultRegion { name } defaultRegionName keepResults maxResultTokens
@@ -282,6 +284,7 @@ async fn a_stage_carries_what_its_tools_may_do() {
     assert_eq!(stage["toolPermissions"][1]["policy"], "ASK");
     assert_eq!(stage["toolAccepts"][0]["tool"], "spawn_agent");
     assert_eq!(stage["toolAccepts"][0]["patterns"][0], "image/*");
+    assert_eq!(stage["writePaths"], serde_json::json!(["docs/**"]));
     assert_eq!(stage["outputRouting"][0]["pattern"], "image/*");
     assert_eq!(stage["outputRouting"][0]["region"]["name"], "notes");
     assert_eq!(stage["outputRouting"][0]["regionName"], "notes");

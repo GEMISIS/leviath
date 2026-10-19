@@ -477,6 +477,12 @@ impl Stage {
             .collect()
     }
 
+    /// Globs, relative to the workdir, that this stage's writes must match as
+    /// well as the blueprint's `writePaths`. Empty adds no limit.
+    async fn write_paths(&self) -> &[String] {
+        &self.stage().write_paths
+    }
+
     /// Where this stage's tool results land in its context. Null leaves the
     /// daemon's own routing.
     async fn tool_routing(&self) -> Option<ToolRouting> {

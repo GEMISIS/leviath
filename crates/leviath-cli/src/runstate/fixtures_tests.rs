@@ -168,6 +168,7 @@ fn spec_of(meta: &RunMeta, regions: Vec<RegionDef>) -> RunSpec {
             max_depth: u8::try_from(meta.max_child_depth).unwrap_or(u8::MAX),
             seed_commands: true,
             capture_model_input: false,
+            write_paths: Vec::new(),
         },
         auto_answers: AutoAnswers::default(),
         placement: Placement {

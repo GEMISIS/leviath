@@ -5734,6 +5734,16 @@
           "unattended": {
             "$ref": "#/$defs/Unattended",
             "description": "How much goes ahead without a person."
+          },
+          "write_paths": {
+            "description": "Write-path layers imposed from outside the run's own graph: the\nrequest's `write_paths`, and the limits in force where the run that\nstarted this one was when it started it. A write must match a glob of\nevery layer (see [`leviath_core::write_paths`]).",
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -5741,7 +5751,8 @@
           "allow",
           "max_depth",
           "seed_commands",
-          "capture_model_input"
+          "capture_model_input",
+          "write_paths"
         ],
         "type": "object"
       },
@@ -7128,6 +7139,14 @@
               "$ref": "#/$defs/ContextTransformDef"
             },
             "type": "array"
+          },
+          "write_paths": {
+            "default": [],
+            "description": "Globs, relative to the workdir, that `write_file`, `edit_file`, a\nshell redirect and a script's `write_file` must match in every stage.\nEmpty is no limit. A stage's own `write_paths` narrow these.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -7945,6 +7964,14 @@
               "string",
               "null"
             ]
+          },
+          "write_paths": {
+            "default": [],
+            "description": "Globs, relative to the workdir, that this stage's writes must match\nas well as the graph's `write_paths`. Empty adds no limit.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [

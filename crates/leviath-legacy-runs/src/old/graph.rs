@@ -201,6 +201,7 @@ impl Conv {
                 .as_ref()
                 .map(|r| r.allow.clone())
                 .unwrap_or_default(),
+            write_paths: Vec::new(),
             safe_commands: match &b.safe_commands {
                 Some(s) => SafeCommandsDef {
                     tools: self.names(at().field("safe_commands").field("tools"), &s.tools),
@@ -334,6 +335,7 @@ impl Conv {
                     Some((self.name(kp.clone(), k)?, self.names::<MimePattern>(kp, v)))
                 })
                 .collect(),
+            write_paths: Vec::new(),
             hooks: hooks(&s.hooks),
         }
     }

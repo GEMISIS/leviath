@@ -118,6 +118,10 @@ pub(crate) struct LaunchPolicy {
     pub(crate) seed_commands: bool,
     /// Whether every model request is recorded in the run's journal.
     pub(crate) capture_model_input: bool,
+    /// Write-path layers the run inherited: its request's `writePaths`, and
+    /// the limits in force where the run that started it was. A write must
+    /// match a glob of every layer, and of the graph's and its stage's own.
+    pub(crate) write_paths: Vec<Vec<String>>,
 }
 
 impl From<&CorePolicy> for LaunchPolicy {
@@ -134,6 +138,7 @@ impl From<&CorePolicy> for LaunchPolicy {
             max_depth: i32::from(policy.max_depth),
             seed_commands: policy.seed_commands,
             capture_model_input: policy.capture_model_input,
+            write_paths: policy.write_paths.clone(),
         }
     }
 }

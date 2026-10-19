@@ -21,6 +21,17 @@ pub const FIXTURES: &[&str] = &[
     "mid-tool-batch",
 ];
 
+/// `spec`, an old build's JSON view of a spec, as this build shows it: with
+/// no write paths on its graph, on any stage, or inherited. No layout before
+/// 7 had them.
+pub fn with_no_write_paths(spec: &mut serde_json::Value) {
+    spec["graph"]["write_paths"] = serde_json::json!([]);
+    for stage in spec["graph"]["stages"].as_array_mut().unwrap() {
+        stage["write_paths"] = serde_json::json!([]);
+    }
+    spec["launch"]["write_paths"] = serde_json::json!([]);
+}
+
 pub fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
@@ -288,10 +299,12 @@ pub fn journal_bytes(frames: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-/// A spec an older layout wrote, the way this build reads it once upgraded:
-/// spawned under no idempotency key, and with no `routing` of its own on the
-/// graph or any stage, since no older layout kept either.
+/// A spec a layout before 6 wrote, the way this build reads it once upgraded:
+/// spawned under no idempotency key, with no `routing` of its own on the
+/// graph or any stage, since no layout before 6 kept either, and with no
+/// write paths (see [`with_no_write_paths`]).
 pub fn as_layout_6_reads(spec: &mut serde_json::Value) {
+    with_no_write_paths(spec);
     spec["delivery"]["idempotency"] = serde_json::Value::Null;
     spec["graph"]["routing"] = serde_json::Value::Null;
     for stage in spec["graph"]["stages"].as_array_mut().unwrap() {

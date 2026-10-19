@@ -113,6 +113,10 @@ pub(super) fn begin(
         .cloned()
         .ok_or_else(|| format!("this fan-out has no worker named '{}'", item.worker))?;
     let item = item.clone();
+    // The stage handing the work out: its write paths bound every worker.
+    let fanning_stage = world
+        .get::<crate::pipeline::StageCursor>(parent)
+        .map_or(0, |c| c.index);
     let prep: WorkerPrep = Box::pin(async move {
         // Off the tick from here: a query is a walk of the agents directory.
         let source = match &worker.runs {
@@ -121,7 +125,8 @@ pub(super) fn begin(
             WorkerSource::Stage(_) => spec.same_graph_source(),
             WorkerSource::Query(query) => SpawnSource::Blueprint(spawner.find_worker(query)?),
         };
-        let (request, caller) = items::worker_request(&spec, &worker, &item, source, parent_depth);
+        let (request, caller) =
+            items::worker_request(&spec, &worker, &item, source, parent_depth, fanning_stage);
         spawner.prepare_worker(request, caller).await
     });
     Ok(Start { prep, depths })

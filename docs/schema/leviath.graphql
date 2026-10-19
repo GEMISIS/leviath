@@ -1036,6 +1036,13 @@ input BlueprintInput {
 	"""
 	readPaths: StringListFilter
 	"""
+	Filter on `BlueprintOutput.writePaths`.
+	
+	Globs, relative to the workdir, that every write of a run of this must
+	match. Empty is no limit beyond the workdir; a stage can narrow it.
+	"""
+	writePaths: StringListFilter
+	"""
 	Filter on `BlueprintOutput.dependencies`.
 	
 	What must be on the machine before a run of this will start. A required
@@ -1223,6 +1230,11 @@ type BlueprintOutput implements Node {
 	granting: an entry takes effect only where the host grants it.
 	"""
 	readPaths: [String!]!
+	"""
+	Globs, relative to the workdir, that every write of a run of this must
+	match. Empty is no limit beyond the workdir; a stage can narrow it.
+	"""
+	writePaths: [String!]!
 	"""
 	What must be on the machine before a run of this will start. A required
 	one missing fails the spawn with its remedy; the rest are warnings.
@@ -6660,6 +6672,12 @@ type LaunchPolicyOutput {
 	seedCommands: Boolean!
 	"Whether every model request is recorded in the run's journal."
 	captureModelInput: Boolean!
+	"""
+	Write-path layers the run inherited: its request's `writePaths`, and
+	the limits in force where the run that started it was. A write must
+	match a glob of every layer, and of the graph's and its stage's own.
+	"""
+	writePaths: [[String!]!]!
 }
 
 "How much a run is trusted with."
@@ -6691,6 +6709,13 @@ input LaunchWrite {
 	attempt. Read it back on `InferenceAttempt.modelInput`.
 	"""
 	captureModelInput: Boolean! = false
+	"""
+	Globs, relative to the workdir, that every `write_file`, `edit_file`
+	and shell redirect of the run must match, on top of any the graph and
+	its stages set. Child runs and fan-out workers inherit them. A glob
+	that leaves the workdir is refused.
+	"""
+	writePaths: [String!]
 }
 
 "One line of the ledger was written."
@@ -15464,6 +15489,13 @@ input StageInput {
 	"""
 	toolAccepts: ToolAcceptRuleListInput
 	"""
+	Filter on `StageOutput.writePaths`.
+	
+	Globs, relative to the workdir, that this stage's writes must match as
+	well as the blueprint's `writePaths`. Empty adds no limit.
+	"""
+	writePaths: StringListFilter
+	"""
 	Filter on `StageOutput.toolRouting`.
 	
 	Where this stage's tool results land in its context. Null leaves the
@@ -15855,6 +15887,11 @@ type StageOutput {
 	toolPermissions: [ToolPermissionRuleOutput!]!
 	"What each tool may be handed here, as mime patterns."
 	toolAccepts: [ToolAcceptRuleOutput!]!
+	"""
+	Globs, relative to the workdir, that this stage's writes must match as
+	well as the blueprint's `writePaths`. Empty adds no limit.
+	"""
+	writePaths: [String!]!
 	"""
 	Where this stage's tool results land in its context. Null leaves the
 	daemon's own routing.

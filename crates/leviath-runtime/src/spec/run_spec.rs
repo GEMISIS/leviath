@@ -164,6 +164,31 @@ impl RunSpec {
     pub fn code_digest(&self, code: &CodeRef) -> Option<&Digest> {
         self.code.iter().find(|(c, _)| c == code).map(|(_, d)| d)
     }
+
+    /// The write-path layers in force at the stage at `stage_index`,
+    /// outermost first: what the run was launched under, then the graph's,
+    /// then the stage's own. Empty lists are left out, so no layers at all
+    /// means writes are limited only by the workdir.
+    pub fn write_layers(&self, stage_index: usize) -> Vec<Vec<String>> {
+        let stage = self.graph.stages.get(stage_index).map(|s| &s.write_paths);
+        let mut layers = self.launch.write_paths.clone();
+        for own in [Some(&self.graph.write_paths), stage].into_iter().flatten() {
+            if !own.is_empty() {
+                layers.push(own.clone());
+            }
+        }
+        layers
+    }
+
+    /// The policy a child run or fan-out worker started from the stage at
+    /// `stage_index` is narrowed against: this run's, with the write paths in
+    /// force at that stage, so nothing it starts can write where it could not.
+    pub fn policy_for_children(&self, stage_index: usize) -> LaunchPolicy {
+        LaunchPolicy {
+            write_paths: self.write_layers(stage_index),
+            ..self.launch.clone()
+        }
+    }
 }
 
 /// What a run answers for itself instead of asking a person.
@@ -449,6 +474,7 @@ pub(crate) mod tests {
                 max_depth: 2,
                 seed_commands: true,
                 capture_model_input: false,
+                write_paths: Vec::new(),
             },
             auto_answers: AutoAnswers::all(),
             placement: Placement {

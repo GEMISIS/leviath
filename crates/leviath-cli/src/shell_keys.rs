@@ -427,6 +427,26 @@ pub(crate) fn write_targets_for(command: &str, backslash_escapes: bool) -> Write
     )
 }
 
+/// [`write_targets_for`] with no target left out: a redirect to a name only
+/// the shell will know (`> $OUT`, `> /dev/tcp/...`) makes the whole line
+/// [`WriteTargets::Unreadable`] rather than being skipped. For a fence that
+/// has to say where every write lands, such as a stage's write paths.
+pub(crate) fn every_write_target_for(command: &str, backslash_escapes: bool) -> WriteTargets {
+    let Some(segments) = tokenize_for(command, backslash_escapes) else {
+        return write_targets_for(command, backslash_escapes);
+    };
+    let targets: Option<Vec<String>> = segments
+        .iter()
+        .flat_map(|segment| segment.writes.iter())
+        .filter_map(|t| match classify_write(t) {
+            WriteTarget::Path(p) => Some(Some(p)),
+            WriteTarget::Unreadable => Some(None),
+            WriteTarget::Discarded => None,
+        })
+        .collect();
+    targets.map_or(WriteTargets::Unreadable, WriteTargets::Known)
+}
+
 /// The literal paths of [`write_targets`], with an unreadable line yielding
 /// none. For callers that report rather than refuse.
 pub(crate) fn write_target_paths(command: &str) -> Vec<String> {

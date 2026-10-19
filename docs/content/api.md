@@ -538,6 +538,14 @@ There is no size cap, so the run's file grows by roughly the context size per at
 enough. Read the captured requests back on `InferenceAttemptOutput.modelInput` over
 [GraphQL](/docs/graphql#what-one-call-sent).
 
+### Holding a run to some folders
+
+A spawn request with `"launch": {"write_paths": ["docs/**", ".polywright/panels/**"]}` holds every
+`write_file`, `edit_file` and shell redirect of the run to those globs, on top of any its blueprint
+sets. Child runs and fan-out workers of the run inherit them. A call outside them is refused before
+it runs and recorded as blocked. A glob that leaves the workdir refuses the spawn. See
+[limiting where a stage writes](/docs/security#limiting-where-a-stage-writes) for what they cover.
+
 ### Answering a question
 
 `GET /api/runs/{id}/interaction` is the request the run is parked on: its `id`, `kind`, `prompt`
@@ -816,7 +824,7 @@ a summary of the run it would be:
   "inputs": {"audience": {"choice": "developers"}, "max_items": {"int": 20},
              "since": {"text": "v0.6.0"}},
   "launch": {"unattended": "all", "allow": [], "max_depth": 0, "seed_commands": true,
-             "capture_model_input": false},
+             "capture_model_input": false, "write_paths": []},
   "workdir": "/home/you/project",
   "warnings": []
 }

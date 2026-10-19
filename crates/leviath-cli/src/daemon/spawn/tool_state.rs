@@ -38,6 +38,11 @@ pub(crate) struct ToolStateParts<'a> {
     pub(crate) stage_required_by_index: Vec<HashSet<String>>,
     /// Per-stage `tool_accepts`, by canonical tool name, indexed by stage.
     pub(crate) stage_tool_accepts_by_index: Vec<HashMap<String, Vec<String>>>,
+    /// The write paths in force at each stage, indexed by stage.
+    pub(crate) stage_write_fences: Vec<leviath_core::write_paths::WriteFence>,
+    /// The entry stage's write paths, shared with the script host, which
+    /// `sync_stage` keeps at the current stage's.
+    pub(crate) write_fence: Arc<StdMutex<leviath_core::write_paths::WriteFence>>,
     /// Agent-wide tool policies from the blueprint.
     pub(crate) agent_perms: HashMap<String, String>,
     /// The blueprint the per-agent grants are looked up under; `None` for a
@@ -111,6 +116,8 @@ pub(crate) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         stage_required_by_index: Arc::new(parts.stage_required_by_index),
         stage_tool_accepts: Arc::new(StdMutex::new(entry_limits)),
         stage_tool_accepts_by_index: Arc::new(parts.stage_tool_accepts_by_index),
+        stage_write_fences: Arc::new(parts.stage_write_fences),
+        write_fence: parts.write_fence,
         agent_perms: Arc::new(parts.agent_perms),
         blueprint_may_loosen: Arc::new(std::sync::atomic::AtomicBool::new(
             parts.config.security.allow_blueprint_permissions,

@@ -25,7 +25,7 @@ use leviath_runtime::spec::graph::{
     ToolRoutingDef, ToolSelector,
 };
 use leviath_runtime::spec::inputs::{InputDecl, InputValues};
-use leviath_runtime::spec::launch::{self, CallbackPlan, LaunchPolicy, Placement};
+use leviath_runtime::spec::launch::{self, CallbackPlan, Placement};
 use leviath_runtime::spec::names::{
     Digest, McpServerName, MimePattern, ModelRef, RegionName, RunId, StageName, ToolName,
 };
@@ -133,6 +133,7 @@ impl From<StageDef> for graph::StageDef {
             input_accepts: s.input_accepts,
             input_as_text: s.input_as_text,
             tool_accepts: s.tool_accepts,
+            write_paths: Vec::new(),
             hooks: s.hooks,
         }
     }
@@ -187,6 +188,7 @@ impl From<RunGraph> for graph::RunGraph {
             tool_permissions: g.tool_permissions,
             sandbox: g.sandbox,
             read_paths: g.read_paths,
+            write_paths: Vec::new(),
             safe_commands: g.safe_commands,
             batch_tool_hint: g.batch_tool_hint,
             shell_hint: g.shell_hint,
@@ -216,7 +218,7 @@ pub(crate) struct RunSpec {
     code: Vec<(CodeRef, Digest)>,
     requested_output: Option<OutputDef>,
     requested_model: Option<ModelRef>,
-    launch: LaunchPolicy,
+    launch: crate::layout6::LaunchPolicy,
     auto_answers: AutoAnswers,
     placement: Placement,
     delivery: DeliveryPlan,
@@ -237,7 +239,7 @@ impl From<RunSpec> for run_spec::RunSpec {
             code: spec.code,
             requested_output: spec.requested_output,
             requested_model: spec.requested_model,
-            launch: spec.launch,
+            launch: spec.launch.into(),
             auto_answers: spec.auto_answers,
             placement: spec.placement,
             delivery: spec.delivery.into(),

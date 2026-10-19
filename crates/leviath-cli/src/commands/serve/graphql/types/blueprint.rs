@@ -628,6 +628,12 @@ impl Blueprint {
         &self.parsed.graph.read_paths
     }
 
+    /// Globs, relative to the workdir, that every write of a run of this must
+    /// match. Empty is no limit beyond the workdir; a stage can narrow it.
+    async fn write_paths(&self) -> &[String] {
+        &self.parsed.graph.write_paths
+    }
+
     /// What must be on the machine before a run of this will start. A required
     /// one missing fails the spawn with its remedy; the rest are warnings.
     async fn dependencies(&self) -> Vec<BlueprintDependency> {

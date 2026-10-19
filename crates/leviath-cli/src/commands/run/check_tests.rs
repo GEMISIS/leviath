@@ -58,6 +58,7 @@ fn summary() -> SpawnSummary {
             max_depth: 2,
             seed_commands: true,
             capture_model_input: false,
+            write_paths: Vec::new(),
         },
         workdir: std::path::PathBuf::from("/work"),
         warnings: Default::default(),

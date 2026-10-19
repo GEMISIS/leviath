@@ -2436,6 +2436,14 @@
             "$ref": "#/$defs/ContextTransformDef"
           },
           "type": "array"
+        },
+        "write_paths": {
+          "default": [],
+          "description": "Globs, relative to the workdir, that `write_file`, `edit_file`, a\nshell redirect and a script's `write_file` must match in every stage.\nEmpty is no limit. A stage's own `write_paths` narrow these.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -3119,6 +3127,14 @@
             "string",
             "null"
           ]
+        },
+        "write_paths": {
+          "default": [],
+          "description": "Globs, relative to the workdir, that this stage's writes must match\nas well as the graph's `write_paths`. Empty adds no limit.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [

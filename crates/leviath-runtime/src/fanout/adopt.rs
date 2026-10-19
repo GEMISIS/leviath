@@ -130,7 +130,8 @@ fn proven_worker(
     if !runs_from(&source, &spec.origin) || spec.placement.worker_stage.as_ref() != stage {
         return Err("it does not run what the fan-out starts".to_string());
     }
-    let (request, _) = items::worker_request(parent_spec, declared, item, source, 0);
+    // Only the request is compared, so the caller's depth and stage are moot.
+    let (request, _) = items::worker_request(parent_spec, declared, item, source, 0, 0);
     let decls: Vec<InputDecl> = spec
         .graph
         .inputs

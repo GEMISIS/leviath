@@ -40,6 +40,7 @@ pub(crate) fn stage(name: &str) -> StageDef {
         input_as_text: vec![],
         tool_accepts: BTreeMap::new(),
         hooks: StageHooks::default(),
+        write_paths: Vec::new(),
     }
 }
 
@@ -107,6 +108,7 @@ pub(crate) fn minimal() -> RunGraph {
         dependencies: vec![],
         mcp_servers: vec![],
         script_permissions: Default::default(),
+        write_paths: Vec::new(),
     }
 }
 
@@ -844,6 +846,29 @@ fn a_worker_is_named_and_written_as_a_blueprint_writes_it() {
 /// for a file change on a stage that cannot change a file, and a fan-out into a
 /// stage that never agreed to be a worker. Both are reported with 0.6.4's
 /// wording, at the field that is wrong.
+/// A write path that leaves the workdir is refused wherever it is written,
+/// and the issue says what a good one looks like.
+#[test]
+fn write_paths_must_stay_inside_the_workdir() {
+    let mut g = minimal();
+    g.write_paths = vec!["docs/**".into(), "/etc/**".into()];
+    g.stages[0].write_paths = vec!["../up/**".into(), "docs/panels/**".into()];
+    assert_eq!(
+        codes(&g),
+        vec![
+            "graph.write_paths[1] Invalid".to_string(),
+            "graph.stages.plan.write_paths[0] Invalid".to_string(),
+        ]
+    );
+    let issues = g.validate(&SpecPath::root().field("graph")).unwrap_err();
+    let first = issues.iter().next().unwrap().to_string();
+    assert!(first.contains("absolute path"), "{first}");
+    assert!(first.contains("docs/**"), "{first}");
+    g.write_paths.pop();
+    g.stages[0].write_paths.remove(0);
+    assert_eq!(codes(&g), Vec::<String>::new());
+}
+
 #[test]
 fn a_gate_no_tool_can_satisfy_and_an_unwilling_worker_are_refused() {
     let mut g = minimal();
