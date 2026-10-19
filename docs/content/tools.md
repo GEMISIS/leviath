@@ -157,25 +157,38 @@ is refused.
 ### Where a safe-listed read may look
 
 The default [safe list](/docs/configuration) lets `cat`, `head`, `grep`, `ls`
-and the read-only `git` commands run without a prompt. That holds only while every path they are
-handed stays inside the working directory or a granted `[read_paths]` root. It is the check
-`read_file` makes, applied to each word that could name a file.
+and the read-only `git` commands run without a prompt. That holds only while every path the line
+names stays inside the working directory or a granted `[read_paths]` root. It is the check
+`read_file` makes, applied to every word after the program and to every `<` redirect.
 
 | Command | Pre-approved? |
 | --- | --- |
-| `cat src/main.rs`, `grep -rn foo .`, `git log -- src` | Yes |
+| `cat src/main.rs`, `grep -rn foo .`, `git log -- src`, `cat src/*.rs` | Yes |
 | `cat /etc/hosts`, `grep -r key ~`, `head ../other/secret` | No |
-| `cd / && cat etc/passwd`, `git -C /elsewhere log` | No |
-| `cat link`, where `link` is a symlink pointing outside | No |
+| `cd / && cat etc/passwd`, `git -C /elsewhere log`, `{ cat; } < /etc/hosts` | No |
+| `cat link`, `cat lea*` or `cat link/../x`, where a symlink points outside | No |
 
-A word counts as a path when it contains `/`, starts with `~` or `..`, names a symlink, or is a
-`cd` or `git -C` target. Flag values count too (`--git-dir=/x`, `-f/etc/list`). A `cd` that leaves
-the working directory makes everything after it on the line uncovered. A `$VAR` cannot be checked,
-so it counts as outside. Programs that open no file named in their arguments, such as `echo`, are
-not checked.
+The check fails closed: what it cannot prove is inside counts as outside.
+
+- **Expansions.** A `$VAR`, `$(...)` or `%VAR%` on `cmd.exe` counts as outside, even handed to
+  `echo`.
+- **Globs and braces.** A glob is expanded and every match checked. A brace list, a pattern that
+  could match `..`, or more than 1,000 matches counts as outside.
+- **`..`.** A path with `..` in it is also resolved as the shell resolves it, through symlinks.
+- **Flags.** Flag values count (`--git-dir=/x`, `-f/etc/list`), so a pattern starting with `/`
+  can prompt too.
+- **`cd`.** A `cd` that leaves the working directory makes everything after it on the line
+  uncovered.
+- **`grep -R`.** It follows every symlink it meets as it recurses, so it counts as outside. Plain
+  `grep -r` does not follow them.
+
+Only programs that open no file named in their arguments, such as `echo` and `printf`, have their
+literal words skipped.
 
 A command that fails the check is not refused. It falls back to the shell's own policy, which asks
-by default. To refuse it instead, even under `--yolo`, set `outside_workdir = "deny"`:
+by default. The prompt offers no grant for the stage or the run: approving `cat src/a /etc/hosts`
+approves that call, and nothing reusable. To refuse such commands instead, even under `--yolo`,
+set `outside_workdir = "deny"`:
 
 ```toml
 # config.toml
@@ -192,9 +205,14 @@ tools = ["read_file", "search_files", "glob", "shell"]
 tool_permissions = { outside_workdir = "deny" }
 ```
 
-The check reads words, not the shell's mind. A program that takes paths from a file (`grep -f
-list`) is held only to where that list lives. Every case it cannot place counts as outside, so a
-miss costs a prompt, never a silent read.
+Under `deny` Leviath also refuses a line whose reads its words cannot show. That covers a line
+that does not parse, `eval` and `source`, and any shell (`sh -c`). It covers interpreters such
+as `python`, `node`, `perl` and `awk`, and runners such as `xargs`, `env`, `find` and `git -c`.
+
+What `deny` confines is what the line names. It cannot see what a program does once it runs: a
+`make` target or a test can read anything the user can. So it narrows a stage, and is not a
+boundary. A stage that must not read outside the project should not have `shell` at all. Give it
+`search_files` and `glob`, or run it in a [sandbox](/docs/containers).
 
 ### How much output comes back
 

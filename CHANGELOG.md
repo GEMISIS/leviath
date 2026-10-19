@@ -41,13 +41,19 @@ same list.
   `git log -- src` still run. `cat /etc/hosts`, `grep -r key ~`,
   `cd / && cat etc/passwd`, `git -C /elsewhere log`, a `$VAR` operand, or a
   symlink pointing outside fall back to the shell's policy, which asks by
-  default. A `cd` out of the workdir uncovers the rest of the line, and
-  command seeds follow the same rule. New `[safe_commands] outside_workdir =
-  "deny"` refuses such a command instead, even under `--yolo`. A blueprint
-  or stage can set it as the `outside_workdir` permission in
-  `tool_permissions`. To read a directory outside the workdir without a
-  prompt, grant it under `[read_paths]`. Approving the prompt for the run
-  also works.
+  default. The check fails closed: an expansion, a glob or brace list it
+  cannot check, a `..` after a symlink, or a `<` redirect on a group counts
+  as outside. A `cd` out of the workdir uncovers the rest of the line, and
+  command seeds follow the same rule. Such a prompt approves that call only:
+  it offers no grant for the stage or the run. New `[safe_commands]
+  outside_workdir = "deny"` refuses such a command instead, even under
+  `--yolo`, along with any line whose reads cannot be checked (`sh -c`,
+  `eval`, an interpreter, `xargs`). A blueprint or stage can set it as the
+  `outside_workdir` permission in `tool_permissions`. To read a directory
+  outside the workdir without a prompt, grant it under `[read_paths]`.
+- `search_files` and `glob` are built-in tool names now, so a Rhai script
+  tool of either name is dropped at discovery, as for any built-in. Rename
+  the script to keep it.
 
 - **Breaking.** A fan-out stage declares the workers it may hand items to.
   `[graph.stages.mode.fan_out]` names its `stage` and lists

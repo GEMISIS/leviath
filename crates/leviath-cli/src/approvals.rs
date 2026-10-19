@@ -59,7 +59,9 @@ use crate::shell_keys::{KEY_PREFIX, is_valid_prefix};
 /// that could name a file (see [`crate::shell_keys::outside_workdir`]).
 /// `cat src/main.rs` runs unprompted; `cat /etc/hosts`, `grep -r key ~` and
 /// `cd / && cat etc/passwd` fall back to the shell's policy, which asks by
-/// default, and [`OutsideWorkdir::Deny`] refuses them outright. And the
+/// default, and [`OutsideWorkdir::Deny`] refuses them outright. The check
+/// fails closed - what it cannot place counts as outside - but it reads words,
+/// so a program the line runs can still read what it likes. And the
 /// read-only `git` subcommands honour a
 /// repository's `core.pager` and `diff.external`. A pager does not run without
 /// a tty, but `diff.external` does - reachable only via `git -c`, which keys as

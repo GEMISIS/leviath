@@ -142,12 +142,17 @@ impl SeedCommandPolicy {
             crate::yolo::home().as_deref(),
             &inside,
         );
-        let uncovered = crate::shell_keys::uncovered_keys(
-            &keys,
-            &outside.keys,
-            &|k| self.safe_keys.contains(k),
-            &|_| false,
-        );
+        if !outside.is_empty() {
+            return Err(format!(
+                "seed command '{command}' reads outside the working directory ({}), so no \
+                 entry pre-approves it. A seed runs before the first inference, with nobody to \
+                 ask; read inside the workdir, or seed the region from `files` with a \
+                 `[read_paths]` grant.",
+                outside.operands.join(", ")
+            ));
+        }
+        let uncovered =
+            crate::shell_keys::uncovered_keys(&keys, &|k| self.safe_keys.contains(k), &|_| false);
         if uncovered.is_empty() {
             return Ok(());
         }
@@ -347,6 +352,29 @@ mod tests {
                 .is_ok(),
             "the shipped agents' seed must keep running unattended"
         );
+    }
+
+    /// A seed that reads outside its workdir is not pre-approved, however the
+    /// safe list reads: nobody is there to ask, and a manifest's `cat` must
+    /// not carry `~/.ssh` into a region.
+    #[test]
+    fn a_seed_reading_outside_the_workdir_is_refused() {
+        let policy = SeedCommandPolicy::new(
+            true,
+            Duration::from_secs(30),
+            safe(&["cat"]),
+            None,
+            Default::default(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let refused = policy
+            .check_covered("cat /etc/hosts", dir.path())
+            .unwrap_err();
+        assert!(
+            refused.contains("reads outside the working directory (/etc/hosts)"),
+            "{refused}"
+        );
+        assert!(policy.check_covered("cat notes.md", dir.path()).is_ok());
     }
 
     #[test]
