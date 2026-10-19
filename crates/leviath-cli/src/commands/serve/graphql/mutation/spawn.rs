@@ -232,7 +232,9 @@ impl Spawned {
 
     /// The event stream's number before the run started. Every frame of the
     /// run is numbered above it, so `runEvents(since:)` with this number and
-    /// the run's id hands over the run from its `RunSpawnedEvent` on.
+    /// the run's id hands over the run from its `RunSpawnedEvent` on. A
+    /// spawn answered with a run that already existed, rather than a new
+    /// one, has that run's `RunSpawnedEvent` below this number.
     async fn seq(&self) -> BigInt {
         BigInt(i64::try_from(self.seq).unwrap_or(i64::MAX))
     }

@@ -1592,7 +1592,10 @@ file reads as "not matching" for now, and is asked again on that run's next stat
 A run's spawn frame can reach the server a moment before the run's record does. Such a run is
 asked again on each of its frames, whatever the filter names, and its frames wait meanwhile. Once
 the record is there the run joins with every frame it sent, spawn first. A filter on `metadata`,
-which is how a client follows the runs it started, catches a run spawned after it subscribed.
+which is how a client follows the runs it started, catches a run spawned after it subscribed. A run
+whose record has not turned up after 32 of its frames is given up on, and so is the oldest of more
+than 256 such runs at once. With `includeDescendants`, a sub-agent joins only through a parent
+already in scope, so the sub-agents a pending parent spawns before it joins are not taken in.
 
 Every frame carries `seq` and `at`, and both come from `Event`, which every frame implements, the
 two transport ones included. `RunEvent` adds `runId`, `agentId` and the `run` itself, and only the
@@ -1706,13 +1709,19 @@ subscription Resume($since: BigInt!, $instance: ID!) {
 
 The opening frame comes first, carrying `since` as its `seq`. Then every kept frame numbered above
 `since` that passes `filter` and `types`, in order, and then the live frames. Nothing is missed or
-repeated between the two. `machineEvents` takes the same two arguments.
+repeated between the two. `machineEvents` takes the same two arguments. A `since` without
+`serverInstance` is read as this server's numbering, so send both whenever you have them.
+
+A resume replays up to 4096 frames before anything live, and the live frames wait in the same
+bounded buffer as always. A client that reads the replay slowly can still fall behind and get an
+`EventsDroppedEvent` partway through.
 
 When the server cannot hand you everything, the frame after the opening one is an
 `EventsDroppedEvent`. That happens when `serverInstance` names another process, because a
 restart starts the numbering again, and when `since` is older than the oldest frame kept. Its
-`count` is an upper bound on what you missed. Re-read whatever you show, and carry on from the
-stream.
+`count` is an upper bound on what you missed. A changed `serverInstance` always means re-read:
+nothing replays, and `count` is the largest `BigInt` there is, because this server cannot know
+what the other one sent. Re-read whatever you show, and carry on from the stream.
 
 A spawn says where its frames start. `spawnRun` answers `seq` and `serverInstance` on
 `SpawnedOutput`, and every frame of the new run is numbered above that `seq`. Subscribe with

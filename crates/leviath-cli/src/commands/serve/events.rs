@@ -597,15 +597,12 @@ impl EventBus {
     pub(crate) fn resume(&self, since: u64) -> Resume {
         let kept = leviath_core::sync::lock(&self.kept);
         let frames = self.tx.subscribe();
+        // The ring is in the order the frames were numbered.
+        let first = kept.frames.partition_point(|frame| frame.seq <= since);
         Resume {
             frames,
             at: latest_seq(),
-            kept: kept
-                .frames
-                .iter()
-                .filter(|frame| frame.seq > since)
-                .cloned()
-                .collect(),
+            kept: kept.frames.range(first..).cloned().collect(),
             evicted: kept.evicted_through.saturating_sub(since),
         }
     }

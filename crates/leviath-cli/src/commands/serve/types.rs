@@ -512,7 +512,8 @@ pub(super) struct SpawnedResp {
     pub(super) warnings: Vec<IssueResp>,
     /// The event stream's number before the run started: every frame of the
     /// run is numbered above it, so a GraphQL subscription with `since` set
-    /// to it is handed the run from its first frame.
+    /// to it is handed the run from its first frame. A spawn answered with a
+    /// run that already existed has that run's spawn frame below it.
     pub(super) seq: u64,
     /// The server process that numbered `seq`.
     pub(super) server_instance: String,

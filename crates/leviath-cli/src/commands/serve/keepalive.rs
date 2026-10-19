@@ -102,9 +102,20 @@ impl Heartbeat {
         }
     }
 
-    /// Wait until the next ping is due.
-    pub(super) async fn due(&mut self) {
-        self.ping.tick().await;
+    /// Wait until a ping is due, or the oldest unanswered one has run out
+    /// of time.
+    ///
+    /// The deadline is a timer of its own rather than something a ping tick
+    /// checks, so a silent peer is dropped when its pong is due and not at
+    /// the first tick after that.
+    pub(super) async fn due(&mut self) -> Beat {
+        let deadline = self
+            .unanswered_since
+            .map(|since| since + self.timing.pong_timeout);
+        tokio::select! {
+            _ = self.ping.tick() => Beat::Ping,
+            () = until(deadline) => Beat::Overdue,
+        }
     }
 
     /// The peer answered.
@@ -112,27 +123,35 @@ impl Heartbeat {
         self.unanswered_since = None;
     }
 
-    /// Ping the peer, or say it is gone.
+    /// Ping the peer.
     ///
-    /// A ping left unanswered past the deadline, and a ping that cannot be
-    /// sent, both mean the peer is gone without a Close. Anything short of
-    /// the deadline just gets another ping: a peer that missed one and
-    /// answers the next is a live peer.
-    pub(super) async fn ping(&mut self, sink: &mut WsSink) -> bool {
-        let overdue = self
-            .unanswered_since
-            .is_some_and(|since| since.elapsed() >= self.timing.pong_timeout);
-        if overdue
-            || !send_within(
-                sink,
-                self.timing.send_timeout,
-                Message::Ping(Vec::new().into()),
-            )
-            .await
-        {
-            return false;
-        }
+    /// The deadline starts as the ping goes out, not once the send has
+    /// finished, and only for the oldest unanswered ping: a peer that missed
+    /// one and answers the next is a live peer. A ping that cannot be sent is
+    /// a ping that will not be answered, so the deadline drops that peer too.
+    pub(super) async fn ping(&mut self, sink: &mut WsSink) {
         self.unanswered_since.get_or_insert_with(Instant::now);
-        true
+        let _ = send_within(
+            sink,
+            self.timing.send_timeout,
+            Message::Ping(Vec::new().into()),
+        )
+        .await;
+    }
+}
+
+/// What a [`Heartbeat`] is due to do.
+pub(super) enum Beat {
+    /// Send a ping.
+    Ping,
+    /// Give up: the oldest ping went unanswered past the deadline.
+    Overdue,
+}
+
+/// Sleep until `deadline`, or forever when there is none.
+async fn until(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }

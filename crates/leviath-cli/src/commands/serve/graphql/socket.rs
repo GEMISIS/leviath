@@ -13,10 +13,10 @@ use async_graphql_axum::{GraphQLProtocol, GraphQLWebSocket};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::PollSender;
 
-use super::super::keepalive::{Heartbeat, WsTiming, send_within};
+use super::super::keepalive::{Beat, Heartbeat, WsTiming, send_within};
 use super::super::shutdown::{Shutdown, going_away};
 use super::LeviathSchema;
 
@@ -24,6 +24,11 @@ use super::LeviathSchema;
 /// itself waits. Small: the send deadline is what bounds a slow peer, and a
 /// deep queue would only hide one.
 const OUTBOUND: usize = 16;
+
+/// How many client messages may wait for the protocol. The socket is not read
+/// while they do, so a client sending faster than the protocol answers is
+/// slowed down rather than buffered.
+const INBOUND: usize = 16;
 
 /// Serve one subscription socket until the client leaves, stops answering,
 /// stops reading, or the server stops.
@@ -38,10 +43,10 @@ pub(super) async fn serve(
     shutdown: Shutdown,
 ) {
     let (mut sink, mut stream) = socket.split();
-    let (inbound, from_client) = mpsc::unbounded_channel::<Result<Message, axum::Error>>();
+    let (inbound, from_client) = mpsc::channel::<Result<Message, axum::Error>>(INBOUND);
     let (to_client, outbound) = mpsc::channel::<Message>(OUTBOUND);
     let mut outbound = ReceiverStream::new(outbound);
-    let from_client = UnboundedReceiverStream::new(from_client);
+    let from_client = ReceiverStream::new(from_client);
     let to_client = PollSender::new(to_client);
     // Fused, so once the protocol has said its last the select below can keep
     // polling it without polling a finished future. Its end drops `to_client`,
@@ -54,7 +59,10 @@ pub(super) async fn serve(
     loop {
         tokio::select! {
             () = &mut graphql => {}
-            msg = stream.next() => match msg {
+            // Room for the message is reserved before the socket is read, so
+            // a read message always has somewhere to go. Both halves are
+            // safe to drop part way, which `select!` does to the losers.
+            (room, msg) = async { (inbound.reserve().await, stream.next().await) } => match msg {
                 Some(Ok(Message::Pong(_))) => heartbeat.answered(),
                 Some(Ok(Message::Close(_))) => {
                     // The reply to a close is queued by the read and goes
@@ -64,10 +72,10 @@ pub(super) async fn serve(
                 }
                 Some(Err(_)) | None => break,
                 Some(Ok(msg)) => {
-                    // The protocol is the only reader; it ending first is
-                    // the protocol closing the socket, which the outbound
-                    // half below sees.
-                    let _ = inbound.send(Ok(msg));
+                    // No room means the protocol has ended, which is the
+                    // protocol closing the socket: the outbound half below
+                    // sees that.
+                    let _ = room.map(|room| room.send(Ok(msg)));
                 }
             },
             msg = outbound.next() => match msg {
@@ -85,11 +93,10 @@ pub(super) async fn serve(
                 let _ = send_within(&mut sink, timing.send_timeout, going_away()).await;
                 break;
             }
-            () = heartbeat.due() => {
-                if !heartbeat.ping(&mut sink).await {
-                    break;
-                }
-            }
+            beat = heartbeat.due() => match beat {
+                Beat::Ping => heartbeat.ping(&mut sink).await,
+                Beat::Overdue => break,
+            },
         }
     }
 }

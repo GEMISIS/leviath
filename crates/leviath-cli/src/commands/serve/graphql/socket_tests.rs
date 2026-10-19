@@ -115,17 +115,24 @@ async fn a_peer_that_answers_pings_stays_connected() {
     receivers_reach(&bus, 0).await;
 }
 
-/// A peer that never answers a ping is closed, and its subscription with it.
+/// A peer that never answers a ping is closed when its pong is due, and its
+/// subscription with it.
 #[tokio::test]
-async fn a_peer_that_never_answers_is_closed() {
+async fn a_peer_that_never_answers_is_closed_when_its_pong_is_due() {
     let (addr, bus) = server(WsTiming {
-        ping_every: Duration::from_millis(50),
-        pong_timeout: Duration::from_millis(1),
+        ping_every: Duration::from_millis(300),
+        pong_timeout: Duration::from_millis(100),
         send_timeout: Duration::from_secs(5),
     })
     .await;
     let mut client = client(addr).await;
     subscribe(&mut client, &bus).await;
+    let pinged = super::super::super::testutil::until_pinged(&mut client).await;
+    assert_eq!(client.recv_eof().await, None, "the server hangs up");
+    super::super::super::testutil::closed_within_the_deadline(
+        pinged.elapsed(),
+        Duration::from_millis(100),
+    );
     receivers_reach(&bus, 0).await;
 }
 
