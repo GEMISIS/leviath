@@ -825,6 +825,41 @@ async fn a_message_with_files_needs_a_run_it_can_read() {
     .await;
 }
 
+/// Ending a conversation names the run to the daemon and answers with the
+/// run; a run with none to end is the daemon's refusal.
+#[tokio::test]
+async fn ending_a_conversation_answers_with_the_run() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-end-conversation", |_d| async move {
+        create_run(&run_in("run-a", RunStatus::WaitingInput)).expect("run written");
+        let (control, _dir, _srv) = fake_daemon(|request| match request {
+            leviath_runtime::control_socket::ControlRequest::EndConversation { run_id } => {
+                assert_eq!(run_id, "run-a");
+                ControlResponse::Ok { ok: true }
+            }
+            other => panic!("the end is what reaches the daemon: {other:?}"),
+        });
+        let answer = mutate(
+            control,
+            r#"mutation { endConversation(request: { runId: "run-a" }) { run { id status } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        assert_eq!(data_of(&answer)["endConversation"]["run"]["id"], "run-a");
+
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Error {
+            message: "run 'run-a' is in stage 's', which is not interactive".to_string(),
+        });
+        let answer = mutate(
+            control,
+            r#"mutation { endConversation(request: { runId: "run-a" }) { run { id } } }"#,
+        )
+        .await;
+        assert_eq!(code_of(&answer), "\"CONFLICT\"");
+        assert!(answer.errors[0].message.contains("not interactive"));
+    })
+    .await;
+}
+
 // ── answering an ask ──
 
 /// Each answer variant reaches the daemon as what that kind of ask takes.

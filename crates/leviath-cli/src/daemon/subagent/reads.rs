@@ -74,7 +74,7 @@ pub(super) fn spawn_schema(args: &Value) -> String {
 pub(super) fn mode_label(mode: &StageMode) -> &'static str {
     match mode {
         StageMode::Autonomous => "autonomous",
-        StageMode::Interactive => "interactive",
+        StageMode::Interactive(_) => "interactive",
         StageMode::InteractivePoints(_) => "interactive_points",
         StageMode::FanOut(_) => "fan_out",
         StageMode::Output => "output",

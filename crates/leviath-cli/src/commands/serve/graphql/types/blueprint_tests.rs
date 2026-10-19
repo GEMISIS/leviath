@@ -376,7 +376,10 @@ fn every_stage_mode_maps_to_one_value() {
     use leviath_runtime::spec::graph::{FanOutDef, StageMode as Mode};
     use leviath_runtime::spec::names::StageName;
     assert_eq!(StageMode::from(&Mode::Autonomous), StageMode::Autonomous);
-    assert_eq!(StageMode::from(&Mode::Interactive), StageMode::Interactive);
+    assert_eq!(
+        StageMode::from(&Mode::Interactive(Default::default())),
+        StageMode::Interactive
+    );
     assert_eq!(StageMode::from(&Mode::Output), StageMode::Output);
     assert_eq!(
         StageMode::from(&Mode::InteractivePoints(Vec::new())),

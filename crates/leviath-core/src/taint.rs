@@ -569,6 +569,13 @@ pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
                 TaintLevel::Public,
             )
         }
+        // `end_conversation` carries nothing anywhere: it only moves the
+        // calling stage on.
+        "end_conversation" => ToolClassification::new(
+            TaintLevel::Public,
+            ToolDirection::Internal,
+            TaintLevel::Public,
+        ),
         // `fan_out` is many `spawn_agent`s at once.
         "spawn_agent" | "check_agent" | "wait_for_agent" | "send_to_agent" | "kill_agent"
         | "spawn_schema" | "describe_blueprint" | "validate_spawn" | "run_history" | "fan_out" => {

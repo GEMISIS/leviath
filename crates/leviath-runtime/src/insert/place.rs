@@ -608,13 +608,18 @@ pub(crate) fn final_output(state: &RunState) -> Option<FinalOutput> {
 /// question one of them put to a person is asked again (one held on an
 /// approval or the taint gate under the same id); a run stopped at a
 /// checkpoint has it asked again over the same document; a run choosing its
-/// next edge is asked again among the same edges.
+/// next edge is asked again among the same edges; an interactive stage
+/// waiting for its next message waits again.
 pub(crate) fn phase(entity: &mut EntityWorldMut<'_>, spec: &RunSpec, state: &RunState) {
     use crate::pipeline::{AwaitingTransitionChoice, ReadyToInfer, WaitingForChildren};
     match &state.phase {
         PipelinePhase::Done | PipelinePhase::FanOut => {}
         PipelinePhase::WaitingForChildren => {
             entity.insert(WaitingForChildren);
+        }
+        // Parked on its next message: it waits again, with no model call.
+        PipelinePhase::AwaitingMessage => {
+            entity.insert(crate::pipeline::AwaitingMessage);
         }
         PipelinePhase::AwaitingChoice(names) => {
             let edges = spec

@@ -229,7 +229,7 @@ impl Dashboard {
 
         // Only show input pane on the tab that can actually respond
         let has_prompt = is_waiting
-            && (pending_req.is_some() || agent.waiting_prompt.is_some())
+            && (pending_req.is_some() || agent.waiting_prompt.is_some() || agent.awaits_message())
             && !matches!(agent.status, AgentDisplayStatus::Cancelled)
             && self.selected_stage_can_respond();
         // Agent is Active (not waiting on anything) but its current stage
@@ -947,12 +947,13 @@ regions = []
     }
 
     #[test]
-    fn draw_detail_panel_complete_interactive() {
+    fn draw_detail_panel_awaiting_a_message() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent("run-ci", AgentDisplayStatus::CompleteInteractive);
-        agent.waiting_prompt = Some("Anything else?".to_string());
+        let mut agent = make_test_agent("run-ci", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = None;
+        agent.wait_reason = Some(leviath_core::run_meta::WaitReason::AwaitingMessage);
         dash.agents.push(agent);
         dash.update_display_indices();
         terminal
@@ -962,7 +963,7 @@ regions = []
             })
             .unwrap();
         let buf = rendered_buffer(&terminal);
-        assert!(buf.contains("COMPLETE"), "{buf}");
+        assert!(buf.contains("Your Turn"), "{buf}");
     }
 
     #[test]

@@ -382,6 +382,10 @@ fn a_tool_that_takes_nothing_is_typed_either_way() {
         tool_call("runtime_info", None, "null"),
         ToolCall::RuntimeInfo(_)
     ));
+    assert!(matches!(
+        tool_call("end_conversation", None, "{}"),
+        ToolCall::EndConversation(_)
+    ));
 }
 
 /// The optional keys are optional: a call that leaves them out still types.

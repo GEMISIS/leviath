@@ -2,6 +2,19 @@
 
 use super::*;
 
+/// What `deliver_messages` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type DeliveryQuery = (
+    Entity,
+    &'static mut AgentState,
+    &'static mut MessageInbox,
+    &'static mut ContextWindow,
+    Option<&'static super::AwaitingMessage>,
+    Option<&'static mut StageProgress>,
+);
+
 /// The receiving end of the world's inbound-message channel. Clients (the
 /// control API) send `AgentMessage`s here; the delivery system routes and
 /// delivers them.
@@ -13,10 +26,14 @@ pub(crate) struct MessageIntake(pub UnboundedReceiver<AgentMessage>);
 /// window - but only for agents whose current stage accepts messages; otherwise
 /// the messages wait in the inbox for a stage that does. Ported from
 /// `AgentEngine::process_messages` / `deliver_inbox_messages`.
+///
+/// An interactive stage parked on its next message is woken by one: it asks
+/// its model again, in the same stage, with the message in its conversation.
 pub(crate) fn deliver_messages(
     mut intake: ResMut<MessageIntake>,
-    mut agents: Query<(Entity, &AgentState, &mut MessageInbox, &mut ContextWindow)>,
+    mut agents: Query<DeliveryQuery>,
     mime: crate::blob_store::MimeParams,
+    mut commands: Commands,
 ) {
     crate::tick_scope::clear();
     // Route inbound channel messages to their target agent's inbox.
@@ -25,7 +42,7 @@ pub(crate) fn deliver_messages(
         incoming.push(msg);
     }
     for msg in incoming {
-        for (entity, state, mut inbox, _) in agents.iter_mut() {
+        for (entity, state, mut inbox, ..) in agents.iter_mut() {
             crate::tick_scope::enter(entity);
             if state.agent_id == msg.agent_id {
                 inbox.push(msg.clone());
@@ -36,12 +53,23 @@ pub(crate) fn deliver_messages(
     }
 
     // Deliver inboxes into context windows for agents that accept messages.
-    for (entity, state, mut inbox, mut window) in agents.iter_mut() {
+    let now = chrono::Utc::now().timestamp();
+    for (entity, mut state, mut inbox, mut window, parked, mut progress) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if !state.accepts_messages {
             continue; // hold until a stage that accepts messages
         }
-        for msg in inbox.drain_all() {
+        let delivered = inbox.drain_all();
+        if parked.is_some() && !delivered.is_empty() {
+            super::conversation::wake(
+                &mut commands,
+                entity,
+                &mut state,
+                progress.as_deref_mut(),
+                now,
+            );
+        }
+        for msg in delivered {
             let region = msg
                 .target_region
                 .clone()

@@ -324,6 +324,27 @@ fn fan_out_gates_carry_and_layout_refs_are_checked() {
     );
 }
 
+/// An idle limit of nothing would end every conversation before anybody
+/// could answer; any other limit, or none, is fine.
+#[test]
+fn an_interactive_stage_needs_an_idle_limit_of_at_least_a_second() {
+    let mut g = minimal();
+    let idle = |secs| {
+        StageMode::Interactive(crate::spec::graph::InteractiveDef {
+            idle_timeout_secs: secs,
+        })
+    };
+    g.stages[1].mode = idle(Some(0));
+    assert_eq!(
+        codes(&g),
+        vec!["graph.stages.build.mode.interactive.idle_timeout_secs OutOfRange"]
+    );
+    for secs in [None, Some(1)] {
+        g.stages[1].mode = idle(secs);
+        assert!(codes(&g).is_empty());
+    }
+}
+
 #[test]
 fn a_stage_layout_and_interaction_points_are_checked_against_that_layout() {
     let mut g = minimal();

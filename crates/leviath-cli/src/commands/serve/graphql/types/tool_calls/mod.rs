@@ -252,6 +252,7 @@ tool_calls! {
         "One `locale_info` call, which takes nothing.", LocaleInfo, LocaleInfoCall, "locale_info";
         "One `environment_info` call, which takes nothing.", EnvironmentInfo, EnvironmentInfoCall, "environment_info";
         "One `runtime_info` call, which takes nothing.", RuntimeInfo, RuntimeInfoCall, "runtime_info";
+        "One `end_conversation` call, which takes nothing.", EndConversation, EndConversationCall, "end_conversation";
     }
 }
 

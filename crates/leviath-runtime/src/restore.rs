@@ -491,6 +491,7 @@ pub(crate) fn classify(state: &crate::state::RunState) -> Option<RestorePriority
         RunStatus::Idle | RunStatus::Active => match state.phase {
             PipelinePhase::FanOut
             | PipelinePhase::AwaitingPerson
+            | PipelinePhase::AwaitingMessage
             | PipelinePhase::Paused
             | PipelinePhase::WaitingForChildren => Some(RestorePriority::Blocked),
             _ => Some(RestorePriority::Active),

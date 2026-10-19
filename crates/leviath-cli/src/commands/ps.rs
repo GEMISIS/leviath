@@ -601,9 +601,13 @@ pub(crate) fn format_runs(
     let blocked = runs
         .iter()
         .filter(|e| {
-            e.wait_reason
-                .as_ref()
-                .is_some_and(|r| r.needs_a_person() && !matches!(r, WaitReason::NeedsSetup { .. }))
+            e.wait_reason.as_ref().is_some_and(|r| {
+                r.needs_a_person()
+                    && !matches!(
+                        r,
+                        WaitReason::NeedsSetup { .. } | WaitReason::AwaitingMessage
+                    )
+            })
         })
         .count();
     let mut out = match blocked {
@@ -611,6 +615,19 @@ pub(crate) fn format_runs(
         1 => format!("{table}\n\n1 run needs an answer: lev interactions"),
         n => format!("{table}\n\n{n} runs need an answer: lev interactions"),
     };
+    // An interactive stage that has replied is not asking a question:
+    // `lev interactions` lists nothing for it. A message resumes it.
+    let conversing = runs
+        .iter()
+        .filter(|e| e.wait_reason == Some(WaitReason::AwaitingMessage))
+        .count();
+    match conversing {
+        0 => {}
+        1 => out.push_str("\n\n1 run waits for a message: lev msg <run> <text>"),
+        n => out.push_str(&format!(
+            "\n\n{n} runs wait for a message: lev msg <run> <text>"
+        )),
+    }
     let parked: Vec<String> = runs
         .iter()
         .filter_map(|e| match &e.wait_reason {

@@ -1084,7 +1084,8 @@ impl Run {
             true => graph.entry_stage(),
             false => graph.stage(&self.meta.current_stage),
         };
-        stage.map(|stage| stage.accepts_messages)
+        // An interactive stage reads what a person sends, whatever it says.
+        stage.map(|stage| stage.accepts_messages || stage.mode.interactive().is_some())
     }
 
     /// Caller-supplied metadata from spawn. Values are always strings.

@@ -75,11 +75,17 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "install_self_tool",
     crate::SUBMIT_OUTPUT_TOOL,
     crate::FAN_OUT_TOOL,
+    crate::END_CONVERSATION_TOOL,
 ];
 
-/// The built-ins a stage mode grants rather than a manifest: `submit_output`
-/// and `fan_out` end or fork the run, so no group hands them out.
-pub const STAGE_CONTROL_TOOLS: &[&str] = &[crate::SUBMIT_OUTPUT_TOOL, crate::FAN_OUT_TOOL];
+/// The built-ins a stage mode grants rather than a manifest: `submit_output`,
+/// `fan_out` and `end_conversation` end, fork or move on the run, so no group
+/// hands them out.
+pub const STAGE_CONTROL_TOOLS: &[&str] = &[
+    crate::SUBMIT_OUTPUT_TOOL,
+    crate::FAN_OUT_TOOL,
+    crate::END_CONVERSATION_TOOL,
+];
 
 /// Whether `name` is a canonical built-in (not an alias, not a sub-agent tool).
 pub fn is_builtin_tool(name: &str) -> bool {
@@ -705,6 +711,17 @@ impl BuiltinTools {
                         }
                     },
                     "required": ["items"]
+                }),
+            },
+            Tool {
+                // Granted by an interactive stage, which otherwise waits for
+                // the next message after every reply.
+                name: crate::END_CONVERSATION_TOOL.to_string(),
+                description: "Close this conversation. After each reply this stage waits for the person's next message; call this instead when the conversation is finished (the person said goodbye, or the task is done and nothing is left to discuss), and the run moves on to its next step. Say anything you want the person to read in the same turn, before calling it.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
                 }),
             },
             Tool {

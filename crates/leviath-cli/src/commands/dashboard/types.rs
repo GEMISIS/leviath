@@ -411,6 +411,15 @@ pub(crate) struct DashboardAgent {
     pub accepts_messages: bool,
 }
 
+impl DashboardAgent {
+    /// Whether the run has replied in an interactive stage and waits for the
+    /// next message: the person's turn, taken with `[i]`.
+    pub(crate) fn awaits_message(&self) -> bool {
+        self.status == AgentDisplayStatus::Waiting
+            && self.wait_reason == Some(leviath_core::run_meta::WaitReason::AwaitingMessage)
+    }
+}
+
 /// Log entry for the dashboard log panel.
 #[derive(Debug, Clone)]
 pub(super) struct LogEntry {

@@ -34,8 +34,11 @@ pub enum RunStatus {
     WaitingInput,
     /// Finished, with nothing further to accept.
     Complete,
-    /// All required stages done; agent still accepts optional follow-up input.
-    /// Shown as "Complete" in the dashboard - no kill option, input still enabled.
+    /// Deprecated: no run reaches this status. A run that has replied in an
+    /// interactive stage and waits for the next message is
+    /// [`WaitingInput`](Self::WaitingInput) with
+    /// [`WaitReason::AwaitingMessage`]. Kept so a record that names it still
+    /// reads, until it is removed in 0.8.0.
     CompleteInteractive,
     /// Paused by the user; resumes on request and is restored paused after a
     /// daemon restart.
@@ -121,6 +124,11 @@ pub enum WaitReason {
 
     /// Blocked on a blueprint stage-boundary checkpoint. Needs a person.
     InteractionPoint,
+
+    /// An interactive stage replied and waits for the next message. Needs a
+    /// person: a message resumes it in the same stage, and ending the
+    /// conversation (or its idle limit running out) moves it on.
+    AwaitingMessage,
 
     /// Parked while fan-out workers run. Healthy; resolves on its own.
     FanOutWorkers {
@@ -308,6 +316,7 @@ impl std::fmt::Display for WaitReason {
             Self::UserPrompt => f.write_str("user prompt"),
             Self::TaintGate => f.write_str("taint gate"),
             Self::InteractionPoint => f.write_str("checkpoint"),
+            Self::AwaitingMessage => f.write_str("awaiting message"),
             Self::FanOutWorkers { outstanding } => write!(f, "workers({outstanding})"),
             Self::Children { outstanding } => write!(f, "children({outstanding})"),
             // The remedy is a sentence; this is a table cell. The blocker is
@@ -354,6 +363,8 @@ pub struct WaitMarkers {
     /// The run is parked until the machine is fixed, and this is what it
     /// needs.
     pub needs_setup: Option<SetupNeeded>,
+    /// An interactive stage replied and waits for the next message.
+    pub awaiting_message: bool,
 }
 
 /// Why a parked run is parked, or `None` when it is not parked or nothing has
@@ -386,6 +397,9 @@ pub fn wait_reason_from(parked: bool, markers: &WaitMarkers) -> Option<WaitReaso
     }
     if let Some(outstanding) = markers.children_outstanding {
         return Some(WaitReason::Children { outstanding });
+    }
+    if markers.awaiting_message {
+        return Some(WaitReason::AwaitingMessage);
     }
     if markers.awaiting_interaction {
         return Some(match markers.interaction {
@@ -1237,6 +1251,7 @@ mod tests {
             (WaitReason::UserPrompt, "user_prompt"),
             (WaitReason::TaintGate, "taint_gate"),
             (WaitReason::InteractionPoint, "interaction_point"),
+            (WaitReason::AwaitingMessage, "awaiting_message"),
             (
                 WaitReason::FanOutWorkers { outstanding: 3 },
                 "fan_out_workers",
@@ -1280,6 +1295,13 @@ mod tests {
                     ..Default::default()
                 },
                 WaitReason::FanOutWorkers { outstanding: 5 },
+            ),
+            (
+                WaitMarkers {
+                    awaiting_message: true,
+                    ..Default::default()
+                },
+                WaitReason::AwaitingMessage,
             ),
             (
                 WaitMarkers {
@@ -1332,6 +1354,7 @@ mod tests {
                 fan_out_outstanding: Some(2),
                 children_outstanding: Some(3),
                 awaiting_interaction: true,
+                awaiting_message: true,
                 interaction: Some(crate::interaction::InteractionKind::ToolApproval),
             },
         );
@@ -1466,6 +1489,7 @@ mod tests {
         assert_eq!(WaitReason::UserPrompt.to_string(), "user prompt");
         assert_eq!(WaitReason::TaintGate.to_string(), "taint gate");
         assert_eq!(WaitReason::InteractionPoint.to_string(), "checkpoint");
+        assert_eq!(WaitReason::AwaitingMessage.to_string(), "awaiting message");
         assert_eq!(
             WaitReason::FanOutWorkers { outstanding: 3 }.to_string(),
             "workers(3)"
@@ -1484,6 +1508,7 @@ mod tests {
         assert!(WaitReason::UserPrompt.needs_a_person());
         assert!(WaitReason::TaintGate.needs_a_person());
         assert!(WaitReason::InteractionPoint.needs_a_person());
+        assert!(WaitReason::AwaitingMessage.needs_a_person());
         assert!(!WaitReason::FanOutWorkers { outstanding: 2 }.needs_a_person());
         assert!(!WaitReason::Children { outstanding: 2 }.needs_a_person());
     }

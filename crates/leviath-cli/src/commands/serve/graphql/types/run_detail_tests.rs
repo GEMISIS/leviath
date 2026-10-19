@@ -60,9 +60,18 @@ fn a_wait_reason_says_whether_it_needs_a_person() {
     assert!(prompt.outstanding.is_none());
     assert!(prompt.blocker.is_none());
 
-    for reason in [Core::ToolApproval, Core::TaintGate, Core::InteractionPoint] {
+    for reason in [
+        Core::ToolApproval,
+        Core::TaintGate,
+        Core::InteractionPoint,
+        Core::AwaitingMessage,
+    ] {
         assert!(WaitReason::from(&reason).needs_a_person, "{reason:?}");
     }
+    assert_eq!(
+        WaitReason::from(&Core::AwaitingMessage).reason,
+        WaitReasonKind::AwaitingMessage
+    );
 
     let workers = WaitReason::from(&Core::FanOutWorkers { outstanding: 7 });
     assert_eq!(workers.reason, WaitReasonKind::FanOutWorkers);

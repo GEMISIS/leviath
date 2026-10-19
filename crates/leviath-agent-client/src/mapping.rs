@@ -7,7 +7,7 @@
 use base64::Engine;
 use leviath_core::interaction::{InteractionKind, InteractionRequest};
 use leviath_core::mime::{InboundPart, MimeRegistry, MimeType};
-use leviath_core::run_meta::RunStatus;
+use leviath_core::run_meta::{RunStatus, WaitReason};
 
 use crate::protocol::{
     ContentBlock, PermissionOption, PermissionOptionKind, RequestPermissionParams, StopReason,
@@ -157,6 +157,13 @@ pub fn stop_reason_for(status: &RunStatus) -> Option<StopReason> {
             None
         }
     }
+}
+
+/// Whether a run is waiting for the next message of an interactive stage. It
+/// has answered: the turn that asked is over, and the session's next prompt
+/// is the message that resumes it.
+pub fn awaits_message(status: &RunStatus, waiting_on: Option<&WaitReason>) -> bool {
+    *status == RunStatus::WaitingInput && waiting_on == Some(&WaitReason::AwaitingMessage)
 }
 
 /// [`stop_reason_for`] over the string labels carried by completion events,
@@ -535,6 +542,18 @@ mod tests {
         ] {
             assert_eq!(stop_reason_for(&status), expected, "status {status}");
         }
+    }
+
+    #[test]
+    fn only_a_run_waiting_for_a_message_awaits_one() {
+        let message = Some(&WaitReason::AwaitingMessage);
+        assert!(awaits_message(&RunStatus::WaitingInput, message));
+        assert!(!awaits_message(
+            &RunStatus::WaitingInput,
+            Some(&WaitReason::UserPrompt)
+        ));
+        assert!(!awaits_message(&RunStatus::WaitingInput, None));
+        assert!(!awaits_message(&RunStatus::Paused, message));
     }
 
     #[test]

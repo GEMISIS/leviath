@@ -24,7 +24,8 @@ fn review_then_build(run_id: &str) {
     let reader = RunFileReader::read(&run_file::path(&recorded)).expect("a recorded run");
     let mut spec = reader.spec().clone();
     let text = "[blueprint]\nname = \"coder\"\nversion = \"1.0.0\"\n\n[graph]\n\
-                stages = [{ name = \"review\", accepts_messages = false }, { name = \"build\" }]\n\
+                stages = [{ name = \"review\", accepts_messages = false }, { name = \"build\" }, \
+                { name = \"chat\", mode = \"interactive\", accepts_messages = false }]\n\
                 layout = { total_budget_tokens = 1000, \
                 regions = [{ name = \"work\", kind = \"temporary\", budget = 100 }] }\n";
     spec.graph = leviath_blueprint::BlueprintFile::parse(text)
@@ -701,6 +702,13 @@ async fn whether_messages_reach_the_run_comes_from_its_stage() {
         let mut building = meta.clone();
         building.current_stage = "build".to_string();
         let json = data(building, "{ run { acceptsMessages } }").await;
+        assert_eq!(json["run"]["acceptsMessages"], true);
+
+        // A stage that takes turns with a person reads what they send,
+        // whatever its own setting says.
+        let mut chatting = meta.clone();
+        chatting.current_stage = "chat".to_string();
+        let json = data(chatting, "{ run { acceptsMessages } }").await;
         assert_eq!(json["run"]["acceptsMessages"], true);
     })
     .await;

@@ -25,6 +25,9 @@ pub(crate) enum WaitReasonKind {
     TaintGate,
     /// Waiting at a blueprint interaction point.
     InteractionPoint,
+    /// An interactive stage replied and waits for the next message:
+    /// `sendMessage` resumes it, `endConversation` moves it on.
+    AwaitingMessage,
     /// Fan-out workers are still running. Healthy; it resolves on its own.
     FanOutWorkers,
     /// Child runs are still running. Healthy; it resolves on its own.
@@ -117,6 +120,7 @@ impl WaitReasonKind {
             Core::UserPrompt => Self::UserPrompt,
             Core::TaintGate => Self::TaintGate,
             Core::InteractionPoint => Self::InteractionPoint,
+            Core::AwaitingMessage => Self::AwaitingMessage,
             Core::FanOutWorkers { .. } => Self::FanOutWorkers,
             Core::Children { .. } => Self::Children,
             Core::NeedsSetup { .. } => Self::NeedsSetup,
@@ -129,9 +133,11 @@ impl From<&leviath_core::run_meta::WaitReason> for WaitReason {
         use leviath_core::run_meta::WaitReason as Core;
         let plain = Self::plain(WaitReasonKind::of(reason), reason.needs_a_person());
         match reason {
-            Core::ToolApproval | Core::UserPrompt | Core::TaintGate | Core::InteractionPoint => {
-                plain
-            }
+            Core::ToolApproval
+            | Core::UserPrompt
+            | Core::TaintGate
+            | Core::InteractionPoint
+            | Core::AwaitingMessage => plain,
             Core::FanOutWorkers { outstanding } | Core::Children { outstanding } => Self {
                 outstanding: Some(i32::try_from(*outstanding).unwrap_or(i32::MAX)),
                 ..plain

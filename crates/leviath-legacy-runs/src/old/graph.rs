@@ -405,7 +405,7 @@ impl Conv {
     fn mode(&mut self, m: &bp::StageMode, stage: &StageName, p: &SpecPath) -> StageMode {
         match m {
             bp::StageMode::Autonomous => StageMode::Autonomous,
-            bp::StageMode::Interactive => StageMode::Interactive,
+            bp::StageMode::Interactive => StageMode::Interactive(Default::default()),
             bp::StageMode::Output => StageMode::Output,
             bp::StageMode::InteractivePoints { points } => StageMode::InteractivePoints(
                 points

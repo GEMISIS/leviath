@@ -2417,6 +2417,11 @@
             "const": "Done",
             "description": "Finished, failed or cancelled.",
             "type": "string"
+          },
+          {
+            "const": "AwaitingMessage",
+            "description": "An interactive stage replied and waits for the next message.",
+            "type": "string"
           }
         ]
       },
@@ -4002,6 +4007,11 @@
               "NeedsSetup"
             ],
             "type": "object"
+          },
+          {
+            "const": "AwaitingMessage",
+            "description": "An interactive stage replied and waits for the next message.",
+            "type": "string"
           }
         ]
       },
@@ -5572,6 +5582,23 @@
         ],
         "type": "object"
       },
+      "InteractiveDef": {
+        "additionalProperties": false,
+        "description": "The settings of an interactive stage.",
+        "properties": {
+          "idle_timeout_secs": {
+            "default": null,
+            "description": "How long, in seconds, the stage waits for the next message before it\nmoves on as though the conversation had been ended. Left out, it waits\nfor as long as it takes, unless nobody is watching the run.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "KindTable": {
         "additionalProperties": false,
         "properties": {
@@ -6025,6 +6052,53 @@
           }
         },
         "type": "object"
+      },
+      "ModeTable": {
+        "description": "The table form of a stage mode: one key, the mode's name, over its\nsettings.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The model and a person take turns, with settings. After a reply with\nno tool calls the stage waits for the next message; it is given the\n`end_conversation` tool that moves it on.",
+            "properties": {
+              "interactive": {
+                "$ref": "#/$defs/InteractiveDef"
+              }
+            },
+            "required": [
+              "interactive"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model works on its own, stopping at declared points for a person.",
+            "properties": {
+              "interactive_points": {
+                "items": {
+                  "$ref": "#/$defs/InteractionPointDef"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "interactive_points"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The stage splits its work over worker runs. It is given the\n`fan_out` tool it starts them with, whether or not its `tools` name it.",
+            "properties": {
+              "fan_out": {
+                "$ref": "#/$defs/FanOutDef"
+              }
+            },
+            "required": [
+              "fan_out"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ModelChoice": {
         "additionalProperties": false,
@@ -7939,51 +8013,17 @@
         "type": "object"
       },
       "StageMode": {
-        "description": "How a stage runs.",
-        "oneOf": [
+        "anyOf": [
           {
-            "const": "autonomous",
-            "description": "The model works on its own until it moves on.",
-            "type": "string"
-          },
-          {
-            "const": "interactive",
-            "description": "The model and a person take turns.",
-            "type": "string"
-          },
-          {
-            "additionalProperties": false,
-            "description": "The model works on its own, stopping at declared points for a person.",
-            "properties": {
-              "interactive_points": {
-                "items": {
-                  "$ref": "#/$defs/InteractionPointDef"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "interactive_points"
+            "enum": [
+              "autonomous",
+              "interactive",
+              "output"
             ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "description": "The stage splits its work over worker runs. It is given the\n`fan_out` tool it starts them with, whether or not its `tools` name it.",
-            "properties": {
-              "fan_out": {
-                "$ref": "#/$defs/FanOutDef"
-              }
-            },
-            "required": [
-              "fan_out"
-            ],
-            "type": "object"
-          },
-          {
-            "const": "output",
-            "description": "The stage only writes the run's final output. It is given the\n`submit_output` tool and must call it, whether or not its `tools` name\nit, and it may end the run when no edge leaves it.",
             "type": "string"
+          },
+          {
+            "$ref": "#/$defs/ModeTable"
           }
         ]
       },
@@ -10221,6 +10261,11 @@
             "const": "Done",
             "description": "Finished, failed or cancelled.",
             "type": "string"
+          },
+          {
+            "const": "AwaitingMessage",
+            "description": "An interactive stage replied and waits for the next message.",
+            "type": "string"
           }
         ]
       },
@@ -11188,6 +11233,11 @@
               "NeedsSetup"
             ],
             "type": "object"
+          },
+          {
+            "const": "AwaitingMessage",
+            "description": "An interactive stage replied and waits for the next message.",
+            "type": "string"
           }
         ]
       },

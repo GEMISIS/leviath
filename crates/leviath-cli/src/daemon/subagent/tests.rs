@@ -1614,7 +1614,7 @@ fn every_stage_mode_has_a_word() {
     use leviath_runtime::spec::names::StageName;
     let words: Vec<&str> = [
         StageMode::Autonomous,
-        StageMode::Interactive,
+        StageMode::Interactive(Default::default()),
         StageMode::InteractivePoints(vec![]),
         StageMode::FanOut(FanOutDef::with_worker(
             StageName::new("split").unwrap(),

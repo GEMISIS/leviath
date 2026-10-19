@@ -295,6 +295,11 @@ pub enum ControlRequest {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         parts: Vec<leviath_core::mime::InboundPart>,
     },
+    /// End the conversation of the interactive stage a run is in.
+    EndConversation {
+        /// The run whose conversation ends.
+        run_id: String,
+    },
     /// List open interactions awaiting an answer.
     ListInteractions,
     /// Answer an open interaction.
@@ -681,6 +686,11 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
                 parts,
                 reply,
             });
+            refusable(rx.await)
+        }
+        ControlRequest::EndConversation { run_id } => {
+            let (reply, rx) = oneshot::channel();
+            let _ = op_tx.send(ControlOp::EndConversation { run_id, reply });
             refusable(rx.await)
         }
         ControlRequest::ListInteractions => {
@@ -1190,6 +1200,7 @@ mod tests {
                         let _ = reply.send(Ok(true));
                     }
                     ControlOp::Message { reply, .. }
+                    | ControlOp::EndConversation { reply, .. }
                     | ControlOp::AnswerInteraction { reply, .. } => {
                         let _ = reply.send(Ok(true));
                     }
@@ -1532,6 +1543,9 @@ mod tests {
             },
             ControlRequest::CancelInteraction {
                 request_id: "q1".to_string(),
+            },
+            ControlRequest::EndConversation {
+                run_id: "r".to_string(),
             },
         ] {
             assert_eq!(round_trip(&req).await, ControlResponse::Ok { ok: true });
@@ -2739,6 +2753,7 @@ mod tests {
                 },
             },
             ControlRequest::CancelInteraction { request_id: run() },
+            ControlRequest::EndConversation { run_id: run() },
             ControlRequest::Shutdown,
         ];
         assert!(read_only.iter().all(ControlRequest::is_read_only));

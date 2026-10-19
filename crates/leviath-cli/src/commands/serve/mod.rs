@@ -237,6 +237,10 @@ fn api_router() -> Router<AppState> {
         .route("/api/runs/{id}/cancel", post(run_reads::cancel_run))
         // Messages
         .route("/api/runs/{id}/message", post(interactions::send_message))
+        .route(
+            "/api/runs/{id}/end-conversation",
+            post(interactions::end_conversation),
+        )
         // Interactions
         .route(
             "/api/runs/{id}/interaction",

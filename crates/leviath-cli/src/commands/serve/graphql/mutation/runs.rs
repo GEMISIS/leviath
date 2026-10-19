@@ -1,5 +1,5 @@
 //! The acts a run itself goes through: `pauseRun`, `resumeRun`, `cancelRun`
-//! and their bulk twins, `sendMessage` and `deleteRuns`. Starting one is
+//! and their bulk twins, `sendMessage`, `endConversation` and `deleteRuns`. Starting one is
 //! [`spawn`](super::spawn)'s.
 //!
 //! Each one answers with the run it moved, so a client renders the new state
@@ -48,6 +48,21 @@ pub(crate) struct SendMessageRequest {
 #[derive(SimpleObject)]
 pub(crate) struct SendMessageResult {
     /// The run the message went to, as its record stands.
+    pub(crate) run: Run,
+}
+
+/// Which run's conversation to end.
+#[derive(Debug, InputObject)]
+pub(crate) struct EndConversationRequest {
+    /// The run in the interactive stage.
+    pub(crate) run_id: ID,
+}
+
+/// What ending a conversation answers with.
+#[derive(SimpleObject)]
+pub(crate) struct EndConversationResult {
+    /// The run, as its record stands. The record can lag the daemon by a
+    /// moment, so it may still read `WAITING_INPUT` while the stage moves on.
     pub(crate) run: Run,
 }
 
@@ -509,6 +524,19 @@ pub(crate) async fn send_message(
         .await
         .gql()?;
     Ok(SendMessageResult {
+        run: run_of(read_meta(&run_id).await.gql()?),
+    })
+}
+
+/// End the conversation of the interactive stage a run is in.
+pub(crate) async fn end_conversation(
+    ctx: &Context<'_>,
+    request: EndConversationRequest,
+) -> async_graphql::Result<EndConversationResult> {
+    let state = ctx.data_unchecked::<AppState>();
+    let run_id = request.run_id.to_string();
+    spawn_core::end_conversation(state, &run_id).await.gql()?;
+    Ok(EndConversationResult {
         run: run_of(read_meta(&run_id).await.gql()?),
     })
 }

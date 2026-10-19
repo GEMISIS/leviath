@@ -163,11 +163,18 @@ impl Dashboard {
                 (" Response ", lines)
             } else {
                 let mut lines: Vec<Line> = vec![];
+                // An interactive stage that has replied asks nothing in
+                // particular: it is the person's turn to say something.
+                let conversing = agent.awaits_message();
+                let idle = match conversing {
+                    true => "It has replied, and waits for your next message",
+                    false => "Waiting for input",
+                };
                 let prompt_text = pending_req
                     .as_ref()
                     .map(|r| r.prompt.as_str())
                     .or(agent.waiting_prompt.as_deref())
-                    .unwrap_or("Waiting for input");
+                    .unwrap_or(idle);
                 lines.push(Line::from(Span::styled(
                     format!(" {}", prompt_text),
                     Style::default().fg(C_WARN),
@@ -186,16 +193,16 @@ impl Dashboard {
                 // An EditText opens the document for in-place editing in the pane
                 // above, so label it as editing rather than a generic response.
                 let is_edit = matches!(kind, Some(InteractionKind::EditText));
-                let hint = match (is_edit, &agent.status) {
+                let hint = match (is_edit, conversing) {
                     (true, _) => " [i] edit the document above  [k] kill",
-                    (false, AgentDisplayStatus::CompleteInteractive) => " [i] respond",
-                    (false, _) => " [i] respond  [k] kill",
+                    (false, true) => " [i] reply  [k] kill",
+                    (false, false) => " [i] respond  [k] kill",
                 };
                 lines.push(Line::from(Span::styled(hint, Style::default().fg(C_DIM))));
-                let title = match (is_edit, &agent.status) {
+                let title = match (is_edit, conversing) {
                     (true, _) => " Edit Document ",
-                    (false, AgentDisplayStatus::CompleteInteractive) => " Input Allowed ",
-                    (false, _) => " Input Required ",
+                    (false, true) => " Your Turn ",
+                    (false, false) => " Input Required ",
                 };
                 (title, lines)
             };
@@ -631,14 +638,17 @@ mod tests {
         assert!(buf.contains("No"), "{buf}");
     }
 
+    /// A run that has replied in an interactive stage asks nothing: the pane
+    /// says it is the person's turn, and how to take it.
     #[test]
-    fn render_input_pane_complete_interactive() {
+    fn render_input_pane_awaiting_a_message() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         dash.input_mode = false;
-        let mut agent = make_test_agent("run-ci", AgentDisplayStatus::CompleteInteractive);
-        agent.waiting_prompt = Some("Anything else?".to_string());
+        let mut agent = make_test_agent("run-ci", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = None;
+        agent.wait_reason = Some(leviath_core::run_meta::WaitReason::AwaitingMessage);
         let pending: Option<interaction::InteractionRequest> = None;
         let kind: Option<interaction::InteractionKind> = None;
         let options: Vec<String> = vec![];
@@ -649,7 +659,9 @@ mod tests {
             })
             .unwrap();
         let buf = rendered_buffer(&terminal);
-        assert!(buf.contains("Anything else?"), "{buf}");
+        assert!(buf.contains("waits for your next message"), "{buf}");
+        assert!(buf.contains("Your Turn"), "{buf}");
+        assert!(buf.contains("[i] reply"), "{buf}");
     }
 
     /// The prompt in the review pane's title is cut to the pane, not to a

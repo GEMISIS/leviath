@@ -495,6 +495,33 @@ impl WorldHost {
         }
     }
 
+    /// End the conversation of the interactive stage `run_id` is in, paging
+    /// the run in first when it was unloaded. `Ok(true)` once it is ended;
+    /// `Err` says why there is none to end.
+    fn end_conversation(&mut self, run_id: &str) -> Result<bool, String> {
+        let agent = match self.resolve_or_reload(run_id) {
+            Ok(agent) => agent,
+            Err(NotPlaced::Held(entry)) => return Err(Self::held_refusal(run_id, &entry)),
+            Err(NotPlaced::Damaged { why, .. }) => {
+                return Err(format!("run '{run_id}' cannot be read back: {why}"));
+            }
+            Err(NotPlaced::Stopped(status)) => {
+                return Err(format!(
+                    "run '{run_id}' has stopped ({}), so it has no conversation to end",
+                    status.label()
+                ));
+            }
+            Err(NotPlaced::Missing) => {
+                return Err(format!(
+                    "no run '{run_id}' is here; `lev ps --all` lists the runs"
+                ));
+            }
+        };
+        let ended = crate::pipeline::end_conversation(self.world.world_mut(), agent.entity());
+        self.world.wake_handle().notify_one();
+        ended.map(|_| true)
+    }
+
     /// Why a message to a run held out of the world is not delivered: what
     /// has to change on this machine first.
     fn held_refusal(agent_id: &str, entry: &RunListEntry) -> String {
@@ -697,6 +724,9 @@ impl WorldHost {
                     .is_ok();
                 let _ = reply.send(Ok(ok));
             }
+            ControlOp::EndConversation { run_id, reply } => {
+                let _ = reply.send(self.end_conversation(&run_id));
+            }
             ControlOp::ListInteractions { reply } => {
                 let _ = reply.send(self.interactions.pending());
             }
@@ -805,3 +835,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../host_resume_tests.rs"]
 mod resume_tests;
+
+#[cfg(test)]
+#[path = "../host_conversation_tests.rs"]
+mod conversation_tests;

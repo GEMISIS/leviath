@@ -45,7 +45,7 @@ pub use validate::*;
 /// Re-exported from `leviath-core`, which owns the name because the blueprint
 /// validator and the manifest parser both need it and neither may depend on
 /// this crate.
-pub use leviath_core::stage_tools::{FAN_OUT_TOOL, SUBMIT_OUTPUT_TOOL};
+pub use leviath_core::stage_tools::{END_CONVERSATION_TOOL, FAN_OUT_TOOL, SUBMIT_OUTPUT_TOOL};
 
 /// Built-in tools: read_file, write_file, edit_file, list_dir, shell.
 ///
@@ -216,7 +216,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let defs = tools.tool_defs();
-        assert_eq!(defs.len(), 33);
+        assert_eq!(defs.len(), 34);
     }
 
     #[test]
@@ -375,6 +375,20 @@ mod tests {
             .await;
         assert!(
             result.contains("fan_out must be handled by the runtime"),
+            "{result}"
+        );
+    }
+
+    /// And for `end_conversation`: it moves the calling agent's stage on,
+    /// which only the world can do.
+    #[tokio::test]
+    async fn end_conversation_is_not_handled_by_builtin_execute() {
+        let tools = make_tools(&std::env::temp_dir());
+        let result = tools
+            .execute(crate::END_CONVERSATION_TOOL, serde_json::json!({}))
+            .await;
+        assert!(
+            result.contains("end_conversation must be handled by the runtime"),
             "{result}"
         );
     }
@@ -539,7 +553,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         // Every def, plus every alias: `bash` and `install_tool`.
-        assert_eq!(tools.names().len(), 35);
+        assert_eq!(tools.names().len(), 36);
     }
 
     /// The taint gate's fallback arm is the third-party default: outbound,
@@ -2682,7 +2696,7 @@ mod tests {
         let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
         assert!(!names.contains(&"shell".to_string()));
         // The rest remain, both installers included: mobile has a filesystem.
-        assert_eq!(tools.tool_defs().len(), 32);
+        assert_eq!(tools.tool_defs().len(), 33);
         assert!(names.contains(&"read_file".to_string()));
         assert!(names.contains(&"install_self_tool".to_string()));
         assert!(names.contains(&"install_global_tool".to_string()));

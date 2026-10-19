@@ -265,16 +265,19 @@ pub(crate) fn stage_layout(spec: &RunSpec, idx: usize) -> Option<Vec<leviath_cor
 /// approve, revise or edit - the text is the work product, not a model
 /// stalling before it starts - and the nudge says "use your tools to complete
 /// the task" to a stage built to produce a document, which usually has no tool
-/// that could. An explicit `enabled` at any level speaks for itself.
+/// that could. An interactive stage is not nudged either: its reply is its
+/// turn in a conversation with a person. An explicit `enabled` at any level
+/// speaks for itself.
 pub(crate) fn stage_nudge(
     graph: &RunGraph,
     stage: Option<&StageDef>,
     global: Option<&NudgeDef>,
 ) -> ResolvedNudge {
-    let reviewed = matches!(
-        stage.map(|s| &s.mode),
-        Some(StageMode::InteractivePoints(points)) if !points.is_empty()
-    );
+    let reviewed = match stage.map(|s| &s.mode) {
+        Some(StageMode::InteractivePoints(points)) => !points.is_empty(),
+        Some(StageMode::Interactive(_)) => true,
+        _ => false,
+    };
     NudgeDef::resolve(
         global,
         graph.nudge.as_ref(),
@@ -437,7 +440,9 @@ pub(crate) fn stage_setup(spec: &RunSpec, idx: usize) -> StageSetup {
             request_timeout_secs: stage.model.request_timeout_secs,
         },
         routing: stage.tool_routing.clone(),
-        accepts_messages: stage.accepts_messages,
+        // A stage that takes turns with a person reads what they send,
+        // whatever its `accepts_messages` says.
+        accepts_messages: stage.accepts_messages || stage.mode.interactive().is_some(),
         context_layout: stage_layout(spec, idx),
         eviction_order: eviction_order(graph, Some(stage)),
         context_hide: stage.hide.iter().map(ToString::to_string).collect(),

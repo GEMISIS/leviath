@@ -153,6 +153,10 @@ impl BuiltinTools {
             // on its workers - neither of which this executor can do. Refused
             // here so the world stays the only thing that can start a fan-out.
             FAN_OUT_TOOL => "[error] fan_out must be handled by the runtime".to_string(),
+            // Moves the calling agent's stage on, which only the world can do.
+            END_CONVERSATION_TOOL => {
+                "[error] end_conversation must be handled by the runtime".to_string()
+            }
             _ => format!("[error] Unknown built-in tool: {}", name),
         };
         text.into()
