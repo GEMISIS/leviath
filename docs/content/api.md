@@ -2183,7 +2183,8 @@ the new shape fails with errors about unknown fields. Check the capability first
 the older request or tell the user to update Leviath.
 
 `api_version` names a release, so a build made between two releases still reports the last one.
-`build` is the git hash the server was built from, which tells that build apart from the release.
+`build` is the short git hash the server was built from, which tells that build apart from the
+release. A build made without git reports `v<version>` there instead.
 In GraphQL the same pair is `config { server { apiVersion build } }`.
 
 ## Writing a mime row

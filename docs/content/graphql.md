@@ -1295,7 +1295,7 @@ it saves. A key is the one exception, and it reads back as `hasKey` on its provi
     gateways { name kind baseUrl hasApiKey headerNames models unknownKeys }
     allowsFileUploads blueprintPaths mcpServerCount
     server {
-      apiVersion capabilities isAdminEnabled
+      apiVersion build capabilities isAdminEnabled
       limits { maxPageSize maxUploadBytes requestTimeoutSecs maxConcurrentRequests }
     }
     health { savedAt error { kind path message line column } }

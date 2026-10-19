@@ -105,7 +105,8 @@ pub(super) struct RedactedConfig {
     /// `docs/schema/openapi.json`. A test holds the two together.
     pub(super) api_version: String,
     /// The build id of this server: the short git hash it was built from,
-    /// with `-dirty` when the tree had uncommitted changes.
+    /// with `-dirty-` and a digest appended when the tree had uncommitted
+    /// changes, or `v<version>` when it was built without git.
     ///
     /// The version names a release, and an unreleased build still reports
     /// the last one. This tells such a build apart from the release itself.

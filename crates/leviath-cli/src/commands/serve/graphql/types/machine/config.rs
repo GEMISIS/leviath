@@ -345,7 +345,8 @@ pub(crate) struct ServerInfo {
     /// The API version this server speaks.
     pub(crate) api_version: String,
     /// The build id of this server: the short git hash it was built from,
-    /// with `-dirty` when the tree had uncommitted changes. An unreleased
+    /// with `-dirty-` and a digest appended when the tree had uncommitted
+    /// changes, or `v<version>` when it was built without git. An unreleased
     /// build reports the last release's `apiVersion`, so this is how a client
     /// tells it apart from that release.
     pub(crate) build: String,
