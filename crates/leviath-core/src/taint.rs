@@ -1171,6 +1171,10 @@ mod tests {
             classified_builtin("edit_file"),
             "edit_document"
         );
+        // Ending a conversation moves nothing anywhere.
+        let ends = classified_builtin("end_conversation").expect("an arm of its own");
+        assert_eq!(ends.direction, ToolDirection::Internal);
+        assert_eq!(ends.sensitivity, TaintLevel::Public);
         for name in [
             "context_write",
             "context_append",
