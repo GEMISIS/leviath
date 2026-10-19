@@ -204,8 +204,10 @@ impl ResolveEnv for Fake {
         })
     }
 
-    fn compaction_model(&self, _model: &ModelRef) -> Result<(), String> {
-        self.compaction_refusal.clone().map_or(Ok(()), Err)
+    fn compaction_routes(&self, named: &[ModelRef]) -> Result<Vec<ModelRef>, String> {
+        self.compaction_refusal
+            .clone()
+            .map_or_else(|| Ok(named.to_vec()), Err)
     }
 
     fn auto_answers(&self, unattended: &Unattended) -> Result<AutoAnswers, Box<SpawnIssue>> {

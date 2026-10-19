@@ -324,9 +324,9 @@ impl ResolveEnv for DaemonEnv {
         }
     }
 
-    fn compaction_model(&self, model: &ModelRef) -> Result<(), String> {
-        host::compaction_model(
-            model,
+    fn compaction_routes(&self, named: &[ModelRef]) -> Result<Vec<ModelRef>, String> {
+        host::compaction_routes(
+            named,
             &crate::daemon::spawn::model_defaults(&self.config),
             &self.registry,
         )

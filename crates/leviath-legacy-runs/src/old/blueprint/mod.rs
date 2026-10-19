@@ -4,9 +4,39 @@
 //! as a run graph.
 
 use crate::old::layout::ContextLayout;
-use leviath_core::lifecycle::CompactionConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+
+/// An old manifest's `[compaction]`: one provider and one model, each
+/// standing at Anthropic's summarizer when the manifest leaves it out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionConfig {
+    /// The provider that writes the summary.
+    pub provider: String,
+    /// The model it writes it with.
+    pub model: String,
+    /// Its system prompt, over the built-in one.
+    pub system_prompt: Option<String>,
+    /// Its request, over the built-in one.
+    pub user_prompt_template: Option<String>,
+    /// The longest summary, in tokens.
+    pub max_summary_tokens: usize,
+    /// Its sampling temperature.
+    pub temperature: f32,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
+            system_prompt: None,
+            user_prompt_template: None,
+            max_summary_tokens: leviath_core::lifecycle::DEFAULT_MAX_SUMMARY_TOKENS,
+            temperature: leviath_core::lifecycle::DEFAULT_SUMMARY_TEMPERATURE,
+        }
+    }
+}
 
 /// When a run looks for tools again after it started.
 ///

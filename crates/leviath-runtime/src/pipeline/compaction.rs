@@ -23,16 +23,102 @@ pub(crate) struct CompactionResults(pub UnboundedReceiver<CompactionOutcome>);
 /// The eviction threshold (fraction of budget) at which compaction kicks in.
 pub(crate) const EVICTION_THRESHOLD: f32 = 0.9;
 
-/// Spawn a compaction job under the lane supervisor, so a job that dies without
-/// reporting still produces an outcome.
+/// Every route a summary for this agent may take now, best first: the
+/// graph's compaction routes, or, when it names none, the model the current
+/// stage runs on followed by that stage's fallbacks.
 ///
-/// Compaction is best-effort, but *waiting* for it is not: the agent is held
-/// `AwaitingCompaction` until an outcome lands. A lost job would park it there
-/// for good. The synthesized error takes the collect system's failure path,
-/// which returns the agent to `ReadyToInfer` with its context untouched - the
-/// same place a genuine summarization failure leaves it.
-fn spawn_supervised_compaction(stage: &InferenceStage, entity: Entity, job: CompactionJob) {
-    spawn_summary_job(stage, &stage.compaction_outcomes, "compaction", entity, job);
+/// A route is left out when its provider is not registered, or when zero
+/// retention refuses its model: a summary carries the run's context, and the
+/// spawn gate refuses or drops such a model, so meeting one here means the
+/// switch was turned on under a running daemon. Each route carries the
+/// request fields its provider's retention settings add.
+pub(crate) fn summary_routes(
+    config: &leviath_core::CompactionConfig,
+    stage: Option<&StageInference>,
+    registry: &ProviderRegistry,
+) -> Vec<SummaryRoute> {
+    let named: Vec<(String, String)> = match config.routes.is_empty() {
+        false => config
+            .routes
+            .iter()
+            .map(|r| (r.provider_or_empty().to_string(), r.model.to_string()))
+            .collect(),
+        true => stage
+            .into_iter()
+            .flat_map(|si| {
+                std::iter::once((si.provider_name.clone(), si.model.clone())).chain(
+                    si.fallbacks
+                        .iter()
+                        .map(|f| (f.provider_or_empty().to_string(), f.model.to_string())),
+                )
+            })
+            .collect(),
+    };
+    named
+        .into_iter()
+        .filter_map(|(provider_name, model)| {
+            let provider = registry.get(&provider_name)?;
+            let refused = registry.retention_refusal(&provider_name, &model).is_some();
+            let mut extra = serde_json::Value::Null;
+            registry.apply_retention_knobs(&provider_name, &mut extra);
+            (!refused).then_some(SummaryRoute {
+                provider,
+                provider_name,
+                model,
+                extra,
+            })
+        })
+        .collect()
+}
+
+/// Why a summary did not start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Declined {
+    /// No route can take it here.
+    NoRoute,
+    /// Every route that can is at its pool's limit this round.
+    PoolFull,
+}
+
+/// Start summarizing `requests` for `entity` on the first of `routes` with a
+/// free pool slot, the rest kept for failover, reporting into `outcomes`
+/// under the lane supervisor (see [`spawn_summary_job`]).
+pub(crate) fn start_summary(
+    stage: &InferenceStage,
+    outcomes: &tokio::sync::mpsc::UnboundedSender<CompactionOutcome>,
+    lane: &'static str,
+    entity: Entity,
+    routes: Vec<SummaryRoute>,
+    requests: Vec<(String, InferenceRequest)>,
+) -> Result<(), Declined> {
+    if routes.is_empty() {
+        return Err(Declined::NoRoute);
+    }
+    let mut rest = routes.into_iter();
+    let (route, permit) = rest
+        .by_ref()
+        .find_map(|r| {
+            stage
+                .pools
+                .try_acquire(&r.provider_name, &r.model)
+                .map(|p| (r, p))
+        })
+        .ok_or(Declined::PoolFull)?;
+    spawn_summary_job(
+        stage,
+        outcomes,
+        lane,
+        entity,
+        CompactionJob {
+            entity,
+            route,
+            permit,
+            fallbacks: rest.collect(),
+            pools: stage.pools.clone(),
+            requests,
+        },
+    );
+    Ok(())
 }
 
 /// Spawn a summarization job under the lane supervisor, reporting into
@@ -85,16 +171,18 @@ type CompactionQuery = (
     &'static mut ContextWindow,
     Option<&'static CompactionSettings>,
     Option<&'static crate::pipeline::PromptCalibration>,
+    Option<&'static StageInference>,
 );
 
 /// Compaction-dispatch system: for each `ReadyToInfer` agent, when the window
 /// as a whole is over the eviction threshold, run the synchronous eviction;
 /// then, for an agent with [`CompactionSettings`], summarize every compacting
 /// region that is past its own threshold (`compact_at`). Builds one request
-/// per region with content to summarize, acquires a permit for the compaction
-/// model, spawns the job, and holds the agent as `AwaitingCompaction`. Anything
-/// that can't proceed (nothing past a threshold, nothing to summarize, provider
-/// missing, pool full) simply leaves the agent `ReadyToInfer` so inference
+/// per region with content to summarize, starts the job on the first of its
+/// routes ([`summary_routes`]) with a free slot, and holds the agent as
+/// `AwaitingCompaction`. Anything that can't proceed (nothing past a
+/// threshold, nothing to summarize, no route this machine can serve, every
+/// route's pool full) simply leaves the agent `ReadyToInfer` so inference
 /// proceeds - compaction is best-effort.
 ///
 /// A region's own threshold is what `compact_at` promises, and acting on it
@@ -110,7 +198,7 @@ pub(crate) fn dispatch_compaction(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, mut window, settings, calibration) in agents.iter_mut() {
+    for (entity, state, mut window, settings, calibration, inference) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled - don't start new work
@@ -162,46 +250,25 @@ pub(crate) fn dispatch_compaction(
             continue; // sync eviction was enough (or nothing summarizable)
         }
 
-        let Some(provider) = providers.0.get(&config.provider) else {
-            continue; // compaction provider not registered - skip, non-fatal
-        };
-        // A summary sends the run's context, so a compaction model zero
-        // retention refuses is never called; the spawn gate refuses such a
-        // blueprint, so this is a switch turned on under a running daemon.
-        if let Some(refusal) = providers
-            .0
-            .retention_refusal(&config.provider, &config.model)
-        {
-            tracing::warn!("compaction skipped: its model is {refusal}");
-            continue;
-        }
-        // A summary request carries the run's context, so the zero-retention
-        // fields ride it the way they ride a stage's own request.
-        for (_, request) in requests.iter_mut() {
-            providers
-                .0
-                .apply_retention_knobs(&config.provider, &mut request.extra);
-        }
-        let Some(permit) = stage.pools.try_acquire(&config.provider, &config.model) else {
-            continue; // pool full - skip compaction this round
-        };
-
-        spawn_supervised_compaction(
+        // Every route the summary may take, best first. A route that cannot
+        // take it (provider gone, zero retention refusing it) is left out, so
+        // the summary is only skipped when no route can serve it at all, or
+        // every one of them is busy this round.
+        let routes = summary_routes(config, inference, &providers.0);
+        let started = start_summary(
             &stage,
+            &stage.compaction_outcomes,
+            "compaction",
             entity,
-            CompactionJob {
-                entity,
-                provider,
-                provider_name: config.provider.clone(),
-                model: config.model.clone(),
-                requests,
-                permit,
-            },
+            routes,
+            requests,
         );
-        commands
-            .entity(entity)
-            .remove::<ReadyToInfer>()
-            .insert(AwaitingCompaction);
+        if started.is_ok() {
+            commands
+                .entity(entity)
+                .remove::<ReadyToInfer>()
+                .insert(AwaitingCompaction);
+        }
     }
 }
 
@@ -379,7 +446,8 @@ pub(crate) fn compaction_request(
                 reasoning: None,
             },
         ],
-        model: config.model.clone(),
+        // Named per route when the request is sent.
+        model: String::new(),
         max_tokens: config.max_summary_tokens,
         temperature: config.temperature,
         tools: Vec::new(),
@@ -502,13 +570,14 @@ type EdgeCompactQuery = (
     &'static ContextWindow,
     &'static PendingEdgeCompact,
     Option<&'static CompactionSettings>,
+    Option<&'static StageInference>,
 );
 
 /// Edge-compaction dispatch: for each `ReadyToInfer` agent with a
 /// [`PendingEdgeCompact`] (an edge transform requested LLM summarization), spawn a
 /// compaction job for the named regions (reusing the compaction lane) and hold the
 /// agent `AwaitingCompaction`. If the agent has no compaction config, nothing to
-/// summarize, or no provider/permit, the request is dropped and the agent proceeds
+/// summarize, or no route with a free slot, the request is dropped and the agent proceeds
 /// to inference un-compacted (memory-pressure compaction still applies later).
 pub(crate) fn dispatch_edge_compact(
     mut agents: Query<EdgeCompactQuery, (With<ReadyToInfer>, Without<AwaitingCompaction>)>,
@@ -517,7 +586,7 @@ pub(crate) fn dispatch_edge_compact(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, window, pending, settings) in agents.iter_mut() {
+    for (entity, state, window, pending, settings, inference) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled - don't start new work
@@ -530,55 +599,37 @@ pub(crate) fn dispatch_edge_compact(
         let started = settings
             .and_then(|s| {
                 let config = &s.0;
-                let mut requests = build_edge_compact_requests(window, &pending.0, config)?;
-                // As above: a summary carries the run's context.
-                for (_, request) in requests.iter_mut() {
-                    providers
-                        .0
-                        .apply_retention_knobs(&config.provider, &mut request.extra);
-                }
-                let Some(provider) = providers.0.get(&config.provider) else {
-                    tracing::warn!(
-                        provider = %config.provider,
-                        regions = ?pending.0,
-                        "edge transform asked to compact, but its compaction provider is \
-                         not registered; carrying the regions as written"
-                    );
-                    return None;
-                };
-                if let Some(refusal) = providers
-                    .0
-                    .retention_refusal(&config.provider, &config.model)
-                {
-                    tracing::warn!(
-                        regions = ?pending.0,
-                        "edge transform asked to compact, but its model is {refusal} \
-                         Carrying the regions as written"
-                    );
-                    return None;
-                }
-                let Some(permit) = stage.pools.try_acquire(&config.provider, &config.model) else {
-                    tracing::warn!(
-                        model = %config.model,
-                        regions = ?pending.0,
-                        "edge transform asked to compact, but the compaction pool is full; \
-                         carrying the regions as written"
-                    );
-                    return None;
-                };
-                spawn_supervised_compaction(
+                let requests = build_edge_compact_requests(window, &pending.0, config)?;
+                let routes = summary_routes(config, inference, &providers.0);
+                let declined = start_summary(
                     &stage,
+                    &stage.compaction_outcomes,
+                    "compaction",
                     entity,
-                    CompactionJob {
-                        entity,
-                        provider,
-                        provider_name: config.provider.clone(),
-                        model: config.model.clone(),
-                        requests,
-                        permit,
-                    },
-                );
-                Some(())
+                    routes,
+                    requests,
+                )
+                .err();
+                match declined {
+                    None => Some(()),
+                    Some(Declined::NoRoute) => {
+                        tracing::warn!(
+                            regions = ?pending.0,
+                            "edge transform asked to compact, but no compaction route can \
+                             take it here (no provider for one is registered, or zero \
+                             retention refuses each); carrying the regions as written"
+                        );
+                        None
+                    }
+                    Some(Declined::PoolFull) => {
+                        tracing::warn!(
+                            regions = ?pending.0,
+                            "edge transform asked to compact, but every compaction route's \
+                             pool is full; carrying the regions as written"
+                        );
+                        None
+                    }
+                }
             })
             .is_some();
 
@@ -613,3 +664,7 @@ pub(crate) fn build_edge_compact_requests(
         .collect();
     (!requests.is_empty()).then_some(requests)
 }
+
+#[cfg(test)]
+#[path = "compaction_tests.rs"]
+mod tests;

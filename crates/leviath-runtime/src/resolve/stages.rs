@@ -326,7 +326,8 @@ pub(super) fn fingerprint(
         graph
             .compaction
             .iter()
-            .filter_map(|c| c.model.provider.clone()),
+            .flat_map(|c| c.named())
+            .filter_map(|m| m.provider),
     );
     servers.extend(
         graph

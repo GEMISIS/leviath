@@ -17,7 +17,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use leviath_providers::{InferenceRequest, Provider, Tool};
 
-use crate::compaction_bridge::{CompactionJob, CompactionOutcome, run_compaction_job};
+use crate::compaction_bridge::{
+    CompactionJob, CompactionOutcome, SummaryRoute, run_compaction_job,
+};
 use crate::components::{
     AgentMessage, AgentState, AgentStatus, AwaitingInteraction, ContextWindow, InferenceConfig,
     MessageInbox,
@@ -104,9 +106,9 @@ pub(crate) use persist::{
 };
 mod compaction;
 pub(crate) use compaction::{
-    AwaitingCompaction, CompactionResults, PendingEdgeCompact, apply_edge_transform,
+    AwaitingCompaction, CompactionResults, Declined, PendingEdgeCompact, apply_edge_transform,
     collect_compaction, compaction_request, dispatch_compaction, dispatch_edge_compact,
-    spawn_summary_job,
+    start_summary, summary_routes,
 };
 pub use compaction::{CompactionSettings, is_stage_specific};
 mod tool_results;

@@ -77,26 +77,33 @@ pub(super) fn fold(graph: &mut RunGraph, limits: &SpawnLimits) {
     graph.taint_tracking = Some(taint);
 }
 
-/// Refuse a compaction model this machine would not send the run's context
-/// to, on the same terms a stage's model is refused.
-pub(super) fn check_compaction(
-    graph: &RunGraph,
+/// Resolve the graph's compaction models into the routes its summaries take
+/// on this machine, as a stage's models are resolved, and write them back as
+/// the graph's `models`: every route names its provider from here on, so the
+/// run never decides it again. A model the machine refuses is an issue, on
+/// the same terms a stage's model is refused.
+pub(super) fn resolve_compaction(
+    graph: &mut RunGraph,
     at: &SpecPath,
     env: &dyn ResolveEnv,
     issues: &mut SpawnIssues,
 ) {
-    let Some(compaction) = &graph.compaction else {
+    let Some(compaction) = graph.compaction.as_mut() else {
         return;
     };
-    if let Err(message) = env.compaction_model(&compaction.model) {
-        issues.push(
-            SpawnIssue::new(
-                at.field("compaction").field("model"),
-                IssueCode::NotAllowed,
-                format!("the compaction model is {message}"),
-            )
-            .got(compaction.model.to_string())
-            .hint("name a compaction model this machine may send the run's context to"),
-        );
+    let named = compaction.named();
+    match env.compaction_routes(&named) {
+        Ok(routes) => {
+            compaction.model = None;
+            compaction.models = routes;
+        }
+        Err(message) => {
+            let got: Vec<String> = named.iter().map(ToString::to_string).collect();
+            issues.push(
+                SpawnIssue::new(at.field("compaction"), IssueCode::Unresolvable, message)
+                    .got(got.join(", "))
+                    .hint("name a compaction model this machine may send the run's context to"),
+            );
+        }
     }
 }

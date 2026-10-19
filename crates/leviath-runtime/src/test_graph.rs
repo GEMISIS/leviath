@@ -637,8 +637,11 @@ pub(crate) mod spawning {
             }
         }
 
-        fn compaction_model(&self, _model: &ModelRef) -> Result<(), String> {
-            Ok(())
+        fn compaction_routes(&self, named: &[ModelRef]) -> Result<Vec<ModelRef>, String> {
+            match &self.stages {
+                StageAnswers::Given(_) => Ok(named.to_vec()),
+                StageAnswers::Host(h) => host::compaction_routes(named, &h.defaults, &h.registry),
+            }
         }
 
         async fn tools(

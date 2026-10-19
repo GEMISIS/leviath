@@ -1,10 +1,12 @@
-//! Upgrading a run file in binary layout 2 or 3 to this build's layout, in
-//! place.
+//! Upgrading a run file in binary layout 2, 3 or 4 to this build's layout,
+//! in place.
 //!
 //! The upgraded file is the old one with each spec, state and delta frame read
 //! as its layout wrote it and written again as this build writes it, and the
 //! code and owner frames copied byte for byte, since they did not change shape
-//! (see [`crate::layout2`] and [`crate::layout3`]). A frame torn by a crash at
+//! (see [`crate::layout2`], [`crate::layout3`] and [`crate::layout4`]). A
+//! state and a delta in layout 4 already have this build's shape, so they are
+//! copied byte for byte too. A frame torn by a crash at
 //! the end of the old file is left out, as any reader of the file would cut it
 //! off. The old file is kept in the run's `legacy/` directory first, and the
 //! new one then replaces it in one step, so the run directory always holds one
@@ -21,7 +23,7 @@ use leviath_runtime::state::{RunState, StateDelta};
 
 use crate::ConvertError;
 use crate::write::LEGACY_DIR;
-use crate::{layout2, layout3};
+use crate::{layout2, layout3, layout4};
 
 /// What upgrading a run file did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +47,9 @@ enum Layout {
     Two,
     /// Builds before a fan-out declared the workers it may hand items to.
     Three,
+    /// Builds before a graph's compaction models were resolved as a stage's
+    /// are.
+    Four,
 }
 
 impl Layout {
@@ -53,6 +58,7 @@ impl Layout {
         [
             (Self::Two, &layout2::FINGERPRINT),
             (Self::Three, &layout3::FINGERPRINT),
+            (Self::Four, &layout4::FINGERPRINT),
         ]
         .into_iter()
         .find(|(_, fingerprint)| codec::check_header(head, fingerprint).is_ok())
@@ -64,6 +70,7 @@ impl Layout {
         match self {
             Self::Two => 2,
             Self::Three => 3,
+            Self::Four => 4,
         }
     }
 }
@@ -149,10 +156,15 @@ fn rewrite(
                 let spec: RunSpec = match layout {
                     Layout::Two => frame.decode::<layout2::RunSpec>(bytes).map(Into::into),
                     Layout::Three => frame.decode::<layout3::RunSpec>(bytes).map(Into::into),
+                    Layout::Four => frame.decode::<layout4::RunSpec>(bytes).map(Into::into),
                 }
                 .map_err(read)?;
                 run_id.get_or_insert_with(|| spec.run_id.clone());
                 out.extend(crate::write::frame(FrameKind::Spec, &spec));
+            }
+            // A state and a delta in layout 4 are this build's.
+            FrameKind::State | FrameKind::Delta if layout == Layout::Four => {
+                out.extend_from_slice(&bytes[frame.offset..frame.end()])
             }
             // A state and a delta are the same shape in layouts 2 and 3.
             FrameKind::State => {

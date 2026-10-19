@@ -431,6 +431,103 @@ fn an_install_script_must_define_install() {
     assert!(none.contains("fn install()"), "{none}");
 }
 
+/// A provider that serves exactly the models it is given.
+struct Serves(&'static [&'static str]);
+
+#[async_trait::async_trait]
+impl leviath_providers::Provider for Serves {
+    async fn infer(
+        &self,
+        r: &leviath_providers::InferenceRequest,
+    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+        Stub.infer(r).await
+    }
+    async fn count_tokens(&self, t: &str, m: &str) -> usize {
+        Stub.count_tokens(t, m).await
+    }
+    fn max_context_tokens(&self, m: &str) -> usize {
+        Stub.max_context_tokens(m)
+    }
+    fn name(&self) -> &str {
+        "serves"
+    }
+    fn capabilities(&self, m: &str) -> leviath_providers::ModelCapabilities {
+        Stub.capabilities(m)
+    }
+    fn serves_model(&self, model_key: &str) -> Option<String> {
+        self.0.contains(&model_key).then(|| model_key.to_string())
+    }
+}
+
+#[tokio::test]
+async fn the_serving_stub_answers_as_the_plain_one_does() {
+    use leviath_providers::Provider as _;
+    let p = Serves(&["m"]);
+    let request: leviath_providers::InferenceRequest = serde_json::from_value(serde_json::json!({
+        "messages": [], "model": "m", "max_tokens": 1, "temperature": 0.0, "tools": [], "extra": null,
+    }))
+    .unwrap();
+    assert!(p.infer(&request).await.is_err());
+    assert_eq!(p.count_tokens("x", "m").await, 1);
+    assert_eq!(p.max_context_tokens("m"), 5000);
+    assert_eq!(p.name(), "serves");
+    let _ = p.capabilities("m");
+}
+
+/// The compaction models, resolved as a stage's are: an open route lands on
+/// the provider the operator prefers, a pinned one stays, and the rest of
+/// the chain follows as failover.
+#[test]
+fn compaction_models_resolve_as_a_stages_do() {
+    let model = |m: &str| ModelRef::parse(m).unwrap();
+    let mut r = ProviderRegistry::new();
+    r.register("cfg".to_string(), Arc::new(Serves(&["small"])));
+    r.register("other".to_string(), Arc::new(Serves(&["small", "big"])));
+    let prefer = |order: &[&str]| ModelDefaults {
+        provider: order[0].to_string(),
+        provider_order: order.iter().map(ToString::to_string).collect(),
+        ..ModelDefaults::default()
+    };
+    let routes = |named: &[&str], d: &ModelDefaults| {
+        let named: Vec<ModelRef> = named.iter().map(|m| model(m)).collect();
+        compaction_routes(&named, d, &r)
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        routes(&[], &prefer(&["cfg"])).is_empty(),
+        "the stage's model"
+    );
+    assert_eq!(routes(&["small"], &prefer(&["cfg"])), ["cfg/small"]);
+    assert_eq!(
+        routes(&["small"], &prefer(&["other", "cfg"])),
+        ["other/small", "cfg/small"],
+        "the operator's order, the rest as failover"
+    );
+    assert_eq!(
+        routes(&["big", "cfg/small"], &prefer(&["cfg", "other"])),
+        ["other/big", "cfg/small"]
+    );
+    let overridden = ModelDefaults {
+        override_model: Some("big".into()),
+        ..prefer(&["other"])
+    };
+    assert_eq!(
+        routes(&["cfg/small"], &overridden),
+        ["other/big", "cfg/small"],
+        "override_model leads, as it does for a stage"
+    );
+    assert_eq!(
+        routes(&["nobody-serves-this", "gone/m"], &prefer(&["cfg"])),
+        ["nobody-serves-this", "gone/m"],
+        "kept as written, and never called"
+    );
+}
+
+/// A compaction model the stage resolver would refuse is refused, with the
+/// resolver's reason.
 #[test]
 fn a_compaction_model_is_refused_only_where_it_would_keep_the_context() {
     let zero = ModelDefaults {
@@ -441,17 +538,15 @@ fn a_compaction_model_is_refused_only_where_it_would_keep_the_context() {
         ..ModelDefaults::default()
     };
     let r = registry(&["openai"]);
-    let model = |m: &str| ModelRef::parse(m).unwrap();
-    let refused = compaction_model(&model("openai/gpt-5.5"), &zero, &r).unwrap_err();
-    assert!(refused.starts_with("openai/gpt-5.5"), "{refused}");
-    assert!(compaction_model(&model("openai/gpt-5.5"), &ModelDefaults::default(), &r).is_ok());
+    let model = |m: &str| vec![ModelRef::parse(m).unwrap()];
+    let refused = compaction_routes(&model("openai/gpt-5.5"), &zero, &r).unwrap_err();
     assert!(
-        compaction_model(&model("gone/m"), &zero, &r).is_ok(),
-        "never called"
+        refused.starts_with("the compaction model names openai/gpt-5.5"),
+        "{refused}"
     );
-    assert!(
-        compaction_model(&model("m"), &zero, &r).is_ok(),
-        "no provider"
+    assert_eq!(
+        compaction_routes(&model("openai/gpt-5.5"), &ModelDefaults::default(), &r),
+        Ok(model("openai/gpt-5.5"))
     );
 }
 

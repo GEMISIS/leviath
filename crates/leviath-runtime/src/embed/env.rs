@@ -207,8 +207,8 @@ impl ResolveEnv for EmbedEnv {
         host::choose_model(stage, requested, &self.defaults, &self.registry).map_err(|issue| *issue)
     }
 
-    fn compaction_model(&self, model: &ModelRef) -> Result<(), String> {
-        host::compaction_model(model, &self.defaults, &self.registry)
+    fn compaction_routes(&self, named: &[ModelRef]) -> Result<Vec<ModelRef>, String> {
+        host::compaction_routes(named, &self.defaults, &self.registry)
     }
 
     async fn tools(

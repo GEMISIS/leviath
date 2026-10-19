@@ -16,7 +16,7 @@ use leviath_providers::Tool;
 
 use crate::pipeline::{
     ModelDefaults, ToolCatalog, ToolOwners, expand_connector_grants, filter_tools_for_stage,
-    resolve_stage_route,
+    resolve_stage_model, resolve_stage_route,
 };
 use crate::provider_creds::ProviderCreds;
 use crate::providers::ProviderRegistry;
@@ -109,7 +109,7 @@ pub fn choose_model(
         .map(ToString::to_string)
         .collect();
     let resolved = resolve_stage_route(
-        stage.name.as_str(),
+        &format!("stage '{}'", stage.name),
         &stage.model,
         &needs,
         requested_text.as_deref(),
@@ -142,26 +142,46 @@ pub fn choose_model(
     })
 }
 
-/// Whether a compaction model may be sent a run's context over `registry`:
-/// refused when its provider would keep what it is sent and the operator asked
-/// for zero retention, as a stage's model is. A model whose provider is not
-/// registered (or that names none) is never called, so it is not judged.
-pub fn compaction_model(
-    model: &ModelRef,
+/// Where a summary goes over `registry`: the compaction models `named`,
+/// resolved as a stage's models are, by the stage resolver itself. Each entry
+/// with no provider is an open route the operator's `provider_order` and
+/// `default_provider` answer; `override_model`, `fallback_model` and
+/// `fallback_order` take the places they take for a stage. The head comes
+/// first and the failover chain after it, every entry naming its provider.
+///
+/// Nothing named is nothing to resolve: a summary then runs on each stage's
+/// own model. Names no registered provider can serve are kept as written,
+/// and a summary is never sent to them, so a blueprint whose summarizer this
+/// machine lacks still runs. A model the stage resolver would refuse (one its
+/// provider does not carry, one that keeps what it is sent under zero
+/// retention, an open route whose model list is unread) is refused here with
+/// the reason, as a stage's would be.
+pub fn compaction_routes(
+    named: &[ModelRef],
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
-) -> Result<(), String> {
-    let Some(provider) = model.provider.as_ref().filter(|p| registry.has(p.as_str())) else {
-        return Ok(());
-    };
-    match registry.retention_refusal_with(
-        &defaults.retention,
-        provider.as_str(),
-        model.model.as_str(),
-    ) {
-        Some(refusal) => Err(refusal),
-        None => Ok(()),
+) -> Result<Vec<ModelRef>, String> {
+    if named.is_empty() {
+        return Ok(Vec::new());
     }
+    let choice = crate::spec::graph::ModelChoice {
+        models: named.to_vec(),
+        ..crate::spec::graph::ModelChoice::default()
+    };
+    let (head, _) = resolve_stage_model(&choice, None, defaults, registry);
+    if !registry.has(&head) {
+        return Ok(named.to_vec());
+    }
+    let route = resolve_stage_route(
+        "the compaction model",
+        &choice,
+        &[],
+        None,
+        defaults,
+        registry,
+    )?;
+    let head = ModelRef::parse(&format!("{}/{}", route.provider_name, route.model)).ok();
+    Ok(head.into_iter().chain(route.fallbacks).collect())
 }
 
 /// A graph's mime rows as the registry layers them: the TOML table a

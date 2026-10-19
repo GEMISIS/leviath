@@ -51,7 +51,7 @@ async fn a_blueprint_carries_its_run_wide_settings() {
              security { taintTracking }
              sandbox { kind image allowNetwork mounts onUnavailable }
              nudge { policy max text }
-             compaction { provider model maxSummaryTokens temperature }
+             compaction { provider model models maxSummaryTokens temperature }
              fileTracking { region { name } regionName trackReads trackWrites }
              repetitionDetection { enabled maxRepeatCalls maxReadonlyStreak }
              safeCommands { tools shell }
@@ -73,6 +73,7 @@ async fn a_blueprint_carries_its_run_wide_settings() {
     assert_eq!(bp["nudge"]["max"], 5);
     assert!(bp["nudge"]["text"].is_null());
     assert_eq!(bp["compaction"]["model"], "claude-haiku-4-5");
+    assert_eq!(bp["compaction"]["models"].as_array().map(Vec::len), Some(1));
     assert_eq!(bp["compaction"]["maxSummaryTokens"], 800);
     assert_eq!(bp["fileTracking"]["region"]["name"], "files");
     assert_eq!(bp["fileTracking"]["regionName"], "files");

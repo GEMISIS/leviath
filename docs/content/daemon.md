@@ -177,7 +177,7 @@ up to date:
   replaced by this release's copy when Leviath ships it;
 - each run directory in the old many-file layout becomes a run file;
 - each run file an alpha build wrote in an earlier binary layout is upgraded in place, and the file
-  as it was stays in the run's `legacy/` folder as `run.v2.lvr` or `run.v3.lvr`.
+  as it was stays in the run's `legacy/` folder as `run.v2.lvr`, `run.v3.lvr` or `run.v4.lvr`.
 
 [Upgrading from 0.6](/docs/upgrading) covers what else changes, outside your home.
 

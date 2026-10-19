@@ -451,6 +451,51 @@ plans the work does.
 > headings survive the merge, which is what keeps a multi-region agent coherent there. See
 > [what the model sees](/docs/context#what-the-model-sees).
 
+## The compaction model
+
+A graph's `compaction` names the model that summarizes its compacting regions. It is resolved
+exactly as a stage's model is, by the same resolver, once at spawn:
+
+```toml
+[graph]
+# One model. With no provider it is an open route, like a stage entry.
+compaction = { model = { model = "claude-sonnet-5-5" } }
+
+# Several, best first, with failover, like a stage's `models`.
+compaction = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }] }
+
+# None: each summary runs on the model the current stage runs on.
+compaction = {}
+```
+
+An entry with no provider goes to whichever configured provider serves it, in your
+`provider_order` or `default_provider` order. `override_model`, `fallback_model` and
+`fallback_order` take the same places they take for a stage, so `override_model` leads here too.
+An entry that names a provider is used as named. Everything after the first route is the failover
+chain. A summary whose provider turns out to be unusable before it wrote anything, out of credits
+or unreachable, moves on to the next route.
+
+With no model named, a summary follows the stage it happens in: the stage's model on your
+provider, then that stage's own fallbacks. This is the setting for a blueprint that should never
+send its context anywhere its stages do not already go.
+
+A model this machine refuses for a stage is refused for summaries too, at spawn, with the same
+reason. That covers a provider that does not carry the model, and a model that keeps what it is sent
+under [zero data retention](/docs/data-retention). Names that no configured provider serves at all
+do not stop the run. Its compacting regions are left as they are, the way a full window behaves with
+no `compaction`, and `lev validate` says so.
+
+`lev validate` prints the compaction model a run would use under the stages, as `(compaction)`, with
+its failover:
+
+```
+  (compaction)     openrouter/anthropic/claude-sonnet-5.5
+                     falls back to: openai/gpt-5.4-mini
+```
+
+The bundled agents name models without providers here, the same cheap models their light stages
+use, so their summaries go where your provider preference sends them.
+
 ## Where credentials live
 
 Keys live in `~/.leviath/config.toml` by default, or (to keep them out of a plaintext file) in

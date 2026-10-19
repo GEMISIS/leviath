@@ -1,6 +1,6 @@
 [blueprint]
 name = "reviewer"
-version = "0.4.2"
+version = "0.4.3"
 description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 
 # discover -> scan -> split_review (review_worker x N) -> deep_review -> report -> summary
@@ -14,7 +14,10 @@ entry = "discover"
 # Read-only agent: it inspects a diff/codebase and reports. No write access.
 tool_permissions = { read_file = "allow", list_dir = "allow", bash = "ask" }
 
-compaction = { model = { provider = "anthropic", model = "claude-sonnet-5-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+# Summaries run on whichever of these this machine serves, the way a stage's
+# models do: no provider is named, so `default_provider` and `provider_order`
+# decide where the run's context is sent.
+compaction = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }], max_summary_tokens = 2000, temperature = 0.2 }
 
 # What the caller asked for, if anything (`--task`), and - when this blueprint
 # is running as one of its own fan-out workers - the area `split_review` gave

@@ -2,6 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::names::ModelRef;
+
+/// The largest summary a compaction call asks for when the graph says
+/// nothing.
+pub const DEFAULT_MAX_SUMMARY_TOKENS: usize = 2000;
+
+/// The sampling temperature of a compaction call when the graph says nothing.
+pub const DEFAULT_SUMMARY_TEMPERATURE: f32 = 0.2;
+
 /// Configuration for LLM-based compaction.
 ///
 /// When a Compacting region hits its threshold, it sends content to an LLM
@@ -9,11 +18,12 @@ use serde::{Deserialize, Serialize};
 /// the summarization prompt is constructed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionConfig {
-    /// Provider to use for compaction (e.g., "anthropic", "openai")
-    pub provider: String,
-
-    /// Model to use (e.g., "claude-sonnet-5-5", "gpt-5.4-mini")
-    pub model: String,
+    /// Where a summary is sent, best first: each a provider and a model on
+    /// it, resolved against the operator's provider preference when the run
+    /// was resolved, so the routes after the first are its failover. Empty
+    /// sends the summary to the model the current stage runs on, failing
+    /// over along that stage's own fallbacks.
+    pub routes: Vec<ModelRef>,
 
     /// Custom system prompt for compaction (None = use default)
     pub system_prompt: Option<String>,
@@ -30,14 +40,15 @@ pub struct CompactionConfig {
 }
 
 impl Default for CompactionConfig {
+    /// A summary on the stage's own model, at the default length and
+    /// temperature.
     fn default() -> Self {
         Self {
-            provider: "anthropic".to_string(),
-            model: "claude-sonnet-5-5".to_string(),
+            routes: Vec::new(),
             system_prompt: None,
             user_prompt_template: None,
-            max_summary_tokens: 2000,
-            temperature: 0.2,
+            max_summary_tokens: DEFAULT_MAX_SUMMARY_TOKENS,
+            temperature: DEFAULT_SUMMARY_TEMPERATURE,
         }
     }
 }
@@ -76,8 +87,9 @@ mod tests {
     #[test]
     fn test_compaction_config_defaults() {
         let config = CompactionConfig::default();
-        assert_eq!(config.max_summary_tokens, 2000);
-        assert_eq!(config.temperature, 0.2);
+        assert!(config.routes.is_empty(), "the stage's own model");
+        assert_eq!(config.max_summary_tokens, DEFAULT_MAX_SUMMARY_TOKENS);
+        assert_eq!(config.temperature, DEFAULT_SUMMARY_TEMPERATURE);
         assert!(config.system_prompt().contains("compaction assistant"));
     }
 

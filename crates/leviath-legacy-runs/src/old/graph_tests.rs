@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use leviath_core::lifecycle::CompactionConfig;
+use crate::old::blueprint::CompactionConfig;
 use leviath_core::mime::TokenRule as CoreTokenRule;
 use leviath_core::mime::registry::MimeRow;
 use leviath_core::output::{ArtifactSpec, OutputSpec};
@@ -342,7 +342,10 @@ fn every_setting_a_blueprint_holds_converts() {
     assert_eq!(g.tool_rescan, ToolRescan::AfterWrites);
     assert_eq!(g.transforms[0].mappings.len(), 4);
     assert_eq!(g.dependencies.len(), 4);
-    assert_eq!(g.compaction.as_ref().unwrap().model.model.as_str(), "small");
+    assert_eq!(
+        g.compaction.as_ref().unwrap().named()[0].model.as_str(),
+        "small"
+    );
     assert_eq!(g.mime_types.len(), 5);
 
     let main = g.stage("main").unwrap();

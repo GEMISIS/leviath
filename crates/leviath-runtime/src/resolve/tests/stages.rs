@@ -273,7 +273,8 @@ async fn the_callers_model_reaches_only_stages_that_allow_it() {
 async fn the_fingerprint_covers_every_provider_and_server_the_run_uses() {
     let mut g = graph();
     g.compaction = Some(CompactionDef {
-        model: model("summer/small"),
+        model: Some(model("summer/small")),
+        models: Vec::new(),
         system_prompt: None,
         user_prompt_template: None,
         max_summary_tokens: 500,

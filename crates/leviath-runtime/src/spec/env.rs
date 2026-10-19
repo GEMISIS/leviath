@@ -251,10 +251,12 @@ pub trait ResolveEnv: Send + Sync {
         stage: &StageDef,
         requested: Option<&ModelRef>,
     ) -> Result<ModelPlan, SpawnIssue>;
-    /// Whether the compaction model may be sent the run's context here: a
-    /// model this machine would not run under its retention rules is refused
-    /// for summaries as it is for stages.
-    fn compaction_model(&self, model: &ModelRef) -> Result<(), String>;
+    /// Where the run's summaries go: the compaction models `named`, resolved
+    /// as a stage's models are, head first and failover after. Empty when
+    /// `named` is, which runs each summary on the current stage's model. A
+    /// model the stage resolver would refuse (under the retention rules, say)
+    /// is refused with the reason.
+    fn compaction_routes(&self, named: &[ModelRef]) -> Result<Vec<ModelRef>, String>;
     /// What an unattended setting leaves to a person. `All` answers
     /// everything and `Off` nothing; a named profile is the host's to read,
     /// and a host with no profiles refuses every name.
