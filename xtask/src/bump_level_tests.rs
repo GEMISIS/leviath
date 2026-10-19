@@ -64,24 +64,71 @@ fn a_changelog_with_no_shipped_section_has_nothing_to_refuse() {
         "0.6.5",
     )
     .unwrap();
-    assert_eq!(shipped_section("# Changelog\n", "0.6.5"), None);
+    assert!(shipped_lines("# Changelog\n", "0.6.5").is_empty());
+}
+
+/// A hand-rolled bump that opened a fresh `## Unreleased` above the rolled
+/// section still ships what that section holds.
+#[test]
+fn both_the_unreleased_and_the_new_version_section_are_read() {
+    let changelog = "# Changelog\n\n## Unreleased\n\n- A small fix.\n\n\
+                     ## 0.6.5 - 2026-10-18\n\n- **Breaking.** A typed request.\n\n\
+                     ## 0.6.4 - 2026-09-26\n\n- Fixed a thing.\n";
+    assert!(ensure_bump_level(changelog, "0.6.4", "0.6.5").is_err());
+    ensure_bump_level(changelog, "0.6.4", "0.7.0").unwrap();
 }
 
 #[test]
-fn the_shipped_section_stops_at_the_next_heading() {
-    let section = shipped_section(BREAKING_UNRELEASED, "0.6.5").unwrap();
-    assert!(section.iter().any(|line| line.contains("typed request")));
-    assert!(!section.iter().any(|line| line.contains("An old one")));
-    let empty = shipped_section("## Unreleased\n## 0.6.4\n- x\n", "0.6.5").unwrap();
+fn the_shipped_lines_stop_at_the_next_heading() {
+    let lines = shipped_lines(BREAKING_UNRELEASED, "0.6.5");
+    assert!(lines.iter().any(|line| line.contains("typed request")));
+    assert!(!lines.iter().any(|line| line.contains("An old one")));
+    let empty = shipped_lines("## Unreleased\n## 0.6.4\n- x\n", "0.6.5");
     assert!(empty.is_empty(), "{empty:?}");
 }
 
 #[test]
-fn only_a_bulleted_entry_counts_as_breaking() {
-    assert!(has_breaking_entry(&["- **Breaking.** x"]));
-    assert!(has_breaking_entry(&["  * **Breaking, library.** x"]));
-    assert!(!has_breaking_entry(&["Prose about **Breaking** changes."]));
-    assert!(!has_breaking_entry(&["- Not **Breaking** at the start."]));
+fn bracketed_headings_are_read_too() {
+    let unreleased = "## [Unreleased]\n\n- **Breaking.** x\n";
+    assert!(ensure_bump_level(unreleased, "0.6.4", "0.6.5").is_err());
+    let rolled = "## [0.6.5] - 2026-10-18\n\n- **Breaking.** x\n";
+    assert!(ensure_bump_level(rolled, "0.6.4", "0.6.5").is_err());
+}
+
+#[test]
+fn every_common_breaking_marker_counts() {
+    for line in [
+        "- **Breaking.** x",
+        "  * **Breaking, library.** x",
+        "+ Breaking: x",
+        "1. Breaking: x",
+        "12) **Breaking** x",
+        "- Breaking",
+        "### Breaking",
+        "### Breaking changes",
+        "#### BREAKING",
+        "- __Breaking__ x",
+    ] {
+        assert!(has_breaking_entry(&[line]), "{line}");
+    }
+    for line in [
+        "Prose about **Breaking** changes.",
+        "- Not **Breaking** at the start.",
+        "- Breakingly fast.",
+        "### Added",
+        "2026 Breaking news",
+        "-",
+    ] {
+        assert!(!has_breaking_entry(&[line]), "{line}");
+    }
+}
+
+/// A version that goes backwards is a revert, and has no level to be too
+/// small for, so it passes rather than suggesting a bump past `from`.
+#[test]
+fn a_downgrade_is_not_checked() {
+    ensure_bump_level(BREAKING_UNRELEASED, "0.7.0", "0.6.5").unwrap();
+    ensure_bump_level(BREAKING_UNRELEASED, "1.0.0", "0.9.9").unwrap();
 }
 
 #[test]

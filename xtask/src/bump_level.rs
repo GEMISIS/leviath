@@ -3,43 +3,69 @@
 //! Under semver a breaking change moves the major version, and below 1.0 it
 //! moves the minor one instead: `0.6.4` to `0.7.0`, never to `0.6.5`. Clients
 //! decide whether they can talk to a server by that number, so a patch bump
-//! that ships a `**Breaking` changelog entry tells them a change is safe when
-//! it is not, and the release that carries it is permanent.
+//! that ships a breaking changelog entry tells them a change is safe when it
+//! is not, and the release that carries it is permanent.
 //!
 //! The entries a bump ships are the ones under `## Unreleased` before the
-//! changelog is rolled, or under the new version's own heading after. Checking
-//! either means `cargo xtask version` can refuse before it writes anything,
-//! and CI can refuse a PR whose bump was written by hand.
+//! changelog is rolled, and under the new version's own heading after. Both
+//! are read, whichever exist, so `cargo xtask version` can refuse before it
+//! writes anything, and CI can refuse a PR whose bump was written by hand,
+//! even one that opened a fresh `## Unreleased` above the rolled section.
 
 use anyhow::Result;
 
-/// The marker a breaking entry starts with, after its list bullet. It also
-/// matches the qualified forms, such as `**Breaking, GraphQL.**`.
-const BREAKING: &str = "**Breaking";
+/// The word that marks a breaking entry or a heading over breaking entries.
+const BREAKING: &str = "breaking";
 
-/// The changelog lines this bump ships: the `## Unreleased` section when there
-/// is one, else the section headed by version `to`. `None` when neither exists.
-pub fn shipped_section<'a>(changelog: &'a str, to: &str) -> Option<Vec<&'a str>> {
-    let section_of = |wanted: &dyn Fn(&str) -> bool| {
-        let mut lines = changelog.lines();
-        lines.find(|line| line.strip_prefix("## ").is_some_and(wanted))?;
-        Some(
-            lines
-                .take_while(|line| !line.starts_with("## "))
-                .collect::<Vec<_>>(),
-        )
-    };
-    section_of(&|heading| heading.trim_end() == "Unreleased")
-        .or_else(|| section_of(&|heading| heading.split_whitespace().next() == Some(to)))
+/// The changelog lines this bump ships: the `## Unreleased` section and the
+/// section headed by version `to`, whichever exist. Either heading may be
+/// bracketed, as in `## [Unreleased]` or `## [0.7.0] - 2026-10-18`.
+pub fn shipped_lines<'a>(changelog: &'a str, to: &str) -> Vec<&'a str> {
+    let mut shipping = false;
+    changelog
+        .lines()
+        .filter(|line| {
+            if let Some(heading) = line.strip_prefix("## ") {
+                let name = heading.split_whitespace().next().unwrap_or_default();
+                let name = name.trim_start_matches('[').trim_end_matches(']');
+                shipping = name.eq_ignore_ascii_case("unreleased") || name == to;
+                return false;
+            }
+            shipping
+        })
+        .collect()
 }
 
-/// Whether any entry in `section` is marked breaking.
-pub fn has_breaking_entry(section: &[&str]) -> bool {
-    section.iter().any(|line| {
-        line.trim_start()
-            .strip_prefix(['-', '*'])
-            .is_some_and(|entry| entry.trim_start().starts_with(BREAKING))
+/// Whether `line` is a breaking entry or a heading over breaking entries:
+/// `### Breaking`, or a `-`, `*`, `+` or numbered bullet that starts with the
+/// word, bold or not, as in `- **Breaking, GraphQL.**` or `1. Breaking: x`.
+fn is_breaking(line: &str) -> bool {
+    entry_text(line.trim_start()).is_some_and(|text| {
+        let text = text.trim_start().trim_start_matches(['*', '_']);
+        let (word, rest) = text.split_at_checked(BREAKING.len()).unwrap_or(("", ""));
+        word.eq_ignore_ascii_case(BREAKING) && !rest.starts_with(|c: char| c.is_alphanumeric())
     })
+}
+
+/// The text of a heading or list item after its marker, or `None` for a line
+/// that is neither.
+fn entry_text(line: &str) -> Option<&str> {
+    if line.starts_with('#') {
+        return Some(line.trim_start_matches('#'));
+    }
+    if let Some(entry) = line.strip_prefix(['-', '*', '+']) {
+        return Some(entry);
+    }
+    let rest = line.trim_start_matches(|c: char| c.is_ascii_digit());
+    match rest.len() < line.len() {
+        true => rest.strip_prefix(['.', ')']),
+        false => None,
+    }
+}
+
+/// Whether any line in `section` is a breaking entry or heading.
+pub fn has_breaking_entry(section: &[&str]) -> bool {
+    section.iter().any(|line| is_breaking(line))
 }
 
 /// The major, minor and patch numbers of a bare `X.Y.Z`. A part that is
@@ -61,15 +87,17 @@ pub fn moves_breaking_level(from: &str, to: &str) -> bool {
 }
 
 /// Refuse a bump from `from` to `to` that ships a breaking entry without moving
-/// the breaking level. Not moving the version at all is not a bump, so it
-/// passes.
+/// the breaking level. Only a forward bump is checked: an unmoved version is no
+/// bump at all, and a version that goes backwards is a revert, which has no
+/// level to be too small for.
 pub fn ensure_bump_level(changelog: &str, from: &str, to: &str) -> Result<()> {
-    let breaking = from != to
-        && shipped_section(changelog, to).is_some_and(|section| has_breaking_entry(&section))
+    let forward = numbers(to) > numbers(from);
+    let breaking = forward
+        && has_breaking_entry(&shipped_lines(changelog, to))
         && !moves_breaking_level(from, to);
     anyhow::ensure!(
         !breaking,
-        "{from} -> {to} ships a `**Breaking` changelog entry, so it has to move the {level} \
+        "{from} -> {to} ships a breaking changelog entry, so it has to move the {level} \
          version, not just the patch: semver reserves that number for breaking changes, \
          and clients rely on it to tell whether they still fit. Bump to {suggested} instead.",
         level = if numbers(from)[0] == 0 {
