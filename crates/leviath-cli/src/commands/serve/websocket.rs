@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use tokio::sync::broadcast;
 
 use super::events::{ServerEvent, Stamped};
-use super::keepalive::{Heartbeat, WS_MAX_WRITE_BUFFER, WS_TIMING, WsTiming, send_within};
+use super::keepalive::{Beat, Heartbeat, WS_MAX_WRITE_BUFFER, WS_TIMING, WsTiming, send_within};
 use super::shutdown::{Shutdown, going_away};
 use super::types::*;
 
@@ -168,11 +168,10 @@ async fn handle_ws_with(
                 let _ = send_within(&mut sink, send_timeout, going_away()).await;
                 break;
             }
-            _ = heartbeat.due() => {
-                if !heartbeat.ping(&mut sink).await {
-                    break;
-                }
-            }
+            beat = heartbeat.due() => match beat {
+                Beat::Ping => heartbeat.ping(&mut sink).await,
+                Beat::Overdue => break,
+            },
         }
     }
 }
@@ -334,27 +333,34 @@ mod tests {
         assert_receiver_count_reached(reached, expected, tx.receiver_count());
     }
 
-    /// A peer that never answers pings is declared dead after one unanswered
-    /// interval: the handler drops its receiver instead of holding it (plus
-    /// its frame buffers) until TCP keepalive fires hours later.
+    /// A peer that never answers pings is declared dead when its pong is
+    /// due: the handler drops its receiver instead of holding it (plus its
+    /// frame buffers) until TCP keepalive fires hours later.
+    ///
+    /// The cadence is three times the deadline, so a deadline only checked on
+    /// a ping tick would close a full cadence after the ping rather than one
+    /// deadline after it.
     #[tokio::test]
-    async fn ws_closes_a_client_that_never_pongs() {
+    async fn ws_closes_a_client_that_never_pongs_when_its_pong_is_due() {
         let state = test_state();
         let tx = state.event_tx.clone();
         let addr = spawn_ping_test_server(
             state,
-            std::time::Duration::from_millis(80),
-            // Shorter than the cadence, so the tick after the first ping is
-            // already past the deadline: two ticks, not two seconds.
-            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(100),
             std::time::Duration::from_secs(5),
         )
         .await;
 
         // The raw test client ignores pings entirely.
-        let _client = WsTestClient::connect(addr, "/ws").await;
+        let mut client = WsTestClient::connect(addr, "/ws").await;
         wait_for_receiver_count(&tx, 1).await;
-        // First interval sends the ping; the second finds it unanswered.
+        let pinged = crate::commands::serve::testutil::until_pinged(&mut client).await;
+        assert_eq!(client.recv_eof().await, None, "the server hangs up");
+        crate::commands::serve::testutil::closed_within_the_deadline(
+            pinged.elapsed(),
+            std::time::Duration::from_millis(100),
+        );
         wait_for_receiver_count(&tx, 0).await;
     }
 

@@ -154,6 +154,16 @@ fn the_documented_page_caps_are_the_ones_the_code_enforces() {
 /// cheap.
 #[tokio::test]
 async fn breadth_costs_what_it_asks_for_rather_than_what_it_is_written_with() {
+    // The modest query really lists runs, so it reads a runs directory of its
+    // own rather than whichever one another test has pointed the process at.
+    crate::runstate::with_isolated_runs_dir_async("graphql-breadth", |_runs| async move {
+        breadth_check().await;
+    })
+    .await;
+}
+
+/// The two queries behind the breadth test.
+async fn breadth_check() {
     let broad = schema()
         .execute(Request::new(
             "{ runs(first: 200) { results { children(first: 200) { results { id } } } } }",

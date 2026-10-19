@@ -89,9 +89,19 @@ struct Named {
 /// store per frame for nothing.
 const HOLD_LIMIT: usize = 32;
 
+/// How many runs may be pending at once before the oldest is given up on.
+///
+/// A pending run that sends no further frame is never asked about again, so
+/// without a cap a stream of spawns whose records never arrive would grow
+/// the map for the life of the subscription.
+const PENDING_LIMIT: usize = 256;
+
 /// The frames of a pending run, waiting for the index to answer.
 #[derive(Default)]
 struct Held {
+    /// The number of the spawn frame that made the run pending, which is
+    /// what decides the oldest.
+    since: u64,
     /// The frames the subscription asked for, oldest first.
     frames: Vec<Stamped>,
     /// Every frame of the run seen while pending, kept or not.
@@ -206,6 +216,27 @@ impl Scope {
 }
 
 impl Named {
+    /// Make a run pending, giving up on the oldest pending run when there
+    /// are already as many as the cap allows.
+    fn hold(&mut self, run_id: &str, since: u64) {
+        if self.pending.len() >= PENDING_LIMIT {
+            let oldest = self
+                .pending
+                .iter()
+                .min_by_key(|(_, held)| held.since)
+                .map(|(id, _)| id.clone())
+                .unwrap_or_default();
+            self.pending.remove(&oldest);
+        }
+        self.pending.insert(
+            run_id.to_string(),
+            Held {
+                since,
+                ..Held::default()
+            },
+        );
+    }
+
     /// Queue, hold or drop one frame.
     async fn admit(
         &mut self,
@@ -224,7 +255,7 @@ impl Named {
             return deliver(stamped, asked_for, ready);
         }
         if !self.runs.contains(&run_id) {
-            self.widen(state, &stamped.event, &run_id, ready).await;
+            self.widen(state, &stamped, &run_id, ready).await;
         }
         if self.runs.contains(&run_id) {
             deliver(stamped, asked_for, ready);
@@ -243,11 +274,11 @@ impl Named {
     async fn widen(
         &mut self,
         state: &AppState,
-        event: &ServerEvent,
+        stamped: &Stamped,
         run_id: &str,
         ready: &mut VecDeque<RunEventFrame>,
     ) {
-        let ask = match event {
+        let ask = match &stamped.event {
             // A spawn is what widens the scope: by its parent when the client
             // asked for descendants, and by the filter itself otherwise. It is
             // pending until the index answers, which is usually at once.
@@ -260,7 +291,7 @@ impl Named {
                     self.runs.insert(run_id.to_string());
                     return;
                 }
-                self.pending.insert(run_id.to_string(), Held::default());
+                self.hold(run_id, stamped.seq);
                 true
             }
             // A status change is the other moment a run's answer can have
@@ -339,8 +370,8 @@ struct Start {
 ///
 /// A plain subscription replays nothing and opens on the bus's latest number.
 /// One that names another server's instance cannot resume: its numbers mean
-/// nothing here, so it opens with a gap as large as everything this process
-/// has sent. One that resumes on this server replays every kept frame above
+/// nothing here, and nothing here says how much it missed, so it opens with
+/// a gap of the largest count there is. One that resumes on this server replays every kept frame above
 /// `since`, and opens with a gap when some of those are no longer kept.
 fn start(state: &AppState, since: Option<BigInt>, instance: Option<ID>) -> Start {
     let elsewhere =
@@ -352,7 +383,7 @@ fn start(state: &AppState, since: Option<BigInt>, instance: Option<ID>) -> Start
     };
     let resume = state.event_tx.resume(resume_from);
     let (seq, gap) = match (elsewhere, since) {
-        (true, _) => (resume.at, Some(resume.at)),
+        (true, _) => (resume.at, Some(u64::MAX)),
         (false, Some(since)) => (
             since.min(resume.at),
             (resume.evicted > 0).then_some(resume.evicted),

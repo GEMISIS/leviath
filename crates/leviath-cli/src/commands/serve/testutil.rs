@@ -329,6 +329,31 @@ impl WsTestClient {
     }
 }
 
+/// Read frames until the server pings, and say when it did.
+pub(super) async fn until_pinged(client: &mut WsTestClient) -> std::time::Instant {
+    loop {
+        let (opcode, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), client.recv_frame())
+                .await
+                .expect("a frame arrives");
+        if opcode == 0x9 {
+            return std::time::Instant::now();
+        }
+    }
+}
+
+/// A silent peer was dropped one pong deadline after its ping: not before,
+/// and well before the next ping would have looked.
+pub(super) fn closed_within_the_deadline(
+    waited: std::time::Duration,
+    deadline: std::time::Duration,
+) {
+    assert!(
+        waited + std::time::Duration::from_millis(20) >= deadline && waited < deadline * 2,
+        "closed outside the pong deadline"
+    );
+}
+
 /// The first run id of every run tree linked so far, in the order they were
 /// linked.
 static TREE_BUILDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());

@@ -38,6 +38,10 @@ same list.
   opened with `_leviath/spawn` says the run has finished. A run that is
   cancelled or held is not replaced; the turn says why it took no message. To keep a
   conversation going in one run, give the blueprint an interactive stage.
+- A filtered GraphQL `runEvents` subscription now brings a run into scope
+  from its spawn frame even when `types` leaves `RUN_SPAWNED` out, so the
+  frames it did ask for arrive. There is no switch back: the run's frames
+  were dropped before, which no client could have wanted.
 - A failed routing call (the "which stage next?" question asked once a stage
   with several edges is done) now fails the run with an error naming the
   routing call, and keeps the stage's finished work. It used to fail the stage
@@ -383,7 +387,10 @@ same list.
 - `/ws/graphql` now pings every 20 seconds, closes a peer that has not
   answered for 60, and gives each frame 10 seconds to go out, the same
   keepalive `/ws` has. A peer that stopped reading no longer holds its
-  subscriptions and their buffers until TCP gives up.
+  subscriptions and their buffers until TCP gives up. A peer that stops
+  answering on `/ws` or `/ws/graphql` is now dropped when its pong is due,
+  60 seconds after the unanswered ping, rather than at the next ping after
+  that.
 - Multi-stage runs on Meta's Muse Spark (directly or as OpenRouter's
   `meta/*`) no longer loop between a finished stage and its error recovery
   until the revisit cap. The routing request sent `tool_choice: "none"`, which

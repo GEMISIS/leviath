@@ -143,7 +143,11 @@ async fn a_stream_numbered_by_another_server_opens_with_a_gap() {
     let opened = next(&mut stream, "runEvents").await;
     let gap = next(&mut stream, "runEvents").await;
     assert_eq!(gap["__typename"], "EventsDroppedEvent");
-    assert!(gap["count"].as_u64().expect("a count") >= 1);
+    assert_eq!(
+        gap["count"],
+        i64::MAX,
+        "nothing here says how much was missed elsewhere"
+    );
     assert_eq!(gap["seq"], opened["seq"]);
     send(&tx, log("run-a", "after"));
     assert_eq!(
@@ -342,8 +346,8 @@ async fn settle(tx: &EventBus, stream: &mut (impl Stream<Item = Response> + Unpi
 /// with every frame it sent meanwhile, spawn first.
 ///
 /// The index cannot answer for the run on its spawn frame and can on the
-/// next, which is exactly the moment a filter naming nothing a status frame
-/// can change used to give up on the run for good.
+/// next. The filter names nothing a status frame can change, so only the
+/// run being pending gets it asked again.
 #[tokio::test]
 async fn a_run_the_index_has_not_seen_yet_joins_a_metadata_filter() {
     with_isolated_runs_dir_async("sub-pending-joins", |_runs| async move {
@@ -408,6 +412,33 @@ async fn a_spawn_frame_not_asked_for_still_widens_the_scope() {
 
         assert_eq!(next(&mut stream, "runEvents").await["line"], "held");
         assert_eq!(next(&mut stream, "runEvents").await["line"], "after");
+    })
+    .await;
+}
+
+/// Pending runs are capped: past the cap the oldest is given up on, so spawns
+/// whose records never arrive cannot grow the map without bound.
+#[tokio::test]
+async fn the_oldest_pending_run_is_given_up_on_past_the_cap() {
+    with_isolated_runs_dir_async("sub-pending-cap", |_runs| async move {
+        let (tx, mut stream, _dir) = window_stream("").await;
+        // Settled every 64 spawns, so the 256-frame bus never laps it.
+        for i in 0..=super::PENDING_LIMIT {
+            send(&tx, spawned(&format!("cap-{i}"), None));
+            if i % 64 == 63 {
+                settle(&tx, &mut stream).await;
+            }
+        }
+        settle(&tx, &mut stream).await;
+        // The first was pushed out by the last; the second is still pending.
+        write_tagged_run("cap-0", "w1");
+        write_tagged_run("cap-1", "w1");
+        send(&tx, log("cap-0", "evicted"));
+        send(&tx, log("cap-1", "kept"));
+        let joined = next(&mut stream, "runEvents").await;
+        assert_eq!(joined["__typename"], "RunSpawnedEvent");
+        assert_eq!(joined["runId"], "cap-1");
+        assert_eq!(next(&mut stream, "runEvents").await["line"], "kept");
     })
     .await;
 }
