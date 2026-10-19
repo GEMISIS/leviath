@@ -177,6 +177,7 @@ impl Conv {
             .collect();
         let layout = self.layout(&b.context_layout, &at().field("layout"));
         RunGraph {
+            routing: None,
             title: Some(b.name.clone()),
             description: (!b.description.is_empty()).then(|| b.description.clone()),
             entry,
@@ -265,6 +266,7 @@ impl Conv {
             })
             .collect();
         StageDef {
+            routing: None,
             name: name.clone(),
             description: s.description.clone(),
             system_prompt: s

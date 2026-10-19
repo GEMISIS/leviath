@@ -2163,6 +2163,7 @@ mod tests {
         world.insert_resource(crate::pipeline::InferenceRetryTuning {
             max_attempts: 7,
             base_delay_ms: 3,
+            routing_attempts: crate::inference_bridge::DEFAULT_ROUTING_RETRY_ATTEMPTS,
         });
         let e = world
             .spawn((

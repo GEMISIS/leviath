@@ -30,6 +30,16 @@ use crate::inference_pool::InferencePermit;
 /// Served from `[limits] inference_retry_attempts`, which defaults to this.
 pub const DEFAULT_RETRY_ATTEMPTS: u32 = 4;
 
+/// Total attempts, including the first, for the call that picks a stage's
+/// next stage: one try and two retries.
+///
+/// Served from `[limits] routing_retry_attempts`, which defaults to this, and
+/// overridden by a blueprint's `routing.retry_attempts`. Lower than
+/// [`DEFAULT_RETRY_ATTEMPTS`] because the call asks one short question after
+/// the stage's work is done, and a run that cannot get it answered stops
+/// rather than redoing that work.
+pub const DEFAULT_ROUTING_RETRY_ATTEMPTS: u32 = 3;
+
 /// The first backoff, in milliseconds, after an ordinary transient failure.
 ///
 /// Served from `[limits] inference_retry_base_ms`, which defaults to this. Each

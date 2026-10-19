@@ -176,6 +176,7 @@ impl LiveLimits {
         ecs.insert_resource(leviath_runtime::pipeline::InferenceRetryTuning {
             max_attempts: config.limits.inference_retry_attempts,
             base_delay_ms: config.limits.inference_retry_base_ms,
+            routing_attempts: config.limits.routing_retry_attempts,
         });
         // The registry every request is built against carries the retention
         // settings: the per-request fields (OpenAI's `store`, OpenRouter's
@@ -419,6 +420,7 @@ mod tests {
         config.limits.provider_circuit_cooldown_secs = 42;
         config.limits.inference_retry_attempts = 7;
         config.limits.inference_retry_base_ms = 250;
+        config.limits.routing_retry_attempts = 5;
         assert!(live.apply(&config, &mut world));
         let policy = world
             .world()
@@ -430,6 +432,7 @@ mod tests {
             .resource::<leviath_runtime::pipeline::InferenceRetryTuning>();
         assert_eq!(retry.max_attempts, 7);
         assert_eq!(retry.base_delay_ms, 250);
+        assert_eq!(retry.routing_attempts, 5);
     }
 
     #[test]

@@ -43,6 +43,7 @@ pub(super) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
             max_output_tokens: limit("max_tokens"),
             supports_temperature: None,
             supports_tools: Some(true),
+            supports_tool_choice: None,
             // The direct API always reads `cache_control` markers; the flag
             // exists for a gateway choosing per upstream.
             explicit_cache_control: None,

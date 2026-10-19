@@ -392,6 +392,26 @@ impl InferenceCall {
             self.waited = Duration::ZERO;
             return Next::Waiting(self.clock.wait(Duration::ZERO));
         }
+        // A routing request whose `tool_choice` the provider refused (Meta
+        // takes only "auto"): ask again at once with no tools, which every
+        // provider takes, and remember the refusal so the next routing call
+        // to this model goes out that way from the start. Once, because the
+        // request sent again carries no `tool_choice` to refuse.
+        if self.lane == CallLane::Routing
+            && self.request.extra.get("tool_choice").is_some()
+            && crate::pipeline::transition_choice::refuses_tool_choice(error)
+        {
+            crate::pipeline::transition_choice::remember_refused_tool_choice(
+                self.provider.name(),
+                &self.request.model,
+            );
+            self.record(&report, Ending::Failed(failed(error, Retry::SameModel)));
+            self.request = Arc::new(crate::pipeline::transition_choice::without_tool_choice(
+                &self.request,
+            ));
+            self.waited = Duration::ZERO;
+            return Next::Waiting(self.clock.wait(Duration::ZERO));
+        }
         match self.clock.after_failure(&self.policy, error) {
             Some(delay) => {
                 self.record(&report, Ending::Failed(failed(error, Retry::SameModel)));

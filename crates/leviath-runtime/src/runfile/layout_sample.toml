@@ -5,6 +5,7 @@ read_paths = []
 tool_rescan = "at_spawn"
 transforms = []
 dependencies = []
+routing = { retry_attempts = 4, on_error = "error_edge" }
 
 [[stages]]
 name = "discover"
@@ -161,6 +162,7 @@ hide = []
 reset = []
 requires_children = false
 max_revisits = 6
+routing = { retry_attempts = 2, on_error = "fail" }
 transition_prompt = """
 You've shown the plan to the user and asked them to approve it, request
 revisions, or edit it directly.

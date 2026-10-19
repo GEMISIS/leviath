@@ -1192,6 +1192,7 @@ async fn dispatch_uses_the_configured_retry_schedule() {
     world.insert_resource(InferenceRetryTuning {
         max_attempts: 2,
         base_delay_ms: 5,
+        routing_attempts: crate::inference_bridge::DEFAULT_ROUTING_RETRY_ATTEMPTS,
     });
     let e = world
         .spawn((
@@ -1222,6 +1223,7 @@ async fn collect_waits_on_a_retried_trip_and_applies_the_answer() {
     world.insert_resource(InferenceRetryTuning {
         max_attempts: 3,
         base_delay_ms: 1,
+        routing_attempts: crate::inference_bridge::DEFAULT_ROUTING_RETRY_ATTEMPTS,
     });
     world.insert_resource(InferenceResults(rx));
     let e = world
@@ -10854,6 +10856,7 @@ fn retry_policy_for_takes_the_configured_schedule() {
         InferenceRetryTuning {
             max_attempts: 9,
             base_delay_ms: 250,
+            routing_attempts: crate::inference_bridge::DEFAULT_ROUTING_RETRY_ATTEMPTS,
         },
     );
     assert_eq!(policy.max_attempts, 9);
@@ -16237,15 +16240,152 @@ fn collect_choice_marks_error_on_failure() {
     })
     .unwrap();
 
+    world.entity_mut(e).insert(StageIoBuffer::default());
+
     run_collect_transition(&mut world);
 
-    assert_eq!(
-        world.get::<AgentState>(e).unwrap().status,
-        AgentStatus::Error {
-            message: "boom".to_string()
-        }
+    // The run fails with the routing error. The stage is not failed, so its
+    // error edge is not followed and its finished work is not redone.
+    let AgentStatus::Error { message } = world.get::<AgentState>(e).unwrap().status.clone() else {
+        panic!("the run failed");
+    };
+    assert!(
+        message.starts_with("the call that picks the stage after 'a' failed: boom."),
+        "{message}"
     );
+    assert!(message.contains("routing.on_error = \"error_edge\""));
     assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
+    assert!(world.get::<StageOutcome>(e).is_none());
+    assert!(world.get::<ResolveTransition>(e).is_none());
+    let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
+    assert_eq!(logs.len(), 1);
+    assert!(logs[0].1.starts_with("[routing] the call that picks"));
+}
+
+/// A routing failure to `outcome`'s agent, collected.
+fn collect_routing_failure(
+    world: &mut World,
+    tx: &mpsc::UnboundedSender<InferenceOutcome>,
+    e: Entity,
+) {
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        attempt_id: String::new(),
+        result: Err(leviath_providers::ProviderError::ApiError(
+            "HTTP 500 Internal Server Error".to_string(),
+        )),
+        pricing: None,
+        attempt: None,
+    })
+    .unwrap();
+    run_collect_transition(world);
+}
+
+/// The routing call is tried as often as the stage, then the graph, then the
+/// operator's `[limits] routing_retry_attempts` says, riding out transient
+/// failures, and the run fails once the tries are spent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_routing_call_is_tried_as_often_as_the_blueprint_or_the_operator_says() {
+    use crate::spec::graph::RoutingDef;
+    let tries = |n: u32| {
+        Some(RoutingDef {
+            retry_attempts: std::num::NonZeroU32::new(n),
+            on_error: None,
+        })
+    };
+    // (graph, stage, operator's attempts, answered)
+    let cases = [
+        (
+            None,
+            None,
+            crate::inference_bridge::DEFAULT_ROUTING_RETRY_ATTEMPTS,
+            true,
+        ),
+        (None, None, 2, false),
+        (tries(2), None, 3, false),
+        (tries(2), tries(3), 1, true),
+    ];
+    for (graph, stage, operator, answered) in cases {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        // Two transient failures, then an answer.
+        let flaky = Arc::new(crate::inference_call::tests::Flaky::failing(2));
+        world
+            .resource_mut::<Providers>()
+            .0
+            .register("cfg".to_string(), flaky.clone());
+        world.insert_resource(InferenceRetryTuning {
+            max_attempts: 9,
+            base_delay_ms: 1,
+            routing_attempts: operator,
+        });
+        let (ttx, trx) = mpsc::unbounded_channel();
+        world.resource_mut::<InferenceStage>().transition_outcomes = ttx;
+        world.insert_resource(TransitionResults(trx));
+        let mut bp = blueprint(vec![stage_named("a", None, false, None)]);
+        bp.routing = graph;
+        bp.stages[0].routing = stage;
+        let e = spawn_choosing_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(dispatch_transition_choice);
+        schedule.run(&mut world);
+        let mut schedule = Schedule::default();
+        schedule.add_systems(
+            (
+                crate::inference_call::fire_due_calls,
+                collect_transition_choice,
+            )
+                .chain(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while world.get::<AwaitingTransitionResponse>(e).is_some() {
+            assert!(std::time::Instant::now() < deadline, "the call never ended");
+            schedule.run(&mut world);
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let status = world.get::<AgentState>(e).unwrap().status.clone();
+        assert_eq!(status == AgentStatus::Active, answered, "{status:?}");
+        assert_eq!(flaky.calls(), if answered { 3 } else { 2 });
+    }
+}
+
+/// A blueprint can send a failed routing call down the stage's `error` edge
+/// instead, at the stage or for the whole graph; the stage's own setting wins.
+#[test]
+fn a_failed_routing_call_takes_the_error_edge_only_when_the_blueprint_asks() {
+    use crate::spec::graph::{OnRoutingError, RoutingDef};
+    let routing = |on_error| {
+        Some(RoutingDef {
+            retry_attempts: None,
+            on_error: Some(on_error),
+        })
+    };
+    // (graph, stage, takes the edge)
+    let cases = [
+        (None, routing(OnRoutingError::ErrorEdge), true),
+        (routing(OnRoutingError::ErrorEdge), None, true),
+        (
+            routing(OnRoutingError::ErrorEdge),
+            routing(OnRoutingError::Fail),
+            false,
+        ),
+    ];
+    for (graph, stage, takes_edge) in cases {
+        let (mut world, tx) = world_with_transition_results();
+        let mut bp = blueprint(vec![stage_named("a", None, false, None)]);
+        bp.routing = graph;
+        bp.stages[0].routing = stage;
+        let e = spawn_responding_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
+        collect_routing_failure(&mut world, &tx, e);
+
+        assert!(matches!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Error { .. }
+        ));
+        assert_eq!(world.get::<ResolveTransition>(e).is_some(), takes_edge);
+        assert_eq!(world.get::<StageOutcome>(e).is_some(), takes_edge);
+    }
 }
 
 #[test]

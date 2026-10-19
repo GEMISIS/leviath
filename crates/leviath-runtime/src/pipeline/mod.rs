@@ -74,7 +74,7 @@ mod spawn;
 pub(crate) use crate::test_graph::{TestRun, place_test_run, place_test_task};
 pub(crate) use spawn::DEFAULT_CONTEXT_WINDOW_TOKENS;
 pub use spawn::ResolvedStage;
-mod transition_choice;
+pub(crate) mod transition_choice;
 #[cfg(test)]
 pub(crate) use transition_choice::build_transition_prompt;
 #[cfg(test)]
@@ -266,10 +266,11 @@ pub struct Providers(pub ProviderRegistry);
 /// The operator's retry schedule for inference, from `[limits]`.
 ///
 /// A world resource rather than constants because the daemon serves it from
-/// `[limits] inference_retry_attempts` and `inference_retry_base_ms`. Absent
-/// means the built-in schedule, which is what these defaults are.
+/// `[limits] inference_retry_attempts`, `inference_retry_base_ms` and
+/// `routing_retry_attempts`. Absent means the built-in schedule, which is what
+/// these defaults are.
 ///
-/// Only the two ordinary-failure numbers are configurable. The capacity
+/// Only the ordinary-failure numbers are configurable. The capacity
 /// schedule and the total-backoff ceiling stay fixed (see
 /// [`crate::inference_bridge::RetryPolicy`]): they exist to bound a provider
 /// outage, and a bound an operator can raise without limit is not one.
@@ -282,6 +283,10 @@ pub struct InferenceRetryTuning {
     /// doubling per retry. See
     /// [`crate::inference_bridge::RetryPolicy::base_delay`].
     pub base_delay_ms: u64,
+    /// Total attempts, including the first, for the call that picks a stage's
+    /// next stage, when the blueprint does not set its own. See
+    /// [`crate::inference_bridge::DEFAULT_ROUTING_RETRY_ATTEMPTS`].
+    pub routing_attempts: u32,
 }
 
 impl Default for InferenceRetryTuning {
@@ -289,6 +294,7 @@ impl Default for InferenceRetryTuning {
         Self {
             max_attempts: crate::inference_bridge::DEFAULT_RETRY_ATTEMPTS,
             base_delay_ms: crate::inference_bridge::DEFAULT_RETRY_BASE_DELAY_MS,
+            routing_attempts: crate::inference_bridge::DEFAULT_ROUTING_RETRY_ATTEMPTS,
         }
     }
 }

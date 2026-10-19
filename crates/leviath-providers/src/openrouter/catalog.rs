@@ -89,6 +89,7 @@ pub(crate) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
                 .and_then(size),
             supports_temperature: takes("temperature"),
             supports_tools: takes("tools"),
+            supports_tool_choice: takes("tool_choice"),
             explicit_cache_control: Some(quotes_cache_write(entry)),
             pricing: parse_pricing(entry),
             released: entry.get("created").and_then(|v| v.as_i64()),
@@ -136,7 +137,7 @@ mod tests {
                 "completion": "0.000004",
                 "input_cache_write": "0.00000040625"
             },
-            "supported_parameters": ["max_tokens", "temperature", "tools"]
+            "supported_parameters": ["max_tokens", "temperature", "tools", "tool_choice"]
         });
         let (id, learned) = parse_entry(&entry).unwrap();
         assert_eq!(id, "qwen/qwen3.6-plus");
@@ -145,6 +146,7 @@ mod tests {
         assert_eq!(learned.max_output_tokens, Some(65_536));
         assert_eq!(learned.supports_temperature, Some(true));
         assert_eq!(learned.supports_tools, Some(true));
+        assert_eq!(learned.supports_tool_choice, Some(true));
         assert_eq!(learned.explicit_cache_control, Some(true));
         assert_eq!(learned.released, Some(1_775_133_557));
         assert_eq!(learned.retires, None);
@@ -165,6 +167,7 @@ mod tests {
         let (_, learned) = parse_entry(&entry).unwrap();
         assert_eq!(learned.supports_temperature, Some(false));
         assert_eq!(learned.supports_tools, Some(false));
+        assert_eq!(learned.supports_tool_choice, Some(false));
     }
 
     #[test]
@@ -173,6 +176,7 @@ mod tests {
         let (_, learned) = parse_entry(&entry).unwrap();
         assert_eq!(learned.supports_temperature, None);
         assert_eq!(learned.supports_tools, None);
+        assert_eq!(learned.supports_tool_choice, None);
         assert_eq!(learned.max_context_tokens, Some(32_000));
         assert_eq!(learned.max_output_tokens, None);
         assert_eq!(learned.display_name, None);

@@ -220,6 +220,94 @@ impl NudgeDef {
     }
 }
 
+/// How the call that picks a stage's next stage is retried, and what the run
+/// does when it still fails.
+///
+/// That call asks one short question after the stage's work is done. A
+/// failure there says nothing about the work, so by default the run stops
+/// with the routing error rather than redoing the stage down its `error`
+/// edge.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingDef {
+    /// Tries per routing call, the first one included. Unset takes the
+    /// operator's `[limits] routing_retry_attempts`.
+    #[serde(default)]
+    pub retry_attempts: Option<std::num::NonZeroU32>,
+    /// What happens once the tries are spent.
+    #[serde(default)]
+    pub on_error: Option<OnRoutingError>,
+}
+
+/// The serde of a graph's or a stage's `routing`: read and written in the
+/// readable forms (a blueprint, a spawn request, the API) and nothing at all
+/// in the run file's binary frames.
+///
+/// Leaving it out of the binary form keeps the run file's layout as it was,
+/// so every run file already on disk reads unchanged. The cost is that a run
+/// resumed from its file has no `routing` of its own and takes the operator's
+/// `routing_retry_attempts` and the default `on_error`, which is `"fail"`.
+pub(crate) mod routing_serde {
+    use super::RoutingDef;
+    use crate::spec::readable::{WriteWith, pick};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// Write `routing`, or nothing in a binary format.
+    pub(crate) fn serialize<S: Serializer>(
+        routing: &Option<RoutingDef>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let binary: WriteWith<Option<RoutingDef>, S> = |_, s| ().serialize(s);
+        let text: WriteWith<Option<RoutingDef>, S> = |routing, s| routing.serialize(s);
+        pick(s.is_human_readable(), binary, text)(routing, s)
+    }
+
+    /// Read `routing`, or nothing in a binary format.
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<RoutingDef>, D::Error> {
+        let binary: fn(D) -> Result<Option<RoutingDef>, D::Error> =
+            |d| <()>::deserialize(d).map(|()| None);
+        let text: fn(D) -> Result<Option<RoutingDef>, D::Error> = Option::<RoutingDef>::deserialize;
+        pick(d.is_human_readable(), binary, text)(d)
+    }
+}
+
+/// What a run does when the call that picks its next stage fails for good.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OnRoutingError {
+    /// The run fails with the routing error. The stage's work is kept.
+    #[default]
+    Fail,
+    /// The stage fails, so its `error` edge is followed when it has one.
+    ErrorEdge,
+}
+
+impl RoutingDef {
+    /// Tries per routing call for a stage, from the narrowest level that sets
+    /// it: the stage, then the graph, then `default` (the operator's).
+    pub fn attempts(graph: Option<&RoutingDef>, stage: Option<&RoutingDef>, default: u32) -> u32 {
+        [stage, graph]
+            .into_iter()
+            .flatten()
+            .find_map(|d| d.retry_attempts)
+            .map_or(default, std::num::NonZeroU32::get)
+    }
+
+    /// What a stage's failed routing call does, from the stage, then the
+    /// graph, then [`OnRoutingError::Fail`].
+    pub fn on_error(graph: Option<&RoutingDef>, stage: Option<&RoutingDef>) -> OnRoutingError {
+        [stage, graph]
+            .into_iter()
+            .flatten()
+            .find_map(|d| d.on_error)
+            .unwrap_or_default()
+    }
+}
+
 /// When repeated tool calls count as a loop.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]

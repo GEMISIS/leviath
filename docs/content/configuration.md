@@ -264,6 +264,7 @@ provider_circuit_cooldown_secs = 300   # how long before it is tried again
 # interaction_timeout_secs = 3600 # unset: a prompt waits for you until answered
 inference_retry_attempts  = 4    # tries per inference, the first one included
 inference_retry_base_ms   = 1000 # first retry wait for an ordinary blip; it doubles
+routing_retry_attempts    = 3    # tries for the "which stage next?" call
 max_tool_call_write_bytes = 2147483648   # 2 GiB; delete the line for no limit
 max_run_write_bytes       = 10737418240  # 10 GiB; delete the line for no limit
 
@@ -293,6 +294,7 @@ cerebras = 1                     # every model this provider serves, together
 | `interaction_timeout_secs` | unset | Bound how long a prompt waits for a person. Unset waits until answered. See below |
 | `inference_retry_attempts` | `4` | Tries per inference, the first included. See below |
 | `inference_retry_base_ms` | `1000` | First retry wait for an ordinary blip, doubling each retry. See below |
+| `routing_retry_attempts` | `3` | Tries for the call that picks the next stage. See below |
 | `max_tool_call_write_bytes` | unset | Most one tool call may write. See below |
 | `max_run_write_bytes` | unset | Most a whole run may write. See below |
 | `max_concurrent_inferences_by_model` | empty | Per-model overrides of the cap above. See below |
@@ -440,6 +442,13 @@ Raising `inference_retry_attempts` is therefore how a run rides out a longer out
 capacity failure about four minutes of waiting rather than about one and a half. Whatever you set,
 the retries of a single request sleep **at most five minutes in total**, and the request itself is
 still bounded by its stage's `request_timeout_secs`, so a run can never wait indefinitely.
+
+**`routing_retry_attempts`** is the same idea for the short call that asks the model which stage
+runs next, once a stage with several edges is done. It retries the same failures on the same
+schedules, three tries by default. When they are spent, the run fails with the routing error and
+keeps the stage's finished work. It does not go down the stage's `error` edge, because that would
+redo the work and usually fail the same way on the way back. A blueprint can change both: see
+[routing](/docs/blueprint-format#routing).
 
 A retry sends the same request again, and a request that reached the provider may already have
 been processed. So a timeout or a reply that stopped part-way can be billed twice: once for the

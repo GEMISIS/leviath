@@ -85,6 +85,10 @@ fn default_inference_retry_base_ms() -> u64 {
     leviath_runtime::DEFAULT_RETRY_BASE_DELAY_MS
 }
 
+fn default_routing_retry_attempts() -> u32 {
+    leviath_runtime::DEFAULT_ROUTING_RETRY_ATTEMPTS
+}
+
 /// Runtime resource limits with safe defaults baked in.
 ///
 /// Both fields default to a bounded value so a fresh install can't accidentally
@@ -338,6 +342,19 @@ pub struct LimitsConfig {
     #[serde(default = "default_inference_retry_base_ms")]
     pub inference_retry_base_ms: u64,
 
+    /// How many times the call that picks a stage's next stage is attempted,
+    /// the first try included, before the run gives up on it.
+    ///
+    /// The same transient failures as `inference_retry_attempts` are retried,
+    /// on the same schedule. Defaults to `3`, one try and two retries. When the
+    /// tries are spent the run fails with the routing error, unless the
+    /// blueprint sets `routing.on_error = "error_edge"`. A blueprint's
+    /// `routing.retry_attempts` overrides this for its own stages.
+    ///
+    /// Reloaded with `config.toml`; read when a routing call is dispatched.
+    #[serde(default = "default_routing_retry_attempts")]
+    pub routing_retry_attempts: u32,
+
     /// Most bytes one tool call may write to disk. Unset is unlimited.
     ///
     /// **Unset in code, set by `lev setup`.** How much an agent should write is
@@ -563,6 +580,7 @@ impl Default for LimitsConfig {
             interaction_timeout_secs: None,
             inference_retry_attempts: default_inference_retry_attempts(),
             inference_retry_base_ms: default_inference_retry_base_ms(),
+            routing_retry_attempts: default_routing_retry_attempts(),
             max_concurrent_inferences_by_model: BTreeMap::new(),
             max_concurrent_inferences_by_provider: BTreeMap::new(),
             // Deliberately `None` here and concrete in `lev setup`: the code

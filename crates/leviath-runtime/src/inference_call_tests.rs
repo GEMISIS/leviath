@@ -101,7 +101,7 @@ impl Flaky {
         }
     }
 
-    fn calls(&self) -> usize {
+    pub(crate) fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
@@ -208,12 +208,23 @@ fn lane_world(status: crate::components::AgentStatus) -> LaneWorld {
 impl LaneWorld {
     /// Start a call to `provider` on `lane`, as dispatch does.
     fn start(&mut self, provider: Arc<dyn Provider>, policy: RetryPolicy, lane: CallLane) {
+        self.start_with(provider, policy, lane, request());
+    }
+
+    /// [`Self::start`] with a request of the caller's.
+    fn start_with(
+        &mut self,
+        provider: Arc<dyn Provider>,
+        policy: RetryPolicy,
+        lane: CallLane,
+        request: InferenceRequest,
+    ) {
         let job = InferenceJob {
             jobs: None,
             entity: self.agent,
             refused: None,
             provider,
-            request: request(),
+            request,
             permit: self.pools.try_acquire("p", "m").expect("a free slot"),
             calibration: None,
             stream: false,
@@ -463,4 +474,154 @@ async fn a_failure_past_the_deadline_is_not_retried() {
         clock.after_failure(&policy, &ProviderError::RequestFailed("reset".into())),
         None
     );
+}
+
+/// Refuses any request that carries a `tool_choice` with `refusal`, and
+/// answers one that does not. Records each request's `(tool_choice?, tools)`.
+struct RefusesToolChoice {
+    refusal: fn() -> ProviderError,
+    seen: std::sync::Mutex<Vec<(bool, usize)>>,
+}
+
+impl RefusesToolChoice {
+    fn with(refusal: fn() -> ProviderError) -> Self {
+        Self {
+            refusal,
+            seen: Default::default(),
+        }
+    }
+
+    /// The error Meta answers a `tool_choice` of "none" with, as the
+    /// OpenAI-compatible providers report it.
+    fn meta() -> Self {
+        Self::with(|| {
+            ProviderError::ApiError(
+                r#"[bad-request] HTTP 400 Bad Request: {"error":{"message":"only `\"auto\"` is supported for `tool_choice`. `\"none\"`, `\"required\"`, and named function choices are not currently supported","param":"tool_choice"}}"#
+                    .into(),
+            )
+        })
+    }
+
+    fn seen(&self) -> Vec<(bool, usize)> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for RefusesToolChoice {
+    async fn infer(&self, r: &InferenceRequest) -> leviath_providers::Result<InferenceResponse> {
+        let choice = r.extra.get("tool_choice").is_some();
+        self.seen.lock().unwrap().push((choice, r.tools.len()));
+        match choice {
+            true => Err((self.refusal)()),
+            false => Ok(response("next")),
+        }
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        100_000
+    }
+    fn name(&self) -> &str {
+        "refuses-tool-choice"
+    }
+    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities::default()
+    }
+}
+
+/// A routing request with the stage's tools and `tool_choice: none`.
+fn routing_request(model: &str) -> InferenceRequest {
+    InferenceRequest {
+        model: model.to_string(),
+        tools: vec![leviath_core::Tool {
+            name: "read_file".to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }],
+        extra: serde_json::json!({ "tool_choice": "none" }),
+        ..request()
+    }
+}
+
+/// A routing call whose `tool_choice` the provider refuses is asked again at
+/// once with no tools, which answers. The refusal is remembered for the
+/// model, and the retry budget is not spent on it: one attempt allowed, two
+/// made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_tool_choice_is_asked_again_once_without_tools() {
+    let mut lane = lane_world(crate::components::AgentStatus::Active);
+    let provider = Arc::new(RefusesToolChoice::meta());
+    let model = "meta/muse-spark-call-test";
+    lane.start_with(
+        provider.clone(),
+        quick(1),
+        CallLane::Routing,
+        routing_request(model),
+    );
+
+    let (outcome, next) = lane.next(CallLane::Routing).await;
+    assert!(outcome.result.is_err());
+    assert!(matches!(next, Next::Waiting(_)), "asked again");
+    assert!(crate::pipeline::transition_choice::refused_tool_choice(
+        "refuses-tool-choice",
+        model
+    ));
+    lane.fire().await;
+    let (outcome, next) = lane.next(CallLane::Routing).await;
+    assert_eq!(next, Next::Done);
+    assert_eq!(outcome.result.expect("answered").content, "next");
+    assert_eq!(provider.seen(), vec![(true, 1), (false, 0)]);
+}
+
+/// Only the routing lane does that: a stage turn's own `tool_choice` is the
+/// blueprint's, and its tools are the turn's work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stage_turn_is_not_stripped_of_its_tools() {
+    let mut lane = lane_world(crate::components::AgentStatus::Active);
+    let provider = Arc::new(RefusesToolChoice::meta());
+    lane.start_with(
+        provider.clone(),
+        quick(3),
+        CallLane::Stage,
+        routing_request("stage-lane-model"),
+    );
+    let (outcome, next) = lane.next(CallLane::Stage).await;
+    assert_eq!(next, Next::Done);
+    assert!(outcome.result.is_err());
+    assert_eq!(provider.seen(), vec![(true, 1)]);
+}
+
+/// A 400 about something else is not retried, and neither is a failure of a
+/// routing request that carried no `tool_choice` to drop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_refused_tool_choice_on_a_request_that_carried_one_is_retried() {
+    let mut lane = lane_world(crate::components::AgentStatus::Active);
+    let provider = Arc::new(RefusesToolChoice::with(|| {
+        ProviderError::ApiError("[bad-request] HTTP 400 Bad Request: unknown model".into())
+    }));
+    lane.start_with(
+        provider.clone(),
+        quick(3),
+        CallLane::Routing,
+        routing_request("other-400-model"),
+    );
+    let (outcome, next) = lane.next(CallLane::Routing).await;
+    assert_eq!(next, Next::Done);
+    assert!(outcome.result.is_err());
+    assert_eq!(provider.seen(), vec![(true, 1)]);
+
+    let mut lane = lane_world(crate::components::AgentStatus::Active);
+    lane.start(
+        Arc::new(Flaky {
+            fail: 9,
+            calls: Default::default(),
+        }),
+        quick(1),
+        CallLane::Routing,
+    );
+    let (outcome, next) = lane.next(CallLane::Routing).await;
+    assert_eq!(next, Next::Done);
+    assert!(outcome.result.is_err());
 }

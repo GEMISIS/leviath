@@ -15,6 +15,17 @@ same list.
 
 ### Changed
 
+- A failed routing call (the "which stage next?" question asked once a stage
+  with several edges is done) now fails the run with an error naming the
+  routing call, and keeps the stage's finished work. It used to fail the stage
+  down its `error` edge, which redid the work and, when the provider refused
+  the question every time, looped until the stage's revisits ran out. The call
+  is tried `[limits] routing_retry_attempts` times first (default 3, the first
+  included), retrying transient failures on the usual schedules. A blueprint
+  sets `routing = { retry_attempts = N, on_error = "fail" | "error_edge" }`
+  under `[graph]` or on a stage; for the old behaviour, set
+  `routing = { on_error = "error_edge" }` under `[graph]`.
+
 - A command that needs the daemon replaces a running one only when it is
   strictly older: a lower version, or the same version from an earlier
   commit. A rebuild of the same commit, or a build made without git, is left
@@ -292,6 +303,16 @@ same list.
   not read them twice.
 
 ### Fixed
+
+- Multi-stage runs on Meta's Muse Spark (directly or as OpenRouter's
+  `meta/*`) no longer loop between a finished stage and its error recovery
+  until the revisit cap. The routing request sent `tool_choice: "none"`, which
+  Meta refuses with a 400 because it takes only `"auto"`. Routing requests to
+  Meta, to `meta/*` on OpenRouter, and to any OpenRouter model whose catalogue
+  entry does not list `tool_choice`, now go out with no tools instead. A
+  routing request whose `tool_choice` any provider refuses with a 400 is asked
+  again once without tools, and that provider and model skip the `tool_choice`
+  for the rest of the process.
 
 - Daemon builds compare versions the way semver does: `0.7.0-beta.1` is
   older than `0.7.0`, so a release replaces a beta daemon instead of

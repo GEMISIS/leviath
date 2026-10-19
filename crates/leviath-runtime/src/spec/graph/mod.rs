@@ -26,9 +26,9 @@ pub use edge::{
 pub use policy::{
     ArtifactDef, CompactionDef, ContentTransform, ContextTransformDef, DEFAULT_MAX_NUDGES,
     DEFAULT_NUDGE_TEXT, DependencyDef, FileTrackingDef, InstallDef, McpServerDef,
-    McpServerTemplate, McpTransport, MimeRowDef, MimeRows, Needs, NudgeDef, OutputDef,
-    RegionMappingDef, RepetitionDef, ResolvedNudge, SafeCommandsDef, SandboxDef, ScriptPermission,
-    ScriptPermissionsDef, TokenRule, ToolRescan,
+    McpServerTemplate, McpTransport, MimeRowDef, MimeRows, Needs, NudgeDef, OnRoutingError,
+    OutputDef, RegionMappingDef, RepetitionDef, ResolvedNudge, RoutingDef, SafeCommandsDef,
+    SandboxDef, ScriptPermission, ScriptPermissionsDef, TokenRule, ToolRescan,
 };
 pub use region::{
     ALWAYS_VISIBLE_REGIONS, Budget, Eviction, RegionDef, RegionKind, RegionLayoutDef,
@@ -100,6 +100,15 @@ pub struct RunGraph {
     /// The empty-response nudge.
     #[serde(default)]
     pub nudge: Option<NudgeDef>,
+    /// How the call that picks each stage's next stage is retried, and what a
+    /// failure does.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "policy::routing_serde"
+    )]
+    #[schemars(with = "Option<RoutingDef>")]
+    pub routing: Option<RoutingDef>,
     /// Loop detection.
     #[serde(default)]
     pub repetition: Option<RepetitionDef>,

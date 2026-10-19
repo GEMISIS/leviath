@@ -138,6 +138,7 @@ pub(crate) struct StageDef {
 impl From<StageDef> for graph::StageDef {
     fn from(s: StageDef) -> Self {
         Self {
+            routing: None,
             mode: s.mode.upgraded(&s.name),
             name: s.name,
             description: s.description,
@@ -209,6 +210,7 @@ pub(crate) struct RunGraph {
 impl From<RunGraph> for graph::RunGraph {
     fn from(g: RunGraph) -> Self {
         Self {
+            routing: None,
             title: g.title,
             description: g.description,
             entry: g.entry,

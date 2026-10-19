@@ -1793,6 +1793,21 @@
       },
       "type": "object"
     },
+    "OnRoutingError": {
+      "description": "What a run does when the call that picks its next stage fails for good.",
+      "oneOf": [
+        {
+          "const": "fail",
+          "description": "The run fails with the routing error. The stage's work is kept.",
+          "type": "string"
+        },
+        {
+          "const": "error_edge",
+          "description": "The stage fails, so its `error` edge is followed when it has one.",
+          "type": "string"
+        }
+      ]
+    },
     "OnUnavailable": {
       "description": "What to do when the configured sandbox runtime can't be established (e.g. no\ncontainer engine on `PATH`, or `namespace` requested on a non-Linux host).",
       "oneOf": [
@@ -2226,6 +2241,35 @@
       },
       "type": "object"
     },
+    "RoutingDef": {
+      "additionalProperties": false,
+      "description": "How the call that picks a stage's next stage is retried, and what the run\ndoes when it still fails.\n\nThat call asks one short question after the stage's work is done. A\nfailure there says nothing about the work, so by default the run stops\nwith the routing error rather than redoing the stage down its `error`\nedge.",
+      "properties": {
+        "on_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnRoutingError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What happens once the tries are spent."
+        },
+        "retry_attempts": {
+          "default": null,
+          "description": "Tries per routing call, the first one included. Unset takes the\noperator's `[limits] routing_retry_attempts`.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "RunGraph": {
       "additionalProperties": false,
       "description": "A whole run, written down.",
@@ -2376,6 +2420,17 @@
           ],
           "default": null,
           "description": "Loop detection."
+        },
+        "routing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoutingDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the call that picks each stage's next stage is retried, and what a\nfailure does."
         },
         "safe_commands": {
           "$ref": "#/$defs/SafeCommandsDef",
@@ -3096,6 +3151,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "routing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoutingDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the call that picks the next edge is retried, and what a failure\ndoes. `None` takes the graph's."
         },
         "sandbox": {
           "anyOf": [

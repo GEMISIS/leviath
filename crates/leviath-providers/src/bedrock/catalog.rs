@@ -523,6 +523,7 @@ pub(super) fn merge_listing(
         max_output_tokens: None,
         supports_temperature: None,
         supports_tools: None,
+        supports_tool_choice: None,
         explicit_cache_control: None,
         pricing: None,
         released: None,
