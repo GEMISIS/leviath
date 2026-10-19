@@ -1,5 +1,6 @@
-//! The `models`, `providers`, `tools` and `toolGroups` fields: the catalogue
-//! this machine can route a run to, whatever run asks.
+//! The `models`, `catalog`, `providers`, `tools` and `toolGroups` fields: the
+//! catalogue this machine can route a run to, whatever run asks, and the one
+//! this build knows about beyond it.
 
 use async_graphql::{Context, ID};
 
@@ -10,10 +11,12 @@ use super::super::error::IntoGraphql;
 use super::super::paging::order::{OrderDirection, Term};
 use super::super::scalars::Cursor;
 use super::super::types::catalog::{
-    BundledTool, Model, ModelFilter, ModelOrder, ModelOrderField, Provider, ProviderFilter,
-    ProviderOrder, ProviderOrderField, SkippedTool, Tool, ToolFilter, ToolGroup, ToolOrder,
-    ToolOrderField, ToolSkips, provider_id,
+    BundledTool, CatalogModel, CatalogModelFilter, CatalogModelOrder, CatalogModelOrderField,
+    Model, ModelFilter, ModelOrder, ModelOrderField, Provider, ProviderFilter, ProviderOrder,
+    ProviderOrderField, SkippedTool, Tool, ToolFilter, ToolGroup, ToolOrder, ToolOrderField,
+    ToolSkips, provider_id,
 };
+use super::super::types::machine::ProviderAuthKind;
 use super::listing::{Window, connection, terms};
 
 /// How many catalogue rows one page may carry.
@@ -86,6 +89,85 @@ async fn catalogue(ctx: &Context<'_>) -> Vec<Model> {
     };
     let (_, listing) = super::super::super::config::models_with(state, &query).await;
     listing.0.iter().map(Model::from).collect()
+}
+
+/// The order the compiled catalogue is read in when nothing says otherwise:
+/// by provider, then by model id within it.
+fn catalog_by_provider() -> Vec<Term<CatalogModelOrderField>> {
+    [
+        CatalogModelOrderField::ProviderName,
+        CatalogModelOrderField::ModelId,
+    ]
+    .into_iter()
+    .map(|field| Term {
+        field,
+        direction: OrderDirection::Asc,
+    })
+    .collect()
+}
+
+/// Every model this build knows about, on every provider it carries, with
+/// whether this machine has that provider set up.
+///
+/// Read from the compiled tables, so it dials nothing, and a provider nobody
+/// configured is asked nothing either.
+pub(crate) async fn catalog(
+    ctx: &Context<'_>,
+    filter: Option<CatalogModelFilter>,
+    order_by: Option<Vec<CatalogModelOrder>>,
+    first: i32,
+    after: Option<Cursor>,
+) -> async_graphql::Result<Connection<CatalogModel>> {
+    let config = ctx.data_unchecked::<AppState>().current_config().await;
+    connection(
+        compiled_catalogue(&config),
+        filter,
+        terms(order_by, CatalogModelOrder::term, catalog_by_provider),
+        |model: &CatalogModel| format!("{}/{}", model.provider_name, model.model_id),
+        Window {
+            first,
+            after,
+            cap: PAGE_CAP,
+            cap_name: "the catalog page cap",
+        },
+    )
+    .await
+}
+
+/// The compiled catalogue as `config` sees it.
+///
+/// A provider counts as configured when a run could route to it, which is the
+/// same test that puts its models in `models`. A row whose provider this build
+/// left out is dropped: nothing here could connect it.
+pub(crate) fn compiled_catalogue(config: &crate::config::Config) -> Vec<CatalogModel> {
+    let routed: std::collections::HashSet<String> =
+        crate::commands::run::session::provider_creds_from_config(config)
+            .into_iter()
+            .map(|creds| creds.name)
+            .collect();
+    let auth: std::collections::HashMap<&str, ProviderAuthKind> =
+        crate::commands::setup::catalog::offered()
+            .iter()
+            .map(|provider| (provider.id, auth_of(provider.credential)))
+            .collect();
+    leviath_providers::capabilities::builtin_catalog()
+        .iter()
+        .filter_map(|entry| {
+            auth.get(entry.provider)
+                .map(|auth| CatalogModel::of(entry, routed.contains(entry.provider), *auth))
+        })
+        .collect()
+}
+
+/// How a provider set up the way `lev setup` sets it up proves who this
+/// machine is.
+fn auth_of(credential: crate::commands::setup::catalog::Credential) -> ProviderAuthKind {
+    use crate::commands::setup::catalog::Credential;
+    match credential {
+        Credential::ApiKey => ProviderAuthKind::ApiKey,
+        Credential::Signin => ProviderAuthKind::SignIn,
+        Credential::BaseUrl | Credential::Endpoint => ProviderAuthKind::None,
+    }
 }
 
 /// The order the providers are read in when nothing says otherwise: by the

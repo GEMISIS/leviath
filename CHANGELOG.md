@@ -935,6 +935,13 @@ same list.
 - `InferenceResponse::content_is_reasoning` (`leviath-providers`): set when
   an OpenAI-shaped reply's text is the model's reasoning standing in for an
   empty answer, so a caller that needs one exact answer can refuse it.
+- GraphQL `catalog` lists every model this build knows about, on providers
+  this machine has not configured too. Each row carries `inputTypes`,
+  `outputTypes`, `isConfigured` and its provider's `auth` kind, so a client
+  can name the provider to connect for a model nothing here serves. It is
+  read from the tables built into the binary and asks no provider anything.
+  Announced as the `models.catalog` capability.
+- `lev models list --all` lists Codex's models beside the other providers'.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is

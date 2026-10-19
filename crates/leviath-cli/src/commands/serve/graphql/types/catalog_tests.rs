@@ -366,3 +366,36 @@ fn the_listing_inputs_round_trip() {
         "the direction is part of what a term is"
     );
 }
+
+/// A compiled catalogue row reaches the schema with its provider's standing,
+/// and with the mime types the runtime would use for the same model.
+#[tokio::test]
+async fn a_catalogue_row_carries_its_types_and_its_providers_standing() {
+    use super::super::machine::ProviderAuthKind;
+    use super::{CatalogModel, CatalogModelOrderField};
+
+    let entry = leviath_providers::capabilities::builtin_catalog()
+        .into_iter()
+        .find(|entry| entry.provider == "meshy" && entry.id == "rig")
+        .expect("Meshy names its rig operation");
+    let row = CatalogModel::of(&entry, false, ProviderAuthKind::ApiKey);
+    assert_eq!(row.model_id, "rig");
+    assert_eq!(row.provider_name, "meshy");
+    assert_eq!(row.display_name, entry.display_name);
+    assert_eq!(row.input_types, vec!["model/gltf-binary"]);
+    assert_eq!(row.output_types, vec!["model/gltf-binary"]);
+    assert_eq!(
+        row.max_context_tokens as usize,
+        entry.capabilities.max_context_tokens
+    );
+    assert_eq!(
+        row.max_output_tokens as usize,
+        entry.capabilities.max_output_tokens
+    );
+    assert_eq!(row.supports_tools, entry.capabilities.supports_tools);
+    assert!(!row.is_configured);
+    assert_eq!(row.auth, ProviderAuthKind::ApiKey);
+
+    exercise(std::slice::from_ref(&row)).await;
+    exercise_order(&row, CatalogModelOrderField::ALL);
+}

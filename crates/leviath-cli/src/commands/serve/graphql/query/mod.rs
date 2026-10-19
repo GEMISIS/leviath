@@ -32,8 +32,9 @@ use super::scalars::{Cursor, Timestamp};
 use super::script_ref::{ScriptKind, ScriptRef};
 use super::types::blueprint::{Blueprint, BlueprintFilter, BlueprintOrder};
 use super::types::catalog::{
-    BundledTool, Model, ModelFilter, ModelOrder, Provider, ProviderFilter, ProviderOrder, Tool,
-    ToolFilter, ToolGroup, ToolOrder, ToolSkips,
+    BundledTool, CatalogModel, CatalogModelFilter, CatalogModelOrder, Model, ModelFilter,
+    ModelOrder, Provider, ProviderFilter, ProviderOrder, Tool, ToolFilter, ToolGroup, ToolOrder,
+    ToolSkips,
 };
 use super::types::machine::{
     Config, Directory, DoctorReport, McpServer, McpServerFilter, McpServerOrder, MimeRow,
@@ -344,6 +345,36 @@ impl Query {
         #[graphql(desc = "The model's id: `model:<provider>/<modelId>`.")] id: ID,
     ) -> Option<Model> {
         catalog::model(ctx, id).await
+    }
+
+    /// Every model this build knows about, on every provider it carries,
+    /// whether or not this machine has that provider set up.
+    ///
+    /// Read from the tables compiled into the binary, so it asks no provider
+    /// anything. `isConfigured` says whether a run here can route to the
+    /// model now, and `auth` says what connecting its provider takes. A
+    /// configured provider may serve more than this: `models` is what it
+    /// actually serves.
+    #[graphql(complexity = "weight(first, child_complexity)")]
+    async fn catalog(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which models to list. Omitted means all of them.")] filter: Option<
+            CatalogModelFilter,
+        >,
+        #[graphql(
+            desc = "Sort keys, in priority order. Omitted means provider, then model id, \
+                    ascending."
+        )]
+        order_by: Option<Vec<CatalogModelOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<CatalogModel>> {
+        catalog::catalog(ctx, filter, order_by, first, after).await
     }
 
     /// The providers a person signs in to through a browser, signed in or not.

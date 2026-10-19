@@ -148,7 +148,8 @@ pub struct CatalogEntry {
 ///
 /// Ollama names none: it serves whatever has been pulled, and nothing compiled
 /// in could say what that is. OpenRouter names a sample of the hundreds it
-/// fronts. The three closed catalogues (Anthropic, OpenAI, Google) name their
+/// fronts. Codex names what its route serves, since it publishes no listing.
+/// The three closed catalogues (Anthropic, OpenAI, Google) name their
 /// current line-up, which is what the `unknown-model` lint checks a blueprint
 /// against when no listing has been read.
 pub fn builtin_catalog() -> Vec<CatalogEntry> {
@@ -227,7 +228,29 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
         crate::meta::CATALOG,
         crate::meta::table_capabilities,
     ))
+    .chain(codex_rows())
     .collect()
+}
+
+/// Codex's rows, which live with its client behind the sign-in feature,
+/// because which of them a ChatGPT plan reaches is decided there.
+#[cfg(feature = "openai-subscription")]
+fn codex_rows() -> Vec<CatalogEntry> {
+    crate::codex::catalog::CATALOG
+        .iter()
+        .map(|(id, display_name)| CatalogEntry {
+            provider: crate::codex::PROVIDER_NAME,
+            id,
+            display_name,
+            capabilities: crate::codex::catalog::capabilities(id),
+        })
+        .collect()
+}
+
+/// A build without the sign-in feature names no Codex models.
+#[cfg(not(feature = "openai-subscription"))]
+fn codex_rows() -> Vec<CatalogEntry> {
+    Vec::new()
 }
 
 /// Models that ignore the system prompt, so a request built for one folds its
@@ -659,6 +682,17 @@ mod catalog_tests {
             !catalog.iter().any(|e| e.provider == "ollama"),
             "nothing compiled in can say what has been pulled"
         );
+    }
+
+    /// Codex publishes no listing, so the compiled list is the only place a
+    /// client that has not signed in can learn what the route serves.
+    #[cfg(feature = "openai-subscription")]
+    #[test]
+    fn the_codex_route_names_what_it_serves() {
+        let catalog = builtin_catalog();
+        let codex: Vec<&CatalogEntry> = catalog.iter().filter(|e| e.provider == "codex").collect();
+        assert_eq!(codex.len(), crate::codex::catalog::CATALOG.len());
+        assert!(codex.iter().all(|e| !e.capabilities.supports_temperature));
     }
 }
 

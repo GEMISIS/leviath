@@ -141,7 +141,7 @@ shows up much later as missing data.
 
 | `first` cap | Listings |
 |---|---|
-| `500` | `models`, `providers`, `tools` |
+| `500` | `models`, `catalog`, `providers`, `tools` |
 | `200` | `runs`, `blueprints`, `scripts`, `mcpServers`, `mimeRows`, `yoloProfiles`, `updateJobs`, `openInteractions`, `heldInteractions`, and every listing on a run except the two below |
 | `1000` | `files` on a run, where a row is a name and a size |
 | `100` | `contextHistory` on a run, where a point carries a whole context window |
@@ -1592,6 +1592,30 @@ can ask every time it opens. `startUpdate` runs it, `updateJob(id:)` follows one
 `serverTime` is the daemon's clock in unix epoch seconds. Every duration a run reports is measured
 against it, so a client drawing its own clocks should draw them against this rather than the
 browser's.
+
+### Models nothing here serves yet
+
+`models` lists only what this machine can route to. `catalog` lists every model this build knows
+about, on every provider it carries, whether or not that provider is set up here:
+
+```graphql
+{
+  catalog(filter: { inputTypes: { has: "model/gltf-binary" } }, first: 50) {
+    results { providerName modelId displayName inputTypes outputTypes isConfigured auth }
+    total
+  }
+}
+```
+
+It is read from the tables built into the binary, so it asks no provider anything, configured or
+not. `isConfigured` says whether a run here can use the model now. When it is false, `auth` says
+what connecting its provider takes: `API_KEY`, `SIGN_IN` for a browser sign-in, or `NONE`.
+
+The rows are the models each provider is known to serve, with the mime types the runtime would use
+for them. A configured provider can serve more than its rows, or newer models, and `models` is the
+live answer for those. Ollama and custom gateways have no rows, because only a live listing can say
+what they serve. `inputTypes` holds patterns such as `image/*`, and `has` matches a pattern
+exactly, so ask for the pattern rather than for one concrete type under it.
 
 ## Live frames
 

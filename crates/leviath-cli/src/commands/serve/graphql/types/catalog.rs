@@ -17,6 +17,7 @@ use super::super::filter::{
     OrderField, Orderable, Parts, Term, Tri, object_confirm, object_test, sort_key,
 };
 use super::super::scalars::{Decimal, Timestamp};
+use super::machine::ProviderAuthKind;
 
 /// Where a model's token limits came from.
 #[mirror]
@@ -164,6 +165,70 @@ impl From<&super::super::super::types::ModelEntry> for Model {
             output_types: entry.output_types.clone(),
         }
     }
+}
+
+/// One model this build knows about, whether or not this machine can route to
+/// it yet.
+///
+/// Read from the tables compiled into the binary, so building the list asks no
+/// provider anything. A provider this machine has configured may serve more
+/// than this, or newer models: `models` is what it actually serves.
+#[mirror]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct CatalogModel {
+    /// The model id, as the provider names it.
+    #[filter(orderable)]
+    pub(crate) model_id: String,
+    /// The registry name of the provider that serves it, which is what a
+    /// blueprint writes and the left half of `provider/model`.
+    #[filter(orderable)]
+    pub(crate) provider_name: String,
+    /// The name to show.
+    pub(crate) display_name: String,
+    /// Mime type patterns it takes.
+    pub(crate) input_types: Vec<String>,
+    /// Mime type patterns it produces.
+    pub(crate) output_types: Vec<String>,
+    /// Context window in tokens, from this build's table.
+    pub(crate) max_context_tokens: i32,
+    /// The most one reply may be, in tokens, from this build's table.
+    pub(crate) max_output_tokens: i32,
+    /// Whether the model takes tool definitions.
+    pub(crate) supports_tools: bool,
+    /// Whether this machine has its provider set up, so a run can route to it.
+    /// False means connecting the provider is what it takes.
+    pub(crate) is_configured: bool,
+    /// How its provider proves who this machine is, which is what connecting
+    /// it takes: an API key, a browser sign-in, or neither.
+    pub(crate) auth: ProviderAuthKind,
+}
+
+impl CatalogModel {
+    /// One compiled catalogue row, with its provider's standing on this
+    /// machine.
+    pub(crate) fn of(
+        entry: &leviath_providers::capabilities::CatalogEntry,
+        is_configured: bool,
+        auth: ProviderAuthKind,
+    ) -> Self {
+        let mime = leviath_providers::mime_tables::builtin_mime(entry.provider, entry.id);
+        Self {
+            model_id: entry.id.to_string(),
+            provider_name: entry.provider.to_string(),
+            display_name: entry.display_name.to_string(),
+            input_types: mime.input,
+            output_types: mime.output,
+            max_context_tokens: tokens(entry.capabilities.max_context_tokens),
+            max_output_tokens: tokens(entry.capabilities.max_output_tokens),
+            supports_tools: entry.capabilities.supports_tools,
+            is_configured,
+            auth,
+        }
+    }
+}
+
+impl Paged for CatalogModel {
+    const NAME: &'static str = "CatalogModel";
 }
 
 /// One provider this machine can reach.
