@@ -291,21 +291,26 @@ impl Walk<'_> {
         let Some(path) = leviath_core::paths::expand_home(text, self.home) else {
             return false;
         };
+        // Asked of the word, before it is joined to a base: joining onto a
+        // Windows verbatim path folds the `..` away.
+        let climbs = path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir);
         self.bases.iter().all(|base| {
-            expansions(base, &path).is_some_and(|paths| paths.iter().all(|p| self.reads_inside(p)))
+            expansions(base, &path)
+                .is_some_and(|paths| paths.iter().all(|p| self.reads_inside(p, climbs)))
         })
     }
 
     /// Whether the shell, opening `path`, opens something `may_read` allows.
     ///
-    /// Two checks. The fence folds `..` lexically, but the shell resolves it
-    /// physically, so `link/../secret` with `link` pointing elsewhere opens a
-    /// file beside the link's target. A path with a `..` in it is therefore
-    /// also canonicalized as written and held to the workdir.
-    fn reads_inside(&self, path: &Path) -> bool {
-        let climbs = path
-            .components()
-            .any(|c| c == std::path::Component::ParentDir);
+    /// Two checks when the word `climbs` with a `..`. The fence folds `..`
+    /// lexically, but the shell resolves it physically, so `link/../secret`
+    /// with `link` pointing elsewhere opens a file beside the link's target.
+    /// Such a path is therefore also canonicalized as written and held to the
+    /// workdir. (On Windows the join has already folded it, so this is the
+    /// lexical answer again; a symlink there needs a privilege to make.)
+    fn reads_inside(&self, path: &Path, climbs: bool) -> bool {
         (self.may_read)(path) && (!climbs || leviath_core::resolves_within(path, self.workdir))
     }
 }
