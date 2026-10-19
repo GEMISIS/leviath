@@ -416,6 +416,7 @@ async fn every_mirrored_function_runs() {
     .await;
     exercise(&[ServerInfo {
         api_version: "v1".to_string(),
+        build: "deadbeef".to_string(),
         capabilities: vec!["providers.quota".to_string()],
         is_admin_enabled: true,
         limits: limits(),
@@ -447,6 +448,7 @@ async fn every_mirrored_function_runs() {
         mcp_server_count: 2,
         server: ServerInfo {
             api_version: "v1".to_string(),
+            build: "deadbeef".to_string(),
             capabilities: vec!["providers.quota".to_string()],
             is_admin_enabled: true,
             limits: limits(),

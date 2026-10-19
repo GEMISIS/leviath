@@ -62,14 +62,25 @@ pub enum VersionMode {
     Set(String),
     /// Verify the declarations already agree. Changes nothing; CI runs this.
     Check,
+    /// Verify that moving from this version to the declared one is big enough
+    /// for the changelog entries it ships. Changes nothing; CI runs this on a
+    /// PR that moves the version.
+    CheckBump(String),
 }
 
 impl VersionMode {
     /// Parse the arguments following `cargo xtask version`.
     pub fn parse(args: &[String]) -> Result<Self> {
         match args {
-            [] => anyhow::bail!("Usage: cargo xtask version <X.Y.Z> | cargo xtask version --check"),
+            [] => anyhow::bail!(
+                "Usage: cargo xtask version <X.Y.Z> | cargo xtask version --check \
+                 | cargo xtask version --check-bump <previous X.Y.Z>"
+            ),
             [flag] if flag == "--check" => Ok(Self::Check),
+            [flag, from] if flag == "--check-bump" => {
+                validate_semver(from)?;
+                Ok(Self::CheckBump(from.clone()))
+            }
             [candidate] => {
                 validate_semver(candidate)?;
                 Ok(Self::Set(candidate.clone()))
@@ -755,15 +766,26 @@ pub fn run_with(runner: &dyn Runner, mode: VersionMode) -> Result<()> {
             );
             Ok(())
         }
+        VersionMode::CheckBump(from) => {
+            let to = workspace_version(&manifest)?;
+            let changelog = std::fs::read_to_string(CHANGELOG)
+                .with_context(|| format!("reading {CHANGELOG}"))?;
+            crate::bump_level::ensure_bump_level(&changelog, &from, &to)?;
+            println!("{from} -> {to} is big enough for the changelog entries it ships.");
+            Ok(())
+        }
         VersionMode::Set(new) => {
             let previous = workspace_version(&manifest)?;
+            // Checked before anything is written, so a refused bump leaves the
+            // tree as it was.
+            let changelog = std::fs::read_to_string(CHANGELOG)
+                .with_context(|| format!("reading {CHANGELOG}"))?;
+            crate::bump_level::ensure_bump_level(&changelog, &previous, &new)?;
             std::fs::write(MANIFEST, set_versions(&manifest, &new)?)
                 .with_context(|| format!("writing {MANIFEST}"))?;
             std::fs::write(CLI_MANIFEST, set_pins(&cli_manifest, &new)?)
                 .with_context(|| format!("writing {CLI_MANIFEST}"))?;
 
-            let changelog = std::fs::read_to_string(CHANGELOG)
-                .with_context(|| format!("reading {CHANGELOG}"))?;
             std::fs::write(CHANGELOG, roll_changelog(&changelog, &new, &today())?)
                 .with_context(|| format!("writing {CHANGELOG}"))?;
 
@@ -923,6 +945,16 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&out).expect("the rewrite is still valid JSON");
         assert_eq!(parsed["info"]["version"], "9.9.9");
+    }
+
+    #[test]
+    fn parse_check_bump_takes_the_previous_version() {
+        assert_eq!(
+            VersionMode::parse(&args(&["--check-bump", "0.6.4"])).unwrap(),
+            VersionMode::CheckBump("0.6.4".to_owned())
+        );
+        assert!(VersionMode::parse(&args(&["--check-bump", "0.6"])).is_err());
+        assert!(VersionMode::parse(&args(&["--check-bump"])).is_err());
     }
 
     #[test]

@@ -344,6 +344,11 @@ pub(crate) struct RoutingConfig {
 pub(crate) struct ServerInfo {
     /// The API version this server speaks.
     pub(crate) api_version: String,
+    /// The build id of this server: the short git hash it was built from,
+    /// with `-dirty` when the tree had uncommitted changes. An unreleased
+    /// build reports the last release's `apiVersion`, so this is how a client
+    /// tells it apart from that release.
+    pub(crate) build: String,
     /// What this server can do. Check these rather than calling a route and
     /// reading a 404, which also means "no such run".
     pub(crate) capabilities: Vec<String>,

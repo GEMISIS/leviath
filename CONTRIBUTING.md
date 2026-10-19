@@ -242,7 +242,13 @@ has no way to make those requirements inherit the workspace version — so they
 are written out, and they have to agree. `cargo xtask version --check` is the CI
 job that fails a hand-edit which moved only some of them.
 
-That same check compares the `[profile.release]` block in
+The bump also has to be big enough for what it ships. While `## Unreleased`
+holds a `**Breaking` entry, `cargo xtask version` refuses a version that moves
+only the patch number. Below 1.0 the minor number has to move, so `0.6.4` goes to
+`0.7.0`, and from 1.0 on the major one does. CI runs the same check on any PR
+that moves the version, as `cargo xtask version --check-bump <previous>`.
+
+That same `--check` compares the `[profile.release]` block in
 `crates/leviath-cli/Cargo.toml` against the root's. The copy exists because
 `cargo install leviath-cli` builds with no workspace — that manifest is the root
 there — and without it cargo's defaults apply, silently dropping

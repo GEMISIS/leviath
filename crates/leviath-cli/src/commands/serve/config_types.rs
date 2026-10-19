@@ -104,6 +104,12 @@ pub(super) struct RedactedConfig {
     /// The API contract this server implements, matching `info.version` in
     /// `docs/schema/openapi.json`. A test holds the two together.
     pub(super) api_version: String,
+    /// The build id of this server: the short git hash it was built from,
+    /// with `-dirty` when the tree had uncommitted changes.
+    ///
+    /// The version names a release, and an unreleased build still reports
+    /// the last one. This tells such a build apart from the release itself.
+    pub(super) build: String,
     /// What this server can do, so a client can light up features in one call.
     ///
     /// Calling a route and reading a 404 as "unsupported" is fragile, because
@@ -158,21 +164,15 @@ pub(crate) struct ConfigErrorInfo {
 /// The API contract version: this build's own version, and nothing to keep in
 /// step by hand.
 ///
-/// It was a literal, held equal to the OpenAPI spec's `info.version` by a test
-/// and to the crates by nobody. The two agreed only because somebody had last
-/// set both to the same string, and `cargo xtask version` writes neither - so
-/// the first release after any bump would have served a version that named a
-/// build it was not, silently, with the suite green.
+/// A test holds it equal to the OpenAPI spec's `info.version`, so bumping the
+/// crates without regenerating `docs/schema/openapi.json` fails the suite.
+/// `leviath-cli` takes `version.workspace = true`, so this is the workspace
+/// version.
 ///
-/// Derived, the test that guarded the spec now guards the release: bump the
-/// crates without regenerating `docs/schema/openapi.json` and it fails, which
-/// is the reminder rather than the trap. `leviath-cli` takes
-/// `version.workspace = true`, so this is the workspace version.
-///
-/// The cost is that it moves on every release, including ones no client can
-/// observe. That is the right trade while `capabilities` is what a client
-/// actually feature-detects on: a version that is always honest about the
-/// build beats one that is occasionally wrong about the contract.
+/// It moves on every release, including ones no client can observe, and it
+/// stays put between releases while unreleased changes land. That is why
+/// `capabilities` is what a client feature-detects on, and why [`RedactedConfig`]
+/// carries the build id beside it.
 pub(super) const API_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Every capability a client may check for.
@@ -217,6 +217,14 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // `POST /api/runs/{id}/message`: a caller can send files with a run.
     "spawn.parts",
     "messages.parts",
+    // The typed spawn request: `POST /api/runs` and `POST /api/runs/validate`
+    // take a `SpawnRequest`, `GET /api/schema/spawn-request` serves its JSON
+    // Schema, and GraphQL `spawnRun` and `validateSpawn` take
+    // `SpawnRunRequest { source, inputs, attachments, model, output, workdir,
+    // launch, delivery }` and answer the `SpawnRunResult` union. Announced
+    // because that shape replaced an incompatible one, and a client has to
+    // know which one it is talking to before it sends either.
+    "spawn.request",
     // `GET /api/runs/{id}/blobs` and `.../blobs/{sha256}`: the stored parts
     // a run holds and their bytes, so a console can show an image the run
     // produced without reaching into the workdir.
