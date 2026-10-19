@@ -289,7 +289,9 @@ fn no_thinking_extra(provider: &str) -> serde_json::Value {
         "ollama" => serde_json::json!({ "think": false }),
         // OpenRouter's unified reasoning control, merged into the body at the
         // top level. This is the provider that hands reasoning back as the
-        // reply when the answer is empty, so it is the one that leaked.
+        // reply when the answer is empty, so it is the one that leaked. A
+        // model that always reasons refuses this; `dispatch_title` floors it
+        // to the least effort that model takes (see `reasoning_floor`).
         "openrouter" => serde_json::json!({ "reasoning": { "enabled": false } }),
         // Claude's own switch, which the Bedrock provider passes through in
         // `additionalModelRequestFields` for Claude and drops for every other
@@ -652,9 +654,12 @@ pub(crate) fn dispatch_title(
         // found a full pool does not cost the run a candidate.
         chain.0.remove(0);
 
+        let mut request = title_request(&meta.task, &provider_name, &model);
+        // A model that always reasons refuses to be told not to; it is asked
+        // for the least effort it takes instead.
+        crate::reasoning_floor::floor_reasoning(provider.as_ref(), &model, &mut request.extra);
         // The title call carries the task, so the zero-retention fields ride
         // it the way they ride a stage's own request.
-        let mut request = title_request(&meta.task, &provider_name, &model);
         providers
             .0
             .apply_retention_knobs(&provider_name, &mut request.extra);

@@ -524,6 +524,8 @@ pub(super) fn merge_listing(
         supports_temperature: None,
         supports_tools: None,
         supports_tool_choice: None,
+        reasoning_mandatory: None,
+        reasoning_efforts: None,
         explicit_cache_control: None,
         pricing: None,
         released: None,

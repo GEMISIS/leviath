@@ -223,10 +223,7 @@ pub(crate) fn without_tool_choice(request: &InferenceRequest) -> InferenceReques
 /// gateway's upstreams take; a refusal is caught and remembered by the call
 /// itself.
 fn gateway_takes_none(provider: &dyn Provider, model: &str) -> bool {
-    let listed = provider
-        .learned_models()
-        .and_then(|learned| learned.find_by_key(model).zip(Some(learned)))
-        .and_then(|(id, learned)| learned.get(&id).map(|entry| (id, entry)));
+    let listed = crate::reasoning_floor::listed_model(provider, model);
     let id = listed.as_ref().map_or(model, |(id, _)| id.as_str());
     let auto_only = AUTO_ONLY_TOOL_CHOICE.iter().any(|p| id.starts_with(p));
     !auto_only && listed.and_then(|(_, entry)| entry.supports_tool_choice) != Some(false)

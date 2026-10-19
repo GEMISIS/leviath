@@ -1268,6 +1268,11 @@ model    = "claude-haiku-5-5"
 provider and model. The section reloads with the rest of the file, so turning titles on or off
 reaches the next run with no daemon restart.
 
+A title needs no reasoning, so the call asks the model not to reason where the provider allows it.
+Some models always reason and refuse that request. On OpenRouter, such a model is asked for its
+lowest reasoning effort instead. Leviath learns this from OpenRouter's model list, or from the
+first refusal, which it retries once and remembers until the daemon restarts.
+
 ## `[webhook]`
 
 Delivery tuning for completion webhooks. Every field has a default, so the whole section can be

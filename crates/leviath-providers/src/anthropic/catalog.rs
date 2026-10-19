@@ -44,6 +44,8 @@ pub(super) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
             supports_temperature: None,
             supports_tools: Some(true),
             supports_tool_choice: None,
+            reasoning_mandatory: None,
+            reasoning_efforts: None,
             // The direct API always reads `cache_control` markers; the flag
             // exists for a gateway choosing per upstream.
             explicit_cache_control: None,
