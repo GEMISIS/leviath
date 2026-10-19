@@ -570,6 +570,9 @@ pub(crate) struct DaemonIdentity {
     /// The path of the executable it is running. Null from a daemon too old
     /// to report it.
     pub(crate) exe: Option<String>,
+    /// Its working directory, which is the data directory. Null from a daemon
+    /// too old to report it.
+    pub(crate) cwd: Option<String>,
     /// Which tool credentials it can see, by name. Names only: no value ever
     /// crosses the wire.
     ///
@@ -683,6 +686,7 @@ fn daemon_link_changed(
             build: identity.build,
             pid: i32::try_from(identity.pid).unwrap_or(i32::MAX),
             exe: identity.exe,
+            cwd: identity.cwd,
             tool_env: identity.tool_env,
         }),
         restarted,

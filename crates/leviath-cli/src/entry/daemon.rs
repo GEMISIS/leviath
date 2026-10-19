@@ -53,14 +53,11 @@ async fn bring_up_daemon(mode: DaemonMode, may_start: bool) -> anyhow::Result<()
             .await;
         poll_until(&mut || !is_daemon_running(&id)).await;
     }
+    // In the data directory and without the serve token, wherever this `lev`
+    // runs and whatever it was handed: `daemon::launch` says why.
     let exe = std::env::current_exe()?;
-    // The daemon is a background process: started from Explorer or a
-    // service it has no console to share, so a raw spawn would open one.
-    let mut cmd = leviath_sys::child_command(exe);
-    cmd.arg("daemon")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    let dir = crate::daemon::launch::daemon_dir(leviath_core::paths::data_dir())?;
+    let mut cmd = crate::daemon::launch::daemon_command(&exe, &dir);
     // Detached from this process, and on Windows out of its job too, so a host
     // that kills `lev serve`'s job on close leaves the daemon running.
     leviath_sys::process::spawn_detached(&mut cmd)?;

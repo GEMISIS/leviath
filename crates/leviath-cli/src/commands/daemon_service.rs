@@ -67,11 +67,19 @@ pub(crate) fn legacy_cleanup(config_home: &Path, uid: u32) -> Vec<(PathBuf, Supe
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const STDIO_FILE: &str = "daemon.stdio.log";
 
+/// The daemon's data root under `home`. The unit starts the daemon there, as
+/// every other way of starting it does (`daemon::launch`), and the stdio
+/// capture goes there too.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn data_root(home: &Path) -> PathBuf {
+    home.join(".leviath")
+}
+
 /// Where the supervisor's capture goes: in the daemon's data root under
 /// `home`, beside `daemon.log`, which is where `lev rage` looks for it.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn stdio_log(home: &Path) -> std::path::PathBuf {
-    home.join(".leviath").join(STDIO_FILE)
+    data_root(home).join(STDIO_FILE)
 }
 
 /// A rendered service definition and where it belongs.
@@ -146,6 +154,8 @@ fn launchd_plist(exe: &Path, home: &Path, log: &Path) -> String {
         <key>LEVIATH_HOME</key>
         <string>{home}</string>
     </dict>
+    <key>WorkingDirectory</key>
+    <string>{dir}</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -162,6 +172,7 @@ fn launchd_plist(exe: &Path, home: &Path, log: &Path) -> String {
         label = SERVICE_LABEL,
         exe = xml_escape(&display(exe)),
         home = xml_escape(&display(home)),
+        dir = xml_escape(&display(&data_root(home))),
         log = xml_escape(&display(log)),
     )
 }
@@ -257,6 +268,8 @@ pub(crate) fn unit_safe(label: &str, value: &Path) -> Result<String> {
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn systemd_unit(exe: &Path, home: &Path, log: &Path) -> Result<String> {
     let exe = unit_safe("executable", exe)?;
+    // Inside `home`, which the next line refuses if it holds a newline.
+    let dir = display(&data_root(home));
     let home = unit_safe("LEVIATH_HOME", home)?;
     let log = unit_safe("log", log)?;
     Ok(format!(
@@ -268,6 +281,7 @@ pub(crate) fn systemd_unit(exe: &Path, home: &Path, log: &Path) -> Result<String
          Type=simple\n\
          ExecStart={exe} daemon\n\
          Environment=LEVIATH_HOME={home}\n\
+         WorkingDirectory={dir}\n\
          Restart=always\n\
          RestartSec=10\n\
          StandardOutput=append:{log}\n\
@@ -774,17 +788,21 @@ mod tests {
             )
             .unwrap();
             assert!(
-                u.contents.contains("<string>/home/u</string>"),
-                "{}",
                 u.contents
-            );
-            assert!(
-                !u.contents.contains("<string>/home/u/.leviath</string>"),
+                    .contains("<key>LEVIATH_HOME</key>\n        <string>/home/u</string>"),
                 "{}",
                 u.contents
             );
             assert!(
                 u.contents.contains("/home/u/.leviath/daemon.stdio.log"),
+                "{}",
+                u.contents
+            );
+            // It starts in the data root, as every other way of starting it
+            // does, so where launchd runs it from never matters.
+            assert!(
+                u.contents
+                    .contains("<key>WorkingDirectory</key>\n    <string>/home/u/.leviath</string>"),
                 "{}",
                 u.contents
             );
@@ -928,6 +946,11 @@ mod tests {
             .unwrap();
             assert!(unit.contains("ExecStart=/usr/local/bin/lev daemon"));
             assert!(unit.contains("Environment=LEVIATH_HOME=/home/u\n"));
+            let dir = display(&Path::new("/home/u").join(".leviath"));
+            assert!(
+                unit.contains(&format!("WorkingDirectory={dir}\n")),
+                "{unit}"
+            );
             assert!(unit.contains("Restart=always"));
             assert!(unit.contains("/home/u/.leviath/daemon.stdio.log"));
         }

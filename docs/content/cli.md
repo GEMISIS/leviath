@@ -1191,6 +1191,7 @@ With no action, runs the [daemon](/docs/daemon) in the foreground.
   "running": true,
   "pid": 41230,
   "exe": "/Users/me/.cargo/bin/lev",
+  "cwd": "/Users/me/.leviath",
   "version": "0.6.4",
   "build": "87296d6e",
   "committed_at": 1791951523,
@@ -1205,6 +1206,7 @@ With no action, runs the [daemon](/docs/daemon) in the foreground.
 | Field | Meaning |
 |---|---|
 | `pid`, `exe` | The daemon's process and executable, as it reports them. `exe` is null from an older daemon |
+| `cwd` | The daemon's working directory, which is the data directory. Null from an older daemon |
 | `version`, `build`, `committed_at` | The daemon's build, from its build marker |
 | `cli` | The same for the `lev` that ran the command |
 | `standing` | `same`, `older`, `newer` or `unordered`, comparing the daemon with this `lev`. Null with no daemon |

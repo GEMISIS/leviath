@@ -267,6 +267,9 @@ pub struct Config {
     /// `PATH`, `EDITOR` and the like) are skipped. `LEVIATH_LOAD_DOTENV=1`
     /// turns it on for one command; `LEVIATH_SKIP_DOTENV` turns it off
     /// whatever this says.
+    ///
+    /// The daemon always runs in the data directory (`daemon::launch`), so
+    /// the `.env` it reads is the data directory's, wherever it was started.
     #[serde(default)]
     pub load_dotenv: bool,
 

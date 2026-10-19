@@ -58,7 +58,7 @@ load_dotenv          = false         # read ./.env from the directory lev runs i
 | `batch_tool_hint` | bool | `true` | Adds a short hint telling the model it may batch independent tool calls |
 | `shell_hint` | bool | `true` | Adds a short hint describing the shell a stage will get. Only says anything on Windows today |
 | `update_check` | bool | `true` | Lets this copy ask whether a newer release exists on its own channel, at most once an hour |
-| `load_dotenv` | bool | `false` | Reads a `.env` file from the directory `lev` runs in |
+| `load_dotenv` | bool | `false` | Reads a `.env` file from the directory `lev` runs in. The daemon reads the data directory's |
 
 All three of those cascade: a stage setting beats a blueprint setting, which beats this file.
 
@@ -619,8 +619,8 @@ defaults are in [Built-in tools](/docs/tools).
 
 ### What a shell command inherits
 
-The daemon holds provider keys, `LEVIATH_API_TOKEN`, and whatever the person who started it had
-exported. Handing all of that to every shell command means one `env` in tool output leaks the lot.
+The daemon holds provider keys and whatever else the person who started it had exported. Handing
+all of that to every shell command means one `env` in tool output leaks the lot.
 `shell_env` decides how much a `shell` tool call, a Rhai `shell()`, and a region's command seed
 inherit. All three answer to the same setting, so a script with `shell` is not a way around the
 `env_var` gate.
@@ -1325,6 +1325,12 @@ turn a later command into code execution: `BASH_ENV`, `GIT_SSH_COMMAND` and the 
 Leviath at a config file of its choosing, with its own MCP server commands and tool permissions.
 Export those yourself if you meant them.
 
+The daemon is the exception to "the directory you run `lev` in". It always runs in the data
+directory (`~/.leviath`), wherever it was started, so with `load_dotenv` on it reads
+`~/.leviath/.env` and never a project's. Runs execute in the daemon, so a key a run needs belongs
+in `~/.leviath/.env` or in the environment of whoever starts the daemon. Other commands still read
+`./.env` from where you run them.
+
 | Variable | Effect |
 |---|---|
 | `LEVIATH_HOME` | Redirects the whole data root. Every home-relative path honors it, so an isolated test or a second install works |
@@ -1332,7 +1338,7 @@ Export those yourself if you meant them.
 | `LEVIATH_LOAD_DOTENV` | `1` or `true` reads `./.env` for this command, as `load_dotenv = true` does |
 | `LEVIATH_SKIP_DOTENV` | Set to skip `.env` loading, whatever `load_dotenv` says |
 | `LEVIATH_RUNS_DIR` | Overrides where run directories are written |
-| `LEVIATH_API_TOKEN` | Bearer token for `lev serve`. The server refuses to start without one |
+| `LEVIATH_API_TOKEN` | Bearer token for `lev serve`, which refuses to start without one. Never passed to a daemon `lev` starts |
 | `LEVIATH_CONTROL_TIMEOUT_SECS` | Deadline for one control-socket request |
 | `LEVIATH_DASHBOARD_LOG_PATH` | Overrides the dashboard log file |
 | `LEVIATH_DUMP_REQUEST_DIR` | Writes each outgoing Anthropic request to this directory, for debugging |

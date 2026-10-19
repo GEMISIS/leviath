@@ -290,6 +290,7 @@ async fn a_daemon_that_introduced_itself_is_named() {
         pid: 4242,
         tool_env: Some(vec!["BRAVE_API_KEY".to_string()]),
         exe: Some("/opt/leviath/bin/lev".to_string()),
+        cwd: Some("/home/me/.leviath".to_string()),
     };
     let client = leviath_runtime::control_socket::DaemonIdentity {
         version: "0.6.2".to_string(),
@@ -297,6 +298,7 @@ async fn a_daemon_that_introduced_itself_is_named() {
         pid: 99,
         tool_env: None,
         exe: None,
+        cwd: None,
     };
     let status = DaemonStatus::of(
         LinkStatus {
@@ -313,6 +315,7 @@ async fn a_daemon_that_introduced_itself_is_named() {
     assert_eq!(status.build.as_deref(), Some("deadbeef"));
     assert_eq!(status.pid, Some(4242));
     assert_eq!(status.exe.as_deref(), Some("/opt/leviath/bin/lev"));
+    assert_eq!(status.cwd.as_deref(), Some("/home/me/.leviath"));
     // Names only, and a real answer either way: `None` is "no daemon said",
     // an empty list is "asked, sees none".
     assert_eq!(
@@ -446,6 +449,7 @@ async fn every_mirrored_function_runs() {
         build: Some("deadbeef".to_string()),
         pid: Some(4242),
         exe: Some("/opt/leviath/bin/lev".to_string()),
+        cwd: Some("/home/me/.leviath".to_string()),
         tool_env: Some(vec!["BRAVE_API_KEY".to_string()]),
         restarts: 2,
         restart_advised: None,

@@ -53,6 +53,22 @@ lev daemon stop
 lev daemon restart
 ```
 
+## Where it runs
+
+The daemon is shared and long-lived, so it should not depend on who happened to start it. Whoever
+starts it, it runs in the data directory (`~/.leviath`, or `$LEVIATH_HOME/.leviath`). That holds
+for a command starting it in the background, for `lev daemon` in the foreground, and for the
+service unit. A daemon started from inside a project therefore never reads that project's `.env`.
+On Windows it also never stops you deleting or renaming the project directory.
+
+`lev serve`'s bearer token, `LEVIATH_API_TOKEN`, is removed from the environment of any daemon a
+`lev` command starts. A sidecar that mints a fresh token per window does not leave one behind in a
+process that outlives it. The service unit never sets it. `lev daemon` run by hand in a shell that
+exports it still has it, so unset it there first.
+
+Everything else is inherited from whoever starts the daemon, including `PATH` and provider keys
+you have exported. `lev daemon status --json` reports the daemon's working directory as `cwd`.
+
 ## Where it logs
 
 The daemon writes its log to `~/.leviath/daemon.log`, however it was started. In the foreground
@@ -339,7 +355,8 @@ lev daemon uninstall
 ```
 
 The unit pins `LEVIATH_HOME` to the home that was current when you installed, since a supervised
-process inherits nothing from your shell. Move the home and run `lev daemon install` again.
+process inherits nothing from your shell. It also sets the working directory to the data
+directory. Move the home and run `lev daemon install` again.
 
 There is no Windows service integration yet: `lev daemon install` reports itself unsupported
 there. Use `lev daemon start`, and remember that `lev run` starts a daemon automatically anyway.

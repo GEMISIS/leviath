@@ -487,6 +487,14 @@ pub struct DaemonIdentity {
     /// daemon too old to report it, or when the process could not tell.
     #[serde(default)]
     pub exe: Option<String>,
+    /// The daemon's working directory.
+    ///
+    /// `lev daemon` moves to the data directory before it loads anything, so
+    /// where it was started from never changes what it reads. A client can
+    /// check that here. `None` from a daemon too old to report it, or when the
+    /// process could not tell.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 impl DaemonIdentity {
@@ -507,6 +515,9 @@ impl DaemonIdentity {
             pid: std::process::id(),
             tool_env: None,
             exe: std::env::current_exe()
+                .ok()
+                .map(|path| path.display().to_string()),
+            cwd: std::env::current_dir()
                 .ok()
                 .map(|path| path.display().to_string()),
         }
@@ -2565,6 +2576,8 @@ mod tests {
         assert_eq!(me.pid, std::process::id());
         let exe = std::env::current_exe().expect("a test knows its own executable");
         assert_eq!(me.exe, Some(exe.display().to_string()));
+        let cwd = std::env::current_dir().expect("a test knows its working directory");
+        assert_eq!(me.cwd, Some(cwd.display().to_string()));
         assert_eq!(
             me.to_string(),
             format!(
@@ -2622,6 +2635,8 @@ mod tests {
         assert_eq!(parsed.sees_tool_env("BRAVE_API_KEY"), None);
         assert_eq!(parsed.exe, None, "an older daemon reports no executable");
         assert!(json.contains(r#""exe":"#), "{json}");
+        assert_eq!(parsed.cwd, None, "an older daemon reports no directory");
+        assert!(json.contains(r#""cwd":"#), "{json}");
     }
 
     /// Which credentials a process can see says nothing about which code it

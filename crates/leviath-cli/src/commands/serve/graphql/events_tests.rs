@@ -454,6 +454,7 @@ fn every_machine_frame_converts_with_its_fields() {
                 assert!(daemon.pid > 0);
                 assert!(daemon.version.len() > 1);
                 assert!(daemon.exe.is_some(), "the daemon names its executable");
+                assert!(daemon.cwd.is_some(), "the daemon names its directory");
             }
             (
                 MachineEventType::ConfigHealthChanged,
