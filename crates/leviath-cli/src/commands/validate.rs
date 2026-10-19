@@ -507,12 +507,13 @@ fn compaction_lines(
     if named.is_empty() {
         return vec![format!("{label} each stage's own model, and its fallbacks")];
     }
-    let routes = match leviath_runtime::bind::host::compaction_routes(&named, defaults, registry) {
-        Ok(routes) => routes,
+    let plan = match leviath_runtime::bind::host::compaction_routes(&named, defaults, registry) {
+        Ok(plan) => plan,
         Err(reason) => return vec![format!("{label} cannot run here: {reason}")],
     };
     // A head with no registered provider means nothing here serves any of
     // the names, which leaves them as written and the regions unsummarized.
+    let routes = &plan.routes;
     let head = routes
         .first()
         .filter(|r| registry.has(r.provider_or_empty()));
@@ -528,6 +529,9 @@ fn compaction_lines(
     if !rest.is_empty() {
         lines.push(format!("  {:<16}   falls back to: {}", "", rest.join(", ")));
     }
+    // The same lines the run's log opens with: the user's settings moving the
+    // summary off the model the graph names, a fallback dropped for retention.
+    lines.extend(plan.notes.iter().map(|n| format!("  {:<16}   {n}", "")));
     lines
 }
 
@@ -1101,6 +1105,25 @@ system_prompt = "hi"
         assert!(
             nobody[0].contains("no configured provider serves nowhere/m"),
             "{nobody:#?}"
+        );
+    }
+
+    /// When `override_model` moves the summary off the graph's model, the
+    /// listing says so with the same line the run's log opens with.
+    #[test]
+    fn an_overridden_compaction_model_says_so() {
+        let def: leviath_runtime::spec::graph::CompactionDef =
+            toml::from_str(r#"model = { model = "claude-sonnet-5" }"#).unwrap();
+        let config = keyed_config("anthropic");
+        let defaults = leviath_runtime::pipeline::ModelDefaults {
+            override_model: Some("claude-opus-5".into()),
+            ..crate::daemon::spawn::model_defaults(&config)
+        };
+        let lines = compaction_lines(&def, &defaults, &registry_for(&config));
+        assert!(lines[0].ends_with(" anthropic/claude-opus-5"), "{lines:#?}");
+        assert!(
+            lines.iter().any(|l| l.contains("(override_model)")),
+            "{lines:#?}"
         );
     }
 

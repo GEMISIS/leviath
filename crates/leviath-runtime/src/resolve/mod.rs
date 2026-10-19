@@ -167,7 +167,12 @@ pub async fn resolve(
             }
         }
     }
-    defaults::resolve_compaction(&mut graph, &src.at, env, &mut issues);
+    notes.extend(defaults::resolve_compaction(
+        &mut graph,
+        &src.at,
+        env,
+        &mut issues,
+    ));
 
     let plans = stages::plan_all(
         &graph,

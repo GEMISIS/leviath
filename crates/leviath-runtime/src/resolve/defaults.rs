@@ -79,23 +79,26 @@ pub(super) fn fold(graph: &mut RunGraph, limits: &SpawnLimits) {
 
 /// Resolve the graph's compaction models into the routes its summaries take
 /// on this machine, as a stage's models are resolved, and write them back as
-/// the graph's `models`: every route names its provider from here on, so the
-/// run never decides it again. A model the machine refuses is an issue, on
-/// the same terms a stage's model is refused.
+/// the graph's `models`, so the run never decides them again. Every route
+/// names its provider, except names nothing here serves, which stay as
+/// written, unpinned, and are never called. A model the machine refuses is an issue, on
+/// the same terms a stage's model is refused. Answers the lines worth logging
+/// about how the routes were decided, which the run's log opens with.
 pub(super) fn resolve_compaction(
     graph: &mut RunGraph,
     at: &SpecPath,
     env: &dyn ResolveEnv,
     issues: &mut SpawnIssues,
-) {
+) -> Vec<String> {
     let Some(compaction) = graph.compaction.as_mut() else {
-        return;
+        return Vec::new();
     };
     let named = compaction.named();
     match env.compaction_routes(&named) {
-        Ok(routes) => {
+        Ok(plan) => {
             compaction.model = None;
-            compaction.models = routes;
+            compaction.models = plan.routes;
+            plan.notes
         }
         Err(message) => {
             let got: Vec<String> = named.iter().map(ToString::to_string).collect();
@@ -104,6 +107,7 @@ pub(super) fn resolve_compaction(
                     .got(got.join(", "))
                     .hint("name a compaction model this machine may send the run's context to"),
             );
+            Vec::new()
         }
     }
 }

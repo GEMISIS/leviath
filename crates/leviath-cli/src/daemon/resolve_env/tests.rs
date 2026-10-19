@@ -204,7 +204,10 @@ fn unattended_settings_answer_by_the_yolo_profile() {
 fn a_compaction_model_answers_to_the_operators_retention_rules() {
     let (env, _agents) = env();
     let named = [ModelRef::parse("mock/m").unwrap()];
-    assert_eq!(env.compaction_routes(&named), Ok(named.to_vec()));
+    assert_eq!(
+        env.compaction_routes(&named).map(|plan| plan.routes),
+        Ok(named.to_vec())
+    );
 }
 
 #[tokio::test]

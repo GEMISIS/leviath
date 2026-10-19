@@ -187,6 +187,27 @@ async fn a_profile_the_machine_lacks_is_refused_with_the_ones_it_has() {
     assert_eq!(issues.0[0].known, ["chatty", "quiet"]);
 }
 
+/// How the compaction routes were decided is the first thing the run's log
+/// says, beside the entry stage's own notes.
+#[tokio::test]
+async fn the_compaction_notes_open_the_runs_log() {
+    let mut g = graph();
+    g.compaction = Some(toml::from_str(r#"model = { model = "small" }"#).unwrap());
+    let env = Fake {
+        compaction_notes: vec!["[model] the compaction model starts on p/big".into()],
+        ..Fake::default()
+    };
+    let resolved = spawn(&raw(g), &env).await.unwrap();
+    let entry = &resolved.spec.stages[0];
+    assert!(
+        entry
+            .notes
+            .contains(&"[model] the compaction model starts on p/big".to_string()),
+        "{:?}",
+        entry.notes
+    );
+}
+
 #[tokio::test]
 async fn a_compaction_model_the_machine_will_not_send_context_to_is_refused() {
     let mut g = graph();

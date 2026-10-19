@@ -457,6 +457,9 @@ impl leviath_providers::Provider for Serves {
     fn serves_model(&self, model_key: &str) -> Option<String> {
         self.0.contains(&model_key).then(|| model_key.to_string())
     }
+    fn served_catalog(&self) -> Option<Vec<String>> {
+        Some(self.0.iter().map(ToString::to_string).collect())
+    }
 }
 
 #[tokio::test]
@@ -492,6 +495,7 @@ fn compaction_models_resolve_as_a_stages_do() {
         let named: Vec<ModelRef> = named.iter().map(|m| model(m)).collect();
         compaction_routes(&named, d, &r)
             .unwrap()
+            .routes
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
@@ -545,8 +549,47 @@ fn a_compaction_model_is_refused_only_where_it_would_keep_the_context() {
         "{refused}"
     );
     assert_eq!(
-        compaction_routes(&model("openai/gpt-5.5"), &ModelDefaults::default(), &r),
+        compaction_routes(&model("openai/gpt-5.5"), &ModelDefaults::default(), &r)
+            .map(|plan| plan.routes),
         Ok(model("openai/gpt-5.5"))
+    );
+}
+
+/// A compaction model its provider says it does not carry is refused, and
+/// the refusal points at the graph's compaction, not at a stage.
+#[test]
+fn a_compaction_model_its_provider_does_not_carry_is_refused() {
+    let mut r = ProviderRegistry::new();
+    r.register("cfg".to_string(), Arc::new(Serves(&["small"])));
+    let named = [ModelRef::parse("cfg/big").unwrap()];
+    let refused = compaction_routes(&named, &ModelDefaults::default(), &r).unwrap_err();
+    assert!(
+        refused.starts_with("the compaction model names cfg/big, which provider 'cfg'"),
+        "{refused}"
+    );
+    assert!(
+        refused.contains("the graph's `compaction.models`"),
+        "{refused}"
+    );
+}
+
+/// The resolver's notes come back with the routes, so the run's log says
+/// when the user's `override_model` moved the summary off the graph's model.
+#[test]
+fn a_compaction_moved_by_override_model_says_so() {
+    let mut r = ProviderRegistry::new();
+    r.register("cfg".to_string(), Arc::new(Serves(&["small", "big"])));
+    let defaults = ModelDefaults {
+        provider: "cfg".to_string(),
+        override_model: Some("big".into()),
+        ..ModelDefaults::default()
+    };
+    let plan = compaction_routes(&[ModelRef::parse("small").unwrap()], &defaults, &r).unwrap();
+    assert_eq!(
+        plan.notes,
+        [
+            "[model] the compaction model starts on cfg/big (override_model); blueprint asked for small"
+        ]
     );
 }
 

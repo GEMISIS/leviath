@@ -49,6 +49,7 @@ pub(super) struct Fake {
     pub(super) tool_code: BTreeMap<String, Vec<(CodeRef, Vec<u8>)>>,
     /// Why the compaction model is refused, when it is.
     pub(super) compaction_refusal: Option<String>,
+    pub(super) compaction_notes: Vec<String>,
     /// The yolo profiles this machine has, by name.
     pub(super) profiles: BTreeMap<String, AutoAnswers>,
     /// Why the graph's mime rows will not layer, when they will not.
@@ -84,6 +85,7 @@ impl Default for Fake {
             printed: BTreeSet::new(),
             tool_code: BTreeMap::new(),
             compaction_refusal: None,
+            compaction_notes: Vec::new(),
             profiles: [("safe".to_string(), AutoAnswers::default())].into(),
             mime_refusal: None,
             seeds_run: Mutex::new(Vec::new()),
@@ -204,10 +206,17 @@ impl ResolveEnv for Fake {
         })
     }
 
-    fn compaction_routes(&self, named: &[ModelRef]) -> Result<Vec<ModelRef>, String> {
-        self.compaction_refusal
-            .clone()
-            .map_or_else(|| Ok(named.to_vec()), Err)
+    fn compaction_routes(
+        &self,
+        named: &[ModelRef],
+    ) -> Result<crate::spec::env::CompactionPlan, String> {
+        match &self.compaction_refusal {
+            Some(refusal) => Err(refusal.clone()),
+            None => Ok(crate::spec::env::CompactionPlan {
+                routes: named.to_vec(),
+                notes: self.compaction_notes.clone(),
+            }),
+        }
     }
 
     fn auto_answers(&self, unattended: &Unattended) -> Result<AutoAnswers, Box<SpawnIssue>> {

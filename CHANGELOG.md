@@ -92,6 +92,11 @@ same list.
   summaries follow `default_provider` and `provider_order` rather than always
   going to Anthropic. To keep the old behaviour, copy the agent and set
   `compaction = { model = { provider = "anthropic", model = "claude-sonnet-5-5" } }`.
+- A compaction model pinned to a configured provider that says it does not
+  carry that model now refuses the run at spawn, with the provider's reason,
+  as a stage naming it would. Before, the run started and never summarized
+  anything. Name a model the provider carries (`lev models list --provider
+  <name>`), or leave the provider off so the user's preference picks one.
 - **Breaking.** Run files move to binary layout 5: a graph's compaction may
   name several models, or none. The daemon upgrades layout-4 files at start,
   the original kept as `legacy/run.v4.lvr`; the one compaction model of an
@@ -100,8 +105,9 @@ same list.
   `models` list, and `max_summary_tokens` and `temperature` default to 2000
   and 0.2. `CompactionConfig` holds the resolved `routes` in place of
   `provider` and `model`. `ResolveEnv::compaction_model` is
-  `compaction_routes`, which answers with the resolved routes, and
-  `bind::host::compaction_model` is `compaction_routes`.
+  `compaction_routes`, which answers with a `CompactionPlan` (the resolved
+  routes and the resolver's notes), and `bind::host::compaction_model` is
+  `compaction_routes`.
 - **Breaking.** A fan-out stage declares the workers it may hand items to.
   `[graph.stages.mode.fan_out]` names its `stage` and lists
   `workers_available`, each with a `name`, one of `stage`, `blueprint` or

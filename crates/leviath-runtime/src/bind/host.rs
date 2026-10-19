@@ -15,12 +15,12 @@ use leviath_core::JsonDoc;
 use leviath_providers::Tool;
 
 use crate::pipeline::{
-    ModelDefaults, ToolCatalog, ToolOwners, expand_connector_grants, filter_tools_for_stage,
-    resolve_stage_model, resolve_stage_route,
+    ModelDefaults, Resolving, ToolCatalog, ToolOwners, expand_connector_grants,
+    filter_tools_for_stage, resolve_candidates, resolve_stage_route,
 };
 use crate::provider_creds::ProviderCreds;
 use crate::providers::ProviderRegistry;
-use crate::spec::env::{CodeUse, ModelPlan};
+use crate::spec::env::{CodeUse, CompactionPlan, ModelPlan};
 use crate::spec::graph::{CodeRef, StageDef, ToolSelector};
 use crate::spec::inputs::PathKind;
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
@@ -109,7 +109,7 @@ pub fn choose_model(
         .map(ToString::to_string)
         .collect();
     let resolved = resolve_stage_route(
-        &format!("stage '{}'", stage.name),
+        Resolving::Stage(stage.name.as_str()),
         &stage.model,
         &needs,
         requested_text.as_deref(),
@@ -146,42 +146,45 @@ pub fn choose_model(
 /// resolved as a stage's models are, by the stage resolver itself. Each entry
 /// with no provider is an open route the operator's `provider_order` and
 /// `default_provider` answer; `override_model`, `fallback_model` and
-/// `fallback_order` take the places they take for a stage. The head comes
-/// first and the failover chain after it, every entry naming its provider.
+/// `fallback_order` take the places they take for a stage. When something
+/// here serves them, the routes are the head first and the failover chain
+/// after it, every entry naming its provider, with the resolver's notes: one
+/// when `override_model` or `fallback_model` moved the summary off the model
+/// the graph names, and one per fallback dropped for zero data retention.
 ///
 /// Nothing named is nothing to resolve: a summary then runs on each stage's
-/// own model. Names no registered provider can serve are kept as written,
-/// and a summary is never sent to them, so a blueprint whose summarizer this
-/// machine lacks still runs. A model the stage resolver would refuse (one its
-/// provider does not carry, one that keeps what it is sent under zero
-/// retention, an open route whose model list is unread) is refused here with
-/// the reason, as a stage's would be.
+/// own model. When no registered provider serves any of the names, they are
+/// kept as written, unpinned, and a summary is never sent to them, so a
+/// blueprint whose summarizer this machine lacks still runs. A model the stage
+/// resolver would refuse (one its provider does not carry, one that keeps what
+/// it is sent under zero retention, an open route whose model list is unread)
+/// is refused here with the reason, as a stage's would be.
 pub fn compaction_routes(
     named: &[ModelRef],
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
-) -> Result<Vec<ModelRef>, String> {
+) -> Result<CompactionPlan, String> {
     if named.is_empty() {
-        return Ok(Vec::new());
+        return Ok(CompactionPlan::default());
     }
     let choice = crate::spec::graph::ModelChoice {
         models: named.to_vec(),
         ..crate::spec::graph::ModelChoice::default()
     };
-    let (head, _) = resolve_stage_model(&choice, None, defaults, registry);
-    if !registry.has(&head) {
-        return Ok(named.to_vec());
+    let about = Resolving::Compaction;
+    let head = resolve_candidates(&choice, None, defaults, registry, &[], about).remove(0);
+    if !registry.has(&head.provider) {
+        return Ok(CompactionPlan {
+            routes: named.to_vec(),
+            notes: Vec::new(),
+        });
     }
-    let route = resolve_stage_route(
-        "the compaction model",
-        &choice,
-        &[],
-        None,
-        defaults,
-        registry,
-    )?;
+    let route = resolve_stage_route(about, &choice, &[], None, defaults, registry)?;
     let head = ModelRef::parse(&format!("{}/{}", route.provider_name, route.model)).ok();
-    Ok(head.into_iter().chain(route.fallbacks).collect())
+    Ok(CompactionPlan {
+        routes: head.into_iter().chain(route.fallbacks).collect(),
+        notes: route.notes,
+    })
 }
 
 /// A graph's mime rows as the registry layers them: the TOML table a

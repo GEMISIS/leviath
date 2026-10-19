@@ -324,7 +324,10 @@ impl ResolveEnv for DaemonEnv {
         }
     }
 
-    fn compaction_routes(&self, named: &[ModelRef]) -> Result<Vec<ModelRef>, String> {
+    fn compaction_routes(
+        &self,
+        named: &[ModelRef],
+    ) -> Result<leviath_runtime::spec::env::CompactionPlan, String> {
         host::compaction_routes(
             named,
             &crate::daemon::spawn::model_defaults(&self.config),
