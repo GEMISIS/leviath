@@ -328,17 +328,22 @@ fn expansions(base: &Path, word: &Path) -> Option<Vec<PathBuf>> {
         glob::Pattern::new(&c.as_os_str().to_string_lossy())
             .is_ok_and(|p| p.matches_with("..", dots))
     });
-    if climbs {
+    // `glob` cannot read a Windows verbatim path, which is what a canonical
+    // workdir is there, so the prefix comes off for the match and goes back
+    // on each result. A base that is not absolute without it (a verbatim UNC
+    // share) cannot be matched, so the word is outside.
+    let base_text = base.to_string_lossy();
+    let (prefix, rest) = split_verbatim(&base_text);
+    if climbs || !Path::new(rest).is_absolute() {
         return None;
     }
     // The base is a real directory whose name may hold a `[`; only the word
     // is a pattern.
-    let pattern = match word.is_absolute() {
-        true => word.to_string_lossy().to_string(),
-        false => format!(
-            "{}/{}",
-            glob::Pattern::escape(&base.to_string_lossy()),
-            word.to_string_lossy()
+    let (prefix, pattern) = match word.is_absolute() {
+        true => ("", word.to_string_lossy().to_string()),
+        false => (
+            prefix,
+            format!("{}/{}", glob::Pattern::escape(rest), word.to_string_lossy()),
         ),
     };
     let found: Vec<PathBuf> = glob::glob_with(&pattern, dots)
@@ -346,12 +351,22 @@ fn expansions(base: &Path, word: &Path) -> Option<Vec<PathBuf>> {
         .flatten()
         .flatten()
         .take(MAX_GLOB_MATCHES + 1)
+        .map(|p| PathBuf::from(format!("{prefix}{}", p.display())))
         .collect();
     match found.len() {
         0 => Some(vec![path.to_path_buf()]),
         n if n > MAX_GLOB_MATCHES => None,
         _ => Some(found),
     }
+}
+
+/// The prefix a Windows verbatim path carries.
+const VERBATIM: &str = r"\\?\";
+
+/// A path's Windows verbatim prefix and the rest of it, or no prefix.
+fn split_verbatim(path: &str) -> (&str, &str) {
+    path.strip_prefix(VERBATIM)
+        .map_or(("", path), |rest| (VERBATIM, rest))
 }
 
 /// The program's own name, without the directory it was named from.

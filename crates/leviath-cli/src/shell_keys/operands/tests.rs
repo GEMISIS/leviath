@@ -291,6 +291,16 @@ fn a_symlink_out_is_outside() {
     );
 }
 
+/// `glob` reads a Windows verbatim path without its prefix, and one that is
+/// not absolute without it cannot be matched, so the word is outside.
+#[test]
+fn a_verbatim_base_is_matched_without_its_prefix() {
+    assert_eq!(split_verbatim(r"\\?\C:\w"), (r"\\?\", r"C:\w"));
+    assert_eq!(split_verbatim("/w"), ("", "/w"));
+    let unc = Path::new(r"\\?\UNC\server\share");
+    assert_eq!(expansions(unc, Path::new("*.rs")), None);
+}
+
 #[test]
 fn candidates_read_flags_the_way_a_program_might() {
     fn all(t: &str) -> Vec<&str> {
