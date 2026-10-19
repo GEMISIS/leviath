@@ -46,12 +46,15 @@ fn remembered(provider: &str, model: &str) -> bool {
 }
 
 /// Whether a failed call was the provider refusing to turn reasoning off: a
-/// 400 whose body says reasoning is mandatory.
+/// 400 whose body carries the refusal's own phrase, "reasoning is
+/// mandatory". The two words apart are not enough: a 400 about a mandatory
+/// field of the reasoning object is a different mistake, and taking it for
+/// this one would remember a model as one that must reason.
 pub(crate) fn refuses_reasoning_off(error: &ProviderError) -> bool {
     let text = error.to_string().to_ascii_lowercase();
     let bad_request = error.failure_kind() == Some(leviath_providers::FailureKind::BadRequest)
         || text.contains("http 400");
-    bad_request && text.contains("reasoning") && text.contains("mandatory")
+    bad_request && text.contains("reasoning is mandatory")
 }
 
 /// What the provider's catalogue says about `model`, under the id it lists

@@ -163,6 +163,16 @@ fn mandatory_refusal() -> ProviderError {
     )
 }
 
+/// A 400 whose body has "reasoning" and "mandatory" in it but is about
+/// something else.
+fn missing_field() -> ProviderError {
+    ProviderError::labelled(
+        FailureKind::BadRequest,
+        "HTTP 400",
+        "Invalid value for reasoning: max_tokens mandatory field missing",
+    )
+}
+
 #[test]
 fn a_refusal_of_no_reasoning_is_a_400_that_says_it_is_mandatory() {
     let spark = mandatory_refusal();
@@ -175,6 +185,8 @@ fn a_refusal_of_no_reasoning_is_a_400_that_says_it_is_mandatory() {
     // else, and a server error that says the same words.
     let budget = ProviderError::ApiError("HTTP 400: reasoning budget too large".into());
     assert!(!refuses_reasoning_off(&budget));
+    // Both words, but not the refusal: a missing field of the reasoning object.
+    assert!(!refuses_reasoning_off(&missing_field()));
     let other = ProviderError::labelled(FailureKind::BadRequest, "HTTP 400", "bad model");
     assert!(!refuses_reasoning_off(&other));
     let server = ProviderError::ApiError("HTTP 500: reasoning is mandatory".into());
@@ -221,6 +233,9 @@ fn any_other_failure_or_request_is_not_asked_again() {
     );
     let other = ProviderError::ApiError("HTTP 400: bad model".into());
     assert!(after_refusal(&provider, &off, &other).is_none());
+    // A 400 that names reasoning and a mandatory field is not the refusal
+    // either: no second trip, and the model is not remembered.
+    assert!(after_refusal(&provider, &off, &missing_field()).is_none());
     // Already floored: nothing left to take back.
     let low = request("acme/not-refused", effort("low"));
     assert!(after_refusal(&provider, &low, &mandatory_refusal()).is_none());
