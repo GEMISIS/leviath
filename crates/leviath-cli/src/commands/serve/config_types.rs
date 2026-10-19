@@ -482,6 +482,16 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // console watching one run of five thousand should not be handed the
     // fleet's frames to sort through.
     "graphql.subscriptions",
+    // `since` and `serverInstance` on `runEvents` and `machineEvents`, and
+    // `seq` and `serverInstance` on `Spawned` and the `POST /api/runs`
+    // answer. Announced because a client without it can only re-read every
+    // run it shows after a reconnect, and one that sent `since` to an older
+    // server would be refused the whole subscription.
+    "graphql.subscriptions.replay",
+    // Server pings, a pong deadline and a send deadline on `/ws/graphql`.
+    // Announced because a browser cannot ping from JavaScript, so a client
+    // that knows the server pings can stop sending protocol pings of its own.
+    "graphql.subscriptions.keepalive",
     // `Run.executions`: what a run tried, read from its journal, with each
     // attempt's outcome and its call typed by its tool. Announced because a
     // console cannot infer it from anything else it can see, and the tab it

@@ -592,8 +592,13 @@ curl -X POST http://localhost:3000/api/runs \
 A run that starts answers `201` with its id:
 
 ```json
-{"run_id": "coder-1790848889-ecc01e84ab94", "warnings": []}
+{"run_id": "coder-1790848889-ecc01e84ab94", "warnings": [], "seq": 4182, "server_instance": "9f3c2a71d04be6a8"}
 ```
+
+`seq` is the event stream's number just before the run started, and `server_instance` is the
+server process that numbered it. Every frame of the new run is numbered above `seq`. A GraphQL
+subscription opened with `since: seq` and the run's id gets the run from its first frame, even
+when that frame went out before you subscribed. See [resuming a stream](/docs/graphql#resuming-a-stream).
 
 `warnings` lists what may keep the run from ever finishing: stages it can reach and never leave,
 each an issue with the code `may_never_finish`. The run started anyway. Show these to whoever
@@ -2208,6 +2213,8 @@ than that feature, not broken.
 | `providers.quota` | `?quota=true` on `GET /api/providers`, and the `quota` object it adds. See [subscription usage](#subscription-usage) |
 | `graphql` | `POST /graphql`, the [GraphQL API](/docs/graphql) beside these routes |
 | `graphql.subscriptions` | `GET /ws/graphql`, the live frames with server-side filtering |
+| `graphql.subscriptions.replay` | `since` and `serverInstance` on `runEvents` and `machineEvents`, and `seq` on a spawn's answer |
+| `graphql.subscriptions.keepalive` | Server pings and send deadlines on `/ws/graphql`, the same as `/ws` |
 | `graphql.executions` | `RunOutput.executions`: what a run tried, with each call typed |
 | `graphql.interactions` | `RunOutput.interactions`: every question a run put to a person, with the settlement typed |
 | `graphql.inferences` | `RunOutput.inferences`: every trip a run made to a provider, retries and failovers included |
@@ -2231,6 +2238,12 @@ be an OpenAI-compatible endpoint rather than a script.
 
 `update.apply` and `scripts.write` say what this build serves, not what *this* daemon mounts. That
 is `--allow-admin`, which you find out by calling one of the routes and reading the status.
+
+`graphql.subscriptions.replay` also covers `seq` and `server_instance` on the `POST /api/runs`
+answer. Send `since` only where it is announced: an older server refuses the whole subscription
+over an argument it does not know. Where `graphql.subscriptions.keepalive` is announced, the server
+pings every 20 seconds and closes a peer that has not answered for 60, so a client need not send
+`graphql-transport-ws` pings of its own.
 
 `interaction.feedback` also covers the "Deny with feedback" option on a tool approval. An older
 daemon drops the field without a word, so offer the box only where this is announced.

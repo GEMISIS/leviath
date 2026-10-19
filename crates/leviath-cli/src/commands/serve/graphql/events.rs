@@ -591,8 +591,10 @@ pub(crate) struct DaemonIdentity {
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SubscriptionOpenedEvent {
     /// The number the last frame before this subscription carried, or zero on
-    /// a server that has sent none. Every frame on this subscription has a
-    /// number above it, though not every number above it arrives here.
+    /// a server that has sent none. A subscription resumed with `since` on
+    /// this server carries that number instead. Every frame on this
+    /// subscription has a number above it, though not every number above it
+    /// arrives here.
     pub(crate) seq: BigInt,
     /// When the subscription opened, in unix seconds.
     pub(crate) at: Timestamp,

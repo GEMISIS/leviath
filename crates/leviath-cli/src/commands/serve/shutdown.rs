@@ -43,11 +43,6 @@ impl Shutdown {
         self.requested.cancelled().await
     }
 
-    /// Whether [`Shutdown::begin`] has been called.
-    pub(super) fn is_requested(&self) -> bool {
-        self.requested.is_cancelled()
-    }
-
     /// `socket` as a connection the server waits for before it exits, so a
     /// close frame it is sending is not cut off by the process ending.
     pub(super) fn track<F: Future>(

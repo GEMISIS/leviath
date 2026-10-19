@@ -177,7 +177,7 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
         update_check: Default::default(),
         update_jobs: Default::default(),
         config: crate::commands::serve::testutil::fixed_config(Config::default()),
-        event_tx,
+        event_tx: event_tx.into(),
         control: control.clone(),
         mcp: super::mcp::McpAdmin::default(),
         providers: super::providers::ProviderAdmin::default(),

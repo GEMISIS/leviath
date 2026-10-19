@@ -3,39 +3,13 @@
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path as AxumPath, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
+use futures_util::StreamExt;
 use tokio::sync::broadcast;
 
 use super::events::{ServerEvent, Stamped};
+use super::keepalive::{Heartbeat, WS_MAX_WRITE_BUFFER, WS_TIMING, WsTiming, send_within};
 use super::shutdown::{Shutdown, going_away};
 use super::types::*;
-
-/// How often the server pings an idle-or-not connection. Browsers answer pings
-/// automatically, so a live client never trips the deadline below.
-const WS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
-
-/// How long the oldest unanswered ping may stay unanswered before the peer is
-/// declared dead.
-///
-/// Deliberately a separate knob from [`WS_PING_INTERVAL`] rather than "gone by
-/// the next ping": the cadence answers "how often do we check", the deadline
-/// answers "how long do we wait", and conflating them meant a single dropped
-/// pong - one lost packet, one paused tab that resumed a moment late -
-/// disconnected an otherwise healthy client. At three times the cadence a peer
-/// gets three chances to answer before it is dropped.
-const WS_PONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// How long one outbound frame may take to send+flush before the peer is
-/// declared dead. A peer that stopped reading without closing (a backgrounded
-/// tab, a sleeping laptop, a NAT that dropped the mapping) leaves `send()`
-/// pending forever otherwise - the task then never polls `recv()` either, so
-/// it holds its broadcast receiver and ~256 KB of frame buffers until TCP
-/// keepalive fires hours later.
-const WS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Cap tungstenite's outbound frame buffering per connection. Without it a
-/// wedged peer's connection buffers frames without bound while waiting for
-/// the send timeout to notice.
-const WS_MAX_WRITE_BUFFER: usize = 256 * 1024;
 
 /// The `events_dropped` frame: this subscriber fell further behind than the
 /// bus holds, and the oldest `count` events went before it read them.
@@ -99,21 +73,6 @@ fn link_greeting(state: &AppState) -> Option<ServerEvent> {
     }
 }
 
-/// The ping cadence, pong deadline and send deadline of one connection.
-#[derive(Clone, Copy)]
-struct WsTiming {
-    ping_every: std::time::Duration,
-    pong_timeout: std::time::Duration,
-    send_timeout: std::time::Duration,
-}
-
-/// What every real connection runs with.
-const WS_TIMING: WsTiming = WsTiming {
-    ping_every: WS_PING_INTERVAL,
-    pong_timeout: WS_PONG_TIMEOUT,
-    send_timeout: WS_SEND_TIMEOUT,
-};
-
 /// Relay one connection, as a connection the server waits for on its way out.
 async fn handle_ws(
     socket: WebSocket,
@@ -147,41 +106,30 @@ async fn handle_ws(
 /// (`socket.recv()` - the only place Close frames and pongs are seen) could be
 /// starved indefinitely.
 async fn handle_ws_with(
-    mut socket: WebSocket,
+    socket: WebSocket,
     mut rx: broadcast::Receiver<Stamped>,
     filter_run_id: Option<String>,
     timing: WsTiming,
     greeting: Option<ServerEvent>,
     shutdown: Shutdown,
 ) {
-    let WsTiming {
-        ping_every,
-        pong_timeout,
-        send_timeout,
-    } = timing;
+    let send_timeout = timing.send_timeout;
+    let (mut sink, mut stream) = socket.split();
     // Something worth saying about the daemon before any run event: said
     // first. A peer that cannot take even that is a dead peer, and the ping
     // cadence below catches it the same as any other; nothing to do here.
     if let Some(greeting) = greeting {
         let json =
             serde_json::to_string(&greeting).expect("ServerEvent serialization must not fail");
-        let _ = send_within(&mut socket, send_timeout, Message::Text(json.into())).await;
+        let _ = send_within(&mut sink, send_timeout, Message::Text(json.into())).await;
     }
-    // First ping only after a full interval - a fresh connection is known
-    // live, and pinging in the handshake's shadow confuses simple clients.
-    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + ping_every, ping_every);
-    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // When the oldest still-unanswered ping went out, or `None` when every
-    // ping so far has been answered. A pong clears it; the deadline is
-    // measured from it, so answering late still costs nothing as long as it
-    // arrives inside `pong_timeout`.
-    let mut unanswered_since: Option<tokio::time::Instant> = None;
+    let mut heartbeat = Heartbeat::new(timing);
     loop {
         tokio::select! {
-            msg = socket.recv() => {
+            msg = stream.next() => {
                 match msg {
                     Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(Message::Pong(_))) => unanswered_since = None,
+                    Some(Ok(Message::Pong(_))) => heartbeat.answered(),
                     Some(Err(_)) => break,
                     _ => {} // Ignore other client messages
                 }
@@ -209,7 +157,7 @@ async fn handle_ws_with(
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
-                if !send_within(&mut socket, send_timeout, Message::Text(json.into())).await {
+                if !send_within(&mut sink, send_timeout, Message::Text(json.into())).await {
                     break; // dead or wedged peer either way
                 }
             }
@@ -217,40 +165,16 @@ async fn handle_ws_with(
                 // Said once and not waited on: the client's own close reply
                 // changes nothing, and a peer that cannot take the frame is
                 // gone either way.
-                let _ = send_within(&mut socket, send_timeout, going_away()).await;
+                let _ = send_within(&mut sink, send_timeout, going_away()).await;
                 break;
             }
-            _ = ping.tick() => {
-                // A ping left unanswered past the deadline, and a ping that
-                // cannot be sent, both mean the peer is gone without a Close
-                // (sleep, kill, dropped NAT mapping). Anything short of the
-                // deadline just gets another ping: a peer that missed one and
-                // answers the next is a live peer.
-                let overdue = unanswered_since
-                    .is_some_and(|since| since.elapsed() >= pong_timeout);
-                if overdue
-                    || !send_within(
-                        &mut socket,
-                        send_timeout,
-                        Message::Ping(Vec::new().into()),
-                    )
-                    .await
-                {
+            _ = heartbeat.due() => {
+                if !heartbeat.ping(&mut sink).await {
                     break;
                 }
-                unanswered_since.get_or_insert_with(tokio::time::Instant::now);
             }
         }
     }
-}
-
-/// Send one frame, bounded by `timeout`. `false` means the peer is dead or
-/// wedged (the send errored, or its flush never completed in time).
-async fn send_within(socket: &mut WebSocket, timeout: std::time::Duration, msg: Message) -> bool {
-    matches!(
-        tokio::time::timeout(timeout, socket.send(msg)).await,
-        Ok(Ok(()))
-    )
 }
 
 #[cfg(test)]
@@ -276,7 +200,7 @@ mod tests {
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
-            event_tx: tx,
+            event_tx: tx.into(),
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
@@ -784,7 +708,7 @@ mod tests {
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
-            event_tx: tx,
+            event_tx: tx.into(),
             control: daemon.client.clone(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
@@ -949,6 +873,7 @@ mod tests {
         // error on the server-side subscriber, exercising that branch of
         // `handle_ws` without needing to fabricate the error directly.
         let (tx, _) = broadcast::channel::<Stamped>(2);
+        let tx = crate::commands::serve::events::EventBus::from(tx);
         let state = AppState {
             shutdown: Default::default(),
             caches: Default::default(),
@@ -1098,7 +1023,7 @@ mod tests {
             update_check: Default::default(),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(Config::default()),
-            event_tx: tx.clone(),
+            event_tx: tx.clone().into(),
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
@@ -1394,6 +1319,7 @@ mod tests {
     #[test]
     fn broadcast_channel_creation() {
         let (tx, _rx) = broadcast::channel::<Stamped>(16);
+        let tx = crate::commands::serve::events::EventBus::from(tx);
         let ev = ServerEvent::Log {
             agent_id: "a".to_string(),
             run_id: "r".to_string(),

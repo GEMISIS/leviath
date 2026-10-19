@@ -177,7 +177,7 @@ mod tests {
             ),
             update_jobs: Default::default(),
             config: crate::commands::serve::testutil::fixed_config(crate::config::Config::default()),
-            event_tx: tx,
+            event_tx: tx.into(),
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
@@ -230,7 +230,7 @@ mod tests {
                 update_check: false,
                 ..crate::config::Config::default()
             }),
-            event_tx: tx,
+            event_tx: tx.into(),
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),

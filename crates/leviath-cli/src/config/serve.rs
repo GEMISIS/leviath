@@ -13,6 +13,10 @@ pub(crate) const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// short recording, and the same figure as `[mime] max_part_bytes`.
 pub(crate) const DEFAULT_MAX_UPLOAD_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Frames `lev serve` keeps for a subscription that resumes with `since`: the
+/// same figure as the daemon's own event log.
+pub(crate) const DEFAULT_EVENT_REPLAY_FRAMES: u64 = 4096;
+
 /// `[serve]` in `~/.leviath/config.toml`.
 ///
 /// Both keys are ceilings on the HTTP API, not on the runs behind it: a spawn
@@ -34,6 +38,16 @@ pub struct ServeConfig {
     /// to `POST /api/runs` or `POST /api/runs/{id}/message`.
     #[serde(default = "default_max_upload_bytes")]
     pub max_upload_bytes: u64,
+
+    /// Frames kept for a GraphQL subscription that resumes with `since`.
+    /// Shared by every subscriber; `0` keeps none, so a resume always reports
+    /// a gap.
+    #[serde(default = "default_event_replay_frames")]
+    pub event_replay_frames: u64,
+}
+
+fn default_event_replay_frames() -> u64 {
+    DEFAULT_EVENT_REPLAY_FRAMES
 }
 
 fn default_max_upload_bytes() -> u64 {
@@ -54,6 +68,7 @@ impl Default for ServeConfig {
             max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
             request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+            event_replay_frames: DEFAULT_EVENT_REPLAY_FRAMES,
         }
     }
 }
@@ -71,6 +86,9 @@ mod tests {
         assert_eq!(empty.max_upload_bytes, 32 * 1024 * 1024);
         let upload: ServeConfig = toml::from_str("max_upload_bytes = 10").unwrap();
         assert_eq!(upload.max_upload_bytes, 10);
+        assert_eq!(empty.event_replay_frames, 4096);
+        let replay: ServeConfig = toml::from_str("event_replay_frames = 0").unwrap();
+        assert_eq!(replay.event_replay_frames, 0);
     }
 
     #[test]

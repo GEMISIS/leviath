@@ -10,7 +10,7 @@ use crate::commands::serve::update_job;
 use crate::runstate::{RunMeta, RunStatus, create_run, with_isolated_runs_dir_async};
 
 /// A status frame for one run.
-fn status(run_id: &str) -> ServerEvent {
+pub(super) fn status(run_id: &str) -> ServerEvent {
     ServerEvent::AgentStatus {
         agent_id: format!("agent-{run_id}"),
         run_id: run_id.to_string(),
@@ -25,7 +25,7 @@ fn status(run_id: &str) -> ServerEvent {
 }
 
 /// A log frame for one run.
-fn log(run_id: &str, line: &str) -> ServerEvent {
+pub(super) fn log(run_id: &str, line: &str) -> ServerEvent {
     ServerEvent::Log {
         agent_id: format!("agent-{run_id}"),
         run_id: run_id.to_string(),
@@ -34,7 +34,7 @@ fn log(run_id: &str, line: &str) -> ServerEvent {
 }
 
 /// A spawn frame, optionally naming the run that started it.
-fn spawned(run_id: &str, parent: Option<&str>) -> ServerEvent {
+pub(super) fn spawned(run_id: &str, parent: Option<&str>) -> ServerEvent {
     ServerEvent::AgentSpawned {
         agent_id: format!("agent-{run_id}"),
         run_id: run_id.to_string(),
@@ -45,12 +45,12 @@ fn spawned(run_id: &str, parent: Option<&str>) -> ServerEvent {
 
 /// An `AppState` with a temp agents directory, so nothing here reads the
 /// reader's own `~/.leviath/agents`.
-fn test_state(dir: &std::path::Path) -> AppState {
+pub(super) fn test_state(dir: &std::path::Path) -> AppState {
     crate::commands::serve::testutil::state_with_agent_paths(vec![dir.to_path_buf()])
 }
 
 /// One run on disk, so the run index has something to answer a filter with.
-fn write_run(id: &str, parent: Option<&str>, blueprint: &str, status: RunStatus) {
+pub(super) fn write_run(id: &str, parent: Option<&str>, blueprint: &str, status: RunStatus) {
     let mut meta = RunMeta::new(
         id.to_string(),
         blueprint.to_string(),
@@ -1017,6 +1017,7 @@ fn the_opening_stamp_follows_the_bus() {
 #[test]
 fn the_bus_stamps_every_frame() {
     let (tx, mut rx) = tokio::sync::broadcast::channel::<Stamped>(8);
+    let tx = crate::commands::serve::events::EventBus::from(tx);
     crate::commands::serve::events::send(&tx, log("run-a", "1"));
     crate::commands::serve::events::send(&tx, log("run-a", "2"));
     let first = rx.try_recv().expect("the first frame");
@@ -1027,6 +1028,7 @@ fn the_bus_stamps_every_frame() {
     // not a console is open.
     let (lonely, dropped) = tokio::sync::broadcast::channel::<Stamped>(8);
     drop(dropped);
+    let lonely = crate::commands::serve::events::EventBus::from(lonely);
     crate::commands::serve::events::send(&lonely, log("run-a", "3"));
 }
 
@@ -1172,19 +1174,23 @@ async fn a_stream_whose_bus_has_gone_ends() {
     use tokio_stream::wrappers::BroadcastStream;
 
     use super::{
-        JobLive, MachineLive, RunLive, Scope, Types, job_frames, machine_frames, run_frames,
+        Feed, JobLive, MachineLive, RunLive, Scope, Types, job_frames, machine_frames, run_frames,
     };
 
     /// A receiver whose only sender is already gone.
-    fn drained() -> BroadcastStream<Stamped> {
+    fn drained() -> Feed {
         let (tx, rx) = tokio::sync::broadcast::channel::<Stamped>(4);
         drop(tx);
-        BroadcastStream::new(rx)
+        Feed {
+            backlog: Default::default(),
+            frames: BroadcastStream::new(rx),
+        }
     }
 
     let dir = tempfile::tempdir().expect("an agents dir");
     let mut runs = Box::pin(run_frames(RunLive {
-        frames: drained(),
+        feed: drained(),
+        ready: Default::default(),
         types: Types(HashSet::new()),
         scope: Scope::Everything,
         state: test_state(dir.path()),
@@ -1193,14 +1199,15 @@ async fn a_stream_whose_bus_has_gone_ends() {
     assert!(runs.next().await.is_none(), "the run stream ends");
 
     let mut machine = Box::pin(machine_frames(MachineLive {
-        frames: drained(),
+        feed: drained(),
+        gap: None,
         types: Types(HashSet::new()),
         last_seq: 0,
     }));
     assert!(machine.next().await.is_none(), "the machine stream ends");
 
     let mut job = Box::pin(job_frames(JobLive {
-        frames: drained(),
+        feed: drained(),
         job: "job-1".to_string(),
         last_seq: 0,
     }));

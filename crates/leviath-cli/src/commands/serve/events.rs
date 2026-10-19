@@ -13,8 +13,9 @@
 //! always were; a GraphQL subscription reads the stamp as well, which is what
 //! lets a client tell a quiet fleet from a gap in what it was handed.
 
-use std::sync::OnceLock;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -511,30 +512,135 @@ pub(crate) fn latest_seq() -> u64 {
     SEQ.load(Ordering::Relaxed)
 }
 
-/// Held across taking a number and handing the frame over, so the two are one
-/// step.
-///
-/// Numbering and delivery apart would let a producer that took the lower
-/// number reach the channel second, and a subscriber would then read a number
-/// going backwards - which is exactly the comparison a gap is reported from.
-/// The lock covers a counter bump and a push into a ring buffer; nothing under
-/// it waits on anything.
-static ORDER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The frames a bus keeps for replay, when nothing says otherwise: the same
+/// figure as the daemon's own event log.
+pub(crate) const DEFAULT_REPLAY_FRAMES: usize = 4096;
 
-/// Stamp one event and hand it to every subscriber.
+/// The fan-out every producer sends through, and the frames it keeps.
+///
+/// A broadcast channel hands a frame to whoever is listening the moment it is
+/// sent, and to nobody else. The ring beside it is what a subscriber that was
+/// away asks for on its return: the last few thousand frames, shared by every
+/// subscriber rather than held once per connection.
+///
+/// Derefs to the channel, so subscribing and counting receivers read as they
+/// always have.
+#[derive(Debug, Clone)]
+pub(crate) struct EventBus {
+    /// The live fan-out.
+    tx: broadcast::Sender<Stamped>,
+    /// The frames kept for replay.
+    ///
+    /// Also the lock that makes numbering, keeping and handing a frame over
+    /// one step. Apart, a producer that took the lower number could reach the
+    /// channel second, and a subscriber would read a number going backwards,
+    /// which is exactly the comparison a gap is reported from. Nothing under
+    /// it waits on anything.
+    kept: Arc<Mutex<Kept>>,
+}
+
+/// The ring of frames a bus keeps.
+#[derive(Debug)]
+struct Kept {
+    /// The newest frames, oldest first.
+    frames: VecDeque<Stamped>,
+    /// How many it holds before the oldest goes.
+    capacity: usize,
+    /// The number of the newest frame that is no longer kept, or zero.
+    evicted_through: u64,
+}
+
+impl Kept {
+    /// Keep one frame, letting the oldest go once the ring is full.
+    fn push(&mut self, frame: Stamped) {
+        self.frames.push_back(frame);
+        while self.frames.len() > self.capacity {
+            let oldest = self.frames.pop_front().map_or(0, |old| old.seq);
+            self.evicted_through = self.evicted_through.max(oldest);
+        }
+    }
+}
+
+/// Where a subscription starts: the receiver, and what it replays first.
+pub(crate) struct Resume {
+    /// The live frames, registered before anything was read from the ring.
+    pub(crate) frames: broadcast::Receiver<Stamped>,
+    /// The number the newest frame carried when the receiver was registered.
+    pub(crate) at: u64,
+    /// The kept frames numbered above the point asked for, oldest first.
+    pub(crate) kept: VecDeque<Stamped>,
+    /// How many numbers above that point are no longer kept: an upper bound
+    /// on the frames a returning subscriber cannot be handed.
+    pub(crate) evicted: u64,
+}
+
+impl EventBus {
+    /// A bus over `tx` that keeps the last `replay_frames` frames.
+    pub(crate) fn new(tx: broadcast::Sender<Stamped>, replay_frames: usize) -> Self {
+        Self {
+            tx,
+            kept: Arc::new(Mutex::new(Kept {
+                frames: VecDeque::new(),
+                capacity: replay_frames,
+                evicted_through: 0,
+            })),
+        }
+    }
+
+    /// Register a receiver, and read what was kept above `since`, as one step.
+    ///
+    /// Done under the lock every send takes, so the two halves meet exactly:
+    /// every frame numbered up to [`Resume::at`] is either in the ring or
+    /// counted as evicted, and every frame numbered above it reaches the
+    /// receiver. There is no frame in between, and none in both. `u64::MAX`
+    /// asks for nothing kept, which is a plain subscription.
+    pub(crate) fn resume(&self, since: u64) -> Resume {
+        let kept = leviath_core::sync::lock(&self.kept);
+        let frames = self.tx.subscribe();
+        Resume {
+            frames,
+            at: latest_seq(),
+            kept: kept
+                .frames
+                .iter()
+                .filter(|frame| frame.seq > since)
+                .cloned()
+                .collect(),
+            evicted: kept.evicted_through.saturating_sub(since),
+        }
+    }
+}
+
+impl From<broadcast::Sender<Stamped>> for EventBus {
+    fn from(tx: broadcast::Sender<Stamped>) -> Self {
+        Self::new(tx, DEFAULT_REPLAY_FRAMES)
+    }
+}
+
+impl std::ops::Deref for EventBus {
+    type Target = broadcast::Sender<Stamped>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tx
+    }
+}
+
+/// Stamp one event, keep it, and hand it to every subscriber.
 ///
 /// The one place a frame is given its sequence number and its time, so no
 /// producer can send an unstamped one or invent a numbering of its own. A send
 /// with nobody listening is not an error: the daemon keeps working whether or
-/// not a console is open.
-pub(crate) fn send(bus: &broadcast::Sender<Stamped>, event: ServerEvent) {
+/// not a console is open, and the frame is still kept for one that returns.
+pub(crate) fn send(bus: &EventBus, event: ServerEvent) {
     let at = leviath_core::duration::now_secs();
-    let _order = leviath_core::sync::lock(&ORDER);
-    let _ = bus.send(Stamped {
+    let mut kept = leviath_core::sync::lock(&bus.kept);
+    let stamped = Stamped {
         seq: SEQ.fetch_add(1, Ordering::Relaxed) + 1,
         at,
         event,
-    });
+    };
+    kept.push(stamped.clone());
+    let _ = bus.tx.send(stamped);
 }
 
 #[cfg(test)]
@@ -552,6 +658,7 @@ mod tests {
     #[test]
     fn frames_arrive_in_the_order_they_were_numbered() {
         let (tx, mut rx) = broadcast::channel::<Stamped>(32_768);
+        let tx = EventBus::from(tx);
         let each = 4_000;
         let producers = 4;
         std::thread::scope(|scope| {

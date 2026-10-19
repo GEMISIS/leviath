@@ -15,8 +15,12 @@
 //! for a receiver, and a subscription that cannot keep up is handed an
 //! `EventsDroppedEvent` saying how many it missed and left open, rather than
 //! quietly losing frames or holding up the rest.
+//!
+//! A client that was away comes back with `since`: the bus keeps its last few
+//! thousand frames, and a resumed subscription replays the ones above that
+//! number before it goes live.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -36,6 +40,7 @@ use super::events::{
 };
 use super::filter::run_predicate;
 use super::paging::walk::Verdict;
+use super::scalars::BigInt;
 use super::types::run::RunFilter;
 
 /// Which runs a subscription is about.
@@ -49,21 +54,48 @@ enum Scope {
     Everything,
     /// The runs a filter named, and the filter itself, so a run that was not
     /// one of them can still join later.
-    Named {
-        /// The runs in scope right now.
-        runs: HashSet<String>,
-        /// The compiled filter, consulted for a run that is not in `runs` yet.
-        predicate: Arc<dyn RunPredicate>,
-        /// Whether a run spawned by a run in scope joins the scope.
-        include_descendants: bool,
-        /// Whether a status frame could change what this filter answers.
-        ///
-        /// Decided once, when the subscription starts, because the filter does
-        /// not change afterwards. A filter it is false for is never asked
-        /// again, which is what keeps a fleet's heartbeat from costing every
-        /// subscriber a reading of the whole run store per frame.
-        status_can_widen: bool,
-    },
+    Named(Named),
+}
+
+/// The runs a filter named, and what decides whether another one joins.
+struct Named {
+    /// The runs in scope right now.
+    runs: HashSet<String>,
+    /// The compiled filter, consulted for a run that is not in `runs` yet.
+    predicate: Arc<dyn RunPredicate>,
+    /// Whether a run spawned by a run in scope joins the scope.
+    include_descendants: bool,
+    /// Whether a status frame could change what this filter answers.
+    ///
+    /// Decided once, when the subscription starts, because the filter does
+    /// not change afterwards. A filter it is false for is never asked again
+    /// about a run the index has already answered for, which is what keeps a
+    /// fleet's heartbeat from costing every subscriber a reading of the whole
+    /// run store per frame.
+    status_can_widen: bool,
+    /// Runs whose spawn frame arrived before the run index had their record.
+    ///
+    /// Asked again on each of their frames, whatever the filter names, until
+    /// the index answers. Their frames wait here meanwhile, so a run that
+    /// joins arrives whole, its spawn frame first.
+    pending: HashMap<String, Held>,
+}
+
+/// How many frames of a pending run are looked at before giving up on it.
+///
+/// The index lags a spawn frame by moments, not by dozens of frames. A run it
+/// still cannot answer for after this many is a run whose record is not
+/// coming, and asking again on every frame would cost a reading of the run
+/// store per frame for nothing.
+const HOLD_LIMIT: usize = 32;
+
+/// The frames of a pending run, waiting for the index to answer.
+#[derive(Default)]
+struct Held {
+    /// The frames the subscription asked for, oldest first.
+    frames: Vec<Stamped>,
+    /// Every frame of the run seen while pending, kept or not.
+    seen: usize,
 }
 
 /// The filter fields a run's own status frame can change the answer to.
@@ -115,83 +147,144 @@ async fn matching(
         .into_iter()
         .map(|meta| meta.run_id.clone())
         .collect();
-    Ok(Scope::Named {
+    Ok(Scope::Named(Named {
         runs,
         predicate,
         include_descendants,
         status_can_widen,
-    })
+        pending: HashMap::new(),
+    }))
 }
 
-/// Whether one run satisfies the filter as things stand.
+/// Whether one run satisfies the filter as things stand, or `None` when the
+/// run index has no record of it yet.
 ///
 /// Answered from the cached run index and the half of the filter that reads
 /// nothing: a frame is not the moment to open a run's files, so a verdict that
-/// would need them counts as not matching until a later frame asks again. A
-/// run the index has not seen yet, which a spawn frame can outrun, does not
-/// match either.
-async fn still_matches(state: &AppState, predicate: &Arc<dyn RunPredicate>, run_id: &str) -> bool {
+/// would need them counts as not matching. A run the index has not seen yet,
+/// which a spawn frame can outrun, has no answer at all.
+async fn index_verdict(
+    state: &AppState,
+    predicate: &Arc<dyn RunPredicate>,
+    run_id: &str,
+) -> Option<bool> {
     let snapshot = state.caches.run_index.snapshot().await;
-    let Some(meta) = snapshot.get(run_id).cloned() else {
-        return false;
-    };
+    let meta = snapshot.get(run_id).cloned()?;
     let runs = snapshot.into_runs();
     let ctx = MatchContext {
         now: leviath_core::duration::now_secs(),
         tree: Arc::new(RunTree::of(&runs)),
     };
-    predicate.verdict(&meta, &ctx) == Verdict::Keep
+    Some(predicate.verdict(&meta, &ctx) == Verdict::Keep)
+}
+
+/// Queue one frame for delivery, if it was asked for and has a run shape.
+fn deliver(stamped: Stamped, asked_for: bool, ready: &mut VecDeque<RunEventFrame>) {
+    if asked_for && let Some(frame) = super::events::run_frame(stamped) {
+        ready.push_back(frame);
+    }
 }
 
 impl Scope {
-    /// Whether this frame's run is in scope, widening the scope where the
+    /// Queue this frame if its run is in scope, widening the scope where the
     /// frame is what widens it.
-    async fn keeps(&mut self, state: &AppState, event: &ServerEvent) -> bool {
-        let Scope::Named {
-            runs,
-            predicate,
-            include_descendants,
-            status_can_widen,
-        } = self
-        else {
-            return true;
-        };
-        match event {
-            // A spawn is what widens the scope, so it is considered before the
-            // membership test that would otherwise reject the new run: by its
-            // parent when the client asked for descendants, and by the filter
-            // itself once the daemon has written the run's record.
-            ServerEvent::AgentSpawned {
-                run_id, parent_id, ..
-            } => {
-                let inherited = *include_descendants
+    ///
+    /// Consulted for every frame, asked for or not: a spawn frame the client
+    /// filtered out by type still brings its run into scope.
+    async fn admit(
+        &mut self,
+        state: &AppState,
+        stamped: Stamped,
+        asked_for: bool,
+        ready: &mut VecDeque<RunEventFrame>,
+    ) {
+        match self {
+            Scope::Everything => deliver(stamped, asked_for, ready),
+            Scope::Named(named) => named.admit(state, stamped, asked_for, ready).await,
+        }
+    }
+}
+
+impl Named {
+    /// Queue, hold or drop one frame.
+    async fn admit(
+        &mut self,
+        state: &AppState,
+        stamped: Stamped,
+        asked_for: bool,
+        ready: &mut VecDeque<RunEventFrame>,
+    ) {
+        let run_id = stamped.event.run_id().to_string();
+        // A machine-level frame reaches a run scope only as the link or
+        // lost-events frame: those explain why a run's frames stopped or may
+        // be missing, so a scoped subscription still gets them, and
+        // `run_frames` drops the others before any scope is consulted because
+        // they are about the install and belong to `machineEvents`.
+        if run_id.is_empty() {
+            return deliver(stamped, asked_for, ready);
+        }
+        if !self.runs.contains(&run_id) {
+            self.widen(state, &stamped.event, &run_id, ready).await;
+        }
+        if self.runs.contains(&run_id) {
+            deliver(stamped, asked_for, ready);
+        } else if let Some(held) = self.pending.get_mut(&run_id) {
+            held.seen += 1;
+            if held.seen > HOLD_LIMIT {
+                self.pending.remove(&run_id);
+            } else if asked_for {
+                held.frames.push(stamped);
+            }
+        }
+    }
+
+    /// Bring a run that is not in scope into it, when this frame is what
+    /// says it now belongs.
+    async fn widen(
+        &mut self,
+        state: &AppState,
+        event: &ServerEvent,
+        run_id: &str,
+        ready: &mut VecDeque<RunEventFrame>,
+    ) {
+        let ask = match event {
+            // A spawn is what widens the scope: by its parent when the client
+            // asked for descendants, and by the filter itself otherwise. It is
+            // pending until the index answers, which is usually at once.
+            ServerEvent::AgentSpawned { parent_id, .. } => {
+                if self.include_descendants
                     && parent_id
                         .as_ref()
-                        .is_some_and(|parent| runs.contains(parent));
-                if inherited || still_matches(state, predicate, run_id).await {
-                    runs.insert(run_id.clone());
+                        .is_some_and(|parent| self.runs.contains(parent))
+                {
+                    self.runs.insert(run_id.to_string());
+                    return;
                 }
+                self.pending.insert(run_id.to_string(), Held::default());
+                true
             }
             // A status change is the other moment a run's answer can have
             // changed, and it is only asked of a filter one could change.
-            ServerEvent::AgentStatus { run_id, .. }
-                if *status_can_widen
-                    && !runs.contains(run_id)
-                    && still_matches(state, predicate, run_id).await =>
-            {
-                runs.insert(run_id.clone());
+            ServerEvent::AgentStatus { .. } => {
+                self.status_can_widen || self.pending.contains_key(run_id)
             }
-            _ => {}
+            _ => self.pending.contains_key(run_id),
+        };
+        if !ask {
+            return;
         }
-        match event.run_id() {
-            // A machine-level frame, which reaches a run scope only as the
-            // link or lost-events frame: those explain why a run's frames
-            // stopped or may be missing, so a scoped subscription still gets
-            // them, and `run_frames` drops the others before any scope is
-            // consulted because they are about the install and belong to
-            // `machineEvents`.
-            "" => true,
-            run_id => runs.contains(run_id),
+        match index_verdict(state, &self.predicate, run_id).await {
+            Some(true) => {
+                self.runs.insert(run_id.to_string());
+                let held = self.pending.remove(run_id).unwrap_or_default();
+                for frame in held.frames {
+                    deliver(frame, true, ready);
+                }
+            }
+            Some(false) => {
+                self.pending.remove(run_id);
+            }
+            None => {}
         }
     }
 }
@@ -209,10 +302,79 @@ impl<T: Eq + Hash> Types<T> {
     }
 }
 
+/// Where a subscription's frames come from: the kept frames it replays, then
+/// the bus.
+struct Feed {
+    /// The kept frames still to replay, oldest first.
+    backlog: VecDeque<Stamped>,
+    /// The live frames, registered before the backlog was read.
+    frames: BroadcastStream<Stamped>,
+}
+
+impl Feed {
+    /// The next frame, or how many went past unread, or `None` once the bus
+    /// has gone.
+    async fn next(&mut self) -> Option<Result<Stamped, u64>> {
+        if let Some(kept) = self.backlog.pop_front() {
+            return Some(Ok(kept));
+        }
+        let next = self.frames.next().await?;
+        Some(next.map_err(|BroadcastStreamRecvError::Lagged(missed)| missed))
+    }
+}
+
+/// Where one subscription starts: what it reads from, the number its greeting
+/// carries, and the gap it opens with.
+struct Start {
+    /// The kept frames to replay, then the live ones.
+    feed: Feed,
+    /// The number the greeting carries.
+    seq: u64,
+    /// How many frames this subscription cannot be handed, when it resumed
+    /// past what the bus still keeps.
+    gap: Option<u64>,
+}
+
+/// Register a subscription on the bus, resuming after `since` when asked to.
+///
+/// A plain subscription replays nothing and opens on the bus's latest number.
+/// One that names another server's instance cannot resume: its numbers mean
+/// nothing here, so it opens with a gap as large as everything this process
+/// has sent. One that resumes on this server replays every kept frame above
+/// `since`, and opens with a gap when some of those are no longer kept.
+fn start(state: &AppState, since: Option<BigInt>, instance: Option<ID>) -> Start {
+    let elsewhere =
+        instance.is_some_and(|id| id.as_str() != super::super::events::server_instance());
+    let since = since.map(|since| u64::try_from(since.0).unwrap_or_default());
+    let resume_from = match (elsewhere, since) {
+        (false, Some(since)) => since,
+        _ => u64::MAX,
+    };
+    let resume = state.event_tx.resume(resume_from);
+    let (seq, gap) = match (elsewhere, since) {
+        (true, _) => (resume.at, Some(resume.at)),
+        (false, Some(since)) => (
+            since.min(resume.at),
+            (resume.evicted > 0).then_some(resume.evicted),
+        ),
+        (false, None) => (resume.at, None),
+    };
+    Start {
+        feed: Feed {
+            backlog: resume.kept,
+            frames: BroadcastStream::new(resume.frames),
+        },
+        seq,
+        gap,
+    }
+}
+
 /// Everything one run subscription carries between frames.
 struct RunLive {
-    /// The frames, as they come off the bus.
-    frames: BroadcastStream<Stamped>,
+    /// The frames, kept then live.
+    feed: Feed,
+    /// Frames ready to hand over, oldest first.
+    ready: VecDeque<RunEventFrame>,
     /// Which frame types this subscription asked for.
     types: Types<RunEventType>,
     /// Which runs it is about.
@@ -226,8 +388,10 @@ struct RunLive {
 
 /// Everything one machine subscription carries between frames.
 struct MachineLive {
-    /// The frames, as they come off the bus.
-    frames: BroadcastStream<Stamped>,
+    /// The frames, kept then live.
+    feed: Feed,
+    /// A gap to report before anything else.
+    gap: Option<u64>,
     /// Which frame types this subscription asked for.
     types: Types<MachineEventType>,
     /// The last sequence number that reached this subscription.
@@ -237,7 +401,7 @@ struct MachineLive {
 /// Everything one update-job subscription carries between frames.
 struct JobLive {
     /// The frames, as they come off the bus.
-    frames: BroadcastStream<Stamped>,
+    feed: Feed,
     /// The job this subscription is about.
     job: String,
     /// The last sequence number that reached this subscription.
@@ -253,31 +417,31 @@ fn opening<Frame>(opened: Frame, rest: impl Stream<Item = Frame>) -> impl Stream
 fn run_frames(live: RunLive) -> impl Stream<Item = RunEventFrame> + use<> {
     futures_util::stream::unfold(live, |mut live| async move {
         loop {
-            match live.frames.next().await? {
-                Ok(stamped) => {
-                    live.last_seq = stamped.seq;
-                    let asked_for = match RunEventType::of(&stamped.event) {
-                        Some(kind) => live.types.wants(kind),
-                        // The link and lost-events frames are not in the run
-                        // vocabulary and are never filtered out: they explain
-                        // a silence.
-                        None => matches!(
-                            stamped.event,
-                            ServerEvent::DaemonLink { .. } | ServerEvent::EventsDropped { .. }
-                        ),
-                    };
-                    if asked_for
-                        && live.scope.keeps(&live.state, &stamped.event).await
-                        && let Some(frame) = super::events::run_frame(stamped)
-                    {
-                        return Some((frame, live));
-                    }
-                }
-                Err(BroadcastStreamRecvError::Lagged(missed)) => {
-                    let gap = super::events::dropped(missed, live.last_seq);
-                    return Some((RunEventFrame::EventsDropped(gap), live));
-                }
+            if let Some(frame) = live.ready.pop_front() {
+                return Some((frame, live));
             }
+            let stamped = match live.feed.next().await? {
+                Ok(stamped) => stamped,
+                Err(missed) => {
+                    let gap = super::events::dropped(missed, live.last_seq);
+                    live.ready.push_back(RunEventFrame::EventsDropped(gap));
+                    continue;
+                }
+            };
+            live.last_seq = stamped.seq;
+            let asked_for = match RunEventType::of(&stamped.event) {
+                Some(kind) => live.types.wants(kind),
+                // The link and lost-events frames are not in the run
+                // vocabulary and are never filtered out: they explain a
+                // silence.
+                None => matches!(
+                    stamped.event,
+                    ServerEvent::DaemonLink { .. } | ServerEvent::EventsDropped { .. }
+                ),
+            };
+            live.scope
+                .admit(&live.state, stamped, asked_for, &mut live.ready)
+                .await;
         }
     })
 }
@@ -285,8 +449,12 @@ fn run_frames(live: RunLive) -> impl Stream<Item = RunEventFrame> + use<> {
 /// The machine frames this subscription wants, one at a time.
 fn machine_frames(live: MachineLive) -> impl Stream<Item = MachineEventFrame> + use<> {
     futures_util::stream::unfold(live, |mut live| async move {
+        if let Some(missed) = live.gap.take() {
+            let gap = super::events::dropped(missed, live.last_seq);
+            return Some((MachineEventFrame::EventsDropped(gap), live));
+        }
         loop {
-            match live.frames.next().await? {
+            match live.feed.next().await? {
                 Ok(stamped) => {
                     live.last_seq = stamped.seq;
                     // Lost events are never filtered out, like this
@@ -299,7 +467,7 @@ fn machine_frames(live: MachineLive) -> impl Stream<Item = MachineEventFrame> + 
                         return Some((frame, live));
                     }
                 }
-                Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                Err(missed) => {
                     let gap = super::events::dropped(missed, live.last_seq);
                     return Some((MachineEventFrame::EventsDropped(gap), live));
                 }
@@ -312,14 +480,14 @@ fn machine_frames(live: MachineLive) -> impl Stream<Item = MachineEventFrame> + 
 fn job_frames(live: JobLive) -> impl Stream<Item = UpdateJobEventFrame> + use<> {
     futures_util::stream::unfold(live, |mut live| async move {
         loop {
-            match live.frames.next().await? {
+            match live.feed.next().await? {
                 Ok(stamped) => {
                     live.last_seq = stamped.seq;
                     if let Some(frame) = super::events::update_job_frame(stamped, &live.job) {
                         return Some((frame, live));
                     }
                 }
-                Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                Err(missed) => {
                     let gap = super::events::dropped(missed, live.last_seq);
                     return Some((UpdateJobEventFrame::EventsDropped(gap), live));
                 }
@@ -345,8 +513,10 @@ pub(crate) struct Subscription_;
 /// update is going. Each opens with a `SubscriptionOpenedEvent` and then
 /// carries only the frames it is about.
 ///
-/// Delivery is at-most-once, so a stream is how a client stays current and not
-/// how it reconstructs the past: for that, read the run.
+/// Delivery is at-most-once. A client that was away resumes with `since` and
+/// the `serverInstance` it was numbered by, and is handed what the server
+/// still keeps; anything older is announced as a gap, and the run itself is
+/// how a client reconstructs that.
 #[Subscription(name = "Subscription")]
 impl Subscription_ {
     /// What runs are doing, as they do it.
@@ -367,7 +537,19 @@ impl Subscription_ {
     ///
     /// Only the filter's in-memory half decides those later checks. A
     /// condition that would have to open a file reads as "not matching" for
-    /// now, and is asked again on that run's next frame.
+    /// now, and is asked again on that run's next status change.
+    ///
+    /// A run whose spawn frame arrives before the server has its record is
+    /// asked again on each of its frames, whatever the filter names, and its
+    /// frames are held meanwhile. Once the record is there the run joins with
+    /// those frames, spawn first, or is dropped with them.
+    ///
+    /// `since` resumes a stream: the frames this server still keeps that are
+    /// numbered above it arrive first, in order, and then the live ones, with
+    /// nothing missed or repeated between. Pass the `serverInstance` that
+    /// numbered `since`. When it names another process, or `since` is older
+    /// than what is kept, an `EventsDroppedEvent` follows the opening frame:
+    /// re-read what you show.
     ///
     /// Filter fields that describe a listing rather than a run - `query`,
     /// `sort` and their neighbours - have nothing to describe on a stream and
@@ -389,21 +571,29 @@ impl Subscription_ {
             default = false
         )]
         include_descendants: bool,
+        #[graphql(desc = "Resume after this frame number: replay the kept frames above it first.")]
+        since: Option<BigInt>,
+        #[graphql(desc = "The `serverInstance` that numbered `since`.")] server_instance: Option<
+            ID,
+        >,
     ) -> async_graphql::Result<impl Stream<Item = RunEventFrame> + use<>> {
         let state = ctx.data_unchecked::<AppState>();
-        // The bus's number is read before the receiver exists, and the receiver
-        // before anything is awaited: a frame sent while the filter is still
-        // being resolved is then buffered rather than lost, and numbered above
-        // the greeting rather than under it.
-        let since = super::super::events::latest_seq();
-        let frames = BroadcastStream::new(state.event_tx.subscribe());
+        // The receiver is registered before anything is awaited: a frame sent
+        // while the filter is still being resolved is then buffered rather
+        // than lost, and numbered above the greeting rather than under it.
+        let Start { feed, seq, gap } = start(state, since, server_instance);
         let scope = match filter {
             Some(filter) => matching(state, filter, include_descendants).await.gql()?,
             None => Scope::Everything,
         };
-        let opened = super::events::opened(state, since);
+        let opened = super::events::opened(state, seq);
+        let ready = gap
+            .map(|missed| RunEventFrame::EventsDropped(super::events::dropped(missed, seq)))
+            .into_iter()
+            .collect();
         let live = RunLive {
-            frames,
+            feed,
+            ready,
             types: Types(types.into_iter().flatten().collect()),
             scope,
             state: state.clone(),
@@ -421,18 +611,26 @@ impl Subscription_ {
     /// the config file, and the progress of a self-update. `/ws` mixes these
     /// in with everything else; here they are their own stream, so a settings
     /// screen subscribes to them without seeing a fleet's worth of log lines.
+    ///
+    /// `since` and `serverInstance` resume it the way they resume
+    /// `runEvents`.
     async fn machine_events(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "Only these frame types; omitted or empty means all of them.")]
         types: Option<Vec<MachineEventType>>,
+        #[graphql(desc = "Resume after this frame number: replay the kept frames above it first.")]
+        since: Option<BigInt>,
+        #[graphql(desc = "The `serverInstance` that numbered `since`.")] server_instance: Option<
+            ID,
+        >,
     ) -> impl Stream<Item = MachineEventFrame> + use<> {
         let state = ctx.data_unchecked::<AppState>();
-        let since = super::super::events::latest_seq();
-        let frames = BroadcastStream::new(state.event_tx.subscribe());
-        let opened = super::events::opened(state, since);
+        let Start { feed, seq, gap } = start(state, since, server_instance);
+        let opened = super::events::opened(state, seq);
         let live = MachineLive {
-            frames,
+            feed,
+            gap,
             types: Types(types.into_iter().flatten().collect()),
             last_seq: opened_seq(&opened),
         };
@@ -453,11 +651,10 @@ impl Subscription_ {
         #[graphql(desc = "The job, as `startUpdate` answered with.")] id: ID,
     ) -> impl Stream<Item = UpdateJobEventFrame> + use<> {
         let state = ctx.data_unchecked::<AppState>();
-        let since = super::super::events::latest_seq();
-        let frames = BroadcastStream::new(state.event_tx.subscribe());
-        let opened = super::events::opened(state, since);
+        let Start { feed, seq, .. } = start(state, None, None);
+        let opened = super::events::opened(state, seq);
         let live = JobLive {
-            frames,
+            feed,
             job: id.to_string(),
             last_seq: opened_seq(&opened),
         };
@@ -471,3 +668,7 @@ impl Subscription_ {
 #[cfg(test)]
 #[path = "subscription_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "subscription_replay_tests.rs"]
+mod replay_tests;

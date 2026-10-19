@@ -542,6 +542,7 @@ mod tests {
             max_concurrent_requests: 8,
             request_timeout_secs: 120,
             max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
+            event_replay_frames: crate::config::DEFAULT_EVENT_REPLAY_FRAMES,
         };
         // Neither flag: the config stands.
         assert_eq!(

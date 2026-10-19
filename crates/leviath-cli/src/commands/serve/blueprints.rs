@@ -651,7 +651,7 @@ layout = {{ total_budget_tokens = 1000, regions = [] }}
                 agent_paths: vec![dir.path().to_path_buf()],
                 ..Default::default()
             }),
-            event_tx: tx,
+            event_tx: tx.into(),
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
@@ -932,7 +932,7 @@ mod tests {
                 agent_paths: vec![path],
                 ..Default::default()
             }),
-            event_tx: tx,
+            event_tx: tx.into(),
             control: crate::commands::serve::testutil::no_daemon_client(),
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),

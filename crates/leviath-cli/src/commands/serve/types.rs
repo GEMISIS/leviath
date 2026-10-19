@@ -4,10 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 
 use super::artifact_types::ArtifactResp;
-use super::events::Stamped;
 use crate::config::Config;
 use crate::daemon::config_reload::{ConfigHealth, ConfigReloader};
 
@@ -54,7 +52,7 @@ pub(crate) struct AppState {
     /// The event fan-out every producer sends through
     /// [`events::send`](super::events::send), which is what stamps a frame
     /// with its place in the stream.
-    pub(super) event_tx: broadcast::Sender<Stamped>,
+    pub(super) event_tx: super::events::EventBus,
     /// Client for the shared-world daemon's control socket. Agent actions
     /// (spawn/cancel/message/interactions) go through this; read endpoints still
     /// observe the runs dir the daemon persists to.
@@ -512,6 +510,12 @@ pub(super) struct SpawnedResp {
     /// What may keep the run from ever finishing: stages it can reach and
     /// never leave. The run started anyway. Empty for most runs.
     pub(super) warnings: Vec<IssueResp>,
+    /// The event stream's number before the run started: every frame of the
+    /// run is numbered above it, so a GraphQL subscription with `since` set
+    /// to it is handed the run from its first frame.
+    pub(super) seq: u64,
+    /// The server process that numbered `seq`.
+    pub(super) server_instance: String,
 }
 
 /// One problem with a spawn request, as the API serves it: the issue itself,
