@@ -25,7 +25,11 @@ same list.
   sets `routing = { retry_attempts = N, on_error = "fail" | "error_edge" }`
   under `[graph]` or on a stage; for the old behaviour, set
   `routing = { on_error = "error_edge" }` under `[graph]`.
-
+- `WorldEvent` has two new variants, `OutputSubmitted` and
+  `InteractionSettled`, and `ToolCallStarted` has two new fields,
+  `arguments` and `arguments_truncated`. An embedder that matches the enum
+  exhaustively or builds `ToolCallStarted` itself must add them; one with a
+  catch-all arm needs no change.
 - A command that needs the daemon replaces a running one only when it is
   strictly older: a lower version, or the same version from an earlier
   commit. A rebuild of the same commit, or a build made without git, is left
@@ -761,8 +765,10 @@ same list.
   `WorldEvent::ToolCallStarted` for embedders. Capability
   `events.tool_arguments`.
 - An `output_submitted` frame (`OutputSubmittedEvent`,
-  `WorldEvent::OutputSubmitted`) when a `submit_output` call is accepted, so
-  the answer shows before the run ends. Capability `events.output_submitted`.
+  `WorldEvent::OutputSubmitted`) when a `submit_output` call is accepted, or
+  an output stage's produced files are taken as its answer, so the answer
+  shows before the run ends. Its content is cut to 16 KiB on the frame.
+  Capability `events.output_submitted`.
 - An `interaction_settled` frame (`InteractionSettledEvent`,
   `WorldEvent::InteractionSettled`) when an ask is answered, times out, is
   cancelled or is refused. Capability `events.interaction_settled`.

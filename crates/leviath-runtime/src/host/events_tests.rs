@@ -55,8 +55,8 @@ fn an_object_too_big_to_shrink_goes_out_empty() {
     assert_eq!(sent, json!({}));
 }
 
-/// A frame from a daemon that sent no arguments still reads, with none and
-/// not cut.
+/// A frame from a daemon that sent no arguments still reads, with an empty
+/// object and not cut.
 #[test]
 fn a_tool_call_frame_without_arguments_still_reads() {
     let frame = json!({
@@ -76,10 +76,30 @@ fn a_tool_call_frame_without_arguments_still_reads() {
             call_id: "c".into(),
             execution_id: "x".into(),
             tool: "read_file".into(),
-            arguments: Value::Null,
+            arguments: json!({}),
             arguments_truncated: false,
         }
     );
+}
+
+/// An answer that fits goes on the frame whole; a longer one is cut at a
+/// character boundary and marked, and one already marked stays marked.
+#[test]
+fn a_submitted_answer_is_cut_to_fit_the_frame() {
+    use leviath_core::output::FinalOutput;
+    let small = capped_output(FinalOutput::new("done", None, "s".into(), 1));
+    assert_eq!(small.content, "done");
+    assert!(!small.truncated);
+
+    let long = "\u{e9}".repeat(MAX_EVENT_OUTPUT_BYTES);
+    let cut = capped_output(FinalOutput::new(&long, None, "s".into(), 1));
+    assert!(cut.truncated);
+    assert!(cut.content.len() <= MAX_EVENT_OUTPUT_BYTES);
+    assert!(cut.content.chars().all(|c| c == '\u{e9}'));
+
+    let mut marked = FinalOutput::new("short", None, "s".into(), 1);
+    marked.truncated = true;
+    assert!(capped_output(marked).truncated);
 }
 
 /// The settled frame carries the journal's record at the top level, so its

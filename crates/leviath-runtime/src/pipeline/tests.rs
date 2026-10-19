@@ -9980,6 +9980,8 @@ fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
     });
 
     let mut world = World::new();
+    let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+    world.insert_resource(crate::host::WorldEventSink(sink_tx));
     let e = world
         .spawn((
             spec_of(bp),
@@ -9988,10 +9990,16 @@ fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
             window,
             stage_inf,
             ResolveTransition,
+            run_metadata(),
         ))
         .id();
 
     run_require_final_output(&mut world);
+
+    // Announced like a submission, so the answer shows before the run ends.
+    let announced = submitted_frames(&mut sink_rx);
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].1, "build");
 
     let output = world
         .get::<crate::persistence::FinalOutput>(e)

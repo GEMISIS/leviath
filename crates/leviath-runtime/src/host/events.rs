@@ -219,14 +219,16 @@ pub enum WorldEvent {
         /// whole; this is what a live viewer needs to say which file a call
         /// read, without asking for the run.
         ///
-        /// Defaulted so a frame from a daemon that sends none still reads.
-        #[serde(default)]
+        /// Defaulted to an empty object, so a frame from a daemon that sends
+        /// none still reads, and reads as an object like every other.
+        #[serde(default = "no_arguments")]
         arguments: serde_json::Value,
         /// Whether `arguments` was cut to fit.
         #[serde(default)]
         arguments_truncated: bool,
     },
-    /// A run's `submit_output` call was accepted.
+    /// A run's answer was recorded: a `submit_output` call was accepted, or
+    /// the parts an output stage produced were taken as its answer.
     ///
     /// The call is answered inline, never on the tool lane, so it has no
     /// [`ToolCallStarted`](Self::ToolCallStarted). Without this the answer
@@ -241,7 +243,9 @@ pub enum WorldEvent {
         agent_id: String,
         /// The stage that submitted it.
         stage: String,
-        /// What was submitted.
+        /// What was submitted, its content cut to
+        /// [`MAX_EVENT_OUTPUT_BYTES`] with `truncated` set when it was. The
+        /// run keeps the whole answer.
         output: leviath_core::output::FinalOutput,
     },
     /// An interaction a run raised was settled: answered, timed out,
@@ -301,6 +305,31 @@ pub enum WorldEvent {
 /// with a large file in it is the common case, and its path matters to a
 /// viewer far more than its content does.
 pub const MAX_EVENT_ARGUMENT_BYTES: usize = 4 * 1024;
+
+/// The most of an answer's content a [`WorldEvent::OutputSubmitted`] carries.
+///
+/// An answer may be far larger, and a frame sits in the broadcast and the
+/// event log like any other. The whole answer is on the run, and on
+/// [`WorldEvent::Completed`] once it ends.
+pub const MAX_EVENT_OUTPUT_BYTES: usize = 16 * 1024;
+
+/// An answer as a [`WorldEvent::OutputSubmitted`] carries it: its content cut
+/// at a character boundary to [`MAX_EVENT_OUTPUT_BYTES`], and `truncated` set
+/// when that cut anything.
+pub(crate) fn capped_output(
+    mut output: leviath_core::output::FinalOutput,
+) -> leviath_core::output::FinalOutput {
+    let kept =
+        leviath_core::text::truncate_at_boundary(&output.content, MAX_EVENT_OUTPUT_BYTES).len();
+    output.truncated |= kept < output.content.len();
+    output.content.truncate(kept);
+    output
+}
+
+/// What a tool-call frame carries when it was sent no arguments.
+fn no_arguments() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
 
 /// The lengths, in characters, every string in an oversized argument object is
 /// cut to in turn, longest first, until the object fits.

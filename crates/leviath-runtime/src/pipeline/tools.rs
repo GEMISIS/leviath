@@ -474,11 +474,13 @@ pub(crate) struct DaemonServices<'w> {
     pub sink: Option<Res<'w, crate::host::WorldEventSink>>,
 }
 
-/// Tell subscribers that a run's `submit_output` call was accepted.
+/// Tell subscribers that a run's answer was recorded: a `submit_output` call
+/// accepted, or an output stage's produced parts taken as its answer.
 ///
 /// Nothing for a batch that submitted nothing or had its submission refused,
-/// and nothing in a world with no subscribers or no run behind the agent.
-fn announce_submission(
+/// and nothing in a world with no subscribers or no run behind the agent. The
+/// content is cut to [`crate::host::MAX_EVENT_OUTPUT_BYTES`] on the frame.
+pub(crate) fn announce_submission(
     sink: Option<&crate::host::WorldEventSink>,
     metadata: Option<&RunMetadata>,
     agent_id: &str,
@@ -489,7 +491,7 @@ fn announce_submission(
             run_id: md.run_id.clone(),
             agent_id: agent_id.to_string(),
             stage: output.stage.clone(),
-            output,
+            output: crate::host::capped_output(output),
         });
     }
 }

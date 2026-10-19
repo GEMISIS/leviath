@@ -225,12 +225,14 @@ pub(crate) enum ServerEvent {
         tool: String,
         /// The arguments the model sent, cut to fit 4 KiB serialized. Long
         /// strings are shortened first, so a path beside a large file's content
-        /// stays whole. The journal keeps them uncut.
+        /// stays whole. The journal keeps them uncut. Always an object: a
+        /// daemon too old to send arguments gives `{}`.
         arguments: serde_json::Value,
         /// Whether `arguments` was cut to fit.
         arguments_truncated: bool,
     },
-    /// A `submit_output` call was accepted.
+    /// The run's answer was recorded: a `submit_output` call was accepted, or
+    /// an output stage's produced files were taken as its answer.
     ///
     /// The call is answered inline rather than on the tool lane, so it sends
     /// no tool-call frames. Without this the answer first shows on
@@ -244,7 +246,9 @@ pub(crate) enum ServerEvent {
         run_id: String,
         /// The stage that submitted it.
         stage: String,
-        /// What was submitted, in the shape `agent_completed` carries it.
+        /// What was submitted, in the shape `agent_completed` carries it, with
+        /// `content` cut to 16 KiB and `truncated` set when it was. The run
+        /// keeps the whole answer.
         final_output: FinalOutputResp,
     },
     /// An ask the run raised was settled: answered, timed out, cancelled, or
