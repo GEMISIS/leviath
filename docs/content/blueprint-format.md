@@ -413,8 +413,9 @@ routing = { on_error = "error_edge" }
 | `on_error` | `"fail"` | `"fail"` ends the run with the error; `"error_edge"` fails the stage. |
 
 Only a transient failure is tried again, as with any model call. A stage's setting wins over the
-graph's, key by key. The run file does not record `routing`, so a run resumed after the daemon
-restarts uses the operator's settings.
+graph's, key by key. The run file records `routing`, so a run resumed after the daemon restarts
+keeps it. A run recorded before the run file kept it (layout 5 and older) has none, and uses the
+operator's settings.
 
 With `"fail"`, the run stops with an error that names the routing call, and the stage's finished
 work is kept. With `"error_edge"`, the stage fails, so its `error` edge runs when it has one. Choose

@@ -30,11 +30,16 @@ pub(super) struct Started {
     /// The starter that made it, which brings the world up to date before
     /// the run is placed in it.
     starter: Arc<dyn RunStarter>,
+    /// The idempotency key the start holds while it runs, when it was sent
+    /// under one.
+    claim: Option<crate::spec::names::IdempotencyKey>,
 }
 
 impl WorldHost {
     /// Send `request` off to be started for `caller`. The reply comes once the
-    /// run is placed, or with every reason it was refused.
+    /// run is placed, or with every reason it was refused. A request under an
+    /// idempotency key that is already held is answered by what holds it
+    /// instead (see `host::claims`).
     pub(super) fn start(
         &mut self,
         request: SpawnRequest,
@@ -46,6 +51,21 @@ impl WorldHost {
             let _ = reply.send(Err(host_refusal("this host cannot start runs")));
             return;
         };
+        let asked = request.idempotency();
+        let reply = match &asked {
+            Some(asked) => {
+                let runs = self.world.runs_dir();
+                match self
+                    .claims
+                    .admit(asked, reply, &|run| claims::record_exists(runs, run))
+                {
+                    Some(reply) => reply,
+                    None => return,
+                }
+            }
+            None => reply,
+        };
+        let claim = asked.map(|asked| asked.key);
         let tx = self.started_tx.clone();
         self.starting += 1;
         tokio::spawn(async move {
@@ -61,6 +81,7 @@ impl WorldHost {
                 parent,
                 reply,
                 starter,
+                claim,
             });
         });
     }
@@ -109,7 +130,8 @@ impl WorldHost {
         });
     }
 
-    /// Place a finished start in the world and answer whoever asked for it.
+    /// Place a finished start in the world and answer whoever asked for it,
+    /// and whoever sent the same request under its key while it ran.
     pub(super) fn place(&mut self, started: Started) {
         self.starting = self.starting.saturating_sub(1);
         let Started {
@@ -117,17 +139,31 @@ impl WorldHost {
             parent,
             reply,
             starter,
+            claim,
         } = started;
-        let prepared = match result {
-            Ok(prepared) => prepared,
+        let outcome = match result {
+            Ok(prepared) => self.insert_started(prepared, parent, starter),
             Err(issues) => {
                 // The refusal goes back over the socket to a caller that may
                 // already have gone, so the daemon's log keeps its own copy.
                 tracing::error!(issues = %issues, "a run was refused at its start");
-                let _ = reply.send(Err(issues));
-                return;
+                Err(issues)
             }
         };
+        if let Some(key) = claim {
+            self.claims.settle(&key, &outcome);
+        }
+        let _ = reply.send(outcome);
+    }
+
+    /// Insert a started run in the world, under the run that asked for it
+    /// when there is one.
+    fn insert_started(
+        &mut self,
+        prepared: PreparedRun,
+        parent: Option<String>,
+        starter: Arc<dyn RunStarter>,
+    ) -> Result<crate::spec::summary::Spawned, SpawnIssues> {
         let run_id = prepared.spec.run_id.clone();
         let warnings = prepared.spec.warnings();
         // Said here as well as to the caller, who may not be watching: a run
@@ -154,8 +190,15 @@ impl WorldHost {
         }));
         let Ok(entity) = placed else {
             tracing::error!(run_id = %run_id, "placing a started run panicked");
-            let _ = reply.send(Err(host_refusal("placing the run panicked")));
-            return;
+            // Its record may already be written; it says the run never
+            // started, so a restart does not hand its key back to it.
+            if let Some(runs) = self.world.runs_dir() {
+                let record = runs
+                    .join(run_id.as_str())
+                    .join(leviath_core::files::RUN_FILE);
+                let _ = claims::mark_refused(&record);
+            }
+            return Err(host_refusal("placing the run panicked"));
         };
         let agent = self.world.own_agent(entity);
         self.register(run_id.to_string(), agent);
@@ -163,7 +206,11 @@ impl WorldHost {
         if let Some(parent) = parent {
             self.link_child(&parent, entity);
         }
-        let _ = reply.send(Ok(crate::spec::summary::Spawned { run_id, warnings }));
+        Ok(crate::spec::summary::Spawned {
+            run_id,
+            warnings,
+            deduplicated: false,
+        })
     }
 
     /// Place every start still out, waiting for each to come back. For a

@@ -68,12 +68,7 @@ pub struct StageDef {
     pub transition_prompt: Option<String>,
     /// How the call that picks the next edge is retried, and what a failure
     /// does. `None` takes the graph's.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "super::policy::routing_serde"
-    )]
-    #[schemars(with = "Option<super::RoutingDef>")]
+    #[serde(default)]
     pub routing: Option<super::RoutingDef>,
     /// Whether messages sent to the run reach this stage.
     #[serde(default = "leviath_core::default_true")]

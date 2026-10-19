@@ -371,7 +371,9 @@ pub async fn send_spawn_batch(
 /// One spawn exchange with the daemon, warnings and printing left to callers.
 async fn spawn_once(client: &ControlClient, run: &LocalRun) -> anyhow::Result<SpawnedRun> {
     match client.spawn(run.request.clone()).await {
-        Ok(ControlResponse::Spawned { run_id, warnings }) => {
+        Ok(ControlResponse::Spawned {
+            run_id, warnings, ..
+        }) => {
             warn_after(&warnings);
             Ok(SpawnedRun {
                 run_id,

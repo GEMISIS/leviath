@@ -267,40 +267,6 @@ pub struct RoutingDef {
     pub on_error: Option<OnRoutingError>,
 }
 
-/// The serde of a graph's or a stage's `routing`: read and written in the
-/// readable forms (a blueprint, a spawn request, the API) and nothing at all
-/// in the run file's binary frames.
-///
-/// Leaving it out of the binary form keeps the run file's layout as it was,
-/// so every run file already on disk reads unchanged. The cost is that a run
-/// resumed from its file has no `routing` of its own and takes the operator's
-/// `routing_retry_attempts` and the default `on_error`, which is `"fail"`.
-pub(crate) mod routing_serde {
-    use super::RoutingDef;
-    use crate::spec::readable::{WriteWith, pick};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    /// Write `routing`, or nothing in a binary format.
-    pub(crate) fn serialize<S: Serializer>(
-        routing: &Option<RoutingDef>,
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
-        let binary: WriteWith<Option<RoutingDef>, S> = |_, s| ().serialize(s);
-        let text: WriteWith<Option<RoutingDef>, S> = |routing, s| routing.serialize(s);
-        pick(s.is_human_readable(), binary, text)(routing, s)
-    }
-
-    /// Read `routing`, or nothing in a binary format.
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<Option<RoutingDef>, D::Error> {
-        let binary: fn(D) -> Result<Option<RoutingDef>, D::Error> =
-            |d| <()>::deserialize(d).map(|()| None);
-        let text: fn(D) -> Result<Option<RoutingDef>, D::Error> = Option::<RoutingDef>::deserialize;
-        pick(d.is_human_readable(), binary, text)(d)
-    }
-}
-
 /// What a run does when the call that picks its next stage fails for good.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,

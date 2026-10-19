@@ -248,6 +248,7 @@ async fn a_spawn_says_where_its_frames_start() {
             leviath_runtime::control_socket::ControlResponse::Spawned {
                 run_id: "seq-run".to_string(),
                 warnings: Default::default(),
+                deduplicated: false,
             }
         });
         state.control = control;

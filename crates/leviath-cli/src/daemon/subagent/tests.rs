@@ -541,6 +541,7 @@ fn fake_host_full(
                                 false => Default::default(),
                             },
                             run_id: leviath_runtime::spec::names::RunId::new(id).unwrap(),
+                            deduplicated: false,
                         })
                         .map_err(|e| {
                             leviath_runtime::spec::issues::SpawnIssue::new(

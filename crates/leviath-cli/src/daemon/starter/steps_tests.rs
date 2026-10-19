@@ -326,6 +326,11 @@ async fn a_refusal_after_the_file_is_written_is_recorded_on_it() {
     let issues: SpawnIssues = refusal(IssueCode::Unavailable, "the provider went away");
 
     record_failed(&path, &state, &issues).expect("the refusal is written");
+    assert!(
+        path.with_file_name(leviath_runtime::host::REFUSED_AT_START)
+            .exists(),
+        "a run refused at its start is marked, so it holds no key"
+    );
     match RunFileReader::read(&path)
         .unwrap()
         .latest_state()

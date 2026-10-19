@@ -21,7 +21,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::graph::{OutputDef, RunGraph};
 use super::inputs::RawInput;
 use super::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
-use super::launch::{Delivery as RunDelivery, LaunchRequest};
+use super::launch::{Delivery as RunDelivery, Idempotency, LaunchRequest};
 use super::names::{BlueprintPath, BlueprintRef, MimePattern, ModelRef, RegionName};
 use super::readable::{WriteWith, pick};
 
@@ -77,6 +77,33 @@ impl SpawnRequest {
         self
     }
 
+    /// The key this request was sent under, with the digest of the request
+    /// itself, when it names one.
+    ///
+    /// The digest is of the request as JSON with the key left out, so the
+    /// same request sent again under the same key has the same digest, and
+    /// any other field changed gives another. Every map in a request is
+    /// ordered, so the JSON of one request is always the same text.
+    ///
+    /// What says nothing is left out first: every field
+    /// still at a request's default, and every null, empty list and empty
+    /// table. A field a later build adds is in neither form while it holds
+    /// such a default, so a request sent again across an upgrade still
+    /// matches. One added with any other default, such as `true`, would not.
+    pub fn idempotency(&self) -> Option<Idempotency> {
+        let key = self.delivery.idempotency_key.clone()?;
+        let mut unkeyed = self.clone();
+        unkeyed.delivery.idempotency_key = None;
+        let mut value = serde_json::to_value(&unkeyed).expect("a spawn request is plain data");
+        let defaults = serde_json::to_value(Self::new(self.source.clone()))
+            .expect("a spawn request is plain data");
+        canonical(&mut value, &defaults);
+        Some(Idempotency {
+            key,
+            request: super::names::Digest::of(value.to_string().as_bytes()),
+        })
+    }
+
     /// Refuse what a request that arrived over the network may not ask for:
     /// a blueprint read from a directory on this machine. A front door that
     /// takes whole requests from a remote caller checks this before handing
@@ -122,6 +149,33 @@ impl SpawnRequest {
             }
         }
     }
+}
+
+/// `value` with what says nothing left out, at every depth: each key of a
+/// table whose value is the one `defaults` holds at the same place, and each
+/// null, empty list and empty table. A list keeps every item.
+fn canonical(value: &mut serde_json::Value, defaults: &serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                canonical(item, &defaults[key.as_str()]);
+            }
+            map.retain(|key, item| !says_nothing(item) && *item != defaults[key.as_str()]);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                canonical(item, &serde_json::Value::Null);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `value` is a null, an empty list or an empty table.
+fn says_nothing(value: &serde_json::Value) -> bool {
+    value.is_null()
+        || value.as_array().is_some_and(Vec::is_empty)
+        || value.as_object().is_some_and(serde_json::Map::is_empty)
 }
 
 /// What a request runs.
@@ -291,6 +345,64 @@ mod tests {
             "source.raw.stages.plan.mode.fan_out.workers_available[0]"
         );
         assert_eq!(issues.0[0].code, IssueCode::NotAllowed);
+    }
+
+    /// The digest is the request's without its key: the same request under
+    /// the same key digests the same, whatever key it was, and any other
+    /// change moves it. A request with no key has none.
+    #[test]
+    fn a_keyed_request_digests_everything_but_its_key() {
+        let base = SpawnRequest::new(SpawnSource::Blueprint(BlueprintRef::parse("c").unwrap()))
+            .input("task", RawInput::Text("fix it".into()));
+        assert_eq!(base.idempotency(), None);
+        let keyed = |key: &str, request: &SpawnRequest| {
+            let mut request = request.clone();
+            request.delivery.idempotency_key =
+                Some(crate::spec::names::IdempotencyKey::new(key).unwrap());
+            request.idempotency().unwrap()
+        };
+        let first = keyed("k-1", &base);
+        assert_eq!(first.key.as_str(), "k-1");
+        assert_eq!(keyed("k-1", &base), first);
+        assert_eq!(keyed("k-2", &base).request, first.request);
+        let other = base
+            .clone()
+            .input("task", RawInput::Text("fix that".into()));
+        assert_ne!(keyed("k-1", &other).request, first.request);
+    }
+
+    /// What says nothing is left out of the digest's form, at any depth,
+    /// and a list keeps its items.
+    #[test]
+    fn the_canonical_form_leaves_out_what_says_nothing() {
+        let mut value = serde_json::json!({
+            "same": 1, "changed": 2, "none": null, "list": [], "table": {"inner": null},
+            "items": [{"gone": null, "kept": 3}, null], "flag": false
+        });
+        let defaults = serde_json::json!({"same": 1, "changed": 1, "flag": true});
+        canonical(&mut value, &defaults);
+        assert_eq!(
+            value,
+            serde_json::json!({"changed": 2, "items": [{"kept": 3}, null], "flag": false})
+        );
+    }
+
+    /// A field a later build adds at a default that says nothing leaves the
+    /// digest where it was: the same request, read with it, still matches.
+    #[test]
+    fn a_field_added_at_its_default_leaves_the_digest_alone() {
+        let mut request =
+            SpawnRequest::new(SpawnSource::Blueprint(BlueprintRef::parse("c").unwrap()));
+        request.delivery.idempotency_key =
+            Some(crate::spec::names::IdempotencyKey::new("k").unwrap());
+        let mut written = serde_json::to_value(&request).unwrap();
+        let mut with_more = written.clone();
+        with_more["launch"]["a_new_list"] = serde_json::json!([]);
+        with_more["a_new_option"] = serde_json::Value::Null;
+        let defaults = serde_json::to_value(SpawnRequest::new(request.source.clone())).unwrap();
+        canonical(&mut written, &defaults);
+        canonical(&mut with_more, &defaults);
+        assert_eq!(written, with_more);
     }
 
     #[test]

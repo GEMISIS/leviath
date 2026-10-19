@@ -2240,7 +2240,8 @@ async fn the_config_field_answers_without_secrets() {
                           options { __typename } }
                         allowsFileUploads blueprintPaths mcpServerCount
                         server { apiVersion build capabilities isAdminEnabled
-                          limits { maxPageSize maxIds maxUploadBytes requestTimeoutSecs } }
+                          limits { maxPageSize maxIds maxUploadBytes requestTimeoutSecs
+                                   spawnTimeoutSecs } }
                         health { error { message } savedAt }
                         yoloFile { path exists error } } }",
         )
@@ -2260,6 +2261,7 @@ async fn the_config_field_answers_without_secrets() {
                 .any(|c| c == "spawn.request"),
             "this server announces the typed spawn request"
         );
+        assert_eq!(config["server"]["limits"]["spawnTimeoutSecs"], 330);
         assert!(
             config["server"]["capabilities"]
                 .as_array()

@@ -81,6 +81,7 @@ fn a_layout_4_run_reads_back_with_its_one_compaction_model_once_upgraded() {
     );
     let mut want = expected["spec"].clone();
     want["graph"]["compaction"]["models"] = json!([]);
+    crate::common::as_layout_6_reads(&mut want);
     assert_eq!(json_of(reader.spec()), want);
     let last = reader.last_seq();
     assert_eq!(json_of(reader.deltas(0, last).unwrap()), expected["deltas"]);

@@ -51,6 +51,9 @@ pub struct WorldHost {
     started_rx: UnboundedReceiver<starts::Started>,
     /// Starts sent off the world and not yet placed.
     starting: usize,
+    /// Every idempotency key in use, by what holds it: a run, or a start
+    /// still under way (see `host::claims`).
+    claims: claims::Claims,
     reloader: Option<Reloader>,
     force_terminator: Option<ForceTerminator>,
     reaper: Option<Reaper>,
@@ -190,6 +193,7 @@ impl WorldHost {
             started_tx,
             started_rx,
             starting: 0,
+            claims: claims::Claims::default(),
             reloader: None,
             force_terminator: None,
             reaper: None,
@@ -227,6 +231,8 @@ impl WorldHost {
 // Sections of the former single-file host impl, one per concern. An inherent
 // impl may live in any module of the defining crate, so each file below carries
 // its own `impl WorldHost` block rather than a trait or a free function.
+mod claims;
+pub use claims::{HeldKey, REFUSED_AT_START, held_keys, mark_refused};
 mod emit;
 mod paging;
 pub use paging::{PageJob, PlacePage};
@@ -386,6 +392,14 @@ impl WorldHost {
         self.starter = Some(starter);
     }
 
+    /// Hold every key in `held` for the run whose record keeps it, so a
+    /// spawn sent again after this host started is still answered with the
+    /// run the first one started. [`held_keys`] reads them from a runs
+    /// directory.
+    pub fn recall_keys(&mut self, held: Vec<HeldKey>) {
+        self.claims.recall(held);
+    }
+
     /// Install the reloader used to page an unloaded run back in on demand.
     /// Without one, an op targeting a run that isn't in memory just misses.
     pub fn set_reloader(&mut self, reloader: Reloader) {
@@ -426,6 +440,9 @@ impl WorldHost {
 
     /// Run the housekeeping hook, if one is installed.
     fn housekeep(&mut self) {
+        // A run deleted from disk frees its idempotency key; dropping the key
+        // here keeps the map from growing with runs nobody can ask about.
+        self.claims.prune(self.world.runs_dir());
         if let Some(hook) = self.housekeeper.as_mut() {
             hook(&mut self.world);
         }

@@ -2369,7 +2369,7 @@
             "properties": {
               "AwaitingChoice": {
                 "items": {
-                  "description": "A edge name.",
+                  "description": "An edge name.",
                   "type": "string"
                 },
                 "type": "array"
@@ -4650,6 +4650,17 @@
             ],
             "description": "The webhook to call when the run finishes."
           },
+          "idempotency": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Idempotency"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The key the run was spawned under, when it was given one. Kept here\nso a daemon that restarts finds every key still held in the records\nit already reads."
+          },
           "metadata": {
             "additionalProperties": {
               "type": "string"
@@ -5177,6 +5188,24 @@
             "type": "array"
           }
         },
+        "type": "object"
+      },
+      "Idempotency": {
+        "description": "A spawn's idempotency key as a resolved run keeps it: the key, and the\ndigest of the request that came with it, which is how a request sent\nagain is told apart from a different one under the same key.",
+        "properties": {
+          "key": {
+            "description": "The key.",
+            "type": "string"
+          },
+          "request": {
+            "description": "The digest of the request, its key left out (see\n[`SpawnRequest::idempotency`](super::request::SpawnRequest::idempotency)).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "request"
+        ],
         "type": "object"
       },
       "InputDecl": {
@@ -7013,6 +7042,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "description": "How the call that picks each stage's next stage is retried, and what a\nfailure does."
           },
           "safe_commands": {
@@ -7829,6 +7859,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "description": "How the call that picks the next edge is retried, and what a failure\ndoes. `None` takes the graph's."
           },
           "sandbox": {
@@ -10213,7 +10244,7 @@
             "properties": {
               "AwaitingChoice": {
                 "items": {
-                  "description": "A edge name.",
+                  "description": "An edge name.",
                   "type": "string"
                 },
                 "type": "array"

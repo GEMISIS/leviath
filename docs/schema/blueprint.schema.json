@@ -2350,6 +2350,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "How the call that picks each stage's next stage is retried, and what a\nfailure does."
         },
         "safe_commands": {
@@ -3032,6 +3033,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "How the call that picks the next edge is retried, and what a failure\ndoes. `None` takes the graph's."
         },
         "sandbox": {

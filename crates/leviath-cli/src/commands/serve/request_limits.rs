@@ -12,8 +12,15 @@
 //!   piling up behind whatever is slow;
 //! - a timeout per request, after which the handler is dropped and the client
 //!   gets `408`. Dropping it does not undo what it had already started: a
-//!   read on the blocking pool runs to its end, and a spawn the daemon took is
-//!   a run. A client that retries a spawn after a `408` can start it twice.
+//!   read on the blocking pool runs to its end.
+//!
+//! A spawn has a deadline of its own, `spawn_timeout_secs`, longer than the
+//! ordinary one because starting a run connects its MCP servers and runs its
+//! seeds first. The spawn routes apply it themselves (see [`OWN_DEADLINE`]),
+//! since only they know what they were asked: a spawn cut off at its deadline
+//! says its outcome is unknown and names the idempotency key to send it again
+//! under, because a spawn the daemon took is a run whether or not anyone hears
+//! back.
 //!
 //! The websocket routes are outside both. A subscription is meant to stay open
 //! for hours.
@@ -51,6 +58,10 @@ pub(super) struct RequestLimits {
     pub(super) max_concurrent_requests: u64,
     /// Seconds a request may take before it is answered 408.
     pub(super) request_timeout_secs: u64,
+    /// Seconds a spawn may take before it is answered 408, in place of
+    /// `request_timeout_secs`.
+    #[serde(default = "default_spawn")]
+    pub(super) spawn_timeout_secs: u64,
     /// Bytes one request body may carry, which is what bounds a multipart
     /// upload. `[serve] max_upload_bytes`; no flag.
     #[serde(default = "default_upload")]
@@ -61,11 +72,16 @@ fn default_upload() -> u64 {
     crate::config::DEFAULT_MAX_UPLOAD_BYTES
 }
 
+fn default_spawn() -> u64 {
+    crate::config::DEFAULT_SPAWN_TIMEOUT_SECS
+}
+
 impl Default for RequestLimits {
     fn default() -> Self {
         Self {
             max_concurrent_requests: crate::config::DEFAULT_MAX_CONCURRENT_REQUESTS,
             request_timeout_secs: crate::config::DEFAULT_REQUEST_TIMEOUT_SECS,
+            spawn_timeout_secs: crate::config::DEFAULT_SPAWN_TIMEOUT_SECS,
             max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         }
     }
@@ -75,21 +91,29 @@ impl RequestLimits {
     /// Reconcile a flag with its config key: a flag that was typed wins, a
     /// config value stands otherwise, and the config's own default fills in
     /// when neither was set.
-    pub(super) fn resolve(
-        flag_max_concurrent: Option<u64>,
-        flag_timeout_secs: Option<u64>,
-        config: &crate::config::ServeConfig,
-    ) -> Self {
+    pub(super) fn resolve(flags: Flags, config: &crate::config::ServeConfig) -> Self {
         Self {
-            max_concurrent_requests: flag_max_concurrent.unwrap_or(config.max_concurrent_requests),
-            request_timeout_secs: flag_timeout_secs.unwrap_or(config.request_timeout_secs),
+            max_concurrent_requests: flags
+                .max_concurrent_requests
+                .unwrap_or(config.max_concurrent_requests),
+            request_timeout_secs: flags
+                .request_timeout_secs
+                .unwrap_or(config.request_timeout_secs),
+            spawn_timeout_secs: flags
+                .spawn_timeout_secs
+                .unwrap_or(config.spawn_timeout_secs),
             max_upload_bytes: config.max_upload_bytes,
         }
     }
 
     /// The per-request deadline, or `None` when it is switched off.
-    fn timeout(&self) -> Option<Duration> {
-        (self.request_timeout_secs > 0).then(|| Duration::from_secs(self.request_timeout_secs))
+    pub(super) fn timeout(&self) -> Option<Duration> {
+        seconds(self.request_timeout_secs)
+    }
+
+    /// The deadline for a spawn, or `None` when it is switched off.
+    pub(super) fn spawn_timeout(&self) -> Option<Duration> {
+        seconds(self.spawn_timeout_secs)
     }
 
     /// The in-flight cap, or `None` when it is switched off.
@@ -97,6 +121,34 @@ impl RequestLimits {
         // A cap larger than the platform's `usize` is no cap at all.
         (self.max_concurrent_requests > 0)
             .then(|| usize::try_from(self.max_concurrent_requests).unwrap_or(usize::MAX))
+    }
+}
+
+/// The `lev serve` flags that set a limit, each `None` when it was not
+/// typed.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Flags {
+    /// `--max-concurrent-requests`.
+    pub(super) max_concurrent_requests: Option<u64>,
+    /// `--request-timeout-secs`.
+    pub(super) request_timeout_secs: Option<u64>,
+    /// `--spawn-timeout-secs`.
+    pub(super) spawn_timeout_secs: Option<u64>,
+}
+
+/// `secs` as a deadline, where `0` is none.
+fn seconds(secs: u64) -> Option<Duration> {
+    (secs > 0).then_some(Duration::from_secs(secs))
+}
+
+/// `work`, cut off at `deadline` when there is one: `None` when it ran past.
+pub(super) async fn within<T>(
+    deadline: Option<Duration>,
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout(deadline, work).await.ok(),
+        None => Some(work.await),
     }
 }
 
@@ -151,11 +203,27 @@ pub(super) const DEADLINE_EXEMPT: &[&str] = &[
     "/api/doctor/live",
 ];
 
-/// Whether `path` is one of the [`DEADLINE_EXEMPT`] routes.
-fn deadline_exempt(path: &str) -> bool {
+/// The routes that take a permit and keep their own deadline, by method and
+/// path: the spawn routes, which apply `spawn_timeout_secs` and say what a
+/// spawn cut off by it means, and `/graphql`, whose deadline depends on the
+/// operation it carries (a `spawnRun` or `validateSpawn` mutation gets the
+/// spawn's) and so is applied once the operation is parsed.
+pub(super) const OWN_DEADLINE: &[(&str, &str)] = &[
+    ("POST", "/api/runs"),
+    ("POST", "/api/runs/validate"),
+    ("POST", "/graphql"),
+];
+
+/// Whether the layer leaves `req` without a deadline: one of the
+/// [`DEADLINE_EXEMPT`] routes, or one of the [`OWN_DEADLINE`] ones.
+fn deadline_exempt(req: &Request) -> bool {
+    let path = req.uri().path();
     DEADLINE_EXEMPT
         .iter()
         .any(|pattern| matches_route(pattern, path))
+        || OWN_DEADLINE
+            .iter()
+            .any(|(method, route)| req.method().as_str() == *method && path == *route)
 }
 
 /// Segment-by-segment match of `path` against `pattern`, where `*` stands
@@ -206,7 +274,7 @@ pub(super) async fn limit_requests(
     };
 
     let deadline = match gate.limits.timeout() {
-        Some(deadline) if !deadline_exempt(req.uri().path()) => deadline,
+        Some(deadline) if !deadline_exempt(&req) => deadline,
         _ => return next.run(req).await,
     };
     match tokio::time::timeout(deadline, next.run(req)).await {
@@ -274,6 +342,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 64,
             request_timeout_secs: 1,
+            spawn_timeout_secs: 330,
             max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let app = app(limits, Router::new().route("/slow", get(slow)));
@@ -287,6 +356,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 64,
             request_timeout_secs: 0,
+            spawn_timeout_secs: 0,
             max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let app = app(limits, Router::new().route("/slow", get(slow)));
@@ -299,6 +369,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 64,
             request_timeout_secs: 5,
+            spawn_timeout_secs: 330,
             max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let app = app(limits, Router::new().route("/slow", get(slow)));
@@ -313,6 +384,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 64,
             request_timeout_secs: 1,
+            spawn_timeout_secs: 330,
             max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let router = Router::new()
@@ -340,6 +412,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 64,
             request_timeout_secs: 1,
+            spawn_timeout_secs: 330,
             max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let router = Router::new()
@@ -369,6 +442,49 @@ mod tests {
         }
     }
 
+    /// The spawn routes and `/graphql` keep their own deadline, so the
+    /// layer's does not cut them off; the same paths under another method
+    /// are ordinary routes.
+    #[tokio::test(start_paused = true)]
+    async fn the_routes_with_their_own_deadline_outlive_the_layers() {
+        let limits = RequestLimits {
+            max_concurrent_requests: 64,
+            request_timeout_secs: 1,
+            spawn_timeout_secs: 330,
+            max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
+        };
+        let router = Router::new()
+            .route("/api/runs", post(slow).get(slow))
+            .route("/api/runs/validate", post(slow))
+            .route("/graphql", post(slow).get(slow));
+        for path in ["/api/runs", "/api/runs/validate", "/graphql"] {
+            let response = app(limits, router.clone())
+                .oneshot(post_request(path))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+        }
+        for path in ["/api/runs", "/graphql"] {
+            let response = app(limits, router.clone())
+                .oneshot(request(path))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT, "{path}");
+        }
+    }
+
+    /// Work inside its deadline answers, work past it does not, and no
+    /// deadline waits for it.
+    #[tokio::test(start_paused = true)]
+    async fn within_cuts_work_off_at_its_deadline_and_only_then() {
+        assert_eq!(within(Some(Duration::from_secs(1)), slow()).await, None);
+        assert_eq!(
+            within(Some(Duration::from_secs(5)), slow()).await,
+            Some("done")
+        );
+        assert_eq!(within(None, slow()).await, Some("done"));
+    }
+
     /// A route outside the deadline is still inside the cap: a parked login
     /// holds the only permit, so the next request is refused.
     #[tokio::test]
@@ -376,6 +492,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 1,
             request_timeout_secs: 1,
+            spawn_timeout_secs: 330,
             max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let parked = Arc::new(Parked::default());
@@ -458,6 +575,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 64,
             request_timeout_secs: 0,
+            spawn_timeout_secs: 0,
             max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let parked = Arc::new(Parked::default());
@@ -511,6 +629,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: 0,
             request_timeout_secs: 0,
+            spawn_timeout_secs: 0,
             max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         let parked = Arc::new(Parked::default());
@@ -541,42 +660,51 @@ mod tests {
         let config = ServeConfig {
             max_concurrent_requests: 8,
             request_timeout_secs: 120,
+            spawn_timeout_secs: 600,
             max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
             event_replay_frames: crate::config::DEFAULT_EVENT_REPLAY_FRAMES,
         };
-        // Neither flag: the config stands.
-        assert_eq!(
-            RequestLimits::resolve(None, None, &config),
-            RequestLimits {
-                max_concurrent_requests: 8,
-                request_timeout_secs: 120,
+        let limits =
+            |max_concurrent_requests, request_timeout_secs, spawn_timeout_secs| RequestLimits {
+                max_concurrent_requests,
+                request_timeout_secs,
+                spawn_timeout_secs,
                 max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
-            }
+            };
+        // No flag: the config stands.
+        assert_eq!(
+            RequestLimits::resolve(Flags::default(), &config),
+            limits(8, 120, 600)
         );
         // Each flag on its own, including `0` to switch a limit off.
-        assert_eq!(
-            RequestLimits::resolve(Some(0), None, &config),
-            RequestLimits {
-                max_concurrent_requests: 0,
-                request_timeout_secs: 120,
-                max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
-            }
-        );
-        assert_eq!(
-            RequestLimits::resolve(None, Some(3), &config),
-            RequestLimits {
-                max_concurrent_requests: 8,
-                request_timeout_secs: 3,
-                max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
-            }
-        );
+        let cap = Flags {
+            max_concurrent_requests: Some(0),
+            ..Flags::default()
+        };
+        assert_eq!(RequestLimits::resolve(cap, &config), limits(0, 120, 600));
+        let timeout = Flags {
+            request_timeout_secs: Some(3),
+            ..Flags::default()
+        };
+        assert_eq!(RequestLimits::resolve(timeout, &config), limits(8, 3, 600));
+        let spawn = Flags {
+            spawn_timeout_secs: Some(0),
+            ..Flags::default()
+        };
+        assert_eq!(RequestLimits::resolve(spawn, &config), limits(8, 120, 0));
         // No config table and no flags: the defaults.
         assert_eq!(
-            RequestLimits::resolve(None, None, &ServeConfig::default()),
+            RequestLimits::resolve(Flags::default(), &ServeConfig::default()),
             RequestLimits::default()
         );
         assert_eq!(RequestLimits::default().max_concurrent_requests, 64);
         assert_eq!(RequestLimits::default().request_timeout_secs, 30);
+        assert_eq!(RequestLimits::default().spawn_timeout_secs, 330);
+        assert_eq!(limits(8, 120, 0).spawn_timeout(), None);
+        assert_eq!(
+            limits(8, 120, 600).spawn_timeout(),
+            Some(Duration::from_secs(600))
+        );
     }
 
     #[test]
@@ -584,6 +712,7 @@ mod tests {
         let limits = RequestLimits {
             max_concurrent_requests: u64::MAX,
             request_timeout_secs: 0,
+            spawn_timeout_secs: 0,
             max_upload_bytes: crate::config::DEFAULT_MAX_UPLOAD_BYTES,
         };
         assert_eq!(limits.cap(), Some(usize::MAX));
@@ -608,5 +737,6 @@ mod tests {
             limits.max_upload_bytes,
             crate::config::DEFAULT_MAX_UPLOAD_BYTES
         );
+        assert_eq!(limits.spawn_timeout_secs, 330);
     }
 }

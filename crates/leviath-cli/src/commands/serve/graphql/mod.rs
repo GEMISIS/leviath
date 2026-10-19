@@ -22,9 +22,11 @@
 
 use async_graphql::http::ALL_WEBSOCKET_PROTOCOLS;
 use async_graphql::{SDLExportOptions, Schema};
+use async_graphql_axum::rejection::GraphQLRejection;
 use async_graphql_axum::{GraphQLProtocol, GraphQLRequest, GraphQLResponse};
-use axum::extract::{Extension, State, WebSocketUpgrade};
-use axum::response::Response;
+use axum::extract::{Extension, FromRequest, State, WebSocketUpgrade};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 
 use super::types::AppState;
 
@@ -32,6 +34,7 @@ mod admin;
 mod checks;
 mod config_input;
 mod connection;
+mod deadline;
 mod error;
 mod events;
 mod filter;
@@ -71,6 +74,7 @@ pub(super) type LeviathSchema =
 /// same for every request, and the per-request state travels in the execution
 /// context instead.
 pub(super) fn build_schema(state: AppState, allow_admin: bool) -> LeviathSchema {
+    let state_limits = state.limits.request_limits;
     Schema::build(
         query::Query,
         mutation::Mutation::default(),
@@ -96,6 +100,9 @@ pub(super) fn build_schema(state: AppState, allow_admin: bool) -> LeviathSchema 
     // The response answers fields in the order the query selected them, as
     // the spec says, whichever field resolved first.
     .extension(ordering::AnswerInSelectionOrder)
+    // The deadline, which a path cannot pick for this route: a spawn's is
+    // minutes, any other operation's is the ordinary one.
+    .extension(deadline::Deadlines::of(&state_limits))
     .limit_depth(MAX_DEPTH)
     .limit_complexity(MAX_COMPLEXITY)
     .finish()
@@ -106,13 +113,39 @@ pub(super) fn build_schema(state: AppState, allow_admin: bool) -> LeviathSchema 
 /// Answers 200 with an `errors` array for a failure inside a field, which is
 /// what makes a partial answer possible: one unreadable run does not cost a
 /// client the other forty-nine on the page. Transport-level refusals still
-/// come from the layers around this one, so a missing token is a 401 and an
-/// over-long request is a 408 exactly as on every REST route.
+/// come from the layers around this one, so a missing token is a 401. An
+/// operation past its deadline is a 408 exactly as on every REST route,
+/// except a `spawnRun`, whose run may have started anyway: that is an error
+/// coded `SPAWN_OUTCOME_UNKNOWN` (see `deadline`).
+///
+/// The request-limit layer leaves this route's deadline to the handler, so
+/// the body is read here under the ordinary deadline: a request still
+/// arriving after it has no business holding a slot.
 pub(super) async fn http(
+    State(state): State<AppState>,
     Extension(schema): Extension<LeviathSchema>,
-    req: GraphQLRequest,
-) -> GraphQLResponse {
-    schema.execute(req.into_inner()).await.into()
+    req: axum::extract::Request,
+) -> Response {
+    let limits = state.limits.request_limits;
+    let read = GraphQLRequest::<GraphQLRejection>::from_request(req, &state);
+    match super::request_limits::within(limits.timeout(), read).await {
+        Some(Ok(request)) => answer(schema.execute(request.into_inner()).await),
+        Some(Err(refused)) => refused.into_response(),
+        None => super::types::err(
+            StatusCode::REQUEST_TIMEOUT,
+            format!("request took longer than {} s", limits.request_timeout_secs),
+        )
+        .into_response(),
+    }
+}
+
+/// The HTTP answer to `response`: a 408 for an operation past its deadline,
+/// as every REST route answers one, and the GraphQL response otherwise.
+fn answer(response: async_graphql::Response) -> Response {
+    match deadline::timed_out(&response) {
+        Some(message) => super::types::err(StatusCode::REQUEST_TIMEOUT, message).into_response(),
+        None => GraphQLResponse::from(response).into_response(),
+    }
 }
 
 /// `GET /ws/graphql`: subscriptions over `graphql-transport-ws`.

@@ -31,7 +31,7 @@ fn the_published_schemas_match_this_build() {
 /// The hash of the binary samples below as this build encodes them. When it
 /// changes, the binary layout changed: bump `LAYOUT_VERSION`, then record
 /// the new hash here.
-const LAYOUT_HASH: &str = "b11f78e5af637712276f94285874756e282ec0e9d3374e9463eb2e222f5b07af";
+const LAYOUT_HASH: &str = "e8c76bf2454494d5570e5c2d479b33a55bb0988798943fe9860fb54140155338";
 
 /// A fully populated sample of every frame type, so a change to any type's
 /// binary encoding changes the bytes.
@@ -47,6 +47,16 @@ fn layout_samples() -> Vec<u8> {
     // multi-line strings keep a CRLF, and the bytes would move.
     let sample = include_str!("layout_sample.toml").replace("\r\n", "\n");
     spec.graph = toml::from_str::<RunGraph>(&sample).unwrap();
+    let routing = crate::spec::graph::RoutingDef {
+        retry_attempts: std::num::NonZeroU32::new(4),
+        on_error: Some(crate::spec::graph::OnRoutingError::ErrorEdge),
+    };
+    spec.graph.routing = Some(routing.clone());
+    spec.graph.stages[0].routing = Some(routing);
+    spec.delivery.idempotency = Some(crate::spec::launch::Idempotency {
+        key: crate::spec::names::IdempotencyKey::new("pw:task-1").unwrap(),
+        request: crate::spec::names::Digest::of(b"request"),
+    });
     let text = InputType::Text {
         multiline: true,
         min_len: Some(1),
@@ -126,7 +136,7 @@ fn the_binary_layout_matches_its_version() {
 /// The hash of [`structure`] over every frame type's schema, the frame kinds
 /// and the layout version. When it changes, a frame type changed shape: the
 /// message in [`the_frame_types_keep_their_structure`] says what to do.
-const STRUCTURE_HASH: &str = "fa990e37ae67988e2c465bd7a7b188b08551b4e27e68b0b8150c5ae9c04b0f84";
+const STRUCTURE_HASH: &str = "ca81753d6a2c96aad9a87f78af8e32e15bb0457e7843740f49b489155ac351d8";
 
 /// Keywords that only document a schema: how the readable form reads and what
 /// a field means. Postcard writes none of them.
@@ -230,8 +240,8 @@ fn the_fingerprint_names_this_layout() {
     assert_eq!(
         (super::LAYOUT_VERSION, hex::encode(super::FINGERPRINT)),
         (
-            5,
-            "c7cd416cf7a87b1ece8b1717e0f65826c075b2a901530a0f25de937790d5b215".to_string()
+            6,
+            "ca81753d6a2c96aad9a87f78af8e32e15bb0457e7843740f49b489155ac351d8".to_string()
         ),
     );
 }

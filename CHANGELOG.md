@@ -135,6 +135,30 @@ same list.
   `compaction_routes`, which answers with a `CompactionPlan` (the resolved
   routes and the resolver's notes), and `bind::host::compaction_model` is
   `compaction_routes`.
+- `lev serve` gives a spawn its own deadline, `--spawn-timeout-secs` or
+  `[serve] spawn_timeout_secs`, 330 s by default. It covers `POST /api/runs`,
+  `POST /api/runs/validate` and the GraphQL `spawnRun` and `validateSpawn`
+  mutations, which no longer answer 408 at `request_timeout_secs`. The
+  `/graphql` route picks its deadline by the operation it carries: only one
+  asking for spawns alone gets the spawn deadline, and any other still
+  answers 408 at the ordinary one. A request body has the ordinary deadline
+  to arrive in on every route. A spawn past its own deadline answers 408
+  with `spawn_outcome: "unknown"` and its idempotency key (GraphQL: an error
+  coded `SPAWN_OUTCOME_UNKNOWN`), since its run may have started anyway. For the old behaviour, set `spawn_timeout_secs` to
+  the same value as `request_timeout_secs`.
+- **Breaking.** Run files move to binary layout 6: a run's delivery keeps
+  the idempotency key it was spawned under, and a graph's and a stage's
+  `routing` are recorded, so a run resumed after a daemon restart keeps its
+  blueprint's routing instead of taking the operator's `[limits]`. The
+  daemon upgrades layout-2 to 5 files at start, saved in the backup first
+  and the original kept as `legacy/run.v5.lvr` (or `v2` to `v4`). A layout-4
+  or 5 file's steps are copied as they are; an upgraded run holds no key
+  and no routing of its own, since no older layout kept either.
+- **Breaking, library.** `DeliveryPlan::of` takes the request's
+  `Idempotency`, `DeliveryPlan` has an `idempotency` field, `Delivery` an
+  `idempotency_key`, `Spawned` a `deduplicated` flag and `DaemonIdentity`
+  an `idempotent_spawns` flag.
+
 - **Breaking.** A fan-out stage declares the workers it may hand items to.
   `[graph.stages.mode.fan_out]` names its `stage` and lists
   `workers_available`, each with a `name`, one of `stage`, `blueprint` or
@@ -416,6 +440,11 @@ same list.
   content summaries all walk the resolved routes, moving on when a provider
   turns out to be unusable, and `lev validate` prints the compaction model a
   run would use.
+- A spawn over `lev serve` no longer answers 408 at the 30 s request
+  deadline while the daemon goes on to start its run. A graph with MCP
+  servers or command seeds can take minutes to start, and a client that
+  retried after the 408 started the run twice. Spawns now run under their
+  own deadline, and a key makes a retry safe.
 - A fan-out stage runs only the worker its blueprint declares. A reviewer
   run's `fan_out` call named `"agent": "review"`, which replaced the stage's
   `review_worker`, and ten workers were queued for a blueprint that does not
@@ -941,6 +970,22 @@ same list.
   `lev daemon status --json` prints it as `cwd`, and GraphQL
   `DaemonStatus.cwd` and `DaemonIdentity.cwd` carry it, null from an older
   daemon.
+- `delivery.idempotency_key` on a spawn request (GraphQL
+  `delivery.idempotencyKey`): 1 to 128 letters, digits, `.`, `_`, `:` or
+  `-`. The daemon starts one run per key on the machine. The same request
+  sent again answers with the first run's id and `deduplicated: true`, and
+  starts no second run, `agent_spawned` frame or webhook. A different
+  request under the key is refused with a `conflict` naming the run that
+  holds it, and a request sent while the first is still starting waits for
+  its answer. A refused spawn claims nothing, and deleting the run frees
+  its key. The key is kept in the run's record, so it survives a daemon
+  restart. Announced as the `spawn.idempotency` capability, only while the
+  daemon keeps keys. The control client retries a keyed spawn after a
+  dropped connection, as it does a read. `RunOutput.spec.delivery` shows a
+  run's `idempotencyKey`. A run refused after its record was written is
+  marked `refused-at-start` in its directory and holds no key.
+- `limits.spawn_timeout_secs` on `GET /api/config` and in GraphQL
+  `config.server`.
 - Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 on Anthropic
   (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`), Bedrock
   (`us.anthropic.claude-haiku-5-5` and the other profiles) and OpenRouter

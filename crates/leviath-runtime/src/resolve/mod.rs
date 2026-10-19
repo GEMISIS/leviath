@@ -238,7 +238,7 @@ pub async fn resolve(
         .unwrap_or(0);
     stages[entry].notes.extend(notes);
     let env_fingerprint = stages::fingerprint(&graph, &stages, env);
-    let (delivery, secrets) = DeliveryPlan::of(&request.delivery, &run_id);
+    let (delivery, secrets) = DeliveryPlan::of(&request.delivery, request.idempotency(), &run_id);
     let spec = RunSpec {
         run_id,
         origin: src.origin,

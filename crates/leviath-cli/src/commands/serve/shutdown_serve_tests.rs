@@ -31,6 +31,7 @@ fn args(grace_secs: u64) -> ServeArgs {
         shutdown_grace_secs: grace_secs,
         json: false,
         ready_file: None,
+        spawn_timeout_secs: None,
     }
 }
 

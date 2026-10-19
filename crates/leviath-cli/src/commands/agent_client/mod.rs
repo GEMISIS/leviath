@@ -725,7 +725,9 @@ impl Server {
             Ok(Ok(request)) => request,
         };
         match self.control.spawn(request).await {
-            Ok(ControlResponse::Spawned { run_id, warnings }) => {
+            Ok(ControlResponse::Spawned {
+                run_id, warnings, ..
+            }) => {
                 let session = self.session.as_mut().expect("session present");
                 session.run = SessionRun::Running(run_id.clone());
                 // Ahead of anything the run says, so a host's user sees why a

@@ -102,12 +102,7 @@ pub struct RunGraph {
     pub nudge: Option<NudgeDef>,
     /// How the call that picks each stage's next stage is retried, and what a
     /// failure does.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "policy::routing_serde"
-    )]
-    #[schemars(with = "Option<RoutingDef>")]
+    #[serde(default)]
     pub routing: Option<RoutingDef>,
     /// Loop detection.
     #[serde(default)]

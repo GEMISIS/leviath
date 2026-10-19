@@ -531,6 +531,25 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "runs.export",
 ];
 
+/// `delivery.idempotency_key` on a spawn, which starts one run however many
+/// times it is sent. Announced beside [`API_CAPABILITIES`] only while the
+/// daemon behind this server says it keeps the keys
+/// (`DaemonIdentity::idempotent_spawns`): an older daemon refuses a request
+/// carrying one, and a capability is a promise.
+pub(super) const SPAWN_IDEMPOTENCY: &str = "spawn.idempotency";
+
+/// What this server announces: [`API_CAPABILITIES`], and
+/// [`SPAWN_IDEMPOTENCY`] when `idempotent_spawns` says the daemon keeps keys.
+pub(super) fn capabilities(idempotent_spawns: bool) -> Vec<String> {
+    let keyed = idempotent_spawns.then_some(SPAWN_IDEMPOTENCY);
+    API_CAPABILITIES
+        .iter()
+        .copied()
+        .chain(keyed)
+        .map(str::to_string)
+        .collect()
+}
+
 /// The server's numeric limits.
 ///
 /// This is what makes capability discovery useful rather than decorative: a
@@ -563,6 +582,10 @@ pub(super) struct ApiLimits {
     /// Seconds a request may take before this server answers 408. `0` means
     /// there is no deadline. `--request-timeout-secs` over `[serve]`.
     pub(super) request_timeout_secs: u64,
+    /// Seconds a spawn may take before this server answers 408, in place of
+    /// `request_timeout_secs`. `0` means there is no deadline.
+    /// `--spawn-timeout-secs` over `[serve]`.
+    pub(super) spawn_timeout_secs: u64,
     /// Bytes one request body may carry: the ceiling on a multipart upload.
     /// `[serve] max_upload_bytes`.
     pub(super) max_upload_bytes: u64,
@@ -584,6 +607,7 @@ impl ApiLimits {
             max_tracked_modified_files: leviath_core::run_meta::MAX_TRACKED_MODIFIED_FILES,
             max_concurrent_requests: requests.max_concurrent_requests,
             request_timeout_secs: requests.request_timeout_secs,
+            spawn_timeout_secs: requests.spawn_timeout_secs,
             max_upload_bytes: requests.max_upload_bytes,
         }
     }

@@ -484,6 +484,7 @@ mod tests {
         let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
             run_id: "x".to_string(),
             warnings: Default::default(),
+            deduplicated: false,
         });
         assert_eq!(
             status_of(

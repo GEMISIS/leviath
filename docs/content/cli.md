@@ -1233,6 +1233,7 @@ Start the [REST and WebSocket API](/docs/api).
 | `--no-remote-seed-commands` | off | Treat every spawn as `launch.seed_commands = false`, so command seeds never run for a run started over the API |
 | `--max-concurrent-requests <N>` | `[serve]` key, else `64` | Requests in flight before the next is answered 503. `0` disables the cap. Websocket routes are not counted |
 | `--request-timeout-secs <SECS>` | `[serve]` key, else `30` | Seconds a request may take before it is answered 408. `0` disables the deadline. Websocket routes are not timed |
+| `--spawn-timeout-secs <SECS>` | `[serve]` key, else `330` | Seconds a spawn or a dry run may take before it is answered 408. `0` disables the deadline |
 | `--tls-cert <PATH>` | unset | PEM certificate chain. Serves HTTPS; needs `--tls-key` too |
 | `--tls-key <PATH>` | unset | PEM private key for `--tls-cert` |
 

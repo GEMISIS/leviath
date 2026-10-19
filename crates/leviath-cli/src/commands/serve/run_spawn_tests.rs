@@ -106,6 +106,7 @@ async fn a_spawn_request_starts_a_run() {
     let (state, seen, _dir) = answering(ControlResponse::Spawned {
         run_id: "run-1".into(),
         warnings: Default::default(),
+        deduplicated: false,
     });
     let before = crate::commands::serve::events::latest_seq();
     let (status, body) = send(state, post("/api/runs", CODER)).await;
@@ -119,6 +120,7 @@ async fn a_spawn_request_starts_a_run() {
         body["server_instance"],
         crate::commands::serve::events::server_instance()
     );
+    assert_eq!(body["deduplicated"], false);
     assert!(carried(&seen).inputs.contains_key("task"));
 }
 
@@ -136,6 +138,7 @@ async fn a_spawn_that_may_never_finish_starts_and_says_so() {
     let (state, _seen, _dir) = answering(ControlResponse::Spawned {
         run_id: "run-1".into(),
         warnings: warned.into(),
+        deduplicated: false,
     });
     let (status, body) = send(state, post("/api/runs", CODER)).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -250,6 +253,7 @@ async fn a_multipart_spawn_carries_its_files_as_attachments() {
     let (state, seen, _dir) = answering(ControlResponse::Spawned {
         run_id: "run-2".into(),
         warnings: Default::default(),
+        deduplicated: false,
     });
     let request = multipart(
         "/api/runs",
@@ -435,4 +439,204 @@ async fn a_blueprints_inputs_are_read_from_its_graph() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, body) = send(state(), get("/api/blueprints/broken/inputs")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+}
+
+/// A spawn under an idempotency key carries it to the daemon, and a repeat
+/// the daemon answered with the first run says so.
+#[tokio::test]
+async fn a_keyed_spawn_carries_its_key_and_says_when_it_was_a_repeat() {
+    let (state, seen, _dir) = answering(ControlResponse::Spawned {
+        run_id: "run-1".into(),
+        warnings: Default::default(),
+        deduplicated: true,
+    });
+    let body = r#"{"source": {"blueprint": {"name": "coder"}}, "inputs": {"task": "fix it"},
+                   "delivery": {"idempotency_key": "pw:task-1"}}"#;
+    let (status, answer) = send(state, post("/api/runs", body)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(answer["run_id"], "run-1");
+    assert_eq!(answer["deduplicated"], true);
+    // A repeat still says where the stream stands now, above the first
+    // spawn's frames.
+    assert!(answer["seq"].is_u64(), "{answer}");
+    let carried = carried(&seen);
+    assert_eq!(
+        carried
+            .delivery
+            .idempotency_key
+            .map(String::from)
+            .as_deref(),
+        Some("pw:task-1")
+    );
+}
+
+/// A key that is not one is refused at its own path, without asking the
+/// daemon, and so is one that is not text at all. A `null` is no key.
+#[tokio::test]
+async fn a_key_that_is_not_one_is_refused_at_its_own_path() {
+    let body = r#"{"source": {"blueprint": {"name": "coder"}},
+                   "delivery": {"idempotency_key": "has space"}}"#;
+    let (status, answer) = send(offline(), post("/api/runs", body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert_eq!(answer["issues"][0]["at"], "delivery.idempotency_key");
+    assert_eq!(answer["issues"][0]["code"], "invalid");
+    let body = r#"{"source": {"blueprint": {"name": "coder"}},
+                   "delivery": {"idempotency_key": 7}}"#;
+    let (status, answer) = send(offline(), post("/api/runs/validate", body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert_eq!(answer["issues"][0]["at"], "delivery.idempotency_key");
+    assert_eq!(answer["issues"][0]["code"], "wrong_type");
+    assert_eq!(answer["issues"][0]["got"], "7");
+    let body = r#"{"source": {"blueprint": {"name": "coder"}},
+                   "delivery": {"idempotency_key": null}}"#;
+    let (status, answer) = send(offline(), post("/api/runs/validate", body)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+}
+
+/// A daemon that takes every request it is sent and answers none.
+fn silent_daemon() -> (
+    leviath_runtime::control_socket::ControlClient,
+    tempfile::TempDir,
+    tokio::task::JoinHandle<()>,
+) {
+    use leviath_runtime::control_socket::{ControlClient, bind_control_listener, control_id};
+    let dir = tempfile::tempdir().unwrap();
+    let id = control_id(dir.path());
+    let mut listener = bind_control_listener(&id).unwrap();
+    let task = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok(Some(stream)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    (ControlClient::new(id), dir, task)
+}
+
+/// A state over a daemon that never answers, with a spawn deadline of
+/// `secs` and the ordinary one left at its default.
+fn waiting(secs: u64) -> (super::AppState, tempfile::TempDir) {
+    let (client, dir, _task) = silent_daemon();
+    let mut state = state_with_agent_paths(Vec::new());
+    state.control = client;
+    state.limits = Arc::new(ServeLimits {
+        request_limits: crate::commands::serve::request_limits::RequestLimits {
+            spawn_timeout_secs: secs,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    (state, dir)
+}
+
+/// A spawn past its own deadline answers 408, says its outcome is unknown,
+/// and names the key to send it again under; one sent with no key says so.
+#[tokio::test]
+async fn a_spawn_past_its_deadline_says_its_outcome_is_unknown() {
+    let (state, _dir) = waiting(1);
+    let keyed = r#"{"source": {"blueprint": {"name": "coder"}}, "inputs": {"task": "fix it"},
+                    "delivery": {"idempotency_key": "pw:task-1"}}"#;
+    let (status, answer) = send(state.clone(), post("/api/runs", keyed)).await;
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{answer}");
+    assert_eq!(answer["spawn_outcome"], "unknown");
+    assert_eq!(answer["idempotency_key"], "pw:task-1");
+    let error = answer["error"].as_str().unwrap();
+    assert!(error.contains("longer than 1 s"), "{error}");
+    assert!(error.contains("; send it again with the same"), "{error}");
+    let (status, answer) = send(state, post("/api/runs", CODER)).await;
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(answer["idempotency_key"], serde_json::Value::Null);
+}
+
+/// A dry run past the spawn deadline is an ordinary timeout: it started
+/// nothing, so there is no outcome to be unsure of.
+#[tokio::test]
+async fn a_dry_run_past_its_deadline_is_an_ordinary_timeout() {
+    let (state, _dir) = waiting(1);
+    let (status, answer) = send(state, post("/api/runs/validate", CODER)).await;
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(answer["error"], "request took longer than 1 s");
+    assert_eq!(answer.get("spawn_outcome"), None);
+}
+
+/// A daemon that predates keys would refuse the whole request unread, so a
+/// key sent to one is refused here, at its path, with what to do about it.
+/// A daemon that keeps keys is announced as the `spawn.idempotency`
+/// capability; one that does not, or has not said, is not.
+#[tokio::test]
+async fn a_key_is_refused_and_unannounced_when_the_daemon_predates_keys() {
+    use leviath_runtime::control_socket::DaemonIdentity;
+    let old = DaemonIdentity {
+        idempotent_spawns: false,
+        ..crate::test_support::same_code_daemon(7)
+    };
+    let daemon = crate::test_support::identified_daemon(old, 3, |req| match req {
+        ControlRequest::Status { .. } => ControlResponse::Status { status: None },
+        _ => ControlResponse::Rejected {
+            issues: Default::default(),
+        },
+    });
+    let mut state = state_with_agent_paths(Vec::new());
+    state.control = daemon.client.clone();
+    let get_config = || {
+        Request::builder()
+            .uri("/api/config")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (_, config) = send(state.clone(), get_config()).await;
+    let announced = |config: &serde_json::Value| {
+        config["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("spawn.idempotency"))
+    };
+    assert!(!announced(&config), "no daemon has said who it is yet");
+    daemon.client.status("anything").await.unwrap();
+    let (_, config) = send(state.clone(), get_config()).await;
+    assert!(!announced(&config), "this daemon predates keys");
+    assert_eq!(config["limits"]["spawn_timeout_secs"], 330);
+
+    let keyed = r#"{"source": {"blueprint": {"name": "coder"}}, "inputs": {"task": "fix it"},
+                    "delivery": {"idempotency_key": "pw:task-1"}}"#;
+    let (status, answer) = send(state, post("/api/runs", keyed)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert_eq!(answer["issues"][0]["at"], "delivery.idempotency_key");
+    assert_eq!(answer["issues"][0]["code"], "not_allowed");
+
+    let current =
+        crate::test_support::identified_daemon(crate::test_support::same_code_daemon(8), 1, |_| {
+            ControlResponse::Status { status: None }
+        });
+    let mut state = state_with_agent_paths(Vec::new());
+    state.control = current.client.clone();
+    current.client.status("anything").await.unwrap();
+    let (_, config) = send(state, get_config()).await;
+    assert!(announced(&config), "{config}");
+}
+
+/// A spawn's body has the ordinary deadline to arrive in: one still arriving
+/// past it is an ordinary 408, on both routes, and nothing reaches the
+/// daemon.
+#[tokio::test(start_paused = true)]
+async fn a_spawn_body_still_arriving_past_the_ordinary_deadline_is_a_408() {
+    for uri in ["/api/runs", "/api/runs/validate"] {
+        let mut state = offline();
+        state.limits = Arc::new(ServeLimits {
+            request_limits: crate::commands::serve::request_limits::RequestLimits {
+                request_timeout_secs: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let stuck = futures_util::stream::pending::<Result<axum::body::Bytes, std::io::Error>>();
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from_stream(stuck))
+            .unwrap();
+        let (status, answer) = send(state, request).await;
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{uri}");
+        assert_eq!(answer["error"], "request took longer than 1 s");
+    }
 }

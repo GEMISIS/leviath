@@ -178,6 +178,7 @@ impl TaskLaunch {
         request.delivery = Delivery {
             callback,
             metadata: self.metadata.into_iter().collect(),
+            idempotency_key: None,
         };
         Ok(request)
     }

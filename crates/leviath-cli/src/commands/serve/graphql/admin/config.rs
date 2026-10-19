@@ -40,6 +40,7 @@ pub(crate) async fn update_config(
         config: super::super::query::config_of(
             &written,
             &state.limits.request_limits,
+            state.daemon_keeps_keys() == Some(true),
             &state.config_health().await,
             // True by construction: this mutation is behind the guard.
             true,

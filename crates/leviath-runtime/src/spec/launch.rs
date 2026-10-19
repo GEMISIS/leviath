@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::names::{HttpUrl, RunId, SecretRef, StageName, ToolName};
+use super::names::{Digest, HttpUrl, IdempotencyKey, RunId, SecretRef, StageName, ToolName};
 
 pub use leviath_core::unattended::Unattended;
 
@@ -182,6 +182,26 @@ pub struct Delivery {
     /// The caller's labels, carried through untouched and shown with the run.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+    /// The caller's name for this spawn. A request sent again with the same
+    /// key and nothing else changed is answered with the run the first one
+    /// started, for as long as that run's record exists, and starts no
+    /// second run. The same key with a different request is refused.
+    /// Written only when set, so a daemon that predates the key reads a
+    /// request without one exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<IdempotencyKey>,
+}
+
+/// A spawn's idempotency key as a resolved run keeps it: the key, and the
+/// digest of the request that came with it, which is how a request sent
+/// again is told apart from a different one under the same key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Idempotency {
+    /// The key.
+    pub key: IdempotencyKey,
+    /// The digest of the request, its key left out (see
+    /// [`SpawnRequest::idempotency`](super::request::SpawnRequest::idempotency)).
+    pub request: Digest,
 }
 
 /// A webhook as a resolved run holds it: the signing secret by the
@@ -204,13 +224,21 @@ pub struct DeliveryPlan {
     pub callback: Option<CallbackPlan>,
     /// The caller's labels.
     pub metadata: BTreeMap<String, String>,
+    /// The key the run was spawned under, when it was given one. Kept here
+    /// so a daemon that restarts finds every key still held in the records
+    /// it already reads.
+    pub idempotency: Option<Idempotency>,
 }
 
 impl DeliveryPlan {
-    /// `delivery` for the run `run`: each secret it carries given a new
-    /// reference, and the secrets themselves under those references, for the
-    /// host to keep in its secret store.
-    pub fn of(delivery: &Delivery, run: &RunId) -> (Self, Vec<(SecretRef, Secret)>) {
+    /// `delivery` for the run `run`, spawned under `idempotency`: each secret
+    /// it carries given a new reference, and the secrets themselves under
+    /// those references, for the host to keep in its secret store.
+    pub fn of(
+        delivery: &Delivery,
+        idempotency: Option<Idempotency>,
+        run: &RunId,
+    ) -> (Self, Vec<(SecretRef, Secret)>) {
         let mut kept = Vec::new();
         let callback = delivery.callback.as_ref().map(|callback| CallbackPlan {
             url: callback.url.clone(),
@@ -223,6 +251,7 @@ impl DeliveryPlan {
         let plan = Self {
             callback,
             metadata: delivery.metadata.clone(),
+            idempotency,
         };
         (plan, kept)
     }
@@ -335,12 +364,18 @@ mod tests {
                 secret: Some(Secret::new("hunter2")),
             }),
             metadata: [("team".to_string(), "a".to_string())].into(),
+            idempotency_key: None,
         };
-        let (plan, kept) = DeliveryPlan::of(&asked, &run);
+        let keyed = Idempotency {
+            key: IdempotencyKey::new("task-1").unwrap(),
+            request: Digest::of(b"request"),
+        };
+        let (plan, kept) = DeliveryPlan::of(&asked, Some(keyed.clone()), &run);
         let reference = plan.callback_secret().unwrap().clone();
         assert_eq!(reference.run(), Some("r-1"));
         assert_eq!(kept, vec![(reference, Secret::new("hunter2"))]);
         assert_eq!(plan.metadata["team"], "a");
+        assert_eq!(plan.idempotency, Some(keyed));
         let bin = postcard::to_stdvec(&plan).unwrap();
         assert!(!String::from_utf8_lossy(&bin).contains("hunter2"));
         assert_eq!(postcard::from_bytes::<DeliveryPlan>(&bin).unwrap(), plan);
@@ -351,10 +386,11 @@ mod tests {
                 secret: None,
             }),
             metadata: BTreeMap::new(),
+            idempotency_key: None,
         };
-        let (plan, kept) = DeliveryPlan::of(&unsigned, &run);
+        let (plan, kept) = DeliveryPlan::of(&unsigned, None, &run);
         assert!(plan.callback.is_some() && plan.callback_secret().is_none() && kept.is_empty());
-        let (plan, kept) = DeliveryPlan::of(&Delivery::default(), &run);
+        let (plan, kept) = DeliveryPlan::of(&Delivery::default(), None, &run);
         assert_eq!((plan, kept.len()), (DeliveryPlan::default(), 0));
     }
 
@@ -370,5 +406,26 @@ mod tests {
         assert_eq!(with_profile.unattended, profile());
         let d: Delivery = serde_json::from_str(r#"{"metadata": {"team": "a"}}"#).unwrap();
         assert_eq!(d.metadata["team"], "a");
+        assert_eq!(d.idempotency_key, None);
+    }
+
+    /// A delivery without a key is written without the field, so a daemon
+    /// that predates it reads the request as before; one with a key carries
+    /// it, and a key that is not one is refused on the way in.
+    #[test]
+    fn an_idempotency_key_is_written_only_when_set() {
+        let none = serde_json::to_value(Delivery::default()).unwrap();
+        assert_eq!(none, serde_json::json!({"callback": null, "metadata": {}}));
+        let keyed: Delivery = serde_json::from_str(r#"{"idempotency_key": "pw:task-7"}"#).unwrap();
+        assert_eq!(
+            keyed.idempotency_key.as_ref().unwrap().as_str(),
+            "pw:task-7"
+        );
+        assert_eq!(
+            serde_json::to_value(&keyed).unwrap()["idempotency_key"],
+            "pw:task-7"
+        );
+        let err = serde_json::from_str::<Delivery>(r#"{"idempotency_key": "a b"}"#).unwrap_err();
+        assert!(err.to_string().contains("idempotency key"), "{err}");
     }
 }

@@ -200,6 +200,7 @@ pub(crate) fn build(
     let run_id = RunId::new(meta.run_id.as_str()).map_err(ConvertError::name("run_id"))?;
     let (delivery, secrets) = DeliveryPlan::of(
         &delivery(meta, old.callback_secret.as_deref(), report),
+        None,
         &run_id,
     );
     let spec = RunSpec {
@@ -642,5 +643,6 @@ fn delivery(meta: &RunMeta, secret: Option<&str>, report: &mut Report) -> Delive
     Delivery {
         callback,
         metadata: meta.metadata.clone().into_iter().collect(),
+        idempotency_key: None,
     }
 }

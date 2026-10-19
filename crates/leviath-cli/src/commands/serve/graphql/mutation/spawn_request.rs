@@ -27,8 +27,8 @@ use leviath_runtime::spec::launch::{
     Callback, Delivery as RunDelivery, LaunchRequest, Secret, Unattended,
 };
 use leviath_runtime::spec::names::{
-    BlueprintName, BlueprintRef as RuntimeRef, Digest, HttpUrl, MimePattern, ModelRef, NameError,
-    ProfileName, RegionName, ToolName,
+    BlueprintName, BlueprintRef as RuntimeRef, Digest, HttpUrl, IdempotencyKey, MimePattern,
+    ModelRef, NameError, ProfileName, RegionName, ToolName,
 };
 use leviath_runtime::spec::request::{Attachment, Bytes, SpawnRequest, SpawnSource};
 
@@ -232,6 +232,15 @@ pub(crate) struct DeliveryWrite {
     /// Labels for whoever started the run, such as a ticket or a tenant. The
     /// run reads none of them, and the run search looks through them.
     pub(crate) metadata: Option<Vec<KeyValueWrite>>,
+    /// Your name for this spawn: 1 to 128 letters, digits, `.`, `_`, `:` or
+    /// `-`. Sent again with the same key and nothing else changed, the
+    /// request is answered with the run the first one started, marked
+    /// `deduplicated`, and starts nothing. The same key with a different
+    /// request is refused with a `CONFLICT` naming the run that holds it. A
+    /// key is held for as long as its run's record exists. `validateSpawn`
+    /// only checks its shape. Announced as the `spawn.idempotency`
+    /// capability.
+    pub(crate) idempotency_key: Option<String>,
 }
 
 /// Everything about a new run: what to run, the values it takes, and how far
@@ -566,6 +575,14 @@ fn delivery(write: DeliveryWrite, issues: &mut SpawnIssues) -> RunDelivery {
             secret: callback.secret.map(Secret::new),
         })
     });
+    let idempotency_key = write.idempotency_key.and_then(|key| {
+        name(
+            issues,
+            at.field("idempotency_key"),
+            IdempotencyKey::new(key.as_str()),
+            &key,
+        )
+    });
     RunDelivery {
         callback,
         metadata: write
@@ -574,6 +591,7 @@ fn delivery(write: DeliveryWrite, issues: &mut SpawnIssues) -> RunDelivery {
             .into_iter()
             .map(|entry| (entry.key, entry.value))
             .collect(),
+        idempotency_key,
     }
 }
 
