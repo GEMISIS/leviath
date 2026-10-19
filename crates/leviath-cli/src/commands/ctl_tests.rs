@@ -77,8 +77,9 @@ where
 fn msg_args() -> MsgArgs {
     MsgArgs {
         agent_id: "a".to_string(),
-        content: "hi".to_string(),
+        content: Some("hi".to_string()),
         attach: Vec::new(),
+        end: false,
     }
 }
 
@@ -123,6 +124,37 @@ async fn message_applied() {
     })
     .await;
     assert!(r.is_ok());
+}
+
+/// `--end` alone ends the conversation; with a message, the message goes
+/// first. A refusal of the end is reported.
+#[tokio::test]
+async fn message_end_ends_the_conversation() {
+    let mut args = msg_args();
+    args.content = None;
+    args.end = true;
+    let only = args.clone();
+    let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {
+        send_message(&c, &only).await
+    })
+    .await;
+    assert!(r.is_ok());
+    let r = with_daemon(r#"{"result":"ok","ok":false}"#, |c| async move {
+        send_message(&c, &args).await
+    })
+    .await;
+    assert!(
+        r.unwrap_err()
+            .to_string()
+            .contains("no run had a conversation")
+    );
+    let mut both = msg_args();
+    both.end = true;
+    let r = with_daemon(r#"{"result":"ok","ok":false}"#, |c| async move {
+        send_message(&c, &both).await
+    })
+    .await;
+    assert!(r.unwrap_err().to_string().contains("no agent accepted"));
 }
 
 #[tokio::test]

@@ -344,7 +344,8 @@ settings.
 
 An interactive stage takes turns with a person. After a reply with no tool calls it waits for the
 next message instead of moving on: the run shows `waiting_input`, waiting on `awaiting_message`.
-A message resumes the stage with its conversation intact. The stage moves on when the model calls
+A message resumes the stage with its conversation intact. A message that arrives while the stage is
+still replying is answered before the stage waits again. The stage moves on when the model calls
 `end_conversation`, which the mode grants, or when a person ends the conversation. It also moves on
 when its idle limit runs out:
 
@@ -352,8 +353,10 @@ when its idle limit runs out:
 mode = { interactive = { idle_timeout_secs = 900 } }
 ```
 
-With no limit the stage waits for as long as it takes. In a run nobody is watching, such as one
-started with `--yolo`, it waits 120 seconds. The limit is checked at least every 30 seconds, so a
+With no limit the stage waits for as long as it takes. In a run nobody is watching it waits 120
+seconds: one started with `--yolo`, or a sub-agent or fan-out worker, which its parent talks to. A
+caller that starts runs of an interactive blueprint should set `idle_timeout_secs` rather than rely
+on either. `lev msg <run> --end` ends a conversation from the command line. The limit is checked at least every 30 seconds, so a
 stage can move on up to that much late. Each reply counts against the stage's `max_iterations`,
 which caps the whole conversation.
 

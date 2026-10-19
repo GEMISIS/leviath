@@ -106,6 +106,7 @@ fn parking_waits_and_keeps_a_pause() {
     let mut world = World::new();
     let active = world.spawn(ReadyForTransition).id();
     let paused = world.spawn(ReadyForTransition).id();
+    let asked = world.spawn(ReadyForTransition).id();
     let mut working = agent(AgentStatus::Active);
     let mut held = agent(AgentStatus::Paused);
     let mut progress = StageProgress::default();
@@ -114,12 +115,21 @@ fn parking_waits_and_keeps_a_pause() {
     park(
         &mut commands,
         active,
+        false,
         Some(&mut working),
         &mut progress,
         100,
     );
-    park(&mut commands, paused, Some(&mut held), &mut progress, 200);
-    park(&mut commands, paused, None, &mut progress, 300);
+    park(
+        &mut commands,
+        paused,
+        false,
+        Some(&mut held),
+        &mut progress,
+        200,
+    );
+    park(&mut commands, paused, false, None, &mut progress, 300);
+    park(&mut commands, asked, true, None, &mut progress, 400);
     queue.apply(&mut world);
 
     assert_eq!(working.status, AgentStatus::Waiting);
@@ -129,6 +139,9 @@ fn parking_waits_and_keeps_a_pause() {
         assert!(world.get::<AwaitingMessage>(entity).is_some());
         assert!(world.get::<ReadyForTransition>(entity).is_none());
     }
+    // One with a message it has not answered asks again instead of waiting.
+    assert!(world.get::<ReadyToInfer>(asked).is_some());
+    assert!(world.get::<AwaitingMessage>(asked).is_none());
 }
 
 /// A message wakes the run to ask its model again, and the wait is taken off
@@ -233,6 +246,28 @@ fn an_unattended_run_does_not_wait_for_ever() {
     let entity = run(&mut world, interactive(None), AgentStatus::Waiting, true);
     let mut spec = (*world.get::<RunSpecC>(entity).unwrap().0).clone();
     spec.auto_answers.questions = true;
+    world
+        .entity_mut(entity)
+        .insert(RunSpecC(std::sync::Arc::new(spec)));
+    let since = now - i64::try_from(DEFAULT_UNATTENDED_IDLE_SECS).unwrap() - 1;
+    world
+        .get_mut::<StageProgress>(entity)
+        .unwrap()
+        .waiting_since = Some(since);
+    world.run_system_cached(expire_idle_conversations).unwrap();
+    assert!(world.get::<ResolveTransition>(entity).is_some());
+}
+
+/// A child run (a sub-agent, a fan-out worker) is talked to by the run that
+/// started it, not a person, so it has the same limit when its stage sets
+/// none, and does not hold its parent for ever.
+#[test]
+fn a_child_run_does_not_wait_for_ever() {
+    let mut world = World::new();
+    let now = chrono::Utc::now().timestamp();
+    let entity = run(&mut world, interactive(None), AgentStatus::Waiting, true);
+    let mut spec = (*world.get::<RunSpecC>(entity).unwrap().0).clone();
+    spec.placement.parent = Some(crate::spec::names::RunId::new("parent").unwrap());
     world
         .entity_mut(entity)
         .insert(RunSpecC(std::sync::Arc::new(spec)));

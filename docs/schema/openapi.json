@@ -1675,6 +1675,9 @@
           "408": {
             "$ref": "#/components/responses/Timeout"
           },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }

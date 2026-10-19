@@ -917,6 +917,7 @@ type EmptyResponseQuery = (
     &'static StageCursor,
     Option<&'static GlobalNudge>,
     Option<&'static super::ConversationEnded>,
+    Option<&'static super::UnansweredMessage>,
 );
 
 /// Empty-response system: for each `ReadyForTransition` agent decide whether the
@@ -943,8 +944,18 @@ pub(crate) fn handle_empty_response(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, mut state, mut window, infer, mut progress, spec, cursor, global, ended) in
-        agents.iter_mut()
+    for (
+        entity,
+        mut state,
+        mut window,
+        infer,
+        mut progress,
+        spec,
+        cursor,
+        global,
+        ended,
+        unanswered,
+    ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
         let graph = &spec.0.graph;
@@ -1045,6 +1056,7 @@ pub(crate) fn handle_empty_response(
                 super::conversation::park(
                     &mut commands,
                     entity,
+                    unanswered.is_some(),
                     state.as_deref_mut(),
                     &mut progress,
                     now,

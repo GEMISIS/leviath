@@ -176,6 +176,7 @@ async fn a_spawned_session_says_its_finished_run_takes_no_more() {
     h.send(&call(1, extensions::SPAWN, coder(serde_json::json!({}))))
         .await;
     let opened = h.recv().await.result.expect("spawned")["sessionId"].clone();
+    h.write_meta_status("complete");
     h.send(&call(
         2,
         "session/prompt",

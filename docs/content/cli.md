@@ -846,7 +846,7 @@ config grants.
 |---|---|---|
 | `lev ps` | `--json`, `--all` | List runs in the daemon with their status. `--all` also reads the runs dir. See [below](#reading-lev-ps) |
 | `lev dash` | | Full-screen TUI [dashboard](/docs/dashboard) |
-| `lev msg <AGENT_ID> <CONTENT>` | `--attach` | Deliver a message into a running agent's context. `--attach` and a `@path` in the text send files with it |
+| `lev msg <AGENT_ID> [CONTENT]` | `--attach`, `--end` | Deliver a message into a running agent's context. `--end` then ends an interactive stage's conversation |
 | `lev pause <RUN_ID>` | | Pause a run. It finishes its in-flight step, then holds. See [below](#pausing-a-run) |
 | `lev resume <RUN_ID>` | | Un-pause a run, or bring back a cancelled one where it stopped |
 | `lev cancel <RUN_ID>` | `--force` | Cancel a run. Also aliased as `lev kill` |

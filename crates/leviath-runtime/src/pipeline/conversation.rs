@@ -7,7 +7,8 @@
 //! call. Three things move it:
 //!
 //! - A message: delivered to the conversation like any mid-run message, and
-//!   the stage asks its model again ([`wake`]).
+//!   the stage asks its model again ([`wake`]). One that arrives mid-turn is
+//!   answered before the stage waits ([`UnansweredMessage`]).
 //! - The end of the conversation: the model calls `end_conversation`, or a
 //!   person ends it from outside. The stage then leaves through its ordinary
 //!   transition, edges and all ([`ConversationEnded`]).
@@ -36,8 +37,9 @@ pub(crate) struct AwaitingMessage;
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct ConversationEnded;
 
-/// The idle limit of an interactive stage in a run nobody is watching (one
-/// whose own questions are answered for it), when the stage sets none.
+/// The idle limit of an interactive stage in a run nobody is watching, when
+/// the stage sets none: one whose own questions are answered for it, or a
+/// child run (a sub-agent or fan-out worker), which its parent talks to.
 pub const DEFAULT_UNATTENDED_IDLE_SECS: u64 = 120;
 
 /// Whether an interactive stage's accepted reply parks it: the stage is
@@ -46,19 +48,31 @@ pub(crate) fn parks_after_reply(stage: Option<&crate::spec::graph::StageDef>, en
     !ended && stage.is_some_and(|s| s.mode.interactive().is_some())
 }
 
+/// A message reached an interactive stage while it was not waiting for one
+/// (a reply in flight, a tool batch, a pause): its next reply is not its
+/// answer to it. Cleared once a request carrying the message goes out.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct UnansweredMessage;
+
 /// Park the agent on `entity`: it waits for the next message. A paused agent
-/// stays paused, and comes back waiting when it is resumed.
+/// stays paused, and comes back waiting when it is resumed. One that was sent
+/// a message since its last request (`unanswered`) asks its model again
+/// instead, so the message is answered rather than left unread.
 pub(crate) fn park(
     commands: &mut Commands,
     entity: Entity,
+    unanswered: bool,
     state: Option<&mut AgentState>,
     progress: &mut StageProgress,
     now: i64,
 ) {
-    commands
-        .entity(entity)
-        .remove::<ReadyForTransition>()
-        .insert(AwaitingMessage);
+    let mut agent = commands.entity(entity);
+    agent.remove::<ReadyForTransition>();
+    if unanswered {
+        agent.insert(ReadyToInfer);
+        return;
+    }
+    agent.insert(AwaitingMessage);
     if let Some(state) = state.filter(|s| s.status == AgentStatus::Active) {
         state.status = AgentStatus::Waiting;
     }
@@ -151,7 +165,10 @@ pub(crate) fn expire_idle_conversations(
             continue;
         }
         let stage = &spec.0.graph.stages[cursor.index];
-        let Some(limit) = idle_limit(stage, spec.0.auto_answers.questions) else {
+        // Nobody watches a run whose questions are answered for it, nor a
+        // child run: the run that started it is what talks to it.
+        let unwatched = spec.0.auto_answers.questions || spec.0.placement.parent.is_some();
+        let Some(limit) = idle_limit(stage, unwatched) else {
             continue;
         };
         let since = *progress.waiting_since.get_or_insert(now);

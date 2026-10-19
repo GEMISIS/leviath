@@ -69,7 +69,8 @@ impl PipelineWorld {
     fn waits_on_a_person(&self, agent: AgentId) -> bool {
         let entity = self.world.entity(agent.entity);
         (entity.contains::<crate::components::AwaitingInteraction>()
-            || entity.contains::<crate::interaction_points::AwaitingInteractionPoint>())
+            || entity.contains::<crate::interaction_points::AwaitingInteractionPoint>()
+            || entity.contains::<crate::pipeline::AwaitingMessage>())
             && !entity.contains::<crate::fanout::FanOutWaiting>()
             && !entity.contains::<crate::pipeline::WaitingForChildren>()
     }

@@ -787,6 +787,21 @@ fn a_parked_run_says_why() {
     );
 }
 
+/// The variants added for an interactive stage's wait sit at the end of their
+/// enums, at these positions, in the run file's binary frames. Moving one
+/// would make every file that holds it read as something else.
+#[test]
+fn the_awaiting_message_variants_keep_their_binary_positions() {
+    assert_eq!(
+        postcard::to_stdvec(&PipelinePhase::AwaitingMessage).unwrap(),
+        vec![11]
+    );
+    assert_eq!(
+        postcard::to_stdvec(&WaitState::AwaitingMessage).unwrap(),
+        vec![7]
+    );
+}
+
 /// Every reason a run can be parked for reads into the run file's form and
 /// back unchanged.
 #[test]

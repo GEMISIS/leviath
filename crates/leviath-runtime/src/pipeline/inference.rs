@@ -958,6 +958,8 @@ pub(crate) fn dispatch_inference(
                         .entity(entity)
                         .insert(call)
                         .remove::<ReadyToInfer>()
+                        // The request carries every message delivered so far.
+                        .remove::<super::UnansweredMessage>()
                         // Dispatched: whatever it was waiting for, it isn't
                         // waiting any more.
                         .remove::<DispatchStall>()
