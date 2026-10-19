@@ -522,6 +522,8 @@ fn parse_native_entry(item: &serde_json::Value) -> Option<(String, LearnedModel)
             supports_temperature: samples,
             supports_tools: Some(true),
             supports_tool_choice: None,
+            reasoning_mandatory: None,
+            reasoning_efforts: None,
             // The native API caches through `createCachedContent`, not
             // through markers on a chat request, so this signal has no
             // meaning here.

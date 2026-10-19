@@ -205,6 +205,15 @@ impl TitleCall {
         let Err(error) = &outcome.result else {
             return Next::Done;
         };
+        // A model that refused to be told not to reason: ask again at once
+        // with the least effort it takes. The refusal is remembered, so the
+        // next title call to it goes out that way from the start.
+        if let Some(floored) =
+            crate::reasoning_floor::after_refusal(self.provider.as_ref(), &self.request, error)
+        {
+            self.request = Arc::new(floored);
+            return Next::Waiting(self.clock.wait(Duration::ZERO));
+        }
         match self.clock.after_failure(&self.policy, error) {
             Some(delay) => Next::Waiting(self.clock.wait(delay)),
             None => Next::Done,

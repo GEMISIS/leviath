@@ -48,6 +48,15 @@ pub struct LearnedModel {
     /// `supported_parameters` does. The runtime reads it before asking a
     /// model to answer without calling a tool.
     pub supports_tool_choice: Option<bool>,
+    /// Whether the model always reasons, so a request that turns reasoning
+    /// off is refused. OpenRouter's listing says so in `reasoning.mandatory`;
+    /// Muse Spark is one such model. The runtime reads it before asking a
+    /// model for no reasoning at all.
+    pub reasoning_mandatory: Option<bool>,
+    /// The reasoning effort levels the model accepts, as the listing spells
+    /// them (`low`, `medium`, `high` and so on). OpenRouter's
+    /// `reasoning.supported_efforts`.
+    pub reasoning_efforts: Option<Vec<String>>,
     /// Whether the upstream bills a cache *write*, which is the signal that it
     /// expects an explicit `cache_control` marker. A model that quotes only a
     /// read price caches on its own by prefix, and marking it buys nothing or

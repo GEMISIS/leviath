@@ -397,6 +397,14 @@ same list.
 
 ### Fixed
 
+- The title call no longer fails on an OpenRouter model that always reasons,
+  such as `meta/muse-spark-1.3`. It asked every OpenRouter model to turn
+  reasoning off, which Muse Spark refuses with a 400 ("Reasoning is
+  mandatory"), so the run fell back to another provider or got no title. A
+  model whose catalogue entry says reasoning is mandatory, or a `meta/` model
+  the catalogue does not describe, is asked for its lowest effort instead
+  (`low` when it takes it). A refusal of that kind is asked again once at the
+  lowest effort, and the model is remembered until the daemon restarts.
 - `mode = "interactive"` did nothing: the stage moved on after its first
   reply like an autonomous one. It now waits for the next message, as the
   docs said.

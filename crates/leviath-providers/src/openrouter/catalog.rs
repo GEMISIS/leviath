@@ -75,6 +75,10 @@ pub(crate) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
     // one too and silently ignores it, so nothing is lost by not sending it.
     let params = entry.get("supported_parameters").and_then(|v| v.as_array());
     let takes = |name: &str| params.map(|p| p.iter().any(|v| v.as_str() == Some(name)));
+    // `reasoning` describes the model's thinking: whether it can be turned
+    // off at all, and which effort levels it takes. Absent for a model that
+    // does not reason.
+    let reasoning = entry.get("reasoning");
     Some((
         id,
         LearnedModel {
@@ -90,6 +94,19 @@ pub(crate) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
             supports_temperature: takes("temperature"),
             supports_tools: takes("tools"),
             supports_tool_choice: takes("tool_choice"),
+            reasoning_mandatory: reasoning
+                .and_then(|r| r.get("mandatory"))
+                .and_then(|v| v.as_bool()),
+            reasoning_efforts: reasoning
+                .and_then(|r| r.get("supported_efforts"))
+                .and_then(|v| v.as_array())
+                .map(|levels| {
+                    levels
+                        .iter()
+                        .filter_map(|l| l.as_str())
+                        .map(str::to_string)
+                        .collect()
+                }),
             explicit_cache_control: Some(quotes_cache_write(entry)),
             pricing: parse_pricing(entry),
             released: entry.get("created").and_then(|v| v.as_i64()),
@@ -159,6 +176,31 @@ mod tests {
     }
 
     #[test]
+    fn a_model_that_must_reason_says_so_with_its_effort_levels() {
+        // Muse Spark's entry as the live listing has it, trimmed.
+        let entry = json!({
+            "id": "meta/muse-spark-1.3",
+            "supported_parameters": ["max_tokens", "reasoning", "tools"],
+            "reasoning": {
+                "mandatory": true,
+                "supported_efforts": ["max", "xhigh", "high", "medium", "low", "minimal"],
+                "default_effort": "medium"
+            }
+        });
+        let (_, learned) = parse_entry(&entry).unwrap();
+        assert_eq!(learned.reasoning_mandatory, Some(true));
+        assert_eq!(
+            learned.reasoning_efforts.as_deref(),
+            Some(&["max", "xhigh", "high", "medium", "low", "minimal"].map(String::from)[..])
+        );
+        // One that may be told not to reason, with no levels listed.
+        let entry = json!({ "id": "acme/optional", "reasoning": { "mandatory": false } });
+        let (_, learned) = parse_entry(&entry).unwrap();
+        assert_eq!(learned.reasoning_mandatory, Some(false));
+        assert_eq!(learned.reasoning_efforts, None);
+    }
+
+    #[test]
     fn a_model_listed_without_temperature_or_tools_is_recorded_as_refusing_them() {
         let entry = json!({
             "id": "openai/gpt-5.5",
@@ -177,6 +219,8 @@ mod tests {
         assert_eq!(learned.supports_temperature, None);
         assert_eq!(learned.supports_tools, None);
         assert_eq!(learned.supports_tool_choice, None);
+        assert_eq!(learned.reasoning_mandatory, None);
+        assert_eq!(learned.reasoning_efforts, None);
         assert_eq!(learned.max_context_tokens, Some(32_000));
         assert_eq!(learned.max_output_tokens, None);
         assert_eq!(learned.display_name, None);

@@ -115,6 +115,7 @@ pub mod pipeline;
 pub mod provider_creds;
 pub mod provider_files;
 pub(crate) mod providers;
+pub(crate) mod reasoning_floor;
 pub(crate) mod repetition;
 pub mod resolve;
 pub mod restore;
