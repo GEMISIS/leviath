@@ -13,6 +13,7 @@ pub mod convert_child;
 pub(crate) mod convert_old;
 pub(crate) mod fanout_spawner;
 pub(crate) mod gate_rules;
+pub mod launch;
 pub mod lifecycle;
 pub mod live_limits;
 pub mod mcp_pool;

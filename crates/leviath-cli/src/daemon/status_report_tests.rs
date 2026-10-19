@@ -18,6 +18,7 @@ fn running(marker: &str) -> Observed {
         identity: Some(DaemonIdentity {
             pid: 41230,
             exe: Some("/Users/me/.cargo/bin/lev".to_string()),
+            cwd: Some("/Users/me/.leviath".to_string()),
             ..DaemonIdentity::this_process("87296d6e")
         }),
         runs: 3,
@@ -71,6 +72,7 @@ fn a_running_older_daemon_reports_every_field() {
             "running": true,
             "pid": 41230,
             "exe": "/Users/me/.cargo/bin/lev",
+            "cwd": "/Users/me/.leviath",
             "version": "0.6.4",
             "build": "87296d6e",
             "committed_at": 1_791_951_523_u64,
@@ -118,6 +120,7 @@ fn no_daemon_running_reports_nulls_and_no_replacement() {
     for field in [
         "pid",
         "exe",
+        "cwd",
         "version",
         "build",
         "committed_at",
@@ -141,7 +144,7 @@ fn a_daemon_that_said_nothing_is_older() {
         ..running("")
     };
     let report = report(observed, &cli());
-    assert_eq!((report.pid, report.exe), (None, None));
+    assert_eq!((report.pid, report.exe, report.cwd), (None, None, None));
     assert_eq!((report.version, report.build), (None, None));
     assert_eq!(report.standing, Some(Standing::Older));
     assert!(report.spawn_would_replace);
@@ -158,4 +161,21 @@ fn the_report_carries_no_secret() {
     let json = to_json(&report(observed, &cli()));
     assert!(!json.contains("BRAVE"), "{json}");
     assert!(!json.contains("token"), "{json}");
+}
+
+/// A daemon that introduced itself without a working directory, as one built
+/// before the field was added does, reports `cwd` as null and the rest as
+/// usual.
+#[test]
+fn a_daemon_that_did_not_report_its_directory_has_a_null_cwd() {
+    let mut observed = running("87296d6e 0.6.4 1791951523");
+    observed.identity = observed.identity.map(|identity| DaemonIdentity {
+        cwd: None,
+        ..identity
+    });
+    let report = report(observed, &cli());
+    assert_eq!(report.cwd, None);
+    assert_eq!(report.pid, Some(41230));
+    let json: serde_json::Value = serde_json::from_str(&to_json(&report)).unwrap();
+    assert_eq!(json["cwd"], serde_json::Value::Null);
 }

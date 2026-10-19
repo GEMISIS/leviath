@@ -30,6 +30,18 @@ same list.
   `arguments` and `arguments_truncated`. An embedder that matches the enum
   exhaustively or builds `ToolCallStarted` itself must add them; one with a
   catch-all arm needs no change.
+
+- The daemon runs in the data directory (`~/.leviath`) however it starts:
+  in the background, in the foreground, or under the launchd or systemd
+  unit, which now set the working directory. With `load_dotenv` on, the
+  daemon reads `~/.leviath/.env` instead of the `.env` wherever it happened
+  to be started. To keep a project's keys, copy them into `~/.leviath/.env`
+  or export them before the daemon starts. Other commands still read
+  `./.env`.
+- A daemon that `lev` starts in the background no longer inherits
+  `LEVIATH_API_TOKEN`, which only `lev serve` reads. Nothing else in its
+  environment changes, `PATH` included.
+
 - A command that needs the daemon replaces a running one only when it is
   strictly older: a lower version, or the same version from an earlier
   commit. A rebuild of the same commit, or a build made without git, is left
@@ -807,6 +819,10 @@ same list.
   coder's prompts prefer them to `grep`.
 - `lev approvals safe --check "<command>"` explains, key by key, whether a
   shell line runs without a prompt, and names any path outside the workdir.
+- The daemon reports its working directory in its handshake.
+  `lev daemon status --json` prints it as `cwd`, and GraphQL
+  `DaemonStatus.cwd` and `DaemonIdentity.cwd` carry it, null from an older
+  daemon.
 - Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 on Anthropic
   (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`), Bedrock
   (`us.anthropic.claude-haiku-5-5` and the other profiles) and OpenRouter

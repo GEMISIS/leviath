@@ -452,6 +452,16 @@ pub fn reaches_daemon(command: &Commands) -> bool {
     }
 }
 
+/// Whether `command` is the daemon itself: `lev daemon` with no action, in the
+/// foreground or under a supervisor. It moves to the data directory before it
+/// starts its runtime or reads its config (`daemon::launch` says why).
+pub fn hosts_daemon(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Daemon(commands::daemon::DaemonArgs { action: None, .. })
+    )
+}
+
 /// Route a parsed subcommand to its executor. Safe commands are called
 /// directly (and are exercised through `dispatch()` by the tests below); the
 /// I/O-risky ones go through `ex` (see [`RiskyExecutors`]).
@@ -607,6 +617,23 @@ mod tests {
         ];
         for argv in local {
             assert!(!reaches_daemon(&parsed(argv)), "{argv:?}");
+        }
+    }
+
+    /// Only the daemon itself moves to the data directory: `lev daemon`, with
+    /// or without `--socket`, and none of its lifecycle actions.
+    #[test]
+    fn only_the_daemon_itself_hosts_the_daemon() {
+        assert!(hosts_daemon(&parsed(&["lev", "daemon"])));
+        assert!(hosts_daemon(&parsed(&["lev", "daemon", "--socket", "s"])));
+        for argv in [
+            &["lev", "daemon", "start"][..],
+            &["lev", "daemon", "status"],
+            &["lev", "daemon", "stop"],
+            &["lev", "serve"],
+            &["lev", "ps"],
+        ] {
+            assert!(!hosts_daemon(&parsed(argv)), "{argv:?}");
         }
     }
 

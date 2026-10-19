@@ -42,6 +42,10 @@ pub struct StatusReport {
     /// The daemon's executable, from its handshake. Null from a daemon too
     /// old to report it.
     pub exe: Option<String>,
+    /// The daemon's working directory, from its handshake: the data
+    /// directory, wherever it was started from. Null from a daemon too old to
+    /// report it.
+    pub cwd: Option<String>,
     /// The daemon's version, from its build marker.
     pub version: Option<String>,
     /// The daemon's build id, from its build marker.
@@ -99,7 +103,8 @@ pub fn report(observed: Observed, cli: &Build) -> StatusReport {
     StatusReport {
         running,
         pid: identity.as_ref().map(|identity| identity.pid),
-        exe: identity.and_then(|identity| identity.exe),
+        exe: identity.as_ref().and_then(|identity| identity.exe.clone()),
+        cwd: identity.and_then(|identity| identity.cwd),
         version: daemon.as_ref().and_then(|daemon| daemon.version.clone()),
         build: daemon.as_ref().map(|daemon| daemon.id.clone()),
         committed_at: daemon.and_then(|daemon| daemon.committed_at),

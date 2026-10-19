@@ -103,11 +103,24 @@ pub fn run_from(argv: impl IntoIterator<Item = String>) -> ExitCode {
     // queued at the thread layer where nothing measured or reported it. 2048
     // covers the largest supported pool; threads are spawned on demand and
     // reaped when idle, so an idle daemon pays nothing for the headroom.
-    let ran = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .max_blocking_threads(2048)
-        .build()
-        .map_err(anyhow::Error::from)
+    //
+    // The daemon itself moves to the data directory first, before the runtime
+    // starts a thread and before anything reads its config, so where it was
+    // started never changes what it reads (`daemon::launch` says why).
+    let entered = if crate::dispatch::hosts_daemon(&cli.command) {
+        crate::daemon::launch::daemon_dir(leviath_core::paths::data_dir())
+            .and_then(|dir| std::env::set_current_dir(dir).map_err(anyhow::Error::from))
+    } else {
+        Ok(())
+    };
+    let ran = entered
+        .and_then(|()| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .max_blocking_threads(2048)
+                .build()
+                .map_err(anyhow::Error::from)
+        })
         .and_then(|runtime| runtime.block_on(async_main(cli)));
     match ran {
         Ok(()) => ExitCode::SUCCESS,

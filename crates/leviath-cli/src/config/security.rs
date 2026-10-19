@@ -93,9 +93,9 @@ pub struct SecurityConfig {
     /// How much of the daemon's environment a `shell` tool call, a Rhai
     /// `shell()` host call, and a region's command seed inherit.
     ///
-    /// The daemon holds provider keys, `LEVIATH_API_TOKEN`, and whatever
-    /// credentials the person who started it had exported. Handing all of that
-    /// to every shell command means a single `env` in tool output leaks the lot.
+    /// The daemon holds provider keys and whatever credentials the person who
+    /// started it had exported. Handing all of that to every shell command
+    /// means a single `env` in tool output leaks the lot.
     ///
     /// `filtered` (the default) withholds credential-shaped names but keeps
     /// `SSH_AUTH_SOCK`, so `git push` over agent keys still works. `strict`
