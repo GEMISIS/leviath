@@ -116,8 +116,10 @@ that keeps something is dropped from failover, with a line in the stage's log sa
 is rerouted: an author who pinned a model would not see it swapped for one at another vendor.
 
 The switch holds past the spawn too. A run's title is written by the first model in its title
-chain that keeps nothing. A blueprint whose `[graph.compaction]` resolves to a model that keeps
-something is refused at spawn, and a compaction fallback that keeps something is dropped. Turning the switch on under a running daemon refuses the next call
+chain that keeps nothing. A blueprint's `[graph.compaction]` is judged as a stage is: a summary
+model that keeps something is refused at spawn, and a compaction fallback that keeps something is
+dropped from failover, with a line in the run's log saying so. Turning the switch on under a running
+daemon refuses the next call
 of a run already going, which then ends with the reason rather than sending it.
 
 `lev validate` says the same thing before a run does. A stage whose model would be refused is a

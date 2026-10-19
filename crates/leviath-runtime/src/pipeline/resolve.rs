@@ -189,6 +189,43 @@ pub(crate) fn resolve_stage_candidates(
     resolve_stage_candidates_for(model_cfg, model_override, defaults, registry, &[])
 }
 
+/// What a model list is being resolved for, so every warning and refusal
+/// names the thing the author wrote: a stage, or the graph's compaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Resolving<'a> {
+    /// The stage of this name.
+    Stage(&'a str),
+    /// The graph's compaction models.
+    Compaction,
+}
+
+impl Resolving<'_> {
+    /// What a message names as the subject: `stage 'plan'`, or the
+    /// compaction model.
+    fn subject(self) -> String {
+        match self {
+            Self::Stage(name) => format!("stage '{name}'"),
+            Self::Compaction => "the compaction model".to_string(),
+        }
+    }
+
+    /// The thing that falls through to the next model listed.
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Stage(_) => "stage",
+            Self::Compaction => "compaction",
+        }
+    }
+
+    /// Where the author lists its models.
+    fn models_list(self) -> &'static str {
+        match self {
+            Self::Stage(_) => "the stage's models list",
+            Self::Compaction => "the graph's `compaction.models`",
+        }
+    }
+}
+
 /// [`resolve_stage_candidates`], with the mime the stage takes.
 ///
 /// `needs` is what the stage's regions accept beyond text. A candidate whose
@@ -203,7 +240,27 @@ pub(crate) fn resolve_stage_candidates_for(
     registry: &ProviderRegistry,
     needs: &[String],
 ) -> Vec<Candidate> {
-    let mut candidates = resolve_candidates_in_order(model_cfg, model_override, defaults, registry);
+    resolve_candidates(
+        model_cfg,
+        model_override,
+        defaults,
+        registry,
+        needs,
+        Resolving::Stage(""),
+    )
+}
+
+/// [`resolve_stage_candidates_for`], for what `about` names.
+pub(crate) fn resolve_candidates(
+    model_cfg: &ModelChoice,
+    model_override: Option<&str>,
+    defaults: &ModelDefaults,
+    registry: &ProviderRegistry,
+    needs: &[String],
+    about: Resolving<'_>,
+) -> Vec<Candidate> {
+    let mut candidates =
+        resolve_candidates_in_order(model_cfg, model_override, defaults, registry, about);
     let needs: Vec<String> = needs.iter().filter(|n| *n != "*/*").cloned().collect();
     if needs.is_empty() || candidates.len() < 2 {
         return candidates;
@@ -226,6 +283,7 @@ fn resolve_candidates_in_order(
     model_override: Option<&str>,
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
+    about: Resolving<'_>,
 ) -> Vec<Candidate> {
     let (override_provider, override_model) = match model_override {
         Some(ov) if ov.contains('/') => {
@@ -333,10 +391,11 @@ fn resolve_candidates_in_order(
         // `resolve_stage_route` refuses the stage before it gets that far
         // (`unknown_open_route`).
         if !routed {
+            let noun = about.noun();
             tracing::warn!(
                 model = %model,
                 "no configured provider serves this model, so it is skipped; \
-                 the stage falls through to the next model listed"
+                 the {noun} falls through to the next model listed"
             );
         }
     }
@@ -618,6 +677,7 @@ pub(crate) fn head_source(
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
     head: &Candidate,
+    about: Resolving<'_>,
 ) -> HeadSource {
     if model_override.is_some() || !model_cfg.allow_user_default {
         return HeadSource::Blueprint;
@@ -627,7 +687,7 @@ pub(crate) fn head_source(
         fallback_model: None,
         ..defaults.clone()
     };
-    let own = resolve_stage_candidates(model_cfg, None, &without, registry);
+    let own = resolve_candidates(model_cfg, None, &without, registry, &[], about);
     if own
         .first()
         .is_some_and(|e| e.provider == head.provider && e.model == head.model)
@@ -957,9 +1017,9 @@ pub(crate) struct StageRoute {
     pub notes: Vec<String>,
 }
 
-/// Decide the model of `subject` (`stage 'plan'`, or the compaction model),
-/// whose model choice is `choice` and which takes the mime types `needs` beyond text, or say why
-/// it has no usable one.
+/// Decide the model of what `about` names (a stage, or the graph's
+/// compaction), whose model choice is `choice` and which takes the mime types
+/// `needs` beyond text, or say why it has no usable one.
 ///
 /// The last fallback in [`resolve_stage_model`] is unchecked: it hands back
 /// the stage's own first entry whether or not anything answers to that name,
@@ -969,13 +1029,14 @@ pub(crate) struct StageRoute {
 /// Catching it here turns a silently wedged run into an error the caller
 /// sees.
 pub(crate) fn resolve_stage_route(
-    subject: &str,
+    about: Resolving<'_>,
     choice: &ModelChoice,
     needs: &[String],
     model_override: Option<&str>,
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
 ) -> Result<StageRoute, String> {
+    let subject = about.subject();
     // Refused before anything is resolved: a stage whose first choice cannot
     // be judged would otherwise start on whatever the chain offers next,
     // which is the silent downgrade this exists to stop.
@@ -989,7 +1050,7 @@ pub(crate) fn resolve_stage_route(
         ));
     }
     let mut candidates =
-        resolve_stage_candidates_for(choice, model_override, defaults, registry, needs);
+        resolve_candidates(choice, model_override, defaults, registry, needs, about);
     let head = candidates.remove(0);
     // `registry.has` also consults the script layer, so a `.rhai` provider
     // sitting on disk counts as usable and is never false-rejected here.
@@ -1022,8 +1083,12 @@ pub(crate) fn resolve_stage_route(
             None => format!(
                 "{subject} names {}/{}, which provider '{}' does not serve. \
                  Run `lev models list --provider {}` to see what it carries, \
-                 then name one of those in the stage's models list.",
-                head.provider, head.model, head.provider, head.provider,
+                 then name one of those in {}.",
+                head.provider,
+                head.model,
+                head.provider,
+                head.provider,
+                about.models_list(),
             ),
         });
     }
@@ -1064,7 +1129,7 @@ pub(crate) fn resolve_stage_route(
     // model it names. It rides the stage's operational log so `lev run`, the
     // dashboard and the journal all carry it; a stage that starts on its own
     // first choice says nothing.
-    let mut notes = match head_source(choice, model_override, defaults, registry, &head) {
+    let mut notes = match head_source(choice, model_override, defaults, registry, &head, about) {
         HeadSource::Blueprint => Vec::new(),
         HeadSource::Override => vec![format!(
             "[model] {subject} starts on {}/{} (override_model); blueprint asked for {}",
@@ -2343,7 +2408,14 @@ mod tests {
         let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
         assert_eq!(pairs(&got), vec![("anthropic", "haiku")]);
         assert_eq!(
-            head_source(&cfg, None, &defaults, &registry, &got[0]),
+            head_source(
+                &cfg,
+                None,
+                &defaults,
+                &registry,
+                &got[0],
+                Resolving::Stage("s")
+            ),
             HeadSource::Fallback
         );
     }
@@ -2365,7 +2437,14 @@ mod tests {
         let got = resolve_stage_candidates(&cfg, None, &defaults, &registry);
         assert_eq!(pairs(&got), vec![("openrouter", "deepseek")]);
         assert_eq!(
-            head_source(&cfg, None, &defaults, &registry, &got[0]),
+            head_source(
+                &cfg,
+                None,
+                &defaults,
+                &registry,
+                &got[0],
+                Resolving::Stage("s")
+            ),
             HeadSource::Blueprint
         );
     }
@@ -2406,7 +2485,14 @@ mod tests {
         let got = resolve_stage_candidates(&cfg, None, &displaced, &registry);
         assert_eq!(got[0].model, "sonnet");
         assert_eq!(
-            head_source(&cfg, None, &displaced, &registry, &got[0]),
+            head_source(
+                &cfg,
+                None,
+                &displaced,
+                &registry,
+                &got[0],
+                Resolving::Stage("s")
+            ),
             HeadSource::Override
         );
         let same = ModelDefaults {
@@ -2415,7 +2501,7 @@ mod tests {
         };
         let got = resolve_stage_candidates(&cfg, None, &same, &registry);
         assert_eq!(
-            head_source(&cfg, None, &same, &registry, &got[0]),
+            head_source(&cfg, None, &same, &registry, &got[0], Resolving::Stage("s")),
             HeadSource::Blueprint
         );
         let got = resolve_stage_candidates(&cfg, Some("anthropic/sonnet"), &displaced, &registry);
@@ -2425,7 +2511,8 @@ mod tests {
                 Some("anthropic/sonnet"),
                 &displaced,
                 &registry,
-                &got[0]
+                &got[0],
+                Resolving::Stage("s"),
             ),
             HeadSource::Blueprint
         );

@@ -220,6 +220,19 @@ impl From<Vec<ToolDef>> for StageTools {
     }
 }
 
+/// Where a run's summaries go, decided: what
+/// [`ResolveEnv::compaction_routes`] answers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompactionPlan {
+    /// The routes, best first. Empty runs each summary on the current
+    /// stage's model.
+    pub routes: Vec<ModelRef>,
+    /// Lines worth logging about how they were decided: the user's settings
+    /// moving the summary off the model the graph names, and fallbacks
+    /// dropped for zero data retention.
+    pub notes: Vec<String>,
+}
+
 /// Every question resolving a run asks of the machine.
 #[async_trait]
 pub trait ResolveEnv: Send + Sync {
@@ -252,11 +265,12 @@ pub trait ResolveEnv: Send + Sync {
         requested: Option<&ModelRef>,
     ) -> Result<ModelPlan, SpawnIssue>;
     /// Where the run's summaries go: the compaction models `named`, resolved
-    /// as a stage's models are, head first and failover after. Empty when
-    /// `named` is, which runs each summary on the current stage's model. A
-    /// model the stage resolver would refuse (under the retention rules, say)
-    /// is refused with the reason.
-    fn compaction_routes(&self, named: &[ModelRef]) -> Result<Vec<ModelRef>, String>;
+    /// as a stage's models are, head first and failover after, with the lines
+    /// worth logging about how they were decided. No routes when `named` is
+    /// empty, which runs each summary on the current stage's model. A model
+    /// the stage resolver would refuse (under the retention rules, say) is
+    /// refused with the reason.
+    fn compaction_routes(&self, named: &[ModelRef]) -> Result<CompactionPlan, String>;
     /// What an unattended setting leaves to a person. `All` answers
     /// everything and `Off` nothing; a named profile is the host's to read,
     /// and a host with no profiles refuses every name.

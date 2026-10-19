@@ -480,7 +480,9 @@ provider, then that stage's own fallbacks. This is the setting for a blueprint t
 send its context anywhere its stages do not already go.
 
 A model this machine refuses for a stage is refused for summaries too, at spawn, with the same
-reason. That covers a provider that does not carry the model, and a model that keeps what it is sent
+reason. The run's log opens with the same lines a stage's does: one when `override_model` or
+`fallback_model` moved the summary off the model the graph names, and one per fallback dropped for
+zero retention. That covers a provider that does not carry the model, and a model that keeps what it is sent
 under [zero data retention](/docs/data-retention). Names that no configured provider serves at all
 do not stop the run. Its compacting regions are left as they are, the way a full window behaves with
 no `compaction`, and `lev validate` says so.

@@ -637,9 +637,15 @@ pub(crate) mod spawning {
             }
         }
 
-        fn compaction_routes(&self, named: &[ModelRef]) -> Result<Vec<ModelRef>, String> {
+        fn compaction_routes(
+            &self,
+            named: &[ModelRef],
+        ) -> Result<crate::spec::env::CompactionPlan, String> {
             match &self.stages {
-                StageAnswers::Given(_) => Ok(named.to_vec()),
+                StageAnswers::Given(_) => Ok(crate::spec::env::CompactionPlan {
+                    routes: named.to_vec(),
+                    notes: Vec::new(),
+                }),
                 StageAnswers::Host(h) => host::compaction_routes(named, &h.defaults, &h.registry),
             }
         }
