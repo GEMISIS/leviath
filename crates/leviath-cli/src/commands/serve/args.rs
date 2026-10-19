@@ -147,4 +147,17 @@ pub struct ServeArgs {
     /// is asked to stop. WebSockets are closed straight away.
     #[arg(long, value_name = "SECS", default_value = "10")]
     pub shutdown_grace_secs: u64,
+
+    /// Print JSON lines on stdout instead of prose: the daemon's start-up,
+    /// a `ready` object once listening, or an `error` line if the server
+    /// fails to start. Nothing else is printed there; logs stay on stderr.
+    /// The vocabulary is in the API guide.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Write the `ready` object to this file once listening, owner-only and
+    /// in one step, and remove it when the server stops cleanly. Works with
+    /// or without `--json`.
+    #[arg(long, value_name = "PATH")]
+    pub ready_file: Option<PathBuf>,
 }

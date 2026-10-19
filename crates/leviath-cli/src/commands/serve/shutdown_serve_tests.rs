@@ -29,6 +29,8 @@ fn args(grace_secs: u64) -> ServeArgs {
         request_timeout_secs: Some(0),
         exit_on_stdin_eof: true,
         shutdown_grace_secs: grace_secs,
+        json: false,
+        ready_file: None,
     }
 }
 

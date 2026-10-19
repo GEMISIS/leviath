@@ -159,6 +159,17 @@ impl StartupView {
     }
 }
 
+/// Who is told how a daemon is brought up for a command: a running one of
+/// another build being replaced, a new one started, and its start-up.
+pub trait BringUpNotices: Send + Sync {
+    /// The running daemon is about to be replaced; `line` says why.
+    fn replacing(&self, line: &str);
+    /// A daemon process was started, and has this pid.
+    fn spawned(&self, pid: u32);
+    /// The watch a control client waiting on the daemon tells.
+    fn watch(self: Arc<Self>) -> StartupWatch;
+}
+
 /// A view following a board; see [`StartupView::follow`].
 pub struct Following {
     task: tokio::task::JoinHandle<()>,

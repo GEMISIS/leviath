@@ -149,6 +149,65 @@ leaves the server's job object, so a host that kills its job on exit leaves the 
 If the job does not allow that, the daemon starts inside it anyway, and the log warns that it
 will end when the job closes. Start the daemon yourself first (`lev daemon start`) to avoid that.
 
+### Knowing when it is ready
+
+A program that starts `lev serve` needs the URL it bound, a sign that it is ready, and which build
+it is. Pass `--json` and stdout carries only JSON lines, one object per line. Logs stay on stderr,
+as does the start-up progress shown for a person.
+
+```bash
+lev serve --port 0 --json --exit-on-stdin-eof
+```
+
+```json
+{"event":"daemon_starting","step":"converting runs","done":412,"total":982,"detail":null}
+{"event":"daemon_ready"}
+{"event":"ready","schema":1,"url":"http://127.0.0.1:53712","pid":4242,"version":"0.6.4","build":"93edfd0c","server_instance":"9f3c1a0b6d2e4f57","daemon":{"pid":41230,"version":"0.6.4","build":"93edfd0c"}}
+```
+
+| `event` | When | Fields |
+| --- | --- | --- |
+| `daemon_replacing` | A running daemon of an older build is about to be stopped | `message` |
+| `daemon_spawned` | A daemon process was started for this server | `pid` |
+| `daemon_starting` | The daemon is still starting up | `step`, `done`, `total`, `detail` |
+| `daemon_ready` | The daemon answers, before the server binds | none |
+| `ready` | The server is listening | see below |
+| `error` | The server failed to start; always the last line | `code`, `message` |
+
+`daemon_starting` is printed when the step changes, and at most four times a second while one step
+counts through its items. `total` is 0 for a step that is not counted. `detail` is null unless the
+step names where its work goes, such as the backup directory on the first start after an upgrade.
+
+The `ready` object has these fields. It never contains the token.
+
+| Field | Meaning |
+| --- | --- |
+| `schema` | The version of this object, now 1; new fields leave it alone |
+| `url` | The address the server bound, with the real port when `--port 0` |
+| `pid`, `version`, `build` | This server process and the build it runs |
+| `server_instance` | The same value every subscription's opening frame reports as `serverInstance` |
+| `daemon` | The daemon's `pid`, `version` and `build`, or null if it did not say |
+
+A server that fails before it is ready ends with one `error` line and exits non-zero. Match on
+the `code`; the `message` is for people and its wording may change.
+
+| `code` | Cause |
+| --- | --- |
+| `config_invalid` | `config.toml` does not parse, or a flag or `LEVIATH_DAEMON` value is wrong |
+| `token_missing` | Neither `--token` nor `LEVIATH_API_TOKEN` is set |
+| `bind_failed` | The port is taken, or the host cannot be resolved or bound |
+| `tls_invalid` | The TLS flags, certificate or key cannot be used |
+| `daemon_unavailable` | No daemon could be reached, started or waited for |
+| `ready_file_failed` | The `--ready-file` could not be written |
+
+A host that cannot read the child's stdout can pass `--ready-file <PATH>` instead, with or
+without `--json`. Once the server listens, it writes the same `ready` object to that file. The
+file is written in one step, so a reader never sees half of it, and on macOS and Linux it is
+readable by its owner only. The server removes it when it stops cleanly, so a file that exists
+names a server that started. A server killed with SIGKILL leaves it behind.
+
+Without either flag, stdout is one line, `Leviath API server listening on http://127.0.0.1:3000`.
+
 ## Reaching a Leviath on another machine
 
 The short version: **`http://` only works on loopback.** Everything else needs HTTPS or a tunnel.
