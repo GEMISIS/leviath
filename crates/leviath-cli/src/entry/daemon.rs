@@ -2,14 +2,17 @@
 //! subprocess, socket and service-manager calls behind `lev daemon`.
 
 use std::io;
+use std::sync::Arc;
+
+use leviath_runtime::control_socket::{DaemonIdentity, StartupWatch};
 
 use tracing::info;
 
-use super::{LOG_TARGET, control_client};
+use super::{LOG_TARGET, control_client, quiet_control_client};
 use crate::commands;
 use crate::daemon::mode::DaemonMode;
 use crate::daemon::readiness::poll_until;
-use crate::daemon::startup_view::StartupView;
+use crate::daemon::startup_view::{BringUpNotices, StartupView};
 
 /// Ensure a daemon this command can use is listening on the control port, as
 /// `mode` allows: `attach` only uses a running one, and the other modes start a
@@ -18,12 +21,43 @@ use crate::daemon::startup_view::StartupView;
 /// [`leviath_runtime::control_socket::is_daemon_running`]; only the real
 /// subprocess spawn + poll live here.
 pub(super) async fn ensure_daemon_running(mode: DaemonMode) -> anyhow::Result<()> {
-    bring_up_daemon(mode, mode.starts()).await
+    bring_up_daemon(mode, mode.starts(), Arc::new(OnStderr))
+        .await
+        .map(drop)
+}
+
+/// [`ensure_daemon_running`], telling `notices` how it goes, and answering
+/// who the daemon said it is.
+pub(super) async fn ensure_daemon_for(
+    mode: DaemonMode,
+    notices: Arc<dyn BringUpNotices>,
+) -> anyhow::Result<Option<DaemonIdentity>> {
+    bring_up_daemon(mode, mode.starts(), notices).await
+}
+
+/// How a person at a terminal is told a daemon is being brought up: the
+/// replacement and the start-up on stderr.
+struct OnStderr;
+
+impl BringUpNotices for OnStderr {
+    fn replacing(&self, line: &str) {
+        eprintln!("{line}");
+    }
+
+    fn spawned(&self, _pid: u32) {}
+
+    fn watch(self: Arc<Self>) -> StartupWatch {
+        StartupView::on_stderr(true).watch()
+    }
 }
 
 /// [`ensure_daemon_running`], with whether it may start a daemon given apart
 /// from the mode, for `lev daemon start`, which always may.
-async fn bring_up_daemon(mode: DaemonMode, may_start: bool) -> anyhow::Result<()> {
+async fn bring_up_daemon(
+    mode: DaemonMode,
+    may_start: bool,
+    notices: Arc<dyn BringUpNotices>,
+) -> anyhow::Result<Option<DaemonIdentity>> {
     use crate::daemon::{build, setup::control_address, setup::read_build_marker};
     use leviath_runtime::control_socket::is_daemon_running;
     let id = control_address()
@@ -36,19 +70,17 @@ async fn bring_up_daemon(mode: DaemonMode, may_start: bool) -> anyhow::Result<()
     );
     let steps = crate::daemon::lifecycle::start_steps_for(running, decision.replace, may_start)
         .map_err(anyhow::Error::msg)?;
+    let client = quiet_control_client()?.with_startup_watch(notices.clone().watch());
     if !steps.spawn {
-        control_client()?.wait_until_started().await?;
-        return Ok(());
+        client.wait_until_started().await?;
+        return Ok(client.link().daemon);
     }
     if steps.shutdown_first {
-        decision
-            .say
-            .into_iter()
-            .for_each(|line| eprintln!("{line}"));
+        decision.say.iter().for_each(|line| notices.replacing(line));
         // Shut down quietly (straight over the control socket) rather than via
         // `daemon::send_shutdown`, whose stdout "daemon shutting down" line would
         // corrupt `lev agent-client`'s JSON-RPC protocol channel.
-        let _ = control_client()?
+        let _ = client
             .request(&leviath_runtime::control_socket::ControlRequest::Shutdown)
             .await;
         poll_until(&mut || !is_daemon_running(&id)).await;
@@ -67,10 +99,11 @@ async fn bring_up_daemon(mode: DaemonMode, may_start: bool) -> anyhow::Result<()
     let mut cmd = daemon_command(&exe, &dir, &env);
     // Detached from this process, and on Windows out of its job too, so a host
     // that kills `lev serve`'s job on close leaves the daemon running.
-    leviath_sys::process::spawn_detached(&mut cmd)?;
+    let child = leviath_sys::process::spawn_detached(&mut cmd)?;
+    notices.spawned(child.id());
     if poll_until(&mut || is_daemon_running(&id)).await {
-        control_client()?.wait_until_started().await?;
-        return Ok(());
+        client.wait_until_started().await?;
+        return Ok(client.link().daemon);
     }
     anyhow::bail!(
         "the leviath daemon did not start within {:?}",
@@ -81,7 +114,7 @@ async fn bring_up_daemon(mode: DaemonMode, may_start: bool) -> anyhow::Result<()
 /// `lev daemon start`: auto-start a detached daemon if none is running. The
 /// mode decides only whether a running one of another build is replaced.
 pub(super) async fn real_daemon_start(mode: DaemonMode) -> anyhow::Result<()> {
-    bring_up_daemon(mode, true).await?;
+    bring_up_daemon(mode, true, Arc::new(OnStderr)).await?;
     println!("leviath daemon is running");
     Ok(())
 }

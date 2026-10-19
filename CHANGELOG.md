@@ -808,6 +808,18 @@ same list.
   it stdin is never read.
 - `lev serve --shutdown-grace-secs <SECS>`: how long requests in flight may
   take to finish once the server is asked to stop. Default 10.
+- `lev serve --json`: stdout carries only JSON lines. The daemon's start-up
+  comes as `daemon_starting` lines (`step`, `done`, `total`, `detail`), then
+  `daemon_ready`, and a replaced or started daemon as `daemon_replacing` and
+  `daemon_spawned`. Once listening, a `ready` object names the bound URL, the
+  server's pid, version, build and `server_instance`, and the daemon's pid,
+  version and build. A server that fails to start ends with an `error` line
+  whose `code` is `config_invalid`, `token_missing`, `bind_failed`,
+  `tls_invalid`, `daemon_unavailable` or `ready_file_failed`. Without the
+  flag, stdout is the one line of prose it was.
+- `lev serve --ready-file <PATH>`: the same `ready` object, written
+  owner-only in one step once the server listens and removed when it stops
+  cleanly. It works with or without `--json`.
 - `leviath_sys::spawn_detached`: `configure_detached` and spawn, retrying
   inside the starter's job on Windows when breakaway is refused.
 - Two built-in search tools that run in-process, so nothing is executed.

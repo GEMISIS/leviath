@@ -270,14 +270,23 @@ impl RiskyExecutors for RealExecutors {
             crate::logging::set_log_file_cap(cap);
             info!(target: LOG_TARGET, path = %path.display(), "leviath serve writing its log here");
         }
+        // What the server says on stdout: a line of prose, or with `--json`
+        // nothing but JSON lines, which is why the daemon is brought up
+        // through it.
+        let announce = commands::serve::Announcer::new(
+            &args,
+            Box::new(io::stdout()),
+            StartupView::on_stderr(true).watch(),
+        );
         // The HTTP API is a gateway to the shared-world daemon: ensure it's
         // running, then serve, routing agent actions through its control socket.
-        ensure_daemon_running(args.daemon.resolve_here()?).await?;
+        let daemon = serve_daemon(args.daemon, announce.clone()).await;
         // Stopped the way the daemon is: Ctrl-C, SIGTERM, or a Windows console
         // close. `execute` adds stdin closing when `--exit-on-stdin-eof` asks.
         commands::serve::execute(
             args,
-            long_lived_control_client()?,
+            announce,
+            daemon,
             std::sync::Arc::new(run_upgrade_captured),
             Box::pin(signals::stop_requested()),
         )
@@ -564,6 +573,23 @@ async fn real_doctor(args: commands::doctor::DoctorArgs) -> anyhow::Result<()> {
         Ok(client) => commands::doctor::execute(args, DaemonTarget::Client(&client)).await,
         Err(e) => commands::doctor::execute(args, DaemonTarget::Unavailable(e.to_string())).await,
     }
+}
+
+/// The daemon `lev serve` serves, brought up as `mode` allows and announced
+/// through `announce`, or why there is none.
+async fn serve_daemon(
+    mode: crate::daemon::mode::DaemonModeArg,
+    announce: std::sync::Arc<commands::serve::Announcer>,
+) -> anyhow::Result<commands::serve::Daemon> {
+    use commands::serve::ErrorCode;
+    announce.stage(ErrorCode::ConfigInvalid);
+    let mode = mode.resolve_here()?;
+    announce.stage(ErrorCode::DaemonUnavailable);
+    let identity = daemon::ensure_daemon_for(mode, announce).await?;
+    Ok(commands::serve::Daemon {
+        control: long_lived_control_client()?,
+        identity,
+    })
 }
 
 /// Build a control client pointed at the daemon's control socket.

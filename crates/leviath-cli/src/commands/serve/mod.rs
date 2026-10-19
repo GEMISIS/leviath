@@ -3,6 +3,7 @@
 //! Exposes agent management, blueprint CRUD, and live event streaming over
 //! HTTP. No web UI - the frontend lives in a separate repo.
 
+mod announce;
 mod args;
 mod artifact_types;
 mod auth;
@@ -62,6 +63,7 @@ mod event_seam_tests;
 #[path = "shutdown_serve_tests.rs"]
 mod shutdown_serve_tests;
 
+pub use announce::{Announcer, Daemon, ErrorCode};
 pub use args::ServeArgs;
 pub(crate) use config::list_model_ids;
 pub(crate) use events::Stamped;
@@ -121,9 +123,15 @@ pub fn parse_log_name(value: &str) -> Result<String, String> {
 /// `stop` resolves when the operating system asks the server to stop (the
 /// composition root waits on the signals). With `--exit-on-stdin-eof`, stdin
 /// reaching its end stops it too; without it, stdin is never read.
+///
+/// `daemon` is the daemon the composition root brought up through
+/// `announce`, or why it could not. Everything the server says to whoever
+/// started it goes through `announce`, including the `error` line of a
+/// server that failed to start.
 pub async fn execute(
     args: ServeArgs,
-    control: leviath_runtime::control_socket::ControlClient,
+    announce: Arc<Announcer>,
+    daemon: anyhow::Result<Daemon>,
     upgrade: crate::commands::update::CommandRunner,
     stop: StopFuture,
 ) -> anyhow::Result<()> {
@@ -131,8 +139,23 @@ pub async fn execute(
         .exit_on_stdin_eof
         .then_some(Box::new(std::io::stdin()) as Box<dyn std::io::Read + Send>)
         .map(shutdown::closed);
+    let result = serve_daemon(args, announce.clone(), daemon, upgrade, stop, stdin).await;
+    announce.finish(result)
+}
+
+/// [`execute`] with stdin's end, when it stops the server, given apart.
+async fn serve_daemon(
+    args: ServeArgs,
+    announce: Arc<Announcer>,
+    daemon: anyhow::Result<Daemon>,
+    upgrade: crate::commands::update::CommandRunner,
+    stop: StopFuture,
+    stdin: Option<StopFuture>,
+) -> anyhow::Result<()> {
+    let daemon = daemon?;
+    announce.daemon_ready(daemon.identity.as_ref());
     let shutdown = shutdown::either(stop, stdin);
-    execute_with_shutdown(args, control, upgrade, shutdown, None).await
+    execute_with_shutdown(args, daemon.control, upgrade, shutdown, announce).await
 }
 
 /// The GraphQL schema this build serves, as SDL.
@@ -458,22 +481,22 @@ fn routes_in(source: &str) -> Vec<(String, String)> {
 /// position has a covered instantiation (this is the same trait-object-erasure
 /// technique used for `io::Write` in `leviath-package`'s `bundler.rs`).
 ///
-/// `ready`, if given, is sent the real bound `SocketAddr` right after
-/// `TcpListener::bind` succeeds (before serving starts). Production passes
-/// `None`; tests pass `Some(tx)` with `args.port = 0` so the OS picks a free
-/// port and the test learns which one was actually bound directly - no
-/// probe-bind-drop-rebind dance, which is a genuine TOCTOU race (confirmed
-/// to reproduce on real CI: another process/test could grab the just-freed
-/// port before this function's own bind runs), not just a test-only
-/// convenience.
+/// `announce` is told the real bound `SocketAddr` right after
+/// `TcpListener::bind` succeeds (before serving starts), and says so to
+/// whoever started the server. A test observes it with `args.port = 0`, so
+/// the OS picks a free port and the test learns which one was actually bound
+/// directly - no probe-bind-drop-rebind dance, which is a genuine TOCTOU race
+/// (confirmed to reproduce on real CI: another process/test could grab the
+/// just-freed port before this function's own bind runs).
 async fn execute_with_shutdown(
     args: ServeArgs,
     control: leviath_runtime::control_socket::ControlClient,
     upgrade: crate::commands::update::CommandRunner,
     shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
-    ready: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
+    announce: Arc<Announcer>,
 ) -> anyhow::Result<()> {
     // Resolve the API token before binding - refuse to start unauthenticated.
+    announce.stage(ErrorCode::TokenMissing);
     let auth_token = std::sync::Arc::new(auth::resolve_token(args.token.as_deref())?);
     // The API can spawn tool-executing agents; loudly warn if bound off-host.
     if !is_local_host(&args.host) {
@@ -484,6 +507,7 @@ async fn execute_with_shutdown(
         );
     }
 
+    announce.stage(ErrorCode::ConfigInvalid);
     let cfg = Config::load()?;
     // Read before `cfg` moves into the shared state below.
     let allow_local_network = cfg.security.allow_local_network;
@@ -728,12 +752,14 @@ async fn execute_with_shutdown(
     // Resolved and loaded before the listener binds. A server that binds and
     // then fails every handshake looks like a network fault from the other
     // machine; one that refuses to start names the file it could not read.
+    announce.stage(ErrorCode::TlsInvalid);
     let tls = tls::resolve(args.tls_cert.clone(), args.tls_key.clone())?;
     let tls_config = match &tls {
         Some(paths) => Some(tls::load(paths).await?),
         None => None,
     };
 
+    announce.stage(ErrorCode::BindFailed);
     let addr = listen_addr(&args.host, args.port).await?;
     let scheme = tls::scheme(tls.as_ref());
 
@@ -751,13 +777,7 @@ async fn execute_with_shutdown(
         .local_addr()
         .expect("infallible: a freshly bound TcpListener always has a local address");
     tracing::info!("Listening on {}://{}", scheme, bound);
-    println!("Leviath API server listening on {scheme}://{bound}");
-
-    if let Some(ready) = ready {
-        // A test-only observer failing to receive (e.g. it already gave up
-        // after a timeout) shouldn't stop the server from starting for real.
-        let _ = ready.send(bound);
-    }
+    announce.listening(scheme, bound)?;
 
     // When the stop is asked for, the server stops accepting and every
     // WebSocket is told to close, at the same moment.
@@ -779,6 +799,7 @@ async fn execute_with_shutdown(
         Some(config) => Box::pin(serve_tls(listener, app, config, signal, grace)),
     };
     shutdown::drain(serving, stopping, grace).await;
+    announce.stopped();
 
     Ok(())
 }
@@ -961,12 +982,13 @@ async fn serve_for_test(
     shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     ready: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 ) -> anyhow::Result<()> {
+    let announce = Announcer::silent(&args).observed_by(ready);
     execute_with_shutdown(
         args,
         control,
         Arc::new(no_upgrade_in_tests),
         shutdown,
-        ready,
+        announce,
     )
     .await
 }
@@ -1729,6 +1751,23 @@ mod tests {
 
     /// A control client pointing at an address with no daemon: agent-action
     /// endpoints report "not reachable", and read/bootstrap paths don't touch it.
+    /// [`execute`] over no daemon, saying nothing and never stopping.
+    async fn execute_quietly(args: ServeArgs) -> anyhow::Result<()> {
+        let announce = Announcer::silent(&args);
+        let daemon = Daemon {
+            control: no_daemon_control(),
+            identity: None,
+        };
+        execute(
+            args,
+            announce,
+            Ok(daemon),
+            Arc::new(no_upgrade_in_tests),
+            Box::pin(std::future::pending()),
+        )
+        .await
+    }
+
     fn no_daemon_control() -> leviath_runtime::control_socket::ControlClient {
         leviath_runtime::control_socket::ControlClient::new(
             leviath_runtime::control_socket::control_id(std::path::Path::new("/no/such/leviath")),
@@ -2595,6 +2634,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -2678,6 +2719,8 @@ mod tests {
                 daemon: Default::default(),
                 exit_on_stdin_eof: false,
                 shutdown_grace_secs: 10,
+                json: false,
+                ready_file: None,
                 port: 0,
                 name: None,
                 host: "127.0.0.1".to_string(),
@@ -2763,6 +2806,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -2842,6 +2887,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -2899,6 +2946,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -2997,6 +3046,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     name: None,
                     port: 0,
                     host: "127.0.0.1".to_string(),
@@ -3077,6 +3128,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3148,6 +3201,8 @@ mod tests {
                 daemon: Default::default(),
                 exit_on_stdin_eof: false,
                 shutdown_grace_secs: 10,
+                json: false,
+                ready_file: None,
                 port: 0,
                 name: None,
                 host: "not a valid host".to_string(),
@@ -3163,13 +3218,7 @@ mod tests {
                 max_concurrent_requests: None,
                 request_timeout_secs: None,
             };
-            let result = execute(
-                args,
-                no_daemon_control(),
-                Arc::new(no_upgrade_in_tests),
-                Box::pin(std::future::pending()),
-            )
-            .await;
+            let result = execute_quietly(args).await;
             assert!(result.is_err());
         })
         .await;
@@ -3200,6 +3249,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3215,13 +3266,7 @@ mod tests {
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
                 };
-                let result = execute(
-                    args,
-                    no_daemon_control(),
-                    Arc::new(no_upgrade_in_tests),
-                    Box::pin(std::future::pending()),
-                )
-                .await;
+                let result = execute_quietly(args).await;
                 assert_execute_failed_on_malformed_config(&result);
             },
         )
@@ -3246,6 +3291,8 @@ mod tests {
             daemon: Default::default(),
             exit_on_stdin_eof: false,
             shutdown_grace_secs: 10,
+json: false,
+ready_file: None,
             port: 0,
             name: None,
             host: "127.0.0.1".to_string(),
@@ -3308,6 +3355,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 8080,
                     name: None,
                     host: "192.0.2.1".to_string(),
@@ -3323,13 +3372,7 @@ mod tests {
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
                 };
-                let result = execute(
-                    args,
-                    no_daemon_control(),
-                    Arc::new(no_upgrade_in_tests),
-                    Box::pin(std::future::pending()),
-                )
-                .await;
+                let result = execute_quietly(args).await;
                 assert_execute_failed_on_port_in_use(&result);
                 // Names the address it could not have, rather than leaving the
                 // reader with a bare errno.
@@ -3359,6 +3402,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3374,13 +3419,7 @@ mod tests {
                     max_concurrent_requests: None,
                     request_timeout_secs: None,
                 };
-                let result = execute(
-                    args,
-                    no_daemon_control(),
-                    Arc::new(no_upgrade_in_tests),
-                    Box::pin(std::future::pending()),
-                )
-                .await;
+                let result = execute_quietly(args).await;
                 assert_execute_failed_on_port_in_use(&result);
                 assert_error_says(
                     &result,
@@ -3401,6 +3440,8 @@ mod tests {
                 daemon: Default::default(),
                 exit_on_stdin_eof: false,
                 shutdown_grace_secs: 10,
+                json: false,
+                ready_file: None,
                 port: 0,
                 name: None,
                 host: "127.0.0.1".to_string(),
@@ -3416,13 +3457,7 @@ mod tests {
                 max_concurrent_requests: None,
                 request_timeout_secs: None,
             };
-            let result = execute(
-                args,
-                no_daemon_control(),
-                Arc::new(no_upgrade_in_tests),
-                Box::pin(std::future::pending()),
-            )
-            .await;
+            let result = execute_quietly(args).await;
             assert!(result.is_err(), "must refuse to start unauthenticated");
         })
         .await;
@@ -3439,6 +3474,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3497,6 +3534,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3552,6 +3591,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3629,6 +3670,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3709,6 +3752,8 @@ mod tests {
                         daemon: Default::default(),
                         exit_on_stdin_eof: false,
                         shutdown_grace_secs: 10,
+                        json: false,
+                        ready_file: None,
                         port: 0,
                         name: None,
                         host: "127.0.0.1".to_string(),
@@ -3816,6 +3861,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3878,6 +3925,8 @@ mod tests {
                     daemon: Default::default(),
                     exit_on_stdin_eof: false,
                     shutdown_grace_secs: 10,
+                    json: false,
+                    ready_file: None,
                     port: 0,
                     name: None,
                     host: "127.0.0.1".to_string(),
@@ -3948,6 +3997,8 @@ mod tests {
             daemon: Default::default(),
             exit_on_stdin_eof: false,
             shutdown_grace_secs: 10,
+            json: false,
+            ready_file: None,
             port: 0,
             name: None,
             host: "127.0.0.1".to_string(),
