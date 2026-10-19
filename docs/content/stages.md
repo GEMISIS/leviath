@@ -121,6 +121,11 @@ cut off in the middle of a tool call four times in a row (see
 [stages and models](/docs/agents#stages-and-models)). The recovery stage finds the
 reason in the context. With no `error` edge the run fails.
 
+A failure of the call that picks the next stage, after the stage's work is done, does not fire
+`error` by default. The run fails with the routing error instead, so finished work is not redone.
+Set [`routing`](/docs/blueprint-format#routing) `on_error = "error_edge"` on the stage to take the
+edge anyway.
+
 The full set of `when` values is `always` (the default), `llm_choice`, `error`, `max_iterations`,
 `stuck`, and `dead_end`. `always` and `llm_choice` both mark a normal edge. A stage that no edge
 leaves ends the run. Anything else in `when` is a parse error rather than an edge that quietly does nothing, so a

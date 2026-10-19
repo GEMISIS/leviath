@@ -334,6 +334,12 @@
           "default": 1000,
           "description": "The wait before the first inference retry, in milliseconds, doubling for each retry after it. This is the schedule for ordinary blips such as a reset connection or a 500; a provider overload does not use it."
         },
+        "routing_retry_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3,
+          "description": "How many times the call that picks a stage's next stage is attempted, the first try included. The same transient failures are retried, on the same schedule, as for inference_retry_attempts. Once the tries are spent the run fails with the routing error, unless the blueprint sets routing.on_error = \"error_edge\". A blueprint's routing.retry_attempts overrides this."
+        },
         "max_tool_call_write_bytes": {
           "type": "integer",
           "minimum": 0,

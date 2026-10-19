@@ -2481,18 +2481,23 @@ some_custom_thing = \"forwarded to the script\"
             old.limits.inference_retry_base_ms,
             leviath_runtime::DEFAULT_RETRY_BASE_DELAY_MS
         );
+        assert_eq!(
+            old.limits.routing_retry_attempts,
+            leviath_runtime::DEFAULT_ROUTING_RETRY_ATTEMPTS
+        );
 
         // An operator riding out longer provider outages, on a slower blip
         // schedule of their own choosing.
         let tuned = load(
             "tuned.toml",
             format!(
-                "{}\n[limits]\ninference_retry_attempts = 8\ninference_retry_base_ms = 2000\n",
+                "{}\n[limits]\ninference_retry_attempts = 8\ninference_retry_base_ms = 2000\nrouting_retry_attempts = 5\n",
                 config_toml_without_limits()
             ),
         );
         assert_eq!(tuned.limits.inference_retry_attempts, 8);
         assert_eq!(tuned.limits.inference_retry_base_ms, 2000);
+        assert_eq!(tuned.limits.routing_retry_attempts, 5);
     }
 
     /// `[limits] exact_token_counting` was removed when the guard it switched
@@ -4541,6 +4546,7 @@ enabled = false
                 interaction_timeout_secs: Some(120),
                 inference_retry_attempts: 6,
                 inference_retry_base_ms: 250,
+                routing_retry_attempts: 2,
                 max_concurrent_inferences_by_model: std::collections::BTreeMap::from([(
                     "gpt-oss-120b".to_string(),
                     2,
@@ -4688,6 +4694,7 @@ enabled = false
         assert_eq!(deserialized.limits.default_max_iterations, Some(99));
         assert_eq!(deserialized.limits.inference_retry_attempts, 6);
         assert_eq!(deserialized.limits.inference_retry_base_ms, 250);
+        assert_eq!(deserialized.limits.routing_retry_attempts, 2);
         assert_eq!(
             deserialized.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-key")

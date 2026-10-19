@@ -161,6 +161,7 @@ The graph-wide settings sit directly under `[graph]`. Everything has a default e
 | `taint_tracking` | off | Track where sensitive data flows. See [Security](/docs/security). |
 | `sandbox` | the operator's | Where tools run. See [Containers](/docs/containers). |
 | `nudge`, `repetition` | the operator's | The empty-reply nudge and loop detection. |
+| `routing` | the operator's | How the "which stage next?" call is retried. See [Routing](#routing). |
 | `file_tracking` | none | A region listing the files the run read and wrote. |
 | `tool_rescan` | `"at_spawn"` | When the tool list is read again. |
 | `dependencies` | none | What the run needs from the machine. |
@@ -307,6 +308,7 @@ and the dashboard show, and the first stage is where a run starts unless `entry`
 | `tool_permissions` | none | `allow`, `ask` or `deny` per tool, for this stage. |
 | `max_revisits` | none | How often a gate may send the run back here. |
 | `transition_prompt` | none | Extra guidance when the model picks the next edge. |
+| `routing` | the graph's | How that pick is retried, and what a failure does. See [Routing](#routing). |
 | `hide`, `reset` | none | Regions this stage does not show, or empties on entry. |
 | `layout` | the graph's | A whole layout for this stage alone. |
 | `hooks` | none | Scripts run at points of the stage's life. |
@@ -363,6 +365,35 @@ fan-out. Code is named the same way everywhere, as `{ file = "path.rhai" }` besi
 hooks = { on_stage_enter = { file = "hooks/load_ticket.rhai" } }
 output = { format = "json", validator = { file = "validators/report.rhai" } }
 ```
+
+## Routing
+
+When a stage with several normal edges is done, the model is asked which one to take. That short
+call can fail like any other. `routing` sets how often it is tried and what happens after the
+last try, for the whole graph under `[graph]` or for one stage:
+
+```toml
+[graph]
+routing = { retry_attempts = 4 }
+
+[[graph.stages]]
+name = "verify"
+routing = { on_error = "error_edge" }
+```
+
+| Key | Default | What it is |
+|---|---|---|
+| `retry_attempts` | the operator's `routing_retry_attempts`, `3` | Tries, the first one included. At least `1`. |
+| `on_error` | `"fail"` | `"fail"` ends the run with the error; `"error_edge"` fails the stage. |
+
+Only a transient failure is tried again, as with any model call. A stage's setting wins over the
+graph's, key by key. The run file does not record `routing`, so a run resumed after the daemon
+restarts uses the operator's settings.
+
+With `"fail"`, the run stops with an error that names the routing call, and the stage's finished
+work is kept. With `"error_edge"`, the stage fails, so its `error` edge runs when it has one. Choose
+that only when the recovery stage can fix what made the routing call fail. Otherwise the run
+redoes the stage and fails the same way until the stage runs out of revisits.
 
 ## Edges
 

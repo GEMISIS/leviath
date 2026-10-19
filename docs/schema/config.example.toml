@@ -74,6 +74,7 @@ provider_circuit_cooldown_secs = 300
 # interaction_timeout_secs = 3600
 inference_retry_attempts = 4
 inference_retry_base_ms = 1000
+routing_retry_attempts = 3
 max_agents_per_run = 0
 notify_spend_usd = [1.0, 5.0]
 # How much an agent may write to disk. Unset in code and written by `lev setup`:

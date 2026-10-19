@@ -6,6 +6,7 @@ use leviath_core::region::{Admission, Volatility};
 
 pub(crate) fn stage(name: &str) -> StageDef {
     StageDef {
+        routing: None,
         name: StageName::new(name).unwrap(),
         description: None,
         system_prompt: Some("work".into()),
@@ -75,6 +76,7 @@ pub(crate) fn edge(name: &str, from: &str, to: &str) -> EdgeDef {
 
 pub(crate) fn minimal() -> RunGraph {
     RunGraph {
+        routing: None,
         title: Some("t".into()),
         description: None,
         entry: None,
@@ -435,6 +437,49 @@ fn unknown_keys_are_refused() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("unknown field `stagse`"), "{err}");
+}
+
+/// `routing` reads from a blueprint, refuses a value it has no meaning for,
+/// and is left out of the binary run file so its layout does not move.
+#[test]
+fn routing_is_read_checked_and_kept_out_of_the_binary_form() {
+    let graph = |extra: &str| {
+        format!(
+            "{extra}\nlayout = {{ regions = [], total_budget_tokens = 1 }}\n\
+             [[stages]]\nname = \"a\"\nrouting = {{ on_error = \"error_edge\" }}\n"
+        )
+    };
+    let g: RunGraph = toml::from_str(&graph("routing = { retry_attempts = 4 }")).unwrap();
+    let expected = RoutingDef {
+        retry_attempts: std::num::NonZeroU32::new(4),
+        on_error: None,
+    };
+    assert_eq!(g.routing, Some(expected.clone()));
+    assert_eq!(
+        g.stages[0].routing.as_ref().and_then(|r| r.on_error),
+        Some(OnRoutingError::ErrorEdge)
+    );
+    assert_eq!(
+        RoutingDef::attempts(g.routing.as_ref(), g.stages[0].routing.as_ref(), 3),
+        4
+    );
+    assert_eq!(RoutingDef::attempts(None, None, 3), 3);
+    assert_eq!(RoutingDef::on_error(None, None), OnRoutingError::Fail);
+    // The readable forms keep it.
+    let json = serde_json::to_string(&g).unwrap();
+    assert_eq!(serde_json::from_str::<RunGraph>(&json).unwrap(), g);
+    // The binary form has no room for it, so it comes back unset.
+    let bin = postcard::to_stdvec(&g).unwrap();
+    let back = postcard::from_bytes::<RunGraph>(&bin).unwrap();
+    assert_eq!((back.routing, back.stages[0].routing.clone()), (None, None));
+
+    for bad in [
+        "routing = { retry_attempts = 0 }",
+        "routing = { on_error = \"retry\" }",
+        "routing = { tries = 2 }",
+    ] {
+        assert!(toml::from_str::<RunGraph>(&graph(bad)).is_err(), "{bad}");
+    }
 }
 
 /// The `[graph]` table of each bundled blueprint's `agent.toml`, by

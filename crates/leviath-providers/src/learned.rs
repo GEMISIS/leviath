@@ -43,6 +43,11 @@ pub struct LearnedModel {
     pub supports_temperature: Option<bool>,
     /// See [`ModelCapabilities::supports_tools`].
     pub supports_tools: Option<bool>,
+    /// Whether the request may carry a `tool_choice` at all. Only a gateway
+    /// that lists each model's accepted parameters can say; OpenRouter's
+    /// `supported_parameters` does. The runtime reads it before asking a
+    /// model to answer without calling a tool.
+    pub supports_tool_choice: Option<bool>,
     /// Whether the upstream bills a cache *write*, which is the signal that it
     /// expects an explicit `cache_control` marker. A model that quotes only a
     /// read price caches on its own by prefix, and marking it buys nothing or

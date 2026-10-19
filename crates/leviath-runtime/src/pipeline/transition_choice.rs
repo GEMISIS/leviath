@@ -167,25 +167,98 @@ type TransitionChoiceQuery = (
     ),
 );
 
+/// Model id prefixes whose upstream takes only `tool_choice: "auto"`.
+///
+/// Meta's API refuses `"none"` with a 400, directly and as OpenRouter's
+/// upstream for `meta/*` models. OpenRouter's catalogue still lists
+/// `tool_choice` for those models, because `"auto"` works, so the listing
+/// alone cannot tell; this list answers for them before it is asked.
+const AUTO_ONLY_TOOL_CHOICE: &[&str] = &["meta/"];
+
+/// Provider and model pairs that refused a routing request's `tool_choice`
+/// in this process, so later routing calls to them go out with no tools at
+/// all rather than being refused again first.
+static REFUSED_TOOL_CHOICE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Remember that `provider` refused a routing `tool_choice` for `model`.
+pub(crate) fn remember_refused_tool_choice(provider: &str, model: &str) {
+    leviath_core::sync::lock(&REFUSED_TOOL_CHOICE)
+        .insert((provider.to_string(), model.to_string()));
+}
+
+/// Whether `provider` refused a routing `tool_choice` for `model` earlier in
+/// this process.
+pub(crate) fn refused_tool_choice(provider: &str, model: &str) -> bool {
+    leviath_core::sync::lock(&REFUSED_TOOL_CHOICE)
+        .contains(&(provider.to_string(), model.to_string()))
+}
+
+/// Whether a failed call was the provider refusing the request's
+/// `tool_choice`: a 400 whose body names the parameter.
+pub(crate) fn refuses_tool_choice(error: &leviath_providers::ProviderError) -> bool {
+    let text = error.to_string();
+    let bad_request = error.failure_kind() == Some(leviath_providers::FailureKind::BadRequest)
+        || text.contains("HTTP 400");
+    bad_request && text.contains("tool_choice")
+}
+
+/// `request` as a routing request with no tools and no `tool_choice`: the
+/// form every provider takes, at the cost of a cold prefix.
+pub(crate) fn without_tool_choice(request: &InferenceRequest) -> InferenceRequest {
+    let mut request = request.clone();
+    request.tools.clear();
+    request.extra.as_object_mut().into_iter().for_each(|extra| {
+        extra.remove("tool_choice");
+    });
+    request
+}
+
+/// Whether OpenRouter will forward `tool_choice: "none"` for `model`.
+///
+/// A model in an [`AUTO_ONLY_TOOL_CHOICE`] family never does. Otherwise the
+/// catalogue's `supported_parameters` decides when it was read and lists the
+/// model. A model it does not describe is sent `"none"`, which most of the
+/// gateway's upstreams take; a refusal is caught and remembered by the call
+/// itself.
+fn gateway_takes_none(provider: &dyn Provider, model: &str) -> bool {
+    let listed = provider
+        .learned_models()
+        .and_then(|learned| learned.find_by_key(model).zip(Some(learned)))
+        .and_then(|(id, learned)| learned.get(&id).map(|entry| (id, entry)));
+    let id = listed.as_ref().map_or(model, |(id, _)| id.as_str());
+    let auto_only = AUTO_ONLY_TOOL_CHOICE.iter().any(|p| id.starts_with(p));
+    !auto_only && listed.and_then(|(_, entry)| entry.supports_tool_choice) != Some(false)
+}
+
 /// The shape of `tool_choice: none` for a provider's wire format, or `None`
-/// for a provider whose format is not known here.
+/// when the routing request should carry no tools at all.
 ///
 /// The routing request carries the stage's tool list so that its prefix is
 /// the stage request's prefix - every provider caches the tool definitions
 /// as part of it - and this is what stops the model from answering the
 /// "which stage next?" question with a tool call instead of a name. A
 /// provider this cannot vouch for gets a request with no tools at all,
-/// which is a cold prefix but a safe one.
-fn routing_tool_choice(provider: &str) -> Option<serde_json::Value> {
-    match provider {
+/// which is a cold prefix but a safe one. So does Meta, whose API takes
+/// only `"auto"`, and any provider and model that refused a `tool_choice`
+/// earlier in this process.
+fn routing_tool_choice(
+    provider_name: &str,
+    provider: &dyn Provider,
+    model: &str,
+) -> Option<serde_json::Value> {
+    if refused_tool_choice(provider.name(), model) {
+        return None;
+    }
+    match provider_name {
         "anthropic" => Some(serde_json::json!({ "type": "none" })),
-        // The Responses providers (Codex, xAI and Grok, Meta) take the same
-        // bare string. Without an arm here the fallback clears the tool array
+        // The Responses providers (Codex, xAI and Grok) take the same bare
+        // string. Without an arm here the fallback clears the tool array
         // instead, which cold-reads the whole window on every stage
         // transition.
-        "openai" | "openrouter" | "gemini" | "codex" | "xai" | "grok" | "meta" => {
-            Some(serde_json::json!("none"))
-        }
+        "openai" | "gemini" | "codex" | "xai" | "grok" => Some(serde_json::json!("none")),
+        "openrouter" => gateway_takes_none(provider, model).then(|| serde_json::json!("none")),
         _ => None,
     }
 }
@@ -219,7 +292,7 @@ pub(crate) fn routing_request(
     let remaining = window.max_tokens.saturating_sub(window.current_tokens);
     request.max_tokens = remaining.min(256); // short routing response
     request.temperature = 0.0; // deterministic routing
-    match routing_tool_choice(&si.provider_name) {
+    match routing_tool_choice(&si.provider_name, provider.as_ref(), &request.model) {
         Some(choice) if !request.tools.is_empty() => {
             let mut extra = match request.extra.take() {
                 serde_json::Value::Object(map) => map,
@@ -243,10 +316,14 @@ pub(crate) fn dispatch_transition_choice(
     mut agents: Query<TransitionChoiceQuery, With<AwaitingTransitionChoice>>,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
+    retry: Option<Res<crate::pipeline::InferenceRetryTuning>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
     let now = chrono::Utc::now().timestamp();
+    // The daemon inserts this from `[limits]`; a world that never set it gets
+    // the built-in schedule.
+    let tuning = retry.map(|r| *r).unwrap_or_default();
     for (entity, state, mut window, si, spec, cursor, choice, in_flight, stalled, built_from) in
         agents.iter_mut()
     {
@@ -330,10 +407,21 @@ pub(crate) fn dispatch_transition_choice(
         // Held on the agent as a call like the stage's own, so the agent waits
         // on `AwaitingTransitionResponse` while the world decides on each
         // failed trip; the trips themselves are supervised.
+        // The stage lane's schedule, with the routing call's own number of
+        // tries: the stage's, then the graph's, then the operator's.
+        let attempts = crate::spec::graph::RoutingDef::attempts(
+            spec.0.graph.routing.as_ref(),
+            current.routing.as_ref(),
+            tuning.routing_attempts,
+        );
+        let policy = crate::inference_bridge::RetryPolicy {
+            max_attempts: attempts,
+            ..crate::pipeline::retry_policy_for(config, tuning)
+        };
         let (call, cancel) = crate::inference_call::start_call(
             &stage,
             job,
-            crate::inference_bridge::RetryPolicy::default(),
+            policy,
             crate::inference_call::CallLane::Routing,
         );
         track_in_flight(&mut commands, entity, in_flight, cancel);
@@ -480,15 +568,44 @@ pub(crate) fn collect_transition_choice(
                 commands
                     .entity(outcome.entity)
                     .remove::<AwaitingTransitionResponse>();
-                // The routing call failed, not the stage's work. Fail it through
-                // the stage's own `error` edge: `resolve_transition` reads an
-                // errored outcome and never comes back here for a second choice.
-                crate::pipeline::fail_stage(
-                    &mut commands,
-                    outcome.entity,
-                    &mut state,
-                    err.to_string(),
+                // The routing call failed, not the stage's work, and its tries
+                // are spent. By default the run stops here with that error:
+                // following the stage's `error` edge would redo work that is
+                // finished, and a provider that refuses the routing question
+                // refuses it again on the way back, so the run circles until
+                // the stage's revisits run out. A blueprint that wants the
+                // edge anyway says so with `routing.on_error = "error_edge"`.
+                let stage = &graph.stages[cursor.index];
+                let on_error = crate::spec::graph::RoutingDef::on_error(
+                    graph.routing.as_ref(),
+                    stage.routing.as_ref(),
                 );
+                match on_error {
+                    crate::spec::graph::OnRoutingError::ErrorEdge => {
+                        // `resolve_transition` reads an errored outcome and
+                        // never comes back here for a second choice.
+                        crate::pipeline::fail_stage(
+                            &mut commands,
+                            outcome.entity,
+                            &mut state,
+                            err.to_string(),
+                        );
+                    }
+                    crate::spec::graph::OnRoutingError::Fail => {
+                        let message = format!(
+                            "the call that picks the stage after '{}' failed: {err}. The \
+                             stage's work is kept and its error edge was not taken; set \
+                             routing.on_error = \"error_edge\" to take it",
+                            stage.name
+                        );
+                        if let Some(mut buffer) = buffer {
+                            buffer
+                                .logs
+                                .push((cursor.index, format!("[routing] {message}")));
+                        }
+                        state.status = AgentStatus::Error { message };
+                    }
+                }
                 continue;
             }
         };
@@ -643,3 +760,7 @@ pub(crate) fn collect_transition_choice(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "transition_choice_tests.rs"]
+mod tests;
