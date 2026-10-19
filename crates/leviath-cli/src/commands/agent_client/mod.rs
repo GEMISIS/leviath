@@ -259,7 +259,7 @@ enum RunStart {
     Delivered(String, Option<Progress>, StageTail),
     /// A follow-up message could not be delivered (the agent already
     /// finished); the prompt it carried comes back.
-    MessageUndeliverable(String, Vec<leviath_core::mime::InboundPart>),
+    MessageUndeliverable(String, Vec<leviath_core::mime::InboundPart>, String),
     /// The daemon refused to spawn the run, or was unreachable.
     SpawnFailed,
 }
@@ -502,8 +502,8 @@ impl Server {
             // The session's run has finished and takes no more messages: the
             // prompt starts a new run of the session's blueprint, and says
             // so, rather than being dropped without a word.
-            RunStart::MessageUndeliverable(task, parts) => {
-                self.start_again(&session_id, task, parts).await
+            RunStart::MessageUndeliverable(task, parts, why) => {
+                self.start_again(&session_id, task, parts, why).await
             }
             start => start,
         };
@@ -661,16 +661,35 @@ impl Server {
     /// Start a new run of the session's blueprint for a prompt its finished
     /// run would not take, telling the host so in the conversation. A session
     /// with no blueprint of its own says it has to be started again instead.
+    ///
+    /// Only a run that has finished is replaced. One that is held, waiting on
+    /// the machine, or cancelled is still the session's run: the turn says
+    /// why it would not take the prompt (the daemon's words) and ends.
     async fn start_again(
         &mut self,
         session_id: &str,
         task: String,
         parts: Vec<leviath_core::mime::InboundPart>,
+        why: String,
     ) -> RunStart {
+        let session = self.session.as_mut().expect("session present");
+        let run_id = session.run_id().unwrap_or_default().to_string();
+        let finished = read_run_meta(&self.runs_dir, &run_id).is_some_and(|meta| {
+            matches!(
+                meta.status,
+                leviath_core::run_meta::RunStatus::Complete
+                    | leviath_core::run_meta::RunStatus::Error
+            )
+        });
+        if !finished {
+            self.emit_chunk(session_id, &format!("[leviath: {why}]\n"))
+                .await;
+            return RunStart::MessageUndeliverable(task, parts, why);
+        }
         let session = self.session.as_mut().expect("session present");
         let Some(blueprint) = session.blueprint.clone() else {
             self.emit_chunk(session_id, RUN_OVER_NOTICE).await;
-            return RunStart::MessageUndeliverable(task, parts);
+            return RunStart::MessageUndeliverable(task, parts, why);
         };
         session.run = SessionRun::Pending(blueprint);
         self.emit_chunk(session_id, NEW_RUN_NOTICE).await;
@@ -732,20 +751,25 @@ impl Server {
         let before = read_run_meta(&self.runs_dir, &run_id).map(|meta| Progress::of(&meta));
         let mut tail = StageTail::new();
         tail.pump(&self.runs_dir, &run_id);
-        let delivered = matches!(
-            self.control
-                .request(&ControlRequest::Message {
-                    agent_id: run_id.clone(),
-                    content: content.clone(),
-                    target_region: None,
-                    parts: parts.clone(),
-                })
-                .await,
-            Ok(ControlResponse::Ok { ok: true })
-        );
-        match delivered {
-            true => RunStart::Delivered(run_id, before, tail),
-            false => RunStart::MessageUndeliverable(content, parts),
+        let reply = self
+            .control
+            .request(&ControlRequest::Message {
+                agent_id: run_id.clone(),
+                content: content.clone(),
+                target_region: None,
+                parts: parts.clone(),
+            })
+            .await;
+        match reply {
+            Ok(ControlResponse::Ok { ok: true }) => RunStart::Delivered(run_id, before, tail),
+            Ok(ControlResponse::Error { message }) => {
+                RunStart::MessageUndeliverable(content, parts, message)
+            }
+            _ => RunStart::MessageUndeliverable(
+                content,
+                parts,
+                "the session's run is not taking messages".to_string(),
+            ),
         }
     }
 

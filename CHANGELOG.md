@@ -25,13 +25,18 @@ same list.
   model or tool slot and comes back waiting after a daemon restart without a
   new model call. Interactive stages are not nudged by default and always
   accept messages. To keep the old behaviour, where the stage moved on after
-  one reply, use `mode = "autonomous"`.
+  one reply, use `mode = "autonomous"`. The run file layout stays at 4 and
+  every existing file reads unchanged. A file that ever recorded a stage
+  with `idle_timeout_secs`, or a run waiting for a message, cannot be read
+  by an older build for the life of that file; downgrading only hides it,
+  nothing is lost.
 - `COMPLETE_INTERACTIVE` (REST `complete_interactive`) is deprecated in
   GraphQL and the docs. No run reaches it; a run waiting for a message is
   `WAITING_INPUT` with `AWAITING_MESSAGE`. It is removed in 0.8.0.
 - In `lev agent-client`, a prompt to a session whose run has finished starts
   a new run of the session's blueprint, and says so in the turn. A session
-  opened with `_leviath/spawn` says the run has finished. To keep a
+  opened with `_leviath/spawn` says the run has finished. A run that is
+  cancelled or held is not replaced; the turn says why it took no message. To keep a
   conversation going in one run, give the blueprint an interactive stage.
 - A failed routing call (the "which stage next?" question asked once a stage
   with several edges is done) now fails the run with an error naming the
@@ -823,12 +828,15 @@ same list.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is
-  watching, which waits 120 seconds.
+  watching (`--yolo`, or a sub-agent or fan-out worker), which waits 120
+  seconds.
 - `endConversation` (GraphQL) and `POST /api/runs/{id}/end-conversation`
   end an interactive stage's conversation, so it moves on through its
   ordinary transition and a final stage completes the run.
 - `lev ps` says how many runs wait for a message, and `lev dash` shows such
   a run as your turn, with `[i]` to reply.
+- `lev msg <run> --end` ends an interactive stage's conversation, after the
+  message when one is given.
 - `lev serve` announces the capability `spawn.request`: the typed spawn
   request on `POST /api/runs`, `POST /api/runs/validate`,
   `GET /api/schema/spawn-request` and GraphQL `spawnRun` and `validateSpawn`.

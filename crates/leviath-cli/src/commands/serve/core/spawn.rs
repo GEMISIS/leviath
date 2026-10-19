@@ -322,6 +322,9 @@ async fn run_refusal(state: &AppState, run_id: &str, message: String) -> ServeEr
     }
 }
 
+/// How a daemon that predates `EndConversation` refuses it.
+const UNKNOWN_END: &str = "unknown variant `end_conversation`";
+
 /// End the conversation of the interactive stage a run is in.
 ///
 /// A stage waiting for its next message moves on now, through its ordinary
@@ -340,6 +343,13 @@ pub(crate) async fn end_conversation(state: &AppState, run_id: &str) -> Result<(
         Ok(ControlResponse::Ok { ok: false }) => Err(ServeError::NotFound(format!(
             "Run '{run_id}' has no conversation to end"
         ))),
+        // A daemon from before the request existed cannot read it at all.
+        Ok(ControlResponse::Error { message }) if message.contains(UNKNOWN_END) => {
+            Err(ServeError::DaemonIncompatible(format!(
+                "the daemon is older than this server and cannot end a conversation; \
+                 restart it with `lev daemon restart` ({message})"
+            )))
+        }
         Ok(ControlResponse::Error { message }) => Err(run_refusal(state, run_id, message).await),
         Ok(other) => Err(ServeError::unexpected_reply(&other)),
         Err(e) => Err(ServeError::from_daemon_io(&e)),

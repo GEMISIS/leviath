@@ -93,8 +93,8 @@ mod messaging;
 pub(crate) use messaging::{MessageIntake, deliver_messages};
 mod conversation;
 pub(crate) use conversation::{
-    AwaitingMessage, ConversationEnded, end_conversation, expire_idle_conversations,
-    forget_ended_conversations,
+    AwaitingMessage, ConversationEnded, UnansweredMessage, end_conversation,
+    expire_idle_conversations, forget_ended_conversations,
 };
 pub use conversation::{DEFAULT_UNATTENDED_IDLE_SECS, EndConversation};
 mod journal_health;

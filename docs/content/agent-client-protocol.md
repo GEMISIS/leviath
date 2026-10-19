@@ -88,7 +88,9 @@ message: the run picks up in the same stage, with everything said so far, and th
 next reply.
 
 A run that has finished takes no more messages. Its session's next prompt starts a new run of the
-same blueprint, with the prompt as its `task`, and the turn opens with a line saying so. A session
+same blueprint, with the prompt as its `task`, and the turn opens with a line saying so. A run that
+is cancelled, or held until the machine is fixed, is still the session's run: the turn says why it
+took no message, and nothing new starts. A session
 opened with `_leviath/spawn` has no blueprint of its own to start again, so the turn says the run
 has finished and ends there.
 

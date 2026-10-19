@@ -20,11 +20,17 @@ pub struct MsgArgs {
     /// The target agent id.
     pub agent_id: String,
     /// The message to deliver. A `@path` inside it attaches that file.
-    pub content: String,
+    /// Optional with `--end`.
+    #[arg(required_unless_present = "end")]
+    pub content: Option<String>,
     /// Attach a file to the message: `path[:region][:type][:text]`, as on
     /// `lev run --attach`. Repeatable.
     #[arg(long, value_name = "PATH[:REGION][:TYPE][:text]")]
     pub attach: Vec<String>,
+    /// End the conversation of the interactive stage the run is in, after
+    /// the message when there is one, so the stage moves on.
+    #[arg(long)]
+    pub end: bool,
 }
 
 /// Arguments for `lev cancel`.
@@ -184,20 +190,35 @@ async fn send_bool(
     }
 }
 
-/// `lev msg`: deliver a message to a running agent.
+/// `lev msg`: deliver a message to a running agent, and with `--end` end the
+/// conversation of the interactive stage it is in.
 pub async fn send_message(client: &ControlClient, args: &MsgArgs) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let (content, parts) = message_parts(&args.content, &args.attach, &cwd)?;
+    if let Some(text) = &args.content {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let (content, parts) = message_parts(text, &args.attach, &cwd)?;
+        send_bool(
+            client,
+            ControlRequest::Message {
+                agent_id: args.agent_id.clone(),
+                content,
+                target_region: None,
+                parts,
+            },
+            "message delivered",
+            "no agent accepted the message",
+        )
+        .await?;
+    }
+    if !args.end {
+        return Ok(());
+    }
     send_bool(
         client,
-        ControlRequest::Message {
-            agent_id: args.agent_id.clone(),
-            content,
-            target_region: None,
-            parts,
+        ControlRequest::EndConversation {
+            run_id: args.agent_id.clone(),
         },
-        "message delivered",
-        "no agent accepted the message",
+        "conversation ended",
+        "no run had a conversation to end",
     )
     .await
 }

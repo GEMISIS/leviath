@@ -985,6 +985,13 @@ mod tests {
             assert_eq!(status, StatusCode::NOT_FOUND);
         })
         .await;
+        // A daemon older than the request says it cannot read it.
+        let (status, _) = ended_with(ControlResponse::Error {
+            message: "invalid request: unknown variant `end_conversation`, expected one of `list`"
+                .to_string(),
+        })
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
         let (status, _) = ended_with(ControlResponse::List {
             runs: vec![],
             finished: vec![],

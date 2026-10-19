@@ -859,8 +859,9 @@ mod tests {
     async fn dispatch_msg_variant_is_routed_through_the_executor() {
         let args = commands::ctl::MsgArgs {
             agent_id: "a".to_string(),
-            content: "c".to_string(),
+            content: Some("c".to_string()),
             attach: Vec::new(),
+            end: false,
         };
         assert!(
             dispatch(Commands::Msg(args), &MockRisky::default())

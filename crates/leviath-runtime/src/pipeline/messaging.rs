@@ -60,6 +60,9 @@ pub(crate) fn deliver_messages(
             continue; // hold until a stage that accepts messages
         }
         let delivered = inbox.drain_all();
+        if !delivered.is_empty() && parked.is_none() {
+            commands.entity(entity).insert(super::UnansweredMessage);
+        }
         if parked.is_some() && !delivered.is_empty() {
             super::conversation::wake(
                 &mut commands,

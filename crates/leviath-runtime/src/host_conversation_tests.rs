@@ -21,6 +21,9 @@ use tokio::sync::oneshot;
 struct Script {
     responses: Mutex<std::collections::VecDeque<InferenceResponse>>,
     seen: Mutex<Vec<String>>,
+    /// When set, the next call waits for this before it answers: a reply
+    /// still in flight.
+    held: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 impl Script {
@@ -28,7 +31,15 @@ impl Script {
         Arc::new(Self {
             responses: Mutex::new(responses.into()),
             seen: Mutex::default(),
+            held: Mutex::default(),
         })
+    }
+
+    /// Hold the next call until the returned handle is notified.
+    fn hold_next(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *self.held.lock().unwrap() = Some(gate.clone());
+        gate
     }
 
     /// How many requests it has been sent.
@@ -54,6 +65,10 @@ impl Provider for Script {
             .lock()
             .unwrap()
             .push(format!("{:?} {:?}", req.system, req.messages));
+        let held = self.held.lock().unwrap().take();
+        if let Some(gate) = held {
+            gate.notified().await;
+        }
         self.responses
             .lock()
             .unwrap()
@@ -445,4 +460,99 @@ async fn resuming_a_paused_parked_run_waits_again() {
     host.world_mut().run_until_idle(20).await;
     assert!(parked(&host, chat));
     assert_eq!(script.calls(), 1);
+}
+
+/// A message that arrives while the stage's reply is still on its way is
+/// answered: the reply lands, and the stage asks its model again with the
+/// message rather than waiting on a message it never read.
+#[tokio::test]
+async fn a_message_sent_mid_turn_is_answered_before_the_stage_waits() {
+    let script = Script::new(vec![text("Working on it."), text("Got your note.")]);
+    let gate = script.hold_next();
+    let mut host = host(script.clone(), Default::default());
+    let chat = place(&mut host, spec("chat", interactive(None)));
+    host.world_mut().run_to_fixed_point();
+    while script.calls() == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let delivered = ask(&mut host, |reply| ControlOp::Message {
+        agent_id: "chat".to_string(),
+        content: "also the empty case".to_string(),
+        target_region: None,
+        parts: Vec::new(),
+        reply,
+    })
+    .await;
+    assert_eq!(delivered, Ok(true));
+    host.world_mut().run_to_fixed_point();
+    gate.notify_one();
+    host.world_mut().run_until_idle(20).await;
+
+    assert_eq!(script.calls(), 2);
+    assert!(script.last().contains("also the empty case"));
+    assert!(parked(&host, chat));
+}
+
+/// The same for a run paused mid-turn: the message is answered once it is
+/// resumed.
+#[tokio::test]
+async fn a_message_sent_while_paused_mid_turn_is_answered_after_resume() {
+    let script = Script::new(vec![text("Working on it."), text("Got your note.")]);
+    let gate = script.hold_next();
+    let mut host = host(script.clone(), Default::default());
+    let chat = place(&mut host, spec("chat", interactive(None)));
+    host.world_mut().run_to_fixed_point();
+    while script.calls() == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(host.world_mut().pause(chat));
+
+    let delivered = ask(&mut host, |reply| ControlOp::Message {
+        agent_id: "chat".to_string(),
+        content: "also the empty case".to_string(),
+        target_region: None,
+        parts: Vec::new(),
+        reply,
+    })
+    .await;
+    assert_eq!(delivered, Ok(true));
+    host.world_mut().run_to_fixed_point();
+    gate.notify_one();
+    // The reply lands and is held while the run is paused; nothing wakes the
+    // world for it, so drive it a while by hand.
+    for _ in 0..50 {
+        host.world_mut().run_to_fixed_point();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(script.calls(), 1, "nothing more while it is paused");
+
+    assert!(host.world_mut().resume(chat));
+    host.world_mut().run_until_idle(20).await;
+    assert_eq!(script.calls(), 2);
+    assert!(script.last().contains("also the empty case"));
+    assert!(parked(&host, chat));
+}
+
+/// A parked run can be paused, which holds its idle clock: it does not move
+/// on while somebody holds it, and comes back waiting when resumed.
+#[tokio::test]
+async fn a_parked_run_can_be_paused_and_its_idle_limit_waits() {
+    let script = Script::new(vec![text("Hello.")]);
+    let mut host = host(script.clone(), Default::default());
+    let chat = place(&mut host, spec("chat", interactive(Some(60))));
+    host.world_mut().run_until_idle(20).await;
+    assert!(parked(&host, chat));
+    assert!(host.world_mut().pause(chat));
+    let now = chrono::Utc::now().timestamp();
+    host.world_mut()
+        .world_mut()
+        .get_mut::<crate::pipeline::StageProgress>(chat.entity())
+        .unwrap()
+        .waiting_since = Some(now - 61);
+    host.world_mut().run_until_idle(20).await;
+    assert_eq!(host.world.agent_status(chat), Some(AgentStatus::Paused));
+    assert!(host.world_mut().resume(chat));
+    host.world_mut().run_until_idle(20).await;
+    assert_ne!(host.world.agent_status(chat), Some(AgentStatus::Paused));
 }

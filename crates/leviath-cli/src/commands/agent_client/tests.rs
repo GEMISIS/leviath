@@ -976,6 +976,7 @@ async fn a_second_prompt_a_finished_run_will_not_take_starts_a_new_run() {
         h.recv_until(is_result).await.result.unwrap()["stopReason"],
         "end_turn"
     );
+    h.write_meta_status("complete");
     h.send(r#"{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"two"}]}}"#)
         .await;
     let notice = h
@@ -988,6 +989,45 @@ async fn a_second_prompt_a_finished_run_will_not_take_starts_a_new_run() {
         "end_turn"
     );
     assert_eq!(spawns.load(std::sync::atomic::Ordering::SeqCst), 2);
+    h.close_input().await;
+}
+
+/// A run that is stopped but not finished (cancelled, or held until the
+/// machine is fixed) is still the session's run: the prompt is not turned
+/// into a new run, and the turn says why it was not taken.
+#[tokio::test]
+async fn a_prompt_a_stopped_run_will_not_take_says_why() {
+    let spawns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = spawns.clone();
+    let daemon = ScriptedDaemon::new(vec![completed("cancelled")], move |req| match req {
+        ControlRequest::Message { .. } => ControlResponse::Error {
+            message: "run was cancelled; `lev resume` first".to_string(),
+        },
+        other => {
+            let spawn = matches!(other, ControlRequest::Spawn { .. });
+            counted.fetch_add(usize::from(spawn), std::sync::atomic::Ordering::SeqCst);
+            spawn_ok(other)
+        }
+    });
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"one"}]}}"#)
+        .await;
+    let _ = h.recv_until(is_result).await;
+    h.write_meta_status("cancelled");
+    h.send(r#"{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"two"}]}}"#)
+        .await;
+    let notice = h
+        .recv_until(|m| update_kind(m).as_deref() == Some("agent_message_chunk"))
+        .await;
+    assert_eq!(
+        notice.params.unwrap()["update"]["content"]["text"],
+        "[leviath: run was cancelled; `lev resume` first]\n"
+    );
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "end_turn"
+    );
+    assert_eq!(spawns.load(std::sync::atomic::Ordering::SeqCst), 1);
     h.close_input().await;
 }
 
