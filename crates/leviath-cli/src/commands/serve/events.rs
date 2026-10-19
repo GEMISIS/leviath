@@ -223,6 +223,46 @@ pub(crate) enum ServerEvent {
         execution_id: String,
         /// The tool's name.
         tool: String,
+        /// The arguments the model sent, cut to fit 4 KiB serialized. Long
+        /// strings are shortened first, so a path beside a large file's content
+        /// stays whole. The journal keeps them uncut.
+        arguments: serde_json::Value,
+        /// Whether `arguments` was cut to fit.
+        arguments_truncated: bool,
+    },
+    /// A `submit_output` call was accepted.
+    ///
+    /// The call is answered inline rather than on the tool lane, so it sends
+    /// no tool-call frames. Without this the answer first shows on
+    /// [`AgentCompleted`](Self::AgentCompleted). A refused submission sends
+    /// nothing; each accepted one sends a frame, and the last one is the run's
+    /// answer.
+    OutputSubmitted {
+        /// The agent's live id in the world.
+        agent_id: String,
+        /// The durable run id.
+        run_id: String,
+        /// The stage that submitted it.
+        stage: String,
+        /// What was submitted, in the shape `agent_completed` carries it.
+        final_output: FinalOutputResp,
+    },
+    /// An ask the run raised was settled: answered, timed out, cancelled, or
+    /// refused before it opened.
+    ///
+    /// The counterpart of [`InteractionNeeded`](Self::InteractionNeeded). A
+    /// status frame cannot stand in for it, because a run with two open asks
+    /// stays waiting after one is answered.
+    InteractionSettled {
+        /// The agent's live id in the world.
+        agent_id: String,
+        /// The durable run id.
+        run_id: String,
+        /// The ask and how it ended, as the run's journal records it:
+        /// `request_id`, `kind`, `tool`, `prompt`, `stage`, `settlement`,
+        /// `asked_at` and `at`.
+        #[serde(flatten)]
+        interaction: leviath_runtime::runfile::record::InteractionRecord,
     },
     /// A lane-executed tool call returned, paired with its start by
     /// `execution_id`.
@@ -367,6 +407,8 @@ impl ServerEvent {
             | ServerEvent::StageTransition { run_id, .. }
             | ServerEvent::ToolCallStarted { run_id, .. }
             | ServerEvent::ToolCallFinished { run_id, .. }
+            | ServerEvent::OutputSubmitted { run_id, .. }
+            | ServerEvent::InteractionSettled { run_id, .. }
             | ServerEvent::AgentSpend { run_id, .. } => run_id,
             ServerEvent::DaemonLink { .. }
             | ServerEvent::EventsDropped { .. }
@@ -763,6 +805,8 @@ mod tests {
                     run_id: "r9".to_string(),
                     call_id: "c1".to_string(),
                     tool: "read_file".to_string(),
+                    arguments: serde_json::Value::Null,
+                    arguments_truncated: false,
                 },
                 "r9",
             ),
@@ -788,6 +832,38 @@ mod tests {
                     stage: "analyze".to_string(),
                 },
                 "r11",
+            ),
+            (
+                ServerEvent::OutputSubmitted {
+                    agent_id: "a".to_string(),
+                    run_id: "r12".to_string(),
+                    stage: "answer".to_string(),
+                    final_output: leviath_core::output::FinalOutput::new(
+                        "done",
+                        None,
+                        "answer".to_string(),
+                        1,
+                    )
+                    .into(),
+                },
+                "r12",
+            ),
+            (
+                ServerEvent::InteractionSettled {
+                    agent_id: "r13".to_string(),
+                    run_id: "r13".to_string(),
+                    interaction: leviath_runtime::runfile::record::InteractionRecord {
+                        request_id: "r13-ask-1".to_string(),
+                        kind: leviath_core::interaction::InteractionKind::FreeText,
+                        tool: None,
+                        prompt: "p".to_string(),
+                        stage: "s".to_string(),
+                        settlement: leviath_core::interaction::Settlement::TimedOut,
+                        asked_at: 1,
+                        at: 2,
+                    },
+                },
+                "r13",
             ),
         ];
         for (ev, want) in cases {

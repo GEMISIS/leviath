@@ -880,6 +880,8 @@ mod tests {
                 run_id: "run-match".to_string(),
                 call_id: "c1".to_string(),
                 tool: "read_file".to_string(),
+                arguments: serde_json::json!({ "path": "src/lib.rs" }),
+                arguments_truncated: false,
             },
             ServerEvent::ToolCallFinished {
                 execution_id: "x1".to_string(),

@@ -2105,6 +2105,9 @@ than that feature, not broken.
 | `events.run_status` | One status vocabulary across the whole API. See [statuses](#statuses) |
 | `events.spend` | The `agent_spend` frame, sent as a run passes a figure in `[limits] notify_spend_usd` |
 | `events.dropped` | The `events_dropped` frame, sent when a socket falls behind and loses events |
+| `events.tool_arguments` | `arguments` and `arguments_truncated` on `tool_call_started`, cut to 4 KiB |
+| `events.output_submitted` | The `output_submitted` frame, sent when a `submit_output` call is accepted |
+| `events.interaction_settled` | The `interaction_settled` frame, sent when an ask is answered, times out or is cancelled |
 | `runs.cost` | `cost_usd` and `subtree_cost_usd` on the agent tree routes |
 | `blueprints.envelope` | The paginated envelope on the blueprint listing |
 | `blueprints.query` | `q=` on that listing |
@@ -2260,11 +2263,13 @@ with either way.
 | `tokens` | The run's token totals move | `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens` |
 | `context_update` | The context window's usage moves | `total_tokens`, `max_tokens` |
 | `stage_transition` | A new stage is entered | `from`, `to`, `iteration`, `edge` (absent when no declared edge was taken), `reason` |
-| `tool_call_started` | A tool call goes to the async lane | `call_id`, `tool` |
+| `tool_call_started` | A tool call goes to the async lane | `call_id`, `tool`, `arguments`, `arguments_truncated` |
 | `tool_call_finished` | That call returns | `call_id`, `tool`, `ok`, `summary` |
 | `log` | A log or output line is written | `line` |
 | `agent_spend` | The run's spend passes a figure named in `[limits] notify_spend_usd` | `threshold_usd`, `total_usd`, `complete`, `stage` |
 | `interaction_needed` | The run is blocked on a person | `request` |
+| `interaction_settled` | An ask is answered, times out, is cancelled or is refused | `request_id`, `kind`, `tool`, `prompt`, `stage`, `settlement`, `asked_at`, `at` |
+| `output_submitted` | A `submit_output` call is accepted | `stage`, `final_output` |
 | `agent_completed` | The run reaches a terminal status | `status`, `result` (its error), `final_output` |
 | `daemon_link` | This server's link to the daemon changes | `connected`, `daemon`, `restarted`, `restart_advised` |
 | `config_health` | `config.toml` stops loading, loads again, or breaks for a different reason | `healthy`, `path`, `error`, `config_mtime` |
@@ -2315,6 +2320,25 @@ provider's own error in it and `blocker` is one of `provider_missing`, `credits_
 `providers_unavailable`. [Troubleshooting](/docs/troubleshooting#a-run-says-paused-and-i-did-not-pause-it)
 says what each one asks of you. `ok` on `tool_call_finished` is `false` for a result the engine
 refused or could not run, so a client should not read a finish frame as a success on its own.
+
+`arguments` on `tool_call_started` is what the model sent, so a client can say which file a call
+reads without fetching the run. It is cut to fit 4 KiB serialized, and `arguments_truncated` says
+when it was. Long strings are shortened first, so the path of a large `write_file` survives while
+its content is cut. The journal keeps the arguments whole. Both fields are the
+`events.tool_arguments` capability.
+
+`submit_output` is answered inline rather than on the tool lane, so it sends no tool-call frames.
+`output_submitted` is what says it happened, carrying the answer in the shape `agent_completed`
+uses. A refused submission sends nothing. Each accepted one sends a frame, and the last one is the
+run's answer, so a run that submits and then goes on to review shows its draft straight away.
+
+`interaction_settled` is the other half of `interaction_needed`. `settlement` is `"timed_out"`,
+`"cancelled"` or `"refused"`, or `{"answered": {...}}` with what the person chose. A status frame
+cannot stand in for it, because a run with two open asks stays waiting after one is answered. A
+client showing a prompt can take it down the moment someone answers it elsewhere.
+
+A run brought back after a daemon restart sends none of these three for work it finished before
+the restart. The capabilities are `events.output_submitted` and `events.interaction_settled`.
 
 `reason` on `stage_transition` says why the run took that edge, spelled as
 `GET /api/runs/{id}/graph` spells it: `Condition`, `Gate`, `ModelChoice`, `Fallback` (the model

@@ -35,13 +35,14 @@ use super::super::config_types::ConfigErrorInfo;
 use super::super::events::{ServerEvent, Stamped};
 use super::super::types::{AppState, FinalOutputResp};
 use super::super::update_job;
-use super::scalars::{BigInt, Decimal, Timestamp};
+use super::scalars::{BigInt, Decimal, Json, Timestamp};
 /// Re-exported so a live frame's pending ask is the same type the
 /// journal-backed interaction answers with, held in one place.
 pub(crate) use super::types::interaction::InteractionOutput;
 use super::types::machine::{ConfigError, ConfigErrorKind};
 use super::types::run::{Run, RunStatus};
 use super::types::run_detail::{FinalOutput, WaitReason};
+use super::types::runfile::state::TransitionReason;
 use super::types::update::{
     DaemonStatus, UpdateJob, UpdateJobStatus, UpdateStep, UpdateStepStatus,
 };
@@ -373,6 +374,13 @@ frames! {
             /// How many times the destination has been entered, this entry
             /// included.
             iteration: BigInt,
+            /// The edge it took, by name. Null when the move took no declared
+            /// edge: a person moved the run, or a fan-out handed it on.
+            edge: Option<String>,
+            /// Why it took that edge: its condition held, a gate let it
+            /// through, the model chose it, and so on. Null from a daemon that
+            /// does not say.
+            reason: Option<TransitionReason>,
         }
 
         /// A tool call was handed to the async tool lane.
@@ -388,6 +396,13 @@ frames! {
             execution_id: ID,
             /// The tool called.
             tool: String,
+            /// The arguments the model sent, cut to fit 4 KiB serialized. Long
+            /// strings are shortened first, so a path beside a large file's
+            /// content stays whole. The journal keeps them uncut, on
+            /// `Run.executions`.
+            arguments: Json,
+            /// Whether `arguments` was cut to fit.
+            arguments_truncated: bool,
         }
 
         /// A lane-executed tool call returned, paired with its start by the
@@ -438,6 +453,30 @@ frames! {
             /// cannot read the shape the daemon sent, which is what a newer
             /// daemon's new kind looks like.
             interaction: Option<InteractionOutput>,
+        }
+
+        /// An ask the run raised was settled: answered, timed out, cancelled,
+        /// or refused before it opened.
+        ///
+        /// A status frame cannot stand in for this, because a run with two
+        /// open asks stays waiting after one is answered.
+        InteractionSettled => InteractionSettled => InteractionSettledEvent {
+            /// The ask in the shape every listing serves it in, with
+            /// `settlement` set to how it ended.
+            interaction: InteractionOutput,
+        }
+
+        /// A `submit_output` call was accepted.
+        ///
+        /// The call is answered inline, so it sends no tool-call frames, and
+        /// without this the answer first shows on `RunCompletedEvent`. A
+        /// refused submission sends nothing; each accepted one sends a frame,
+        /// and the last one is the run's answer.
+        OutputSubmitted => OutputSubmitted => OutputSubmittedEvent {
+            /// The stage that submitted it.
+            stage: String,
+            /// What was submitted.
+            final_output: FinalOutput,
         }
 
         /// A run reached a terminal status.
@@ -801,16 +840,58 @@ pub(crate) fn run_frame(stamped: Stamped) -> Option<RunEventFrame> {
             from,
             to,
             iteration,
-            ..
-        } => StageTransitionedEvent::new(head, run_id, agent_id, (from, to, big(iteration))).into(),
+            edge,
+            reason,
+        } => StageTransitionedEvent::new(
+            head,
+            run_id,
+            agent_id,
+            (
+                from,
+                to,
+                big(iteration),
+                edge,
+                reason.map(TransitionReason::from),
+            ),
+        )
+        .into(),
         ServerEvent::ToolCallStarted {
             agent_id,
             run_id,
             call_id,
             execution_id,
             tool,
-        } => ToolCallStartedEvent::new(head, run_id, agent_id, (call_id, ID(execution_id), tool))
-            .into(),
+            arguments,
+            arguments_truncated,
+        } => ToolCallStartedEvent::new(
+            head,
+            run_id,
+            agent_id,
+            (
+                call_id,
+                ID(execution_id),
+                tool,
+                Json(arguments),
+                arguments_truncated,
+            ),
+        )
+        .into(),
+        ServerEvent::OutputSubmitted {
+            agent_id,
+            run_id,
+            stage,
+            final_output: output,
+        } => {
+            OutputSubmittedEvent::new(head, run_id, agent_id, (stage, final_output(output))).into()
+        }
+        ServerEvent::InteractionSettled {
+            agent_id,
+            run_id,
+            interaction,
+        } => {
+            let settled = InteractionOutput::settled(run_id.clone(), interaction);
+            InteractionSettledEvent::new(head, run_id, agent_id, (settled,)).into()
+        }
         ServerEvent::ToolCallFinished {
             agent_id,
             run_id,

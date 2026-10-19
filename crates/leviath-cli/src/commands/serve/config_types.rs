@@ -326,6 +326,21 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // a stream with a silent hole in it. Announced so a console knows a
     // silence from this server is a real one.
     "events.dropped",
+    // `arguments` and `arguments_truncated` on `tool_call_started` (and on
+    // GraphQL's `ToolCallStartedEvent`): what the model sent, cut to 4 KiB.
+    // Announced because a missing field must not read as a call with no
+    // arguments; without it a console fetches the run's executions per call.
+    "events.tool_arguments",
+    // The `output_submitted` frame (`OutputSubmittedEvent`), sent when a
+    // `submit_output` call is accepted. Without it the answer first shows on
+    // `agent_completed`, and a console cannot tell "not submitted yet" from
+    // "this daemon does not say".
+    "events.output_submitted",
+    // The `interaction_settled` frame (`InteractionSettledEvent`), sent when an
+    // ask is answered, times out, is cancelled or is refused. A console holding
+    // a prompt someone answered elsewhere takes it down on this rather than
+    // polling after every status frame.
+    "events.interaction_settled",
     // Region kinds in a context snapshot are spelled the way the blueprint
     // spells them - `sliding_window`, `compact_history` - rather than the
     // shorter `sliding`/`history` that only ever existed in a snapshot.

@@ -339,7 +339,7 @@ impl Interaction {
     }
 
     /// One ask that has settled, read from the run's journal.
-    fn settled(run_id: String, record: InteractionRecord) -> Self {
+    pub(crate) fn settled(run_id: String, record: InteractionRecord) -> Self {
         Self {
             run_id,
             id: record.request_id,

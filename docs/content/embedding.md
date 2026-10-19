@@ -162,8 +162,10 @@ Everything the world does streams through `world.events()`, an async stream of
 | `Status` | Status, stage, iteration, or tool-call count changed. |
 | `Tokens` / `Context` | Token totals or context-window usage changed. |
 | `StageTransition` | The run moved from one stage to another. |
-| `ToolCallStarted` / `ToolCallFinished` | A tool call entered the async lane / returned, paired by `call_id`. |
+| `ToolCallStarted` / `ToolCallFinished` | A tool call entered the async lane / returned, paired by `call_id`. The start carries `arguments`, cut to 4 KiB. |
+| `OutputSubmitted` | A `submit_output` call was accepted, with what was submitted. |
 | `Interaction` | The agent asked something and is waiting on an answer. |
+| `InteractionSettled` | That ask was answered, timed out, cancelled or refused. |
 | `Log` | A readable output or operational log line. |
 | `Completed` | The run reached a terminal status, with whatever it handed back. |
 
