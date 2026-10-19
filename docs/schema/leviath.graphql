@@ -1610,6 +1610,164 @@ type CapturedRequestOutput {
 	assemblyVersion: String!
 }
 
+"""
+One page of a listing: the items, where to resume, and how many there are
+altogether.
+"""
+type CatalogModelConnection {
+	"The items on this page, at most `first` of them."
+	results: [CatalogModelOutput!]!
+	"Pass as `after` to read the next page. Null when this is the last one."
+	cursor: Cursor
+	"""
+	How many items match, across every page.
+	
+	Counted only when it is selected. For a filter answerable from memory
+	that is free; for one that reads files it is a pass over the store, so
+	ask for it on the first page rather than on every one.
+	"""
+	total: Int!
+}
+
+"""
+Filter on `CatalogModelOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
+
+`and`, `or` and `not` compose filters of this same type, and `isNull` asks about the value being absent rather than about its contents.
+"""
+input CatalogModelInput {
+	"""
+	Filter on `CatalogModelOutput.modelId`.
+	
+	The model id, as the provider names it.
+	"""
+	modelId: StringFilter
+	"""
+	Filter on `CatalogModelOutput.providerName`.
+	
+	The registry name of the provider that serves it, which is what a
+	blueprint writes and the left half of `provider/model`.
+	"""
+	providerName: StringFilter
+	"""
+	Filter on `CatalogModelOutput.displayName`.
+	
+	The name to show.
+	"""
+	displayName: StringFilter
+	"""
+	Filter on `CatalogModelOutput.inputTypes`.
+	
+	Mime type patterns it takes.
+	"""
+	inputTypes: StringListFilter
+	"""
+	Filter on `CatalogModelOutput.outputTypes`.
+	
+	Mime type patterns it produces.
+	"""
+	outputTypes: StringListFilter
+	"""
+	Filter on `CatalogModelOutput.maxContextTokens`.
+	
+	Context window in tokens, from this build's table.
+	"""
+	maxContextTokens: IntFilter
+	"""
+	Filter on `CatalogModelOutput.maxOutputTokens`.
+	
+	The most one reply may be, in tokens, from this build's table.
+	"""
+	maxOutputTokens: IntFilter
+	"""
+	Filter on `CatalogModelOutput.supportsTools`.
+	
+	Whether the model takes tool definitions.
+	"""
+	supportsTools: BooleanFilter
+	"""
+	Filter on `CatalogModelOutput.isConfigured`.
+	
+	Whether this machine has its provider set up, so a run can route to it.
+	False means connecting the provider is what it takes.
+	"""
+	isConfigured: BooleanFilter
+	"""
+	Filter on `CatalogModelOutput.auth`.
+	
+	How its provider proves who this machine is, which is what connecting
+	it takes: an API key, a browser sign-in, or neither.
+	"""
+	auth: ProviderAuthKindFilter
+	"Every filter in this list has to hold."
+	and: [CatalogModelInput!]
+	"At least one filter in this list has to hold."
+	or: [CatalogModelInput!]
+	"This filter must not hold."
+	not: CatalogModelInput
+	"""
+	Match where the value itself is absent.
+	
+	`true` matches only where there is no value, `false` only where there is one.
+	"""
+	isNull: Boolean
+}
+
+"One sort key a listing of `CatalogModelOutput` runs in, and its direction."
+input CatalogModelOrder {
+	"Which field to order by."
+	field: CatalogModelOrderField!
+	"Which way it runs. Newest or largest first unless you say otherwise."
+	direction: OrderDirection! = DESC
+}
+
+"The fields a listing of `CatalogModelOutput` can be sorted by."
+enum CatalogModelOrderField {
+	"Sort by `CatalogModelOutput.modelId`."
+	MODEL_ID
+	"Sort by `CatalogModelOutput.providerName`."
+	PROVIDER_NAME
+}
+
+"""
+One model this build knows about, whether or not this machine can route to
+it yet.
+
+Read from the tables compiled into the binary, so building the list asks no
+provider anything. A provider this machine has configured may serve more
+than this, or newer models: `models` is what it actually serves.
+"""
+type CatalogModelOutput {
+	"The model id, as the provider names it."
+	modelId: String!
+	"""
+	The registry name of the provider that serves it, which is what a
+	blueprint writes and the left half of `provider/model`.
+	"""
+	providerName: String!
+	"The name to show."
+	displayName: String!
+	"Mime type patterns it takes."
+	inputTypes: [String!]!
+	"Mime type patterns it produces."
+	outputTypes: [String!]!
+	"Context window in tokens, from this build's table."
+	maxContextTokens: Int!
+	"The most one reply may be, in tokens, from this build's table."
+	maxOutputTokens: Int!
+	"Whether the model takes tool definitions."
+	supportsTools: Boolean!
+	"""
+	Whether this machine has its provider set up, so a run can route to it.
+	False means connecting the provider is what it takes.
+	"""
+	isConfigured: Boolean!
+	"""
+	How its provider proves who this machine is, which is what connecting
+	it takes: an API key, a browser sign-in, or neither.
+	"""
+	auth: ProviderAuthKind!
+}
+
 "Arguments for the `check_agent` tool."
 type CheckAgentArgsOutput {
 	"The agent asked about, by its live id."
@@ -9490,6 +9648,20 @@ enum ProviderAuthKind {
 	NONE
 }
 
+"Exact and set tests on `ProviderAuthKind` (API_KEY, SIGN_IN, NONE)."
+input ProviderAuthKindFilter {
+	"Exactly this value."
+	eq: ProviderAuthKind
+	"Anything but this value."
+	ne: ProviderAuthKind
+	"One of these values."
+	in: [ProviderAuthKind!]
+	"None of these values."
+	notIn: [ProviderAuthKind!]
+	"Match where there is no value at all."
+	isNull: Boolean
+}
+
 "One provider this build knows, as this machine has it set up."
 type ProviderConfigOutput {
 	"""
@@ -9916,6 +10088,26 @@ type Query {
 		"The model's id: `model:<provider>/<modelId>`."
 		id: ID!
 	): ModelOutput
+	"""
+	Every model this build knows about, on every provider it carries,
+	whether or not this machine has that provider set up.
+	
+	Read from the tables compiled into the binary, so it asks no provider
+	anything. `isConfigured` says whether a run here can route to the
+	model now, and `auth` says what connecting its provider takes. A
+	configured provider may serve more than this: `models` is what it
+	actually serves.
+	"""
+	catalog(
+		"Which models to list. Omitted means all of them."
+		filter: CatalogModelInput,
+		"Sort keys, in priority order. Omitted means provider, then model id, ascending."
+		orderBy: [CatalogModelOrder!],
+		"Page size; capped by the server's page-size cap."
+		first: Int! = 50,
+		"Cursor from the previous page."
+		after: Cursor
+	): CatalogModelConnection!
 	"""
 	The providers a person signs in to through a browser, signed in or not.
 	

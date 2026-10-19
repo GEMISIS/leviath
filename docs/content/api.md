@@ -1860,6 +1860,13 @@ absent. `?refresh=1` asks the providers again and waits for them, for a settings
 has just changed a key and wants to show the result rather than the memory of the old one.
 Announced as the `models.cached` capability.
 
+This listing holds only models this machine can route to. For every model the build knows about,
+on providers nobody has set up here too, ask the GraphQL `catalog` query. It is read from tables
+built into the binary and asks no provider anything. Each row says whether its provider is
+configured and what connecting it takes. See
+[models nothing here serves yet](/docs/graphql#models-nothing-here-serves-yet). Announced as the
+`models.catalog` capability.
+
 ## Two providers, one model id
 
 `GET /api/models` returns a flat list, and each entry carries the `provider`
@@ -2282,6 +2289,7 @@ than that feature, not broken.
 | `runs.files.mime_type` | `mime_type` on every file-listing entry, typed by the run's registry from the file's name |
 | `models.mime_types` | `input_types` and `output_types` on every `GET /api/models` entry: the mime type patterns a model takes and hands back |
 | `models.cached` | `GET /api/models` answers from a catalogue the server keeps. See [the model catalogue](#the-model-catalogue) |
+| `models.catalog` | GraphQL `catalog`: every model this build knows, configured or not, with `isConfigured` and `auth` |
 | `spawn.parts` | `attachments`, and `multipart/form-data` file fields named after them, on `POST /api/runs`. See [attaching files](#attaching-files) |
 | `spawn.idempotency` | `delivery.idempotency_key` on a spawn, kept by the daemon. See [sending a spawn again](#sending-a-spawn-again) |
 | `messages.parts` | `parts`, `multipart/form-data` and `@path` tokens on `POST /api/runs/{id}/message` |

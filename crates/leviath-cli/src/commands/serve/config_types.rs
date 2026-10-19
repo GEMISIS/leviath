@@ -216,6 +216,11 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // a console knows the call is cheap, and that `X-Leviath-Catalog-Age`,
     // `X-Leviath-Catalog-Complete` and `?refresh=1` are there.
     "models.cached",
+    // GraphQL `catalog`: every model this build knows about, on providers
+    // this machine has not configured too, with `isConfigured` and `auth`.
+    // Announced so a client that needs a model nothing here serves can name
+    // the provider to connect from Leviath's own data.
+    "models.catalog",
     // `attachments`, and `multipart/form-data` file parts named after them, on
     // `POST /api/runs`; `parts`, `multipart/form-data` and `@path` tokens
     // resolved inside the run's working directory on

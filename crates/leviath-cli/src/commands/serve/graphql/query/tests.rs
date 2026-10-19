@@ -4419,6 +4419,131 @@ async fn the_models_listing_filters_orders_pages_and_answers_to_its_id() {
     .await;
 }
 
+/// The compiled catalogue lists models on providers this machine has not set
+/// up, says which providers are set up, and says what connecting one takes.
+///
+/// The config here holds a Meshy key and nothing else, so `models` knows Meshy
+/// alone. `catalog` has to know the rest from the binary, without asking
+/// anyone: none of the other providers has a credential to ask with.
+#[tokio::test]
+async fn the_catalog_lists_models_on_providers_nobody_configured() {
+    with_static_models(|state| async move {
+        let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+            .data(state)
+            .finish();
+
+        let all = answer(
+            &schema,
+            "{ catalog(first: 500) { results { modelId providerName displayName \
+                 inputTypes outputTypes maxContextTokens maxOutputTokens supportsTools \
+                 isConfigured auth } total } }",
+        )
+        .await;
+        let rows = all["catalog"]["results"].as_array().expect("a catalogue");
+        assert_eq!(
+            all["catalog"]["total"].as_u64(),
+            Some(rows.len() as u64),
+            "one page holds the whole catalogue"
+        );
+        let of = |provider: &str| -> Vec<&serde_json::Value> {
+            rows.iter()
+                .filter(|row| row["providerName"] == provider)
+                .collect()
+        };
+
+        // The configured provider is marked as such, and its rows carry what
+        // a client picks a model on.
+        let meshy = of("meshy");
+        assert!(!meshy.is_empty(), "{rows:?}");
+        for row in &meshy {
+            assert_eq!(row["isConfigured"], true, "{row}");
+            assert_eq!(row["auth"], "API_KEY", "{row}");
+            assert!(row["displayName"].as_str().is_some_and(|n| !n.is_empty()));
+            assert!(row["maxContextTokens"].as_i64() > Some(0));
+        }
+
+        // The ones nobody configured are there too, with what it takes to
+        // connect them: a key for Anthropic, a browser sign-in for Codex.
+        let anthropic = of("anthropic");
+        assert!(!anthropic.is_empty(), "{rows:?}");
+        assert!(anthropic.iter().all(|row| row["isConfigured"] == false));
+        assert!(anthropic.iter().all(|row| row["auth"] == "API_KEY"));
+        assert!(
+            anthropic.iter().any(|row| row["inputTypes"]
+                .as_array()
+                .is_some_and(|types| types.iter().any(|t| t == "image/*"))),
+            "a Claude model reads images: {anthropic:?}"
+        );
+        let codex = of("codex");
+        assert!(!codex.is_empty(), "{rows:?}");
+        assert!(codex.iter().all(|row| row["auth"] == "SIGN_IN"));
+        assert!(codex.iter().all(|row| row["isConfigured"] == false));
+        // A provider whose models only a live listing can name has no rows.
+        assert!(of("ollama").is_empty());
+
+        // Read in provider order, then model order, when nothing says otherwise.
+        let keys: Vec<(String, String)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["providerName"].as_str().unwrap_or_default().to_string(),
+                    row["modelId"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted);
+
+        // The question a client asks: which model reads a mesh, and is its
+        // provider set up yet? The filter answers it on the server.
+        let reads_mesh = answer(
+            &schema,
+            r#"{ catalog(filter: { inputTypes: { has: "model/gltf-binary" } }) {
+                   results { providerName isConfigured } } }"#,
+        )
+        .await;
+        let found = reads_mesh["catalog"]["results"].as_array().expect("a page");
+        assert!(!found.is_empty(), "Meshy's rig reads a mesh");
+        assert!(found.iter().all(|row| row["providerName"] == "meshy"));
+        let unconfigured = answer(
+            &schema,
+            r#"{ catalog(filter: { isConfigured: { eq: false }, auth: { eq: SIGN_IN } }) {
+                   total } }"#,
+        )
+        .await;
+        assert!(unconfigured["catalog"]["total"].as_i64() > Some(0));
+
+        // Pages resume from the cursor the previous one handed back.
+        let page = answer(
+            &schema,
+            "{ catalog(first: 1) { results { providerName modelId } cursor } }",
+        )
+        .await;
+        assert_eq!(
+            page["catalog"]["results"][0]["modelId"].as_str(),
+            Some(keys[0].1.as_str())
+        );
+        let cursor = page["catalog"]["cursor"].as_str().expect("more follow");
+        let next = schema
+            .execute(
+                Request::new(
+                    "query($after: Cursor) { catalog(first: 1, after: $after) { \
+                       results { modelId } } }",
+                )
+                .variables(Variables::from_json(serde_json::json!({ "after": cursor }))),
+            )
+            .await;
+        assert!(next.errors.is_empty(), "{:?}", next.errors);
+        let next = serde_json::to_value(&next.data).expect("data serializes");
+        assert_eq!(
+            next["catalog"]["results"][0]["modelId"].as_str(),
+            Some(keys[1].1.as_str())
+        );
+    })
+    .await;
+}
+
 /// A model id nothing here serves is an absence, whichever way it is asked for.
 ///
 /// A machine with no provider configured routes to no model at all, which is
