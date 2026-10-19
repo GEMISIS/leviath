@@ -565,6 +565,11 @@ jobs:
   #
   # It compares the declared version rather than whether Cargo.toml was touched:
   # dependency edits land in that file constantly and none of them ship anything.
+  #
+  # A bump also has to be big enough for what it ships: a `**Breaking` changelog
+  # entry needs the minor version to move below 1.0, the major one after. No
+  # label overrides that, because the number is what clients read to decide
+  # whether they still fit.
   guard-version-bump:
     name: Guard release version bump
     runs-on: ubuntu-latest
@@ -578,10 +583,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - name: Require maintainer override to bump the release version
+      - name: Read the workspace version on each side
+        id: versions
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -595,11 +599,29 @@ jobs:
           }
           before=$(read_version "$base")
           after=$(read_version "$HEAD")
-
+          echo "before=$before" >> "$GITHUB_OUTPUT"
+          echo "after=$after" >> "$GITHUB_OUTPUT"
           if [ "$before" = "$after" ]; then
             echo "Workspace version unchanged at $after."
-            exit 0
           fi
+      - if: steps.versions.outputs.before != steps.versions.outputs.after
+        uses: ./.github/actions/rust-setup
+        with:
+          cache: "false"
+      - name: Refuse a bump too small for a breaking change
+        if: steps.versions.outputs.before != steps.versions.outputs.after
+        env:
+          BEFORE: ${{ steps.versions.outputs.before }}
+        run: cargo xtask version --check-bump "$BEFORE"
+      - name: Require maintainer override to bump the release version
+        if: steps.versions.outputs.before != steps.versions.outputs.after
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          before: ${{ steps.versions.outputs.before }}
+          after: ${{ steps.versions.outputs.after }}
+        run: |
+          set -euo pipefail
 
           # Only asked once the answer can change the outcome; see
           # `guard-main-rs` for why that ordering matters to a PR opened by

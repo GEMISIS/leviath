@@ -415,6 +415,7 @@ pub(crate) fn config_of(
         mcp_server_count: count(redacted.mcp_server_count),
         server: ServerInfo {
             api_version: redacted.api_version,
+            build: redacted.build,
             capabilities: redacted.capabilities,
             is_admin_enabled: admin_enabled,
             limits: ServeLimits {

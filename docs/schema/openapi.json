@@ -6102,6 +6102,7 @@
           "agent_paths",
           "mcp_server_count",
           "api_version",
+          "build",
           "capabilities",
           "limits"
         ],
@@ -6190,6 +6191,10 @@
           "api_version": {
             "type": "string",
             "description": "The version of this document the server implements; equal to `info.version` here."
+          },
+          "build": {
+            "type": "string",
+            "description": "The build id of this server: the short git hash it was built from, with `-dirty` when the tree had uncommitted changes. An unreleased build still reports the last release's `api_version`, so this is how a client tells it apart from that release."
           },
           "capabilities": {
             "type": "array",

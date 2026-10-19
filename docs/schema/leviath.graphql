@@ -13871,6 +13871,13 @@ type ServerInfoOutput {
 	"The API version this server speaks."
 	apiVersion: String!
 	"""
+	The build id of this server: the short git hash it was built from,
+	with `-dirty` when the tree had uncommitted changes. An unreleased
+	build reports the last release's `apiVersion`, so this is how a client
+	tells it apart from that release.
+	"""
+	build: String!
+	"""
 	What this server can do. Check these rather than calling a route and
 	reading a 404, which also means "no such run".
 	"""

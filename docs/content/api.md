@@ -2047,7 +2047,7 @@ Check `scripts.providers` in the `capabilities` list before offering the kind.
 
 ## Feature detection
 
-`GET /api/config` reports `api_version`, a `capabilities` list, and the server's `limits`. Check
+`GET /api/config` reports `api_version`, `build`, a `capabilities` list, and the server's `limits`. Check
 those instead of calling a route and treating a 404 as "unsupported": a 404 also means "no such
 run", and it costs a round trip per feature. The limits matter as much as the capability names: they
 are where the page cap, file cap and listing cap actually live, so a client never has to hardcode
@@ -2081,6 +2081,7 @@ than that feature, not broken.
 | `models.cached` | `GET /api/models` answers from a catalogue the server keeps. See [the model catalogue](#the-model-catalogue) |
 | `spawn.parts` | `attachments`, and `multipart/form-data` file fields named after them, on `POST /api/runs`. See [attaching files](#attaching-files) |
 | `messages.parts` | `parts`, `multipart/form-data` and `@path` tokens on `POST /api/runs/{id}/message` |
+| `spawn.request` | The typed spawn request on REST and GraphQL. See [detecting the spawn request](#detecting-the-spawn-request) |
 | `runs.blobs` | `GET /api/runs/{id}/blobs` and `/blobs/{sha256}`: the stored parts a run holds and their bytes. See [a run's parts](#a-runs-parts) |
 | `runs.files.raw` | `GET /api/runs/{id}/files/raw?path=`, a workdir file's bytes under its own content type |
 | `runs.artifacts` | `GET /api/runs/{id}/artifacts/{name}`, the bytes of one file the run handed back, from the blob store or the workdir |
@@ -2165,6 +2166,25 @@ a daemon that ignored the parameter, or a subscription with nothing to report.
 
 Without `config.health`, a missing `config_error` means nothing, so a console cannot tell a file
 that loads from a daemon that would not say.
+
+### Detecting the spawn request
+
+The shape a run is spawned with changed in a way older servers do not accept. `spawn.request`
+says this server takes the new shape everywhere:
+
+- `POST /api/runs` and `POST /api/runs/validate` take a `SpawnRequest`.
+- `GET /api/schema/spawn-request` serves that request's JSON Schema.
+- GraphQL `spawnRun` and `validateSpawn` take `SpawnRunRequest`, with `source`, `inputs`,
+  `attachments`, `model`, `output`, `workdir`, `launch` and `delivery`. They answer the
+  `SpawnRunResult` union.
+
+A server without it speaks the older request, which named a `blueprint` and a `task`. Sending it
+the new shape fails with errors about unknown fields. Check the capability first, then fall back to
+the older request or tell the user to update Leviath.
+
+`api_version` names a release, so a build made between two releases still reports the last one.
+`build` is the git hash the server was built from, which tells that build apart from the release.
+In GraphQL the same pair is `config { server { apiVersion build } }`.
 
 ## Writing a mime row
 

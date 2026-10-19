@@ -1143,6 +1143,7 @@ mod tests {
             agent_paths: vec![],
             mcp_server_count: 0,
             api_version: API_VERSION.to_string(),
+            build: crate::daemon::setup::CURRENT_BUILD.to_string(),
             capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
             limits: ApiLimits::current(&Default::default()),
             config_error: None,

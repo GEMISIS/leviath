@@ -2239,7 +2239,7 @@ async fn the_config_field_answers_without_secrets() {
                         providers { id name auth isEnabled hasKey baseUrl region
                           options { __typename } }
                         allowsFileUploads blueprintPaths mcpServerCount
-                        server { apiVersion capabilities isAdminEnabled
+                        server { apiVersion build capabilities isAdminEnabled
                           limits { maxPageSize maxIds maxUploadBytes requestTimeoutSecs } }
                         health { error { message } savedAt }
                         yoloFile { path exists error } } }",
@@ -2248,6 +2248,18 @@ async fn the_config_field_answers_without_secrets() {
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
         let json = serde_json::to_value(&answer.data).expect("data serializes");
         let config = &json["config"];
+        assert_eq!(
+            config["server"]["build"],
+            crate::daemon::setup::CURRENT_BUILD
+        );
+        assert!(
+            config["server"]["capabilities"]
+                .as_array()
+                .expect("capabilities")
+                .iter()
+                .any(|c| c == "spawn.request"),
+            "this server announces the typed spawn request"
+        );
         assert!(
             config["server"]["capabilities"]
                 .as_array()

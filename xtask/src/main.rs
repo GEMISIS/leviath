@@ -7,6 +7,7 @@
 //!   `coverage --package <pkg>`  Gate just one package (the CI per-package fan-out).
 //!   `version <X.Y.Z>`           Move the workspace version and roll the changelog.
 //!   `version --check`           Verify the version declarations agree (CI runs this).
+//!   `version --check-bump <old>` Refuse a bump too small for a `**Breaking` changelog entry.
 //!   `docs`                      Check `docs/content/` for dead links and bad frontmatter.
 //!   `structure`                 Hold every source file to the production-line limit.
 //!   `structure --list`          Print every file's production-line count, longest first.
@@ -20,6 +21,7 @@
 //!   `schema --check`            Fail if a checked-in schema differs from what the code generates.
 
 mod bedrock_windows;
+mod bump_level;
 mod coverage;
 mod docs;
 mod modalities;
@@ -122,6 +124,7 @@ pub fn dispatch_with(
             println!("  coverage --package <pkg>  Gate one package (CI per-package fan-out)");
             println!("  version <X.Y.Z>           Move the workspace version, roll the changelog");
             println!("  version --check           Verify the version declarations agree");
+            println!("  version --check-bump <old> Refuse a bump too small for a Breaking entry");
             println!("  structure                 Hold every file to the production-line limit");
             println!("  structure --list          Print every file's production-line count");
             println!("  docs                      Check docs/content for dead links + frontmatter");

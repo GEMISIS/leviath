@@ -81,6 +81,7 @@ pub(super) fn redact(
         agent_paths: c.agent_paths.clone(),
         mcp_server_count: c.mcp_servers.len(),
         api_version: API_VERSION.to_string(),
+        build: crate::daemon::setup::CURRENT_BUILD.to_string(),
         capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
         limits: ApiLimits::current(requests),
     }
@@ -700,7 +701,9 @@ mod tests {
         let config: RedactedConfig = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(config.api_version, API_VERSION);
+        assert_eq!(config.build, crate::daemon::setup::CURRENT_BUILD);
         for expected in [
+            "spawn.request",
             "runs.envelope",
             "runs.search",
             "runs.files.listing",
@@ -989,6 +992,7 @@ mod tests {
             agent_paths: vec![],
             mcp_server_count: 2,
             api_version: API_VERSION.to_string(),
+            build: crate::daemon::setup::CURRENT_BUILD.to_string(),
             capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
             limits: ApiLimits::current(&Default::default()),
             config_error: None,
@@ -1029,6 +1033,7 @@ mod tests {
             agent_paths: vec![],
             mcp_server_count: 0,
             api_version: API_VERSION.to_string(),
+            build: crate::daemon::setup::CURRENT_BUILD.to_string(),
             capabilities: API_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
             limits: ApiLimits::current(&Default::default()),
             config_error: None,

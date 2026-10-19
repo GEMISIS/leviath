@@ -721,6 +721,18 @@ same list.
 
 ### Added
 
+- `lev serve` announces the capability `spawn.request`: the typed spawn
+  request on `POST /api/runs`, `POST /api/runs/validate`,
+  `GET /api/schema/spawn-request` and GraphQL `spawnRun` and `validateSpawn`.
+  A client checks it before sending that shape, since an older server rejects
+  it with errors about unknown fields.
+- `build` on `GET /api/config` and GraphQL `config { server { build } }`: the
+  git hash the server was built from. A build made between releases still
+  reports the last release's `api_version`, and this tells the two apart.
+- `cargo xtask version` refuses a bump that moves only the patch number while
+  `## Unreleased` holds a `**Breaking` entry. Below 1.0 the minor number has to
+  move. CI runs the same check on a PR that moves the version, as
+  `cargo xtask version --check-bump <previous>`.
 - `--daemon <attach|ensure|replace>` on `lev serve`, `lev agent-client`,
   `lev run`, `lev doctor`, `lev dash` and `lev daemon start`, with
   `LEVIATH_DAEMON` as the fallback for hosts that cannot add flags. `attach`
