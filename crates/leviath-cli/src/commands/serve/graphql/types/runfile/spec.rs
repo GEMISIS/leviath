@@ -516,7 +516,8 @@ pub(crate) struct RunDelivery {
     pub(crate) callback_url: Option<String>,
     /// Whether that post is signed. The secret itself is never read back.
     pub(crate) callback_signed: bool,
-    /// The caller's labels, carried through untouched.
+    /// The caller's labels, carried through untouched. The run reads one of
+    /// them, `leviath.context_scope`, the scope it shares `shared_intents` in.
     pub(crate) metadata: Vec<MetadataEntry>,
     /// The `delivery.idempotencyKey` the run was spawned under, which it
     /// holds for as long as its record exists. Null for a run spawned

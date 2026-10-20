@@ -46,7 +46,19 @@ fn record(run: &str, content: &str, tokens: usize) -> Record {
         run: run.to_string(),
         content: content.to_string(),
         tokens,
+        taint: leviath_core::TaintLevel::Public,
     }
+}
+
+fn laid_out(laid: &[Laid]) -> Vec<(String, String)> {
+    laid.iter()
+        .map(|(e, _)| {
+            (
+                e.key.clone().unwrap_or_default(),
+                e.content.as_str().to_string(),
+            )
+        })
+        .collect()
 }
 
 fn spec_in(scope: Option<&str>) -> RunSpecC {
@@ -249,19 +261,23 @@ fn a_plan_adds_what_fits_beside_the_runs_own_record() {
     );
     // 4 + 1 + 3 = 8, so c does not fit; d would, but the cap is three
     // entries and mine, the note and b are three.
-    let keep = plan(region, "r-a", &[&b, &c, &d]).unwrap();
-    assert_eq!(keep, vec![b.clone()]);
+    let laid = plan(region, "r-a", &[&b, &c, &d]).unwrap();
+    assert_eq!(
+        laid_out(&laid),
+        vec![pair("r-a", "mine"), pair("", "note"), pair("r-b", "b")]
+    );
     // Planned against a region that already holds them, there is nothing to do.
-    apply(&mut w, "r-a", keep);
+    apply(&mut w, laid);
     let region = w.get_region(SHARED_REGION).unwrap();
-    assert_eq!(plan(region, "r-a", &[&b, &c, &d]), None);
+    assert!(plan(region, "r-a", &[&b, &c, &d]).is_none());
 }
 
 #[test]
 fn a_region_with_no_entry_cap_takes_what_fits() {
     let region = Region::new(SHARED_REGION.to_string(), RegionKind::Pinned, 10);
     let (b, c) = (record("r-b", "b", 6), record("r-c", "c", 4));
-    assert_eq!(plan(&region, "r-a", &[&b, &c]), Some(vec![b, c]));
+    let laid = plan(&region, "r-a", &[&b, &c]).unwrap();
+    assert_eq!(laid_out(&laid), vec![pair("r-b", "b"), pair("r-c", "c")]);
 }
 
 #[test]
@@ -270,7 +286,13 @@ fn apply_replaces_the_other_runs_records_and_keeps_its_own() {
     let region = w.get_region_mut(SHARED_REGION).unwrap();
     region.upsert_by_key("r-a", "mine", 1).unwrap();
     region.upsert_by_key("r-gone", "old", 1).unwrap();
-    apply(&mut w, "r-a", vec![record("r-b", "new", 1)]);
+    let laid = plan(
+        w.get_region(SHARED_REGION).unwrap(),
+        "r-a",
+        &[&record("r-b", "new", 1)],
+    )
+    .unwrap();
+    apply(&mut w, laid);
     assert_eq!(
         shared(&w),
         vec![
@@ -412,4 +434,93 @@ fn the_shared_region_has_to_be_keyed() {
     );
     g.layout.regions[2].kind = crate::spec::graph::RegionKind::Keyed { max_entries: None };
     assert!(g.validate(&SpecPath::root().field("graph")).is_ok());
+}
+
+#[test]
+fn a_key_that_names_no_other_run_lands_as_the_runs_own() {
+    // A keyed region asks for a key, and a model cannot know its run id, so
+    // whatever it calls its record is its record.
+    let mut w = window_with(keyed(1000, None));
+    let out = call(
+        &mut w,
+        "context_write",
+        json!({"region": SHARED_REGION, "key": "plan", "content": "edit App.tsx"}),
+    );
+    assert_eq!(
+        out, "Stored in 'shared_intents' section under key 'r-a'.",
+        "{out}"
+    );
+    let out = call(
+        &mut w,
+        "context_append",
+        json!({"region": SHARED_REGION, "key": "plan", "content": "and Header.tsx"}),
+    );
+    assert!(out.starts_with("Appended"), "{out}");
+    assert_eq!(
+        shared(&w),
+        vec![pair("r-a", "edit App.tsx\nand Header.tsx")]
+    );
+    let out = call(
+        &mut w,
+        "context_delete",
+        json!({"region": SHARED_REGION, "key": "plan"}),
+    );
+    assert_eq!(out, "Released 'r-a' from 'shared_intents'.");
+}
+
+fn tainted(world: &mut World, e: Entity, level: leviath_core::TaintLevel) {
+    let mut w = world.get_mut::<ContextWindow>(e).unwrap();
+    let mut secrets = Region::new("secrets".to_string(), RegionKind::Pinned, 1000);
+    secrets.enable_taint_tracking();
+    secrets
+        .add_typed_tainted_entry("a secret", 1, leviath_core::EntryKind::default(), level)
+        .unwrap();
+    w.add_region(secrets);
+}
+
+fn shared_taint(world: &World, e: Entity) -> Option<leviath_core::TaintLevel> {
+    world
+        .get::<ContextWindow>(e)
+        .unwrap()
+        .get_region(SHARED_REGION)
+        .unwrap()
+        .taint_level()
+}
+
+#[test]
+fn a_record_carries_the_taint_of_the_run_that_wrote_it() {
+    use bevy_ecs::system::RunSystemOnce;
+    use leviath_core::TaintLevel;
+    let mut world = World::new();
+    let a = spawn(&mut world, "r-a", Some("proj"), true);
+    let b = spawn(&mut world, "r-b", Some("proj"), true);
+    let untracked = spawn(&mut world, "r-u", Some("proj"), true);
+    tainted(&mut world, a, TaintLevel::Private);
+    world
+        .get_mut::<ContextWindow>(b)
+        .unwrap()
+        .enable_taint_tracking();
+    write(&mut world, a, "r-a", "what a read in private");
+    world.run_system_once(sync_shared_regions).unwrap();
+    assert_eq!(shared_taint(&world, b), Some(TaintLevel::Private));
+    // A run that tracks no taint has no gate for it to raise.
+    assert_eq!(shared_taint(&world, untracked), None);
+    // Once the private run leaves, so does its taint.
+    world.get_mut::<AgentState>(a).unwrap().status = AgentStatus::Complete;
+    world.run_system_once(sync_shared_regions).unwrap();
+    assert_eq!(shared_taint(&world, b), Some(TaintLevel::Public));
+}
+
+#[test]
+fn the_runs_own_record_comes_first() {
+    use bevy_ecs::system::RunSystemOnce;
+    let mut world = World::new();
+    let a = spawn(&mut world, "r-a", Some("proj"), true);
+    let b = spawn(&mut world, "r-b", Some("proj"), true);
+    write(&mut world, a, "r-a", "a");
+    world.run_system_once(sync_shared_regions).unwrap();
+    // b writes after a's record reached it.
+    write(&mut world, b, "r-b", "b");
+    world.run_system_once(sync_shared_regions).unwrap();
+    assert_eq!(seen(&world, b), vec![pair("r-b", "b"), pair("r-a", "a")]);
 }

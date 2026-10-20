@@ -1091,8 +1091,9 @@ impl Run {
     /// Caller-supplied metadata from spawn. Values are always strings.
     ///
     /// Labels for whoever started the run, such as a ticket or a tenant. They
-    /// are searched by `filter.query` and read back unchanged, and nothing in
-    /// the run reads them: not a typed extension point.
+    /// are searched by `filter.query` and read back unchanged. The run reads
+    /// one of them, `leviath.context_scope`, which puts it in a scope whose
+    /// runs share the `shared_intents` region; it reads no other.
     ///
     /// Sorted by key: the daemon keeps these in a hash map, and a listing
     /// whose order changes between two identical requests is a diff nobody
