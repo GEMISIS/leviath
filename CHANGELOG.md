@@ -900,6 +900,14 @@ same list.
   allow_env_vars` entry. The values follow `[security] credential_store`
   like the provider keys. `lev doctor` counts a stored `BRAVE_API_KEY` as a
   working search setup, and `lev rage` scrubs the table.
+- `installBundledTool` (GraphQL) and `POST /api/tools/bundled/{name}`
+  install a tool the bundled agents ship, such as `web_search` or
+  `web_fetch`, into `~/.leviath/tools/` from the copy inside the binary.
+  Every agent and every inline graph can then be granted it, with no
+  research agent installed. The answer says whether the global copy was
+  installed, already current, or replaced. Both need `lev serve
+  --allow-admin`, and `tools.install_bundled` in `capabilities` says the
+  build serves them.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is

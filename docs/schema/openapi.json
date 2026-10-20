@@ -3645,6 +3645,46 @@
         }
       }
     },
+    "/api/tools/bundled/{name}": {
+      "post": {
+        "tags": [
+          "scripts"
+        ],
+        "summary": "Install a bundled tool globally",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed. Writes this build's copy of a tool the bundled agents ship, such as `web_search`, into the global tools directory, so every agent and every inline graph can be granted it. Answers `name`, `path`, `compiles`, `error` and `outcome` (`installed`, `unchanged` or `replaced`). A name this build ships no tool under is a 404 naming the ones it does.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The tool, by the name a stage grants it by: `web_search` or `web_fetch`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
     "/api/scripts": {
       "get": {
         "tags": [

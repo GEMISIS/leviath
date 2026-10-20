@@ -1690,3 +1690,34 @@ fn install_surfaces_a_remove_failure() {
 
     assert!(result.is_err());
 }
+
+/// The bundled tools are every `tools/*.rhai` any bundled agent ships, once
+/// each, carrying the agents' own bytes.
+#[test]
+fn the_bundled_tools_are_the_agents_tool_scripts_once_each() {
+    let tools = bundled_tools();
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+    assert!(names.contains(&"web_search"), "{names:?}");
+    assert!(names.contains(&"web_fetch"), "{names:?}");
+    let mut deduped = names.clone();
+    deduped.sort_unstable();
+    deduped.dedup();
+    assert_eq!(names, deduped, "sorted, and each name once");
+
+    // Every tool any agent ships is offered, with that agent's bytes.
+    for agent in BUNDLED_AGENTS {
+        for (rel, contents) in agent.files {
+            if let Some(name) = rel
+                .strip_prefix("tools/")
+                .and_then(|f| f.strip_suffix(".rhai"))
+            {
+                assert_eq!(bundled_tool(name).map(|t| t.source), Some(*contents));
+            }
+        }
+    }
+
+    // Nothing else is: a manifest is not a tool, and neither is a name no
+    // agent ships.
+    assert_eq!(bundled_tool("agent"), None);
+    assert_eq!(bundled_tool("no_such_tool"), None);
+}

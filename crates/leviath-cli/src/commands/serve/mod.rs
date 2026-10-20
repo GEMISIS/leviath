@@ -8,6 +8,7 @@ mod args;
 mod artifact_types;
 mod auth;
 mod blobs;
+mod bundled_tools;
 use crate::blocking;
 mod blueprint_types;
 mod blueprints;
@@ -683,6 +684,14 @@ async fn execute_with_shutdown(
             .route(
                 "/api/scripts/{kind}/{name}",
                 put(scripts::put_script).delete(scripts::delete_script),
+            )
+            // Installing a bundled tool globally writes the same `.rhai` file
+            // the script write above would, so it is gated the same way. It
+            // has no read half: `GET /api/tools` already lists what is
+            // installed, so without admin the path 404s.
+            .route(
+                "/api/tools/bundled/{name}",
+                post(bundled_tools::install_bundled_tool),
             ),
         false => app,
     };
@@ -1152,6 +1161,7 @@ mod tests {
         ("compat", include_str!("compat.rs")),
         ("run_spawn", include_str!("run_spawn.rs")),
         ("blobs", include_str!("blobs.rs")),
+        ("bundled_tools", include_str!("bundled_tools.rs")),
         ("blueprints", include_str!("blueprints.rs")),
         ("config", include_str!("config.rs")),
         ("doctor", include_str!("doctor.rs")),
@@ -3999,6 +4009,21 @@ mod tests {
                 match allow_admin {
                     false => assert_eq!(write, 405, "the write route must not be mounted"),
                     true => assert_ne!(write, 405, "the write route must be mounted"),
+                }
+
+                // Installing a bundled tool is the same write, gated the same
+                // way. It has no read half, so unmounted is a plain 404.
+                let install = client
+                    .post(format!("http://{addr}/api/tools/bundled/web_search"))
+                    .bearer_auth("t")
+                    .send()
+                    .await
+                    .expect("request")
+                    .status()
+                    .as_u16();
+                match allow_admin {
+                    false => assert_eq!(install, 404, "the install route must not be mounted"),
+                    true => assert_eq!(install, 200, "the install route must be mounted"),
                 }
 
                 // The read half answers either way. Nothing was written when
