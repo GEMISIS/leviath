@@ -1465,6 +1465,24 @@ enum BundledToolOutcome {
 	REPLACED
 }
 
+"""
+A tool the bundled agents ship that `installBundledTool` can install
+globally, and where this machine stands with it.
+"""
+type BundledToolOutput {
+	"The name a stage grants it by, and the name `installBundledTool` takes."
+	name: String!
+	"What the tool says it does."
+	description: String!
+	"Whether a global tool by this name is on the machine."
+	isInstalled: Boolean!
+	"""
+	Whether that global copy is this build's, byte for byte. False when it
+	is missing, older, or edited, which is when an install changes it.
+	"""
+	isCurrent: Boolean!
+}
+
 "How a failed model call failed, and what happened next."
 type CallFailureOutput {
 	"The kind of failure, as the provider layer names it."
@@ -9959,6 +9977,15 @@ type Query {
 	code rather than by anything on the machine.
 	"""
 	toolGroups: [ToolGroupOutput!]!
+	"""
+	The tools the bundled agents ship that `installBundledTool` can
+	install globally, with whether each is installed and current.
+	
+	A bare list: this build carries the set, so it is bounded by the
+	binary rather than by anything on the machine. Readable without
+	`--allow-admin`, so a console can show what an operator could turn on.
+	"""
+	bundledTools: [BundledToolOutput!]!
 	"""
 	Who is on the other end of the control socket.
 	

@@ -167,6 +167,27 @@ async fn every_admin_mutation_is_gated() {
 #[tokio::test]
 async fn a_bundled_tool_installs_as_a_global_script() {
     crate::commands::serve::testutil::with_home(|_home| async move {
+        // The listing is readable without the flag, and names what can be
+        // installed before anything is.
+        let listed = schema(false)
+            .execute(Request::new(
+                "{ bundledTools { name description isInstalled isCurrent } }",
+            ))
+            .await;
+        assert!(listed.errors.is_empty(), "{:?}", listed.errors);
+        let listed = serde_json::to_value(&listed.data).expect("data serializes");
+        let row = |listed: &serde_json::Value| {
+            listed["bundledTools"]
+                .as_array()
+                .expect("a list")
+                .iter()
+                .find(|row| row["name"] == "web_search")
+                .expect("web_search is listed")
+                .clone()
+        };
+        assert_eq!(row(&listed)["isInstalled"], false);
+        assert!(row(&listed)["description"].as_str().is_some());
+
         let installed = ask(
             r#"mutation { installBundledTool(request: { name: "web_search" })
                  { outcome script { id kind name scope blueprintName path relativePath
@@ -199,6 +220,9 @@ async fn a_bundled_tool_installs_as_a_global_script() {
             ask(r#"mutation { installBundledTool(request: { name: "web_search" }) { outcome } }"#)
                 .await;
         assert_eq!(again["installBundledTool"]["outcome"], "UNCHANGED");
+        let after = ask("{ bundledTools { name isInstalled isCurrent } }").await;
+        assert_eq!(row(&after)["isInstalled"], true);
+        assert_eq!(row(&after)["isCurrent"], true);
 
         let missing = schema(true)
             .execute(Request::new(

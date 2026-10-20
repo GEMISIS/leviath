@@ -1,7 +1,7 @@
 //! Tests for the catalogue types: models, providers and tools.
 
 use super::{
-    BuiltinTool, Model, ModelLimitsSource, ModelOrderField, ModelPricing, Provider,
+    BuiltinTool, BundledTool, Model, ModelLimitsSource, ModelOrderField, ModelPricing, Provider,
     ProviderOrderField, ScriptTool, SkippedTool, Tool, ToolGroup, ToolOrderField, ToolOrigin,
 };
 use crate::commands::serve::graphql::filter::testkit::{
@@ -285,6 +285,14 @@ async fn every_mirrored_function_runs() {
     exercise(&[SkippedTool {
         path: "/g/broken.rhai".to_string(),
         reason: "missing @description".to_string(),
+    }])
+    .await;
+
+    exercise(&[BundledTool {
+        name: "web_search".to_string(),
+        description: "searches the web".to_string(),
+        is_installed: true,
+        is_current: false,
     }])
     .await;
 }

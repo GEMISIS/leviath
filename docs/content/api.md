@@ -403,7 +403,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves, before writing a gateway for it. See [below](#gateways) |
 | `GET /api/providers?quota=&refresh=` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. See [below](#signing-in-to-a-subscription-provider) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
-| `POST /api/tools/bundled/{name}` *(admin)* | Install a bundled tool such as `web_search` globally. See [below](#installing-a-bundled-tool) |
+| `GET /api/tools/bundled` · `POST /api/tools/bundled/{name}` *(admin)* | List the bundled tools, and install one such as `web_search` globally. See [below](#installing-a-bundled-tool) |
 | `GET /api/mime` · `PUT /api/mime` *(admin)* · `DELETE /api/mime` *(admin)* | Read the effective [mime registry](/docs/mime#the-registry), and write to it. The writes need admin. See [below](#writing-a-mime-row) |
 | `GET /api/scripts?agent=&include=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `POST …` · `DELETE …/{name}` · `GET …/{name}/status` · `POST …/{name}/login` · `POST …/{name}/test` | List, add, remove, check, log in, test. All but the two `GET`s need admin |
@@ -1818,12 +1818,21 @@ than from a copy that drifts:
 
 `outcome` says what happened to the global copy. `installed` means there was none, `unchanged`
 means it already matched this build byte for byte, and `replaced` means an older or edited copy was
-overwritten. Send it again after an upgrade to bring the copy level with the new binary. A name no
-bundled agent ships is a 404 that lists the names it does.
+overwritten. A copy that already matches is left alone rather than rewritten. Send it again after
+an upgrade to bring the copy level with the new binary. A name no bundled agent ships is a 404 that
+lists the names it does.
 
 It writes the same file `PUT /api/scripts/tool/{name}` would, so it is mounted only with
-`--allow-admin` and answers 404 without it. Check `tools.install_bundled` in the `capabilities`
-list before offering it. The GraphQL twin is `installBundledTool`.
+`--allow-admin` and answers 404 without it. Both writes replace the file in one step, so a run
+loading the script meanwhile reads the old file or the new one, never half of it.
+
+`GET /api/tools/bundled` is the read half and is always mounted. It lists every tool the install
+takes, with its `description` and two flags. `installed` says a global copy exists, and `current`
+says that copy is this build's. An upgrade that changed a tool shows up as `installed: true,
+current: false`, which is the cue to install it again.
+
+Check `tools.install_bundled` in the `capabilities` list before offering either. The GraphQL twins
+are `installBundledTool` and `bundledTools`.
 
 ### Providers
 
@@ -2318,7 +2327,7 @@ than that feature, not broken.
 | `scripts.providers` | `provider` as a fifth script `kind`, the machine's drop-in model providers |
 | `scripts.candidates` | `?include=candidates` on the script listing, plus `relative_path` and `declared` on every entry |
 | `scripts.mime_checks` | `mime_check` as a sixth script `kind`: the byte checks mime rows name |
-| `tools.install_bundled` | `POST /api/tools/bundled/{name}` and `installBundledTool`; admin only. See [above](#installing-a-bundled-tool) |
+| `tools.install_bundled` | `GET` and `POST /api/tools/bundled`, `bundledTools` and `installBundledTool`. See [above](#installing-a-bundled-tool) |
 | `config.gateways` | `gateways` on `GET /api/config`, the custom providers this machine has |
 | `config.gateways.kinds` | `kind`, `header_names` and `models` on each gateway, and `kind`, `headers` and `models` accepted by `PUT /api/config` |
 | `models.probe` | `POST /api/models/probe`, which asks an OpenAI-compatible server what it serves before a gateway for it is written; admin only |

@@ -27,6 +27,11 @@ same list.
   There is no switch for the old answer; read the field path from the new
   message instead.
 
+- `PUT /api/scripts/{kind}/{name}` and `upsertScript` now replace the file in
+  one step, staged beside it and renamed over it, so a run loading the script
+  meanwhile never reads a half-written file. A newly created script file is
+  owner-only on Unix; an existing one keeps its permissions. To get the old
+  permissions on a new file, `chmod` it after the write.
 - A stage with `mode = "interactive"` now takes turns with a person. After a
   reply with no tool calls it waits for the next message instead of moving
   on: `waiting_input`, wait reason `awaiting_message` (GraphQL
@@ -905,9 +910,11 @@ same list.
   `web_fetch`, into `~/.leviath/tools/` from the copy inside the binary.
   Every agent and every inline graph can then be granted it, with no
   research agent installed. The answer says whether the global copy was
-  installed, already current, or replaced. Both need `lev serve
-  --allow-admin`, and `tools.install_bundled` in `capabilities` says the
-  build serves them.
+  installed, already current, or replaced, and a current copy is not
+  rewritten. Both need `lev serve --allow-admin`. `bundledTools` and
+  `GET /api/tools/bundled` list what can be installed and whether each copy
+  is current, with no flag. `tools.install_bundled` in `capabilities` says
+  the build serves them.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is

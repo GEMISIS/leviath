@@ -428,7 +428,8 @@ Over the API, `lev serve --allow-admin` installs either one into `~/.leviath/too
 the copy inside the `lev` binary. Send `POST /api/tools/bundled/web_search` or the
 [`installBundledTool`](/docs/graphql#config-and-admin) mutation. None of the research agents has to
 be installed, and an inline graph can then grant the tool like any other global one. Send it again
-after an upgrade to bring the global copy level with the new binary. See
+after an upgrade to bring the global copy level with the new binary. `GET /api/tools/bundled`, or
+`bundledTools` in GraphQL, lists what can be installed and whether each copy is current. See
 [installing a bundled tool](/docs/api#installing-a-bundled-tool).
 
 > [!IMPORTANT]

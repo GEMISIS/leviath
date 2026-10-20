@@ -29,8 +29,24 @@ async fn a_bundled_tool_installs_globally_and_says_what_it_did() {
         assert_eq!(first.written.path, path.display().to_string());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), shipped.source);
 
+        // A copy that already matches is not rewritten: a run loading it at
+        // that moment must not race a replacement. Backdating the file and
+        // finding the date unmoved shows nothing touched it.
+        let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
         let again = install_one(&dirs(), "web_search").expect("installs again");
         assert_eq!(again.outcome, InstallOutcome::Unchanged);
+        assert_eq!(again.written.path, path.display().to_string());
+        assert!(again.written.compiles);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            long_ago
+        );
 
         std::fs::write(&path, "// @tool web_search\n\"edited\"").unwrap();
         let replaced = install_one(&dirs(), "web_search").expect("replaces");
@@ -66,6 +82,62 @@ async fn a_global_path_that_is_not_a_file_is_refused() {
         let refused = install_one(&dirs(), "web_search").expect_err("not a plain file");
         assert!(matches!(refused, ServeError::Forbidden(_)), "{refused}");
         assert!(path.is_dir(), "the directory is left alone");
+    })
+    .await;
+}
+
+/// The listing names every bundled tool, and follows the global copy from
+/// missing, to current, to edited.
+#[tokio::test]
+async fn the_listing_follows_the_global_copy() {
+    with_home(|home| async move {
+        let row = |name: &str| {
+            list(&dirs())
+                .into_iter()
+                .find(|row| row.name == name)
+                .expect("listed")
+        };
+        let names: Vec<String> = list(&dirs()).into_iter().map(|row| row.name).collect();
+        let shipped: Vec<String> = crate::bundled::bundled_tools()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert_eq!(names, shipped);
+
+        let missing = row("web_search");
+        assert!(!missing.installed && !missing.current);
+        assert!(
+            missing.description.contains("Search the web"),
+            "{}",
+            missing.description
+        );
+
+        install_one(&dirs(), "web_search").expect("installs");
+        let current = row("web_search");
+        assert!(current.installed && current.current);
+
+        std::fs::write(global_copy(&home, "web_search"), "// @tool web_search\n1").unwrap();
+        let edited = row("web_search");
+        assert!(edited.installed && !edited.current);
+    })
+    .await;
+}
+
+/// The read route answers with the same rows.
+#[tokio::test]
+async fn the_read_route_lists_the_bundled_tools() {
+    with_home(|_home| async move {
+        let Json(listed) = list_bundled_tools(State(state_with_agent_paths(Vec::new()))).await;
+        let body = serde_json::to_value(&listed).expect("serializes");
+        let search = body["tools"]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .find(|row| row["name"] == "web_search")
+            .expect("web_search is listed")
+            .clone();
+        assert_eq!(search["installed"], false);
+        assert_eq!(search["current"], false);
     })
     .await;
 }

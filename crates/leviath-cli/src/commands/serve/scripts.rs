@@ -1079,8 +1079,12 @@ pub(super) fn write_one(
 }
 
 /// Write a script that [`guard`] has already accepted.
+///
+/// Staged beside the target and renamed over it, so a run that loads the
+/// script while it is being saved reads the old file or the new one, never
+/// a truncated one.
 fn write_script(target: &Target, content: &str) -> Result<ScriptWritten, ServeError> {
-    std::fs::write(&target.path, content).map_err(|e| {
+    leviath_sys::write_atomic(&target.path, content.as_bytes(), None).map_err(|e| {
         ServeError::Internal(format!("cannot write '{}': {e}", target.path.display()))
     })?;
     let label = target.path.display().to_string();

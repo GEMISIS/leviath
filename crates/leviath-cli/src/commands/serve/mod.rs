@@ -315,6 +315,9 @@ fn api_router() -> Router<AppState> {
         // there is nothing to write, since a tool is either built in or a file
         // the scripts routes below own.
         .route("/api/tools", get(tools::list_tools))
+        // The tools this build can install globally, and whether each is.
+        // The install itself is mounted behind `--allow-admin`.
+        .route("/api/tools/bundled", get(bundled_tools::list_bundled_tools))
         // Scripts - the read half of the Rhai surface. The write half is
         // mounted by `execute_with_shutdown`, behind `--allow-admin`.
         .route("/api/scripts", get(scripts::list_scripts))
@@ -686,9 +689,9 @@ async fn execute_with_shutdown(
                 put(scripts::put_script).delete(scripts::delete_script),
             )
             // Installing a bundled tool globally writes the same `.rhai` file
-            // the script write above would, so it is gated the same way. It
-            // has no read half: `GET /api/tools` already lists what is
-            // installed, so without admin the path 404s.
+            // the script write above would, so it is gated the same way. The
+            // read half, `GET /api/tools/bundled`, is a different path, so
+            // without admin this one 404s.
             .route(
                 "/api/tools/bundled/{name}",
                 post(bundled_tools::install_bundled_tool),

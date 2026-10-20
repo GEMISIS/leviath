@@ -3645,13 +3645,36 @@
         }
       }
     },
+    "/api/tools/bundled": {
+      "get": {
+        "tags": [
+          "scripts"
+        ],
+        "summary": "Tools this build can install globally",
+        "description": "Every tool the bundled agents ship that `POST /api/tools/bundled/{name}` can install, sorted by name. Each row carries `name`, `description`, `installed` (a global tool by that name exists) and `current` (that copy is this build's, byte for byte). Always mounted; the install needs `--allow-admin`.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
     "/api/tools/bundled/{name}": {
       "post": {
         "tags": [
           "scripts"
         ],
         "summary": "Install a bundled tool globally",
-        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed. Writes this build's copy of a tool the bundled agents ship, such as `web_search`, into the global tools directory, so every agent and every inline graph can be granted it. Answers `name`, `path`, `compiles`, `error` and `outcome` (`installed`, `unchanged` or `replaced`). A name this build ships no tool under is a 404 naming the ones it does.",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed. Writes this build's copy of a tool the bundled agents ship, such as `web_search`, into the global tools directory, so every agent and every inline graph can be granted it. Answers `name`, `path`, `compiles`, `error` and `outcome` (`installed`, `unchanged` or `replaced`). A global copy that already matches is left alone and reported as `unchanged`. A name this build ships no tool under is a 404 naming the ones it does.",
         "parameters": [
           {
             "name": "name",

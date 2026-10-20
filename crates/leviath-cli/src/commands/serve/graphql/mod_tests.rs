@@ -797,11 +797,13 @@ fn every_listing_a_client_can_reach_is_a_connection() {
 
     /// The bounded lists: each one is as long as the document or the act it
     /// belongs to, and none of them grows with use.
-    const BOUNDED: [&str; 12] = [
+    const BOUNDED: [&str; 13] = [
         // One answer per id asked about, so the client sets the length.
         "Query.nodes",
         // The group tokens a stage may name: a handful, fixed by this build.
         "Query.toolGroups",
+        // The tools the bundled agents ship, fixed by this build.
+        "Query.bundledTools",
         // A manifest's own contents, bounded by the document.
         "BlueprintOutput.stages",
         "BlueprintOutput.regions",

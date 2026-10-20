@@ -1454,9 +1454,21 @@ mutation {
 ```
 
 `outcome` is `INSTALLED` when there was no global copy, `UNCHANGED` when it already matched this
-build, and `REPLACED` when an older or edited copy was overwritten. Run it again after an upgrade
-to bring the copy level with the new binary. A name no bundled agent ships is `NOT_FOUND`, and the
-message lists the names that are.
+build, and `REPLACED` when an older or edited copy was overwritten. A copy that already matches is
+not rewritten. Run it again after an upgrade to bring the copy level with the new binary. A name
+no bundled agent ships is `NOT_FOUND`, and the message lists the names that are.
+
+`bundledTools` is the read half, and it needs no flag. It lists what `installBundledTool` takes,
+and whether this machine has each one and has this build's copy:
+
+```graphql
+{
+  bundledTools { name description isInstalled isCurrent }
+}
+```
+
+`isInstalled` true with `isCurrent` false means the global copy is older or edited, so an install
+would replace it.
 
 Anything that dials out is a mutation, so queries stay side-effect free. `refreshModels`,
 `checkMachine`, `checkProvider`, `checkMcpServer`, `checkEndpoint`, `signInProvider` and
