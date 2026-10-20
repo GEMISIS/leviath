@@ -195,11 +195,11 @@ impl WriteFence {
             .and_then(crate::paths::canonicalize_for_match);
         let real = canonical.as_deref().and_then(|p| relative(p, &root));
         match (written, real) {
+            // Written without a branch: on Windows nothing is ever hard
+            // linked, and an arm only Unix can take would go uncovered there.
             (Some(w), Some(r)) if self.allows(&w) && self.allows(&r) => {
-                match canonical.as_deref().is_some_and(hard_linked) {
-                    true => Err(Refused::HardLinked(shown)),
-                    false => Ok(()),
-                }
+                let linked = canonical.as_deref().is_some_and(hard_linked);
+                (!linked).then_some(()).ok_or(Refused::HardLinked(shown))
             }
             _ => Err(Refused::Outside(shown)),
         }
