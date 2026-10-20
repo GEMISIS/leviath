@@ -46,6 +46,7 @@ fn args(json: bool, ready_file: Option<PathBuf>) -> ServeArgs {
         cors: None,
         token: Some("secret-test-token".to_string()),
         allow_admin: false,
+        admin_token: None,
         print_graphql_schema: false,
         workdir_root: None,
         no_remote_yolo: false,

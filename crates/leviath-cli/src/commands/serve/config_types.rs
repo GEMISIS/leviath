@@ -547,6 +547,14 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // paged requests, and a client that does not know this is here writes that
     // loop and keeps it forever.
     "runs.export",
+    // `--admin-token` / `LEVIATH_API_ADMIN_TOKEN`, and the
+    // `X-Leviath-Admin-Token` header that elevates one request. Announced
+    // whether or not this server has an admin token, the same narrower claim
+    // `scripts.write` makes: it says this build can scope admin requests to a
+    // token, so a client can keep one ordinary server and elevate only the
+    // writes its user approved, rather than starting a second server with
+    // `--allow-admin` for each.
+    "admin.token",
 ];
 
 /// `delivery.idempotency_key` on a spawn, which starts one run however many

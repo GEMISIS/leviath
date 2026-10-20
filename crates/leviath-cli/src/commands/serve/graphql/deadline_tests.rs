@@ -200,7 +200,7 @@ async fn the_route_reads_its_body_under_the_ordinary_deadline() {
         crate::commands::serve::api_router()
             .layer(axum::extract::Extension(super::super::build_schema(
                 state.clone(),
-                false,
+                crate::commands::serve::admin_gate::AdminGate::Off,
             )))
             .with_state(state.clone())
     };

@@ -3,6 +3,7 @@
 //! Exposes agent management, blueprint CRUD, and live event streaming over
 //! HTTP. No web UI - the frontend lives in a separate repo.
 
+mod admin_gate;
 mod announce;
 mod args;
 mod artifact_types;
@@ -345,6 +346,84 @@ fn api_router() -> Router<AppState> {
         .route("/ws/agents/{id}", get(websocket::ws_agent))
 }
 
+/// Every admin route: the acts that change the machine rather than a run.
+///
+/// The MCP administration endpoints are remote code execution by
+/// construction: `add_server` writes a `command` and `args` into
+/// `~/.leviath/config.toml`, and Leviath then spawns exactly that - for this
+/// run and every future one. The rest of the API can only run agents the user
+/// already installed. [`execute_with_shutdown`] mounts these only behind the
+/// admin gate, and layers every one of them with it, so a route added here is
+/// gated by being added here.
+fn admin_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/mcp/servers", post(mcp::add_server))
+        .route("/api/mcp/servers/{name}", delete(mcp::remove_server))
+        // Login opens the operator's browser and completes an OAuth flow
+        // on this host; test connects to the server and, for a stdio one,
+        // spawns its command. Neither is a read, and both were reachable by
+        // anyone holding the bearer token.
+        .route("/api/mcp/servers/{name}/login", post(mcp::login))
+        .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
+        // The provider sign-in opens the operator's browser and binds a
+        // fixed loopback port on this host, and the sign-out deletes a
+        // credential. Same category of act as the MCP login above, gated
+        // the same way. The read half stays open, so a console without
+        // admin can still show what is signed in and offer nothing else.
+        .route("/api/providers/{name}/login", post(providers::login))
+        .route("/api/providers/{name}/logout", post(providers::logout))
+        // The check makes a real authenticated call to the provider, the
+        // same category as `/api/models/probe` beside it.
+        .route("/api/providers/{name}/check", post(providers::check))
+        // The live doctor makes two billed provider calls and spawns a run
+        // through the daemon. The read half in `api_router` stops before
+        // either.
+        .route("/api/doctor/live", post(doctor::run_doctor_live))
+        // Config-write persists provider secrets to disk, so it is gated the
+        // same way as MCP admin.
+        .route("/api/config", put(config::put_config))
+        // A yolo profile is a grant of permissions, so writing the file is
+        // the same category of act as writing the config.
+        .route("/api/yolo", put(yolo::put_profiles))
+        // Writing a mime row rewrites `mime_types.toml` beside the config,
+        // the same category of act, and gated the same way: the read half
+        // (`GET /api/mime`) is always mounted, these writes need
+        // `--allow-admin`, and a client learns that from the capability.
+        .route(
+            "/api/mime",
+            put(mime::put_mime_row).delete(mime::delete_mime_row),
+        )
+        // The probe makes this host open a connection to any address the
+        // caller names, the same act as testing an MCP server, and it
+        // exists to precede the write above. Gated with it; there is no
+        // read half, so without admin the path 404s.
+        .route("/api/models/probe", post(config::probe_models))
+        // Carrying out the update the GET half only describes: it runs a
+        // package manager, replaces the blueprints in the agents directory
+        // and rewrites the config. Same category of act as the three above,
+        // and gated the same way - the read half stays open, so a console
+        // without admin still shows what to type.
+        .route("/api/update", post(update::post_update))
+        .route("/api/update/jobs/{id}", get(update::get_update_job))
+        // A `.rhai` file is executable code every agent then runs, so
+        // writing one is the same category of act as adding an MCP server
+        // rather than the same category as saving a blueprint. The GET half
+        // in `api_router` stays open so an editor degrades to read-only
+        // instead of disappearing.
+        .route(
+            "/api/scripts/{kind}/{name}",
+            put(scripts::put_script).delete(scripts::delete_script),
+        )
+        // Installing a bundled tool globally writes the same `.rhai` file
+        // the script write above would, so it is gated the same way. The
+        // read half, `GET /api/tools/bundled`, is a different path in
+        // `api_router`, so without an admin surface this one 404s.
+        .route(
+            "/api/tools/bundled/{name}",
+            post(bundled_tools::install_bundled_tool),
+        )
+}
+
 /// Every `(path, method)` this file registers, read out of its own source.
 ///
 /// Axum's `Router` offers no way to enumerate what it holds, so the only place
@@ -507,6 +586,8 @@ async fn execute_with_shutdown(
     // Resolve the API token before binding - refuse to start unauthenticated.
     announce.stage(ErrorCode::TokenMissing);
     let auth_token = std::sync::Arc::new(auth::resolve_token(args.token.as_deref())?);
+    let admin =
+        admin_gate::AdminGate::resolve(args.allow_admin, args.admin_token.as_deref(), &auth_token)?;
     // The API can spawn tool-executing agents; loudly warn if bound off-host.
     if !is_local_host(&args.host) {
         tracing::warn!(
@@ -621,82 +702,16 @@ async fn execute_with_shutdown(
         }
     };
 
-    let app = api_router();
-
-    // The MCP administration endpoints are remote code execution by
-    // construction: `add_server` writes a `command` and `args` into
-    // `~/.leviath/config.toml`, and Leviath then spawns exactly that - for this
-    // run and every future one. The rest of the API can only run agents the user
-    // already installed. Not mounted unless the operator asked for them, so an
-    // unmounted route 404s rather than relying on a check inside the handler
-    // that someone could later route around.
-    let app = match args.allow_admin {
-        true => app
-            .route("/api/mcp/servers", post(mcp::add_server))
-            .route("/api/mcp/servers/{name}", delete(mcp::remove_server))
-            // Login opens the operator's browser and completes an OAuth flow
-            // on this host; test connects to the server and, for a stdio one,
-            // spawns its command. Neither is a read, and both were reachable by
-            // anyone holding the bearer token.
-            .route("/api/mcp/servers/{name}/login", post(mcp::login))
-            .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
-            // The provider sign-in opens the operator's browser and binds a
-            // fixed loopback port on this host, and the sign-out deletes a
-            // credential. Same category of act as the MCP login above, gated
-            // the same way. The read half stays open, so a console without
-            // admin can still show what is signed in and offer nothing else.
-            .route("/api/providers/{name}/login", post(providers::login))
-            .route("/api/providers/{name}/logout", post(providers::logout))
-            // The check makes a real authenticated call to the provider, the
-            // same category as `/api/models/probe` beside it.
-            .route("/api/providers/{name}/check", post(providers::check))
-            // The live doctor makes two billed provider calls and spawns a run
-            // through the daemon. The read half above stops before either.
-            .route("/api/doctor/live", post(doctor::run_doctor_live))
-            // Config-write persists provider secrets to disk, so it is gated the
-            // same way as MCP admin: unmounted (404) unless --allow-admin.
-            .route("/api/config", put(config::put_config))
-            // A yolo profile is a grant of permissions, so writing the file is
-            // the same category of act as writing the config.
-            .route("/api/yolo", put(yolo::put_profiles))
-            // Writing a mime row rewrites `mime_types.toml` beside the config,
-            // the same category of act, and gated the same way: the read half
-            // (`GET /api/mime`) is always mounted, these writes need
-            // `--allow-admin`, and a client learns that from the capability.
-            .route(
-                "/api/mime",
-                put(mime::put_mime_row).delete(mime::delete_mime_row),
-            )
-            // The probe makes this host open a connection to any address the
-            // caller names, the same act as testing an MCP server, and it
-            // exists to precede the write above. Gated with it; there is no
-            // read half, so without admin the path 404s.
-            .route("/api/models/probe", post(config::probe_models))
-            // Carrying out the update the GET half only describes: it runs a
-            // package manager, replaces the blueprints in the agents directory
-            // and rewrites the config. Same category of act as the three above,
-            // and gated the same way - the read half stays open, so a console
-            // without admin still shows what to type.
-            .route("/api/update", post(update::post_update))
-            .route("/api/update/jobs/{id}", get(update::get_update_job))
-            // A `.rhai` file is executable code every agent then runs, so
-            // writing one is the same category of act as adding an MCP server
-            // rather than the same category as saving a blueprint. Unmounted
-            // (404) unless --allow-admin; the GET half above stays open so an
-            // editor degrades to read-only instead of disappearing.
-            .route(
-                "/api/scripts/{kind}/{name}",
-                put(scripts::put_script).delete(scripts::delete_script),
-            )
-            // Installing a bundled tool globally writes the same `.rhai` file
-            // the script write above would, so it is gated the same way. The
-            // read half, `GET /api/tools/bundled`, is a different path, so
-            // without admin this one 404s.
-            .route(
-                "/api/tools/bundled/{name}",
-                post(bundled_tools::install_bundled_tool),
-            ),
-        false => app,
+    // Every admin route sits behind the one gate, `--allow-admin` or an
+    // admin token. Without either, the routes are not mounted at all, so they
+    // 404 or 405 rather than relying on a check inside the handler that
+    // someone could later route around. With either, each is layered with
+    // `require_admin`, which asks `AdminGate::admits` for every request.
+    let app = match admin.mounted() {
+        true => api_router().merge(admin_routes().route_layer(
+            axum::middleware::from_fn_with_state(admin.clone(), admin_gate::require_admin),
+        )),
+        false => api_router(),
     };
 
     // How large a body any route takes: the multipart spawn and message
@@ -711,7 +726,7 @@ async fn execute_with_shutdown(
     // execution context instead.
     let app = app.layer(axum::extract::Extension(graphql::build_schema(
         state.clone(),
-        args.allow_admin,
+        admin.clone(),
     )));
     // Kept back before the state moves into the router: the stop is begun from
     // the signal below and waited on after the server returns.
@@ -724,6 +739,7 @@ async fn execute_with_shutdown(
         .layer(axum::middleware::from_fn_with_state(
             auth::AuthState {
                 token: auth_token,
+                admin: admin.token(),
                 signer: std::sync::Arc::clone(&state.signer),
             },
             auth::require_auth,
@@ -1393,16 +1409,16 @@ mod tests {
     /// constants its handler names, plus what the layers around every handler
     /// add (401 from auth on all of them; 408 and 503 from the request limits
     /// on all but the websocket; 405 on an admin method of a path that is
-    /// mounted without `--allow-admin`, where axum answers for the missing
-    /// method). The spec may list more, since a handler can answer through a
+    /// mounted without the admin gate, where axum answers for the missing
+    /// method; 403 from the gate on every admin route). The spec may list more, since a handler can answer through a
     /// helper this reader cannot see into.
     #[test]
     fn the_openapi_spec_documents_every_status_a_handler_can_answer() {
         let spec: serde_json::Value = serde_json::from_str(OPENAPI).expect("the spec is JSON");
         let production = production_source();
         let (open, admin) = production
-            .split_once("match args.allow_admin")
-            .expect("the admin routes are mounted on allow_admin");
+            .split_once("fn admin_routes() -> Router<AppState> {")
+            .expect("the admin routes are declared apart");
         let open_routes = handlers_in(open);
         let admin_routes = handlers_in(admin);
         assert!(open_routes.len() > 25);
@@ -1425,6 +1441,9 @@ mod tests {
                 }
                 if is_admin && open_routes.iter().any(|(open, ..)| open == path) {
                     required.push(405);
+                }
+                if is_admin {
+                    required.push(403);
                 }
                 // Filtered rather than pushed inside an `if`: a branch only a
                 // failure reaches is a region the coverage gate reports.
@@ -1856,7 +1875,7 @@ mod tests {
         let app = api_router()
             .layer(axum::extract::Extension(graphql::build_schema(
                 state.clone(),
-                false,
+                crate::commands::serve::admin_gate::AdminGate::Off,
             )))
             .with_state(state);
         let req = Request::builder()
@@ -1892,7 +1911,10 @@ mod tests {
             let app = api_router()
                 .layer(axum::extract::Extension(graphql::build_schema(
                     state.clone(),
-                    allow_admin,
+                    match allow_admin {
+                        true => admin_gate::AdminGate::Open,
+                        false => admin_gate::AdminGate::Off,
+                    },
                 )))
                 .with_state(state);
             let req = Request::builder()
@@ -1940,7 +1962,7 @@ mod tests {
         let app = api_router()
             .layer(axum::extract::Extension(graphql::build_schema(
                 state.clone(),
-                false,
+                crate::commands::serve::admin_gate::AdminGate::Off,
             )))
             .with_state(state);
         let req = Request::builder()
@@ -1994,6 +2016,7 @@ mod tests {
             let state = test_state();
             let auth = auth::AuthState {
                 token: Arc::new("secret".to_string()),
+                admin: None,
                 signer: Arc::clone(&state.signer),
             };
             let app = crate::commands::serve::mcp::scoped(
@@ -2068,6 +2091,7 @@ mod tests {
             let state = test_state();
             let auth = auth::AuthState {
                 token: Arc::new("secret".to_string()),
+                admin: None,
                 signer: Arc::clone(&state.signer),
             };
             let app = crate::commands::serve::mcp::scoped(
@@ -2667,6 +2691,7 @@ mod tests {
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -2753,6 +2778,7 @@ mod tests {
                 cors: None,
                 token: Some("test-token".to_string()),
                 allow_admin: false,
+                admin_token: None,
                 print_graphql_schema: false,
                 workdir_root: None,
                 no_remote_yolo: false,
@@ -2841,6 +2867,7 @@ mod tests {
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -2923,6 +2950,7 @@ mod tests {
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -2983,6 +3011,7 @@ mod tests {
                     cors: Some("*".to_string()),
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -3084,6 +3113,7 @@ mod tests {
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -3167,6 +3197,7 @@ mod tests {
                     cors: Some("https://example.com".to_string()),
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -3241,6 +3272,7 @@ mod tests {
                 cors: None,
                 token: Some("test-token".to_string()),
                 allow_admin: false,
+                admin_token: None,
                 print_graphql_schema: false,
                 workdir_root: None,
                 no_remote_yolo: false,
@@ -3290,6 +3322,7 @@ mod tests {
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -3333,6 +3366,7 @@ mod tests {
             cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
+            admin_token: None,
             print_graphql_schema: false,
             workdir_root: None,
             no_remote_yolo: false,
@@ -3398,6 +3432,7 @@ mod tests {
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -3446,6 +3481,7 @@ mod tests {
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -3485,6 +3521,7 @@ mod tests {
                 cors: None,
                 token: None,
                 allow_admin: false,
+                admin_token: None,
                 print_graphql_schema: false,
                 workdir_root: None,
                 no_remote_yolo: false,
@@ -3520,6 +3557,7 @@ mod tests {
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -3581,6 +3619,7 @@ mod tests {
                     cors: None,
                     token: Some("test-token".to_string()),
                     allow_admin: false,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -3639,6 +3678,7 @@ mod tests {
                     cors: cors.map(str::to_string),
                     token: Some("t".to_string()),
                     allow_admin: false,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -3719,6 +3759,7 @@ mod tests {
                     cors: None,
                     token: Some("t".to_string()),
                     allow_admin,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -3802,6 +3843,7 @@ mod tests {
                         cors: None,
                         token: Some("t".to_string()),
                         allow_admin,
+                        admin_token: None,
                         print_graphql_schema: false,
                         workdir_root: None,
                         no_remote_yolo: false,
@@ -3912,6 +3954,7 @@ mod tests {
                     cors: None,
                     token: Some("t".to_string()),
                     allow_admin,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -3954,6 +3997,153 @@ mod tests {
         .await;
     }
 
+    /// A server started with an admin token mounts the admin routes but takes
+    /// them only from a request that presents it, over REST and GraphQL
+    /// alike. `--allow-admin` beside it does not open them to the API token.
+    /// The read half of a path the gate shares stays open to the API token.
+    #[tokio::test]
+    async fn an_admin_token_scopes_the_admin_routes_to_requests_that_present_it() {
+        let home = tempfile::tempdir().expect("a temp dir");
+        let root = home.path().to_path_buf();
+        let mut vars = crate::config::config_isolation_vars(&root);
+        vars.push(("LEVIATH_HOME", Some(root.clone().into_os_string())));
+        vars.push((admin_gate::ADMIN_TOKEN_ENV, Some("root".into())));
+
+        temp_env::async_with_vars(vars, async move {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+            let args = ServeArgs {
+                daemon: Default::default(),
+                exit_on_stdin_eof: false,
+                shutdown_grace_secs: 10,
+                json: false,
+                ready_file: None,
+                port: 0,
+                name: None,
+                host: "127.0.0.1".to_string(),
+                cors: None,
+                token: Some("t".to_string()),
+                allow_admin: true,
+                admin_token: None,
+                print_graphql_schema: false,
+                workdir_root: None,
+                no_remote_yolo: false,
+                tls_cert: None,
+                tls_key: None,
+                no_remote_seed_commands: false,
+                max_concurrent_requests: None,
+                request_timeout_secs: None,
+                spawn_timeout_secs: None,
+            };
+            let server = tokio::spawn(serve_for_test(
+                args,
+                no_daemon_control(),
+                Box::pin(async move {
+                    let _ = stop_rx.await;
+                }),
+                Some(ready_tx),
+            ));
+            let addr = ready_rx.await.expect("bound");
+            let client = reqwest::Client::new();
+            let probe = |bearer: &'static str, header: Option<&'static str>| {
+                let mut request = client
+                    .post(format!("http://{addr}/api/models/probe"))
+                    .bearer_auth(bearer)
+                    .json(&serde_json::json!({ "base_url": "http://127.0.0.1:1/v1" }));
+                if let Some(header) = header {
+                    request = request.header(admin_gate::ADMIN_TOKEN_HEADER, header);
+                }
+                async move { request.send().await.expect("request").status().as_u16() }
+            };
+            assert_eq!(probe("t", None).await, 403, "the API token alone");
+            assert_eq!(probe("t", Some("nope")).await, 403, "a wrong admin token");
+            assert_eq!(probe("root", None).await, 502, "the admin token as bearer");
+            assert_eq!(probe("t", Some("root")).await, 502, "the admin header");
+
+            let mime = |method: reqwest::Method| {
+                client
+                    .request(method, format!("http://{addr}/api/mime"))
+                    .bearer_auth("t")
+                    .json(&serde_json::json!({ "mime_type": "text/x-lev" }))
+                    .send()
+            };
+            let read = mime(reqwest::Method::GET).await.expect("request").status();
+            assert_eq!(read.as_u16(), 200, "the read half stays open");
+            let write = mime(reqwest::Method::PUT).await.expect("request").status();
+            assert_eq!(write.as_u16(), 403, "the write half is gated");
+
+            let enabled = |header: Option<&'static str>| {
+                let mut request = client
+                    .post(format!("http://{addr}/graphql"))
+                    .bearer_auth("t")
+                    .json(&serde_json::json!({
+                        "query": "{ config { server { isAdminEnabled } } }"
+                    }));
+                if let Some(header) = header {
+                    request = request.header(admin_gate::ADMIN_TOKEN_HEADER, header);
+                }
+                async move {
+                    let body: serde_json::Value = request
+                        .send()
+                        .await
+                        .expect("request")
+                        .json()
+                        .await
+                        .expect("json");
+                    body["data"]["config"]["server"]["isAdminEnabled"].clone()
+                }
+            };
+            assert_eq!(enabled(None).await, false);
+            assert_eq!(enabled(Some("root")).await, true);
+
+            let _ = stop_tx.send(());
+            let _ = server.await;
+        })
+        .await;
+    }
+
+    /// An admin token that cannot scope anything refuses to start the server.
+    #[tokio::test]
+    async fn execute_refuses_an_admin_token_equal_to_the_api_token() {
+        temp_env::async_with_vars([(admin_gate::ADMIN_TOKEN_ENV, Some("t"))], async {
+            let args = ServeArgs {
+                daemon: Default::default(),
+                exit_on_stdin_eof: false,
+                shutdown_grace_secs: 10,
+                json: false,
+                ready_file: None,
+                port: 0,
+                name: None,
+                host: "127.0.0.1".to_string(),
+                cors: None,
+                token: Some("t".to_string()),
+                allow_admin: false,
+                admin_token: None,
+                print_graphql_schema: false,
+                workdir_root: None,
+                no_remote_yolo: false,
+                tls_cert: None,
+                tls_key: None,
+                no_remote_seed_commands: false,
+                max_concurrent_requests: None,
+                request_timeout_secs: None,
+                spawn_timeout_secs: None,
+            };
+            // Never polled: the server refuses before it would wait to stop.
+            let refused = serve_for_test(
+                args,
+                no_daemon_control(),
+                Box::pin(std::future::pending()),
+                None,
+            )
+            .await
+            .expect_err("refused")
+            .to_string();
+            assert!(refused.contains("must differ"), "{refused}");
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn the_script_write_routes_are_mounted_only_with_allow_admin() {
         let home = tempfile::tempdir().expect("a temp dir");
@@ -3977,6 +4167,7 @@ mod tests {
                     cors: None,
                     token: Some("t".to_string()),
                     allow_admin,
+                    admin_token: None,
                     print_graphql_schema: false,
                     workdir_root: None,
                     no_remote_yolo: false,
@@ -4065,6 +4256,7 @@ mod tests {
             cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
+            admin_token: None,
             print_graphql_schema: false,
             workdir_root: None,
             no_remote_yolo: false,

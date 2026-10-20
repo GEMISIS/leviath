@@ -13,6 +13,7 @@
 use async_graphql::{EmptySubscription, Request, Schema};
 
 use super::mime::{MimeRowWrite, MimeTokensWrite};
+use crate::commands::serve::admin_gate::AdminGate;
 use crate::commands::serve::graphql::mutation::Mutation;
 use crate::commands::serve::graphql::query::Query;
 
@@ -34,7 +35,10 @@ fn schema(allow_admin: bool) -> Schema<Query, Mutation, EmptySubscription> {
     let state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
     Schema::build(Query, Mutation::default(), EmptySubscription)
         .data(state)
-        .data(super::AdminAccess(allow_admin))
+        .data(match allow_admin {
+            true => AdminGate::Open,
+            false => AdminGate::Off,
+        })
         .finish()
 }
 
@@ -1619,7 +1623,7 @@ async fn the_machine_acts_refuse_when_their_own_state_says_no() {
             .id;
         let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
             .data(state.clone())
-            .data(super::AdminAccess(true))
+            .data(AdminGate::Open)
             .finish();
 
         let refused = schema
@@ -2091,7 +2095,7 @@ async fn a_sign_in_that_cannot_take_its_port_is_reported() {
         state.providers.ports = Some(vec![taken]);
         let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
             .data(state)
-            .data(super::AdminAccess(true))
+            .data(AdminGate::Open)
             .finish();
         crate::commands::serve::mcp::TEST_PATHS
             .scope(paths_in(&home), async {
@@ -2476,7 +2480,7 @@ fn schema_over(
 ) -> Schema<Query, Mutation, EmptySubscription> {
     Schema::build(Query, Mutation::default(), EmptySubscription)
         .data(state)
-        .data(super::AdminAccess(true))
+        .data(AdminGate::Open)
         .finish()
 }
 

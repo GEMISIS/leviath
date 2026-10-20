@@ -933,7 +933,7 @@ same list.
   Every agent and every inline graph can then be granted it, with no
   research agent installed. The answer says whether the global copy was
   installed, already current, or replaced, and a current copy is not
-  rewritten. Both need `lev serve --allow-admin`. `bundledTools` and
+  rewritten. Both are admin writes. `bundledTools` and
   `GET /api/tools/bundled` list what can be installed and whether each copy
   is current, with no flag. `tools.install_bundled` in `capabilities` says
   the build serves them.
@@ -947,6 +947,16 @@ same list.
   can name the provider to connect for a model nothing here serves. It is
   read from the tables built into the binary and asks no provider anything.
   Announced as the `models.catalog` capability.
+- `lev serve --admin-token <t>` (or `LEVIATH_API_ADMIN_TOKEN`) scopes admin
+  requests to a second token. The admin routes and GraphQL mutations are
+  mounted, but only a request presenting that token may use them: as its
+  bearer token, or in an `X-Leviath-Admin-Token` header beside the API
+  token, which elevates just that request. Anything else gets `403`
+  (GraphQL `FORBIDDEN`). An admin token wins over `--allow-admin`, must
+  differ from the API token, and is never inherited by a daemon `lev`
+  starts. Announced as `admin.token`. A server without an admin token
+  behaves as before: `--allow-admin` alone still opens the admin routes to
+  every holder of the API token, and without it they are not mounted.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is

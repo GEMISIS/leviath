@@ -53,9 +53,10 @@ fn the_serve_token_and_dotenv_names_are_removed_and_nothing_else() {
         envs,
         [
             (std::ffi::OsStr::new("BRAVE_API_KEY"), None),
+            (std::ffi::OsStr::new("LEVIATH_API_ADMIN_TOKEN"), None),
             (std::ffi::OsStr::new("LEVIATH_API_TOKEN"), None),
         ],
-        "only the serve token and the .env names change, and they are removed"
+        "only the serve tokens and the .env names change, and they are removed"
     );
 }
 
@@ -114,6 +115,7 @@ fn a_child_started_this_way_sees_the_fixed_environment() {
     let mut env_cmd = Command::new("/usr/bin/env");
     env_cmd
         .env("LEVIATH_API_TOKEN", "starter-token")
+        .env("LEVIATH_API_ADMIN_TOKEN", "starter-admin")
         .env("LEV_FROM_DOTENV", "from-project")
         .env("LEVIATH_LAUNCH_PROBE", "kept");
     for (name, value) in cmd.get_envs() {
@@ -125,6 +127,7 @@ fn a_child_started_this_way_sees_the_fixed_environment() {
     let out = env_cmd.output().unwrap();
     let seen = String::from_utf8(out.stdout).unwrap();
     assert!(!seen.contains("LEVIATH_API_TOKEN"), "{seen}");
+    assert!(!seen.contains("LEVIATH_API_ADMIN_TOKEN"), "{seen}");
     assert!(!seen.contains("LEV_FROM_DOTENV"), "{seen}");
     assert!(seen.contains("LEVIATH_LAUNCH_PROBE=kept"), "{seen}");
     assert!(seen.contains("LEVIATH_HOME=/starter/h"), "{seen}");
@@ -146,6 +149,7 @@ fn a_child_started_this_way_sees_the_fixed_environment() {
     env_cmd
         .args(["/C", "set"])
         .env("LEVIATH_API_TOKEN", "starter-token")
+        .env("LEVIATH_API_ADMIN_TOKEN", "starter-admin")
         .env("LEV_FROM_DOTENV", "from-project")
         .env("LEVIATH_LAUNCH_PROBE", "kept");
     for (name, value) in cmd.get_envs() {
@@ -157,6 +161,7 @@ fn a_child_started_this_way_sees_the_fixed_environment() {
     let out = env_cmd.output().unwrap();
     let seen = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(!seen.contains("LEVIATH_API_TOKEN"), "{seen}");
+    assert!(!seen.contains("LEVIATH_API_ADMIN_TOKEN"), "{seen}");
     assert!(!seen.contains("LEV_FROM_DOTENV"), "{seen}");
     assert!(seen.contains("LEVIATH_LAUNCH_PROBE=kept"), "{seen}");
     assert!(
