@@ -54,7 +54,9 @@ a test, so a client generator or an agent can consume the contract directly.
   | `DELETE /api/mcp/servers/{name}` | 404, because nothing else is mounted on that path |
   | `POST /api/update` | 405, because `GET /api/update` is mounted |
   | `POST /api/models/probe` | 404, because nothing else is mounted on that path |
-- **`--workdir-root`** confines run workdirs. **`--no-remote-yolo`** refuses `launch.unattended`
+- **`--workdir-root`** confines run workdirs. Repeat it to allow more than one root; a workdir
+  under any of them is accepted, and `fs.workdir_roots` in the `capabilities` list says the server
+  takes several. **`--no-remote-yolo`** refuses `launch.unattended`
   other than `"off"` and any `launch.allow` list on a spawn, which are one lever rather than two.
   See [refusals only this server makes](#refusals-only-this-server-makes).
 - **`--no-remote-seed-commands`** runs every spawn as if it carried `"launch": {"seed_commands":
@@ -486,7 +488,9 @@ Only the fields you send are changed, and a bad type or rule is a 400.
 model providers and mime checks. `include=candidates` also lists the files nothing declares yet.
 
 `GET /api/fs/dirs` takes absolute paths only, fenced by `--workdir-root`, and `hidden=true`
-includes dot-prefixed names. `POST /api/fs/dirs` uses the same fence, answers `409` when the
+includes dot-prefixed names. Its answer carries `roots`, every root the server allows, and `root`,
+the one the listed directory sits under. Without a path it opens on the server's own directory,
+or on the first root when that directory is under none. `POST /api/fs/dirs` uses the same fence, answers `409` when the
 directory already exists, and is announced as `fs.mkdir`.
 
 ### Routes kept for older clients
@@ -773,7 +777,7 @@ input hears about both in one answer.
 
 | `at` | Refused when |
 |---|---|
-| `workdir` | The workdir sits outside `--workdir-root`. A symlink under the root that points out of it counts as outside |
+| `workdir` | The workdir sits outside every `--workdir-root`. A symlink or `..` that leads out counts as outside |
 | `launch.unattended` | The server runs with `--no-remote-yolo` and the value is anything but `"off"` |
 | `launch.allow` | The server runs with `--no-remote-yolo` and the list is not empty |
 | `delivery.callback.url` | The URL fails the outbound policy: loopback, private and link-local addresses are refused |
@@ -781,8 +785,14 @@ input hears about both in one answer.
 | `source.blueprint_file` | Always. A blueprint is read from a directory only for a caller on this machine |
 
 A request with no `workdir` runs in the directory `lev serve` was started in. Under
-`--workdir-root` that directory is held to the root like any other, and the refusal says the
+`--workdir-root` that directory is held to the roots like any other, and the refusal says the
 request named none.
+
+With several roots, each request picks one by naming a workdir under it. A server started with
+`--workdir-root ~/tasks --workdir-root ~/project` takes a run in `~/tasks/task-7` and a read-only
+look at `~/project` alike, and refuses `~/elsewhere`. `validateSpawn` and `POST /api/runs/validate`
+apply the same check. A run's tools are confined to its own workdir, so a run in one root cannot
+reach into the other.
 
 The callback check is the one a model-supplied URL gets. `[security] allow_local_network = true`
 lets a webhook reach a local service. A raw graph whose fan-out reads a worker from a directory is

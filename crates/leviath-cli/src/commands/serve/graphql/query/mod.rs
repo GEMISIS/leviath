@@ -294,8 +294,8 @@ impl Query {
 
     /// The directories under a path, for a file picker.
     ///
-    /// Confined to `--workdir-root` when the operator set one, which is also
-    /// why `parent` is null at that fence rather than leading above it.
+    /// Confined to the `--workdir-root`s when the operator set any, which is
+    /// also why `parent` is null at that fence rather than leading above it.
     async fn directory(
         &self,
         ctx: &Context<'_>,

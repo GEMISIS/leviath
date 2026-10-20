@@ -82,13 +82,15 @@ pub struct ServeArgs {
     #[arg(long, hide = true)]
     pub print_graphql_schema: bool,
 
-    /// Restrict agent working directories to this root.
+    /// Restrict agent working directories to this root. Repeat it to allow
+    /// several roots; a workdir under any one of them is accepted.
     ///
     /// Without it, `POST /api/runs` accepts any `workdir` - including `/` -
     /// so a token holder can point a tool-executing agent at the whole
-    /// filesystem. Set this to the directory the API is meant to work in.
-    #[arg(long)]
-    pub workdir_root: Option<PathBuf>,
+    /// filesystem. Set this to the directory the API is meant to work in, or
+    /// once per directory when it is meant to work in more than one.
+    #[arg(long = "workdir-root", value_name = "WORKDIR_ROOT")]
+    pub workdir_roots: Vec<PathBuf>,
 
     /// PEM certificate chain to serve HTTPS with. Needs `--tls-key` too.
     ///
@@ -181,4 +183,37 @@ pub struct ServeArgs {
     /// `0` disables the timeout.
     #[arg(long, value_name = "SECS")]
     pub spawn_timeout_secs: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    /// `lev serve`'s flags on their own, as a command line.
+    #[derive(Parser)]
+    struct Serve {
+        #[command(flatten)]
+        args: super::ServeArgs,
+    }
+
+    /// `--workdir-root` may be given more than once, and every root is kept in
+    /// the order given.
+    #[test]
+    fn serve_takes_several_workdir_roots() {
+        let parsed = Serve::parse_from([
+            "serve",
+            "--workdir-root",
+            "/srv/a",
+            "--workdir-root",
+            "/srv/b",
+        ]);
+        assert_eq!(
+            parsed.args.workdir_roots,
+            vec![
+                std::path::PathBuf::from("/srv/a"),
+                std::path::PathBuf::from("/srv/b")
+            ]
+        );
+        assert!(Serve::parse_from(["serve"]).args.workdir_roots.is_empty());
+    }
 }

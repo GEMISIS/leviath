@@ -3973,6 +3973,17 @@ type DirectoryOutput {
 	home: String!
 	"This server's own working directory, for a \"here\" shortcut."
 	cwd: String!
+	"""
+	The `--workdir-root` the listed directory sits under. Null when the
+	server sets none.
+	"""
+	root: String
+	"""
+	Every `--workdir-root` the server sets, in the order given. A run's
+	workdir may sit under any one of them. Empty when it sets none, so any
+	directory may be listed and named.
+	"""
+	roots: [String!]!
 	"The directories inside, by name."
 	entries: [String!]!
 }
@@ -8708,9 +8719,9 @@ type Mutation {
 	Make one directory, so a picker can offer "New Folder" rather than one
 	that refuses.
 	
-	The three refusals are told apart on purpose: a path outside
-	`--workdir-root`, a parent that is not there, and a name already taken are
-	three different things to show somebody.
+	The three refusals are told apart on purpose: a path outside every
+	`--workdir-root`, a parent that is not there, and a name already taken
+	are three different things to show somebody.
 	"""
 	createDirectory(
 		"Where to make it, and what to call it."
@@ -10086,8 +10097,8 @@ type Query {
 	"""
 	The directories under a path, for a file picker.
 	
-	Confined to `--workdir-root` when the operator set one, which is also
-	why `parent` is null at that fence rather than leading above it.
+	Confined to the `--workdir-root`s when the operator set any, which is
+	also why `parent` is null at that fence rather than leading above it.
 	"""
 	directory(
 		"The directory to list. Omitted means this server's own."
@@ -14968,8 +14979,9 @@ input SpawnRunRequest {
 	"The final-output shape the caller wants, over the graph's."
 	output: OutputShapeWrite
 	"""
-	Where the run's tools work. Defaults to this server's own directory,
-	and is refused outside `--workdir-root` when the operator set one.
+	Where the run's tools work. Defaults to this server's own directory.
+	When the operator set `--workdir-root`, once or more, it must sit under
+	one of those roots and is refused otherwise.
 	"""
 	workdir: String
 	"How much the run is trusted with."

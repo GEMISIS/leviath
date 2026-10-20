@@ -1063,6 +1063,14 @@ same list.
   it finishes, and a restart rebuilds the copies. A run with no scope shares
   nothing. The run file layout does not change.
 
+- `lev serve --workdir-root` can be given more than once. A spawn or a dry
+  run (`validateSpawn`, `POST /api/runs/validate`) is accepted when its
+  workdir sits under any one of the roots, so one server can take runs in a
+  task workspaces folder and in a project folder alike. `GET /api/fs/dirs`
+  and GraphQL `Directory` gain `roots`, every root in force, and `Directory`
+  gains `root`, the one the listed directory sits under. The new
+  `fs.workdir_roots` capability announces it. A refused path now names the
+  roots it fell outside.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is

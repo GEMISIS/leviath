@@ -1034,7 +1034,7 @@ mod tests {
             allow_admin: false,
             admin_token: None,
             print_graphql_schema,
-            workdir_root: None,
+            workdir_roots: Vec::new(),
             no_remote_yolo: false,
             tls_cert: None,
             tls_key: None,

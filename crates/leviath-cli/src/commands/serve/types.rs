@@ -125,8 +125,10 @@ impl AppState {
 /// guarded by a field is one refactor away from being reachable.
 #[derive(Debug, Clone, Default)]
 pub(super) struct ServeLimits {
-    /// `--workdir-root`: the directory agent workdirs must sit under.
-    pub(super) workdir_root: Option<PathBuf>,
+    /// `--workdir-root`, once per flag: the directories agent workdirs must
+    /// sit under, any one of them. Empty when the operator set none, which
+    /// fences nothing.
+    pub(super) workdir_roots: Vec<PathBuf>,
     /// `--no-remote-yolo`: whether a spawn request may waive approvals, with
     /// either `"yolo": true` or an `"allow"` list.
     pub(super) no_remote_yolo: bool,
@@ -167,18 +169,47 @@ impl ServeLimits {
     /// Check a requested agent workdir against `--workdir-root`.
     ///
     /// Uses the same symlink-aware containment the file tools use, so a symlink
-    /// under the root cannot be used to point an agent outside it.
+    /// under a root cannot be used to point an agent outside it.
     pub(super) fn check_workdir(&self, workdir: &std::path::Path) -> Result<(), String> {
-        let Some(root) = &self.workdir_root else {
-            return Ok(());
-        };
-        match leviath_core::resolves_within(workdir, root) {
+        match self.fences_in(workdir) {
             true => Ok(()),
             false => Err(format!(
-                "workdir '{}' is outside the configured --workdir-root '{}'",
+                "workdir '{}' is outside {}",
                 workdir.display(),
-                root.display()
+                self.roots_named()
             )),
+        }
+    }
+
+    /// The first configured root `path` resolves inside, or `None` when it
+    /// is under none of them (and always when no root is set).
+    ///
+    /// Both sides are canonicalized, so a `..` or a symlink cannot carry a
+    /// path out of a root while still reading as under it.
+    pub(super) fn root_holding(&self, path: &std::path::Path) -> Option<&std::path::Path> {
+        self.workdir_roots
+            .iter()
+            .map(PathBuf::as_path)
+            .find(|root| leviath_core::resolves_within(path, root))
+    }
+
+    /// Whether a caller may name `path` here: anywhere when no root is set,
+    /// and otherwise only inside one of the roots.
+    pub(super) fn fences_in(&self, path: &std::path::Path) -> bool {
+        self.workdir_roots.is_empty() || self.root_holding(path).is_some()
+    }
+
+    /// The roots, as a refusal names them: the one root, or every root when
+    /// the operator set several.
+    pub(super) fn roots_named(&self) -> String {
+        let quoted: Vec<String> = self
+            .workdir_roots
+            .iter()
+            .map(|root| format!("'{}'", root.display()))
+            .collect();
+        match quoted.as_slice() {
+            [one] => format!("the configured --workdir-root {one}"),
+            many => format!("every configured --workdir-root ({})", many.join(", ")),
         }
     }
 }
@@ -876,8 +907,13 @@ pub(super) struct DirsResp {
     pub(super) home: String,
     /// The serve process's working directory, for the picker's "here" shortcut.
     pub(super) cwd: String,
-    /// The configured `--workdir-root`, or `null` when the server has none.
+    /// The configured `--workdir-root` the listed directory sits under, or
+    /// `null` when the server has none.
     pub(super) root: Option<String>,
+    /// Every configured `--workdir-root`, in the order given. Empty when the
+    /// server has none, so any directory may be listed.
+    #[serde(default)]
+    pub(super) roots: Vec<String>,
     /// The immediate subdirectories, name-sorted. Dotted names are excluded,
     /// and with a root set, so is any symlink that resolves outside it.
     pub(super) dirs: Vec<DirEntry>,
@@ -1208,11 +1244,59 @@ mod tests {
         assert!(open.check_workdir(std::path::Path::new("/")).is_ok());
         let root = tempfile::tempdir().unwrap();
         let rooted = ServeLimits {
-            workdir_root: Some(root.path().to_path_buf()),
+            workdir_roots: vec![root.path().to_path_buf()],
             ..ServeLimits::default()
         };
         assert!(rooted.check_workdir(root.path()).is_ok());
         assert!(rooted.check_workdir(std::path::Path::new("/")).is_err());
+    }
+
+    /// Several `--workdir-root`s: a workdir under any one of them is accepted,
+    /// a `..` that climbs out of every root is refused, and the refusal names
+    /// every root.
+    #[test]
+    fn a_workdir_under_any_of_several_roots_is_accepted() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::create_dir(second.path().join("task")).unwrap();
+        let limits = ServeLimits {
+            workdir_roots: vec![first.path().to_path_buf(), second.path().to_path_buf()],
+            ..ServeLimits::default()
+        };
+        assert!(limits.check_workdir(first.path()).is_ok());
+        let task = second.path().join("task");
+        assert!(limits.check_workdir(&task).is_ok());
+        assert_eq!(limits.root_holding(&task), Some(second.path()));
+
+        let climbed = task.join("..").join("..");
+        assert_eq!(limits.root_holding(&climbed), None);
+        assert_eq!(
+            limits.check_workdir(&climbed).unwrap_err(),
+            format!(
+                "workdir '{}' is outside every configured --workdir-root ('{}', '{}')",
+                climbed.display(),
+                first.path().display(),
+                second.path().display()
+            )
+        );
+    }
+
+    /// A symlink under an allowed root that points out of every root is
+    /// outside, however it is spelled.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_out_of_every_root_is_outside() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let link = first.path().join("out");
+        std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
+        let limits = ServeLimits {
+            workdir_roots: vec![first.path().to_path_buf(), second.path().to_path_buf()],
+            ..ServeLimits::default()
+        };
+        assert!(limits.check_workdir(&link).is_err());
+        assert!(limits.check_workdir(&link.join("deeper")).is_err());
     }
 
     #[test]
@@ -1250,6 +1334,7 @@ mod tests {
             home: "/Users/someone".to_string(),
             cwd: "/work/project".to_string(),
             root: Some("/work".to_string()),
+            roots: vec!["/work".to_string()],
             dirs: vec![DirEntry {
                 name: "src".to_string(),
                 path: "/work/src".to_string(),

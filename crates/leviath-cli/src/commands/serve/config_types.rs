@@ -555,6 +555,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // writes its user approved, rather than starting a second server with
     // `--allow-admin` for each.
     "admin.token",
+    // `--workdir-root` may be given more than once, and a workdir under any
+    // one of the roots is accepted. `roots` on `GET /api/fs/dirs` and on
+    // GraphQL `Directory` lists them all. Announced so a client that keeps
+    // work in more than one place knows one server can take all of it, and
+    // knows to read `roots` rather than the single `root`.
+    "fs.workdir_roots",
 ];
 
 /// `delivery.idempotency_key` on a spawn, which starts one run however many

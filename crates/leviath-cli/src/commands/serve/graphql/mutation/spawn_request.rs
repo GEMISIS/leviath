@@ -270,8 +270,9 @@ pub(crate) struct SpawnRunRequest {
     pub(crate) model: Option<String>,
     /// The final-output shape the caller wants, over the graph's.
     pub(crate) output: Option<OutputShapeWrite>,
-    /// Where the run's tools work. Defaults to this server's own directory,
-    /// and is refused outside `--workdir-root` when the operator set one.
+    /// Where the run's tools work. Defaults to this server's own directory.
+    /// When the operator set `--workdir-root`, once or more, it must sit under
+    /// one of those roots and is refused otherwise.
     pub(crate) workdir: Option<String>,
     /// How much the run is trusted with.
     pub(crate) launch: Option<LaunchWrite>,

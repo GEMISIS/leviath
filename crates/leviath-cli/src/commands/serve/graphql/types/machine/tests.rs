@@ -560,6 +560,8 @@ async fn every_mirrored_function_runs() {
         parent: Some("/home/user".to_string()),
         home: "/home/user".to_string(),
         cwd: "/home/user/projects".to_string(),
+        root: Some("/home/user".to_string()),
+        roots: vec!["/home/user".to_string(), "/srv/work".to_string()],
         entries: vec!["a".to_string(), "b".to_string()],
     }])
     .await;

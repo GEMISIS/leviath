@@ -68,7 +68,7 @@ pub(crate) async fn check_machine(ctx: &Context<'_>) -> async_graphql::Result<Ch
 /// Make one directory, so a picker can offer "New Folder" rather than one
 /// that refuses.
 ///
-/// The three refusals are told apart on purpose: a path outside
+/// The three refusals are told apart on purpose: a path outside every
 /// `--workdir-root`, a parent that is not there, and a name already taken are
 /// three different things to show somebody.
 pub(crate) async fn create_directory(
@@ -76,8 +76,12 @@ pub(crate) async fn create_directory(
     request: CreateDirectoryRequest,
 ) -> async_graphql::Result<CreateDirectoryResult> {
     let state = ctx.data_unchecked::<AppState>().clone();
-    let made = super::super::super::blocking::blocking(move || {
-        super::super::super::fs::made(&state, &request.parent_path, &request.name)
+    let limits = std::sync::Arc::clone(&state.limits);
+    let (made, root) = super::super::super::blocking::blocking(move || {
+        let made = super::super::super::fs::made(&state, &request.parent_path, &request.name)?;
+        let root =
+            super::super::super::fs::root_of(&state.limits, std::path::Path::new(&made.path));
+        Ok::<_, ServeError>((made, root))
     })
     .await
     .gql()?;
@@ -92,6 +96,8 @@ pub(crate) async fn create_directory(
             cwd: super::super::super::fs::picker_cwd()
                 .to_string_lossy()
                 .into_owned(),
+            root,
+            roots: super::super::super::fs::roots_of(&limits),
             // Described rather than listed: a directory that has just been
             // created is empty, and a second read of it could only say so
             // again.

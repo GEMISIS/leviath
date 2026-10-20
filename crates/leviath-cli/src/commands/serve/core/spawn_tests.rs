@@ -34,7 +34,7 @@ fn state(control: leviath_runtime::control_socket::ControlClient, limits: ServeL
 /// seed commands, no webhooks at local addresses.
 fn hardened(root: &std::path::Path) -> ServeLimits {
     ServeLimits {
-        workdir_root: Some(root.to_path_buf()),
+        workdir_roots: vec![root.to_path_buf()],
         no_remote_yolo: true,
         no_remote_seed_commands: true,
         ..ServeLimits::default()
@@ -212,7 +212,7 @@ async fn no_workdir_under_a_root_is_refused_saying_where_it_came_from() {
     };
     let (client, _seen, _dir, _task) = recording(summary.clone());
     let limits = ServeLimits {
-        workdir_root: Some(root.path().to_path_buf()),
+        workdir_roots: vec![root.path().to_path_buf()],
         ..ServeLimits::default()
     };
     let answer = validate(&state(client, limits.clone()), named("coder"))
@@ -236,6 +236,87 @@ async fn no_workdir_under_a_root_is_refused_saying_where_it_came_from() {
         panic!("/ is outside the root")
     };
     assert!(issues.0[0].message.starts_with("workdir '/'"), "{issues}");
+}
+
+/// A server with several `--workdir-root`s starts a run under any one of
+/// them, and a dry run agrees. A workdir under none, `..` included, is
+/// refused before the daemon is asked to start anything, and both front doors
+/// say so with every root named.
+#[tokio::test]
+async fn a_workdir_under_any_of_several_roots_runs_and_one_under_none_is_refused() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    std::fs::create_dir(second.path().join("task")).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let limits = ServeLimits {
+        workdir_roots: vec![first.path().to_path_buf(), second.path().to_path_buf()],
+        ..ServeLimits::default()
+    };
+    let spawned = ControlResponse::Spawned {
+        run_id: "run-1".into(),
+        warnings: Default::default(),
+        deduplicated: false,
+    };
+    for workdir in [first.path().to_path_buf(), second.path().join("task")] {
+        let mut request = named("coder");
+        request.workdir = Some(workdir.clone());
+        let (client, seen, _dir, _task) = recording(spawned.clone());
+        let answer = start(&state(client, limits.clone()), request.clone())
+            .await
+            .unwrap();
+        assert!(matches!(answer, Verdict::Accepted(_)), "{answer:?}");
+        assert_eq!(carried(&seen).workdir, Some(workdir));
+
+        let (client, _seen, _dir, _task) = recording(ControlResponse::Valid {
+            summary: Box::new(summary()),
+        });
+        let answer = validate(&state(client, limits.clone()), request)
+            .await
+            .unwrap();
+        assert!(matches!(answer, Verdict::Accepted(_)), "{answer:?}");
+    }
+
+    let climbed = second.path().join("task").join("..").join("..");
+    for workdir in [outside.path().to_path_buf(), climbed] {
+        let mut request = named("coder");
+        request.workdir = Some(workdir.clone());
+        let (client, seen, _dir, _task) = recording(ControlResponse::Valid {
+            summary: Box::new(summary()),
+        });
+        let Verdict::Rejected(issues) = start(&state(client, limits.clone()), request.clone())
+            .await
+            .unwrap()
+        else {
+            panic!("{} is under no root", workdir.display())
+        };
+        // Asked only for its own issues, never to start the run.
+        assert!(
+            matches!(
+                seen.lock().unwrap().take(),
+                Some(ControlRequest::ValidateSpawn { .. })
+            ),
+            "the daemon was asked to start a refused run"
+        );
+        let expected = format!(
+            "workdir '{}' is outside every configured --workdir-root ('{}', '{}')",
+            workdir.display(),
+            first.path().display(),
+            second.path().display()
+        );
+        assert_eq!(issues.0[0].path.to_string(), "workdir");
+        assert_eq!(issues.0[0].message, expected);
+
+        let (client, _seen, _dir, _task) = recording(ControlResponse::Valid {
+            summary: Box::new(summary()),
+        });
+        let Verdict::Rejected(issues) = validate(&state(client, limits.clone()), request)
+            .await
+            .unwrap()
+        else {
+            panic!("a dry run refuses it too")
+        };
+        assert_eq!(issues.0[0].message, expected);
+    }
 }
 
 /// A blueprint read from a directory is refused over the network, and the

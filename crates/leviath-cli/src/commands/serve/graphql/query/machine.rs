@@ -261,8 +261,8 @@ pub(crate) async fn script(
 
 /// The directories under a path, for a file picker.
 ///
-/// Confined to `--workdir-root` when the operator set one, which is also
-/// why `parent` is null at that fence rather than leading above it.
+/// Confined to the `--workdir-root`s when the operator set any, which is
+/// also why `parent` is null at that fence rather than leading above it.
 pub(crate) async fn directory(
     ctx: &Context<'_>,
     path: Option<String>,
@@ -279,6 +279,8 @@ pub(crate) async fn directory(
         parent: listing.parent,
         home: listing.home,
         cwd: listing.cwd,
+        root: listing.root,
+        roots: listing.roots,
         entries: listing.dirs.into_iter().map(|dir| dir.name).collect(),
     })
 }
