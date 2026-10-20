@@ -933,7 +933,7 @@ same list.
   Every agent and every inline graph can then be granted it, with no
   research agent installed. The answer says whether the global copy was
   installed, already current, or replaced, and a current copy is not
-  rewritten. Both are admin writes. `bundledTools` and
+  rewritten. Both need `lev serve --allow-admin`. `bundledTools` and
   `GET /api/tools/bundled` list what can be installed and whether each copy
   is current, with no flag. `tools.install_bundled` in `capabilities` says
   the build serves them.
