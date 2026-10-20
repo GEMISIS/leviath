@@ -64,6 +64,7 @@ pub(crate) fn env_with(config: Config) -> (DaemonEnv, tempfile::TempDir) {
         blob_store: Arc::new(leviath_core::mime::MemoryBlobStore::new()),
         mcp_overrides: HashMap::new(),
         secrets: None,
+        credentials: crate::daemon::script_host::CredentialSource::none(),
     };
     (env, agents)
 }

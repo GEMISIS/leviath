@@ -408,6 +408,7 @@ pub(crate) fn config_of(
                 unknown_keys: gateway.extra_keys.clone(),
             })
             .collect(),
+        tool_credentials: redacted.tool_credentials,
         allows_file_uploads: redacted.file_uploads,
         blueprint_paths: redacted
             .agent_paths

@@ -70,6 +70,7 @@ async fn the_coder_lands_with_what_the_daemons_systems_read() {
                 blob_store: Arc::new(leviath_core::mime::MemoryBlobStore::new()),
                 mcp_overrides: HashMap::new(),
                 secrets: None,
+                credentials: crate::daemon::script_host::CredentialSource::none(),
             };
             let mut request = SpawnRequest::new(SpawnSource::Blueprint(
                 BlueprintRef::parse("coder").unwrap(),

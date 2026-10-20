@@ -1,6 +1,6 @@
 [blueprint]
 name = "deep-researcher"
-version = "0.6.2"
+version = "0.6.3"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
 
 # gather -> investigate (fan out) -> analyze -> challenge -> synthesize -> polish -> summary

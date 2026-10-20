@@ -8,10 +8,11 @@
 let n = if params.count == () { 5 } else { params.count };
 let results = [];
 
-// Probe BRAVE_API_KEY. env_var throws for two very different reasons and the
-// caller has to tell them apart: the variable is genuinely unset, or it is set
-// and the security layer refused it because the name looks like a credential
-// (`[security] allow_env_vars`). Collapsing both into "" is what let this tool
+// Probe BRAVE_API_KEY. env_var answers from `[tool_credentials]` first, then
+// the daemon's environment. It throws for two very different reasons and the
+// caller has to tell them apart: the key is genuinely unset, or the security
+// layer refused to read the environment because the name looks like a
+// credential (`[security] allow_env_vars`), whether or not it is set there. Collapsing both into "" is what let this tool
 // degrade to Wikipedia for a whole run without anyone noticing.
 let key = "";
 let key_state = "unset";
@@ -56,9 +57,9 @@ if key_state == "ok" {
         engine_problem = `Brave Search failed: ${e}. The key may be invalid or rate limited, or the network is blocked.`;
     }
 } else if key_state == "denied" {
-    engine_problem = "BRAVE_API_KEY is set but the security layer refused to hand it to this script, because the name looks like a credential. Fix: add `allow_env_vars = [\"BRAVE_API_KEY\"]` under `[security]` in ~/.leviath/config.toml, then restart the daemon.";
+    engine_problem = "BRAVE_API_KEY is not stored under `[tool_credentials]`, and the security layer will not read it from the daemon's environment because the name looks like a credential. Fix: get a key from https://brave.com/search/api/ and store it under `[tool_credentials]` in ~/.leviath/config.toml (or through the config API's toolCredentials). No restart is needed.";
 } else {
-    engine_problem = "BRAVE_API_KEY is not set, so no search engine is configured. Fix: get a key from https://brave.com/search/api/, put it in the daemon's environment, and add `allow_env_vars = [\"BRAVE_API_KEY\"]` under `[security]` in ~/.leviath/config.toml.";
+    engine_problem = "BRAVE_API_KEY is not set, so no search engine is configured. Fix: get a key from https://brave.com/search/api/ and store it under `[tool_credentials]` in ~/.leviath/config.toml, or through the config API's toolCredentials. No restart is needed.";
 }
 
 let out = "";

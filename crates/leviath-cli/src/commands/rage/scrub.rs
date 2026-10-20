@@ -159,8 +159,9 @@ fn secret_key(key: &str) -> bool {
 
 /// Whether a table holds values that are credentials as often as not: a
 /// header map, an MCP server's `env`, a script provider's forwarded extras.
+/// `[tool_credentials]` holds nothing else.
 fn secret_table(key: &str) -> bool {
-    key == "env" || key == "extra" || key.contains("header")
+    key == "env" || key == "extra" || key == "tool_credentials" || key.contains("header")
 }
 
 /// Walk a TOML table, redacting string values under secret-shaped keys, and
@@ -327,6 +328,13 @@ pub(crate) fn config_secrets(config: &crate::config::Config) -> Vec<String> {
     ] {
         out.extend(headers.values().cloned());
     }
+    out.extend(
+        config
+            .tool_credentials
+            .names()
+            .iter()
+            .filter_map(|name| config.tool_credentials.get(name).map(str::to_string)),
+    );
     for server in &config.mcp_servers {
         out.extend(server.env.values().cloned());
         out.extend(server.headers.values().cloned());

@@ -15,6 +15,13 @@ same list.
 
 ### Changed
 
+- The bundled `data-analyst` (0.3.3), `researcher` (0.6.4),
+  `deep-researcher` (0.6.3) and `wide-researcher` (0.6.3) say to store a
+  missing Brave key under `[tool_credentials]` when `web_search` has no
+  engine. A key a tool reads from `[tool_credentials]` now wins over a
+  daemon environment variable of the same name. To keep reading the
+  environment's copy, leave the name out of `[tool_credentials]`.
+
 - A stage with `mode = "interactive"` now takes turns with a person. After a
   reply with no tool calls it waits for the next message instead of moving
   on: `waiting_input`, wait reason `awaiting_message` (GraphQL
@@ -878,6 +885,16 @@ same list.
 
 ### Added
 
+- `[tool_credentials]`: secrets script tools read by name, such as the
+  `BRAVE_API_KEY` the bundled `web_search` uses. Store and remove them
+  through the config API with `toolCredentials` on GraphQL `updateConfig`
+  or `tool_credentials` on `PUT /api/config` (both admin writes). A read
+  lists the names only, never a secret. A tool's `env_var("NAME")` asks this
+  table before the daemon's environment, on every call, so a stored key
+  reaches a running run with no restart and needs no `[security]
+  allow_env_vars` entry. The values follow `[security] credential_store`
+  like the provider keys. `lev doctor` counts a stored `BRAVE_API_KEY` as a
+  working search setup, and `lev rage` scrubs the table.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is

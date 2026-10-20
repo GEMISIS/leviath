@@ -702,6 +702,16 @@
         }
       }
     },
+    "tool_credentials": {
+      "type": "object",
+      "description": "Secrets a script tool reads by name with env_var(), asked before the daemon's environment. In keychain mode each value is empty and the secret is in the OS store.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "agent_read_paths": {
       "type": "object",
       "description": "Read grants outside the workdir, keyed by agent name. A blueprint's [read_paths] is inert until granted here.",

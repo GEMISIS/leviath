@@ -379,6 +379,9 @@ pub(crate) struct Config {
     pub(crate) providers: Vec<ProviderConfig>,
     /// The custom model gateways `[model_providers]` declares, name-sorted.
     pub(crate) gateways: Vec<Gateway>,
+    /// The names of the secrets script tools read by name, sorted. A secret
+    /// itself never crosses the wire.
+    pub(crate) tool_credentials: Vec<String>,
     /// Whether providers may be handed files rather than text. Zero data
     /// retention turns uploads off whatever this says.
     pub(crate) allows_file_uploads: bool,

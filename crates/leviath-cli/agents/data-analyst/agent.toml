@@ -1,6 +1,6 @@
 [blueprint]
 name = "data-analyst"
-version = "0.3.2"
+version = "0.3.3"
 description = "Data analyst - searches the web for data on a subject, builds a clean CSV of it, and hands back a ready-to-use summary of what the numbers say"
 
 [graph]

@@ -123,6 +123,41 @@ pub(crate) struct ProviderConfigWrite {
     pub(crate) codex: Option<CodexOptionsWrite>,
 }
 
+/// A secret a script tool reads by name, to store or remove.
+///
+/// A tool asking for `env_var("NAME")` gets the secret stored under `NAME`
+/// on its next call. The value is never read back: `Config.toolCredentials`
+/// lists the names.
+#[derive(Debug, InputObject)]
+pub(crate) struct ToolCredentialWrite {
+    /// The name a tool asks for, spelled like an environment variable.
+    pub(crate) name: String,
+    /// The secret to store under it. Never read back.
+    pub(crate) value: Option<String>,
+    /// Remove the name and its secret. Refused together with `value`, because
+    /// the two say opposite things.
+    #[graphql(default = false)]
+    pub(crate) clear: bool,
+}
+
+impl ToolCredentialWrite {
+    /// The REST route's spelling of this edit: a secret to store, or `None`
+    /// to remove the name.
+    fn into_entry(self) -> Result<(String, Option<String>), ServeError> {
+        match (self.value, self.clear) {
+            (Some(_), true) => Err(ServeError::BadRequest(format!(
+                "tool credential '{}': value and clear say opposite things; send one of them",
+                self.name
+            ))),
+            (None, false) => Err(ServeError::BadRequest(format!(
+                "tool credential '{}': send a value to store or clear to remove it",
+                self.name
+            ))),
+            (value, _) => Ok((self.name, value)),
+        }
+    }
+}
+
 /// The settings that belong to no one provider.
 #[derive(Debug, InputObject)]
 pub(crate) struct ConfigWrite {
@@ -175,6 +210,9 @@ pub(crate) struct UpdateConfigRequest {
     /// Gateways to remove, by name. Removals run after the edits above, so one
     /// request that does both does not depend on the order.
     pub(crate) delete_gateways: Option<Vec<String>>,
+    /// Secrets script tools read by name, to store or remove. A name left out
+    /// is left alone, and one named twice is refused.
+    pub(crate) tool_credentials: Option<Vec<ToolCredentialWrite>>,
 }
 
 /// A request that changes nothing, which every field then fills in.
@@ -202,6 +240,7 @@ fn nothing() -> WriteConfigReq {
         codex_replay_reasoning: None,
         gateways: None,
         remove_gateways: None,
+        tool_credentials: None,
     }
 }
 
@@ -399,6 +438,19 @@ impl UpdateConfigRequest {
                 .collect()
         });
         req.remove_gateways = self.delete_gateways;
+        if let Some(writes) = self.tool_credentials {
+            let mut entries = std::collections::BTreeMap::new();
+            for write in writes {
+                let (name, value) = write.into_entry()?;
+                if entries.contains_key(&name) {
+                    return Err(ServeError::BadRequest(format!(
+                        "tool credential '{name}' is named twice; send it once"
+                    )));
+                }
+                entries.insert(name, value);
+            }
+            req.tool_credentials = Some(entries);
+        }
         Ok(req)
     }
 }

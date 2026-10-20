@@ -1,6 +1,6 @@
 [blueprint]
 name = "wide-researcher"
-version = "0.6.2"
+version = "0.6.3"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
 
 # survey -> investigate (fan out) -> compare -> deep_dive -> challenge -> summarize -> polish -> summary

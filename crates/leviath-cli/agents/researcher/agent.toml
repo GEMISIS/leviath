@@ -1,6 +1,6 @@
 [blueprint]
 name = "researcher"
-version = "0.6.3"
+version = "0.6.4"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
 
 # gather -> analyze -> summarize -> summary

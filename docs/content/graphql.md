@@ -1348,7 +1348,7 @@ it saves. A key is the one exception, and it reads back as `hasKey` on its provi
 Read `config.server.capabilities` before choosing a code path. A 404 also means "no such run", so
 discovering a feature by being refused costs a round trip and tells you less.
 
-A write is a partial edit in five parts, and what none of them mentions is left alone.
+A write is a partial edit in six parts, and what none of them mentions is left alone.
 
 ```graphql
 mutation {
@@ -1363,11 +1363,13 @@ mutation {
       models: ["qwen3-coder"]
     }]
     deleteGateways: ["old-proxy"]
+    toolCredentials: [{ name: "BRAVE_API_KEY", value: "not-a-real-key" }]
   }) {
     config {
       routing { providerOrder overrideModel fallbackModel }
       gateways { name kind models }
       providers { id hasKey isEnabled }
+      toolCredentials
     }
   }
 }
@@ -1378,6 +1380,13 @@ state, spelled in the schema as `ConfigClearable` rather than hidden in a null. 
 `overrideModel` back to nothing is a value you send, not an absence the server has to guess at.
 Every refusal happens before anything is written, so a request that is going to fail leaves the
 file as it was.
+
+`toolCredentials` stores a secret that script tools read by name. The bundled `web_search` asks
+for `BRAVE_API_KEY`, so storing that one turns Brave Search on. Send `{ name, clear: true }` to
+remove one. The secret never comes back: `config.toolCredentials` lists the names only. A
+tool's `env_var("NAME")` answers from these before the daemon's environment, on every call. So a
+key stored here reaches a run that is already going, with no restart and no `allow_env_vars`
+entry. See [tool credentials](/docs/configuration#tool_credentials).
 
 The admin group is mounted only with `--allow-admin`. Without it those fields are invisible to
 introspection and refused with `FORBIDDEN` if you name one anyway. The hiding is a courtesy and the

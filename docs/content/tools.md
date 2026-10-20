@@ -425,18 +425,21 @@ another agent web access, copy them into that agent's `tools/`
 directory, or drop them in `~/.leviath/tools/` to offer them to every agent.
 
 > [!IMPORTANT]
-> Setting `BRAVE_API_KEY` is not enough on its own. The name ends in `KEY`, so Leviath treats it as
-> a credential and refuses to hand it to a script unless you list it explicitly:
+> Store the key as a [tool credential](/docs/configuration#tool_credentials). It takes one table
+> in `config.toml`, or one `toolCredentials` write through the config API:
 >
 > ```toml
-> [security]
-> allow_env_vars = ["BRAVE_API_KEY"]
+> [tool_credentials]
+> BRAVE_API_KEY = "your-brave-search-key"
 > ```
 >
-> Without that line the tool falls back to Wikipedia. It now says so in every result rather than
-> returning a bare empty list, and `lev doctor` reports it as a `search` warning, but the searches
-> still find nothing until you add the line. The grant is config, which the daemon re-reads before
-> every run, so adding it needs no restart. See
+> The tool reads it on its next call, so there is nothing to restart and nothing to allowlist.
+>
+> Exporting `BRAVE_API_KEY` in the daemon's environment still works, but it takes two more steps.
+> The daemon only sees variables it had when it started. And the name ends in `KEY`, so Leviath
+> treats it as a credential and refuses to hand it to a script unless `[security] allow_env_vars`
+> lists it. Miss either and the tool falls back to Wikipedia. It says so in every result, and
+> `lev doctor` reports it as a `search` warning. See
 > [environment variables](/docs/configuration#environment-variables).
 
 > [!IMPORTANT]

@@ -213,6 +213,7 @@ fn written(path: &std::path::Path, req: WriteConfigReq) -> Result<Config, ServeE
     for name in req.remove_gateways.unwrap_or_default() {
         config.model_providers.remove(&name);
     }
+    let forgotten = apply_tool_credentials(&mut config, req.tool_credentials)?;
     // The same check the loader makes, made before the write: a file this
     // would refuse to read back is not a file worth saving.
     for (name, provider) in &config.model_providers {
@@ -224,6 +225,36 @@ fn written(path: &std::path::Path, req: WriteConfigReq) -> Result<Config, ServeE
     config
         .save_to_path(path)
         .map_err(|e| ServeError::Internal(format!("failed to write config: {e}")))?;
+    // After the save, so a write that failed leaves the store as it was.
+    config.forget_tool_credentials(&forgotten);
 
     Ok(config)
+}
+
+/// Store or remove each tool credential `sent` names, and answer with the
+/// names removed, for the credential store to forget once the file is saved.
+///
+/// Every refusal names the credential and never its value, and runs before
+/// anything is saved.
+fn apply_tool_credentials(
+    config: &mut Config,
+    sent: Option<std::collections::BTreeMap<String, Option<String>>>,
+) -> Result<Vec<String>, ServeError> {
+    let mut forgotten = Vec::new();
+    for (name, value) in sent.unwrap_or_default() {
+        crate::config::tool_credentials::check_name(&name).map_err(ServeError::BadRequest)?;
+        match value {
+            None => {
+                config.tool_credentials.remove(&name);
+                forgotten.push(name);
+            }
+            Some(secret) if secret.trim().is_empty() => {
+                return Err(ServeError::BadRequest(format!(
+                    "tool credential '{name}' must not be empty; send null to remove it"
+                )));
+            }
+            Some(secret) => config.tool_credentials.set(&name, &secret),
+        }
+    }
+    Ok(forgotten)
 }

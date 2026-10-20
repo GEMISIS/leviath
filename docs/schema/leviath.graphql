@@ -2074,6 +2074,11 @@ type ConfigOutput {
 	"The custom model gateways `[model_providers]` declares, name-sorted."
 	gateways: [GatewayOutput!]!
 	"""
+	The names of the secrets script tools read by name, sorted. A secret
+	itself never crosses the wire.
+	"""
+	toolCredentials: [String!]!
+	"""
 	Whether providers may be handed files rather than text. Zero data
 	retention turns uploads off whatever this says.
 	"""
@@ -17250,6 +17255,25 @@ type ToolConnection {
 	skipped: [SkippedToolOutput!]!
 }
 
+"""
+A secret a script tool reads by name, to store or remove.
+
+A tool asking for `env_var("NAME")` gets the secret stored under `NAME`
+on its next call. The value is never read back: `Config.toolCredentials`
+lists the names.
+"""
+input ToolCredentialWrite {
+	"The name a tool asks for, spelled like an environment variable."
+	name: String!
+	"The secret to store under it. Never read back."
+	value: String
+	"""
+	Remove the name and its secret. Refused together with `value`, because
+	the two say opposite things.
+	"""
+	clear: Boolean! = false
+}
+
 "A tool as a stage gets it, frozen when the run was resolved."
 type ToolDefOutput {
 	"Its name, as the model calls it."
@@ -18910,6 +18934,11 @@ input UpdateConfigRequest {
 	request that does both does not depend on the order.
 	"""
 	deleteGateways: [String!]
+	"""
+	Secrets script tools read by name, to store or remove. A name left out
+	is left alone, and one named twice is refused.
+	"""
+	toolCredentials: [ToolCredentialWrite!]
 }
 
 "What changing the config left behind."

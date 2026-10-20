@@ -30,8 +30,10 @@ use tokio::process::Command as TokioCommand;
 use crate::config::{ScriptPermission, ScriptToolPermissions, ToolPolicy};
 use crate::daemon::sandbox_manager::SandboxManager;
 
+mod credentials;
 mod http_limits;
 mod permissions;
+pub(crate) use credentials::CredentialSource;
 pub(crate) use http_limits::mirror_process_policy;
 use http_limits::*;
 #[cfg(test)]
@@ -116,6 +118,9 @@ pub(crate) struct DaemonScriptHost {
     /// `[security] allow_env_vars`: credential-shaped environment variables this
     /// agent's scripts may read. Empty by default.
     allow_env_vars: Vec<String>,
+    /// `[tool_credentials]`, asked first on every `env_var` call. Empty
+    /// unless the spawn hands the daemon's live config in.
+    credentials: CredentialSource,
     /// `[security] shell_env`: which of the daemon's variables a script's
     /// `shell()` hands to the child. The same policy the built-in shell tool
     /// applies, so `shell()` is not a way around the `env_var` gate.
@@ -146,6 +151,7 @@ impl DaemonScriptHost {
             shell_timeout: Duration::from_secs(60),
             allow_local_network: false,
             allow_env_vars: Vec::new(),
+            credentials: CredentialSource::none(),
             shell_env: leviath_tools::ShellEnvPolicy::default(),
             writes: None,
             mime: None,
@@ -186,6 +192,13 @@ impl DaemonScriptHost {
     /// from `[security] allow_env_vars`. Consuming builder used at spawn.
     pub(crate) fn with_env_allowlist(mut self, names: Vec<String>) -> Self {
         self.allow_env_vars = names;
+        self
+    }
+
+    /// Answer `env_var` from `[tool_credentials]` before the environment.
+    /// Consuming builder used at spawn.
+    pub(crate) fn with_credentials(mut self, credentials: CredentialSource) -> Self {
+        self.credentials = credentials;
         self
     }
 
@@ -563,6 +576,13 @@ impl ScriptHost for DaemonScriptHost {
         if !self.allow.env_var {
             return Err(denied("env_var"));
         }
+        // A name the operator stored in `[tool_credentials]` was stored for
+        // tools to read, so it needs no allowlist entry. Asked first, and on
+        // every call, so a credential set while the daemon runs is the one
+        // this call gets.
+        if let Some(secret) = self.credentials.get(name) {
+            return Ok(secret);
+        }
         // A script tool ships inside the agent bundle, so this call is
         // attacker-authored in exactly the case that matters. Ordinary variables
         // pass; a credential-shaped name needs the user to have listed it. Two
@@ -570,9 +590,10 @@ impl ScriptHost for DaemonScriptHost {
         // otherwise a working exfiltration path with no prompt in it anywhere.
         if !leviath_core::script_env_allowed(name, &self.allow_env_vars) {
             return Err(format!(
-                "[denied] '{name}' looks like a credential. Add it to `[security] \
-                 allow_env_vars` in ~/.leviath/config.toml if this agent is meant \
-                 to read it."
+                "[denied] '{name}' looks like a credential. Store it under \
+                 `[tool_credentials]` (or through the config API's toolCredentials), \
+                 or add it to `[security] allow_env_vars` in ~/.leviath/config.toml, \
+                 if this agent is meant to read it."
             ));
         }
         self.io.env_var(name)
@@ -1616,6 +1637,45 @@ mod tests {
             .with_env_allowlist(vec!["MY_PROVIDER_KEY".to_string()]);
         assert_eq!(host.env_var("MY_PROVIDER_KEY").unwrap(), "e");
         assert!(host.env_var("ANTHROPIC_API_KEY").is_err());
+    }
+
+    /// A host over a config whose `[tool_credentials]` holds `name`.
+    fn credentials_holding(name: &str, secret: &str) -> CredentialSource {
+        let mut config = crate::config::Config::default();
+        config.tool_credentials.set(name, secret);
+        CredentialSource::fixed(Arc::new(config))
+    }
+
+    /// Issue #974: a credential stored in `[tool_credentials]` is what
+    /// `env_var` answers with, with no allowlist entry and without reaching
+    /// the process environment. A name it does not hold still goes through
+    /// the gate as before.
+    #[test]
+    fn env_var_answers_a_stored_tool_credential_first() {
+        let io = RecordingIo::arc();
+        let host = DaemonScriptHost::with_io(all_allowed(), std::env::temp_dir(), io.clone())
+            .with_credentials(credentials_holding("BRAVE_API_KEY", "sk-brave-stored"));
+        assert_eq!(host.env_var("BRAVE_API_KEY").unwrap(), "sk-brave-stored");
+        assert!(
+            io.calls.lock().unwrap().is_empty(),
+            "a stored credential never asks the environment"
+        );
+        let err = host.env_var("ANTHROPIC_API_KEY").unwrap_err();
+        assert!(err.contains("[tool_credentials]"), "names the fix: {err}");
+        assert_eq!(host.env_var("PATH").unwrap(), "e");
+    }
+
+    /// `[tool_script_permissions] env_var = "deny"` still wins: storing a
+    /// credential does not hand it to a tool the operator denied env access.
+    #[test]
+    fn a_denied_env_var_stays_denied_for_a_stored_credential() {
+        let mut allow = all_allowed();
+        allow.env_var = false;
+        let host = DaemonScriptHost::with_io(allow, std::env::temp_dir(), RecordingIo::arc())
+            .with_credentials(credentials_holding("BRAVE_API_KEY", "sk-brave-stored"));
+        let err = host.env_var("BRAVE_API_KEY").unwrap_err();
+        assert!(err.contains("denied"), "{err}");
+        assert!(!err.contains("sk-brave-stored"), "{err}");
     }
 
     /// A malformed URL is refused rather than passed through for the HTTP client

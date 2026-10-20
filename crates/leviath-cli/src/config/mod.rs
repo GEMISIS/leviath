@@ -27,6 +27,10 @@ pub(crate) use nudge::NudgeSettings;
 // credential store the user chose.
 mod secrets;
 pub(crate) use secrets::{PROVIDER_KEYS, ProviderKey};
+// `[tool_credentials]`: the secrets script tools read by name, kept in the
+// same credential store as the provider keys.
+pub(crate) mod tool_credentials;
+pub use tool_credentials::ToolCredentials;
 
 // Why a config file would not load, kept structured rather than flattened into
 // a string, so the surfaces that have to explain a broken file can point at
@@ -373,6 +377,26 @@ pub struct Config {
     /// takes effect for a path the blueprint also declares.
     #[serde(default)]
     pub agent_read_paths: HashMap<String, ReadPathGrants>,
+
+    /// `[tool_credentials]`: secrets a script tool reads by name, ahead of
+    /// the daemon's environment.
+    ///
+    /// ```toml
+    /// [tool_credentials]
+    /// BRAVE_API_KEY = "..."
+    /// ```
+    ///
+    /// A script's `env_var("BRAVE_API_KEY")` answers from here first, on
+    /// every call, so a key stored through the config API needs no daemon
+    /// restart and no `[security] allow_env_vars` entry. The values follow
+    /// `[security] credential_store`; see [`ToolCredentials`].
+    #[serde(default, skip_serializing_if = "is_empty_credentials")]
+    pub tool_credentials: ToolCredentials,
+}
+
+/// Whether there is no `[tool_credentials]` table worth writing.
+fn is_empty_credentials(credentials: &ToolCredentials) -> bool {
+    *credentials == ToolCredentials::default()
 }
 
 impl Default for Config {
@@ -411,6 +435,7 @@ impl Default for Config {
             mime: MimeConfig::default(),
             mime_types: toml::Table::new(),
             agent_read_paths: HashMap::new(),
+            tool_credentials: ToolCredentials::default(),
         }
     }
 }
@@ -4513,6 +4538,7 @@ enabled = false
         let config = Config {
             update_check: true,
             load_dotenv: false,
+            tool_credentials: ToolCredentials::default(),
             mime: MimeConfig::default(),
             mime_types: toml::Table::new(),
             default_provider: "anthropic".to_string(),

@@ -265,6 +265,7 @@ impl DaemonStarter {
             blob_store: self.blob_store.clone(),
             mcp_overrides: self.policy.current().mcp_overrides,
             secrets: Some(self.secrets()),
+            credentials: crate::daemon::script_host::CredentialSource::live(self.config.clone()),
         }
     }
 

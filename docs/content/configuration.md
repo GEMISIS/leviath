@@ -596,6 +596,38 @@ An agent's declarations mean nothing until one of these grants lands, so `lev va
 checks each declared entry against this file and prints the block above, filled in, for whatever it
 does not find. `lev list` and `lev ps` carry the same counts.
 
+<a id="tool_credentials"></a>
+
+## `[tool_credentials]`
+
+Secrets that script tools read by name. The bundled `web_search` asks for `BRAVE_API_KEY`, so this
+is where its key goes.
+
+```toml
+[tool_credentials]
+BRAVE_API_KEY = "your-brave-search-key"
+```
+
+A script's `env_var("BRAVE_API_KEY")` looks here first and the daemon's environment second. The
+daemon reads this table from the config it has in force at the moment of each call, and it reloads
+`config.toml` within a couple of seconds of a save. So a key you store reaches the next tool call,
+even in a run that is already going. Nothing needs a restart. The daemon's environment cannot do
+that: it is fixed when the daemon starts.
+
+Storing a name here is the grant, so it needs no `[security] allow_env_vars` entry. Every script
+tool that may call `env_var()` can read every name in this table, so store only what your tools
+need. `[tool_script_permissions] env_var = "deny"` still refuses them all.
+
+Names are spelled like environment variables: letters, digits and underscores, not starting with
+a digit. The values follow `[security] credential_store`, like the provider keys. With `file`
+they sit in this file, which is written `0600`. With `keychain` each secret goes to the OS store,
+and the file keeps the name with an empty value.
+
+From a client, store and remove them with `toolCredentials` in GraphQL's `updateConfig` or
+`tool_credentials` on `PUT /api/config`. Both are admin writes, so `lev serve` needs
+`--allow-admin`. A read lists the names and never the secrets. `lev doctor` counts a stored
+`BRAVE_API_KEY` as a working search setup.
+
 ## Tool permissions
 
 `[tool_permissions]` sets a machine-wide ceiling. A blueprint's own `tool_permissions` may
@@ -1365,7 +1397,8 @@ in `~/.leviath/.env` or in the environment of whoever starts the daemon. Other c
 > [!WARNING]
 > A variable whose name looks like a credential is not readable by Rhai scripts through `env_var()`
 > unless you list it in `[security] allow_env_vars`. That closed an exfiltration path where a
-> two-line script tool could read a provider key and POST it elsewhere with no prompt.
+> two-line script tool could read a provider key and POST it elsewhere with no prompt. A key a
+> tool is meant to have belongs in [`[tool_credentials]`](#tool_credentials) instead.
 
 ## Where things live on disk
 

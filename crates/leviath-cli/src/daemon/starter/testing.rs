@@ -137,6 +137,9 @@ pub(crate) fn env_for(world: &World, deps: TestDeps<'_>) -> DaemonEnv {
         blob_store,
         mcp_overrides,
         secrets: None,
+        credentials: crate::daemon::script_host::CredentialSource::fixed(Arc::new(
+            deps.config.clone(),
+        )),
     }
 }
 

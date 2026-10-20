@@ -281,9 +281,19 @@ const SEARCH_KEY: &str = "BRAVE_API_KEY";
 /// The allowlist half needs no such care: it comes from `config.toml`, which
 /// both processes read, and which the daemon re-reads per spawn.
 ///
+/// A key stored in `[tool_credentials]` settles it before any of that: the
+/// script host asks that table first on every call, it needs no allowlist
+/// entry, and both processes read it from the same file.
+///
 /// Warns rather than fails: an install with no search key is perfectly good for
 /// everyone not running a research agent.
 fn search_check(config: &Config, daemon: Option<&DaemonIdentity>) -> Check {
+    if config.tool_credentials.get(SEARCH_KEY).is_some() {
+        return Check::ok(
+            "search",
+            format!("brave ({SEARCH_KEY} stored in [tool_credentials])"),
+        );
+    }
     let allowlisted = leviath_core::script_env_allowed(SEARCH_KEY, &config.security.allow_env_vars);
     let grant_fix = format!(
         "Add `allow_env_vars = [\"{SEARCH_KEY}\"]` under `[security]` in ~/.leviath/config.toml"
@@ -333,8 +343,9 @@ fn search_check(config: &Config, daemon: Option<&DaemonIdentity>) -> Check {
             format!(
                 "no search engine configured: {SEARCH_KEY} is not readable by {whose}, so \
                  research agents fall back to a keyless Wikipedia lookup. Get a key from \
-                 https://brave.com/search/api/ and export it in the shell the daemon starts \
-                 from. {grant_fix}"
+                 https://brave.com/search/api/ and store it under `[tool_credentials]` in \
+                 ~/.leviath/config.toml (or through the config API's toolCredentials), which \
+                 needs no restart and no allowlist entry"
             ),
         ),
     }

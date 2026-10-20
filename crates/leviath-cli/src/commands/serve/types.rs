@@ -1173,6 +1173,7 @@ mod tests {
             codex_verbosity: None,
             codex_replay_reasoning: true,
             gateways: Vec::new(),
+            tool_credentials: Vec::new(),
             agent_paths: vec![],
             mcp_server_count: 0,
             api_version: API_VERSION.to_string(),

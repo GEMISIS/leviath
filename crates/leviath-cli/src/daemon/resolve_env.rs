@@ -85,6 +85,10 @@ pub struct DaemonEnv {
     /// The secret store a resumed run's webhook secret is looked for in.
     /// `None` for an env that only looks stages up and binds no run.
     pub(crate) secrets: Option<leviath_runtime::secret_store::SecretStore>,
+    /// Where a bound run's script tools find `[tool_credentials]`: the
+    /// daemon's live config, so a credential stored mid-run reaches the next
+    /// call.
+    pub(crate) credentials: crate::daemon::script_host::CredentialSource,
 }
 
 impl DaemonEnv {

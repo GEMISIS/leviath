@@ -2135,6 +2135,19 @@ price. Unset is the state most machines want: see
 the only way to get back there through this API, in the same way `remove_gateways` is the only way
 to delete a gateway.
 
+`tool_credentials` is a map from name to secret, for the keys script tools read by name. A string
+stores a secret, `null` removes the name, and a name the map leaves out is left alone:
+
+```json
+{ "tool_credentials": { "BRAVE_API_KEY": "not-a-real-key", "OLD_TOKEN": null } }
+```
+
+`GET /api/config` answers with the names alone, as `tool_credentials: ["BRAVE_API_KEY"]`, and no
+response carries a secret back. An empty string is a 400, as for a provider key. So is a name an
+environment variable could not have. A tool's `env_var("NAME")` asks these first, on every call,
+so the next search of a run already going uses the new key. See
+[tool credentials](/docs/configuration#tool_credentials).
+
 `"override_model": ""` (or `"fallback_model": ""`) is a **400**, not a clear. An empty string is not
 a model id, and a form that posts its empty box should be told rather than quietly lose the
 setting. Nothing is written when it is refused.
