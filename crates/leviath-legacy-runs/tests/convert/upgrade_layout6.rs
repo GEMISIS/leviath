@@ -1,7 +1,7 @@
 //! Run files in binary layout 6, which knew no write paths, upgraded in
 //! place.
 //!
-//! `fixtures/layout-6/run.lvr` was written by a layout-6 build (4b9df080)
+//! `fixtures/layout-6/run.lvr` was written by a layout-6 build (bfcb0632)
 //! against the mock provider: a one-stage run that wrote `docs/a.md` with
 //! `write_file` and finished. `fixtures/layout-6.json` is what that build read
 //! back from the file: the spec, every delta, and the first and latest state.
@@ -27,7 +27,7 @@ fn a_layout_6_run_reads_back_with_no_write_paths_once_upgraded() {
     let dir = tmp
         .path()
         .join("runs")
-        .join("probe5-1792455863-d1819d4faf7c");
+        .join("probe5-1792508424-19166f7cbca2");
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("run.lvr");
     std::fs::copy(fixtures_dir().join("layout-6/run.lvr"), &file).unwrap();
