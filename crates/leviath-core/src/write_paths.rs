@@ -134,6 +134,17 @@ impl WriteFence {
         }
     }
 
+    /// What a call to `tool` that would write `shown` is answered with: the
+    /// tool, the path, and the globs, so the model can correct course. Starts
+    /// with `[blocked]`, so the run's events record the call as blocked.
+    pub fn refusal(&self, tool: &str, shown: &str) -> String {
+        format!(
+            "[blocked] {tool} refused: {shown} is outside this stage's write paths ({}). Write \
+             inside them instead.",
+            self.describe()
+        )
+    }
+
     /// Judge a write to `requested` (relative to `workdir`, or absolute) and
     /// return `Err` with the path as the refusal should show it when the
     /// fence refuses it. An open fence allows everything; whether the path
@@ -147,21 +158,30 @@ impl WriteFence {
             false => workdir.join(requested),
         };
         let lexical = crate::paths::fold_dot_dot(&raw);
-        let shown = lexical
-            .as_deref()
-            .and_then(|p| relative(p, workdir))
-            .unwrap_or(requested.to_string());
         let root = std::fs::canonicalize(workdir).unwrap_or(workdir.to_path_buf());
+        let written = lexical.as_deref().and_then(|p| under(p, workdir, &root));
+        let shown = written.clone().unwrap_or(requested.to_string());
         let real = lexical
             .as_deref()
             .and_then(crate::paths::canonicalize_for_match)
             .and_then(|p| relative(&p, &root));
-        let written = lexical.as_deref().and_then(|p| relative(p, workdir));
         match (written, real) {
             (Some(w), Some(r)) if self.allows(&w) && self.allows(&r) => Ok(()),
             _ => Err(shown),
         }
     }
+}
+
+/// `path` under the workdir as [`relative`] reads it, spelled either the way
+/// `workdir` is or through any other name for it (`/tmp` for `/private/tmp`
+/// on macOS): an ancestor of `path` that resolves to `root`, the workdir's
+/// real path, is the workdir however it is spelled.
+fn under(path: &Path, workdir: &Path, root: &Path) -> Option<String> {
+    relative(path, workdir).or_else(|| {
+        path.ancestors()
+            .find(|a| std::fs::canonicalize(a).is_ok_and(|real| real == root))
+            .and_then(|alias| relative(path, alias))
+    })
 }
 
 /// `path` under `root`, its components joined by `/`. `None` when it is not

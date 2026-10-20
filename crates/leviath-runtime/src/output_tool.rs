@@ -103,6 +103,10 @@ pub(crate) struct OutputContext<'a> {
     /// file at its path: the blueprint's `overwrite_artifacts`, else the
     /// operator's `[mime]` value.
     pub overwrite_artifacts: bool,
+    /// The write paths in force at the stage, which a produced part written
+    /// to disk as an artifact is held to. `None` limits nothing beyond the
+    /// workdir.
+    pub write_fence: Option<&'a leviath_core::write_paths::WriteFence>,
 }
 
 /// Apply a `submit_output` call.
@@ -122,6 +126,7 @@ pub(crate) fn handle_output_tool(
     window: &mut ContextWindow,
 ) -> (String, Option<FinalOutput>) {
     let OutputContext {
+        write_fence,
         spec,
         validators,
         stage,
@@ -245,6 +250,7 @@ pub(crate) fn handle_output_tool(
         &produced,
         sink,
         overwrite_artifacts,
+        write_fence,
     ) {
         Ok(ingested) => ingested,
         Err(message) => return (message, None),

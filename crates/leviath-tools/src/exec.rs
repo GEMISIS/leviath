@@ -78,7 +78,13 @@ pub fn resolve_within(
         anyhow::bail!("path '{}' escapes the working directory", requested);
     };
 
-    if !normalized.starts_with(workdir) {
+    // Spelled through another name for the workdir (`/tmp` for `/private/tmp`
+    // on macOS) is still inside it: what it resolves to decides.
+    let aliased = || {
+        leviath_core::canonicalize_for_match(&normalized)
+            .is_some_and(|real| real.starts_with(workdir))
+    };
+    if !normalized.starts_with(workdir) && !aliased() {
         // Names the workspace and what to do instead. "Denied" on its own
         // sends an agent looking for a different way out, and it spends
         // iterations - which the stage's budget is charged for - finding

@@ -576,6 +576,12 @@ pub(crate) fn dispatch_tools(
         let routing_stage = blueprint
             .zip(cursor)
             .and_then(|(spec, cur)| spec.0.graph.stages.get(cur.index));
+        // The write paths in force at this stage, for the tools answered
+        // inline that write files: `context_export` and `submit_output`'s
+        // produced artifacts. The tool lane holds every other write to them.
+        let write_fence = blueprint.zip(cursor).map(|(spec, cur)| {
+            leviath_core::write_paths::WriteFence::new(&spec.0.write_layers(cur.index))
+        });
 
         // Apply context_* tools inline (they need world access); collect the rest
         // for the async lane. A taint-gated agent's outbound call that would leak
@@ -739,6 +745,7 @@ pub(crate) fn dispatch_tools(
                     &c.arguments,
                     &mut window,
                     &crate::mime_tools::MimeToolContext {
+                        write_fence: write_fence.as_ref(),
                         mime: &mime,
                         entity,
                         run_id: &state.agent_id,
@@ -871,6 +878,7 @@ pub(crate) fn dispatch_tools(
                 let (text, output) = crate::output_tool::handle_output_tool(
                     &c.arguments,
                     &crate::output_tool::OutputContext {
+                        write_fence: write_fence.as_ref(),
                         spec: stage_inf.output.as_ref(),
                         validators,
                         stage: &state.current_stage,

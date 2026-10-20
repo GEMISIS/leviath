@@ -4437,6 +4437,23 @@ fn write_paths_beside_shell_or_mcp_are_flagged() {
     );
     assert_eq!(codes(&asked), ["write-paths-shell"]);
 
+    let scripts = write_paths_fixture(fenced, "tools = [\"@scripts\"]");
+    assert_eq!(codes(&scripts), ["write-paths-script-shell"]);
+    let scripts_denied = write_paths_fixture(
+        &format!("{fenced}\nscript_permissions = {{ shell = \"deny\" }}"),
+        "tools = [\"@scripts\"]",
+    );
+    assert_eq!(codes(&scripts_denied), Vec::<&str>::new());
+    let everything = write_paths_fixture(fenced, "tools = [\"@all\"]");
+    assert_eq!(
+        codes(&everything),
+        [
+            "write-paths-shell",
+            "write-paths-script-shell",
+            "write-paths-mcp"
+        ]
+    );
+
     let mcp = write_paths_fixture(fenced, "tools = [\"@mcp\"]");
     assert_eq!(codes(&mcp), ["write-paths-mcp"]);
     let connected = write_paths_fixture(fenced, "connectors = [\"files\"]");

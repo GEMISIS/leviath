@@ -161,6 +161,16 @@ same list.
   as a stage naming it would. Before, the run started and never summarized
   anything. Name a model the provider carries (`lev models list --provider
   <name>`), or leave the provider off so the user's preference picks one.
+- The working directory's own fence on a shell line's redirects now follows
+  `cd`, `pushd` and `popd`, and reads `>&word` as a write to `word` unless
+  `word` is a descriptor number or `-`. `cd /tmp && echo x > f` and
+  `echo x >&/tmp/f` were let through; both are refused now, and so is a
+  redirect after a `cd` to somewhere not spelled out (`cd -`, `cd $DIR`).
+  A dangling symlink in a write's path is refused by every write tool,
+  since the write would follow it to wherever it points, and an absolute
+  path through another name for the workdir (`/tmp` for `/private/tmp`) is
+  accepted as inside it. There is no switch back; redirect to a path from
+  the workdir instead of after a `cd`.
 - **Breaking.** Run files move to binary layout 7: a graph and its stages
   carry `write_paths`, and a run's launch policy the write-path layers it
   inherited. The daemon upgrades layout-6 files at start, the original kept
@@ -980,10 +990,12 @@ same list.
 - `write_paths`: globs, relative to the workdir, that a stage's writes must
   match. Set them under `[graph]`, on a stage (which only narrows the
   graph's), or on a spawn request's `launch` (GraphQL `LaunchWrite.writePaths`).
-  `write_file`, `edit_file`, `shell` redirects and a script tool's
-  `write_file` and `shell()` redirects outside them are refused before they
-  run, whatever the permissions say, and the refusal names the globs. Paths
-  are judged as written and as symlinks resolve them. Child runs and fan-out
+  `write_file`, `edit_file`, `context_export`, a part `submit_output` writes
+  to disk as an artifact, `shell` redirects, and a script tool's `write_file`
+  and `shell()` redirects outside them are refused before they run, whatever
+  the permissions say, and the refusal names the globs. Paths are judged as
+  written and as symlinks resolve them. A program `shell` runs (`cp`, `mv`,
+  `tee`) is not checked, only the redirects on its line. Child runs and fan-out
   workers inherit the write paths in force where their parent was, under any
   of their own. `lev validate` refuses a glob that leaves the workdir, and
   warns when a stage with write paths can still run `shell`

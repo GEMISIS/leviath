@@ -121,6 +121,7 @@ fn place_produced(
     bytes: &[u8],
     sha256: &str,
     overwrite: bool,
+    fence: Option<(&leviath_core::write_paths::WriteFence, &std::path::Path)>,
 ) -> Result<String, String> {
     let (path, dest) = match std::fs::read(full) {
         Ok(existing) if sha256_hex(&existing) == sha256 => return Ok(path.to_string()),
@@ -148,6 +149,13 @@ fn place_produced(
             )
         }
     };
+    // Held to the stage's write paths like any other write, at the path it
+    // really lands on, which may be the one beside the name it was given.
+    if let Some((fence, workdir)) = fence
+        && let Err(shown) = fence.check(&path, workdir)
+    {
+        return Err(fence.refusal("submit_output", &shown));
+    }
     // Written to the path as given, whose directory must exist - the same as a
     // regular artifact, which is a file already on disk. A name with a missing
     // parent fails here with the reason, rather than silently making the tree.
@@ -164,6 +172,7 @@ pub(super) fn resolve(
     produced: &[Part],
     sink: Option<&PartSink<'_>>,
     overwrite: bool,
+    fence: Option<&leviath_core::write_paths::WriteFence>,
 ) -> Result<Ingested, String> {
     let named = listed(args)?;
     if named.is_empty() {
@@ -220,7 +229,14 @@ pub(super) fn resolve(
         // part answers to is read from the workdir, as a file the run wrote.
         let (bytes, path) = match produced_part(&item.path, produced, sink)? {
             Some((bytes, sha256)) => {
-                let path = place_produced(&item.path, &full, &bytes, &sha256, overwrite)?;
+                let path = place_produced(
+                    &item.path,
+                    &full,
+                    &bytes,
+                    &sha256,
+                    overwrite,
+                    fence.map(|f| (f, workdir)),
+                )?;
                 if path != item.path {
                     moved.push(format!(
                         "'{}' already held a different file, so '{}' was written beside it \
@@ -348,7 +364,16 @@ mod tests {
             "big.bin",
             "",
         ]});
-        let out = resolve(&args, Some(dir.path()), &specs(), &[], Some(&sink), false).unwrap();
+        let out = resolve(
+            &args,
+            Some(dir.path()),
+            &specs(),
+            &[],
+            Some(&sink),
+            false,
+            None,
+        )
+        .unwrap();
         let names: Vec<&str> = out.records.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["final", "notes.md", "notes", "big.bin"]);
         assert_eq!(out.records[0].mime_type.as_str(), "video/mp4");
@@ -369,10 +394,19 @@ mod tests {
         let args = json!({"artifacts": [
             {"name": "final", "path": "cut.mp4"}, {"name": "final", "path": "cut.mp4"}
         ]});
-        let out = resolve(&args, Some(dir.path()), &specs(), &[], Some(&sink), false).unwrap();
+        let out = resolve(
+            &args,
+            Some(dir.path()),
+            &specs(),
+            &[],
+            Some(&sink),
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(out.records.len(), 1);
         // Without a sink: typed by the built-in registry, nothing stored.
-        let out = resolve(&args, Some(dir.path()), &[], &[], None, false).unwrap();
+        let out = resolve(&args, Some(dir.path()), &[], &[], None, false, None).unwrap();
         assert_eq!(out.records[0].mime_type.as_str(), "video/mp4");
         assert!(out.parts.is_empty());
     }
@@ -409,7 +443,8 @@ mod tests {
             (json!({"artifacts": ["missing.mp4"]}), "neither a file"),
         ];
         for (args, expect) in cases {
-            let err = resolve(&args, Some(dir.path()), &specs(), &[], None, false).unwrap_err();
+            let err =
+                resolve(&args, Some(dir.path()), &specs(), &[], None, false, None).unwrap_err();
             assert!(err.contains(expect), "{args}: {err}");
         }
         let err = resolve(
@@ -419,12 +454,13 @@ mod tests {
             &[],
             None,
             false,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("working directory"), "{err}");
         // Nothing declared, nothing named: nothing to check.
         assert!(
-            resolve(&json!({}), None, &[], &[], None, false)
+            resolve(&json!({}), None, &[], &[], None, false, None)
                 .unwrap()
                 .records
                 .is_empty()
@@ -468,6 +504,7 @@ mod tests {
             &[],
             Some(&sink),
             false,
+            None,
         )
         .unwrap();
         assert_eq!(out.records.len(), 1);
