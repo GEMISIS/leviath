@@ -379,6 +379,19 @@ impl<'a> Validator<'a> {
             {
                 self.need_region(at.field("kind").field("source"), source, &names);
             }
+            if region.name.as_str() == crate::shared_region::SHARED_REGION
+                && !matches!(region.kind, RegionKind::Keyed { .. })
+            {
+                self.issue(
+                    at.field("kind"),
+                    IssueCode::WrongType,
+                    format!(
+                        "region \"{}\" holds one record per run sharing it, so it has to be keyed",
+                        region.name
+                    ),
+                )
+                .hint = Some("declare it with kind = \"keyed\"".to_string());
+            }
             if let Budget::Percent { percent, min, max } = &region.budget {
                 if !(*percent > 0.0 && *percent <= 1.0) {
                     self.issue(

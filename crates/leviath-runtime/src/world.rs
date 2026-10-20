@@ -650,7 +650,12 @@ impl PipelineWorld {
                 // on a prompt is already wearing its marker and is exempt; and
                 // before persistence, so the failure reaches the run file on the
                 // same tick rather than waiting for the next one.
-                fail_wedged_runs,
+                //
+                // Then the shared regions: a run that finished or failed on
+                // this tick drops out of its scope before persistence, so the
+                // other runs' files never hold a record from a run that ended.
+                // Paired for the 20-system `.chain()` limit, as above.
+                (fail_wedged_runs, crate::shared_region::sync_shared_regions).chain(),
                 dispatch_persistence,
                 // After persistence: a merged fan-out worker is only slimmed
                 // once its terminal snapshot has been dispatched to the lane,

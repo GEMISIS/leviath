@@ -123,6 +123,7 @@ pub mod runfile;
 pub(crate) mod runtime_info_tool;
 pub mod script_provider;
 pub mod secret_store;
+pub mod shared_region;
 pub mod spec;
 pub(crate) mod stage_seeds;
 pub mod state;

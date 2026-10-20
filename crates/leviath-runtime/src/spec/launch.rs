@@ -202,6 +202,8 @@ pub struct Delivery {
     #[serde(default)]
     pub callback: Option<Callback>,
     /// The caller's labels, carried through untouched and shown with the run.
+    /// One is also read: `leviath.context_scope` names the scope whose
+    /// shared region (`shared_intents`) the run takes part in.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
     /// The caller's name for this spawn. A request sent again with the same

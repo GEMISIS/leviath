@@ -346,8 +346,10 @@ with `lev run --request` or over ACP gets its callback only when a `lev serve` i
 same machine as the run finishes. With no server running, nothing is sent and the run says nothing
 about it.
 
-`metadata` is a table of text labels: a ticket, a tenant, a batch. Nothing in the run reads them.
-They come back unchanged with the run, and the run search looks through them.
+`metadata` is a table of text labels: a ticket, a tenant, a batch. Nothing in the run reads them,
+except `leviath.context_scope`, which puts the run in a [shared
+scope](/docs/context#sharing-a-region-across-runs). They come back unchanged with the run, and the
+run search looks through them.
 
 `idempotency_key` is your name for the spawn: 1 to 128 letters, digits, `.`, `_`, `:` or `-`. Send
 the same request again under it and the daemon answers with the run the first one started, and
