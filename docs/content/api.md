@@ -2688,7 +2688,8 @@ curl -X POST http://localhost:3000/api/runs \
 
 `delivery.callback.url` has to pass the server's outbound policy, or the spawn is refused; see
 [refusals only this server makes](#refusals-only-this-server-makes). `delivery.metadata` is a map of
-your own string labels, carried on the run's record as `metadata`.
+your own string labels, carried on the run's record as `metadata`. One key is read:
+`leviath.context_scope` puts the run in a [shared scope](/docs/context#sharing-a-region-across-runs).
 
 Five things to know about the delivery.
 

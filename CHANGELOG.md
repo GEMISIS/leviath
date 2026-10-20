@@ -61,6 +61,10 @@ same list.
   why. Interactive stages are unchanged. There is no switch
   for the old behaviour; a stage that should keep working after it answers
   can call `submit_output` last.
+- A region named `shared_intents` is now the region runs in one scope share
+  (see Added), so a graph that declares it with any kind but `keyed` is
+  refused at spawn, and `context_write` on it always writes the run's own
+  key. To keep the old behaviour, rename the region.
 - A stage with `mode = "interactive"` now takes turns with a person. After a
   reply with no tool calls it waits for the next message instead of moving
   on: `waiting_input`, wait reason `awaiting_message` (GraphQL
@@ -1046,6 +1050,16 @@ same list.
   count: the `submit_output` calls a stage made after a visit to it already
   held an answer. Run files move to layout 8; layout 2 to 7 files are
   upgraded at daemon start, with no resubmissions counted.
+
+- Shared context regions: runs on one project can see what the others plan
+  to change while they work. A graph declares a keyed region named
+  `shared_intents`, and runs spawned with the same
+  `delivery.metadata["leviath.context_scope"]` share it. Each run owns one
+  record under its run id, written with `context_write` and cleared with
+  `context_delete`; other runs' records are read-only. A run's record leaves
+  the others when it finishes, and a restart rebuilds the copies. A run with
+  no scope shares nothing. The run file layout does not change.
+
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is

@@ -777,8 +777,12 @@ pub(crate) fn dispatch_tools(
                 continue;
             }
             if crate::context_tools::is_context_tool(&c.name) {
-                let text =
-                    crate::context_tools::handle_context_tool(&c.name, &c.arguments, &mut window);
+                let text = crate::shared_region::handle_context_tool(
+                    &c.name,
+                    &c.arguments,
+                    &state.agent_id,
+                    &mut window,
+                );
                 context_results.push((c.tool_id.clone(), text));
                 continue;
             }

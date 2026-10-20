@@ -401,7 +401,7 @@
             "type": "string"
           },
           "default": {},
-          "description": "The caller's labels, carried through untouched and shown with the run.",
+          "description": "The caller's labels, carried through untouched and shown with the run.\nOne is also read: `leviath.context_scope` names the scope whose\nshared region (`shared_intents`) the run takes part in.",
           "type": "object"
         }
       },

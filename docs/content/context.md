@@ -761,6 +761,60 @@ can read more*. It is a better failure mode than a silent omission the agent nev
 is also a genuinely different memory discipline from mechanical eviction, worth reaching for when
 the region holds findings rather than transcript.
 
+## Sharing a region across runs
+
+Several runs can work on one project at once, each in its own copy of it. Each lands its changes
+when it finishes, and two runs that rewrote the same file meet only then. A shared region lets each
+run say what it plans to change while it works, so the others can steer around it.
+
+Sharing takes two things. The graph declares a keyed region named `shared_intents`:
+
+```toml
+[[graph.layout.regions]]
+name = "shared_intents"
+kind = "keyed"
+budget = 2000
+description = "What each run on this project plans to change, and why"
+describe_in_prompt = true
+```
+
+And the run is spawned into a scope, named in its delivery metadata under `leviath.context_scope`:
+
+```json
+{
+  "source": { "blueprint": { "name": "coder" } },
+  "inputs": { "task": "Add a search field to the header" },
+  "delivery": { "metadata": { "leviath.context_scope": "github.com/acme/shop" } }
+}
+```
+
+Runs spawned with the same scope share the region. A run spawned with no scope shares nothing, and
+its region holds only what it wrote itself. The scope is any text you choose. Name the project in
+it, such as its repository, because every run on this daemon with the same scope sees the records.
+The run's working directory plays no part, so runs in separate copies of one project still share.
+
+Each run owns one record in the region, kept under its run id:
+
+| Call | What it does in `shared_intents` |
+|---|---|
+| `context_write` | Replaces the run's own record, whatever key it names |
+| `context_append` | Adds a line to the run's own record |
+| `context_delete` | Clears the run's own record |
+| `context_read`, `context_list` | Read any run's record |
+
+A call that names another run's key, or deletes by `index` or `oldest`, is refused: those records
+belong to other runs. A record bigger than the region's whole budget is refused too.
+
+The daemon copies every record into every other run in the scope, so each sees them on its next
+turn. A run that finishes, fails or is cancelled leaves the scope, and its record leaves the other
+runs' regions. Its own window keeps what it wrote. A restart rebuilds the copies from what each run
+wrote. The region's budget holds every record, the run's own first. Records that do not fit are left
+out of that run's view, so size the budget for the number of runs you expect at once.
+
+A stage that should read the region lists it in its layout like any other region. Tell the model in
+the stage's prompt what to write: the files it plans to change and what for. Keep it short; other
+runs read it on every turn.
+
 ## Routing tool output
 
 Tool output is **routed** to a region, so exploration lands in a persistent codebase region rather
