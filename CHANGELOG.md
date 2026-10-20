@@ -526,6 +526,9 @@ same list.
   value's `Debug` printed its TLS secret) and RUSTSEC-2026-0347 (data
   buffered before a rejected Encrypted Client Hello went to the outer
   server).
+- **Security.** rustls-webpki is 0.103.16, past RUSTSEC-2026-0382: a
+  certificate chain through one of the distrusted emSign intermediates, whose
+  private keys are now public, could pass verification.
 - **Security.** The outbound policy also refuses all of `0.0.0.0/8`, IPv6
   documentation (`2001:db8::/32`) and local-use NAT64 (`64:ff9b:1::/48`). An
   IPv6 address that carries an IPv4 one, as IPv4-compatible (`::a.b.c.d`),
