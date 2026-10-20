@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::spec::graph::{CompactionDef, InstallDef, MimeRowDef, Needs, NudgeDef, TokenRule};
+use crate::spec::launch::LaunchPolicy;
 use crate::spec::names::ProfileName;
 use crate::spec::request::{Attachment, Bytes};
 use crate::state::context::PartBody;
@@ -106,6 +107,7 @@ async fn the_operator_can_record_every_runs_model_input() {
     let child = Caller::Child {
         parent: n("p-1"),
         policy: spec.launch.clone(),
+        answers_questions: true,
         depth: 0,
     };
     let resolved = resolve(&raw(graph()), &child, &env, ResolveMode::Spawn)
@@ -175,6 +177,86 @@ async fn a_named_profile_decides_what_the_run_answers_for_itself() {
 
     request.launch.unattended = Unattended::All;
     let spec = spawn(&request, &env).await.unwrap().spec;
+    assert_eq!(spec.auto_answers, AutoAnswers::all());
+}
+
+/// `allow_questions` keeps the model's questions for a person while the
+/// rest of the unattended setting stands: the tools that ask are offered,
+/// and checkpoints and the gate still answer themselves.
+#[tokio::test]
+async fn allowing_questions_keeps_them_for_a_person_and_waives_the_rest() {
+    let env = asking_tools();
+    let mut request = raw(graph());
+    request.launch.unattended = Unattended::All;
+    request.launch.allow_questions = true;
+    let spec = spawn(&request, &env).await.unwrap().spec;
+    assert_eq!(
+        spec.auto_answers,
+        AutoAnswers {
+            questions: false,
+            checkpoints: true,
+            gate: true,
+        }
+    );
+    assert_eq!(spec.launch.unattended, Unattended::All);
+    assert_eq!(names(&spec, 0), ["read_file", "ask_user_text"]);
+    assert_eq!(
+        crate::spec::summary::SpawnSummary::of(&spec).attention,
+        "approvals waived; questions still reach the user"
+    );
+
+    request.launch.unattended = Unattended::Profile(n::<ProfileName>("quiet"));
+    let spec = spawn(&request, &env).await.unwrap().spec;
+    assert!(!spec.auto_answers.questions && spec.auto_answers.gate);
+    assert_eq!(names(&spec, 0), ["read_file", "ask_user_text"]);
+
+    // An attended run's questions reach a person either way.
+    request.launch.unattended = Unattended::Off;
+    let spec = spawn(&request, &env).await.unwrap().spec;
+    assert_eq!(spec.auto_answers, AutoAnswers::default());
+}
+
+/// A run started by one whose questions reach a person keeps its own for
+/// one, whatever it asked for: sub-agents and fan-out workers alike.
+#[tokio::test]
+async fn a_child_of_a_run_that_keeps_its_questions_keeps_its_own() {
+    let env = asking_tools();
+    let mut request = raw(graph());
+    request.launch.unattended = Unattended::All;
+    let parent = LaunchPolicy::top_level(&request.launch, 3, true);
+    let child = Caller::Child {
+        parent: n("p-1"),
+        policy: parent.clone(),
+        answers_questions: false,
+        depth: 0,
+    };
+    let worker = Caller::Worker {
+        parent: n("p-1"),
+        policy: parent.clone(),
+        answers_questions: false,
+        depth: 0,
+        stage: Some(n("build")),
+        item: "item-1".to_string(),
+    };
+    for caller in [&child, &worker] {
+        let spec = resolve(&request, caller, &env, ResolveMode::Spawn)
+            .await
+            .unwrap()
+            .spec;
+        assert_eq!(spec.launch.unattended, Unattended::All);
+        assert!(!spec.auto_answers.questions && spec.auto_answers.checkpoints);
+        assert_eq!(names(&spec, 0), ["read_file", "ask_user_text"]);
+    }
+    let answering = Caller::Child {
+        parent: n("p-1"),
+        policy: parent,
+        answers_questions: true,
+        depth: 0,
+    };
+    let spec = resolve(&request, &answering, &env, ResolveMode::Spawn)
+        .await
+        .unwrap()
+        .spec;
     assert_eq!(spec.auto_answers, AutoAnswers::all());
 }
 

@@ -185,6 +185,11 @@ pub(crate) struct SpawnSummary {
     pub(crate) inputs: Vec<InputEntry>,
     /// What it would be trusted with.
     pub(crate) launch: LaunchPolicy,
+    /// What it would answer for itself instead of asking a person.
+    pub(crate) auto_answers: AutoAnswers,
+    /// Who would answer its prompts, in a line: "approvals waived; questions
+    /// still reach the user", say.
+    pub(crate) attention: String,
     /// The directory its tools would work in.
     pub(crate) workdir: String,
     /// What may keep the run from ever finishing: stages it can reach and
@@ -202,6 +207,8 @@ impl From<&CoreSummary> for SpawnSummary {
             stages: summary.stages.iter().map(StageSummary::from).collect(),
             inputs: entries(&summary.inputs),
             launch: LaunchPolicy::from(&summary.launch),
+            auto_answers: AutoAnswers::from(&summary.auto_answers),
+            attention: summary.attention.clone(),
             workdir: summary.workdir.display().to_string(),
             warnings: summary
                 .warnings

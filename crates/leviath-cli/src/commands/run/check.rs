@@ -80,6 +80,7 @@ pub(crate) fn check_report(summary: &SpawnSummary, json: bool) -> String {
         Unattended::Profile(name) => format!("under the '{name}' profile"),
     };
     lines.push(format!("  unattended: {unattended}"));
+    lines.push(format!("  prompts:   {}", summary.attention));
     if !launch.allow.is_empty() {
         let allow: Vec<&str> = launch.allow.iter().map(|t| t.as_str()).collect();
         lines.push(format!("  allowed:   {}", allow.join(", ")));

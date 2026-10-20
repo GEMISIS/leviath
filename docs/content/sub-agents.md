@@ -117,11 +117,13 @@ its own. Leviath narrows that policy against the parent's before the child start
 | `allow` | Only the tools both approve outright |
 | Depth | At most one less than the parent's |
 | Seed commands | Only when both allow them |
+| Questions | Kept for a person when the parent keeps its own |
 
 Both tools ask for the parent's `unattended` setting, so a child of a `--yolo=careful` run runs
 under `careful`. They ask for nothing in `allow`, so a child approves no tool outright that its
 config does not. `spawn_agent`'s `max_child_depth` can ask for a shallower tree, never a
-deeper one. Fan-out workers never run seed commands, since the parent already scoped the work. See
+deeper one. Fan-out workers never run seed commands, since the parent already scoped the work. A
+child of a run started with `--allow-questions` keeps the model's questions for a person too. See
 [launch policy](/docs/starting-a-run#launch-policy) for what each setting means.
 
 ## Fan-out

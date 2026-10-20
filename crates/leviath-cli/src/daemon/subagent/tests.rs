@@ -363,6 +363,8 @@ fn summary() -> leviath_runtime::spec::summary::SpawnSummary {
             1,
             false,
         ),
+        auto_answers: Default::default(),
+        attention: String::new(),
         workdir: std::path::PathBuf::from("/w"),
         warnings: Default::default(),
     }

@@ -538,6 +538,7 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
         model: args.model,
         workdir: &workdir,
         yolo: args.yolo,
+        allow_questions: args.allow_questions,
         allow: args.allow,
         max_depth: args.max_depth,
         regions: args.regions,

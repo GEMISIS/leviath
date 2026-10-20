@@ -151,6 +151,7 @@ async fn a_spawn_carries_every_field_it_was_given() {
             assert!(!request.launch.seed_commands);
             assert!(request.launch.capture_model_input);
             assert_eq!(request.launch.write_paths, ["docs/**"]);
+            assert!(request.launch.allow_questions);
             let callback = request.delivery.callback.as_ref().expect("a callback");
             assert_eq!(callback.url.as_str(), "https://1.1.1.1/hook");
             assert_eq!(callback.secret.as_ref().map(|s| s.expose()), Some("shh"));
@@ -215,6 +216,7 @@ async fn a_spawn_carries_every_field_it_was_given() {
                     "seedCommands": false,
                     "captureModelInput": true,
                     "writePaths": ["docs/**"],
+                    "allowQuestions": true,
                 },
                 "delivery": {
                     "callback": { "url": "https://1.1.1.1/hook", "secret": "shh" },
@@ -665,6 +667,8 @@ fn brief() -> leviath_runtime::spec::summary::SpawnSummary {
             capture_model_input: false,
             write_paths: vec![vec!["docs/**".to_string()]],
         },
+        auto_answers: Default::default(),
+        attention: String::new(),
         workdir: "/work".into(),
         warnings: Default::default(),
     }
@@ -886,6 +890,7 @@ fn every_spawn_write_shape_round_trips() {
         seed_commands: true,
         capture_model_input: false,
         write_paths: Some(vec!["docs/**".to_string()]),
+        allow_questions: true,
     });
     round_trip(&CallbackWrite {
         url: "https://example.com".to_string(),

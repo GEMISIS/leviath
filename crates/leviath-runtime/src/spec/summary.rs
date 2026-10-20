@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use super::inputs::InputValues;
 use super::issues::SpawnIssues;
-use super::launch::LaunchPolicy;
+use super::launch::{LaunchPolicy, Unattended};
 use super::names::{ModelId, ProviderName, RunId, StageName, ToolName};
-use super::run_spec::{RunSpec, SpecOrigin};
+use super::run_spec::{AutoAnswers, RunSpec, SpecOrigin};
 
 /// A resolved run, in brief.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -30,6 +30,13 @@ pub struct SpawnSummary {
     pub inputs: InputValues,
     /// What it would be trusted with.
     pub launch: LaunchPolicy,
+    /// What it would answer for itself instead of asking a person.
+    #[serde(default)]
+    pub auto_answers: AutoAnswers,
+    /// Who would answer its prompts, in a line: "approvals waived; questions
+    /// still reach the user", say.
+    #[serde(default)]
+    pub attention: String,
     /// The directory its tools would work in.
     pub workdir: PathBuf,
     /// What may keep it from ever finishing: stages it can reach and never
@@ -90,10 +97,27 @@ impl SpawnSummary {
                 .collect(),
             inputs: spec.inputs.clone(),
             launch: spec.launch.clone(),
+            auto_answers: spec.auto_answers,
+            attention: attention(&spec.launch.unattended, &spec.auto_answers),
             workdir: spec.placement.workdir.clone(),
             warnings: spec.warnings(),
         }
     }
+}
+
+/// Who answers a run's prompts, in a line: its tool approvals, as its
+/// unattended setting has them, and the model's own questions.
+pub fn attention(unattended: &Unattended, answers: &AutoAnswers) -> String {
+    let approvals = match unattended {
+        Unattended::Off => return "a person answers every approval and question".to_string(),
+        Unattended::All => "approvals waived".to_string(),
+        Unattended::Profile(name) => format!("approvals as the yolo profile \"{name}\" says"),
+    };
+    let questions = match answers.questions {
+        true => "the run answers its own questions",
+        false => "questions still reach the user",
+    };
+    format!("{approvals}; {questions}")
 }
 
 #[cfg(test)]
@@ -117,10 +141,40 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(summary.launch, spec.launch);
+        assert_eq!(summary.auto_answers, spec.auto_answers);
+        assert_eq!(
+            summary.attention,
+            attention(&spec.launch.unattended, &spec.auto_answers)
+        );
         let json = serde_json::to_string(&summary).unwrap();
         assert_eq!(
             serde_json::from_str::<SpawnSummary>(&json).unwrap(),
             summary
+        );
+    }
+
+    /// The line says what goes ahead without a person, and whether the
+    /// model's questions still come to one.
+    #[test]
+    fn attention_says_who_answers_approvals_and_questions() {
+        let kept = AutoAnswers::default();
+        let answered = AutoAnswers::all();
+        let careful = Unattended::Profile(crate::spec::names::ProfileName::new("careful").unwrap());
+        assert_eq!(
+            attention(&Unattended::Off, &kept),
+            "a person answers every approval and question"
+        );
+        assert_eq!(
+            attention(&Unattended::All, &answered),
+            "approvals waived; the run answers its own questions"
+        );
+        assert_eq!(
+            attention(&Unattended::All, &kept),
+            "approvals waived; questions still reach the user"
+        );
+        assert_eq!(
+            attention(&careful, &kept),
+            "approvals as the yolo profile \"careful\" says; questions still reach the user"
         );
     }
 

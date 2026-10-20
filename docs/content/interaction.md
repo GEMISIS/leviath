@@ -74,6 +74,31 @@ call until the answer comes back, then continues with it:
 > fan-out workers inherit it, and it survives a daemon restart. Otherwise a child could stop
 > on a prompt nobody was watching for and take its parent down with it.
 
+### Tool approvals and agent questions
+
+An unattended run waives two different kinds of prompt, and you can keep the second.
+
+| | Tool approval | Agent question |
+|---|---|---|
+| Who raises it | Leviath, before a tool marked `ask` runs | The model, by calling an `ask_user_*` tool |
+| What it asks | May this call run? | Something only you know, such as which account to use |
+| Under `--yolo` | Approved, unless a rule denies the call | Not offered; the model decides alone |
+| Under `--yolo --allow-questions` | Approved, unless a rule denies the call | Offered, and waits for your answer |
+
+`--allow-questions` on `lev run`, or `launch.allow_questions = true` in a
+[spawn request](/docs/starting-a-run#launch-policy), keeps the five tools above for the model.
+Everything else unattended waives stays waived: tool approvals, stage checkpoints and the taint
+gate. A `deny` rule, an `outside_workdir = "deny"` and a `write_paths` limit still refuse a call,
+because unattended never overrides a refusal. Sub-agents and fan-out workers of such a run keep
+their questions too, and `runtime_info` tells the model a person is there to answer. A dry run's
+summary says so in a line: `approvals waived; questions still reach the user`.
+
+A kept question waits as it would in an attended run, so answer it with `lev respond`, the
+dashboard or the API. By default it waits until somebody does. Set `[limits]
+interaction_timeout_secs` to bound the wait; when it runs out, the model is told no answer came
+and decides for itself. A yolo profile with `questions = "ask"` gives the same split from
+`yolo.toml`.
+
 ## When nobody answers
 
 Every prompt on this page waits on a person, and by default it waits until one answers. A run

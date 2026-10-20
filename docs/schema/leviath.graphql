@@ -6730,6 +6730,15 @@ input LaunchWrite {
 	that leaves the workdir is refused.
 	"""
 	writePaths: [String!]
+	"""
+	Keep the model's own questions (`ask_user_*` and the like) for a
+	person while `unattended` waives the rest. The tools that ask are
+	offered, and a question waits for an answer as in an attended run.
+	Every child run and fan-out worker keeps its questions too. Nothing
+	changes for an attended run. Allowed on a server started with
+	`--no-remote-yolo`, since it only asks a person more.
+	"""
+	allowQuestions: Boolean! = false
 }
 
 "One line of the ledger was written."
@@ -15053,6 +15062,13 @@ type SpawnSummaryOutput {
 	inputs: [InputEntryOutput!]!
 	"What it would be trusted with."
 	launch: LaunchPolicyOutput!
+	"What it would answer for itself instead of asking a person."
+	autoAnswers: AutoAnswersOutput!
+	"""
+	Who would answer its prompts, in a line: "approvals waived; questions
+	still reach the user", say.
+	"""
+	attention: String!
 	"The directory its tools would work in."
 	workdir: String!
 	"""

@@ -74,6 +74,12 @@ same list.
   key unless the key names another run's record. To keep the old
   behaviour, rename the region.
 
+- `runtime_info` now reports `unattended: false`, and says a person is there
+  to answer, in an unattended run whose questions still reach a person: one
+  started with `allow_questions`, or under a yolo profile with
+  `questions = "ask"`. It reported `true` there before, which told the model
+  nobody would answer a question that would in fact wait for one. There is
+  no switch back; a run that answers its own questions still reports `true`.
 - A stage with `mode = "interactive"` now takes turns with a person. After a
   reply with no tool calls it waits for the next message instead of moving
   on: `waiting_input`, wait reason `awaiting_message` (GraphQL
@@ -1078,6 +1084,21 @@ same list.
   gains `root`, the one the listed directory sits under. The new
   `fs.workdir_roots` capability announces it. A refused path now names the
   roots it fell outside.
+- `launch.allow_questions` on a spawn request (GraphQL
+  `launch.allowQuestions`, `lev run --allow-questions`) splits what an
+  unattended run waives: tool approvals, checkpoints and the taint gate go
+  ahead as `unattended` says, while the model keeps `ask_user_*`,
+  `edit_document` and `present_for_review`, and a question waits for a
+  person as in an attended run, bounded by `[limits]
+  interaction_timeout_secs` when that is set. Sub-agents and fan-out workers
+  of such a run keep their questions too. Denied tools, `outside_workdir =
+  "deny"` and `write_paths` still refuse. `--no-remote-yolo` allows it,
+  since it only asks a person more. Nothing changes for an attended run.
+- A dry run's summary (`lev run --check`, `POST /api/runs/validate`,
+  `validateSpawn`) carries `auto_answers` (GraphQL `autoAnswers`) and
+  `attention`, a line saying who answers the run's prompts, such as
+  "approvals waived; questions still reach the user". `lev run --check`
+  prints it as `prompts:`.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is

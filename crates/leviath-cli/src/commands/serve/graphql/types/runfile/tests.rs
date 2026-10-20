@@ -1098,6 +1098,8 @@ impl Probe {
             stages: Vec::new(),
             inputs: input_values(),
             launch: spec().launch,
+            auto_answers: Default::default(),
+            attention: String::new(),
             workdir: "/work".into(),
             warnings: Default::default(),
         })

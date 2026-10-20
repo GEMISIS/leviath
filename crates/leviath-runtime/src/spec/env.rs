@@ -35,6 +35,9 @@ pub enum Caller {
         parent: RunId,
         /// The parent's policy, which the child's is narrowed against.
         policy: LaunchPolicy,
+        /// Whether the parent answers the model's questions itself. A child
+        /// of a parent whose questions reach a person keeps its own for one.
+        answers_questions: bool,
         /// The parent's depth.
         depth: u8,
     },
@@ -44,6 +47,9 @@ pub enum Caller {
         parent: RunId,
         /// The parent's policy.
         policy: LaunchPolicy,
+        /// Whether the parent answers the model's questions itself, as for a
+        /// child.
+        answers_questions: bool,
         /// The parent's depth.
         depth: u8,
         /// The stage the worker runs, for a same-graph worker.
@@ -59,6 +65,21 @@ impl Caller {
         match self {
             Self::Worker { item, .. } => Some(item),
             Self::TopLevel | Self::Child { .. } => None,
+        }
+    }
+
+    /// Whether the run that asks lets a new run answer the model's questions
+    /// for itself. A person or program asking for a top-level run leaves that
+    /// to the request; a parent whose questions reach a person does not.
+    pub fn answers_questions(&self) -> bool {
+        match self {
+            Self::TopLevel => true,
+            Self::Child {
+                answers_questions, ..
+            }
+            | Self::Worker {
+                answers_questions, ..
+            } => *answers_questions,
         }
     }
 }

@@ -138,7 +138,7 @@ pub async fn resolve(
     regions::required_messages(&src.graph, &mut issues);
     inputs::check_blueprints(&src.graph, &checked, env, &mut issues).await;
     let (launch, placement) = launch::decide(request, caller, &src.graph, &limits, &mut issues);
-    let auto_answers = launch::auto_answers(&launch, env, &mut issues);
+    let auto_answers = launch::auto_answers(&launch, &request.launch, caller, env, &mut issues);
     if !graph_ok {
         stages::check_models(&src.graph, request, &src.at, env, &mut issues).await;
         return Err(issues);

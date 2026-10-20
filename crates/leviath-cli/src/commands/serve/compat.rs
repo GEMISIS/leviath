@@ -250,6 +250,7 @@ fn launch_of(
         no_seed_commands: body.no_seed_commands,
         output,
         capture_model_input: body.capture_model_input,
+        allow_questions: false,
         metadata: body.metadata,
         callback_url: body.callback_url,
         callback_secret: body.callback_secret,

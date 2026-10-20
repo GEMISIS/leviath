@@ -1407,6 +1407,10 @@
           },
           "type": "array"
         },
+        "allow_questions": {
+          "description": "Keep the model's own questions (`ask_user_*` and the like) for a\nperson while `unattended` waives the rest: the tools that ask are\noffered, and a question waits for an answer as in an attended run.\nTool approvals stay as `unattended` says. Nothing changes for an\nattended run, whose questions reach a person anyway. Every child run\nand fan-out worker keeps its questions too. Written only when set, so\na daemon that predates it reads a request without it as before.",
+          "type": "boolean"
+        },
         "capture_model_input": {
           "default": false,
           "description": "Whether to record every request sent to the model, for debugging.",

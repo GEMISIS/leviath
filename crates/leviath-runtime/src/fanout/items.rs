@@ -466,6 +466,7 @@ pub(crate) fn worker_request(
     let caller = Caller::Worker {
         parent: parent.run_id.clone(),
         policy: parent.policy_for_children(fanning_stage),
+        answers_questions: parent.auto_answers.questions,
         depth: u8::try_from(depth).unwrap_or(u8::MAX),
         stage: match &worker.runs {
             WorkerSource::Stage(stage) => Some(stage.clone()),
@@ -1050,6 +1051,7 @@ mod tests {
                     write_paths: layers(&[&["**"], &["docs/**"], &["docs/panels/**"]]),
                     ..parent.launch.clone()
                 },
+                answers_questions: parent.auto_answers.questions,
                 depth: 1,
                 stage: Some(stage_name("w")),
                 item: "a".to_string(),
@@ -1071,6 +1073,7 @@ mod tests {
                     write_paths: layers(&[&["**"], &["docs/**"]]),
                     ..parent.launch.clone()
                 },
+                answers_questions: parent.auto_answers.questions,
                 depth: u8::MAX,
                 stage: None,
                 item: "a".to_string(),

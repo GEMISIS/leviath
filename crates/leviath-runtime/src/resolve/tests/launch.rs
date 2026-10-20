@@ -18,6 +18,7 @@ fn child(depth: u8) -> Caller {
     Caller::Child {
         parent: n("parent-1"),
         policy: parent_policy(depth),
+        answers_questions: true,
         depth: 1,
     }
 }
@@ -84,6 +85,7 @@ async fn write_paths_are_checked_and_a_child_inherits_them() {
             write_paths: vec![vec!["docs/**".into()]],
             ..parent_policy(2)
         },
+        answers_questions: true,
         depth: 1,
     };
     let resolved = resolve(&request, &fenced, &Fake::default(), ResolveMode::Spawn)
@@ -145,6 +147,7 @@ fn worker(stage: Option<&str>) -> Caller {
     Caller::Worker {
         parent: n("parent-1"),
         policy: parent_policy(2),
+        answers_questions: true,
         depth: 0,
         stage: stage.map(n::<StageName>),
         item: "item-1".to_string(),
@@ -240,6 +243,7 @@ async fn a_parent_that_turned_commands_off_turns_them_off_for_its_child() {
     let caller = Caller::Child {
         parent: n("p"),
         policy,
+        answers_questions: true,
         depth: 0,
     };
     let env = Fake::default();

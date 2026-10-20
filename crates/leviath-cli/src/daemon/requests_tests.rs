@@ -96,6 +96,7 @@ fn every_flag_reaches_the_request() {
         no_seed_commands: true,
         output: Some(leviath_core::output::OutputSpec::default()),
         capture_model_input: true,
+        allow_questions: true,
         metadata: HashMap::from([("k".to_string(), "v".to_string())]),
         callback_url: Some("https://example.com/hook".to_string()),
         callback_secret: Some("s".to_string()),
@@ -126,6 +127,7 @@ fn every_flag_reaches_the_request() {
     );
     assert!(!request.launch.seed_commands);
     assert!(request.launch.capture_model_input);
+    assert!(request.launch.allow_questions);
     assert_eq!(request.delivery.metadata["k"], "v");
     let callback = request.delivery.callback.unwrap();
     assert_eq!(callback.url.as_str(), "https://example.com/hook");

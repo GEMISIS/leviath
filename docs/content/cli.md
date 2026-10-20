@@ -72,6 +72,7 @@ lev run --request nightly.toml
 | `-m`, `--model <MODEL>` | Model override for the whole run, as `provider/model` or a bare model name. Fan-out workers and sub-agents inherit it |
 | `--workdir <DIR>` | Working directory for the run, defaulting to where you ran the command. See below |
 | `--yolo[=PROFILE]` | Run unattended, or under a named profile from `yolo.toml`. The equals sign is required. See below |
+| `--allow-questions` | With `--yolo`, still bring the model's own questions to you. See below |
 | `--allow <TOOL>` | Allow one tool outright. Repeatable |
 | `--max-depth <N>` | Override the blueprint's maximum sub-agent tree depth |
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions for this run |
@@ -103,6 +104,14 @@ approval, because everything after that gate writes code. `lev run --yolo` print
 before the run starts, and `lev validate` reports it as `holds-under-yolo`.
 
 `--yolo` can turn an `ask` into an `allow`, but it can never lift a `deny`.
+
+**`--allow-questions`** keeps the model's questions while `--yolo` waives the rest. Tool calls are
+still approved without asking, but `ask_user_text`, `ask_user_choice`, `ask_user_confirm`,
+`edit_document` and `present_for_review` stay offered, and a question waits for
+[`lev respond`](/docs/interaction) as in an attended run. Sub-agents and fan-out workers keep their
+questions too. It is for a run that should not stop for every command but should still ask before
+a one-way door. Without `--yolo` it changes nothing. See
+[Tool approvals and agent questions](/docs/interaction#tool-approvals-and-agent-questions).
 
 **`--yolo=<profile>`** is `--yolo` taken apart. A profile in [`yolo.toml`](/docs/yolo)
 says which tool calls and shell commands run unprompted, which still go through the ordinary
@@ -240,6 +249,7 @@ release-notes would run (blueprint release-notes@a4adce5110b52cc26e95bb6ef879985
   starts in: gather
   workdir:   /srv/repo
   unattended: no
+  prompts:   a person answers every approval and question
   max depth: 3
   inputs:
     audience = users
@@ -1235,7 +1245,7 @@ Start the [REST and WebSocket API](/docs/api).
 | `--allow-admin` | off | Mount the MCP administration and config-write routes |
 | `--admin-token <TOKEN>` | unset | Mount the admin routes for requests that present this token only. Overrides `LEVIATH_API_ADMIN_TOKEN`. See [scoping admin requests](/docs/api#scoping-admin-requests-to-a-token) |
 | `--workdir-root <PATH>` | unset | Restrict agent working directories to this root. Repeat it to allow several roots |
-| `--no-remote-yolo` | off | Refuse a spawn request whose `launch.unattended` is not `off`, or that sets `launch.allow` |
+| `--no-remote-yolo` | off | Refuse a spawn request whose `launch.unattended` is not `off`, or that sets `launch.allow`. `launch.allow_questions` is allowed |
 | `--no-remote-seed-commands` | off | Treat every spawn as `launch.seed_commands = false`, so command seeds never run for a run started over the API |
 | `--max-concurrent-requests <N>` | `[serve]` key, else `64` | Requests in flight before the next is answered 503. `0` disables the cap. Websocket routes are not counted |
 | `--request-timeout-secs <SECS>` | `[serve]` key, else `30` | Seconds a request may take before it is answered 408. `0` disables the deadline. Websocket routes are not timed |

@@ -47,6 +47,9 @@ pub(crate) struct TaskLaunch {
     pub output: Option<leviath_core::output::OutputSpec>,
     /// Record every request sent to the model.
     pub capture_model_input: bool,
+    /// Keep the model's own questions for a person while `unattended`
+    /// waives the rest.
+    pub allow_questions: bool,
     /// The caller's labels for the run.
     pub metadata: HashMap<String, String>,
     /// A webhook to call when the run ends.
@@ -165,6 +168,7 @@ impl TaskLaunch {
             seed_commands: !self.no_seed_commands,
             capture_model_input: self.capture_model_input,
             write_paths: Vec::new(),
+            allow_questions: self.allow_questions,
         };
         let callback = self
             .callback_url

@@ -6942,11 +6942,13 @@ fn runtime_info_is_answered_from_the_world_and_never_reaches_the_lane() {
             Staged::from(st)
         })
         .collect();
+    let mut spec = spec_of(blueprint(stages));
+    std::sync::Arc::make_mut(&mut spec.0).auto_answers = crate::spec::run_spec::AutoAnswers::all();
     let e = world
         .spawn((
             agent_state(),
             metadata,
-            spec_of(blueprint(stages)),
+            spec,
             offers,
             result,
             conv_window(),
@@ -7015,6 +7017,48 @@ fn runtime_info_is_answered_from_the_world_and_never_reaches_the_lane() {
             .is_some_and(|g| g.contains("ask_user_text")),
         "an unattended run is told which tools nobody will answer"
     );
+}
+
+/// An unattended run that keeps the model's questions for a person says a
+/// person is there, so the model asks rather than deciding alone.
+#[test]
+fn runtime_info_says_a_person_answers_when_an_unattended_run_keeps_its_questions() {
+    let mut world = World::new();
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    let (offers, result) = infer_with(vec![tc("c1", "runtime_info")]);
+    let mut metadata = run_metadata();
+    metadata.unattended = leviath_core::Unattended::All;
+    let mut spec = spec_of(blueprint(vec![Staged::from(tg::stage("s"))]));
+    std::sync::Arc::make_mut(&mut spec.0).auto_answers = crate::spec::run_spec::AutoAnswers {
+        questions: false,
+        ..crate::spec::run_spec::AutoAnswers::all()
+    };
+    let e = world
+        .spawn((
+            agent_state(),
+            metadata,
+            spec,
+            offers,
+            result,
+            conv_window(),
+            StageCursor { index: 0 },
+            ReadyForTools,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
+    s.run(&mut world);
+    let window = world.get::<ContextWindow>(e).expect("the window survives");
+    let text = window
+        .regions
+        .iter()
+        .flat_map(|r| r.content.iter().map(|entry| entry.content.clone()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("\"unattended\": false"), "{text}");
+    assert!(text.contains("A person is available to answer"), "{text}");
 }
 
 /// The stage-entry refresh, end to end through the two systems that implement
