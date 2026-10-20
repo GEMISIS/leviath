@@ -743,7 +743,10 @@ pub(crate) fn dispatch_tools(
                     total_iterations: state.iteration,
                     provider_model: (&stage_inf.provider_name, &stage_inf.model),
                     tools: stage_inf.tools.iter().map(|t| t.name.as_str()).collect(),
-                    unattended: metadata.is_some_and(|m| m.unattended.is_on()),
+                    // Whether anyone answers the model's questions, which an
+                    // unattended run that keeps them (`launch.allow_questions`,
+                    // a profile's `questions = "ask"`) still has.
+                    unattended: blueprint.is_some_and(|spec| spec.0.auto_answers.questions),
                     workdir: metadata.map(|m| m.workdir.as_str()),
                 };
                 let text = crate::runtime_info_tool::handle_runtime_info(&facts, &window);

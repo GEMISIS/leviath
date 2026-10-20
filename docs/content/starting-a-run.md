@@ -288,9 +288,18 @@ gets.
 | `seed_commands` | `true` | Whether region seeds that run a shell command may run |
 | `capture_model_input` | `false` | Record every request sent to the model |
 | `write_paths` | `[]` | Globs every write of the run must match, on top of its graph's |
+| `allow_questions` | `false` | With `unattended` on, the model's own questions still come to you |
 
 `unattended = "all"` is what `--yolo` sends, and `{ profile = "careful" }` is `--yolo=careful`. A
 profile names a section of `yolo.toml`, described in [Yolo profiles](/docs/yolo).
+
+`allow_questions = true` is what `--allow-questions` sends. It splits what unattended waives. Tool
+approvals, checkpoints and the taint gate go ahead as `unattended` says. The model keeps
+`ask_user_text`, `ask_user_choice`, `ask_user_confirm`, `edit_document` and `present_for_review`,
+and a question it asks waits for you as in an attended run. Use it when a run should not stop for
+every command but should still ask before a one-way door, such as which account to deploy to. See
+[Agent-raised questions](/docs/interaction#agent-raised-questions) for how long such a question
+waits. An attended run already brings every question to you, so there it changes nothing.
 
 The operator's settings bound every request. Seed commands run only when the operator allows them,
 whoever asks. A server started with `--no-remote-yolo` refuses `unattended` and `allow` from the
@@ -309,6 +318,7 @@ daemon narrows that request against its parent's policy:
 | `seed_commands` | only when both allow them |
 | `capture_model_input` | what the child asked for |
 | `write_paths` | every layer in force where the parent was, plus its own |
+| `allow_questions` | kept when the parent keeps its questions, whatever the child asked for |
 
 A child's writes have to match the write paths of its parent's stage as well as its own. See
 [limiting where a stage writes](/docs/security#limiting-where-a-stage-writes).
@@ -378,6 +388,7 @@ release-notes would run (blueprint release-notes@a4adce5110b52cc26e95bb6ef879985
   starts in: gather
   workdir:   /home/ana/project
   unattended: yes
+  prompts:   approvals waived; the run answers its own questions
   max depth: 0
   inputs:
     audience = developers

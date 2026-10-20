@@ -262,6 +262,7 @@ binds = [{ region = "task" }]
         let caller = Caller::Worker {
             parent: spec.run_id.clone(),
             policy: spec.launch.clone(),
+            answers_questions: spec.auto_answers.questions,
             depth: 0,
             stage: stage.map(|s| leviath_runtime::spec::names::StageName::new(s).unwrap()),
             item: "item-1".to_string(),

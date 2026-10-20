@@ -213,6 +213,14 @@ pub(crate) struct LaunchWrite {
     /// its stages set. Child runs and fan-out workers inherit them. A glob
     /// that leaves the workdir is refused.
     pub(crate) write_paths: Option<Vec<String>>,
+    /// Keep the model's own questions (`ask_user_*` and the like) for a
+    /// person while `unattended` waives the rest. The tools that ask are
+    /// offered, and a question waits for an answer as in an attended run.
+    /// Every child run and fan-out worker keeps its questions too. Nothing
+    /// changes for an attended run. Allowed on a server started with
+    /// `--no-remote-yolo`, since it only asks a person more.
+    #[graphql(default = false)]
+    pub(crate) allow_questions: bool,
 }
 
 /// Where a run posts its events, and what signs them.
@@ -565,6 +573,7 @@ fn launch(write: LaunchWrite, issues: &mut SpawnIssues) -> LaunchRequest {
         seed_commands: write.seed_commands,
         capture_model_input: write.capture_model_input,
         write_paths: write.write_paths.unwrap_or_default(),
+        allow_questions: write.allow_questions,
     }
 }
 
@@ -667,6 +676,7 @@ impl SpawnRunRequest {
                 seed_commands: true,
                 capture_model_input: false,
                 write_paths: None,
+                allow_questions: false,
             }),
             &mut issues,
         );

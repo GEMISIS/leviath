@@ -396,6 +396,7 @@ async fn the_tree_of_runs_is_linked_back_together() {
                 capture_model_input: false,
                 write_paths: Vec::new(),
             },
+            answers_questions: true,
             depth: 0,
         };
         crate::daemon::block_on::block_on(recorder.start_with(env, request, caller))

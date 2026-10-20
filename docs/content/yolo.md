@@ -174,7 +174,9 @@ default to `auto`, because a profile is a kind of `--yolo` until it says otherwi
 
 `questions = "ask"` keeps the tools that wait on a person advertised, and their calls come to
 you. Those are `ask_user_*`, `present_for_review` and `edit_document`. Under `auto` they are
-not offered, and a stray call is answered for the model.
+not offered, and a stray call is answered for the model. A spawn can keep them without a profile:
+`lev run --yolo --allow-questions`, or `launch.allow_questions = true` in a request. That also
+overrides `questions = "auto"` for the run it starts.
 
 `checkpoints = "ask"` opens every stage checkpoint. Under `auto` they approve themselves,
 apart from any the blueprint marks `unattended = "ask"`. `gate` is the same choice for

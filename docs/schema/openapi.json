@@ -6828,7 +6828,7 @@
       },
       "SpawnSummary": {
         "type": "object",
-        "description": "A resolved run, in brief: its title, where its graph came from, its entry stage, each stage's provider, model and tools, its checked inputs, its launch policy, its workdir, and its warnings: stages it could reach and never leave, each a SpawnIssue with code may_never_finish. A run with warnings still starts."
+        "description": "A resolved run, in brief: its title, where its graph came from, its entry stage, each stage's provider, model and tools, its checked inputs, its launch policy, what it answers for itself (`auto_answers`), who answers its prompts in a line (`attention`, such as \"approvals waived; questions still reach the user\"), its workdir, and its warnings: stages it could reach and never leave, each a SpawnIssue with code may_never_finish. A run with warnings still starts."
       },
       "RunSpec": {
         "type": "object",

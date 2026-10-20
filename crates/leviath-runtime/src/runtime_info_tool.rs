@@ -43,7 +43,9 @@ pub(crate) struct RuntimeFacts<'a> {
     pub provider_model: (&'a str, &'a str),
     /// The tool names this stage advertises.
     pub tools: Vec<&'a str>,
-    /// Whether the run was launched with nobody available to answer a prompt.
+    /// Whether nobody is there to answer the model's questions: an unattended
+    /// run that answers them itself. One that keeps its questions for a
+    /// person reports `false`, whatever it waives besides.
     pub unattended: bool,
     /// The run's working directory.
     pub workdir: Option<&'a str>,

@@ -103,6 +103,14 @@ pub struct RunArgs {
     )]
     pub yolo: Option<String>,
 
+    /// With `--yolo`, still bring the agent's own questions (ask_user_text,
+    /// ask_user_choice, ask_user_confirm and the like) to you. Tool approvals
+    /// stay waived; a question waits for `lev respond` as in an attended run,
+    /// for at most `[limits] interaction_timeout_secs`. Sub-agents and fan-out
+    /// workers keep their questions too. Nothing changes without `--yolo`.
+    #[arg(long)]
+    pub allow_questions: bool,
+
     /// Allow a tool outright (repeatable).
     #[arg(long)]
     pub allow: Vec<String>,

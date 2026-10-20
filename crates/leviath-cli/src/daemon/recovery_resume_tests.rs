@@ -640,6 +640,7 @@ async fn a_profiled_run_and_its_narrowed_child_keep_their_settings_across_a_rest
         let caller = Caller::Child {
             parent: parent.run_id.clone(),
             policy: parent.launch.clone(),
+            answers_questions: true,
             depth: 0,
         };
         let child = starter
@@ -690,6 +691,7 @@ async fn worker_on_disk(starter: &DaemonStarter, parent: &str, item: &str) -> St
     let caller = Caller::Worker {
         parent: spec.run_id.clone(),
         policy: spec.launch.clone(),
+        answers_questions: true,
         depth: 0,
         stage: Some(leviath_runtime::spec::names::StageName::new("work").unwrap()),
         item: item.to_string(),

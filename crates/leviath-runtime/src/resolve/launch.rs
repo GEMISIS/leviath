@@ -59,6 +59,7 @@ pub(super) fn decide(
             parent,
             policy,
             depth,
+            ..
         } => (parent, policy, *depth, None),
         Caller::Worker {
             parent,
@@ -117,19 +118,27 @@ pub(super) fn decide(
 /// What the run's unattended setting answers without a person, as the host
 /// reads it. A profile the host does not have is an issue at
 /// `launch.unattended`, and the run is judged as attended meanwhile.
+///
+/// The model's questions still reach a person when the request asks for that
+/// (`launch.allow_questions`), and in any run started by one whose questions
+/// do: what a run leaves to a person, its whole tree leaves to one.
 pub(super) fn auto_answers(
     launch: &LaunchPolicy,
+    request: &LaunchRequest,
+    caller: &Caller,
     env: &dyn ResolveEnv,
     issues: &mut SpawnIssues,
 ) -> AutoAnswers {
-    match env.auto_answers(&launch.unattended) {
+    let mut answers = match env.auto_answers(&launch.unattended) {
         Ok(answers) => answers,
         Err(issue) => {
             let at = SpecPath::root().field("launch").field("unattended");
             issues.push(super::rebase(&at, *issue));
             AutoAnswers::default()
         }
-    }
+    };
+    answers.questions &= !request.allow_questions && caller.answers_questions();
+    answers
 }
 
 fn placement(

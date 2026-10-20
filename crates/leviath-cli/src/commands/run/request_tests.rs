@@ -437,13 +437,16 @@ fn launch_flags_land_on_the_request() {
     assert!(!launch.seed_commands);
     assert!(run.request.output.is_some());
     assert!(run.request.model.is_none(), "a blank model is no model");
+    assert!(!launch.allow_questions);
     let run = run_request(RunLine {
         task: Some("t"),
         yolo: Some(String::new()),
+        allow_questions: true,
         ..line(&manifest, dir.path())
     })
     .unwrap();
     assert_eq!(run.request.launch.unattended, Unattended::All);
+    assert!(run.request.launch.allow_questions);
 }
 
 /// Files attached, named by a region flag, and named in the task all become
@@ -681,6 +684,7 @@ fn launch(path: &str, regions: super::super::RunInputs) -> RunFlags<'_> {
         model: None,
         workdir: "/mine",
         yolo: None,
+        allow_questions: false,
         allow: Vec::new(),
         max_depth: None,
         regions,

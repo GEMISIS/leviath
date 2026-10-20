@@ -2071,6 +2071,7 @@ async fn subagent_spawn_links_child_and_registers() {
                 write_paths: vec![vec!["docs/**".to_string()]],
                 ..parent_spec.launch.clone()
             },
+            answers_questions: parent_spec.auto_answers.questions,
             depth: 0,
         }]
     );

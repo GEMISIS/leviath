@@ -164,6 +164,7 @@ pub(crate) fn request_for(
         no_seed_commands: args.no_seed_commands,
         output: args.output.clone(),
         capture_model_input: args.capture_model_input,
+        allow_questions: false,
         metadata: args.metadata.clone(),
         callback_url: args.callback_url.clone(),
         callback_secret: args.callback_secret.clone(),
@@ -199,6 +200,7 @@ pub(crate) fn caller_for(args: &TestLaunch) -> Caller {
     Caller::Child {
         parent,
         policy,
+        answers_questions: true,
         depth: 0,
     }
 }

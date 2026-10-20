@@ -128,6 +128,7 @@ impl WorldHost {
         Ok(crate::spec::env::Caller::Child {
             parent: spec.run_id.clone(),
             policy: spec.policy_for_children(stage),
+            answers_questions: spec.auto_answers.questions,
             depth: u8::try_from(depth).unwrap_or(u8::MAX),
         })
     }

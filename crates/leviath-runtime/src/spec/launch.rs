@@ -43,6 +43,15 @@ pub struct LaunchRequest {
     /// limit. A child run or fan-out worker of this run inherits them.
     #[serde(default)]
     pub write_paths: Vec<String>,
+    /// Keep the model's own questions (`ask_user_*` and the like) for a
+    /// person while `unattended` waives the rest: the tools that ask are
+    /// offered, and a question waits for an answer as in an attended run.
+    /// Tool approvals stay as `unattended` says. Nothing changes for an
+    /// attended run, whose questions reach a person anyway. Every child run
+    /// and fan-out worker keeps its questions too. Written only when set, so
+    /// a daemon that predates it reads a request without it as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_questions: bool,
 }
 
 impl Default for LaunchRequest {
@@ -54,6 +63,7 @@ impl Default for LaunchRequest {
             seed_commands: true,
             capture_model_input: false,
             write_paths: Vec::new(),
+            allow_questions: false,
         }
     }
 }
@@ -337,6 +347,7 @@ mod tests {
             seed_commands: true,
             capture_model_input: true,
             write_paths: Vec::new(),
+            allow_questions: false,
         };
         let child = LaunchPolicy::narrow(&greedy, &parent);
         assert_eq!(child.unattended, profile());

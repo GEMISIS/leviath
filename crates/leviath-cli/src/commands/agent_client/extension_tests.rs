@@ -378,6 +378,8 @@ async fn a_dry_run_answers_with_the_summary_or_the_daemons_issues() {
             .into(),
         ),
         launch: LaunchPolicy::top_level(&LaunchRequest::default(), 3, true),
+        auto_answers: Default::default(),
+        attention: String::new(),
         workdir: "/w".into(),
         warnings: Default::default(),
     };

@@ -60,6 +60,8 @@ fn summary() -> SpawnSummary {
             capture_model_input: false,
             write_paths: Vec::new(),
         },
+        auto_answers: Default::default(),
+        attention: String::new(),
         workdir: std::path::PathBuf::from("/work"),
         warnings: Default::default(),
     }
@@ -99,12 +101,17 @@ fn a_summary_reads_as_the_run_it_would_be() {
     other.launch.unattended = Unattended::All;
     other.launch.allow = vec![ToolName::new("shell").unwrap()];
     other.inputs = InputValues::default();
+    other.attention = "approvals waived; questions still reach the user".to_string();
     let text = check_report(&other, false);
     assert!(
         text.contains(&format!("(blueprint in {coder}, version 0.1.0)")),
         "{text}"
     );
     assert!(text.contains("  unattended: yes"), "{text}");
+    assert!(
+        text.contains("  prompts:   approvals waived; questions still reach the user"),
+        "{text}"
+    );
     assert!(text.contains("  allowed:   shell"), "{text}");
     assert!(!text.contains("inputs:"), "{text}");
     other.origin = SpecOrigin::Raw;

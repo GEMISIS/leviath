@@ -73,6 +73,9 @@ pub struct RunLine<'a> {
     /// `--yolo` as typed: `None` without the flag, empty for the bare flag,
     /// and the profile's name for `--yolo=<name>`.
     pub yolo: Option<String>,
+    /// `--allow-questions`: keep the model's questions for a person while
+    /// `--yolo` waives the rest.
+    pub allow_questions: bool,
     /// `--allow`: tools permitted outright.
     pub allow: Vec<String>,
     /// `--max-depth`: sub-agent tree cap.
@@ -102,6 +105,7 @@ impl<'a> RunLine<'a> {
             workdir,
             workdir_given: false,
             yolo: None,
+            allow_questions: false,
             allow: Vec::new(),
             max_depth: None,
             no_seed_commands: false,
@@ -126,6 +130,9 @@ pub struct RunFlags<'a> {
     /// `--yolo` as typed: `None` without the flag, empty for the bare flag,
     /// and the profile's name for `--yolo=<name>`.
     pub yolo: Option<String>,
+    /// `--allow-questions`: keep the model's questions for a person while
+    /// `--yolo` waives the rest.
+    pub allow_questions: bool,
     /// `--allow`: tools permitted outright.
     pub allow: Vec<String>,
     /// `--max-depth`: sub-agent tree cap.
@@ -164,6 +171,7 @@ pub fn read_run_flags(req: RunFlags<'_>) -> anyhow::Result<LocalRun> {
         workdir: req.workdir,
         workdir_given: regions.workdir_given,
         yolo: req.yolo,
+        allow_questions: req.allow_questions,
         allow: req.allow,
         max_depth: req.max_depth,
         no_seed_commands: req.no_seed_commands,
@@ -506,6 +514,7 @@ fn apply_flags(request: &mut SpawnRequest, line: &RunLine<'_>) -> SpawnIssues {
     if line.no_seed_commands {
         request.launch.seed_commands = false;
     }
+    request.launch.allow_questions |= line.allow_questions;
     issues
 }
 

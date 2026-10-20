@@ -314,6 +314,8 @@ it either: the open prompt is written to disk, and the run comes back still park
 So an unattended run does not get them. A run launched with `--yolo` (and every sub-agent and
 fan-out worker under it) has these five tools removed from the set advertised to the model, per
 stage, before the first inference. The model never sees them and decides for itself instead.
+A run launched with `--yolo --allow-questions` keeps all five, for every stage. See
+[Tool approvals and agent questions](/docs/interaction#tool-approvals-and-agent-questions).
 
 A stage that genuinely needs a person can opt out, tool by tool:
 

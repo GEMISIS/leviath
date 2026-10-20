@@ -642,7 +642,8 @@ and its first literal argument, so `RUN` on `touch a.txt` does not cover `touch 
 second one asks again.
 
 An unattended run asks nobody, so it has no interactions to list. An empty list on a run that
-plainly did something dangerous means exactly that.
+plainly did something dangerous means exactly that. The exception is a run spawned with
+`launch.allowQuestions: true`, whose model's questions still open interactions here.
 
 ### What a run's provider calls took
 
