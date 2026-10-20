@@ -138,7 +138,8 @@ pub(crate) async fn catalog(
 ///
 /// A provider counts as configured when a run could route to it, which is the
 /// same test that puts its models in `models`. A row whose provider this build
-/// left out is dropped: nothing here could connect it.
+/// left out is dropped: nothing here could connect it. A `[model_capabilities]`
+/// entry for a model corrects its row, as it corrects what the provider serves.
 pub(crate) fn compiled_catalogue(config: &crate::config::Config) -> Vec<CatalogModel> {
     let routed: std::collections::HashSet<String> =
         crate::commands::run::session::provider_creds_from_config(config)
@@ -153,8 +154,14 @@ pub(crate) fn compiled_catalogue(config: &crate::config::Config) -> Vec<CatalogM
     leviath_providers::capabilities::builtin_catalog()
         .iter()
         .filter_map(|entry| {
-            auth.get(entry.provider)
-                .map(|auth| CatalogModel::of(entry, routed.contains(entry.provider), *auth))
+            auth.get(entry.provider).map(|auth| {
+                CatalogModel::of(
+                    entry,
+                    config.model_capabilities.get(entry.id),
+                    routed.contains(entry.provider),
+                    *auth,
+                )
+            })
         })
         .collect()
 }

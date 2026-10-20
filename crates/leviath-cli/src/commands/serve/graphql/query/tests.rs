@@ -4544,6 +4544,59 @@ async fn the_catalog_lists_models_on_providers_nobody_configured() {
     .await;
 }
 
+/// A `[model_capabilities]` entry corrects a catalogue row the way it corrects
+/// the model the provider serves, so `catalog` and `models` agree on what the
+/// model takes and a client filtering on the corrected type finds it.
+#[tokio::test]
+async fn a_capability_override_corrects_the_catalog_row_as_it_corrects_the_model() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        let path = home.join("config.toml");
+        std::fs::write(
+            &path,
+            "default_provider = \"meshy\"\n\n[providers]\n\
+             meshy_api_key = \"msy_not_a_real_key\"\n\n\
+             [model_capabilities.rig]\n\
+             input_types = [\"model/gltf-binary\", \"model/obj\"]\n\
+             max_context_tokens = 4321\n",
+        )
+        .expect("a config file");
+        let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+            .data(crate::commands::serve::testutil::state_with_config_at(
+                &path,
+            ))
+            .finish();
+
+        let reads_obj = r#"{ inputTypes: { has: "model/obj" } }"#;
+        let catalog = answer(
+            &schema,
+            &format!(
+                "{{ catalog(filter: {reads_obj}) {{ results {{ providerName modelId \
+                   inputTypes maxContextTokens }} }} }}"
+            ),
+        )
+        .await;
+        let models = answer(
+            &schema,
+            &format!("{{ models(filter: {reads_obj}) {{ results {{ providerName modelId inputTypes }} }} }}"),
+        )
+        .await;
+        let row = &catalog["catalog"]["results"];
+        assert_eq!(row.as_array().map(Vec::len), Some(1), "{catalog}");
+        assert_eq!(row[0]["providerName"], "meshy");
+        assert_eq!(row[0]["modelId"], "rig");
+        assert_eq!(
+            row[0]["inputTypes"],
+            serde_json::json!(["model/gltf-binary", "model/obj"])
+        );
+        assert_eq!(row[0]["maxContextTokens"], 4321);
+        assert_eq!(
+            models["models"]["results"][0]["inputTypes"], row[0]["inputTypes"],
+            "the two listings agree: {models}"
+        );
+    })
+    .await;
+}
+
 /// A model id nothing here serves is an absence, whichever way it is asked for.
 ///
 /// A machine with no provider configured routes to no model at all, which is

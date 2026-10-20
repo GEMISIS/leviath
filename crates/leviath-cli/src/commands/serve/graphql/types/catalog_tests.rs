@@ -378,7 +378,7 @@ async fn a_catalogue_row_carries_its_types_and_its_providers_standing() {
         .into_iter()
         .find(|entry| entry.provider == "meshy" && entry.id == "rig")
         .expect("Meshy names its rig operation");
-    let row = CatalogModel::of(&entry, false, ProviderAuthKind::ApiKey);
+    let row = CatalogModel::of(&entry, None, false, ProviderAuthKind::ApiKey);
     assert_eq!(row.model_id, "rig");
     assert_eq!(row.provider_name, "meshy");
     assert_eq!(row.display_name, entry.display_name);
