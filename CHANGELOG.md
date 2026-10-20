@@ -21,6 +21,11 @@ same list.
   engine. A key a tool reads from `[tool_credentials]` now wins over a
   daemon environment variable of the same name. To keep reading the
   environment's copy, leave the name out of `[tool_credentials]`.
+- `PUT /api/config` answers a field of the wrong type with a 400 that names
+  the field and what it takes, and never quotes the value sent. It was a 422
+  carrying serde's message, which echoed a provider key sent as a number.
+  There is no switch for the old answer; read the field path from the new
+  message instead.
 
 - A stage with `mode = "interactive"` now takes turns with a person. After a
   reply with no tool calls it waits for the next message instead of moving

@@ -25,8 +25,8 @@ const MAX_NAME_LEN: usize = 128;
 /// Every tool credential the config holds, by name.
 ///
 /// An empty value is a name with no secret behind it: what a keychain-mode
-/// file holds before the store fills it in. Every reader below treats it as
-/// absent.
+/// file holds before the store fills it in. [`ToolCredentials::get`] treats
+/// it as absent; [`ToolCredentials::names`] still lists the name.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ToolCredentials(BTreeMap<String, String>);
@@ -48,13 +48,11 @@ impl ToolCredentials {
             .filter(|value| !value.is_empty())
     }
 
-    /// Every name with a secret behind it, sorted.
+    /// Every name the table holds, sorted, including one still waiting on
+    /// the store: in keychain mode a name is listed from the file even when
+    /// the store has nothing for it, so a client can see it and remove it.
     pub fn names(&self) -> Vec<String> {
-        self.0
-            .iter()
-            .filter(|(_, value)| !value.is_empty())
-            .map(|(name, _)| name.clone())
-            .collect()
+        self.0.keys().cloned().collect()
     }
 
     /// Store `secret` under `name`, replacing what was there.
@@ -137,7 +135,10 @@ mod tests {
         assert_eq!(credentials.get("BRAVE_API_KEY"), Some("sk-brave"));
         assert_eq!(credentials.get("WAITING"), None);
         assert_eq!(credentials.get("brave_api_key"), None, "matched exactly");
-        assert_eq!(credentials.names(), vec!["BRAVE_API_KEY".to_string()]);
+        assert_eq!(
+            credentials.names(),
+            vec!["BRAVE_API_KEY".to_string(), "WAITING".to_string()]
+        );
         assert_eq!(credentials.unfilled(), vec!["WAITING".to_string()]);
         assert_eq!(
             credentials.secrets().collect::<Vec<_>>(),

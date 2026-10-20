@@ -193,8 +193,9 @@ impl ConfigWrite {
 
 /// What `updateConfig` takes.
 ///
-/// Four lists over one file, applied in one write: what to set, what to clear,
-/// which providers to change, and which gateways to add or take away. Every
+/// Lists over one file, applied in one write: what to set, what to clear,
+/// which providers to change, which gateways to add or take away, and which
+/// tool credentials to store or remove. Every
 /// refusal happens before anything is written, so a request that is going to
 /// fail leaves the file as it was.
 #[derive(Debug, InputObject)]

@@ -8407,10 +8407,11 @@ type Mutation {
 	"""
 	Change the machine's config.
 	
-	A partial edit in four parts: `set` names the settings to change,
+	A partial edit in six parts: `set` names the settings to change,
 	`clear` the ones to take back to nothing, `providers` the per-provider
-	settings, and the two gateway lists what to add and what to remove.
-	What none of them mentions is left alone. Every refusal happens before
+	settings, the two gateway lists what to add and what to remove, and
+	`toolCredentials` the secrets script tools read by name. What none of
+	them mentions is left alone. Every refusal happens before
 	anything is written, so a request that is going to fail leaves the file
 	as it was.
 	"""
@@ -18915,8 +18916,9 @@ type UpdateBlueprintResult {
 """
 What `updateConfig` takes.
 
-Four lists over one file, applied in one write: what to set, what to clear,
-which providers to change, and which gateways to add or take away. Every
+Lists over one file, applied in one write: what to set, what to clear,
+which providers to change, which gateways to add or take away, and which
+tool credentials to store or remove. Every
 refusal happens before anything is written, so a request that is going to
 fail leaves the file as it was.
 """
