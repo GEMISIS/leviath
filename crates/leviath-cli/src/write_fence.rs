@@ -13,7 +13,7 @@
 
 use leviath_core::write_paths::WriteFence;
 
-use crate::shell_keys::WriteTargets;
+use crate::shell_keys::Landing;
 
 /// The refusal for a call to `tool_name` with `arguments` that would write
 /// outside `fence`, or `None` when it writes only inside it, writes nothing a
@@ -55,14 +55,24 @@ pub(crate) fn write_paths_refusal_for(
             .collect(),
         "shell" => {
             let command = arguments.get("command").and_then(|v| v.as_str())?;
-            match crate::shell_keys::every_write_target_for(command, backslash_escapes) {
-                WriteTargets::Known(targets) => targets,
-                WriteTargets::Unreadable => {
+            let home = crate::yolo::home();
+            match crate::shell_keys::landing_for(
+                command,
+                backslash_escapes,
+                workdir,
+                home.as_deref(),
+            ) {
+                Landing::Known(targets) => targets
+                    .into_iter()
+                    .map(|(_, landed)| landed.to_string_lossy().into_owned())
+                    .collect(),
+                Landing::Unparsed | Landing::Unnamed | Landing::Lost => {
                     return Some(format!(
                         "[blocked] shell refused: this line redirects a write to a place that \
-                         cannot be read ahead of time (a variable, a substitution, or a construct \
-                         that does not parse), so it cannot be held to this stage's write paths \
-                         ({}). Redirect to a literal path inside them, or use write_file.",
+                         cannot be read ahead of time (a variable, a substitution, a `cd` to \
+                         somewhere that is not spelled out, or a construct that does not parse), \
+                         so it cannot be held to this stage's write paths ({}). Redirect to a \
+                         literal path inside them, or use write_file.",
                         fence.describe()
                     ));
                 }
@@ -71,11 +81,7 @@ pub(crate) fn write_paths_refusal_for(
         _ => return None,
     };
     let shown = targets.iter().find_map(|t| fence.check(t, workdir).err())?;
-    Some(format!(
-        "[blocked] {tool} refused: {shown} is outside this stage's write paths ({}). Write \
-         inside them instead.",
-        fence.describe()
-    ))
+    Some(fence.refusal(tool, &shown))
 }
 
 #[cfg(test)]

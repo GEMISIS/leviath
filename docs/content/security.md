@@ -297,17 +297,30 @@ that is absolute, starts with `~`, or has a `.` or `..` part, and so does a spaw
 | Write | Held to `write_paths` |
 |---|---|
 | `write_file` and `edit_file` | Yes. |
-| A `shell` redirect (`echo x > f`, `>> f`) | Yes. A redirect to a variable or an unparsed line is refused. |
+| `context_export` | Yes. |
+| A part `submit_output` writes to disk as an artifact | Yes, at the path it lands on. |
+| A `shell` redirect (`>`, `>>`, `>&file`, `&>`) | Yes, after any `cd` on the line. |
+| A redirect to a variable, after a `cd` that is not spelled out, or on an unparsed line | Refused. |
 | A script tool's `write_file`, and redirects in its `shell()` | Yes. |
-| `cp`, `mv`, `tee`, `sed -i` and any other program `shell` runs | No. |
+| `cp`, `mv`, `tee`, `sed -i` and any other program `shell` or `shell()` runs | No. |
 | MCP tools | No. They write wherever their server lets them. |
 | `install_self_tool` and `install_global_tool` | No. They write outside the workdir by design. |
 
+A `cd` on a shell line may fail, so a redirect after one has to land inside the write paths from
+where the line started and from where it moved. `cd src && echo x > docs/a.md` is refused, since
+it may write `src/docs/a.md`. Redirect to a path from the workdir instead.
+
 `shell` stays governed by the shell's own permissions, and a program it runs can write anywhere
-in the workdir. `lev validate` warns about a stage that sets write paths and can still run shell
-(`write-paths-shell`) or call MCP tools (`write-paths-mcp`). For a hard limit, give such a stage
-no `shell`, or set `shell = "deny"` in its `tool_permissions`, and run it in a
+in the workdir. Only the redirects on its line are checked, never what the programs do.
+`lev validate` warns about a stage that sets write paths and can still run shell
+(`write-paths-shell`), whose script tools may call `shell()` (`write-paths-script-shell`), or that
+can call MCP tools (`write-paths-mcp`). For a hard limit, give such a stage no `shell`, set
+`shell = "deny"` in its `tool_permissions` and in `[graph.script_permissions]`, and run it in a
 [sandbox](#sandboxes).
+
+The check looks at the filesystem when the call is judged, not when the file is opened. A symlink
+swapped in between the two, or a hard link made earlier to a file outside the globs, still wins.
+A dangling symlink is refused, since a write would follow it to a target nothing has checked.
 
 ## Taint tracking (experimental)
 

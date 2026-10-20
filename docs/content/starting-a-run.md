@@ -287,6 +287,7 @@ gets.
 | `max_depth` | the graph's `max_child_depth`, then the operator's | How deep the run's tree of child runs may grow |
 | `seed_commands` | `true` | Whether region seeds that run a shell command may run |
 | `capture_model_input` | `false` | Record every request sent to the model |
+| `write_paths` | `[]` | Globs every write of the run must match, on top of its graph's |
 
 `unattended = "all"` is what `--yolo` sends, and `{ profile = "careful" }` is `--yolo=careful`. A
 profile names a section of `yolo.toml`, described in [Yolo profiles](/docs/yolo).
@@ -307,6 +308,10 @@ daemon narrows that request against its parent's policy:
 | `max_depth` | at most one less than the parent's |
 | `seed_commands` | only when both allow them |
 | `capture_model_input` | what the child asked for |
+| `write_paths` | every layer in force where the parent was, plus its own |
+
+A child's writes have to match the write paths of its parent's stage as well as its own. See
+[limiting where a stage writes](/docs/security#limiting-where-a-stage-writes).
 
 A parent whose depth allowance is used up cannot start a child at all. The refusal is an issue at
 `launch.max_depth` that says so. No chain of runs can widen its own trust, however it is

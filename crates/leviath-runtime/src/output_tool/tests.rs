@@ -54,6 +54,7 @@ fn a_submission_is_recorded_verbatim_and_mirrored_into_the_region() {
     let (ack, output) = handle_output_tool(
         &json!({"content": "Renamed two helpers and updated their callers."}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec(Some("markdown"), None)),
             validators: None,
             stage: "summary",
@@ -87,6 +88,7 @@ fn an_unrecognized_format_is_carried_through_without_inspection() {
     let (_, output) = handle_output_tool(
         &json!({ "content": a2ui }),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec(Some("a2ui"), None)),
             validators: None,
             stage: "summary",
@@ -111,6 +113,7 @@ fn a_format_with_no_schema_never_parses_the_content() {
     let (_, output) = handle_output_tool(
         &json!({"content": "<report><finding>one</finding></report>"}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec(Some("xml"), None)),
             validators: None,
             stage: "summary",
@@ -138,6 +141,7 @@ fn a_format_checks_well_formedness_but_not_shape() {
     let (_, output) = handle_output_tool(
         &json!({"content": r#"{"totally":"unexpected"}"#}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec(Some("json"), None)),
             validators: None,
             stage: "summary",
@@ -155,6 +159,7 @@ fn a_format_checks_well_formedness_but_not_shape() {
     let (message, refused) = handle_output_tool(
         &json!({"content": "this is not JSON at all"}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec(Some("json"), None)),
             validators: None,
             stage: "summary",
@@ -176,6 +181,7 @@ fn no_spec_at_all_still_records_an_answer() {
     let (_, output) = handle_output_tool(
         &json!({"content": "done"}),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "summary",
@@ -203,6 +209,7 @@ fn a_submission_matching_its_schema_is_accepted() {
     let (_, output) = handle_output_tool(
         &json!({"content": r#"{"summary":"two files changed"}"#}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec(Some("json"), Some(schema))),
             validators: None,
             stage: "summary",
@@ -228,6 +235,7 @@ fn a_submission_violating_its_schema_is_refused_and_records_nothing() {
     let (message, output) = handle_output_tool(
         &json!({"content": r#"{"nope":1}"#}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec(Some("json"), Some(schema))),
             validators: None,
             stage: "summary",
@@ -256,6 +264,7 @@ fn content_that_is_not_json_fails_a_schema_check_with_a_readable_reason() {
     let (message, output) = handle_output_tool(
         &json!({"content": "plain prose"}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec(None, Some(json!({"type": "object"})))),
             validators: None,
             stage: "summary",
@@ -279,6 +288,7 @@ fn an_uncompilable_schema_records_the_submission_unchecked() {
     let (_, output) = handle_output_tool(
         &json!({"content": "anything"}),
         &OutputContext {
+            write_fence: None,
             spec: // A misspelled `type` is the schema this workspace already uses to mean
         // "will not compile" (a typo'd Rhai `@param n strng` produces exactly it).
         Some(&spec(None, Some(json!({"type": "strng"})))),
@@ -301,6 +311,7 @@ fn a_missing_content_argument_is_refused() {
     let (message, output) = handle_output_tool(
         &json!({}),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "summary",
@@ -324,6 +335,7 @@ fn a_blank_submission_is_refused() {
         let (message, output) = handle_output_tool(
             &json!({ "content": blank }),
             &OutputContext {
+                write_fence: None,
                 spec: None,
                 validators: None,
                 stage: "summary",
@@ -347,6 +359,7 @@ fn an_oversized_submission_is_truncated_and_the_model_is_told() {
     let (ack, output) = handle_output_tool(
         &json!({ "content": huge }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "summary",
@@ -375,6 +388,7 @@ fn a_second_submission_replaces_the_first() {
     let (_, first) = handle_output_tool(
         &json!({"content": "draft"}),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "summary",
@@ -390,6 +404,7 @@ fn a_second_submission_replaces_the_first() {
     let (_, second) = handle_output_tool(
         &json!({"content": "final"}),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "summary",
@@ -414,6 +429,7 @@ fn a_window_without_the_region_still_records_the_output() {
     let (_, output) = handle_output_tool(
         &json!({"content": "done"}),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "summary",
@@ -446,6 +462,7 @@ fn artifacts_inside_the_workdir_are_recorded() {
             "artifacts": ["results.csv", "notes/summary.md"],
         }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "present",
@@ -475,6 +492,7 @@ fn an_artifact_outside_the_workdir_refuses_the_whole_submission() {
     let (message, output) = handle_output_tool(
         &json!({ "content": "done", "artifacts": ["../../etc/passwd"] }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "present",
@@ -498,6 +516,7 @@ fn no_artifacts_argument_records_an_empty_list() {
     let (_, output) = handle_output_tool(
         &json!({ "content": "done" }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "present",
@@ -520,6 +539,7 @@ fn artifacts_with_no_workdir_are_refused() {
     let (message, output) = handle_output_tool(
         &json!({ "content": "done", "artifacts": ["results.csv"] }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "present",
@@ -546,6 +566,7 @@ fn a_long_answer_is_mirrored_as_a_bounded_preview() {
     let (_, output) = handle_output_tool(
         &json!({ "content": long }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "summary",
@@ -582,6 +603,7 @@ fn a_submission_that_is_not_the_format_it_claims_is_refused() {
     let (message, output) = handle_output_tool(
         &json!({ "content": "```json\n{\"a\":1}\n```" }),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec(Some("json"), None)),
             validators: None,
             stage: "summary",
@@ -603,6 +625,7 @@ fn a_well_formed_submission_in_a_known_format_is_accepted() {
     let (_, output) = handle_output_tool(
         &json!({ "content": "<report><finding/></report>" }),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec(Some("xml"), None)),
             validators: None,
             stage: "summary",
@@ -625,6 +648,7 @@ fn an_unknown_format_is_still_never_inspected() {
     let (_, output) = handle_output_tool(
         &json!({ "content": "anything at all, really" }),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec(Some("a2ui"), None)),
             validators: None,
             stage: "summary",
@@ -647,6 +671,7 @@ fn the_format_check_reports_before_the_schema_check() {
     let (message, output) = handle_output_tool(
         &json!({ "content": "not json at all" }),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec(
                 Some("json"),
                 Some(json!({"type": "object", "required": ["summary"]})),
@@ -709,6 +734,7 @@ fn an_agent_supplied_validator_rejects_a_bad_answer() {
     let (message, output) = handle_output_tool(
         &json!({"content": r#"{"nope":1}"#}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec_with_validator("a2ui")),
             validators: Some(&vals),
             stage: "summary",
@@ -739,6 +765,7 @@ fn an_agent_supplied_validator_accepts_a_good_answer() {
     let (_, output) = handle_output_tool(
         &json!({"content": r#"{"root":{"component":"Card"}}"#}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec_with_validator("a2ui")),
             validators: Some(&vals),
             stage: "summary",
@@ -764,6 +791,7 @@ fn a_throwing_validator_rejects_the_submission_by_default() {
     let (message, output) = handle_output_tool(
         &json!({"content": "an answer nothing checked"}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec_with_validator("a2ui")),
             validators: Some(&vals),
             stage: "summary",
@@ -798,6 +826,7 @@ fn an_accept_policy_records_the_submission_unchecked() {
     let (_, output) = handle_output_tool(
         &json!({"content": "the agent's perfectly good answer"}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec_with_lenient_validator("a2ui")),
             validators: Some(&vals),
             stage: "summary",
@@ -833,6 +862,7 @@ fn a_broken_validator_is_recorded_once_however_often_it_is_hit() {
         let (message, output) = handle_output_tool(
             &json!({"content": "an answer"}),
             &OutputContext {
+                write_fence: None,
                 spec: Some(&spec_with_validator("a2ui")),
                 validators: Some(&vals),
                 stage: "summary",
@@ -860,6 +890,7 @@ fn a_working_validator_records_nothing() {
     handle_output_tool(
         &json!({"content": "an answer"}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec_with_validator("a2ui")),
             validators: Some(&vals),
             stage: "summary",
@@ -882,6 +913,7 @@ fn a_named_validator_with_nothing_compiled_is_skipped() {
     let (_, output) = handle_output_tool(
         &json!({"content": "anything"}),
         &OutputContext {
+            write_fence: None,
             spec: Some(&spec_with_validator("a2ui")),
             validators: None,
             stage: "summary",
@@ -924,6 +956,7 @@ fn an_answer_that_fits_is_mirrored_whole() {
 /// Everything a submission is judged against, with no blueprint behind it.
 fn ctx<'a>(stage: &'a str, stage_names: &'a [String]) -> OutputContext<'a> {
     OutputContext {
+        write_fence: None,
         spec: None,
         validators: None,
         stage,
@@ -1051,6 +1084,7 @@ fn stored_artifacts_are_mirrored_beside_the_answer() {
             "artifacts": [{"name": "final", "path": "cut.mp4"}],
         }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "present",
@@ -1126,6 +1160,7 @@ fn a_produced_part_named_as_an_artifact_is_written_to_disk() {
             "artifacts": [{"name": "image", "path": "image-1.png"}],
         }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "describe",
@@ -1145,6 +1180,70 @@ fn a_produced_part_named_as_an_artifact_is_written_to_disk() {
     assert_eq!(output.artifacts.len(), 1);
     assert_eq!(output.artifacts[0].name, "image");
     assert!(ack.contains("image"), "{ack}");
+}
+
+/// A produced part written to disk as an artifact is a write, held to the
+/// stage's write paths: outside them the submission is refused, nothing lands,
+/// and inside them it is written as before.
+#[test]
+fn a_produced_part_outside_the_write_paths_is_refused() {
+    use leviath_core::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, MimeType, Part};
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    let store = MemoryBlobStore::new();
+    let registry = MimeRegistry::builtin();
+    let blob =
+        Blob::new(MimeType::parse("text/plain").unwrap(), b"payload".to_vec()).named("payload.txt");
+    let reference = store.put("run-1", &blob, &registry).expect("stored");
+    let mut w = win();
+    w.add_region(Region::new("held".to_string(), RegionKind::Pinned, 100_000));
+    let content = leviath_core::region::EntryContent::from_parts(vec![
+        Part::stored(reference).named("payload.txt"),
+    ]);
+    let tokens = content.tokens(None);
+    w.add_assistant_turn_content("held", leviath_core::EntryKind::Text, content, tokens, None)
+        .expect("stored");
+    let sink = crate::context_setup::PartSink {
+        store: &store,
+        registry: &registry,
+        run_id: "run-1",
+        max_part_bytes: 1024,
+        inline_text_bytes: 1024,
+    };
+    let fence = leviath_core::write_paths::WriteFence::new(&[vec!["docs/**".to_string()]]);
+    let mut submit = |path: &str| {
+        handle_output_tool(
+            &json!({
+                "content": "done",
+                "artifacts": [{"name": "payload.txt", "path": path}],
+            }),
+            &OutputContext {
+                write_fence: Some(&fence),
+                spec: None,
+                validators: None,
+                stage: "describe",
+                stage_names: &[],
+                workdir: Some(dir.path()),
+                sink: Some(&sink),
+                overwrite_artifacts: true,
+            },
+            0,
+            &mut w,
+        )
+    };
+    let (refused, output) = submit("src/payload.txt");
+    assert!(output.is_none());
+    assert!(
+        refused.starts_with("[blocked] submit_output refused: src/payload.txt is outside"),
+        "{refused}"
+    );
+    let landed = dir.path().join("src/payload.txt").exists();
+    assert!(!landed, "a refused artifact was written anyway");
+    let (_, output) = submit("docs/payload.txt");
+    assert!(output.is_some());
+    let wrote = dir.path().join("docs/payload.txt").exists();
+    assert!(wrote);
 }
 
 /// Naming an artifact that is neither on disk nor a produced part is refused
@@ -1169,6 +1268,7 @@ fn an_artifact_that_is_neither_a_file_nor_a_produced_part_is_refused() {
             "artifacts": [{"name": "image", "path": "ghost.png"}],
         }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "describe",
@@ -1242,6 +1342,7 @@ fn a_produced_part_resolves_by_its_file_name() {
             "artifacts": [{"name": "image", "path": "./image-1.png"}],
         }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "describe",
@@ -1280,6 +1381,7 @@ fn a_produced_part_resolves_by_sha_prefix() {
             "artifacts": [{"name": "image", "path": prefix}],
         }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "describe",
@@ -1330,6 +1432,7 @@ fn a_produced_part_whose_store_read_fails_is_refused() {
             "artifacts": [{"name": "image", "path": "image-1.png"}],
         }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "describe",
@@ -1367,6 +1470,7 @@ fn a_produced_part_written_to_a_missing_directory_is_refused() {
             "artifacts": [{"name": "image", "path": "nope/image-1.png"}],
         }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "describe",
@@ -1403,6 +1507,7 @@ fn submit_produced_png(
             "artifacts": [{"name": "image", "path": path}],
         }),
         &OutputContext {
+            write_fence: None,
             spec: None,
             validators: None,
             stage: "describe",

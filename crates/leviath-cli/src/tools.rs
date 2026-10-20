@@ -375,12 +375,30 @@ pub(crate) fn escaping_write_refusal_for(
         return None;
     }
     let command = arguments.get("command").and_then(|v| v.as_str())?;
-    let targets = match crate::shell_keys::write_targets_for(command, backslash_escapes) {
-        crate::shell_keys::WriteTargets::Known(targets) => targets,
+    let home = crate::yolo::home();
+    use crate::shell_keys::Landing;
+    let targets = match crate::shell_keys::landing_for(
+        command,
+        backslash_escapes,
+        workdir,
+        home.as_deref(),
+    ) {
+        Landing::Known(targets) => targets,
+        // A target only the shell can name (`> $OUT`) is left to the write
+        // policy, which never lets a grant cover one: it prompts every time.
+        Landing::Unnamed => return None,
+        // After a `cd` to somewhere this cannot read, every relative target
+        // could be anywhere.
+        Landing::Lost => {
+            return Some(
+                "[denied] This shell line moves to a directory that cannot be read ahead of                  time (`cd` with no argument, `cd -`, `popd`, or a target with an expansion)                  and then redirects a write, so where it writes cannot be checked against the                  working directory. Redirect to a path inside the workspace without moving, or                  use the `write_file` tool."
+                    .to_string(),
+            );
+        }
         // Refused even when the redirect would land inside the tree: "inside"
         // is a judgement about a path this could not read, and the fence is
         // only as good as what it can read.
-        crate::shell_keys::WriteTargets::Unreadable => {
+        Landing::Unparsed => {
             return Some(
                 "[denied] This shell line redirects with `>` inside a construct that cannot be \
                  read ahead of time (a backtick, an unterminated quote, an unbalanced `$(`, or \
@@ -391,9 +409,9 @@ pub(crate) fn escaping_write_refusal_for(
             );
         }
     };
-    let escaping = targets
+    let (escaping, _) = targets
         .into_iter()
-        .find(|target| !leviath_core::resolves_within(&target_path(target, workdir), workdir))?;
+        .find(|(_, landed)| !leviath_core::resolves_within(landed, workdir))?;
     Some(format!(
         "[denied] Shell redirect writes to '{escaping}', which is outside the working directory \
          ({}). The `write_file` tool refuses the same path; a redirect is not a way around it. \

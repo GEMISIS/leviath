@@ -148,3 +148,79 @@ fn a_junction_is_judged_by_where_it_lands() {
         Err("docs/to_src/main.rs".to_string())
     );
 }
+
+/// A directory link at `at` to `target`: a symlink on Unix, a junction on
+/// Windows, which needs no privilege.
+fn link_dir(target: &Path, at: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, at).expect("link");
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(at)
+            .arg(target)
+            .status()
+            .expect("mklink runs");
+        assert!(status.success());
+    }
+}
+
+/// An absolute path through another name for the workdir (`/tmp` for
+/// `/private/tmp` on macOS) is the workdir, and judged inside it.
+#[test]
+fn a_path_through_another_name_for_the_workdir_is_inside_it() {
+    let (_dir, root) = workdir();
+    let holder = tempfile::tempdir().expect("temp dir");
+    let alias = holder.path().join("alias");
+    link_dir(&root, &alias);
+    let fence = WriteFence::new(&[globs(&["docs/**"])]);
+    let inside = alias.join("docs").join("a.md");
+    let outside = alias.join("src").join("a.rs");
+    assert_eq!(fence.check(&inside.to_string_lossy(), &root), Ok(()));
+    assert_eq!(
+        fence.check(&outside.to_string_lossy(), &root),
+        Err("src/a.rs".to_string())
+    );
+}
+
+/// A link that points nowhere is followed by a write to wherever it points,
+/// so nothing past it can be verified: refused, by the workdir's own fence
+/// and so by the write paths.
+#[test]
+fn a_dangling_link_is_refused() {
+    let (_dir, root) = workdir();
+    link_dir(
+        &root.join("src").join("gone"),
+        &root.join("docs").join("dl"),
+    );
+    let through = root.join("docs").join("dl").join("x.rs");
+    assert!(!crate::resolves_within(&through, &root));
+    let fence = WriteFence::new(&[globs(&["docs/**"])]);
+    assert_eq!(
+        fence.check("docs/dl/x.rs", &root),
+        Err("docs/dl/x.rs".to_string())
+    );
+}
+
+/// The reviewer's shape on Unix: a leaf symlink to a file that does not exist
+/// yet, which `fs::write` would create outside the globs.
+#[cfg(unix)]
+#[test]
+fn a_dangling_leaf_symlink_is_refused() {
+    let (_dir, root) = workdir();
+    std::os::unix::fs::symlink("../src/dangling.rs", root.join("docs/dl")).expect("link");
+    let fence = WriteFence::new(&[globs(&["docs/**"])]);
+    assert_eq!(fence.check("docs/dl", &root), Err("docs/dl".to_string()));
+    assert!(!crate::resolves_within(&root.join("docs/dl"), &root));
+}
+
+#[test]
+fn a_refusal_names_the_tool_the_path_and_the_globs() {
+    let fence = WriteFence::new(&[globs(&["docs/**"])]);
+    assert_eq!(
+        fence.refusal("context_export", "src/App.tsx"),
+        "[blocked] context_export refused: src/App.tsx is outside this stage's write paths \
+         (docs/**). Write inside them instead."
+    );
+}

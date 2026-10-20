@@ -677,6 +677,36 @@ mod tests {
         assert!(resolved.ends_with("notes.txt"));
     }
 
+    /// An absolute path spelled through another name for the workdir (`/tmp`
+    /// for `/private/tmp` on macOS) is inside it: what it resolves to decides.
+    #[test]
+    fn resolve_admits_a_path_through_another_name_for_the_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = std::fs::canonicalize(dir.path()).unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let alias = holder.path().join("alias");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&workdir, &alias).unwrap();
+        #[cfg(windows)]
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&alias)
+            .arg(&workdir)
+            .status()
+            .unwrap()
+            .success();
+        #[cfg(windows)]
+        assert!(made);
+        let spelled = alias.join("notes.txt");
+        let resolved = resolve_within(
+            &spelled.to_string_lossy(),
+            &workdir,
+            leviath_core::resolves_within,
+        )
+        .expect("the workdir under another name is the workdir");
+        assert!(resolved.ends_with("notes.txt"));
+    }
+
     /// The escape a lexical check cannot see: `<workdir>/link -> /` makes
     /// `link/etc/hosts` textually contained the whole way, so a `starts_with`
     /// containment lets `fs::read_to_string` follow it straight out. The file

@@ -129,23 +129,47 @@ fn a_windows_redirect_is_read_as_cmd_reads_it() {
     assert!(refused.is_some());
 }
 
+/// A `cd` moves where a redirect lands, and a `>&` to a name is a write: both
+/// are held to the globs as the shell would run them.
 #[test]
-fn every_write_target_names_them_all_or_says_it_cannot() {
-    use crate::shell_keys::every_write_target_for;
-    assert_eq!(
-        every_write_target_for("a > x; b 2>/dev/null >> y", true),
-        WriteTargets::Known(vec!["x".to_string(), "y".to_string()])
-    );
-    assert_eq!(
-        every_write_target_for("a > x; b > $Y", true),
-        WriteTargets::Unreadable
-    );
-    assert_eq!(
-        every_write_target_for("echo `x` > y", true),
-        WriteTargets::Unreadable
-    );
-    assert_eq!(
-        every_write_target_for("echo 'open", true),
-        WriteTargets::Known(Vec::new())
-    );
+fn a_redirect_is_judged_where_the_shell_would_put_it() {
+    let (_dir, root) = workdir();
+    let fence = docs_only();
+    let shell = |command: &str| {
+        write_paths_refusal_for("shell", &json!({ "command": command }), &root, &fence, true)
+    };
+    let moved = shell("cd src && echo x > docs/cd.txt").unwrap();
+    assert!(moved.contains("src/docs/cd.txt is outside"), "{moved}");
+    let dup = shell("echo x >&src/a.txt").unwrap();
+    assert!(dup.contains("src/a.txt is outside"), "{dup}");
+    let dup = shell("echo x 2>&1 >& src/b.txt").unwrap();
+    assert!(dup.contains("src/b.txt is outside"), "{dup}");
+    let lost = shell("cd $D && echo x > docs/a.md").unwrap();
+    assert!(lost.contains("cannot be read ahead of time"), "{lost}");
+    let posix_nul = shell("echo x > nul").unwrap();
+    assert!(posix_nul.contains("nul is outside"), "{posix_nul}");
+    assert_eq!(shell("echo x >&2 > docs/ok.md"), None);
+}
+
+/// The workdir's own fence follows `cd` and `>&` the same way, whatever the
+/// stage's write paths.
+#[test]
+fn the_workdir_fence_follows_cd_and_a_dup_to_a_name() {
+    let (_dir, root) = workdir();
+    let refused = |command: &str| {
+        crate::tools::escaping_write_refusal_for(
+            "shell",
+            &json!({ "command": command }),
+            &root,
+            true,
+        )
+    };
+    let moved = refused("cd /tmp && echo x > esc.txt").unwrap();
+    assert!(moved.contains("outside the working directory"), "{moved}");
+    let dup = refused("echo x >&/tmp/esc.txt").unwrap();
+    assert!(dup.contains("outside the working directory"), "{dup}");
+    let lost = refused("cd - && echo x > a.txt").unwrap();
+    assert!(lost.contains("moves to a directory"), "{lost}");
+    assert_eq!(refused("cd docs && echo x > a.txt"), None);
+    assert_eq!(refused("echo x > $OUT"), None, "left to the write policy");
 }

@@ -127,6 +127,11 @@ working directory is refused, exactly as `write_file` refuses that path, and no 
 `--yolo` included. That is deliberate: `--yolo` grants permission, and this is not a permission
 question.
 
+A target is judged where the shell would put it. A `cd`, `pushd` or `popd` earlier on the line
+moves it, and since a `cd` may fail, the target has to stay inside from both places. A redirect
+after a `cd` to somewhere not spelled out (`cd -`, `cd $DIR`) is refused. `>&file` writes `file`
+like `>`; only `>&2` or `>&-` duplicate or close a descriptor.
+
 Discarded writes cost nothing. `2>/dev/null`, `> /dev/null 2>&1`, `&> /dev/null` and `> NUL` write
 nowhere anyone can read back, so they are neither clamped nor confined.
 

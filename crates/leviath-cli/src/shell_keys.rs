@@ -427,26 +427,6 @@ pub(crate) fn write_targets_for(command: &str, backslash_escapes: bool) -> Write
     )
 }
 
-/// [`write_targets_for`] with no target left out: a redirect to a name only
-/// the shell will know (`> $OUT`, `> /dev/tcp/...`) makes the whole line
-/// [`WriteTargets::Unreadable`] rather than being skipped. For a fence that
-/// has to say where every write lands, such as a stage's write paths.
-pub(crate) fn every_write_target_for(command: &str, backslash_escapes: bool) -> WriteTargets {
-    let Some(segments) = tokenize_for(command, backslash_escapes) else {
-        return write_targets_for(command, backslash_escapes);
-    };
-    let targets: Option<Vec<String>> = segments
-        .iter()
-        .flat_map(|segment| segment.writes.iter())
-        .filter_map(|t| match classify_write(t) {
-            WriteTarget::Path(p) => Some(Some(p)),
-            WriteTarget::Unreadable => Some(None),
-            WriteTarget::Discarded => None,
-        })
-        .collect();
-    targets.map_or(WriteTargets::Unreadable, WriteTargets::Known)
-}
-
 /// The literal paths of [`write_targets`], with an unreadable line yielding
 /// none. For callers that report rather than refuse.
 pub(crate) fn write_target_paths(command: &str) -> Vec<String> {
@@ -624,7 +604,10 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
                 }
                 // `>&1` duplicates a descriptor; that `&` belongs to the
                 // target, not to a separator. A descriptor is not a file, so
-                // nothing is written that this has to name.
+                // nothing is written that this has to name. But `>&word` with
+                // a word that is not a descriptor number (or `-`) sends both
+                // streams to the file `word`, so whether it writes is decided
+                // by the word itself (see `Swallow::Dup`).
                 let dup = chars.peek() == Some(&'&');
                 if dup {
                     chars.next();
@@ -637,6 +620,7 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
                     chars.next();
                 }
                 lex.swallow = Some(match (c, dup, read_write) {
+                    ('>', true, _) => Swallow::Dup,
                     (_, true, _) => Swallow::Other,
                     ('>', _, _) | (_, _, true) => Swallow::Write,
                     _ => Swallow::Read,
@@ -828,6 +812,9 @@ enum Swallow {
     Write,
     Read,
     Other,
+    /// The word after `>&`: a descriptor when it is all digits or `-`, a file
+    /// written to otherwise.
+    Dup,
 }
 
 impl Lexer {
@@ -853,6 +840,13 @@ impl Lexer {
                 Some(Swallow::Write) => self.writes.push(word),
                 Some(Swallow::Read) => self.reads.push(word),
                 Some(Swallow::Other) => {}
+                Some(Swallow::Dup) => {
+                    let descriptor = word.text == "-"
+                        || (!word.text.is_empty() && word.text.chars().all(|d| d.is_ascii_digit()));
+                    if !descriptor {
+                        self.writes.push(word);
+                    }
+                }
                 None => self.current.push(word),
             }
         }
@@ -1158,6 +1152,8 @@ fn folds_into_key(program: &str, arg: &Word) -> bool {
 
 mod operands;
 pub(crate) use operands::{Outside, outside_workdir};
+mod targets;
+pub(crate) use targets::{Landing, landing_for};
 
 #[cfg(test)]
 mod tests;

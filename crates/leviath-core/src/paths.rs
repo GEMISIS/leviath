@@ -183,6 +183,12 @@ fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
             }
             return Some(full);
         }
+        // Something is here that does not resolve: a dangling symlink, whose
+        // target a write would create wherever it points. Nothing past it
+        // can be verified, so the path is not.
+        if std::fs::symlink_metadata(&probe).is_ok() {
+            return None;
+        }
         // Both in one step: after `file_name()` succeeds, `parent()` cannot
         // fail (only a root has no parent, and a root has no file name either),
         // so two separate `?`s would leave the second permanently uncovered.

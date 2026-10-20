@@ -547,6 +547,27 @@ pub(super) fn lint_write_paths(graph: &RunGraph) -> Vec<LintFinding> {
                 ),
             );
         }
+        // A script's `shell()` is held at its redirects only, like the tool.
+        let scripts = tool_groups(stage)
+            .into_iter()
+            .any(|g| covers(g, ToolGroup::Scripts));
+        let script_shell_denied = graph.script_permissions.shell
+            == Some(leviath_runtime::spec::graph::ScriptPermission::Deny);
+        if scripts && !script_shell_denied {
+            findings.push(
+                LintFinding::new(
+                    LintSeverity::Warning,
+                    "write-paths-script-shell",
+                    format!(
+                        "limits writes to {globs} but its script tools may call shell(), which \
+                         can write anywhere in the workdir: only its redirects are held to \
+                         write_paths"
+                    ),
+                )
+                .in_stage(stage.name.as_str())
+                .with_fix("set shell = \"deny\" under [graph.script_permissions]"),
+            );
+        }
         let mcp_group = tool_groups(stage)
             .into_iter()
             .any(|g| covers(g, ToolGroup::Mcp));

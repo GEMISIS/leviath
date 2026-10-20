@@ -35,6 +35,9 @@ pub(crate) struct MimeToolContext<'a> {
     /// What the stage lets this tool be handed (`tool_accepts`), when it
     /// limits it: a part outside the list is refused by name.
     pub tool_limit: Option<&'a [String]>,
+    /// The write paths in force at the stage, which `context_export` writes
+    /// are held to. `None` limits nothing beyond the workdir.
+    pub write_fence: Option<&'a leviath_core::write_paths::WriteFence>,
 }
 
 /// Answer one mime tool call, as text for the model.
@@ -60,15 +63,7 @@ pub(crate) fn handle_mime_tool(
     };
     match name {
         "context_attach" => attach(args, window, &sink, workdir),
-        _ => export(
-            args,
-            window,
-            store.as_ref(),
-            &registry,
-            ctx.run_id,
-            workdir,
-            ctx.tool_limit,
-        ),
+        _ => export(args, window, store.as_ref(), &registry, workdir, ctx),
     }
 }
 
@@ -197,10 +192,10 @@ fn export(
     window: &ContextWindow,
     store: &dyn BlobStore,
     registry: &MimeRegistry,
-    run_id: &str,
     workdir: &Path,
-    limit: Option<&[String]>,
+    ctx: &MimeToolContext<'_>,
 ) -> String {
+    let (run_id, limit) = (ctx.run_id, ctx.tool_limit);
     let Some(wanted) = arg(args, "name") else {
         return "[error] missing 'name' argument: a part's file name or the start of its sha256"
             .to_string();
@@ -245,6 +240,12 @@ fn export(
         Ok(p) => p,
         Err(e) => return format!("[error] {e}"),
     };
+    // The stage's write paths hold this write as they hold `write_file`'s.
+    if let Some(fence) = ctx.write_fence
+        && let Err(shown) = fence.check(&target, workdir)
+    {
+        return fence.refusal("context_export", &shown);
+    }
     let bytes = match store.read(run_id, &blob.sha256) {
         Ok(b) => b,
         Err(e) => return format!("[error] could not read the stored bytes of '{wanted}': {e}"),
@@ -332,6 +333,7 @@ mod tests {
             &args,
             window,
             &MimeToolContext {
+                write_fence: None,
                 mime,
                 entity,
                 run_id: "run-1",
@@ -364,6 +366,7 @@ mod tests {
                 &json!({"name": "hero.png"}),
                 &mut w,
                 &MimeToolContext {
+                    write_fence: None,
                     mime,
                     entity,
                     run_id: "run-1",
@@ -381,6 +384,7 @@ mod tests {
                 &json!({"name": "hero.png", "path": "out.png"}),
                 &mut w,
                 &MimeToolContext {
+                    write_fence: None,
                     mime,
                     entity,
                     run_id: "run-1",
@@ -389,6 +393,53 @@ mod tests {
                 },
             );
             assert!(out.starts_with("Wrote"), "{out}");
+        });
+    }
+
+    /// `context_export` writes a file, so the stage's write paths hold it as
+    /// they hold `write_file`: outside them it is refused and nothing lands.
+    #[test]
+    fn an_export_outside_the_write_paths_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs/payload.txt"), b"any bytes").unwrap();
+        let fence = leviath_core::write_paths::WriteFence::new(&[vec!["docs/**".to_string()]]);
+        with_world(true, &mut |mime, entity| {
+            let mut w = window();
+            let out = call(
+                "context_attach",
+                json!({"region": "sprites", "path": "docs/payload.txt"}),
+                &mut w,
+                mime,
+                entity,
+                Some(dir.path()),
+            );
+            assert!(out.starts_with("Attached"), "{out}");
+            let export = |path: &str, w: &mut ContextWindow| {
+                handle_mime_tool(
+                    "context_export",
+                    &json!({"name": "payload.txt", "path": path}),
+                    w,
+                    &MimeToolContext {
+                        write_fence: Some(&fence),
+                        mime,
+                        entity,
+                        run_id: "run-1",
+                        workdir: Some(dir.path()),
+                        tool_limit: None,
+                    },
+                )
+            };
+            let refused = export("src/App.tsx", &mut w);
+            assert_eq!(
+                refused,
+                "[blocked] context_export refused: src/App.tsx is outside this stage's write \
+                 paths (docs/**). Write inside them instead."
+            );
+            let landed = dir.path().join("src/App.tsx").exists();
+            assert!(!landed, "a refused export wrote anyway");
+            let wrote = export("docs/copy.txt", &mut w);
+            assert!(wrote.starts_with("Wrote"), "{wrote}");
         });
     }
 
