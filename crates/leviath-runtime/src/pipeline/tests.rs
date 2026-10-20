@@ -7464,6 +7464,10 @@ async fn the_blueprint_overwrite_policy_wins_over_the_operators() {
                 result,
                 window,
                 ReadyForTools,
+                // A spec and a stage, so the write paths in force are known
+                // (none): without them the artifact write is refused.
+                spec_of(self::blueprint(vec![stage_named("s", None, false, None)])),
+                StageCursor { index: 0 },
             ))
             .id();
         let mut s = Schedule::default();

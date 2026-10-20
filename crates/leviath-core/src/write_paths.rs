@@ -70,6 +70,16 @@ struct Layer {
     patterns: Vec<glob::Pattern>,
 }
 
+/// Why the fence refused a write, with the path as the refusal shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refused {
+    /// The path is outside the globs, or could not be resolved.
+    Outside(String),
+    /// The path is an existing file with another hard link, which may sit
+    /// anywhere: writing it in place would change that file too.
+    HardLinked(String),
+}
+
 /// A compiled set of write-path layers. With no layers, every path inside the
 /// workdir may be written.
 #[derive(Debug, Clone, Default)]
@@ -98,6 +108,17 @@ impl WriteFence {
             })
             .collect();
         Self { layers }
+    }
+
+    /// A fence that refuses every write: for a caller that cannot tell which
+    /// write paths are in force, which must not take that for "none".
+    pub fn closed() -> Self {
+        Self {
+            layers: vec![Layer {
+                written: vec!["none: this stage's write paths could not be read".to_string()],
+                patterns: Vec::new(),
+            }],
+        }
     }
 
     /// Whether this fence limits nothing.
@@ -134,22 +155,30 @@ impl WriteFence {
         }
     }
 
-    /// What a call to `tool` that would write `shown` is answered with: the
-    /// tool, the path, and the globs, so the model can correct course. Starts
-    /// with `[blocked]`, so the run's events record the call as blocked.
-    pub fn refusal(&self, tool: &str, shown: &str) -> String {
-        format!(
-            "[blocked] {tool} refused: {shown} is outside this stage's write paths ({}). Write \
-             inside them instead.",
-            self.describe()
-        )
+    /// What a call to `tool` that `refused` is answered with: the tool, the
+    /// path, and why, so the model can correct course. Starts with
+    /// `[blocked]`, so the run's events record the call as blocked.
+    pub fn refusal(&self, tool: &str, refused: &Refused) -> String {
+        match refused {
+            Refused::Outside(shown) => format!(
+                "[blocked] {tool} refused: {shown} is outside this stage's write paths ({}). \
+                 Write inside them instead.",
+                self.describe()
+            ),
+            Refused::HardLinked(shown) => format!(
+                "[blocked] {tool} refused: {shown} has another hard link, which may be outside \
+                 this stage's write paths ({}), and writing it in place would change that file \
+                 too. Write a new file instead.",
+                self.describe()
+            ),
+        }
     }
 
     /// Judge a write to `requested` (relative to `workdir`, or absolute) and
     /// return `Err` with the path as the refusal should show it when the
     /// fence refuses it. An open fence allows everything; whether the path
     /// stays inside the workdir at all is the write tool's own check.
-    pub fn check(&self, requested: &str, workdir: &Path) -> Result<(), String> {
+    pub fn check(&self, requested: &str, workdir: &Path) -> Result<(), Refused> {
         if self.is_open() {
             return Ok(());
         }
@@ -161,15 +190,34 @@ impl WriteFence {
         let root = std::fs::canonicalize(workdir).unwrap_or(workdir.to_path_buf());
         let written = lexical.as_deref().and_then(|p| under(p, workdir, &root));
         let shown = written.clone().unwrap_or(requested.to_string());
-        let real = lexical
+        let canonical = lexical
             .as_deref()
-            .and_then(crate::paths::canonicalize_for_match)
-            .and_then(|p| relative(&p, &root));
+            .and_then(crate::paths::canonicalize_for_match);
+        let real = canonical.as_deref().and_then(|p| relative(p, &root));
         match (written, real) {
-            (Some(w), Some(r)) if self.allows(&w) && self.allows(&r) => Ok(()),
-            _ => Err(shown),
+            (Some(w), Some(r)) if self.allows(&w) && self.allows(&r) => {
+                match canonical.as_deref().is_some_and(hard_linked) {
+                    true => Err(Refused::HardLinked(shown)),
+                    false => Ok(()),
+                }
+            }
+            _ => Err(Refused::Outside(shown)),
         }
     }
+}
+
+/// Whether `path` is an existing file with more than one hard link. Unix
+/// only: Windows does not say on stable Rust, so a hard link there goes
+/// unnoticed (the docs say so).
+#[cfg(unix)]
+fn hard_linked(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.nlink() > 1)
+}
+
+#[cfg(not(unix))]
+fn hard_linked(_path: &Path) -> bool {
+    false
 }
 
 /// `path` under the workdir as [`relative`] reads it, spelled either the way

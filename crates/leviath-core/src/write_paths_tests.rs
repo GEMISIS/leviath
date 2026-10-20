@@ -94,19 +94,25 @@ fn a_path_is_judged_lexically_and_as_resolved() {
     assert_eq!(fence.check("./docs/x/../a.md", &root), Ok(()));
     assert_eq!(
         fence.check("src/App.tsx", &root),
-        Err("src/App.tsx".to_string())
+        Err(Refused::Outside("src/App.tsx".to_string()))
     );
     assert_eq!(
         fence.check("docs/../src/App.tsx", &root),
-        Err("src/App.tsx".to_string()),
+        Err(Refused::Outside("src/App.tsx".to_string())),
         "the refusal shows the folded path"
     );
     // Outside the workdir, or climbing past the root: shown as asked.
-    assert_eq!(fence.check("/etc/passwd", &root), Err("/etc/passwd".into()));
+    assert_eq!(
+        fence.check("/etc/passwd", &root),
+        Err(Refused::Outside("/etc/passwd".into()))
+    );
     let deep = "../".repeat(64) + "x";
-    assert_eq!(fence.check(&deep, &root), Err(deep.clone()));
+    assert_eq!(
+        fence.check(&deep, &root),
+        Err(Refused::Outside(deep.clone()))
+    );
     // The workdir itself is no file to write.
-    assert_eq!(fence.check(".", &root), Err(".".into()));
+    assert_eq!(fence.check(".", &root), Err(Refused::Outside(".".into())));
 }
 
 /// A symlink inside an allowed directory that points outside it is judged by
@@ -121,11 +127,11 @@ fn a_symlink_is_judged_by_where_it_lands() {
     let fence = WriteFence::new(&[globs(&["docs/**"])]);
     assert_eq!(
         fence.check("docs/to_src/main.rs", &root),
-        Err("docs/to_src/main.rs".to_string())
+        Err(Refused::Outside("docs/to_src/main.rs".to_string()))
     );
     assert_eq!(
         fence.check("src/to_docs/a.md", &root),
-        Err("src/to_docs/a.md".to_string())
+        Err(Refused::Outside("src/to_docs/a.md".to_string()))
     );
 }
 
@@ -145,7 +151,7 @@ fn a_junction_is_judged_by_where_it_lands() {
     let fence = WriteFence::new(&[globs(&["docs/**"])]);
     assert_eq!(
         fence.check("docs/to_src/main.rs", &root),
-        Err("docs/to_src/main.rs".to_string())
+        Err(Refused::Outside("docs/to_src/main.rs".to_string()))
     );
 }
 
@@ -180,7 +186,7 @@ fn a_path_through_another_name_for_the_workdir_is_inside_it() {
     assert_eq!(fence.check(&inside.to_string_lossy(), &root), Ok(()));
     assert_eq!(
         fence.check(&outside.to_string_lossy(), &root),
-        Err("src/a.rs".to_string())
+        Err(Refused::Outside("src/a.rs".to_string()))
     );
 }
 
@@ -199,7 +205,7 @@ fn a_dangling_link_is_refused() {
     let fence = WriteFence::new(&[globs(&["docs/**"])]);
     assert_eq!(
         fence.check("docs/dl/x.rs", &root),
-        Err("docs/dl/x.rs".to_string())
+        Err(Refused::Outside("docs/dl/x.rs".to_string()))
     );
 }
 
@@ -211,15 +217,65 @@ fn a_dangling_leaf_symlink_is_refused() {
     let (_dir, root) = workdir();
     std::os::unix::fs::symlink("../src/dangling.rs", root.join("docs/dl")).expect("link");
     let fence = WriteFence::new(&[globs(&["docs/**"])]);
-    assert_eq!(fence.check("docs/dl", &root), Err("docs/dl".to_string()));
+    assert_eq!(
+        fence.check("docs/dl", &root),
+        Err(Refused::Outside("docs/dl".to_string()))
+    );
     assert!(!crate::resolves_within(&root.join("docs/dl"), &root));
+}
+
+/// A file with another hard link may share its bytes with a file anywhere;
+/// writing it in place changes that one too, so it is refused.
+#[cfg(unix)]
+#[test]
+fn a_hard_linked_file_is_refused() {
+    let (_dir, root) = workdir();
+    std::fs::write(root.join("src/secret.rs"), "x").unwrap();
+    std::fs::hard_link(root.join("src/secret.rs"), root.join("docs/linked.md")).unwrap();
+    std::fs::write(root.join("docs/plain.md"), "x").unwrap();
+    let fence = WriteFence::new(&[globs(&["docs/**"])]);
+    assert_eq!(
+        fence.check("docs/linked.md", &root),
+        Err(Refused::HardLinked("docs/linked.md".into()))
+    );
+    assert_eq!(fence.check("docs/plain.md", &root), Ok(()));
+    let said = fence.refusal("edit_file", &Refused::HardLinked("docs/linked.md".into()));
+    assert!(said.contains("has another hard link"), "{said}");
+}
+
+/// Hard links go unnoticed on Windows, which stable Rust gives no link
+/// count for; the fence still judges the path.
+#[cfg(windows)]
+#[test]
+fn a_hard_link_is_judged_by_its_path_on_windows() {
+    let (_dir, root) = workdir();
+    std::fs::write(root.join("src/secret.rs"), "x").unwrap();
+    std::fs::hard_link(root.join("src/secret.rs"), root.join("docs/linked.md")).unwrap();
+    let fence = WriteFence::new(&[globs(&["docs/**"])]);
+    assert_eq!(fence.check("docs/linked.md", &root), Ok(()));
+    let said = fence.refusal("edit_file", &Refused::HardLinked("docs/linked.md".into()));
+    assert!(said.contains("has another hard link"), "{said}");
+}
+
+/// A caller that cannot tell which write paths are in force refuses
+/// everything rather than taking that for none.
+#[test]
+fn a_closed_fence_refuses_everything() {
+    let (_dir, root) = workdir();
+    let fence = WriteFence::closed();
+    assert!(!fence.is_open());
+    assert_eq!(
+        fence.check("docs/a.md", &root),
+        Err(Refused::Outside("docs/a.md".into()))
+    );
+    assert!(fence.describe().contains("could not be read"));
 }
 
 #[test]
 fn a_refusal_names_the_tool_the_path_and_the_globs() {
     let fence = WriteFence::new(&[globs(&["docs/**"])]);
     assert_eq!(
-        fence.refusal("context_export", "src/App.tsx"),
+        fence.refusal("context_export", &Refused::Outside("src/App.tsx".into())),
         "[blocked] context_export refused: src/App.tsx is outside this stage's write paths \
          (docs/**). Write inside them instead."
     );

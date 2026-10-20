@@ -299,16 +299,22 @@ that is absolute, starts with `~`, or has a `.` or `..` part, and so does a spaw
 | `write_file` and `edit_file` | Yes. |
 | `context_export` | Yes. |
 | A part `submit_output` writes to disk as an artifact | Yes, at the path it lands on. |
-| A `shell` redirect (`>`, `>>`, `>&file`, `&>`) | Yes, after any `cd` on the line. |
-| A redirect to a variable, after a `cd` that is not spelled out, or on an unparsed line | Refused. |
+| A `shell` redirect (`>`, `>>`, `>&file`, `&>`) | Yes, after a plain `cd <dir>` on the line too. |
+| A relative redirect on a line that changes directory any other way | Refused. |
+| A redirect to a variable, or on a line that does not parse | Refused. |
+| An existing file with another hard link | Refused on Unix; not detected on Windows. |
 | A script tool's `write_file`, and redirects in its `shell()` | Yes. |
 | `cp`, `mv`, `tee`, `sed -i` and any other program `shell` or `shell()` runs | No. |
 | MCP tools | No. They write wherever their server lets them. |
 | `install_self_tool` and `install_global_tool` | No. They write outside the workdir by design. |
 
-A `cd` on a shell line may fail, so a redirect after one has to land inside the write paths from
-where the line started and from where it moved. `cd src && echo x > docs/a.md` is refused, since
-it may write `src/docs/a.md`. Redirect to a path from the workdir instead.
+Only the plainest move is followed: a command that is exactly `cd <dir>` or `pushd <dir>`. That
+`cd` may fail, so a redirect after it has to land inside the write paths from where the line
+started and from where it moved. `cd src && echo x > docs/a.md` is refused, since it may write
+`src/docs/a.md`, and the refusal names the path from the workdir to use instead. Any other way a
+line can change directory makes its relative redirects refused: a `cd` behind `{`, `!`, `then`,
+`command`, `builtin` or an assignment, `popd`, `chdir`, any `CDPATH`, `.`, `source`, `eval`, or a
+program that is itself an expansion. An absolute redirect is still judged where it says.
 
 `shell` stays governed by the shell's own permissions, and a program it runs can write anywhere
 in the workdir. Only the redirects on its line are checked, never what the programs do.
@@ -318,9 +324,11 @@ can call MCP tools (`write-paths-mcp`). For a hard limit, give such a stage no `
 `shell = "deny"` in its `tool_permissions` and in `[graph.script_permissions]`, and run it in a
 [sandbox](#sandboxes).
 
-The check looks at the filesystem when the call is judged, not when the file is opened. A symlink
-swapped in between the two, or a hard link made earlier to a file outside the globs, still wins.
-A dangling symlink is refused, since a write would follow it to a target nothing has checked.
+The check looks at the filesystem when the call is judged, not when the file is opened, so a
+symlink swapped in between the two still wins. A dangling symlink is refused, since a write would
+follow it to a target nothing has checked. An existing file with more than one hard link is
+refused on Unix, since writing it in place would change the other file too, wherever it is.
+Windows gives no link count, so there a hard link made earlier goes unnoticed.
 
 ## Taint tracking (experimental)
 

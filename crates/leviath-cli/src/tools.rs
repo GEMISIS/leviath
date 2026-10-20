@@ -391,7 +391,12 @@ pub(crate) fn escaping_write_refusal_for(
         // could be anywhere.
         Landing::Lost => {
             return Some(
-                "[denied] This shell line moves to a directory that cannot be read ahead of                  time (`cd` with no argument, `cd -`, `popd`, or a target with an expansion)                  and then redirects a write, so where it writes cannot be checked against the                  working directory. Redirect to a path inside the workspace without moving, or                  use the `write_file` tool."
+                "[denied] This shell line may change directory in a way that is not followed (a \
+                 `cd` behind `{`, `!`, `then`, `command` or an assignment, `cd -`, `popd`, \
+                 `CDPATH`, `.`, `source` or `eval`) and redirects a write to a relative path, \
+                 so where it writes cannot be checked against the working directory. Redirect \
+                 to a path inside the workspace on a line that does not move, or use the \
+                 `write_file` tool."
                     .to_string(),
             );
         }
@@ -409,13 +414,18 @@ pub(crate) fn escaping_write_refusal_for(
             );
         }
     };
-    let (escaping, _) = targets
-        .into_iter()
-        .find(|(_, landed)| !leviath_core::resolves_within(landed, workdir))?;
+    let (written, landed) = targets.iter().find_map(|t| {
+        let out = t
+            .lands
+            .iter()
+            .find(|l| !leviath_core::resolves_within(l, workdir))?;
+        Some((&t.written, out))
+    })?;
     Some(format!(
-        "[denied] Shell redirect writes to '{escaping}', which is outside the working directory \
-         ({}). The `write_file` tool refuses the same path; a redirect is not a way around it. \
-         Write inside the workspace instead.",
+        "[denied] Shell redirect writes to '{written}', which may land at '{}', outside the \
+         working directory ({}). The `write_file` tool refuses the same path; a redirect is \
+         not a way around it. Write inside the workspace instead.",
+        landed.display(),
         workdir.display()
     ))
 }

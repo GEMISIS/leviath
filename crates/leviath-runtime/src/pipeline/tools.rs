@@ -579,9 +579,14 @@ pub(crate) fn dispatch_tools(
         // The write paths in force at this stage, for the tools answered
         // inline that write files: `context_export` and `submit_output`'s
         // produced artifacts. The tool lane holds every other write to them.
-        let write_fence = blueprint.zip(cursor).map(|(spec, cur)| {
-            leviath_core::write_paths::WriteFence::new(&spec.0.write_layers(cur.index))
-        });
+        // A run whose spec or stage cannot be read refuses those writes
+        // rather than taking that for "no write paths".
+        let write_fence = blueprint.zip(cursor).map_or_else(
+            leviath_core::write_paths::WriteFence::closed,
+            |(spec, cur)| {
+                leviath_core::write_paths::WriteFence::new(&spec.0.write_layers(cur.index))
+            },
+        );
 
         // Apply context_* tools inline (they need world access); collect the rest
         // for the async lane. A taint-gated agent's outbound call that would leak
@@ -745,7 +750,7 @@ pub(crate) fn dispatch_tools(
                     &c.arguments,
                     &mut window,
                     &crate::mime_tools::MimeToolContext {
-                        write_fence: write_fence.as_ref(),
+                        write_fence: Some(&write_fence),
                         mime: &mime,
                         entity,
                         run_id: &state.agent_id,
@@ -878,7 +883,7 @@ pub(crate) fn dispatch_tools(
                 let (text, output) = crate::output_tool::handle_output_tool(
                     &c.arguments,
                     &crate::output_tool::OutputContext {
-                        write_fence: write_fence.as_ref(),
+                        write_fence: Some(&write_fence),
                         spec: stage_inf.output.as_ref(),
                         validators,
                         stage: &state.current_stage,

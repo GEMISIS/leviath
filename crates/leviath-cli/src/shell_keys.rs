@@ -1153,7 +1153,7 @@ fn folds_into_key(program: &str, arg: &Word) -> bool {
 mod operands;
 pub(crate) use operands::{Outside, outside_workdir};
 mod targets;
-pub(crate) use targets::{Landing, landing_for};
+pub(crate) use targets::{Landing, Target, landing_for};
 
 #[cfg(test)]
 mod tests;
