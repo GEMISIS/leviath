@@ -152,9 +152,9 @@ fn place_produced(
     // Held to the stage's write paths like any other write, at the path it
     // really lands on, which may be the one beside the name it was given.
     if let Some((fence, workdir)) = fence
-        && let Err(shown) = fence.check(&path, workdir)
+        && let Err(refused) = fence.check(&path, workdir)
     {
-        return Err(fence.refusal("submit_output", &shown));
+        return Err(fence.refusal("submit_output", &refused));
     }
     // Written to the path as given, whose directory must exist - the same as a
     // regular artifact, which is a file already on disk. A name with a missing

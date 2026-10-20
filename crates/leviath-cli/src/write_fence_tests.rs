@@ -129,8 +129,25 @@ fn a_windows_redirect_is_read_as_cmd_reads_it() {
     assert!(refused.is_some());
 }
 
+/// Every line the second review wrote outside the fence with, then outside
+/// the workdir with: each changes directory in a way that is not followed.
+const MOVING_LINES: &[&str] = &[
+    "{ cd src; }; echo x > docs/a.txt",
+    "command cd src && echo x > docs/a.txt",
+    "builtin cd src && echo x > docs/a.txt",
+    "CDPATH=. cd src && echo x > docs/a.txt",
+    "if true; then cd src; fi; echo x > docs/a.txt",
+    "! cd src; echo x > docs/a.txt",
+    "export CDPATH=src; cd docs && echo x > docs/b.txt",
+    "printf 'cd src' > docs/s.sh; . docs/s.sh; echo x > docs/c.txt",
+    "{ cd /tmp/x; }; echo > esc.txt",
+    "command cd /tmp/x && echo > esc.txt",
+    "if true; then cd /tmp/x; fi; echo > esc.txt",
+];
+
 /// A `cd` moves where a redirect lands, and a `>&` to a name is a write: both
-/// are held to the globs as the shell would run them.
+/// are held to the globs as the shell would run them. A plain `cd` that may
+/// fail names the path to use instead.
 #[test]
 fn a_redirect_is_judged_where_the_shell_would_put_it() {
     let (_dir, root) = workdir();
@@ -138,21 +155,34 @@ fn a_redirect_is_judged_where_the_shell_would_put_it() {
     let shell = |command: &str| {
         write_paths_refusal_for("shell", &json!({ "command": command }), &root, &fence, true)
     };
+    let moved = shell("cd docs && echo x > inner.txt").unwrap();
+    assert!(
+        moved.contains("'inner.txt' may land at inner.txt")
+            && moved.contains("Use docs/inner.txt (a path from the workdir)"),
+        "{moved}"
+    );
     let moved = shell("cd src && echo x > docs/cd.txt").unwrap();
-    assert!(moved.contains("src/docs/cd.txt is outside"), "{moved}");
+    assert!(moved.contains("may land at src/docs/cd.txt"), "{moved}");
     let dup = shell("echo x >&src/a.txt").unwrap();
     assert!(dup.contains("src/a.txt is outside"), "{dup}");
     let dup = shell("echo x 2>&1 >& src/b.txt").unwrap();
     assert!(dup.contains("src/b.txt is outside"), "{dup}");
-    let lost = shell("cd $D && echo x > docs/a.md").unwrap();
-    assert!(lost.contains("cannot be read ahead of time"), "{lost}");
     let posix_nul = shell("echo x > nul").unwrap();
     assert!(posix_nul.contains("nul is outside"), "{posix_nul}");
+    let unnamed = shell("echo x > $OUT").unwrap();
+    assert!(
+        unnamed.contains("cannot be read ahead of time"),
+        "{unnamed}"
+    );
     assert_eq!(shell("echo x >&2 > docs/ok.md"), None);
+    for line in MOVING_LINES {
+        let lost = shell(line).unwrap_or_default();
+        assert!(lost.contains("may change directory"), "{line}: {lost}");
+    }
 }
 
 /// The workdir's own fence follows `cd` and `>&` the same way, whatever the
-/// stage's write paths.
+/// stage's write paths, and names where an escaping write would land.
 #[test]
 fn the_workdir_fence_follows_cd_and_a_dup_to_a_name() {
     let (_dir, root) = workdir();
@@ -164,12 +194,17 @@ fn the_workdir_fence_follows_cd_and_a_dup_to_a_name() {
             true,
         )
     };
-    let moved = refused("cd /tmp && echo x > esc.txt").unwrap();
-    assert!(moved.contains("outside the working directory"), "{moved}");
+    let moved = refused("cd /tmp/x && echo x > esc.txt").unwrap();
+    assert!(
+        moved.contains("may land at '") && moved.contains("esc.txt', outside the working"),
+        "{moved}"
+    );
     let dup = refused("echo x >&/tmp/esc.txt").unwrap();
     assert!(dup.contains("outside the working directory"), "{dup}");
-    let lost = refused("cd - && echo x > a.txt").unwrap();
-    assert!(lost.contains("moves to a directory"), "{lost}");
+    for line in MOVING_LINES {
+        let lost = refused(line).unwrap_or_default();
+        assert!(lost.contains("may change directory"), "{line}: {lost}");
+    }
     assert_eq!(refused("cd docs && echo x > a.txt"), None);
     assert_eq!(refused("echo x > $OUT"), None, "left to the write policy");
 }

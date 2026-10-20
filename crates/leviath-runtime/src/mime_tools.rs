@@ -242,9 +242,9 @@ fn export(
     };
     // The stage's write paths hold this write as they hold `write_file`'s.
     if let Some(fence) = ctx.write_fence
-        && let Err(shown) = fence.check(&target, workdir)
+        && let Err(refused) = fence.check(&target, workdir)
     {
-        return fence.refusal("context_export", &shown);
+        return fence.refusal("context_export", &refused);
     }
     let bytes = match store.read(run_id, &blob.sha256) {
         Ok(b) => b,

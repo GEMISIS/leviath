@@ -162,10 +162,12 @@ same list.
   anything. Name a model the provider carries (`lev models list --provider
   <name>`), or leave the provider off so the user's preference picks one.
 - The working directory's own fence on a shell line's redirects now follows
-  `cd`, `pushd` and `popd`, and reads `>&word` as a write to `word` unless
-  `word` is a descriptor number or `-`. `cd /tmp && echo x > f` and
-  `echo x >&/tmp/f` were let through; both are refused now, and so is a
-  redirect after a `cd` to somewhere not spelled out (`cd -`, `cd $DIR`).
+  a plain `cd <dir>` or `pushd <dir>`, and reads `>&word` as a write to
+  `word` unless `word` is a descriptor number or `-`. `cd /tmp && echo x > f`
+  and `echo x >&/tmp/f` were let through; both are refused now, and so is a
+  relative redirect on a line that changes directory any other way (`cd -`,
+  `cd $DIR`, `popd`, a `cd` behind `{` or `command`, `CDPATH`, `.`,
+  `source`, `eval`).
   A dangling symlink in a write's path is refused by every write tool,
   since the write would follow it to wherever it points, and an absolute
   path through another name for the workdir (`/tmp` for `/private/tmp`) is
@@ -995,7 +997,9 @@ same list.
   and `shell()` redirects outside them are refused before they run, whatever
   the permissions say, and the refusal names the globs. Paths are judged as
   written and as symlinks resolve them. A program `shell` runs (`cp`, `mv`,
-  `tee`) is not checked, only the redirects on its line. Child runs and fan-out
+  `tee`) is not checked, only the redirects on its line. An existing file
+  with another hard link is refused on Unix. A run whose stage cannot be
+  read refuses `context_export` and produced-artifact writes. Child runs and fan-out
   workers inherit the write paths in force where their parent was, under any
   of their own. `lev validate` refuses a glob that leaves the workdir, and
   warns when a stage with write paths can still run `shell`
