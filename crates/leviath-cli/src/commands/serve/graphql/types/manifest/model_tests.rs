@@ -60,6 +60,7 @@ async fn every_mirrored_function_runs() {
             provider_params: Json(serde_json::Value::Object(serde_json::Map::new())),
         },
         request_timeout_secs: Some(300),
+        effort: Some("low".to_string()),
     }])
     .await;
 }
@@ -135,9 +136,12 @@ fn a_model_config_carries_its_routes_and_timeout() {
             ]
             .into(),
         },
+        effort: Some(leviath_core::Effort::Medium),
         ..ModelChoice::default()
     };
     let config = StageModelConfig::from(&core);
+    assert_eq!(config.effort.as_deref(), Some("medium"));
+    assert_eq!(StageModelConfig::from(&ModelChoice::default()).effort, None);
     assert_eq!(config.models[0].provider, "anthropic");
     assert_eq!(config.models[0].model, "claude-sonnet-5");
     // A model named alone is served with no provider: the machine's provider

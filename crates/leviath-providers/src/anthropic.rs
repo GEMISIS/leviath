@@ -1010,6 +1010,18 @@ impl Provider for AnthropicProvider {
         Some(&self.learned)
     }
 
+    /// `output_config.effort`: the levels the listing names for the model
+    /// when it named any, else the models the id says take one.
+    fn effort_extra(&self, model: &str, effort: leviath_core::Effort) -> serde_json::Value {
+        match self.learned.listed(model).and_then(|m| m.reasoning_efforts) {
+            Some(levels) => effort.clamp(Some(&levels)).map_or(
+                serde_json::Value::Null,
+                |level| serde_json::json!({ "output_config": { "effort": level } }),
+            ),
+            None => crate::effort::claude_effort(model, effort),
+        }
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Three answers, narrowest first: what the user wrote, what the API
         // says, what this build was compiled with.
@@ -4315,5 +4327,45 @@ mod learned_tests {
         let err = provider.prime_capabilities().await.unwrap_err();
         assert!(err.to_string().contains("data"), "{err}");
         assert_eq!(provider.served_catalog(), None);
+    }
+
+    /// A stage's effort reaches Claude as `output_config.effort`: at a level
+    /// the listing names when it named the model, else by the id's rule.
+    #[test]
+    fn effort_follows_the_listing_then_the_id() {
+        use leviath_core::Effort;
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        );
+        assert_eq!(
+            provider.effort_extra("claude-opus-5", Effort::Low),
+            serde_json::json!({ "output_config": { "effort": "low" } })
+        );
+        assert!(
+            provider
+                .effort_extra("claude-haiku-4-5", Effort::Low)
+                .is_null()
+        );
+        let listed = |levels: Vec<&str>| crate::learned::LearnedModel {
+            reasoning_efforts: Some(levels.into_iter().map(str::to_string).collect()),
+            ..Default::default()
+        };
+        provider.learned.replace(std::collections::HashMap::from([
+            (
+                "claude-sonnet-5".to_string(),
+                listed(vec!["medium", "high"]),
+            ),
+            ("claude-haiku-4-5".to_string(), listed(vec![])),
+        ]));
+        assert_eq!(
+            provider.effort_extra("claude-sonnet-5", Effort::Low),
+            serde_json::json!({ "output_config": { "effort": "medium" } })
+        );
+        assert!(
+            provider
+                .effort_extra("claude-haiku-4-5", Effort::Low)
+                .is_null()
+        );
     }
 }

@@ -15659,6 +15659,14 @@ input StageModelConfigInput {
 	Null leaves the daemon's own deadline in place.
 	"""
 	requestTimeoutSecs: IntFilter
+	"""
+	Filter on `StageModelConfigOutput.effort`.
+	
+	How hard the stage asks its model to think: low, medium or high. Each
+	provider sends it in its own field, and only to a model that takes one.
+	Null leaves each model at its own default.
+	"""
+	effort: StringFilter
 	"Every filter in this list has to hold."
 	and: [StageModelConfigInput!]
 	"At least one filter in this list has to hold."
@@ -15692,6 +15700,12 @@ type StageModelConfigOutput {
 	Null leaves the daemon's own deadline in place.
 	"""
 	requestTimeoutSecs: Int
+	"""
+	How hard the stage asks its model to think: low, medium or high. Each
+	provider sends it in its own field, and only to a model that takes one.
+	Null leaves each model at its own default.
+	"""
+	effort: String
 }
 
 """

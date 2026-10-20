@@ -505,6 +505,16 @@ impl Provider for OpenAIProvider {
         Some(&self.learned)
     }
 
+    /// `reasoning.effort` for a model that reasons. A chat model refuses the
+    /// field, and a `-pro` model takes only part of the range, which differs
+    /// by generation, so both are sent none and keep their own default.
+    fn effort_extra(&self, model: &str, effort: leviath_core::Effort) -> serde_json::Value {
+        match reasons(model) && !model.contains("-pro") {
+            true => crate::effort::reasoning_effort(effort, None),
+            false => serde_json::Value::Null,
+        }
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // The listing says nothing about size or shape (see
         // `prime_capabilities`), so the table is the base and the operator's

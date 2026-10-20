@@ -412,6 +412,25 @@ impl Provider for XaiProvider {
         Some(&self.learned)
     }
 
+    /// `reasoning.effort` at a level the subscription's catalogue lists for
+    /// the model, or at the stage's level for a model the compiled rule says
+    /// takes one. A model that picks its own depth, or refused an effort
+    /// before, is sent none.
+    fn effort_extra(&self, model: &str, effort: leviath_core::Effort) -> serde_json::Value {
+        let model = self.canonical(model);
+        let listed = self
+            .efforts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|all| all.get(&model).cloned());
+        let takes = listed.is_some() || catalog::takes_effort(&model);
+        match takes && !self.effort_refused.contains(&model) {
+            true => crate::effort::reasoning_effort(effort, listed.as_deref()),
+            false => serde_json::Value::Null,
+        }
+    }
+
     /// Read the four listings. The chat listing is required; the modality and
     /// media listings are best effort, and without them the compiled table
     /// answers for what they would have said.

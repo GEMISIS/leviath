@@ -341,6 +341,26 @@ model = { models = [{ model = "gpt-5.5" }], params = { extra = { reasoning_effor
 region such as `"100% of claims"`. `extra` passes settings the provider understands straight
 through. Set `allow_user_default = false` to refuse the operator's default model as a stand-in.
 
+`effort` asks the model to think less or more: `"low"`, `"medium"` or `"high"`. Each provider
+sends it in its own field, so a stage whose list mixes providers sets it once:
+
+```toml
+model = { models = [{ provider = "meta", model = "muse-spark" }, { model = "claude-sonnet-5" }, { model = "gpt-5.5" }], effort = "low" }
+```
+
+| Provider | What it sends |
+|---|---|
+| OpenAI | `reasoning.effort`, to its reasoning models only |
+| Anthropic | `output_config.effort`, to Opus 4.5 and every model from 4.6 on |
+| Bedrock | Claude's `output_config.effort`, or `reasoningConfig` to Nova 2 |
+| Gemini | `thinking_level`, to Gemini 3 text models |
+| OpenRouter | `reasoning.effort`, at a level the model's listing names |
+| Meta, Codex, xAI, Grok | `reasoning.effort`, to the models that take one |
+
+A model with no such control is sent nothing. A level a model does not take moves to the nearest
+one it does, so a model that takes only `high` gets `high`. Use `effort` rather than `extra` for
+this: `extra` reaches every model in the list exactly as written, whichever provider serves it.
+
 `mode` is `"autonomous"`, `"interactive"` or `"output"`, or a table for the modes that carry
 settings.
 
@@ -424,6 +444,9 @@ still name a stage. On Meta, Codex, xAI and Grok, the call asks for `low` effort
 takes one. On OpenRouter, a model that must reason is asked for the least effort it takes, except
 Anthropic's, which keep their cached context. A reply cut off by that limit, or one that holds only
 the model's reasoning, is read as naming no stage.
+A stage that sets `effort` sends it on its routing call too, in the same field its own calls use.
+Where nothing above replaces it, the routing call asks for exactly what the stage asked for, which
+keeps Anthropic's cached prompt.
 
 An answer that names no stage is not taken as a choice. The question is asked once more with the
 stage names alone, such as `Answer with exactly one of: build, summary.`, plus `DONE` where the

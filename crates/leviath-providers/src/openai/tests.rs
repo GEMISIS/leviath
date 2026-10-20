@@ -647,3 +647,25 @@ async fn a_media_model_runs_on_its_own_route_through_the_provider() {
     assert_eq!(provider.serves_model("whisper-1"), Some("whisper-1".into()));
     assert!(!provider.capabilities("tts-1").supports_tools);
 }
+
+/// A stage's effort reaches a reasoning model as `reasoning.effort`, and a
+/// chat or `-pro` model is sent none.
+#[test]
+fn effort_goes_to_reasoning_models_only() {
+    use leviath_core::Effort;
+    let provider = OpenAIProvider::new(client(), "k".to_string());
+    assert_eq!(
+        provider.effort_extra("gpt-5.4-mini", Effort::Low),
+        serde_json::json!({ "reasoning": { "effort": "low" } })
+    );
+    assert_eq!(
+        provider.effort_extra("o4-mini", Effort::High),
+        serde_json::json!({ "reasoning": { "effort": "high" } })
+    );
+    for model in ["gpt-4.1", "gpt-5-chat-latest", "gpt-5-pro"] {
+        assert!(
+            provider.effort_extra(model, Effort::Low).is_null(),
+            "{model}"
+        );
+    }
+}

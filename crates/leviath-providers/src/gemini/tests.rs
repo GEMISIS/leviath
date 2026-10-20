@@ -15,6 +15,25 @@ fn provider_at(url: &str) -> GeminiProvider {
     GeminiProvider::new(client(), "test-key".to_string()).with_base_url(Some(url.to_string()))
 }
 
+/// A stage's effort reaches a Gemini 3 text model as `thinking_level`, with
+/// a Pro model's missing `medium` moved up, and no other model.
+#[test]
+fn effort_reaches_gemini_three_text_models() {
+    use leviath_core::Effort;
+    let provider = GeminiProvider::new(client(), "k".to_string());
+    assert_eq!(
+        provider.effort_extra("gemini-3-flash", Effort::Medium),
+        serde_json::json!({ "thinking_level": "medium" })
+    );
+    assert_eq!(
+        provider.effort_extra("gemini-3.1-pro-preview", Effort::Medium),
+        serde_json::json!({ "thinking_level": "high" })
+    );
+    for model in ["gemini-2.5-flash", "gemini-3-pro-image-preview"] {
+        assert!(provider.effort_extra(model, Effort::Low).is_null());
+    }
+}
+
 fn simple_request() -> InferenceRequest {
     InferenceRequest {
         system: vec![],

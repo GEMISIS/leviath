@@ -858,6 +858,11 @@ readable!(RegionKind, KindText);
 #[path = "readable_mode.rs"]
 mod mode;
 
+// ── ModelChoice ─────────────────────────────────────────────────────────────
+
+#[path = "readable_choice.rs"]
+pub(crate) mod choice;
+
 #[cfg(test)]
 #[path = "readable_tests.rs"]
 mod tests;

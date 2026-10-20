@@ -66,6 +66,29 @@ fn signed_in(url: &str, tokens: Arc<dyn TokenSource>) -> XaiProvider {
     XaiProvider::new(reqwest::Client::new(), Auth::Signin(tokens)).with_base_url(Some(url.into()))
 }
 
+/// A stage's effort reaches a Grok that takes one, at a level its catalogue
+/// lists, and never a Grok that picks its own depth or refused one.
+#[test]
+fn effort_reaches_the_groks_that_take_one() {
+    use leviath_core::Effort;
+    let p = keyed("http://x");
+    assert_eq!(
+        p.effort_extra("grok-4.6", Effort::Medium),
+        serde_json::json!({ "reasoning": { "effort": "medium" } })
+    );
+    assert!(p.effort_extra("grok-4", Effort::Low).is_null());
+    *p.efforts.write().unwrap() = Some(HashMap::from([(
+        "grok-4.5".to_string(),
+        vec!["low".to_string(), "high".to_string()],
+    )]));
+    assert_eq!(
+        p.effort_extra("grok-4.5", Effort::Medium),
+        serde_json::json!({ "reasoning": { "effort": "high" } })
+    );
+    p.effort_refused.insert("grok-4.6");
+    assert!(p.effort_extra("grok-4.6", Effort::Medium).is_null());
+}
+
 fn request(model: &str) -> InferenceRequest {
     InferenceRequest {
         system: vec![SystemBlock {

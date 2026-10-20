@@ -438,6 +438,7 @@ pub(crate) fn stage_setup(spec: &RunSpec, idx: usize) -> StageSetup {
                 stage.shell_hint,
             ),
             request_timeout_secs: stage.model.request_timeout_secs,
+            effort: stage.model.effort,
         },
         routing: stage.tool_routing.clone(),
         // A stage that takes turns with a person reads what they send,

@@ -925,6 +925,20 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// The request extras that ask `model` for `effort`, in this provider's
+    /// own spelling, or `Value::Null` when the model takes no such control.
+    ///
+    /// A stage names one provider-neutral effort and the provider serving
+    /// each request spells it, so a fallback on another provider is never
+    /// sent a field meant for the first. A level the model does not take is
+    /// moved to the nearest one it does (see [`leviath_core::Effort::clamp`]).
+    ///
+    /// Defaults to nothing: a provider that cannot say what its models take
+    /// sends none, since a refused field costs the whole call.
+    fn effort_extra(&self, _model: &str, _effort: leviath_core::Effort) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
     /// Why this provider will not serve `model_key`, when it has something
     /// more useful to say than "it is not in my catalogue".
     ///
@@ -2161,6 +2175,13 @@ mod tests {
         // A provider whose limits come from its compiled table keeps no learned
         // store, so it neither writes to nor is filled from the shared cache.
         assert!(MinimalProvider.learned_models().is_none());
+    }
+
+    /// A provider that says nothing about reasoning is sent no effort.
+    #[test]
+    fn default_effort_extra_sends_nothing() {
+        let extra = MinimalProvider.effort_extra("m", leviath_core::Effort::Low);
+        assert!(extra.is_null());
     }
 
     #[tokio::test]

@@ -113,6 +113,7 @@ fn setup() -> StageSetup {
             shell_hint: false,
             request_timeout_secs: None,
             as_text: Vec::new(),
+            effort: None,
         },
         routing: None,
         accepts_messages: true,

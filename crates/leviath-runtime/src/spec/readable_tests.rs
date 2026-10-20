@@ -563,6 +563,66 @@ fn an_interactive_mode_keeps_its_binary_shape() {
     }
 }
 
+/// A model block's `effort` reads and writes in readable formats, while the
+/// run file keeps the four fields a model block always had: a block with no
+/// effort is the same bytes as before, and one with an effort keeps it among
+/// its parameters and gets it back out.
+#[test]
+fn a_model_blocks_effort_keeps_the_binary_shape() {
+    use crate::spec::graph::{ModelChoice, ModelParams};
+    use leviath_core::Effort;
+    use serde_json::json;
+    #[derive(Serialize)]
+    struct Before {
+        models: Vec<crate::spec::names::ModelRef>,
+        allow_user_default: bool,
+        params: ModelParams,
+        request_timeout_secs: Option<u64>,
+    }
+    let before = |params: ModelParams| Before {
+        models: vec![crate::spec::names::ModelRef::parse("meta/muse-spark").unwrap()],
+        allow_user_default: false,
+        params,
+        request_timeout_secs: Some(30),
+    };
+    let plain = ModelChoice {
+        models: vec![crate::spec::names::ModelRef::parse("meta/muse-spark").unwrap()],
+        allow_user_default: false,
+        request_timeout_secs: Some(30),
+        ..Default::default()
+    };
+    assert_eq!(
+        postcard::to_stdvec(&plain).unwrap(),
+        postcard::to_stdvec(&before(ModelParams::default())).unwrap()
+    );
+    let low = ModelChoice {
+        effort: Some(Effort::Low),
+        ..plain.clone()
+    };
+    let bin = postcard::to_stdvec(&low).unwrap();
+    let mut folded = ModelParams::default();
+    folded.extra.insert(
+        super::choice::EFFORT_KEY.to_string(),
+        ParamScalar::Text("low".into()),
+    );
+    assert_eq!(bin, postcard::to_stdvec(&before(folded)).unwrap());
+    assert_eq!(postcard::from_bytes::<ModelChoice>(&bin).unwrap(), low);
+
+    let text = serde_json::to_value(&low).unwrap();
+    assert_eq!(text["effort"], json!("low"));
+    assert_eq!(serde_json::from_value::<ModelChoice>(text).unwrap(), low);
+    let unset = serde_json::to_value(&plain).unwrap();
+    assert!(unset.get("effort").is_none());
+    let toml: ModelChoice = toml::from_str("models = []\neffort = \"high\"").unwrap();
+    assert_eq!(toml.effort, Some(Effort::High));
+
+    refused::<ModelChoice>(json!({ "effort": "extreme" }), "unknown variant");
+    refused::<ModelChoice>(
+        json!({ "params": { "extra": { "leviath.effort": "low" } } }),
+        "is not a parameter a stage may set",
+    );
+}
+
 #[test]
 fn a_mistyped_stage_mode_says_what_is_wrong() {
     use serde_json::json;

@@ -438,10 +438,17 @@ pub(crate) fn build_request(
     };
 
     // Pass through any extra model parameters (top_p, stop, seed, …) so the
-    // provider can apply them; `Null` when there are none.
-    let extra = match config.map(|c| &c.extra_params) {
-        Some(params) if !params.is_empty() => serde_json::Value::Object(params.clone()),
-        _ => serde_json::Value::Null,
+    // provider can apply them, with the stage's effort in the serving
+    // provider's spelling for this model; `Null` when there are none.
+    let params = with_effort(
+        config.map(|c| c.extra_params.clone()).unwrap_or_default(),
+        provider.as_ref(),
+        &stage.model,
+        config.and_then(|c| c.effort),
+    );
+    let extra = match params.is_empty() {
+        true => serde_json::Value::Null,
+        false => serde_json::Value::Object(params),
     };
 
     // A model that cannot call tools is refused by its provider for any
@@ -510,6 +517,28 @@ pub(crate) fn build_request(
         request_timeout_secs: config.and_then(|c| c.request_timeout_secs),
     };
     (request, system_hash, block_hashes)
+}
+
+/// A stage's request extras with its `effort` added, as the provider serving
+/// the request spells it for `model`.
+///
+/// Spelled per request rather than once per stage, so a fallback on another
+/// provider gets that provider's field, or none when its model takes no
+/// effort, never the first provider's. A key the stage set itself in its
+/// parameters is left as the stage wrote it.
+pub(crate) fn with_effort(
+    mut extra: serde_json::Map<String, serde_json::Value>,
+    provider: &dyn Provider,
+    model: &str,
+    effort: Option<leviath_core::Effort>,
+) -> serde_json::Map<String, serde_json::Value> {
+    if let Some(serde_json::Value::Object(fields)) = effort.map(|e| provider.effort_extra(model, e))
+    {
+        for (key, value) in fields {
+            extra.entry(key).or_insert(value);
+        }
+    }
+    extra
 }
 
 /// Fold the system blocks into the first user turn and clear them, for a model

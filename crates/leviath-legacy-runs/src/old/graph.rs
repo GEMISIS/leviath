@@ -390,6 +390,7 @@ impl Conv {
                 extra,
             },
             request_timeout_secs: m.request_timeout_secs,
+            effort: None,
         }
     }
 

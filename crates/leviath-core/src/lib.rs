@@ -15,6 +15,7 @@ pub mod config;
 pub mod context_cause;
 pub mod credentials;
 pub mod duration;
+pub mod effort;
 pub mod error;
 pub mod execution;
 pub mod files;
@@ -49,6 +50,7 @@ pub use context_cause::ContextCause;
 pub use credentials::{
     CredentialStore, CredentialStoreKind, MemoryStore, mcp_account, provider_account,
 };
+pub use effort::Effort;
 pub use error::{Error, Result};
 pub use json_doc::JsonDoc;
 pub use lifecycle::CompactionConfig;

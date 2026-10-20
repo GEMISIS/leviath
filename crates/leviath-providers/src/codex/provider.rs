@@ -377,6 +377,12 @@ impl Provider for CodexProvider {
         super::PROVIDER_NAME
     }
 
+    /// `reasoning.effort`, over the route's own setting: every model here
+    /// reasons, and each takes all three of the levels a stage can name.
+    fn effort_extra(&self, _model: &str, effort: leviath_core::Effort) -> serde_json::Value {
+        crate::effort::reasoning_effort(effort, None)
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         let base = catalog::capabilities(model);
         match self.capability_overrides.get(model) {

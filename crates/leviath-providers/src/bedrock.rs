@@ -1032,6 +1032,24 @@ impl Provider for BedrockProvider {
         Some(&self.learned)
     }
 
+    /// Claude's `output_config.effort` for a Claude that takes one, and
+    /// Nova 2's `reasoningConfig` for a Nova 2 text model. Every other
+    /// vendor's model is sent none: Bedrock refuses a field the model does
+    /// not know.
+    fn effort_extra(&self, model: &str, effort: leviath_core::Effort) -> serde_json::Value {
+        let name = catalog::vendor_model(model);
+        match catalog::vendor_of(model) {
+            catalog::Vendor::Anthropic => crate::effort::claude_effort(name, effort),
+            catalog::Vendor::Nova if name.starts_with("nova-2-") && !name.contains("sonic") => {
+                serde_json::json!({ "reasoningConfig": {
+                    "type": "enabled",
+                    "maxReasoningEffort": effort.as_str()
+                } })
+            }
+            _ => serde_json::Value::Null,
+        }
+    }
+
     /// Config first, then what the price file said, then Anthropic's list
     /// price for a Claude: AWS bills Claude through Marketplace at the same
     /// rates Anthropic publishes, and leaves it out of the price file.
