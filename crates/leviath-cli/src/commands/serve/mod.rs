@@ -969,10 +969,13 @@ fn cors_layer(origin: impl Into<AllowOrigin>) -> CorsLayer {
         .allow_methods(Any)
         // `Access-Control-Allow-Headers: *` does NOT cover `Authorization` per
         // the Fetch spec, so a browser sending the required bearer token would
-        // be blocked. List the headers the API actually needs explicitly.
+        // be blocked. List the headers the API actually needs explicitly,
+        // including the one that elevates a single request to admin, so a
+        // browser console can send it without a second server.
         .allow_headers([
             axum::http::header::AUTHORIZATION,
             axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderName::from_static(admin_gate::ADMIN_TOKEN_HEADER),
         ])
         .expose_headers([
             model_catalog::CATALOG_AGE,
@@ -3040,7 +3043,7 @@ mod tests {
                         b"OPTIONS /api/config HTTP/1.1\r\nHost: localhost\r\n\
                           Origin: https://leviath.dev\r\n\
                           Access-Control-Request-Method: GET\r\n\
-                          Access-Control-Request-Headers: authorization\r\n\
+                          Access-Control-Request-Headers: authorization, x-leviath-admin-token\r\n\
                           Access-Control-Request-Private-Network: true\r\n\
                           Connection: close\r\n\r\n",
                     )
@@ -3053,6 +3056,12 @@ mod tests {
                     lower.contains("access-control-allow-headers")
                         && lower.contains("authorization"),
                     "preflight must allow the Authorization header, got:\n{lower}"
+                );
+                // And the admin elevation header, or a browser console could
+                // never elevate a request on a server with an admin token.
+                assert!(
+                    lower.contains(admin_gate::ADMIN_TOKEN_HEADER),
+                    "preflight must allow the admin token header, got:\n{lower}"
                 );
                 // One preflight an hour, not one every request; the catalogue
                 // headers readable from a page; a public page allowed to reach
