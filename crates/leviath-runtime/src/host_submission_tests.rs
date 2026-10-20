@@ -46,7 +46,7 @@ fn output(name: &str) -> StageDef {
 }
 
 /// The spec of run `run_id` over `stages`, each going on to the next, each
-/// offered `submit_output` and `context_append`, with a required region
+/// offered `submit_output`, `context_append` and `write_file`, with a required region
 /// `notes` when `notes` is set. The nudge is off.
 fn spec(run_id: &str, stages: Vec<StageDef>, notes: bool) -> Arc<crate::spec::run_spec::RunSpec> {
     let mut regions = vec![g::region("conversation", RegionKind::Clearable, 10_000)];
@@ -73,11 +73,23 @@ fn spec(run_id: &str, stages: Vec<StageDef>, notes: bool) -> Arc<crate::spec::ru
     let own = Arc::make_mut(&mut spec);
     own.run_id = crate::spec::names::RunId::new(run_id).unwrap();
     for plan in &mut own.stages {
-        for tool in [SUBMIT_OUTPUT_TOOL, "context_append"] {
+        let loose = json!({ "type": "object" });
+        // A write needs both its path and its content, so one without content
+        // is refused before it runs.
+        let write = json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" }, "content": { "type": "string" } },
+            "required": ["path", "content"],
+        });
+        for (tool, schema) in [
+            (SUBMIT_OUTPUT_TOOL, &loose),
+            ("context_append", &loose),
+            ("write_file", &write),
+        ] {
             plan.tools.push(crate::spec::run_spec::ToolDef {
                 name: crate::spec::names::ToolName::new(tool).unwrap(),
                 description: String::new(),
-                schema: leviath_core::JsonDoc::new(json!({ "type": "object" })),
+                schema: leviath_core::JsonDoc::new(schema.clone()),
                 source: crate::spec::run_spec::ToolSource::StageControl,
             });
         }
@@ -260,4 +272,28 @@ async fn an_interactive_stage_talks_on_after_its_answer() {
     assert_eq!(script.calls(), 3);
     assert_eq!(host.world.agent_status(run), Some(AgentStatus::Waiting));
     assert_eq!(announced(&events), ["x", "x"]);
+}
+
+/// A call refused before it ran, beside an accepted answer, keeps a terminal
+/// stage going: the model is shown the refusal, and its next answer ends the
+/// stage. Here the write has no content, so it never happened.
+#[tokio::test]
+async fn a_refused_call_beside_the_answer_keeps_the_stage_going() {
+    let script = Script::new(vec![
+        calling(&[
+            ("write_file", json!({ "path": "bad.txt" })),
+            (SUBMIT_OUTPUT_TOOL, json!({ "content": "Wrote it." })),
+        ]),
+        submit("Wrote it."),
+        submit("Wrote it."),
+    ]);
+    let mut host = host(script.clone(), Default::default());
+    let run = place(&mut host, spec("refused", vec![output("answer")], false));
+    let events = settle(&mut host).await;
+
+    assert_eq!(script.calls(), 2);
+    assert!(script.last().contains("[error]"), "{}", script.last());
+    assert_eq!(host.world.agent_status(run), Some(AgentStatus::Complete));
+    assert_eq!(announced(&events), ["Wrote it."]);
+    assert_eq!(resubmissions(&host, run), [("answer".to_string(), 1)]);
 }

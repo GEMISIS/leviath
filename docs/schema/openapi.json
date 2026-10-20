@@ -6114,6 +6114,11 @@
             "minimum": 0,
             "description": "Without this a stage showing no cache reads cannot be told apart from one paying to write a prefix nothing reuses."
           },
+          "resubmissions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "`submit_output` calls this stage made after a visit to it already held an answer, whether each changed the answer or handed back the same one. Zero on a run recorded before Leviath counted them."
+          },
           "cost_usd": {
             "type": [
               "number",

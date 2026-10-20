@@ -602,12 +602,18 @@ pub(crate) fn dispatch_tools(
         // What this batch's `submit_output` calls came to. A final output
         // submitted here is committed to the entity after the loop (the loop
         // holds borrows `commands` would conflict with).
+        let entered_at = ledger
+            .as_deref()
+            .and_then(|l| l.0.iter().find(|r| r.name == state.current_stage))
+            .and_then(|r| r.visits.last())
+            .map(|v| v.entered_at);
         let mut submissions = super::submission::BatchSubmissions::new(
             routing_stage,
-            &state.current_visit,
+            state,
             recorded,
             kept,
-            resolved.is_some(),
+            resolved,
+            entered_at,
         );
         // A `fan_out` call in this batch, started after the loop for the same
         // reason: it parks the agent, which is a `commands` write.
@@ -649,7 +655,8 @@ pub(crate) fn dispatch_tools(
         let recovered: Vec<crate::tool_bridge::ToolResult> =
             recovered.map(|r| r.0.clone()).unwrap_or_default();
         for c in &result.tool_calls {
-            if recovered.iter().any(|(id, _)| id == &c.tool_id) {
+            if let Some((_, done)) = recovered.iter().find(|(id, _)| id == &c.tool_id) {
+                submissions.recovered(&c.name, done.as_str());
                 continue;
             }
             // Everything this call commits to the window is this call's, and
@@ -938,6 +945,7 @@ pub(crate) fn dispatch_tools(
         if let (false, Some((hub, gate_stage))) = (pending_prompts.is_empty(), interactive) {
             let n = pending_prompts.len();
             let mut held = resolved.cloned().unwrap_or_default();
+            held.submissions.get_or_insert_with(|| submissions.start());
             for (tool_id, name, taint, clearance) in pending_prompts {
                 let question = hold
                     .and_then(|h| h.0.asked.get(&tool_id).cloned())
@@ -976,6 +984,7 @@ pub(crate) fn dispatch_tools(
         // subscribers about one submission twice.
         // Settled here for the same reason: the batch held above is judged
         // again once its prompts resolve, against what came before it.
+        // A call that failed here keeps the stage going, so the model sees why.
         let stage_ends = submissions.settle(
             &mut commands.entity(entity),
             state,
@@ -983,7 +992,7 @@ pub(crate) fn dispatch_tools(
                 super::submission::ends_on_submission(&spec.0, cur.index)
             }),
             ledger.as_deref_mut(),
-        );
+        ) && !super::submission::any_refused(&result.tool_calls, &context_results);
         let super::submission::BatchSubmissions {
             submitted,
             produced,

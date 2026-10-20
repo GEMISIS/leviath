@@ -9344,6 +9344,61 @@ async fn an_answer_ends_a_stage_with_nowhere_else_to_go() {
     }
 }
 
+/// After a daemon restart, which keeps nothing about the visit's answer: a
+/// batch whose answer was accepted before the restart ends a stage with
+/// nowhere else to go rather than asking the model again, and the answer
+/// recorded earlier in the visit, submitted again in a stage with somewhere to
+/// go, is a repeat, neither recorded nor announced twice.
+#[tokio::test]
+async fn a_restart_keeps_the_visits_answer() {
+    let layout = tg::layout(vec![], 10_000);
+    let alone = tg::graph(vec![tg::stage("s")], layout.clone());
+    let onward = tg::graph(vec![tg::stage("s"), tg::stage("t")], layout);
+    let (mut world, mut rx, _lane) = announcing_world();
+    let now = chrono::Utc::now().timestamp();
+    let mut record = leviath_core::run_meta::StageRecord::new("s".into(), 0);
+    record.begin_visit(now - 60, "v".into());
+    let answer = leviath_core::output::FinalOutput::new("x", None, "s".into(), now - 30);
+
+    let recovered = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![submit_call("o1", "x")]),
+            output_window(),
+            ReadyForTools,
+            run_metadata(),
+            spec_of(alone),
+            StageCursor { index: 0 },
+            crate::persistence::FinalOutput(answer.clone()),
+            crate::pipeline::RecoveredResults(vec![(
+                "o1".to_string(),
+                "Recorded as this run's final output.".into(),
+            )]),
+        ))
+        .id();
+    let repeated = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![submit_call("o2", "x")]),
+            output_window(),
+            ReadyForTools,
+            run_metadata(),
+            spec_of(onward),
+            StageCursor { index: 0 },
+            crate::persistence::FinalOutput(answer),
+            StageLedger(vec![record]),
+        ))
+        .id();
+    dispatch_once(&mut world);
+
+    assert!(world.get::<ResolveTransition>(recovered).is_some());
+    assert_eq!(submitted_frames(&mut rx), Vec::new(), "nothing announced");
+    let kept = world.get::<crate::pipeline::VisitSubmissions>(repeated);
+    assert_eq!(kept.map(|k| k.repeats), Some(1));
+    let ledger = &world.get::<StageLedger>(repeated).unwrap().0[0];
+    assert_eq!(ledger.resubmissions, 1);
+}
+
 #[test]
 fn collect_tools_merges_stashed_context_results() {
     let (tx, rx) = mpsc::unbounded_channel();

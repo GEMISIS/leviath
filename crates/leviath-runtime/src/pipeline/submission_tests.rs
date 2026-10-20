@@ -55,6 +55,14 @@ fn state() -> AgentState {
     }
 }
 
+/// [`state`], in visit `visit`.
+fn at(visit: &str) -> AgentState {
+    AgentState {
+        current_visit: visit.to_string(),
+        ..state()
+    }
+}
+
 /// A stage ends on its answer when no normal edge leaves it, or when it is the
 /// stage a fan-out worker runs; never when it is interactive.
 #[test]
@@ -101,15 +109,37 @@ fn the_held_answer_is_the_visits_own() {
         repeats: 1,
     };
     let stage = g::stage("s");
-    let this_visit = BatchSubmissions::new(Some(&stage), "v1", Some(&recorded), Some(&kept), false);
+    let this_visit = BatchSubmissions::new(
+        Some(&stage),
+        &state(),
+        Some(&recorded),
+        Some(&kept),
+        None,
+        None,
+    );
     assert_eq!(this_visit.held.map(|o| o.content.as_str()), Some("a"));
     assert_eq!((this_visit.repeats, this_visit.guarded), (1, true));
-    let earlier = BatchSubmissions::new(Some(&stage), "v2", Some(&recorded), Some(&kept), false);
+    let earlier = BatchSubmissions::new(
+        Some(&stage),
+        &at("v2"),
+        Some(&recorded),
+        Some(&kept),
+        None,
+        None,
+    );
     assert!(earlier.held.is_none());
     assert_eq!(earlier.repeats, 0);
-    let rerun = BatchSubmissions::new(Some(&stage), "v1", Some(&recorded), Some(&kept), true);
+    let rerun = crate::gate_prompt::GateResolved::default();
+    let rerun = BatchSubmissions::new(
+        Some(&stage),
+        &state(),
+        Some(&recorded),
+        Some(&kept),
+        Some(&rerun),
+        None,
+    );
     assert!(rerun.held.is_none());
-    let bare = BatchSubmissions::new(None, "v1", None, None, false);
+    let bare = BatchSubmissions::new(None, &state(), None, None, None, None);
     assert!(!bare.guarded, "with no graph to read, nothing is guarded");
 }
 
@@ -120,7 +150,7 @@ fn the_held_answer_is_the_visits_own() {
 fn the_same_answer_again_is_not_recorded_again() {
     let mut w = window();
     let stage = g::stage("s");
-    let mut batch = BatchSubmissions::new(Some(&stage), "v1", None, None, false);
+    let mut batch = BatchSubmissions::new(Some(&stage), &state(), None, None, None, None);
 
     let first = batch.apply(&submit("c1", "the answer"), None, &ctx(), &mut w);
     assert!(
@@ -154,7 +184,7 @@ fn an_interactive_stage_records_every_submission() {
         mode: interactive(),
         ..g::stage("s")
     };
-    let mut batch = BatchSubmissions::new(Some(&stage), "v1", None, None, false);
+    let mut batch = BatchSubmissions::new(Some(&stage), &state(), None, None, None, None);
     for id in ["c1", "c2"] {
         let text = batch.apply(&submit(id, "the answer"), None, &ctx(), &mut w);
         assert!(text.starts_with("Recorded"), "{text}");
@@ -184,11 +214,18 @@ fn settling_keeps_the_visit_and_says_when_the_stage_ends() {
     let mut commands = Commands::new(&mut queue, &world);
 
     // Nothing submitted and nothing held: nothing kept, nothing ends.
-    let idle = BatchSubmissions::new(Some(&stage), "v1", None, None, false);
+    let idle = BatchSubmissions::new(Some(&stage), &state(), None, None, None, None);
     assert!(!idle.settle(&mut commands.entity(agent), &state(), true, None));
 
     // The held answer again, once more than allowed so far: the stage ends.
-    let mut repeat = BatchSubmissions::new(Some(&stage), "v1", Some(&recorded), Some(&kept), false);
+    let mut repeat = BatchSubmissions::new(
+        Some(&stage),
+        &state(),
+        Some(&recorded),
+        Some(&kept),
+        None,
+        None,
+    );
     repeat.apply(&submit("c1", "a"), None, &ctx(), &mut w);
     assert!(repeat.settle(
         &mut commands.entity(agent),
@@ -212,10 +249,107 @@ fn settling_keeps_the_visit_and_says_when_the_stage_ends() {
     // A new answer ends a stage with nowhere to go, and only such a stage.
     let mut queue = bevy_ecs::world::CommandQueue::default();
     let mut commands = Commands::new(&mut queue, &world);
-    let mut fresh = BatchSubmissions::new(Some(&stage), "v2", None, None, false);
+    let mut fresh = BatchSubmissions::new(Some(&stage), &at("v2"), None, None, None, None);
     fresh.apply(&submit("c2", "b"), None, &ctx(), &mut w);
     assert!(fresh.settle(&mut commands.entity(agent), &state(), true, None));
     assert!(!fresh.settle(&mut commands.entity(agent), &state(), false, None));
     queue.apply(&mut world);
     assert_eq!(world.get::<VisitSubmissions>(agent).unwrap().repeats, 0);
+}
+
+/// With nothing kept, as after a daemon restart, the answer is the visit's
+/// when this stage recorded it since the visit began. A batch run again after
+/// a gate prompt starts from what its hold kept, and a hold keeps where the
+/// batch started.
+#[test]
+fn the_held_answer_survives_a_restart_and_a_gate_hold() {
+    let stage = g::stage("s");
+    let answer = FinalOutput::new("a", None, "s".into(), 100);
+    let recorded = crate::persistence::FinalOutput(answer.clone());
+    let held = |entered_at| {
+        BatchSubmissions::new(
+            Some(&stage),
+            &state(),
+            Some(&recorded),
+            None,
+            None,
+            entered_at,
+        )
+        .held
+        .is_some()
+    };
+    assert!(held(Some(50)), "recorded since the visit began");
+    assert!(!held(Some(150)), "recorded before it");
+    assert!(!held(None), "no visit to compare with");
+    let elsewhere = crate::persistence::FinalOutput(FinalOutput::new("a", None, "t".into(), 100));
+    let other = BatchSubmissions::new(
+        Some(&stage),
+        &state(),
+        Some(&elsewhere),
+        None,
+        None,
+        Some(50),
+    );
+    assert!(other.held.is_none(), "another stage's answer");
+
+    let hold = crate::gate_prompt::GateResolved {
+        submissions: Some(HeldSubmission {
+            answer: Some(answer),
+            repeats: 1,
+        }),
+        ..Default::default()
+    };
+    let mut w = window();
+    let mut rerun = BatchSubmissions::new(Some(&stage), &state(), None, None, Some(&hold), None);
+    assert_eq!(rerun.held.map(|o| o.content.as_str()), Some("a"));
+    let text = rerun.apply(&submit("c1", "a"), None, &ctx(), &mut w);
+    assert_eq!(text, REPEATED_SUBMISSION);
+    let start = rerun.start();
+    assert_eq!(start.answer.map(|o| o.content), Some("a".to_string()));
+    assert_eq!((start.repeats, rerun.repeats), (1, 2));
+}
+
+/// A call the batch finished before a restart hands back the answer when it
+/// was a `submit_output` that was accepted or answered as a repeat.
+#[test]
+fn a_recovered_submission_counts_as_answered() {
+    let answered = |name: &str, text: &str| {
+        let mut batch = BatchSubmissions::new(None, &state(), None, None, None, None);
+        batch.recovered(name, text);
+        batch.answered
+    };
+    let submit = leviath_core::stage_tools::SUBMIT_OUTPUT_TOOL;
+    assert!(answered(
+        submit,
+        "Recorded as this run's final output. Artifacts: a."
+    ));
+    assert!(answered(submit, REPEATED_SUBMISSION));
+    assert!(!answered(submit, "[error] final output is empty"));
+    assert!(!answered(
+        "write_file",
+        "Recorded as this run's final output."
+    ));
+}
+
+/// Only a failed call other than a `submit_output` counts as refused.
+#[test]
+fn only_another_calls_failure_is_a_refusal() {
+    let write = crate::components::ToolCall {
+        name: "write_file".to_string(),
+        ..submit("w1", "")
+    };
+    let calls = [write, submit("s1", "x")];
+    let refused = |results: &[(&str, &str)]| {
+        let results: Vec<(String, String)> = results
+            .iter()
+            .map(|(id, text)| (id.to_string(), text.to_string()))
+            .collect();
+        any_refused(&calls, &results)
+    };
+    assert!(refused(&[
+        ("w1", "[error] missing content"),
+        ("s1", "Recorded")
+    ]));
+    assert!(!refused(&[("w1", "wrote it"), ("s1", "[error] empty")]));
+    assert!(!refused(&[("gone", "[error] no such call")]));
 }

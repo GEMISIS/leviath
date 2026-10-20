@@ -48,6 +48,9 @@ pub(crate) struct GateResolved {
     /// The id of the question each call still waiting on a person was put
     /// under, by tool-call id.
     pub asked: HashMap<String, String>,
+    /// The answer the batch's stage held when the batch first arrived, so the
+    /// run again judges its `submit_output` calls as the first pass did.
+    pub submissions: Option<crate::pipeline::HeldSubmission>,
 }
 
 /// One resolved gate prompt, reported on the lane.
