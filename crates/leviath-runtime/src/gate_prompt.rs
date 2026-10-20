@@ -493,13 +493,15 @@ mod tests {
             runtime: Handle::current(),
         };
         ask(&stage, &hub, gated_call());
+        // Whether the question is up yet is the scheduler's choice, so the
+        // wait has no arm for either answer: the body always runs once (the
+        // list starts empty) and the condition alone decides when to stop.
         let mut open = Vec::new();
-        for _ in 0..500 {
-            open = hub.pending();
-            if !open.is_empty() {
-                break;
-            }
+        let mut tries = 0;
+        while open.is_empty() && tries < 500 {
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            open = hub.pending();
+            tries += 1;
         }
         let mut answer = InteractionResponse::text(&open[0].1.id, "");
         answer.choice_index = Some(0);
