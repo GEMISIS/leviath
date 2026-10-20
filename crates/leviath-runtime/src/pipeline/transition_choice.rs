@@ -71,9 +71,34 @@ pub(crate) fn match_transition_choice(
     route_choice(choice, edges, allow_complete).map(|(to, _)| to)
 }
 
-/// Match an LLM transition response to one of the choosable edges' target stages,
-/// with why the run goes there,
-/// or `None` if the stage may complete and the LLM chose to end here.
+/// Where a routing answer sends the run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Routed {
+    /// Into this stage, for this reason.
+    To(String, crate::state::TransitionReason),
+    /// Nowhere: the run ends here.
+    End,
+}
+
+/// [`named_choice`], falling back to [`fallback_choice`] when the answer
+/// names nothing, with `None` for the end of the run.
+#[cfg(test)]
+pub(crate) fn route_choice(
+    choice: &str,
+    edges: &[EdgeDef],
+    allow_complete: bool,
+) -> Option<(String, crate::state::TransitionReason)> {
+    match named_choice(choice, edges, allow_complete)
+        .unwrap_or_else(|| fallback_choice(edges, allow_complete))
+    {
+        Routed::To(to, reason) => Some((to, reason)),
+        Routed::End => None,
+    }
+}
+
+/// Match an LLM transition response to one of the choosable edges' target
+/// stages, or to `DONE` where the stage may complete. `None` when it names
+/// neither.
 ///
 /// Models are asked to answer with only the target stage name (or `DONE`), but
 /// frequently wrap it in prose or re-explain the stage. We therefore look for a
@@ -81,14 +106,11 @@ pub(crate) fn match_transition_choice(
 /// line, for a **whole-word** match against a stage name or `DONE` - instead of
 /// substring-scanning the whole response, where a stage name mentioned in
 /// passing ("the implementation", "the approved plan") would hijack the routing.
-/// When nothing matches, a stage that may complete ends the run; otherwise the
-/// run advances along the first declared edge, as a fallback: the model chose
-/// nothing it could take.
-pub(crate) fn route_choice(
+pub(crate) fn named_choice(
     choice: &str,
     edges: &[EdgeDef],
     allow_complete: bool,
-) -> Option<(String, crate::state::TransitionReason)> {
+) -> Option<Routed> {
     let lines: Vec<&str> = choice
         .lines()
         .map(str::trim)
@@ -109,37 +131,79 @@ pub(crate) fn route_choice(
         .last()
         .copied()
         .filter(|l| lines.len() > 1 && words_in(l) <= 3);
-    for line in first.into_iter().chain(last) {
-        for word in line.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-') {
-            if word.is_empty() {
-                continue;
-            }
-            if allow_complete && word.eq_ignore_ascii_case("done") {
-                return None;
-            }
-            if let Some(edge) = edges
-                .iter()
-                .find(|e| word.eq_ignore_ascii_case(e.to.as_str()))
-            {
-                return Some((
+    let mut words = first
+        .into_iter()
+        .chain(last)
+        .flat_map(|line| line.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-'));
+    words.find_map(|word| {
+        if allow_complete && word.eq_ignore_ascii_case("done") {
+            return Some(Routed::End);
+        }
+        edges
+            .iter()
+            .find(|e| word.eq_ignore_ascii_case(e.to.as_str()))
+            .map(|edge| {
+                Routed::To(
                     edge.to.to_string(),
                     crate::state::TransitionReason::ModelChoice,
-                ));
-            }
-        }
+                )
+            })
+    })
+}
+
+/// Where the run goes when the answer named nothing it could take: a stage
+/// that may end prefers ending over looping back; otherwise the run advances
+/// along the first declared edge.
+pub(crate) fn fallback_choice(edges: &[EdgeDef], allow_complete: bool) -> Routed {
+    match edges.first() {
+        Some(edge) if !allow_complete => Routed::To(
+            edge.to.to_string(),
+            crate::state::TransitionReason::Fallback,
+        ),
+        _ => Routed::End,
     }
-    // No clear decision: a stage that may end prefers ending over looping back;
-    // otherwise the run advances along the first declared edge.
+}
+
+/// The routing question was asked once more, because the first answer named
+/// no stage. A second answer that names none takes [`fallback_choice`].
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct RoutingReasked;
+
+/// The question asked when the first routing answer named no stage: the
+/// stage names alone, and `DONE` where the stage may end the run.
+pub(crate) fn build_reask_prompt(edges: &[EdgeDef], allow_complete: bool) -> String {
+    let mut names: Vec<&str> = edges.iter().map(|e| e.to.as_str()).collect();
     if allow_complete {
-        None
-    } else {
-        edges.first().map(|edge| {
-            (
-                edge.to.to_string(),
-                crate::state::TransitionReason::Fallback,
-            )
-        })
+        names.push("DONE");
     }
+    let mut p = format!(
+        "Your last reply named no stage. Answer with exactly one of: {}.",
+        names.join(", ")
+    );
+    if allow_complete {
+        p.push_str(" DONE ends the run here.");
+    }
+    p
+}
+
+/// The most characters of a reply quoted in a routing note.
+const QUOTED_REPLY_CHARS: usize = 80;
+
+/// Why a routing reply named no stage, as a stage log reads it.
+fn why_unrouted(response: &leviath_providers::InferenceResponse, answer: &str) -> String {
+    if response.finish_reason == leviath_providers::FinishReason::TokenLimit {
+        return "the reply was cut off before it named a stage".to_string();
+    }
+    if response.content_is_reasoning {
+        return "the reply was the model's reasoning, with no answer".to_string();
+    }
+    if answer.is_empty() {
+        return "the answer was empty".to_string();
+    }
+    let flat = answer.split_whitespace().collect::<Vec<_>>().join(" ");
+    let quoted: String = flat.chars().take(QUOTED_REPLY_CHARS).collect();
+    let more = if quoted.len() < flat.len() { "..." } else { "" };
+    format!("the answer named no stage (\"{quoted}{more}\")")
 }
 
 /// What `dispatch_transition_choice` selects.
@@ -156,6 +220,7 @@ type TransitionChoiceQuery = (
     &'static AwaitingTransitionChoice,
     Option<&'static InFlightWork>,
     Option<&'static DispatchStall>,
+    Option<&'static RoutingReasked>,
     // What the stage's own request was built from, so the routing request
     // can be built the same way and share its cached prefix.
     (
@@ -389,8 +454,19 @@ pub(crate) fn dispatch_transition_choice(
     // The daemon inserts this from `[limits]`; a world that never set it gets
     // the built-in schedule.
     let tuning = retry.map(|r| *r).unwrap_or_default();
-    for (entity, state, mut window, si, spec, cursor, choice, in_flight, stalled, built_from) in
-        agents.iter_mut()
+    for (
+        entity,
+        state,
+        mut window,
+        si,
+        spec,
+        cursor,
+        choice,
+        in_flight,
+        stalled,
+        reasked,
+        built_from,
+    ) in agents.iter_mut()
     {
         let (config, progress, prefix, block_prefix, calibration) = built_from;
         crate::tick_scope::enter(entity);
@@ -414,7 +490,12 @@ pub(crate) fn dispatch_transition_choice(
         };
 
         let current = &spec.0.graph.stages[cursor.index];
-        let prompt = build_transition_prompt(current, &choice.0);
+        // Asked once more, the question is the stage names alone: the full
+        // prompt is still in the context just above.
+        let prompt = match reasked {
+            Some(_) => build_reask_prompt(&choice.0, current.allow_complete),
+            None => build_transition_prompt(current, &choice.0),
+        };
         let tokens = leviath_core::estimate_tokens(&prompt);
         let _ = window.add_typed_entry_caused(
             leviath_core::ContextCause::Framework,
@@ -475,7 +556,8 @@ pub(crate) fn dispatch_transition_choice(
         // on `AwaitingTransitionResponse` while the world decides on each
         // failed trip; the trips themselves are supervised.
         // The stage lane's schedule, with the routing call's own number of
-        // tries: the stage's, then the graph's, then the operator's.
+        // tries: the stage's, then the graph's, then the operator's. A
+        // question asked once more is a new call and gets them all again.
         let attempts = crate::spec::graph::RoutingDef::attempts(
             spec.0.graph.routing.as_ref(),
             current.routing.as_ref(),
@@ -518,7 +600,10 @@ type CollectTransitionChoiceQuery = (
     Option<&'static crate::persistence::RunMetadata>,
     Option<&'static mut crate::persistence::TokenTotals>,
     Option<&'static mut StageLedger>,
-    Option<&'static StageInference>,
+    (
+        Option<&'static StageInference>,
+        Option<&'static RoutingReasked>,
+    ),
     Option<&'static mut crate::pipeline::StageIoBuffer>,
 );
 
@@ -549,8 +634,8 @@ pub(crate) fn collect_transition_choice(
             metadata,
             mut totals,
             mut ledger,
-            called,
-            buffer,
+            (called, reasked),
+            mut buffer,
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -634,7 +719,8 @@ pub(crate) fn collect_transition_choice(
                 }
                 commands
                     .entity(outcome.entity)
-                    .remove::<AwaitingTransitionResponse>();
+                    .remove::<AwaitingTransitionResponse>()
+                    .remove::<RoutingReasked>();
                 // The routing call failed, not the stage's work, and its tries
                 // are spent. By default the run stops here with that error:
                 // following the stage's `error` edge would redo work that is
@@ -703,20 +789,68 @@ pub(crate) fn collect_transition_choice(
 
         // A reply that gives no answer is read as an empty one.
         let choice = routing_answer(&response).unwrap_or_default().to_string();
-        let tokens = leviath_core::estimate_tokens(&choice);
+        let allow_complete = graph.stages[cursor.index].allow_complete;
+        let named = named_choice(&choice, &resp.0, allow_complete);
         // The framework's own phrasing of the decision, not the model's text:
-        // the reply was a bare stage name.
+        // the reply was a bare stage name. A reply that named none is kept as
+        // it came, so a second ask reads what it is answering.
+        let entry = match (&named, choice.is_empty()) {
+            (Some(_), _) => format!("Transitioning to: {choice}"),
+            (None, false) => choice.clone(),
+            (None, true) => "(no answer)".to_string(),
+        };
+        let tokens = leviath_core::estimate_tokens(&entry);
         let _ = window.add_typed_entry_caused(
             leviath_core::ContextCause::Framework,
             "conversation",
             leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
-            format!("Transitioning to: {choice}"),
+            entry,
             tokens,
         );
+        // This answer settles the question one way or another, or asks it
+        // again below.
+        commands.entity(outcome.entity).remove::<RoutingReasked>();
+        let routed = match named {
+            Some(routed) => routed,
+            None => {
+                let stage = &graph.stages[cursor.index];
+                let why = why_unrouted(&response, &choice);
+                // Asked once more before guessing, on a new routing call with
+                // its own tries. The stage's retries and the call's tries are
+                // for failures, and this call did not fail.
+                if reasked.is_none() {
+                    let note = format!("{why}; asking once more");
+                    tracing::warn!(stage = %stage.name, "routing: {note}");
+                    if let Some(buffer) = buffer.as_mut() {
+                        buffer
+                            .logs
+                            .push((cursor.index, format!("[routing] {note}")));
+                    }
+                    commands
+                        .entity(outcome.entity)
+                        .remove::<AwaitingTransitionResponse>()
+                        .insert(crate::pipeline::AwaitingTransitionChoice(resp.0.clone()))
+                        .insert(RoutingReasked);
+                    continue;
+                }
+                let fallback = fallback_choice(&resp.0, allow_complete);
+                let took = match &fallback {
+                    Routed::To(to, _) => format!("took '{to}', the first edge"),
+                    Routed::End => "ended the run, as the stage may".to_string(),
+                };
+                let note = format!("{why}, asked twice; {took}");
+                tracing::warn!(stage = %stage.name, "routing: {note}");
+                if let Some(buffer) = buffer.as_mut() {
+                    buffer
+                        .logs
+                        .push((cursor.index, format!("[routing] {note}")));
+                }
+                fallback
+            }
+        };
 
-        let allow_complete = graph.stages[cursor.index].allow_complete;
-        match route_choice(&choice, &resp.0, allow_complete) {
-            Some((target, picked)) => {
+        match routed {
+            Routed::To(target, picked) => {
                 let idx = spec_view::stage_index(graph, &target).unwrap_or(0);
                 // The chosen edge (absent when the matched target has no explicit
                 // edge, e.g. a fallback - then Direct, ungated).
@@ -819,7 +953,7 @@ pub(crate) fn collect_transition_choice(
                     }
                 }
             }
-            None => {
+            Routed::End => {
                 state.status = AgentStatus::Complete;
                 commands
                     .entity(outcome.entity)
