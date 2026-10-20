@@ -140,14 +140,26 @@ impl Config {
         }
     }
 
-    /// Overlay `store`'s secrets onto whichever provider keys are still unset.
+    /// Overlay `store`'s secrets onto whichever provider keys are still unset,
+    /// and onto each tool credential the file names without a value.
     pub(super) fn apply_credential_store(&mut self, store: &dyn leviath_core::CredentialStore) {
-        let accounts: Vec<String> = PROVIDER_KEYS.iter().map(ProviderKey::account).collect();
+        let mut accounts: Vec<String> = PROVIDER_KEYS.iter().map(ProviderKey::account).collect();
+        accounts.extend(
+            self.tool_credentials
+                .unfilled()
+                .iter()
+                .map(|name| super::tool_credentials::account(name)),
+        );
         let mut found = store.read_all(&accounts);
         for key in PROVIDER_KEYS {
             let slot = (key.slot)(self);
             if slot.is_none() {
                 *slot = found.remove(&key.account());
+            }
+        }
+        for (name, value) in self.tool_credentials.entries_mut() {
+            if let Some(secret) = found.remove(&super::tool_credentials::account(name)) {
+                *value = secret;
             }
         }
     }
@@ -159,10 +171,16 @@ impl Config {
     /// mutating in place matters - the caller is usually saving a config it is
     /// still going to use for inference, and blanking its keys would break the
     /// run that triggered the save.
+    ///
+    /// A tool credential keeps its name with an empty value: the name is how
+    /// the next load knows which account to ask the store for.
     pub(super) fn without_secrets(&self) -> Self {
         let mut copy = self.clone();
         for key in PROVIDER_KEYS {
             *(key.slot)(&mut copy) = None;
+        }
+        for (_, value) in copy.tool_credentials.entries_mut() {
+            value.clear();
         }
         copy
     }
@@ -186,7 +204,10 @@ impl Config {
     ) -> anyhow::Result<()> {
         let to_write = match resolved.map_err(|e| anyhow::anyhow!("{e}"))? {
             Some(store) => {
-                for (account, secret) in self.provider_secrets() {
+                let tools = self.tool_credentials.secrets().map(|(name, secret)| {
+                    (super::tool_credentials::account(name), secret.to_string())
+                });
+                for (account, secret) in self.provider_secrets().into_iter().chain(tools) {
                     store
                         .set(&account, &secret)
                         .map_err(|e| anyhow::anyhow!("failed to store {account}: {e}"))?;
@@ -211,6 +232,41 @@ impl Config {
         let path_display = path.display();
         tracing::debug!("Saved config to {}", path_display);
         Ok(())
+    }
+}
+
+impl Config {
+    /// Take the tool credentials `names` out of the configured credential
+    /// store, after a save that dropped them from the file.
+    ///
+    /// Only the keychain holds anything to take out: in `file` mode the save
+    /// already removed them. A store that cannot be reached, or an entry that
+    /// will not delete, is a warning. The file no longer names the account, so
+    /// nothing reads it again either way.
+    pub(crate) fn forget_tool_credentials(&self, names: &[String]) {
+        let resolved = crate::credentials::store_for(self.security.credential_store);
+        forget_tool_credentials_with(names, resolved);
+    }
+}
+
+/// [`Config::forget_tool_credentials`] with the backend already resolved.
+pub(super) fn forget_tool_credentials_with(
+    names: &[String],
+    resolved: crate::credentials::Resolved,
+) {
+    let store = match resolved {
+        Ok(Some(store)) => store,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!("{e}. Removed tool credentials may still be in the credential store.");
+            return;
+        }
+    };
+    for name in names {
+        let account = super::tool_credentials::account(name);
+        if let Err(e) = store.delete(&account) {
+            tracing::warn!("could not remove {account} from the credential store: {e}");
+        }
     }
 }
 
@@ -290,5 +346,92 @@ mod tests {
                 Some("from-file")
             );
         });
+    }
+
+    /// A store the test keeps a handle on after handing it to `write_to`.
+    struct Shared(std::sync::Arc<leviath_core::MemoryStore>);
+    impl leviath_core::CredentialStore for Shared {
+        fn get(&self, a: &str) -> Result<Option<String>, String> {
+            self.0.get(a)
+        }
+        fn set(&self, a: &str, s: &str) -> Result<(), String> {
+            self.0.set(a, s)
+        }
+        fn delete(&self, a: &str) -> Result<bool, String> {
+            self.0.delete(a)
+        }
+    }
+
+    /// In keychain mode a tool credential's secret goes to the store under its
+    /// own account and the file keeps the name alone; loading puts the two
+    /// back together, and forgetting takes the account out of the store.
+    #[test]
+    fn a_tool_credential_round_trips_through_the_keychain() {
+        use leviath_core::CredentialStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let store = std::sync::Arc::new(leviath_core::MemoryStore::new());
+        let mut config = Config::default();
+        config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
+        config
+            .tool_credentials
+            .set("BRAVE_API_KEY", "sk-brave-keychain");
+        config
+            .write_to(&path, Ok(Some(Box::new(Shared(store.clone())))))
+            .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("sk-brave-keychain"), "{text}");
+        assert!(text.contains("BRAVE_API_KEY = \"\""), "{text}");
+        assert_eq!(
+            store.get("tool/BRAVE_API_KEY").unwrap().as_deref(),
+            Some("sk-brave-keychain")
+        );
+
+        let mut loaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(loaded.tool_credentials.get("BRAVE_API_KEY"), None);
+        // A name the store has nothing for stays a name with no secret.
+        loaded.tool_credentials.set("NOT_IN_STORE", "");
+        loaded.fill_from_credential_store_with(Ok(Some(Box::new(Shared(store.clone())))));
+        assert_eq!(loaded.tool_credentials.get("NOT_IN_STORE"), None);
+        assert_eq!(
+            loaded.tool_credentials.get("BRAVE_API_KEY"),
+            Some("sk-brave-keychain")
+        );
+
+        super::forget_tool_credentials_with(
+            &["BRAVE_API_KEY".to_string()],
+            Ok(Some(Box::new(Shared(store.clone())))),
+        );
+        assert_eq!(store.get("tool/BRAVE_API_KEY").unwrap(), None);
+    }
+
+    /// Forgetting has nothing to do in `file` mode, and a store that cannot
+    /// be reached or will not delete is a warning rather than a failure.
+    #[test]
+    fn forgetting_a_tool_credential_never_fails() {
+        struct Stuck;
+        impl leviath_core::CredentialStore for Stuck {
+            fn get(&self, _: &str) -> Result<Option<String>, String> {
+                Ok(None)
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn delete(&self, _: &str) -> Result<bool, String> {
+                Err("locked".to_string())
+            }
+        }
+        use leviath_core::CredentialStore;
+        let _guard = leviath_testkit::tracing_guard();
+        let names = ["GONE".to_string()];
+        super::forget_tool_credentials_with(&names, Ok(None));
+        super::forget_tool_credentials_with(&names, Err("no keychain".to_string()));
+        super::forget_tool_credentials_with(&names, Ok(Some(Box::new(Stuck))));
+        assert_eq!(Stuck.get("tool/GONE").unwrap(), None);
+        assert!(Stuck.set("tool/GONE", "x").is_ok());
+        // The `file` backend, through the public entry point.
+        Config::default().forget_tool_credentials(&names);
     }
 }

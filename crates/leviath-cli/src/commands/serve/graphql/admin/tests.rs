@@ -1579,7 +1579,7 @@ async fn the_machine_acts_refuse_when_their_own_state_says_no() {
 fn the_admin_inputs_round_trip() {
     use crate::commands::serve::graphql::config_input::{
         CodexOptionsWrite, ConfigClearable, ConfigWrite, GatewayWrite, ProviderConfigWrite,
-        UpdateConfigRequest,
+        ToolCredentialWrite, UpdateConfigRequest,
     };
     use crate::commands::serve::graphql::inputs::KeyValueWrite;
     use crate::commands::serve::graphql::types::machine::{
@@ -1657,6 +1657,11 @@ fn the_admin_inputs_round_trip() {
             models: Some(vec!["llama".to_string()]),
         }]),
         delete_gateways: Some(vec!["old".to_string()]),
+        tool_credentials: Some(vec![ToolCredentialWrite {
+            name: "BRAVE_API_KEY".to_string(),
+            value: Some("sk-b".to_string()),
+            clear: false,
+        }]),
     };
     let value = request.to_value();
     let Ok(read_back) = UpdateConfigRequest::parse(Some(value)) else {
@@ -1674,6 +1679,13 @@ fn the_admin_inputs_round_trip() {
     assert_eq!(wire.codex_replay_reasoning, Some(true));
     assert_eq!(wire.file_uploads, Some(true));
     assert_eq!(wire.remove_gateways, Some(vec!["old".to_string()]));
+    assert_eq!(
+        wire.tool_credentials,
+        Some(std::collections::BTreeMap::from([(
+            "BRAVE_API_KEY".to_string(),
+            Some("sk-b".to_string())
+        )]))
+    );
     let gateway = wire
         .gateways
         .as_ref()
@@ -1712,7 +1724,7 @@ fn the_admin_inputs_round_trip() {
 #[test]
 fn an_input_object_refuses_what_it_cannot_read() {
     use crate::commands::serve::graphql::config_input::{
-        ConfigWrite, GatewayWrite, ProviderConfigWrite, UpdateConfigRequest,
+        ConfigWrite, GatewayWrite, ProviderConfigWrite, ToolCredentialWrite, UpdateConfigRequest,
     };
     use crate::commands::serve::graphql::inputs::KeyValueWrite;
     use async_graphql::{InputType, Name, Value, indexmap::IndexMap};
@@ -1742,6 +1754,21 @@ fn an_input_object_refuses_what_it_cannot_read() {
     assert!(ConfigWrite::parse(one("defaultProvider", number())).is_err());
     assert!(UpdateConfigRequest::parse(scalar()).is_err());
     assert!(UpdateConfigRequest::parse(one("clear", number())).is_err());
+    assert!(UpdateConfigRequest::parse(one("toolCredentials", number())).is_err());
+    assert!(ToolCredentialWrite::parse(scalar()).is_err());
+    assert!(ToolCredentialWrite::parse(None).is_err(), "a name");
+    assert!(ToolCredentialWrite::parse(one("name", number())).is_err());
+    // Each field of the wrong type behind a name that reads, so the refusal
+    // lands on that field rather than on the missing name.
+    for (field, wrong) in [
+        ("value", number()),
+        ("clear", Value::String("yes".to_string())),
+    ] {
+        let mut map = IndexMap::new();
+        map.insert(Name::new("name"), Value::String("A".to_string()));
+        map.insert(Name::new(field), wrong);
+        assert!(ToolCredentialWrite::parse(Some(Value::Object(map))).is_err());
+    }
     assert!(ProviderConfigWrite::parse(None).is_err(), "a provider name");
     assert!(ProviderConfigWrite::parse(one("provider", number())).is_err());
     assert!(MimeRowWrite::parse(scalar()).is_err());
@@ -2778,6 +2805,77 @@ for line in sys.stdin:
                 assert_eq!(result["toolNames"], serde_json::json!(["ping"]));
                 assert_eq!(result["mcpServer"]["name"], "local");
                 assert_eq!(result["mcpServer"]["transport"], "STDIO");
+            })
+            .await;
+    })
+    .await;
+}
+
+/// A tool credential is written with its secret and read back as a name, and
+/// the secret appears in no answer, refusals included. Issue #974.
+#[tokio::test]
+async fn tool_credentials_are_written_with_a_secret_and_read_back_as_names() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        let paths = paths_in(&home);
+        let config_path = paths.config.clone();
+        std::fs::write(&paths.config, "").expect("a config file");
+        crate::commands::serve::mcp::TEST_PATHS
+            .scope(paths, async {
+                let written = ask(r#"mutation { updateConfig(request: { toolCredentials: [
+                         { name: "BRAVE_API_KEY", value: "brave-secret-974" },
+                         { name: "OTHER_TOKEN", value: "other-secret-974" } ] })
+                       { config { toolCredentials } } }"#)
+                .await;
+                assert_eq!(
+                    written["updateConfig"]["config"]["toolCredentials"],
+                    serde_json::json!(["BRAVE_API_KEY", "OTHER_TOKEN"])
+                );
+                assert!(!written.to_string().contains("secret-974"), "{written}");
+                let stored = crate::config::Config::load_from_path(&config_path)
+                    .unwrap()
+                    .tool_credentials;
+                assert_eq!(stored.get("BRAVE_API_KEY"), Some("brave-secret-974"));
+
+                let cleared = ask(r#"mutation { updateConfig(request: { toolCredentials: [
+                         { name: "OTHER_TOKEN", clear: true } ] })
+                       { config { toolCredentials } } }"#)
+                .await;
+                assert_eq!(
+                    cleared["updateConfig"]["config"]["toolCredentials"],
+                    serde_json::json!(["BRAVE_API_KEY"])
+                );
+
+                let cases = [
+                    (
+                        r#"{ name: "A", value: "x-secret-974", clear: true }"#,
+                        "opposite things",
+                    ),
+                    (r#"{ name: "A" }"#, "send a value"),
+                    (
+                        r#"{ name: "A", value: "x-secret-974" }, { name: "A", clear: true }"#,
+                        "named twice",
+                    ),
+                    (
+                        r#"{ name: "BAD NAME", value: "x-secret-974" }"#,
+                        "not a tool credential name",
+                    ),
+                ];
+                for (writes, expected) in cases {
+                    let answer = schema(true)
+                        .execute(Request::new(format!(
+                            r#"mutation {{ updateConfig(request: {{ toolCredentials: [{writes}] }})
+                                 {{ config {{ toolCredentials }} }} }}"#
+                        )))
+                        .await;
+                    let error = answer.errors.first().expect("a refusal");
+                    assert_eq!(refusal_code(&answer), "\"BAD_USER_INPUT\"", "{writes}");
+                    assert!(
+                        error.message.contains(expected),
+                        "{writes}: {}",
+                        error.message
+                    );
+                    assert!(!error.message.contains("x-secret-974"), "{}", error.message);
+                }
             })
             .await;
     })

@@ -3246,6 +3246,16 @@
                       "type": "string"
                     },
                     "description": "Ordered provider preference for a bare model name, best first (e.g. [\"codex\", \"openrouter\", \"openai\"]). Absent leaves it untouched; a present list replaces it whole; an empty list clears it back to default_provider alone. Naming a subscription transport here opts it into bare-name routing at that priority."
+                  },
+                  "tool_credentials": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "description": "Secrets script tools read by name ([tool_credentials]). A string stores the secret under that name, null removes the name, and a name left out is left alone. A tool's env_var(\"NAME\") answers from these on its next call, before the daemon's environment. Never read back: GET lists the names only. An empty string, or a name that could not be an environment variable's, is a 400."
                   }
                 }
               }
@@ -6240,6 +6250,13 @@
             "items": {
               "$ref": "#/components/schemas/GatewayInfo"
             }
+          },
+          "tool_credentials": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names in [tool_credentials], sorted. A secret written there is never served."
           },
           "agent_paths": {
             "type": "array",

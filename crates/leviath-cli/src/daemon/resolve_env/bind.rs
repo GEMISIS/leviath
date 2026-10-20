@@ -403,7 +403,8 @@ impl DaemonEnv {
                     shell_env,
                 )
                 .with_local_network(config.security.allow_local_network)
-                .with_env_allowlist(config.security.allow_env_vars.clone()),
+                .with_env_allowlist(config.security.allow_env_vars.clone())
+                .with_credentials(self.credentials.clone()),
         );
         let subagent = crate::daemon::subagent::SubAgentHandle {
             sender: self.subagent_tx.clone(),

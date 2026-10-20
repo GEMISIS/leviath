@@ -444,6 +444,7 @@ async fn every_mirrored_function_runs() {
         },
         providers: vec![provider()],
         gateways: vec![gateway()],
+        tool_credentials: vec!["BRAVE_API_KEY".to_string()],
         allows_file_uploads: true,
         blueprint_paths: vec!["~/.leviath/agents".to_string()],
         mcp_server_count: 2,

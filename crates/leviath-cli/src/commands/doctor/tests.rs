@@ -396,6 +396,32 @@ fn search_check_catches_a_daemon_started_before_the_key_existed() {
     );
 }
 
+/// A key stored in `[tool_credentials]` is what the script host reads first,
+/// with no allowlist entry and no restart, so it settles the check even
+/// against a daemon whose environment has no key at all.
+#[test]
+fn search_check_passes_on_a_stored_tool_credential() {
+    let mut config = Config::default();
+    config
+        .tool_credentials
+        .set("BRAVE_API_KEY", "sk-brave-stored");
+    let daemon = daemon_seeing(&[]);
+    let check = temp_env::with_var("BRAVE_API_KEY", None::<&str>, || {
+        search_check(&config, Some(&daemon))
+    });
+    assert_eq!(check.status, CheckStatus::Ok, "{}", check.detail);
+    assert!(
+        check.detail.contains("[tool_credentials]"),
+        "{}",
+        check.detail
+    );
+    assert!(
+        !check.detail.contains("sk-brave-stored"),
+        "{}",
+        check.detail
+    );
+}
+
 #[test]
 fn search_check_reports_a_key_nobody_has_as_unconfigured() {
     // Neither side has it: that is not a restart problem, it is a setup one,
@@ -410,6 +436,11 @@ fn search_check_reports_a_key_nobody_has_as_unconfigured() {
     assert!(
         !check.detail.contains("lev daemon restart"),
         "no restart advice when there is no key to load: {}",
+        check.detail
+    );
+    assert!(
+        check.detail.contains("[tool_credentials]"),
+        "points at the store that needs no restart: {}",
         check.detail
     );
 }

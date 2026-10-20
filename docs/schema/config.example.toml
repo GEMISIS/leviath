@@ -163,6 +163,13 @@ env_var = "deny"
 [agent_read_paths.reviewer]
 allow = ["~/reference", "glob:~/schemas/**/*.json"]
 
+# Secrets script tools read by name. A tool's env_var("BRAVE_API_KEY") answers
+# from here before the daemon's environment, with no restart and no
+# allow_env_vars entry. Set them through the config API to keep them off disk
+# in keychain mode.
+[tool_credentials]
+BRAVE_API_KEY = "your-brave-search-key"
+
 # What runs without an approval prompt. A shell entry is a program, optionally
 # with the subcommand that narrows it, so `git status` never covers `git push`.
 [safe_commands]

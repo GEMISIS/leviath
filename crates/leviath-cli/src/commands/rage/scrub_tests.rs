@@ -163,6 +163,9 @@ base_url = "http://localhost:9"
 api_token = "extra-token"
 [model_providers.gw.headers]
 authorization = "Bearer abc"
+
+[tool_credentials]
+SEARCH = "tool-secret"
 "#;
     let (out, count) = s.scrub_toml(text);
     assert!(out.starts_with("# my config\n"), "comments survive: {out}");
@@ -185,7 +188,12 @@ authorization = "Bearer abc"
     assert!(!out.contains("env-value"), "{out}");
     assert!(!out.contains("extra-token"), "{out}");
     assert!(!out.contains("Bearer abc"), "{out}");
-    assert_eq!(count, 5);
+    assert!(
+        out.contains("SEARCH = \"<redacted>\""),
+        "every tool credential goes, whatever it is called: {out}"
+    );
+    assert!(!out.contains("tool-secret"), "{out}");
+    assert_eq!(count, 6);
 }
 
 #[test]
@@ -253,6 +261,8 @@ api_key = "gw-key-1"
 headers = { g = "gw-hdr-1" }
 api_token = "gw-extra-1"
 region = "not-a-secret"
+[tool_credentials]
+SEARCH = "tool-cred-1"
 "#;
     let config: crate::config::Config = toml::from_str(toml).unwrap();
     let mut out = config_secrets(&config);
@@ -275,6 +285,7 @@ region = "not-a-secret"
         "mesh-key-value-1",
         "oai-key-value-1",
         "or-key-value-1",
+        "tool-cred-1",
     ];
     assert_eq!(out, expected);
 }

@@ -81,6 +81,7 @@ pub(super) fn redact(
         codex_verbosity: c.providers.codex_verbosity.clone(),
         codex_replay_reasoning: c.providers.codex_replay_reasoning,
         gateways: gateways_of(c),
+        tool_credentials: c.tool_credentials.names(),
         agent_paths: c.agent_paths.clone(),
         mcp_server_count: c.mcp_servers.len(),
         api_version: API_VERSION.to_string(),
@@ -1004,6 +1005,7 @@ mod tests {
             codex_verbosity: None,
             codex_replay_reasoning: true,
             gateways: Vec::new(),
+            tool_credentials: Vec::new(),
             agent_paths: vec![],
             mcp_server_count: 2,
             api_version: API_VERSION.to_string(),
@@ -1045,6 +1047,7 @@ mod tests {
             codex_verbosity: None,
             codex_replay_reasoning: true,
             gateways: Vec::new(),
+            tool_credentials: Vec::new(),
             agent_paths: vec![],
             mcp_server_count: 0,
             api_version: API_VERSION.to_string(),
@@ -1623,6 +1626,72 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes).to_string();
         assert!(text.contains("openrouter_key"), "{text}");
         assert!(text.contains("null to clear"), "{text}");
+    }
+
+    /// A tool credential is stored, listed back by name only, and removed by
+    /// `null`; a name left out of the map is left alone. Issue #974: before
+    /// this, the only way to give `web_search` its key was to edit the file
+    /// and restart the daemon with the variable exported.
+    #[tokio::test]
+    async fn put_config_stores_lists_and_removes_tool_credentials_by_name_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let secret = "brave-secret-value-974";
+
+        let body = serde_json::json!({
+            "tool_credentials": { "BRAVE_API_KEY": secret, "OTHER_TOKEN": "other-secret-974" }
+        })
+        .to_string();
+        let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert!(!text.contains(secret), "the value never comes back: {text}");
+        let answer: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            answer["tool_credentials"],
+            serde_json::json!(["BRAVE_API_KEY", "OTHER_TOKEN"])
+        );
+        let stored = Config::load_from_path(&path).unwrap().tool_credentials;
+        assert_eq!(stored.get("BRAVE_API_KEY"), Some(secret));
+
+        let body = serde_json::json!({ "tool_credentials": { "OTHER_TOKEN": null } }).to_string();
+        let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let stored = Config::load_from_path(&path).unwrap().tool_credentials;
+        assert_eq!(stored.names(), vec!["BRAVE_API_KEY".to_string()]);
+        assert_eq!(stored.get("BRAVE_API_KEY"), Some(secret), "left alone");
+
+        for (body, wants) in [
+            (
+                serde_json::json!({ "tool_credentials": { "BRAVE_API_KEY": "  " } }),
+                "null to remove",
+            ),
+            (
+                serde_json::json!({ "tool_credentials": { "NOT-A-NAME": "x-secret-974" } }),
+                "not a tool credential name",
+            ),
+        ] {
+            let resp =
+                put_config_request(state_with_config_path(path.clone()), &body.to_string()).await;
+            assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            assert!(text.contains(wants), "{text}");
+            assert!(!text.contains("x-secret-974"), "{text}");
+        }
+        assert_eq!(
+            Config::load_from_path(&path)
+                .unwrap()
+                .tool_credentials
+                .get("BRAVE_API_KEY"),
+            Some(secret),
+            "a refused write leaves the file as it was"
+        );
     }
 
     /// `fallback_model` has the same three states as `override_model`: a

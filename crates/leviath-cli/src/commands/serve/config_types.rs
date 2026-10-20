@@ -99,6 +99,10 @@ pub(super) struct RedactedConfig {
     /// people most likely to want a form for provider setup are the ones not
     /// using a first-party provider.
     pub(super) gateways: Vec<GatewayInfo>,
+    /// The names in `[tool_credentials]`, sorted. Names only: a secret
+    /// written there never crosses the wire again.
+    #[serde(default)]
+    pub(super) tool_credentials: Vec<String>,
     pub(super) agent_paths: Vec<PathBuf>,
     pub(super) mcp_server_count: usize,
     /// The API contract this server implements, matching `info.version` in
@@ -727,6 +731,17 @@ pub(super) struct WriteConfigReq {
     /// the read-modify-write hazard the gateway split avoids does not arise.
     #[serde(default)]
     pub(super) provider_order: Option<Vec<String>>,
+    /// Tool credentials to store or remove, by name (`[tool_credentials]`).
+    ///
+    /// A string stores the secret under that name, `null` removes the name,
+    /// and a name the map leaves out is left alone. A script tool's
+    /// `env_var("NAME")` answers from these on its next call. The secret is
+    /// never read back: `GET /api/config` lists the names only.
+    ///
+    /// An empty string is refused with a 400, as for a provider key. So is a
+    /// name that could not be an environment variable's.
+    #[serde(default)]
+    pub(super) tool_credentials: Option<std::collections::BTreeMap<String, Option<String>>>,
 }
 
 /// One custom gateway as `GET /api/config` reports it.

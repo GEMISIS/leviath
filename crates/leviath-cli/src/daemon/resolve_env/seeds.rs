@@ -306,7 +306,10 @@ fn run_tools(env: &SeedEnv, calls: &[SeedToolCall], cx: SeedCx<'_>) -> Result<St
     let allow = layers::script_allow(config, cx.graph, &layers, profile.as_deref(), &workdir);
     let script_host = Arc::new(
         crate::daemon::script_host::DaemonScriptHost::new(allow, workdir.clone())
-            .with_write_budget(writes.clone()),
+            .with_write_budget(writes.clone())
+            .with_credentials(crate::daemon::script_host::CredentialSource::fixed(
+                env.config.clone(),
+            )),
     );
     let (script_tools, script_names) = layers::code_tools(cx.code);
     let known_builtins = builtin_names.clone();

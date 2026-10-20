@@ -75,7 +75,7 @@ tool's `@requires` line is not a gate: it only filters which platforms discover 
 | `read_file(path)` | Reads a file, always confined to the workdir |
 | `read_file_bytes(path)` | The same file, as bytes: an exact Rhai blob, ready for `write_part`. See below |
 | `write_file(path, content)` | Writes a file |
-| `env_var(name)` | Reads an environment variable. Credential-shaped names need [`allow_env_vars`](/docs/configuration#security) |
+| `env_var(name)` | Reads a [tool credential](/docs/configuration#tool_credentials), else an environment variable. Credential-shaped variables need [`allow_env_vars`](/docs/configuration#security) |
 | `read_part(name)` | The bytes of a stored [part](/docs/mime) the run holds, as a Rhai blob. See below |
 | `write_part(bytes [, type [, name]])` | Stores bytes as a part of the run and returns its map. See below |
 | `list_parts()` | Every stored part the run holds, as maps |
