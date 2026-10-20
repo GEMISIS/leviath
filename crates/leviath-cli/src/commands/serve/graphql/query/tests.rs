@@ -2636,9 +2636,10 @@ async fn the_config_says_whether_admin_is_open() {
             async_graphql::EmptySubscription,
         )
         .data(state.clone())
-        .data(crate::commands::serve::graphql::admin::AdminAccess(
-            allow_admin,
-        ))
+        .data(match allow_admin {
+            true => crate::commands::serve::admin_gate::AdminGate::Open,
+            false => crate::commands::serve::admin_gate::AdminGate::Off,
+        })
         .finish();
         let answer = schema
             .execute(async_graphql::Request::new(

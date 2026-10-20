@@ -1388,10 +1388,12 @@ tool's `env_var("NAME")` answers from these before the daemon's environment, on 
 key stored here reaches a run that is already going, with no restart and no `allow_env_vars`
 entry. See [tool credentials](/docs/configuration#tool_credentials).
 
-The admin group is mounted only with `--allow-admin`. Without it those fields are invisible to
-introspection and refused with `FORBIDDEN` if you name one anyway. The hiding is a courtesy and the
-refusal is the boundary. The published schema documents them either way, because it describes what
-the API is rather than what one server will do.
+The admin group is mounted only with `--allow-admin` or an admin token. Without either, those
+fields are invisible to introspection and refused with `FORBIDDEN` if you name one anyway. A server
+with an [admin token](/docs/api#scoping-admin-requests-to-a-token) shows them, but runs one only for
+a request that presents that token, as its bearer or in `X-Leviath-Admin-Token`. The hiding is a
+courtesy and the refusal is the boundary. The published schema documents them either way, because
+it describes what the API is rather than what one server will do.
 
 ```graphql
 mutation {

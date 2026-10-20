@@ -12,7 +12,7 @@ fn schema() -> super::LeviathSchema {
         // The published schema documents the admin surface whatever this server
         // was started with: `sdl()` ignores visibility, deliberately, so one
         // published schema describes every Leviath rather than this one.
-        true,
+        crate::commands::serve::admin_gate::AdminGate::Open,
     )
 }
 
@@ -293,7 +293,7 @@ async fn every_field_comes_back_in_the_order_it_was_asked_for() {
     let dir = tempfile::tempdir().expect("a temp directory");
     let schema = build_schema(
         crate::commands::serve::testutil::state_with_agent_paths(vec![dir.path().to_path_buf()]),
-        true,
+        crate::commands::serve::admin_gate::AdminGate::Open,
     );
     let query = "{ blueprints { total results { name } } serverTime config { allowsFileUploads blueprintPaths } }";
     let answer = schema.execute(Request::new(query)).await;

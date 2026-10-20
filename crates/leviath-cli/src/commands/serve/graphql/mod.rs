@@ -25,9 +25,10 @@ use async_graphql::{SDLExportOptions, Schema};
 use async_graphql_axum::rejection::GraphQLRejection;
 use async_graphql_axum::{GraphQLProtocol, GraphQLRequest, GraphQLResponse};
 use axum::extract::{Extension, FromRequest, State, WebSocketUpgrade};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 
+use super::admin_gate::{AdminGate, Presented};
 use super::types::AppState;
 
 mod admin;
@@ -73,7 +74,7 @@ pub(super) type LeviathSchema =
 /// Built once at startup and shared: the type registry and the limits are the
 /// same for every request, and the per-request state travels in the execution
 /// context instead.
-pub(super) fn build_schema(state: AppState, allow_admin: bool) -> LeviathSchema {
+pub(super) fn build_schema(state: AppState, admin: AdminGate) -> LeviathSchema {
     let state_limits = state.limits.request_limits;
     Schema::build(
         query::Query,
@@ -87,11 +88,12 @@ pub(super) fn build_schema(state: AppState, allow_admin: bool) -> LeviathSchema 
     // the schema at all.
     .register_output_type::<events::Event>()
     .register_output_type::<events::RunEvent>()
-    // Whether this server was started for the acts that change the machine.
-    // Decided once, here, rather than read per request: the REST side answers
-    // 404 for them by not mounting the route at all, and a schema has no
-    // "unmounted", so this is what stands in for it.
-    .data(admin::AdminAccess(allow_admin))
+    // How this server offers the acts that change the machine. Decided once,
+    // here: the REST side answers 404 for them by not mounting the route at
+    // all, and a schema has no "unmounted", so this is what stands in for it.
+    // Whether one request may use them is the gate's answer to what that
+    // request presented, which `http` and `ws` put beside it.
+    .data(admin)
     // What gives a parse or validation refusal the same `extensions.code` a
     // resolver's failure carries. Registered here and not in `sdl()`, because
     // an extension is a hook around execution and contributes nothing to the
@@ -127,9 +129,12 @@ pub(super) async fn http(
     req: axum::extract::Request,
 ) -> Response {
     let limits = state.limits.request_limits;
+    // What the request presented, kept for the admin guard: by the time a
+    // mutation runs, the HTTP request is long gone.
+    let presented = Presented::of(req.headers(), req.uri());
     let read = GraphQLRequest::<GraphQLRejection>::from_request(req, &state);
     match super::request_limits::within(limits.timeout(), read).await {
-        Some(Ok(request)) => answer(schema.execute(request.into_inner()).await),
+        Some(Ok(request)) => answer(schema.execute(request.into_inner().data(presented)).await),
         Some(Err(refused)) => refused.into_response(),
         None => super::types::err(
             StatusCode::REQUEST_TIMEOUT,
@@ -163,8 +168,13 @@ pub(super) async fn ws(
     State(state): State<AppState>,
     Extension(schema): Extension<LeviathSchema>,
     protocol: GraphQLProtocol,
+    headers: HeaderMap,
+    uri: Uri,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    // What the upgrade presented, which is what every operation on the socket
+    // presents to the admin guard.
+    let presented = Presented::of(&headers, &uri);
     // Upgraded by hand rather than with the ready-made service, so this stays a
     // handler in the one route table the spec is held to.
     let shutdown = state.shutdown;
@@ -176,6 +186,7 @@ pub(super) async fn ws(
                 socket,
                 schema,
                 protocol,
+                presented,
                 super::keepalive::WS_TIMING,
                 shutdown,
             ))

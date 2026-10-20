@@ -8341,7 +8341,7 @@ type ModelValueOutput {
 
 """
 The whole write side: the acts on runs and blueprints, plus the ones
-`--allow-admin` opens.
+`--allow-admin` or an admin token opens.
 
 Merged rather than nested, so an admin mutation reads the same as every
 other mutation to a client that is allowed to use it, and does not exist to
@@ -14361,8 +14361,9 @@ type ServerInfoOutput {
 	"""
 	capabilities: [String!]!
 	"""
-	Whether this server was started with `--allow-admin`, so the mutations
-	that change the machine will run rather than answer `FORBIDDEN`. Worth
+	Whether this request may run the mutations that change the machine,
+	rather than have them answer `FORBIDDEN`: the server was started with
+	`--allow-admin`, or with an admin token this request presented. Worth
 	asking before offering a settings screen that cannot save.
 	"""
 	isAdminEnabled: Boolean!

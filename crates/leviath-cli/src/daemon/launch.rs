@@ -28,11 +28,12 @@ use std::process::{Command, Stdio};
 /// Environment variables only `lev serve` reads, removed from every daemon
 /// `lev` starts.
 ///
-/// `LEVIATH_API_TOKEN` is the serve API's bearer token. A sidecar that mints a
-/// fresh one per window and happens to start the daemon would otherwise leave
-/// it in a process that outlives the serve, visible in `ps eww` and to every
-/// shell tool run under `shell_env = "inherit"`.
-pub const SERVE_ONLY_ENV: &[&str] = &["LEVIATH_API_TOKEN"];
+/// `LEVIATH_API_TOKEN` is the serve API's bearer token, and
+/// `LEVIATH_API_ADMIN_TOKEN` the one that alone may make admin requests. A
+/// sidecar that mints them per window and happens to start the daemon would
+/// otherwise leave them in a process that outlives the serve, visible in
+/// `ps eww` and to every shell tool run under `shell_env = "inherit"`.
+pub const SERVE_ONLY_ENV: &[&str] = &["LEVIATH_API_TOKEN", "LEVIATH_API_ADMIN_TOKEN"];
 
 /// Environment variables that name a path the daemon reads or writes. A
 /// relative one is resolved against the starter's working directory before
