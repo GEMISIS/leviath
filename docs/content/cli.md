@@ -1258,7 +1258,7 @@ Start the [REST and WebSocket API](/docs/api).
 > `--workdir-root` matters for the same reason: without it a token holder can point a
 > tool-executing agent at any directory, including `/`. Give it once per directory the API may
 > work in, such as `--workdir-root ~/work/tasks --workdir-root ~/work/project`. A workdir under
-> any one of them is accepted.
+> any one of them is accepted. Each root must already exist: it is resolved once, at startup.
 
 ## Configuration and tools
 

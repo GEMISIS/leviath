@@ -406,7 +406,10 @@ async fn a_refused_workdir_has_none_of_its_files_read() {
         deduplicated: false,
     }));
     state.limits = Arc::new(ServeLimits {
-        workdir_roots: vec![root.path().to_path_buf()],
+        workdir_roots: crate::commands::serve::workdir_roots::WorkdirRoots::resolve(&[root
+            .path()
+            .to_path_buf()])
+        .unwrap(),
         ..ServeLimits::default()
     });
     let body = serde_json::json!({

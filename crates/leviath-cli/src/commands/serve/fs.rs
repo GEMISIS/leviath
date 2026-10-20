@@ -67,7 +67,12 @@ pub(super) fn dir_listing(
         // roots are set and the cwd is under none of them.
         None => match limits.fences_in(&cwd) {
             true => cwd.clone(),
-            false => limits.workdir_roots.first().cloned().unwrap_or(cwd.clone()),
+            false => limits
+                .workdir_roots
+                .as_slice()
+                .first()
+                .cloned()
+                .unwrap_or(cwd.clone()),
         },
     };
     existing_dir(&listed)?;
@@ -138,6 +143,7 @@ pub(super) fn root_of(limits: &ServeLimits, dir: &Path) -> Option<String> {
 pub(super) fn roots_of(limits: &ServeLimits) -> Vec<String> {
     limits
         .workdir_roots
+        .as_slice()
         .iter()
         .map(|r| r.to_string_lossy().into_owned())
         .collect()
@@ -364,7 +370,10 @@ mod tests {
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Arc::new(ServeLimits {
-                workdir_roots,
+                workdir_roots: crate::commands::serve::workdir_roots::WorkdirRoots::resolve(
+                    &workdir_roots,
+                )
+                .unwrap(),
                 ..Default::default()
             }),
         };
@@ -539,15 +548,19 @@ mod tests {
     async fn list_dirs_refuses_a_path_outside_the_workdir_root() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let app = app_with_root(Some(root.path().to_path_buf()));
-        let (status, body) = get_dirs(app, Some(&outside.path().to_string_lossy())).await;
+        let app = app_with_root(Some(root.path().canonicalize().unwrap().to_path_buf()));
+        let (status, body) = get_dirs(
+            app,
+            Some(&outside.path().canonicalize().unwrap().to_string_lossy()),
+        )
+        .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(
             error_of(&body),
             format!(
                 "path '{}' is outside the configured --workdir-root '{}'",
-                outside.path().display(),
-                root.path().display()
+                outside.path().canonicalize().unwrap().display(),
+                root.path().canonicalize().unwrap().display()
             )
         );
     }
@@ -560,14 +573,17 @@ mod tests {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        std::fs::create_dir(second.path().join("inside")).unwrap();
-        let roots = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+        std::fs::create_dir(second.path().canonicalize().unwrap().join("inside")).unwrap();
+        let roots = vec![
+            first.path().canonicalize().unwrap().to_path_buf(),
+            second.path().canonicalize().unwrap().to_path_buf(),
+        ];
         let named: Vec<String> = roots
             .iter()
             .map(|r| r.to_string_lossy().into_owned())
             .collect();
 
-        let inside = second.path().join("inside");
+        let inside = second.path().canonicalize().unwrap().join("inside");
         let (status, body) = get_dirs(
             app_with_roots(roots.clone()),
             Some(&inside.to_string_lossy()),
@@ -585,7 +601,7 @@ mod tests {
 
         let (status, body) = get_dirs(
             app_with_roots(roots),
-            Some(&outside.path().to_string_lossy()),
+            Some(&outside.path().canonicalize().unwrap().to_string_lossy()),
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -593,7 +609,7 @@ mod tests {
             error_of(&body),
             format!(
                 "path '{}' is outside every configured --workdir-root ('{}', '{}')",
-                outside.path().display(),
+                outside.path().canonicalize().unwrap().display(),
                 named[0],
                 named[1]
             )
@@ -605,17 +621,45 @@ mod tests {
     #[tokio::test]
     async fn list_dirs_a_nested_root_leads_up_into_the_outer_one() {
         let outer = tempfile::tempdir().unwrap();
-        let inner = outer.path().join("inner");
+        let inner = outer.path().canonicalize().unwrap().join("inner");
         std::fs::create_dir(&inner).unwrap();
-        let app = app_with_roots(vec![inner.clone(), outer.path().to_path_buf()]);
+        let app = app_with_roots(vec![
+            inner.clone(),
+            outer.path().canonicalize().unwrap().to_path_buf(),
+        ]);
         let (status, body) = get_dirs(app, Some(&inner.to_string_lossy())).await;
         assert_eq!(status, StatusCode::OK);
         let got = listing_of(&body);
         assert_eq!(
             got.parent.as_deref(),
-            Some(outer.path().to_string_lossy().as_ref())
+            Some(
+                outer
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
         assert_eq!(got.root.as_deref(), Some(inner.to_string_lossy().as_ref()));
+    }
+
+    /// A nested root swapped for a symlink after startup lists nothing
+    /// through the link: the root is the directory it named when the server
+    /// started.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_dirs_refuses_a_nested_root_swapped_for_a_symlink() {
+        let outer = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::create_dir(elsewhere.path().join("Users")).unwrap();
+        let inner = outer.path().join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        let app = app_with_roots(vec![inner.clone(), outer.path().to_path_buf()]);
+        std::fs::remove_dir(&inner).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), &inner).unwrap();
+        let (status, _) = get_dirs(app, Some(&inner.join("Users").to_string_lossy())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     /// At the workdir-root itself `parent` is `null` - the picker is never
@@ -623,23 +667,36 @@ mod tests {
     #[tokio::test]
     async fn list_dirs_parent_is_null_at_the_workdir_root() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("inside")).unwrap();
+        std::fs::create_dir(root.path().canonicalize().unwrap().join("inside")).unwrap();
 
-        let app = app_with_root(Some(root.path().to_path_buf()));
-        let (status, body) = get_dirs(app, Some(&root.path().to_string_lossy())).await;
+        let app = app_with_root(Some(root.path().canonicalize().unwrap().to_path_buf()));
+        let (status, body) = get_dirs(
+            app,
+            Some(&root.path().canonicalize().unwrap().to_string_lossy()),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let got = listing_of(&body);
         assert!(got.parent.is_none());
-        assert_eq!(got.root.as_deref(), Some(root.path().to_str().unwrap()));
+        assert_eq!(
+            got.root.as_deref(),
+            Some(root.path().canonicalize().unwrap().to_str().unwrap())
+        );
 
-        let app = app_with_root(Some(root.path().to_path_buf()));
-        let inside = root.path().join("inside");
+        let app = app_with_root(Some(root.path().canonicalize().unwrap().to_path_buf()));
+        let inside = root.path().canonicalize().unwrap().join("inside");
         let (status, body) = get_dirs(app, Some(&inside.to_string_lossy())).await;
         assert_eq!(status, StatusCode::OK);
         let got = listing_of(&body);
         assert_eq!(
             got.parent.as_deref(),
-            Some(root.path().to_string_lossy().as_ref())
+            Some(
+                root.path()
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
     }
 
@@ -648,12 +705,15 @@ mod tests {
     #[tokio::test]
     async fn list_dirs_default_is_clamped_to_the_workdir_root() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("only")).unwrap();
-        let app = app_with_root(Some(root.path().to_path_buf()));
+        std::fs::create_dir(root.path().canonicalize().unwrap().join("only")).unwrap();
+        let app = app_with_root(Some(root.path().canonicalize().unwrap().to_path_buf()));
         let (status, body) = get_dirs(app, None).await;
         assert_eq!(status, StatusCode::OK);
         let got = listing_of(&body);
-        assert_eq!(got.path, root.path().to_string_lossy());
+        assert_eq!(
+            got.path,
+            root.path().canonicalize().unwrap().to_string_lossy()
+        );
         assert!(got.parent.is_none());
         assert_eq!(got.dirs.len(), 1);
         assert_eq!(got.dirs[0].name, "only");
@@ -802,23 +862,33 @@ mod tests {
     async fn create_dir_refuses_a_parent_outside_the_workdir_root() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let app = app_with_root(Some(root.path().to_path_buf()));
-        let (status, body) = post_dir(app, &outside.path().to_string_lossy(), "x").await;
+        let app = app_with_root(Some(root.path().canonicalize().unwrap().to_path_buf()));
+        let (status, body) = post_dir(
+            app,
+            &outside.path().canonicalize().unwrap().to_string_lossy(),
+            "x",
+        )
+        .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(
             error_of(&body),
             format!(
                 "path '{}' is outside the configured --workdir-root '{}'",
-                outside.path().display(),
-                root.path().display()
+                outside.path().canonicalize().unwrap().display(),
+                root.path().canonicalize().unwrap().display()
             )
         );
-        assert!(!outside.path().join("x").exists());
+        assert!(!outside.path().canonicalize().unwrap().join("x").exists());
 
         // The control: inside the fence the same request succeeds, so the 403
         // is the fence and not something else about the request.
-        let app = app_with_root(Some(root.path().to_path_buf()));
-        let (status, _) = post_dir(app, &root.path().to_string_lossy(), "x").await;
+        let app = app_with_root(Some(root.path().canonicalize().unwrap().to_path_buf()));
+        let (status, _) = post_dir(
+            app,
+            &root.path().canonicalize().unwrap().to_string_lossy(),
+            "x",
+        )
+        .await;
         assert_eq!(status, StatusCode::CREATED);
     }
 
