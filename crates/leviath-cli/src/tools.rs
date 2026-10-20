@@ -389,17 +389,11 @@ pub(crate) fn escaping_write_refusal_for(
         Landing::Unnamed => return None,
         // After a `cd` to somewhere this cannot read, every relative target
         // could be anywhere.
-        Landing::Lost => {
-            return Some(
-                "[denied] This shell line may change directory in a way that is not followed (a \
-                 `cd` behind `{`, `!`, `then`, `command` or an assignment, `cd -`, `popd`, \
-                 `CDPATH`, `.`, `source` or `eval`) and redirects a write to a relative path, \
-                 so where it writes cannot be checked against the working directory. Redirect \
-                 to a path inside the workspace on a line that does not move, or use the \
-                 `write_file` tool."
-                    .to_string(),
-            );
-        }
+        // After a move this does not follow, a relative target could be
+        // anywhere. That is not a known escape, so it is left to the write
+        // policy (which asks, and offers no grant: see
+        // `unplaced_redirect`); a stage with write paths refuses it.
+        Landing::Lost => return None,
         // Refused even when the redirect would land inside the tree: "inside"
         // is a judgement about a path this could not read, and the fence is
         // only as good as what it can read.
@@ -428,6 +422,30 @@ pub(crate) fn escaping_write_refusal_for(
         landed.display(),
         workdir.display()
     ))
+}
+
+/// Whether a `shell` call redirects to a relative path on a line that may
+/// change directory in a way [`crate::shell_keys::landing_for`] does not
+/// follow. Such a write is asked about every time and never covered by a
+/// grant or the safe list: approving it was approving that line.
+pub(crate) fn unplaced_redirect(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    workdir: &std::path::Path,
+) -> bool {
+    let command = match leviath_tools::canonical_tool_name(tool_name) {
+        "shell" => arguments.get("command").and_then(|v| v.as_str()),
+        _ => None,
+    };
+    command.is_some_and(|command| {
+        let home = crate::yolo::home();
+        crate::shell_keys::landing_for(
+            command,
+            crate::shell_keys::BACKSLASH_ESCAPES,
+            workdir,
+            home.as_deref(),
+        ) == crate::shell_keys::Landing::Lost
+    })
 }
 
 /// What a `shell` call names outside the workdir, as far as the read fence

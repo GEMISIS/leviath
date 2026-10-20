@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{Segment, WriteTarget, classify_write, tokenize_for};
+use super::{Segment, Stripped, Word, WriteTarget, classify_write, strip_to_program, tokenize_for};
 
 /// The most directories a line is followed into before it counts as lost.
 const MAX_CWDS: usize = 64;
@@ -103,15 +103,32 @@ pub(crate) fn landing_for(
 }
 
 /// Whether `segment` may change the shell's directory, or run something that
-/// might: a mover anywhere in it, `CDPATH` anywhere in it, or a program that
-/// is itself an expansion.
+/// might: a mover anywhere in it, `CDPATH` anywhere in it, or a program this
+/// cannot name (see [`program_unknown`]).
 fn moves(segment: &Segment) -> bool {
-    let program_unknown = segment.words.first().is_some_and(|w| !w.literal);
-    program_unknown
-        || segment
-            .words
-            .iter()
-            .any(|w| MOVERS.contains(&w.text.as_str()) || w.text.contains("CDPATH"))
+    segment
+        .words
+        .iter()
+        .any(|w| MOVERS.contains(&w.text.as_str()) || w.text.contains("CDPATH"))
+        || program_unknown(&segment.words)
+}
+
+/// Whether the program `words` run is one this cannot name: past keywords,
+/// bindings and `command`, `builtin` or `exec`, an expansion
+/// (`{ $X src; }`, `$(printf c)d`), or a program that runs text it was handed.
+fn program_unknown(words: &[Word]) -> bool {
+    match strip_to_program(words) {
+        Stripped::Unreadable => true,
+        Stripped::NothingRuns(_) => false,
+        Stripped::Program { words, .. } => match words {
+            [prefix, rest @ ..]
+                if matches!(prefix.text.as_str(), "command" | "builtin" | "exec") =>
+            {
+                program_unknown(rest)
+            }
+            _ => false,
+        },
+    }
 }
 
 /// The directory `segment` moves to when it is exactly `cd <dir>` or
@@ -120,10 +137,15 @@ fn plain_move(segment: &Segment, home: Option<&Path>) -> Option<PathBuf> {
     let [program, target] = segment.words.as_slice() else {
         return None;
     };
+    // `~-`, `~+` and `~user` name directories only the shell knows; `~` and
+    // `~/...` are the home directory, which is known.
+    let tilde = target.text.starts_with('~');
+    let home_named = target.text == "~" || target.text.starts_with("~/");
     let plain = matches!(program.text.as_str(), "cd" | "pushd")
         && program.literal
         && target.literal
-        && !target.text.starts_with('-');
+        && !target.text.starts_with('-')
+        && (!tilde || home_named);
     plain
         .then(|| leviath_core::paths::expand_home(&target.text, home))
         .flatten()

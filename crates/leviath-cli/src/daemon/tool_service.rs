@@ -678,6 +678,10 @@ pub(crate) fn decide_call(
             state.builtins.workdir(),
         ));
     }
+    // A redirect after a move this cannot follow could land anywhere: like a
+    // line naming somewhere outside, it is covered by nothing below.
+    let placed = outside.is_empty()
+        && !crate::tools::unplaced_redirect(&tc.name, &tc.arguments, state.builtins.workdir());
     let policy = resolve(&tc.name, is_builtin);
     // A shell redirect writes a file, and no tool name says so. Clamping by
     // the write tool's own policy is what stops `echo x > f` being a spelling
@@ -723,8 +727,7 @@ pub(crate) fn decide_call(
     // the person saw.
     let policy = match policy {
         ToolPolicy::Ask
-            if outside.is_empty()
-                && crate::shell_keys::all_covered(&approval_keys, &is_safe, &is_granted) =>
+            if placed && crate::shell_keys::all_covered(&approval_keys, &is_safe, &is_granted) =>
         {
             ToolPolicy::Allow
         }
@@ -761,7 +764,7 @@ pub(crate) fn decide_call(
         // read, and a grant of `cat src/a` would go on to cover
         // `cat src/a ~/.aws/credentials`. So it is approved once or not at all.
         ToolPolicy::Ask => ToolVerdict::Ask {
-            keys: match outside.is_empty() {
+            keys: match placed {
                 true => crate::shell_keys::uncovered_keys(&approval_keys, &is_safe, &is_granted),
                 false => Vec::new(),
             },
@@ -2847,6 +2850,63 @@ pub(crate) mod tests {
         let unlimited = out[0].1.clone();
         let wrote = root.join("src/App.tsx").exists();
         assert!(wrote, "{unlimited}");
+    }
+
+    /// A relative redirect after a move that is not followed: a stage with
+    /// write paths refuses it; one without asks about it, offering no grant
+    /// and covered by none, and an allowing policy lets it run.
+    #[test]
+    fn an_unplaced_redirect_asks_without_write_paths_and_is_refused_with_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let line = call(
+            "c1",
+            "shell",
+            serde_json::json!({ "command": "cd $DIR && make > log" }),
+        );
+        let mut grants = leviath_runtime::pipeline::ToolGrants::default();
+        grants.grant(
+            Some(ApprovalScope::Run),
+            &[
+                "shell:cd".to_string(),
+                "shell:make".to_string(),
+                ">log".to_string(),
+            ],
+        );
+        let ctx = DecideCtx {
+            grants: &grants,
+            written: 0,
+            stage_index: 0,
+        };
+        let asking = budgeted_state(
+            &InteractionHub::new(),
+            &root,
+            unlimited_writes(),
+            HashMap::new(),
+        );
+        assert_eq!(
+            decide_call(&asking, &line, &ctx),
+            ToolVerdict::Ask {
+                keys: Vec::new(),
+                charge: 0
+            },
+            "asked once, with nothing a grant could cover"
+        );
+        let allowing = state_with_writes(&root, unlimited_writes());
+        assert_eq!(
+            decide_call(&allowing, &line, &ctx),
+            ToolVerdict::Run { charge: 0 },
+            "an allowing policy lets it run"
+        );
+        let mut fenced = (*allowing).clone();
+        fenced.stage_write_fences = Arc::new(vec![leviath_core::write_paths::WriteFence::new(&[
+            vec!["docs/**".to_string()],
+        ])]);
+        let refused = matches!(
+            decide_call(&Arc::new(fenced), &line, &ctx),
+            ToolVerdict::Refuse(text) if text.contains("may change directory")
+        );
+        assert!(refused, "refused where write paths are set");
     }
 
     // ─── Write ceilings ──────────────────────────────────────────────────────

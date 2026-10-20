@@ -79,6 +79,13 @@ fn a_plain_cd_moves_where_later_targets_land() {
 #[test]
 fn any_other_move_loses_relative_targets() {
     for line in [
+        "X=cd; { $X src; }; echo x > docs/var.txt",
+        "{ $(printf c)d src; }; echo x > docs/sub.txt",
+        "command $X src; echo > a",
+        "export OLDPWD=/tmp/x; cd ~-; echo > esc.txt",
+        "cd ~+ && echo > a",
+        "cd ~root && echo > a",
+        "trap 'cd src' EXIT; echo > a",
         "{ cd src; }; echo x > docs/a.txt",
         "command cd src && echo x > docs/a.txt",
         "builtin cd src && echo x > docs/a.txt",
@@ -110,6 +117,20 @@ fn any_other_move_loses_relative_targets() {
     assert_eq!(
         landed(&format!("{{ cd /tmp/x; }}; echo x > {absolute}")),
         known(&[(absolute, &[absolute])])
+    );
+}
+
+/// What does not move leaves a line followed: bindings with no program, and
+/// a known program behind `command`.
+#[test]
+fn what_does_not_move_keeps_the_line_followed() {
+    assert_eq!(
+        landed("export X=1; command ls; echo > a"),
+        known(&[("a", &["/w/a"])])
+    );
+    assert_eq!(
+        landed("cd ~/src && echo > a"),
+        known(&[("a", &["/w/a", "/home/me/src/a"])])
     );
 }
 

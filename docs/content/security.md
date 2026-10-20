@@ -313,8 +313,9 @@ Only the plainest move is followed: a command that is exactly `cd <dir>` or `pus
 started and from where it moved. `cd src && echo x > docs/a.md` is refused, since it may write
 `src/docs/a.md`, and the refusal names the path from the workdir to use instead. Any other way a
 line can change directory makes its relative redirects refused: a `cd` behind `{`, `!`, `then`,
-`command`, `builtin` or an assignment, `popd`, `chdir`, any `CDPATH`, `.`, `source`, `eval`, or a
-program that is itself an expansion. An absolute redirect is still judged where it says.
+`command`, `builtin` or an assignment, `cd ~-` or `cd ~user`, `popd`, `chdir`, any `CDPATH`, `.`,
+`source`, `eval`, or a program that is itself an expansion. An absolute redirect is still judged
+where it says. In a stage without write paths such a line is not refused; it asks every time.
 
 `shell` stays governed by the shell's own permissions, and a program it runs can write anywhere
 in the workdir. Only the redirects on its line are checked, never what the programs do.

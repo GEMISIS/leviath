@@ -164,15 +164,17 @@ same list.
 - The working directory's own fence on a shell line's redirects now follows
   a plain `cd <dir>` or `pushd <dir>`, and reads `>&word` as a write to
   `word` unless `word` is a descriptor number or `-`. `cd /tmp && echo x > f`
-  and `echo x >&/tmp/f` were let through; both are refused now, and so is a
-  relative redirect on a line that changes directory any other way (`cd -`,
-  `cd $DIR`, `popd`, a `cd` behind `{` or `command`, `CDPATH`, `.`,
-  `source`, `eval`).
+  and `echo x >&/tmp/f` were let through; both are refused now. A relative
+  redirect on a line that changes directory any other way (`cd $DIR && make
+  > log`, `cd -`, `popd`, a `cd` behind `{` or `command`, `CDPATH`, `.`,
+  `source`, `eval`, a program that is an expansion) now asks every time,
+  with no grant or safe-list entry covering it; an unattended run still
+  lets it through. In a stage with `write_paths` it is refused.
   A dangling symlink in a write's path is refused by every write tool,
   since the write would follow it to wherever it points, and an absolute
   path through another name for the workdir (`/tmp` for `/private/tmp`) is
-  accepted as inside it. There is no switch back; redirect to a path from
-  the workdir instead of after a `cd`.
+  accepted as inside it. There is no switch back; to keep such a line from
+  prompting, redirect to a path from the workdir instead of after a `cd`.
 - **Breaking.** Run files move to binary layout 7: a graph and its stages
   carry `write_paths`, and a run's launch policy the write-path layers it
   inherited. The daemon upgrades layout-6 files at start, the original kept
