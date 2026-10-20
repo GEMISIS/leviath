@@ -317,6 +317,12 @@ line can change directory makes its relative redirects refused: a `cd` behind `{
 `source`, `eval`, or a program that is itself an expansion. An absolute redirect is still judged
 where it says. In a stage without write paths such a line is not refused; it asks every time.
 
+> [!WARNING]
+> Under `--yolo`, or a policy that allows the write, that question is answered yes, so such a line
+> runs. An unattended stage without write paths has no protection against a redirect after a
+> `cd` it cannot follow, and that redirect can land outside the workdir. Give the stage write
+> paths, or run it in a [sandbox](#sandboxes).
+
 `shell` stays governed by the shell's own permissions, and a program it runs can write anywhere
 in the workdir. Only the redirects on its line are checked, never what the programs do.
 `lev validate` warns about a stage that sets write paths and can still run shell

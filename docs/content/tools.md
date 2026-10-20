@@ -132,7 +132,9 @@ line moves it, and since that may fail, the target has to stay inside from both 
 redirect on a line that changes directory any other way (`cd -`, `cd $DIR`, `cd ~-`, `popd`, a
 `cd` behind `{` or `command`, `CDPATH`, `.`, `source`, `eval`, a program that is an expansion)
 could land anywhere. It asks every time, and no grant or safe-list entry covers it; in a stage
-with write paths it is refused. `>&file` writes `file` like `>`; only `>&2` or `>&-` duplicate or
+with write paths it is refused. Under `--yolo`, or a policy that allows the write, it runs, so an
+unattended stage without write paths is not protected from it: give the stage
+[write paths](/docs/security#limiting-where-a-stage-writes), or a sandbox. `>&file` writes `file` like `>`; only `>&2` or `>&-` duplicate or
 close a descriptor.
 
 Discarded writes cost nothing. `2>/dev/null`, `> /dev/null 2>&1`, `&> /dev/null` and `> NUL` write

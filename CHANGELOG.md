@@ -169,7 +169,8 @@ same list.
   > log`, `cd -`, `popd`, a `cd` behind `{` or `command`, `CDPATH`, `.`,
   `source`, `eval`, a program that is an expansion) now asks every time,
   with no grant or safe-list entry covering it; an unattended run still
-  lets it through. In a stage with `write_paths` it is refused.
+  lets it through, so an unattended stage needs `write_paths` or a sandbox
+  to be protected from it. In a stage with `write_paths` it is refused.
   A dangling symlink in a write's path is refused by every write tool,
   since the write would follow it to wherever it points, and an absolute
   path through another name for the workdir (`/tmp` for `/private/tmp`) is
