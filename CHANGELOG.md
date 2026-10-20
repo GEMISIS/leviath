@@ -52,7 +52,9 @@ same list.
   the answer already recorded records nothing again: the model is told its
   answer is in, and the stage moves on after the second repeat. The stage
   leaves through its ordinary transition, so gates, review and required
-  regions still apply. Interactive stages are unchanged. There is no switch
+  regions still apply. A turn in which another call failed, refused before
+  it ran or failed when it ran, does not end the stage, so the model sees
+  why. Interactive stages are unchanged. There is no switch
   for the old behaviour; a stage that should keep working after it answers
   can call `submit_output` last.
 - A stage with `mode = "interactive"` now takes turns with a person. After a

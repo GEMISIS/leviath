@@ -1,8 +1,8 @@
 //! What an accepted `submit_output` means for the stage that made it.
 //!
-//! A stage used to end only on a reply with no tool call, so a model that
-//! calls a tool on every turn kept handing back the answer it had already
-//! handed back, until the stage's iteration cap. Two rules stop that:
+//! A model that calls a tool on every turn never sends the reply with no
+//! tool call that ends a stage, so without these rules it would hand back the
+//! same answer until the stage's iteration cap:
 //!
 //! - A stage with nowhere else to go ends on an accepted submission: no normal
 //!   edge leaves it, or it is the stage a fan-out worker was started to run.
@@ -14,6 +14,13 @@
 //! Ending goes through the stage's ordinary transition, so its gates, its
 //! review and its required regions still have their say: a gate that sends the
 //! stage back gets a stage that can submit again.
+//!
+//! A batch in which any other call failed does not end the stage, whichever
+//! rule would have ended it: a refused call (bad arguments, a call cut off, a
+//! tool the stage was not offered, a gate's `[blocked]`) and a failed one on the
+//! tool lane alike. The model is shown the failure, and the next batch that
+//! hands the answer back ends the stage. A shell command that exits non-zero
+//! has still run, so it does not count as failed.
 //!
 //! An interactive stage is left alone. Its conversation, not its answer, says
 //! when it is over.
@@ -45,6 +52,32 @@ pub(crate) struct VisitSubmissions {
     pub visit: String,
     /// Submissions of the same answer since it was recorded.
     pub repeats: u32,
+}
+
+/// The answer a batch started from, kept on its gate hold so that the batch,
+/// run again once the prompts resolve, is judged as it was the first time:
+/// by then its own submission has been committed.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HeldSubmission {
+    /// The answer the visit held.
+    pub answer: Option<FinalOutput>,
+    /// Submissions of the same answer since it was recorded.
+    pub repeats: u32,
+}
+
+/// Whether a call in `calls` other than a `submit_output` failed without
+/// reaching the tool lane: refused, cut off, not offered, or blocked. `results`
+/// are the calls the dispatcher answered itself.
+pub(super) fn any_refused(
+    calls: &[crate::components::ToolCall],
+    results: &[(String, String)],
+) -> bool {
+    results.iter().any(|(id, text)| {
+        call_had_no_effect(text)
+            && calls
+                .iter()
+                .any(|c| c.tool_id == *id && !crate::output_tool::is_output_tool(&c.name))
+    })
 }
 
 /// The stage ends once this batch's tool results land, unless one of them
@@ -82,33 +115,69 @@ pub(super) struct BatchSubmissions<'a> {
     resubmissions: usize,
     /// Submissions of the same answer since it was recorded.
     repeats: u32,
+    /// [`repeats`](Self::repeats) as the batch arrived.
+    start_repeats: u32,
     /// Whether a call in this batch handed back an answer: one recorded, or
     /// the one already held, again.
     answered: bool,
 }
 
 impl<'a> BatchSubmissions<'a> {
-    /// The batch's starting point: the answer the agent holds (`recorded`)
-    /// counts as this visit's only when `kept` says it was recorded in this
-    /// visit. A batch run again after a gate prompt (`rerun`) is judged as it
-    /// was the first time, before its own submission was committed.
+    /// The batch's starting point. A batch run again after a gate prompt
+    /// (`resolved`) starts where it started the first time. Otherwise the
+    /// answer the agent holds (`recorded`) is this visit's when `kept` says it
+    /// was recorded in this visit, or, with nothing kept (a daemon restart
+    /// loses it), when this stage recorded it since the visit began at
+    /// `entered_at`.
     pub(super) fn new(
         stage: Option<&StageDef>,
-        visit: &str,
+        state: &AgentState,
         recorded: Option<&'a crate::persistence::FinalOutput>,
         kept: Option<&VisitSubmissions>,
-        rerun: bool,
+        resolved: Option<&'a crate::gate_prompt::GateResolved>,
+        entered_at: Option<i64>,
     ) -> Self {
-        let kept = kept.filter(|k| k.visit == visit && !rerun);
+        let recorded = recorded.map(|o| &o.0);
+        let (held, repeats) = match (resolved, kept.filter(|k| k.visit == state.current_visit)) {
+            (Some(r), _) => r
+                .submissions
+                .as_ref()
+                .map_or((None, 0), |s| (s.answer.as_ref(), s.repeats)),
+            (None, Some(k)) => (recorded, k.repeats),
+            (None, None) => {
+                let since = |o: &&FinalOutput| {
+                    o.stage == state.current_stage
+                        && entered_at.is_some_and(|t| o.submitted_at >= t)
+                };
+                (recorded.filter(since), 0)
+            }
+        };
         Self {
-            held: kept.and(recorded).map(|o| &o.0),
+            held,
             guarded: stage.is_some_and(|s| s.mode.interactive().is_none()),
             submitted: None,
             produced: Vec::new(),
             resubmissions: 0,
-            repeats: kept.map_or(0, |k| k.repeats),
+            repeats,
+            start_repeats: repeats,
             answered: false,
         }
+    }
+
+    /// Where the batch started, for its gate hold.
+    pub(super) fn start(&self) -> HeldSubmission {
+        HeldSubmission {
+            answer: self.held.cloned(),
+            repeats: self.start_repeats,
+        }
+    }
+
+    /// Note a call the batch finished before a restart, whose result was
+    /// `text`: a `submit_output` that was accepted, or answered as a repeat,
+    /// handed back the answer.
+    pub(super) fn recovered(&mut self, name: &str, text: &str) {
+        self.answered |= crate::output_tool::is_output_tool(name)
+            && (text.starts_with(crate::output_tool::ACCEPTED) || text == REPEATED_SUBMISSION);
     }
 
     /// Apply one `submit_output` call, answering what the model reads.

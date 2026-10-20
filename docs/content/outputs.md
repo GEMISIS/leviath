@@ -77,6 +77,11 @@ Either way the stage leaves through its ordinary transition. Its gates, review a
 regions still apply, and one that sends the stage back gets a stage that can submit again. An
 interactive stage is left alone: its conversation decides when it ends, not its answer.
 
+A turn in which another call failed does not end the stage, so the model sees what went wrong.
+That covers a call refused before it ran, such as one with bad arguments, and one that failed when
+it ran. The next turn that hands the answer back ends the stage. A shell command that exits
+non-zero has still run, so it does not hold the stage open.
+
 `lev stages` counts each stage's `submit_output` calls after its answer was already in, in the
 `RESUB` column.
 

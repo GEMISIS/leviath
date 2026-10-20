@@ -434,6 +434,7 @@ async fn every_mirrored_function_runs() {
         visits: vec![visit],
         region_peaks: vec![peak],
         runaway_warned: false,
+        resubmissions: 0,
         started_at: Some(Timestamp(10)),
         ended_at: None,
         active: Some(WorkingClock {

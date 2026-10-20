@@ -16158,6 +16158,12 @@ input StageRecordInput {
 	"""
 	runawayWarned: BooleanFilter
 	"""
+	Filter on `StageRecordOutput.resubmissions`.
+	
+	`submit_output` calls made here after a visit already held an answer.
+	"""
+	resubmissions: IntFilter
+	"""
 	Filter on `StageRecordOutput.startedAt`.
 	
 	First entry, unix epoch seconds.
@@ -16256,6 +16262,8 @@ type StageRecordOutput {
 	regionPeaks: [RegionPeakOutput!]!
 	"Whether the runaway detector fired here."
 	runawayWarned: Boolean!
+	"`submit_output` calls made here after a visit already held an answer."
+	resubmissions: Int!
 	"First entry, unix epoch seconds."
 	startedAt: Timestamp
 	"Last exit; null while the stage is active."

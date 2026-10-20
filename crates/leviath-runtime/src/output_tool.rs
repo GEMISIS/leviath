@@ -72,6 +72,9 @@ fn routing_token<'a>(content: &str, stage_names: &'a [String]) -> Option<&'a str
         .map(String::as_str)
 }
 
+/// How the result of an accepted submission begins.
+pub(crate) const ACCEPTED: &str = "Recorded as this run's final output.";
+
 /// Whether a tool name is the final-output tool this module handles.
 pub(crate) fn is_output_tool(name: &str) -> bool {
     name == leviath_core::stage_tools::SUBMIT_OUTPUT_TOOL
@@ -270,7 +273,7 @@ pub(crate) fn handle_output_tool(
         ctx.sink.map(|s| s.registry),
     );
 
-    let mut ack = "Recorded as this run's final output.".to_string();
+    let mut ack = ACCEPTED.to_string();
     if !output.artifacts.is_empty() {
         let listed: Vec<String> = output
             .artifacts

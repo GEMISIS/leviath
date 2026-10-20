@@ -378,6 +378,8 @@ pub(crate) struct StageRecord {
     pub(crate) region_peaks: Vec<RegionPeak>,
     /// Whether the runaway detector fired here.
     pub(crate) runaway_warned: bool,
+    /// `submit_output` calls made here after a visit already held an answer.
+    pub(crate) resubmissions: i32,
     /// First entry, unix epoch seconds.
     pub(crate) started_at: Option<Timestamp>,
     /// Last exit; null while the stage is active.
@@ -460,6 +462,7 @@ impl From<&leviath_core::run_meta::StageRecord> for StageRecord {
                 .collect(),
             region_peaks,
             runaway_warned: record.runaway_warned,
+            resubmissions: count(record.resubmissions),
             started_at: record.started_at.map(Timestamp),
             ended_at: record.ended_at.map(Timestamp),
             active: record.active.map(|clock| WorkingClock {
