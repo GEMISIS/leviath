@@ -489,7 +489,8 @@ model providers and mime checks. `include=candidates` also lists the files nothi
 
 `GET /api/fs/dirs` takes absolute paths only, fenced by `--workdir-root`, and `hidden=true`
 includes dot-prefixed names. Its answer carries `roots`, every root the server allows, and `root`,
-the one the listed directory sits under. Without a path it opens on the server's own directory,
+the deepest one the listed directory sits under. Both show each root as the server resolved it
+at startup. Without a path it opens on the server's own directory,
 or on the first root when that directory is under none. `POST /api/fs/dirs` uses the same fence, answers `409` when the
 directory already exists, and is announced as `fs.mkdir`.
 
@@ -791,8 +792,12 @@ request named none.
 With several roots, each request picks one by naming a workdir under it. A server started with
 `--workdir-root ~/tasks --workdir-root ~/project` takes a run in `~/tasks/task-7` and a read-only
 look at `~/project` alike, and refuses `~/elsewhere`. `validateSpawn` and `POST /api/runs/validate`
-apply the same check. A run's tools are confined to its own workdir, so a run in one root cannot
-reach into the other.
+apply the same check. A run's tools are confined to its own workdir. Two separate roots therefore
+keep their runs apart, but a run in an outer root can reach a root nested inside it.
+
+Each root is resolved once, when `lev serve` starts, and a root that is not an existing directory
+refuses the start. A root swapped for a symlink later is still the directory it named at startup,
+so the swap opens nothing.
 
 The callback check is the one a model-supplied URL gets. `[security] allow_local_network = true`
 lets a webhook reach a local service. A raw graph whose fan-out reads a worker from a directory is

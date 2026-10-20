@@ -454,7 +454,10 @@ async fn this_servers_refusals_are_issues_beside_the_daemons() {
     let root = tempfile::tempdir().expect("a workdir root");
     let outside = tempfile::tempdir().expect("a workdir outside it");
     let limits = ServeLimits {
-        workdir_roots: vec![root.path().to_path_buf()],
+        workdir_roots: crate::commands::serve::workdir_roots::WorkdirRoots::resolve(&[root
+            .path()
+            .to_path_buf()])
+        .unwrap(),
         no_remote_yolo: true,
         ..Default::default()
     };
@@ -503,7 +506,10 @@ async fn a_refused_workdir_has_none_of_its_attachments_read() {
     let root = tempfile::tempdir().expect("a workdir root");
     let outside = tempfile::tempdir().expect("a workdir outside it");
     let limits = ServeLimits {
-        workdir_roots: vec![root.path().to_path_buf()],
+        workdir_roots: crate::commands::serve::workdir_roots::WorkdirRoots::resolve(&[root
+            .path()
+            .to_path_buf()])
+        .unwrap(),
         ..Default::default()
     };
     let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
@@ -537,7 +543,11 @@ async fn a_dry_run_takes_a_workdir_under_any_root_and_refuses_one_under_none() {
     let second = tempfile::tempdir().expect("a second root");
     let outside = tempfile::tempdir().expect("a workdir outside both");
     let limits = ServeLimits {
-        workdir_roots: vec![first.path().to_path_buf(), second.path().to_path_buf()],
+        workdir_roots: crate::commands::serve::workdir_roots::WorkdirRoots::resolve(&[
+            first.path().to_path_buf(),
+            second.path().to_path_buf(),
+        ])
+        .unwrap(),
         ..Default::default()
     };
     let checked = |workdir: &std::path::Path| {

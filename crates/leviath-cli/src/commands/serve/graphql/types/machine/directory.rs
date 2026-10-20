@@ -16,12 +16,13 @@ pub(crate) struct Directory {
     pub(crate) home: String,
     /// This server's own working directory, for a "here" shortcut.
     pub(crate) cwd: String,
-    /// The `--workdir-root` the listed directory sits under. Null when the
-    /// server sets none.
+    /// The deepest `--workdir-root` the listed directory sits under, as the
+    /// server resolved it at startup. Null when the server sets none.
     pub(crate) root: Option<String>,
-    /// Every `--workdir-root` the server sets, in the order given. A run's
-    /// workdir may sit under any one of them. Empty when it sets none, so any
-    /// directory may be listed and named.
+    /// Every `--workdir-root` the server sets, in the order given, each as
+    /// the server resolved it at startup. A run's workdir may sit under any
+    /// one of them. Empty when it sets none, so any directory may be listed
+    /// and named.
     pub(crate) roots: Vec<String>,
     /// The directories inside, by name.
     pub(crate) entries: Vec<String>,

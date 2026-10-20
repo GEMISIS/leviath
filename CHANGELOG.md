@@ -15,6 +15,13 @@ same list.
 
 ### Changed
 
+- `lev serve` resolves each `--workdir-root` once, at startup, and refuses
+  to start when one is not an existing directory. A root used to be
+  resolved again on every request, so a root missing at startup and later
+  created as a symlink to `/`, or a root swapped for one, opened the whole
+  filesystem. Roots are now reported and named in refusals as resolved
+  paths. To keep a server starting, create the directory before passing it.
+
 - The bundled `data-analyst` (0.3.3), `researcher` (0.6.4),
   `deep-researcher` (0.6.3) and `wide-researcher` (0.6.3) say to store a
   missing Brave key under `[tool_credentials]` when `web_search` has no

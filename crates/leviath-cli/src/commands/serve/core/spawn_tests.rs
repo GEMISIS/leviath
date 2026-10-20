@@ -34,7 +34,10 @@ fn state(control: leviath_runtime::control_socket::ControlClient, limits: ServeL
 /// seed commands, no webhooks at local addresses.
 fn hardened(root: &std::path::Path) -> ServeLimits {
     ServeLimits {
-        workdir_roots: vec![root.to_path_buf()],
+        workdir_roots: crate::commands::serve::workdir_roots::WorkdirRoots::resolve(&[
+            root.to_path_buf()
+        ])
+        .unwrap(),
         no_remote_yolo: true,
         no_remote_seed_commands: true,
         ..ServeLimits::default()
@@ -212,7 +215,10 @@ async fn no_workdir_under_a_root_is_refused_saying_where_it_came_from() {
     };
     let (client, _seen, _dir, _task) = recording(summary.clone());
     let limits = ServeLimits {
-        workdir_roots: vec![root.path().to_path_buf()],
+        workdir_roots: crate::commands::serve::workdir_roots::WorkdirRoots::resolve(&[root
+            .path()
+            .to_path_buf()])
+        .unwrap(),
         ..ServeLimits::default()
     };
     let answer = validate(&state(client, limits.clone()), named("coder"))
@@ -249,7 +255,11 @@ async fn a_workdir_under_any_of_several_roots_runs_and_one_under_none_is_refused
     std::fs::create_dir(second.path().join("task")).unwrap();
     let outside = tempfile::tempdir().unwrap();
     let limits = ServeLimits {
-        workdir_roots: vec![first.path().to_path_buf(), second.path().to_path_buf()],
+        workdir_roots: crate::commands::serve::workdir_roots::WorkdirRoots::resolve(&[
+            first.path().to_path_buf(),
+            second.path().to_path_buf(),
+        ])
+        .unwrap(),
         ..ServeLimits::default()
     };
     let spawned = ControlResponse::Spawned {
@@ -300,8 +310,8 @@ async fn a_workdir_under_any_of_several_roots_runs_and_one_under_none_is_refused
         let expected = format!(
             "workdir '{}' is outside every configured --workdir-root ('{}', '{}')",
             workdir.display(),
-            first.path().display(),
-            second.path().display()
+            first.path().canonicalize().unwrap().display(),
+            second.path().canonicalize().unwrap().display()
         );
         assert_eq!(issues.0[0].path.to_string(), "workdir");
         assert_eq!(issues.0[0].message, expected);
@@ -317,6 +327,47 @@ async fn a_workdir_under_any_of_several_roots_runs_and_one_under_none_is_refused
         };
         assert_eq!(issues.0[0].message, expected);
     }
+}
+
+/// A nested root swapped for a symlink after the server started opens
+/// nothing: something that can write in the outer root replaces the inner
+/// one with a link elsewhere, and a workdir through the link is refused,
+/// because each root is the directory it named at startup.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_nested_root_swapped_for_a_symlink_after_startup_is_refused() {
+    let outer = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::create_dir(elsewhere.path().join("etc")).unwrap();
+    let inner = outer.path().join("inner");
+    std::fs::create_dir(&inner).unwrap();
+    let limits = ServeLimits {
+        workdir_roots: crate::commands::serve::workdir_roots::WorkdirRoots::resolve(&[
+            inner.clone(),
+            outer.path().to_path_buf(),
+        ])
+        .unwrap(),
+        ..ServeLimits::default()
+    };
+    std::fs::remove_dir(&inner).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), &inner).unwrap();
+
+    let mut request = named("coder");
+    request.workdir = Some(inner.join("etc"));
+    let (client, seen, _dir, _task) = recording(ControlResponse::Valid {
+        summary: Box::new(summary()),
+    });
+    let Verdict::Rejected(issues) = start(&state(client, limits), request).await.unwrap() else {
+        panic!("a workdir through the swapped root is outside every root")
+    };
+    assert_eq!(issues.0[0].path.to_string(), "workdir");
+    assert!(
+        matches!(
+            seen.lock().unwrap().take(),
+            Some(ControlRequest::ValidateSpawn { .. })
+        ),
+        "the daemon was asked to start a refused run"
+    );
 }
 
 /// A blueprint read from a directory is refused over the network, and the

@@ -3129,7 +3129,7 @@
           "diagnostics"
         ],
         "summary": "One directory level, for a folder picker",
-        "description": "Lists one directory's subdirectories. `root` is the --workdir-root the listed directory sits under, and `roots` is every root the server sets, in the order given. With no root set, `root` is null and `roots` is empty.",
+        "description": "Lists one directory's subdirectories. `root` is the deepest --workdir-root the listed directory sits under, and `roots` is every root the server sets, in the order given. Both are the roots as the server resolved them at startup. With no root set, `root` is null and `roots` is empty.",
         "parameters": [
           {
             "name": "path",

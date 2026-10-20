@@ -56,6 +56,7 @@ mod update_job;
 mod upload;
 mod webhook_outbox;
 mod websocket;
+mod workdir_roots;
 mod yolo;
 
 #[cfg(test)]
@@ -598,6 +599,10 @@ async fn execute_with_shutdown(
     }
 
     announce.stage(ErrorCode::ConfigInvalid);
+    // Each root is resolved once, here: a root resolved per request would
+    // follow a symlink swapped in after startup.
+    let workdir_roots =
+        workdir_roots::WorkdirRoots::resolve(&args.workdir_roots).map_err(anyhow::Error::msg)?;
     let cfg = Config::load()?;
     // Read before `cfg` moves into the shared state below.
     let allow_local_network = cfg.security.allow_local_network;
@@ -635,7 +640,7 @@ async fn execute_with_shutdown(
         mcp: mcp::McpAdmin::default(),
         providers: providers::ProviderAdmin::default(),
         limits: Arc::new(ServeLimits {
-            workdir_roots: args.workdir_roots.clone(),
+            workdir_roots,
             no_remote_yolo: args.no_remote_yolo,
             no_remote_seed_commands: args.no_remote_seed_commands,
             request_limits,
@@ -3545,6 +3550,45 @@ mod tests {
             assert!(result.is_err(), "must refuse to start unauthenticated");
         })
         .await;
+    }
+
+    /// A `--workdir-root` that is not there refuses the start: a root
+    /// created later could be a link to `/`, and the fence would follow it.
+    #[tokio::test]
+    async fn execute_refuses_to_start_with_a_workdir_root_that_is_not_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("later");
+        let args = ServeArgs {
+            daemon: Default::default(),
+            exit_on_stdin_eof: false,
+            shutdown_grace_secs: 10,
+            json: false,
+            ready_file: None,
+            port: 0,
+            name: None,
+            host: "127.0.0.1".to_string(),
+            cors: None,
+            token: Some("test-token".to_string()),
+            allow_admin: false,
+            admin_token: None,
+            print_graphql_schema: false,
+            workdir_roots: vec![dir.path().to_path_buf(), missing.clone()],
+            no_remote_yolo: false,
+            tls_cert: None,
+            tls_key: None,
+            no_remote_seed_commands: false,
+            max_concurrent_requests: None,
+            request_timeout_secs: None,
+            spawn_timeout_secs: None,
+        };
+        let result = execute_quietly(args).await;
+        assert_error_says(
+            &result,
+            &format!(
+                "--workdir-root '{}' is not a directory that exists",
+                missing.display()
+            ),
+        );
     }
 
     /// Covers `axum::serve(...).await?` Ok path (lines 117, 119) by running

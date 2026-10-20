@@ -1,6 +1,5 @@
 //! Shared types: ServerEvent, AppState, request/response structs, error types.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -125,10 +124,10 @@ impl AppState {
 /// guarded by a field is one refactor away from being reachable.
 #[derive(Debug, Clone, Default)]
 pub(super) struct ServeLimits {
-    /// `--workdir-root`, once per flag: the directories agent workdirs must
-    /// sit under, any one of them. Empty when the operator set none, which
-    /// fences nothing.
-    pub(super) workdir_roots: Vec<PathBuf>,
+    /// `--workdir-root`, once per flag, resolved when the server started: the
+    /// directories agent workdirs must sit under, any one of them. Empty when
+    /// the operator set none, which fences nothing.
+    pub(super) workdir_roots: super::workdir_roots::WorkdirRoots,
     /// `--no-remote-yolo`: whether a spawn request may waive approvals, with
     /// either `"yolo": true` or an `"allow"` list.
     pub(super) no_remote_yolo: bool,
@@ -168,8 +167,9 @@ impl ServeLimits {
 
     /// Check a requested agent workdir against `--workdir-root`.
     ///
-    /// Uses the same symlink-aware containment the file tools use, so a symlink
-    /// under a root cannot be used to point an agent outside it.
+    /// The workdir is resolved the way the file tools resolve a path, so a
+    /// symlink or `..` under a root cannot point an agent outside it. The
+    /// roots themselves were resolved once, at startup.
     pub(super) fn check_workdir(&self, workdir: &std::path::Path) -> Result<(), String> {
         match self.fences_in(workdir) {
             true => Ok(()),
@@ -181,16 +181,10 @@ impl ServeLimits {
         }
     }
 
-    /// The first configured root `path` resolves inside, or `None` when it
+    /// The deepest configured root `path` resolves inside, or `None` when it
     /// is under none of them (and always when no root is set).
-    ///
-    /// Both sides are canonicalized, so a `..` or a symlink cannot carry a
-    /// path out of a root while still reading as under it.
     pub(super) fn root_holding(&self, path: &std::path::Path) -> Option<&std::path::Path> {
-        self.workdir_roots
-            .iter()
-            .map(PathBuf::as_path)
-            .find(|root| leviath_core::resolves_within(path, root))
+        self.workdir_roots.holding(path)
     }
 
     /// Whether a caller may name `path` here: anywhere when no root is set,
@@ -204,6 +198,7 @@ impl ServeLimits {
     pub(super) fn roots_named(&self) -> String {
         let quoted: Vec<String> = self
             .workdir_roots
+            .as_slice()
             .iter()
             .map(|root| format!("'{}'", root.display()))
             .collect();
@@ -907,11 +902,12 @@ pub(super) struct DirsResp {
     pub(super) home: String,
     /// The serve process's working directory, for the picker's "here" shortcut.
     pub(super) cwd: String,
-    /// The configured `--workdir-root` the listed directory sits under, or
-    /// `null` when the server has none.
+    /// The deepest configured `--workdir-root` the listed directory sits
+    /// under, as resolved at startup, or `null` when the server has none.
     pub(super) root: Option<String>,
-    /// Every configured `--workdir-root`, in the order given. Empty when the
-    /// server has none, so any directory may be listed.
+    /// Every configured `--workdir-root`, in the order given, each as
+    /// resolved at startup. Empty when the server has none, so any directory
+    /// may be listed.
     #[serde(default)]
     pub(super) roots: Vec<String>,
     /// The immediate subdirectories, name-sorted. Dotted names are excluded,
@@ -1244,7 +1240,10 @@ mod tests {
         assert!(open.check_workdir(std::path::Path::new("/")).is_ok());
         let root = tempfile::tempdir().unwrap();
         let rooted = ServeLimits {
-            workdir_roots: vec![root.path().to_path_buf()],
+            workdir_roots: crate::commands::serve::workdir_roots::WorkdirRoots::resolve(&[root
+                .path()
+                .to_path_buf()])
+            .unwrap(),
             ..ServeLimits::default()
         };
         assert!(rooted.check_workdir(root.path()).is_ok());
@@ -1260,13 +1259,18 @@ mod tests {
         let second = tempfile::tempdir().unwrap();
         std::fs::create_dir(second.path().join("task")).unwrap();
         let limits = ServeLimits {
-            workdir_roots: vec![first.path().to_path_buf(), second.path().to_path_buf()],
+            workdir_roots: crate::commands::serve::workdir_roots::WorkdirRoots::resolve(&[
+                first.path().to_path_buf(),
+                second.path().to_path_buf(),
+            ])
+            .unwrap(),
             ..ServeLimits::default()
         };
         assert!(limits.check_workdir(first.path()).is_ok());
         let task = second.path().join("task");
         assert!(limits.check_workdir(&task).is_ok());
-        assert_eq!(limits.root_holding(&task), Some(second.path()));
+        let second_real = second.path().canonicalize().unwrap();
+        assert_eq!(limits.root_holding(&task), Some(second_real.as_path()));
 
         let climbed = task.join("..").join("..");
         assert_eq!(limits.root_holding(&climbed), None);
@@ -1275,8 +1279,8 @@ mod tests {
             format!(
                 "workdir '{}' is outside every configured --workdir-root ('{}', '{}')",
                 climbed.display(),
-                first.path().display(),
-                second.path().display()
+                first.path().canonicalize().unwrap().display(),
+                second_real.display()
             )
         );
     }
@@ -1292,7 +1296,11 @@ mod tests {
         let link = first.path().join("out");
         std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
         let limits = ServeLimits {
-            workdir_roots: vec![first.path().to_path_buf(), second.path().to_path_buf()],
+            workdir_roots: crate::commands::serve::workdir_roots::WorkdirRoots::resolve(&[
+                first.path().to_path_buf(),
+                second.path().to_path_buf(),
+            ])
+            .unwrap(),
             ..ServeLimits::default()
         };
         assert!(limits.check_workdir(&link).is_err());
