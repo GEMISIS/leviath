@@ -73,6 +73,10 @@ pub(crate) struct InferenceConfig {
     /// Mime type patterns whose parts reach this stage's model as text
     /// whatever the model takes: `[stages.<name>.input] as_text`.
     pub as_text: Vec<String>,
+    /// The stage's provider-neutral reasoning effort (`[stages.<name>.model]
+    /// effort`). Each request asks the provider serving it to spell this for
+    /// the model it is sent to; `None` sends nothing.
+    pub effort: Option<leviath_core::Effort>,
 }
 
 /// Per-entity tool result routing configuration.

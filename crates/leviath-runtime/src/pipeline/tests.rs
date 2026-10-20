@@ -705,6 +705,7 @@ fn build_request_filters_tools_and_uses_config_overrides() {
         shell_hint: false,
         request_timeout_secs: None,
         as_text: Vec::new(),
+        effort: None,
     };
     let si = stage(
         "m",
@@ -775,6 +776,7 @@ fn build_request_passes_through_extra_params() {
         shell_hint: false,
         request_timeout_secs: None,
         as_text: Vec::new(),
+        effort: None,
     };
     let si = stage("m", vec![], None);
     let req = build_request(
@@ -810,6 +812,7 @@ fn build_request_prepends_batch_hint_when_enabled() {
         shell_hint: false,
         request_timeout_secs: None,
         as_text: Vec::new(),
+        effort: None,
     };
     let si = stage("m", vec![], None);
     let req = build_request(
@@ -848,6 +851,7 @@ fn build_request_omits_batch_hint_when_disabled_or_absent() {
         shell_hint: false,
         request_timeout_secs: None,
         as_text: Vec::new(),
+        effort: None,
     };
     let req = build_request(
         &window_with_sys(),
@@ -887,6 +891,7 @@ fn hint_config(batch_tool_hint: bool, shell_hint: bool) -> InferenceConfig {
         shell_hint,
         request_timeout_secs: None,
         as_text: Vec::new(),
+        effort: None,
     }
 }
 
@@ -9695,6 +9700,7 @@ fn setup() -> StageSetup {
             shell_hint: false,
             request_timeout_secs: None,
             as_text: Vec::new(),
+            effort: None,
         },
         routing: None,
         accepts_messages: true,
@@ -10456,6 +10462,7 @@ fn enter_stage_injects_system_prompt_and_config() {
         shell_hint: false,
         request_timeout_secs: None,
         as_text: Vec::new(),
+        effort: None,
     };
     s.accepts_messages = false;
     let mut world = World::new();
@@ -15729,6 +15736,97 @@ async fn a_routing_question_asked_once_more_names_the_stages_alone() {
         "Your last reply named no stage. Answer with exactly one of: b, c."
     );
     let _ = trx.recv().await.expect("routing outcome");
+}
+
+/// A provider that answers with the request's extras, and spells an effort
+/// the way Claude does.
+struct EchoesExtras;
+
+#[async_trait::async_trait]
+impl Provider for EchoesExtras {
+    async fn infer(
+        &self,
+        r: &InferenceRequest,
+    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+        Ok(leviath_providers::InferenceResponse {
+            content: r.extra.to_string(),
+            tool_calls: vec![],
+            tokens_used: leviath_providers::TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+                reported_cost_usd: None,
+            },
+            finish_reason: leviath_providers::FinishReason::Complete,
+            reasoning: None,
+            parts: Vec::new(),
+            content_is_reasoning: false,
+        })
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        100_000
+    }
+    fn name(&self) -> &str {
+        "cfg"
+    }
+    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities {
+            max_output_tokens: 1000,
+            ..Default::default()
+        }
+    }
+    fn effort_extra(&self, _m: &str, effort: leviath_core::Effort) -> serde_json::Value {
+        serde_json::json!({ "output_config": { "effort": effort.as_str() } })
+    }
+}
+
+/// A stage's `effort` rides both routing calls: the first question, and the
+/// one asked once more when the first answer named no stage.
+#[tokio::test]
+async fn both_routing_calls_carry_the_stages_effort() {
+    for reasked in [false, true] {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let mut registry = ProviderRegistry::new();
+        registry.register("cfg".to_string(), Arc::new(EchoesExtras));
+        world.insert_resource(Providers(registry));
+        let (ttx, mut trx) = mpsc::unbounded_channel();
+        world.resource_mut::<InferenceStage>().transition_outcomes = ttx;
+        let bp = blueprint(vec![
+            stage_named("a", None, false, None),
+            stage_named("b", None, false, None),
+            stage_named("c", None, false, None),
+        ]);
+        let e = spawn_choosing_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1"), si("m2")],
+            vec![plain_edge("b"), plain_edge("c")],
+        );
+        world.entity_mut(e).insert(InferenceConfig {
+            effort: Some(leviath_core::Effort::Low),
+            ..Default::default()
+        });
+        if reasked {
+            world.entity_mut(e).insert(RoutingReasked);
+        }
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(dispatch_transition_choice);
+        schedule.run(&mut world);
+
+        let outcome = trx.recv().await.expect("routing outcome");
+        let sent: serde_json::Value =
+            serde_json::from_str(&outcome.result.expect("answered").content).unwrap();
+        assert_eq!(
+            sent["output_config"],
+            serde_json::json!({ "effort": "low" })
+        );
+    }
 }
 
 /// The question asked once more offers `DONE` where the stage may end the
@@ -21122,6 +21220,7 @@ fn build_request_raises_the_cap_to_the_model_maximum_after_a_cut_off() {
         shell_hint: false,
         request_timeout_secs: None,
         as_text: Vec::new(),
+        effort: None,
     };
     let si = stage("m", vec![], None);
     let raised = build_request(
@@ -21741,6 +21840,7 @@ fn build_request_resolves_relative_output_caps() {
         shell_hint: false,
         request_timeout_secs: None,
         as_text: Vec::new(),
+        effort: None,
     };
     let si = stage("m", vec![], None);
     let w = ctx(&[("conversation", 10_000), ("claims", 3_000)]);
@@ -21836,6 +21936,7 @@ fn routing_request_shares_the_stage_prefix_and_forbids_tool_use() {
         shell_hint: false,
         request_timeout_secs: None,
         as_text: Vec::new(),
+        effort: None,
     };
     let w = ctx(&[("conversation", 10_000), ("notes", 2_000)]);
     let mut si = stage("m", vec![tool("read_file"), tool("write_file")], None);
@@ -21907,6 +22008,7 @@ fn routing_request_turns_reasoning_down_where_every_model_reasons() {
         shell_hint: false,
         request_timeout_secs: None,
         as_text: Vec::new(),
+        effort: None,
     };
     let w = ctx(&[("conversation", 10_000)]);
     let mut si = stage("muse-spark-1.3", vec![tool("read_file")], None);

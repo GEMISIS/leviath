@@ -8,6 +8,15 @@ fn provider(url: &str) -> MetaProvider {
     MetaProvider::new(reqwest::Client::new(), "meta-key".into()).with_base_url(Some(url.into()))
 }
 
+/// A stage's effort reaches Muse as `reasoning.effort`.
+#[test]
+fn effort_is_reasoning_effort() {
+    assert_eq!(
+        provider("http://x").effort_extra("muse-spark", leviath_core::Effort::Low),
+        serde_json::json!({ "reasoning": { "effort": "low" } })
+    );
+}
+
 fn request(model: &str) -> InferenceRequest {
     InferenceRequest {
         system: vec![],

@@ -12,6 +12,32 @@ fn client() -> reqwest::Client {
     crate::provider::build_http_client(None).expect("a test client builds")
 }
 
+/// A stage's effort reaches each vendor in its own field, or not at all.
+#[test]
+fn effort_is_spelled_per_vendor() {
+    use leviath_core::Effort;
+    let p = BedrockProvider::new(client(), "k".to_string());
+    assert_eq!(
+        p.effort_extra("us.anthropic.claude-opus-5", Effort::Low),
+        json!({ "output_config": { "effort": "low" } })
+    );
+    assert!(
+        p.effort_extra("anthropic.claude-sonnet-4-5-20250929-v1:0", Effort::Low)
+            .is_null()
+    );
+    assert_eq!(
+        p.effort_extra("us.amazon.nova-2-lite-v1:0", Effort::Medium),
+        json!({ "reasoningConfig": { "type": "enabled", "maxReasoningEffort": "medium" } })
+    );
+    for model in [
+        "amazon.nova-2-sonic-v1:0",
+        "amazon.nova-pro-v1:0",
+        "meta.llama4-maverick-17b-instruct-v1:0",
+    ] {
+        assert!(p.effort_extra(model, Effort::High).is_null());
+    }
+}
+
 /// A provider whose every host is `url`.
 fn provider_at(url: &str) -> BedrockProvider {
     let mut p = BedrockProvider::new(client(), "ABSK-test".to_string())

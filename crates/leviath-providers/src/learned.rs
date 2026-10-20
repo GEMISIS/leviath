@@ -179,6 +179,12 @@ impl LearnedModels {
             .cloned()
     }
 
+    /// What the listing said about the model `key` names (see
+    /// [`Self::find_by_key`]), if it named it.
+    pub fn listed(&self, key: &str) -> Option<LearnedModel> {
+        self.find_by_key(key).and_then(|id| self.get(&id))
+    }
+
     /// `base` corrected by what the listing said about `id`, if anything.
     pub fn corrected(&self, id: &str, base: ModelCapabilities) -> ModelCapabilities {
         match self.get(id) {

@@ -87,6 +87,16 @@ fn provider(url: &str, tokens: Arc<dyn TokenSource>) -> CodexProvider {
     CodexProvider::new(reqwest::Client::new(), tokens).with_base_url(Some(url.to_string()))
 }
 
+/// A stage's effort reaches the route as `reasoning.effort`.
+#[test]
+fn effort_is_reasoning_effort() {
+    let codex = provider("http://x", Static::new("t"));
+    assert_eq!(
+        codex.effort_extra("gpt-5.5", leviath_core::Effort::High),
+        serde_json::json!({ "reasoning": { "effort": "high" } })
+    );
+}
+
 fn request() -> InferenceRequest {
     InferenceRequest {
         system: vec![SystemBlock {

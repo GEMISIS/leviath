@@ -19,6 +19,7 @@ pub mod codex;
 pub mod compiled;
 #[cfg(feature = "debug-http")]
 pub(crate) mod debug_http;
+pub mod effort;
 pub mod endpoint;
 pub mod factory;
 pub mod failure;

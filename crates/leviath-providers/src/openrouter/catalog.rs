@@ -97,16 +97,21 @@ pub(crate) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
             reasoning_mandatory: reasoning
                 .and_then(|r| r.get("mandatory"))
                 .and_then(|v| v.as_bool()),
-            reasoning_efforts: reasoning
-                .and_then(|r| r.get("supported_efforts"))
-                .and_then(|v| v.as_array())
-                .map(|levels| {
-                    levels
-                        .iter()
-                        .filter_map(|l| l.as_str())
-                        .map(str::to_string)
-                        .collect()
-                }),
+            // A model listed without the `reasoning` parameter takes no
+            // effort at all, which an empty list says.
+            reasoning_efforts: match takes("reasoning") {
+                Some(false) => Some(Vec::new()),
+                _ => reasoning
+                    .and_then(|r| r.get("supported_efforts"))
+                    .and_then(|v| v.as_array())
+                    .map(|levels| {
+                        levels
+                            .iter()
+                            .filter_map(|l| l.as_str())
+                            .map(str::to_string)
+                            .collect()
+                    }),
+            },
             explicit_cache_control: Some(quotes_cache_write(entry)),
             pricing: parse_pricing(entry),
             released: entry.get("created").and_then(|v| v.as_i64()),
@@ -210,6 +215,10 @@ mod tests {
         assert_eq!(learned.supports_temperature, Some(false));
         assert_eq!(learned.supports_tools, Some(false));
         assert_eq!(learned.supports_tool_choice, Some(false));
+        // Listed without `reasoning`: no effort level at all.
+        let entry = json!({ "id": "acme/plain", "supported_parameters": ["max_tokens"] });
+        let (_, learned) = parse_entry(&entry).unwrap();
+        assert_eq!(learned.reasoning_efforts, Some(vec![]));
     }
 
     #[test]

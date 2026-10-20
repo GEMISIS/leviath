@@ -344,3 +344,6 @@ pub(crate) struct InferenceStage {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod effort_tests;

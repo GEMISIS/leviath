@@ -388,6 +388,22 @@ impl Provider for GeminiProvider {
         Some(&self.learned)
     }
 
+    /// `thinking_level` for a Gemini 3 text model, the generation that takes
+    /// one. A Pro model takes only `low` and `high`, so `medium` moves up.
+    /// Older models think by a token budget instead, and image models not
+    /// at all, so both are sent none.
+    fn effort_extra(&self, model: &str, effort: leviath_core::Effort) -> serde_json::Value {
+        let pro = ["low".to_string(), "high".to_string()];
+        let accepted = model.contains("-pro").then_some(&pro[..]);
+        match model.starts_with("gemini-3") && !model.contains("image") {
+            true => effort.clamp(accepted).map_or(
+                serde_json::Value::Null,
+                |level| serde_json::json!({ "thinking_level": level }),
+            ),
+            false => serde_json::Value::Null,
+        }
+    }
+
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         let base = media::adjusted(
             model,

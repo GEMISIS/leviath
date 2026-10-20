@@ -277,10 +277,9 @@ fn writes_text(provider: &str, model: &str) -> bool {
 /// about generating a title rather than a title.
 ///
 /// Keyed on the resolved provider because each API spells the switch
-/// differently and rejects the others' spelling outright. The providers not
-/// listed need nothing: Anthropic only thinks when a request asks it to, and
-/// OpenAI never returns reasoning text, so `reasoning_effort` would buy
-/// nothing here while risking a 400 on a model with no reasoning to configure.
+/// differently and rejects the others' spelling outright. A provider with no
+/// switch here gets `Value::Null`, and [`title_extra`] asks it for the least
+/// effort instead, in its own spelling and only for a model that takes one.
 fn no_thinking_extra(provider: &str) -> serde_json::Value {
     match provider {
         // Ollama's own switch, which its provider lifts to the top level of
@@ -331,6 +330,22 @@ pub(crate) fn least_reasoning_extra(provider: &str) -> serde_json::Value {
         // own depth has the field taken back off by its provider.
         "xai" | "grok" | "meta" => serde_json::json!({ "reasoning": { "effort": "low" } }),
         _ => serde_json::Value::Null,
+    }
+}
+
+/// The title request's reasoning control for `model`: the provider's own
+/// switch to not think where [`no_thinking_extra`] names one, else the
+/// least effort the provider spells for the model, the same mapping a
+/// stage's `effort` goes through
+/// ([`Provider::effort_extra`](leviath_providers::Provider::effort_extra)).
+fn title_extra(
+    provider: &dyn leviath_providers::Provider,
+    provider_name: &str,
+    model: &str,
+) -> serde_json::Value {
+    match no_thinking_extra(provider_name) {
+        serde_json::Value::Null => provider.effort_extra(model, leviath_core::Effort::Low),
+        switch => switch,
     }
 }
 
@@ -667,6 +682,7 @@ pub(crate) fn dispatch_title(
         chain.0.remove(0);
 
         let mut request = title_request(&meta.task, &provider_name, &model);
+        request.extra = title_extra(provider.as_ref(), &provider_name, &model);
         // A model that always reasons refuses to be told not to; it is asked
         // for the least effort it takes instead.
         crate::reasoning_floor::floor_reasoning(provider.as_ref(), &model, &mut request.extra);
@@ -951,6 +967,27 @@ mod tests {
         fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
             leviath_providers::ModelCapabilities::default()
         }
+        fn effort_extra(&self, _m: &str, effort: leviath_core::Effort) -> serde_json::Value {
+            serde_json::json!({ "effort": effort.as_str() })
+        }
+    }
+
+    /// A title call asks for the least effort in the provider's own
+    /// spelling, unless the provider has a switch that turns thinking off.
+    #[test]
+    fn the_title_call_asks_for_low_effort_where_there_is_no_off_switch() {
+        let provider = Scripted {
+            reply: Ok("t"),
+            finish_reason: leviath_providers::FinishReason::Complete,
+        };
+        assert_eq!(
+            title_extra(&provider, "mock", "m"),
+            serde_json::json!({ "effort": "low" })
+        );
+        assert_eq!(
+            title_extra(&provider, "openrouter", "m"),
+            serde_json::json!({ "reasoning": { "enabled": false } })
+        );
     }
 
     fn metadata(model: Option<&str>) -> RunMetadata {
@@ -2037,8 +2074,8 @@ mod tests {
             title_request("t", "bedrock", "us.anthropic.claude-sonnet-5").extra,
             serde_json::json!({ "thinking": { "type": "disabled" } })
         );
-        // Anthropic only thinks when asked, and OpenAI never returns reasoning
-        // text, so neither needs a switch and neither is sent one.
+        // Anthropic and OpenAI have no off switch here; `title_extra` asks
+        // them for the least effort in their own spelling instead.
         assert_eq!(
             title_request("t", "anthropic", "claude-sonnet-4-6").extra,
             serde_json::Value::Null

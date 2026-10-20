@@ -784,6 +784,15 @@ impl Provider for OpenRouterProvider {
         Some(&self.learned)
     }
 
+    /// `reasoning.effort` at a level the listing names for the model. A
+    /// model listed without the `reasoning` parameter is sent none; one the
+    /// listing does not describe is sent the stage's level, which the
+    /// gateway drops for an upstream that does not reason.
+    fn effort_extra(&self, model: &str, effort: leviath_core::Effort) -> serde_json::Value {
+        let listed = self.learned.listed(model).and_then(|m| m.reasoning_efforts);
+        crate::effort::reasoning_effort(effort, listed.as_deref())
+    }
+
     /// The zero-retention list, if it was never read.
     async fn refresh_retention(&self) {
         let unread = self
@@ -1060,6 +1069,34 @@ mod tests {
         );
         assert!(p.learned_models().is_some());
         assert_eq!(p.pricing("x-ai/grok-4.6"), None);
+    }
+
+    /// A stage's effort reaches a model at a level its listing names, and
+    /// a model listed without `reasoning` gets none.
+    #[test]
+    fn effort_follows_the_listing() {
+        use leviath_core::Effort;
+        let p = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        );
+        assert_eq!(
+            p.effort_extra("meta/muse-spark", Effort::Low),
+            serde_json::json!({ "reasoning": { "effort": "low" } })
+        );
+        let listed = |levels: &[&str]| crate::learned::LearnedModel {
+            reasoning_efforts: Some(levels.iter().map(|l| l.to_string()).collect()),
+            ..Default::default()
+        };
+        p.learned.replace(std::collections::HashMap::from([
+            ("openai/gpt-5-pro".to_string(), listed(&["high"])),
+            ("acme/plain".to_string(), listed(&[])),
+        ]));
+        assert_eq!(
+            p.effort_extra("openai/gpt-5-pro", Effort::Low),
+            serde_json::json!({ "reasoning": { "effort": "high" } })
+        );
+        assert!(p.effort_extra("acme/plain", Effort::Low).is_null());
     }
     use super::*;
     use crate::test_support::always_on_tracing_guard;

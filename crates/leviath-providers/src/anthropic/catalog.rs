@@ -45,7 +45,7 @@ pub(super) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
             supports_tools: Some(true),
             supports_tool_choice: None,
             reasoning_mandatory: None,
-            reasoning_efforts: None,
+            reasoning_efforts: efforts(entry),
             // The direct API always reads `cache_control` markers; the flag
             // exists for a gateway choosing per upstream.
             explicit_cache_control: None,
@@ -62,6 +62,26 @@ pub(super) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
             output_types: None,
         },
     ))
+}
+
+/// The effort levels an entry's `capabilities.effort` marks supported.
+///
+/// `Some` and empty when it says the model takes no effort, so none is sent.
+/// `None` when it says nothing usable, which leaves the model id to decide.
+fn efforts(entry: &serde_json::Value) -> Option<Vec<String>> {
+    let effort = entry.pointer("/capabilities/effort")?;
+    let supported = |v: &serde_json::Value| v.get("supported").and_then(|s| s.as_bool());
+    match supported(effort)? {
+        false => Some(Vec::new()),
+        true => {
+            let levels: Vec<String> = leviath_core::effort::LEVELS
+                .iter()
+                .filter(|level| effort.get(**level).and_then(supported) == Some(true))
+                .map(|level| level.to_string())
+                .collect();
+            (!levels.is_empty()).then_some(levels)
+        }
+    }
 }
 
 /// The `after_id` cursor for the next page, if the envelope says there is one.
@@ -101,6 +121,33 @@ mod tests {
         assert_eq!(learned.pricing, None);
         assert_eq!(learned.released, Some(1_784_851_200));
         assert_eq!(learned.retires, None);
+    }
+
+    #[test]
+    fn the_effort_levels_come_from_the_capabilities() {
+        let entry = json!({ "id": "m", "capabilities": { "effort": {
+            "supported": true,
+            "low": { "supported": true },
+            "medium": { "supported": false },
+            "high": { "supported": true }
+        } } });
+        let (_, learned) = parse_entry(&entry).unwrap();
+        assert_eq!(
+            learned.reasoning_efforts,
+            Some(vec!["low".to_string(), "high".to_string()])
+        );
+        let refused = json!({ "id": "m", "capabilities": { "effort": { "supported": false } } });
+        assert_eq!(
+            parse_entry(&refused).unwrap().1.reasoning_efforts,
+            Some(vec![])
+        );
+        for silent in [
+            json!({ "id": "m", "capabilities": { "effort": { "supported": true } } }),
+            json!({ "id": "m", "capabilities": { "effort": {} } }),
+            json!({ "id": "m" }),
+        ] {
+            assert_eq!(parse_entry(&silent).unwrap().1.reasoning_efforts, None);
+        }
     }
 
     #[test]

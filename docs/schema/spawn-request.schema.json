@@ -648,6 +648,26 @@
       ],
       "type": "object"
     },
+    "Effort": {
+      "description": "How much reasoning a stage asks of its model.",
+      "oneOf": [
+        {
+          "const": "low",
+          "description": "As little as the model takes.",
+          "type": "string"
+        },
+        {
+          "const": "medium",
+          "description": "A moderate amount.",
+          "type": "string"
+        },
+        {
+          "const": "high",
+          "description": "A thorough pass.",
+          "type": "string"
+        }
+      ]
+    },
     "Eviction": {
       "description": "How a sliding window drops old entries.",
       "oneOf": [
@@ -1689,6 +1709,17 @@
           "default": true,
           "description": "Whether the operator's default model may stand in when none of\n`models` is available.",
           "type": "boolean"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How hard the model should think: `low`, `medium` or `high`. Each\nprovider sends it in its own field, at a level the model takes, and a\nmodel with no such control is sent nothing. Unset leaves each model at\nits own default."
         },
         "models": {
           "default": [],

@@ -153,8 +153,10 @@ impl StageDef {
 }
 
 /// The models a stage may run on, best first.
+// The run file's binary frames keep the four fields this had before
+// `effort` (see `spec::readable::choice`); readable formats write them all.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct ModelChoice {
     /// The models, best first. Empty takes the operator's default.
     #[serde(default)]
@@ -169,6 +171,12 @@ pub struct ModelChoice {
     /// How long one request may take, in seconds.
     #[serde(default)]
     pub request_timeout_secs: Option<u64>,
+    /// How hard the model should think: `low`, `medium` or `high`. Each
+    /// provider sends it in its own field, at a level the model takes, and a
+    /// model with no such control is sent nothing. Unset leaves each model at
+    /// its own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<leviath_core::Effort>,
 }
 
 impl Default for ModelChoice {
@@ -178,6 +186,7 @@ impl Default for ModelChoice {
             allow_user_default: true,
             params: ModelParams::default(),
             request_timeout_secs: None,
+            effort: None,
         }
     }
 }

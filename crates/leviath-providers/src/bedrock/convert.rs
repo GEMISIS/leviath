@@ -73,7 +73,7 @@ fn reasoning_requested(extra: &Value) -> (bool, bool) {
 /// Bedrock model, which is exactly the case.
 fn passes_to_vendor(key: &str, vendor: Vendor) -> bool {
     match key {
-        "thinking" | "anthropic_beta" => vendor == Vendor::Anthropic,
+        "thinking" | "anthropic_beta" | "output_config" => vendor == Vendor::Anthropic,
         "reasoningConfig" => vendor == Vendor::Nova,
         _ => true,
     }
@@ -675,6 +675,19 @@ mod tests {
             body["additionalModelRequestFields"]["anthropic_beta"],
             json!(["context-1m-2025-08-07"])
         );
+    }
+
+    #[test]
+    fn claude_effort_reaches_claude_only() {
+        let mut req = request(vec![user("hi")]);
+        req.extra = json!({ "output_config": { "effort": "low" } });
+        let body = converse_body(&req, &caps(), Vendor::Anthropic);
+        assert_eq!(
+            body["additionalModelRequestFields"]["output_config"],
+            json!({ "effort": "low" })
+        );
+        let body = converse_body(&req, &caps(), Vendor::Nova);
+        assert!(body.get("additionalModelRequestFields").is_none());
     }
 
     #[test]

@@ -169,6 +169,10 @@ pub(crate) struct StageModelConfig {
     /// A per-stage deadline for one inference, in seconds, including retries.
     /// Null leaves the daemon's own deadline in place.
     pub(crate) request_timeout_secs: Option<i32>,
+    /// How hard the stage asks its model to think: low, medium or high. Each
+    /// provider sends it in its own field, and only to a model that takes one.
+    /// Null leaves each model at its own default.
+    pub(crate) effort: Option<String>,
 }
 
 impl From<&leviath_runtime::spec::graph::ModelChoice> for StageModelConfig {
@@ -191,6 +195,7 @@ impl From<&leviath_runtime::spec::graph::ModelChoice> for StageModelConfig {
             request_timeout_secs: model
                 .request_timeout_secs
                 .map(|secs| i32::try_from(secs).unwrap_or(i32::MAX)),
+            effort: model.effort.map(|e| e.to_string()),
         }
     }
 }

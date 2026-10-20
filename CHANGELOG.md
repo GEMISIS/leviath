@@ -37,6 +37,10 @@ same list.
   `content_is_reasoning`. Code outside the workspace that builds an
   `InferenceResponse` with a struct literal must set it; `false` keeps the
   old meaning.
+- The title call asks an OpenAI reasoning model, a Claude that takes an
+  effort, and a Gemini 3 model for the least effort, in the same mapping a
+  stage's `effort` uses. It used to send them nothing. To send nothing,
+  point `[title] model` at a model that takes no effort.
 
 - Codex's models are now part of the built-in model catalogue. `lev models
   list --all` and `lev models show` list them. Blueprint lint checks and the
@@ -964,6 +968,21 @@ same list.
 
 ### Added
 
+- `effort = "low" | "medium" | "high"` on a stage's model block: one
+  provider-neutral reasoning effort that each provider sends in its own
+  field, per request, so a fallback on another provider gets its own
+  spelling or nothing. OpenAI and OpenRouter, Meta, Codex, xAI and Grok send
+  `reasoning.effort`, Anthropic `output_config.effort`, Bedrock Claude's
+  field or Nova 2's `reasoningConfig`, and Gemini 3 `thinking_level`. A
+  model with no such control is sent nothing, and a level a model does not
+  take moves to the nearest one it does. The stage's routing call carries
+  the same field, which keeps Anthropic's cached prompt. The run file
+  layout does not change, and existing run files read as before.
+- `Provider::effort_extra` (`leviath-providers`) spells an effort for a
+  model, and `leviath_core::Effort` names the three levels. Anthropic's
+  listing now fills `LearnedModel::reasoning_efforts` from
+  `capabilities.effort`, and OpenRouter's records an empty list for a model
+  listed without the `reasoning` parameter.
 - `[tool_credentials]`: secrets script tools read by name, such as the
   `BRAVE_API_KEY` the bundled `web_search` uses. Store and remove them
   through the config API with `toolCredentials` on GraphQL `updateConfig`

@@ -297,6 +297,11 @@ impl Provider for MetaProvider {
         Some(&self.learned)
     }
 
+    /// `reasoning.effort`: every model here reasons, at any of the three.
+    fn effort_extra(&self, _model: &str, effort: leviath_core::Effort) -> serde_json::Value {
+        crate::effort::reasoning_effort(effort, None)
+    }
+
     /// Read the listing: which models this key can reach, and when each was
     /// added. The windows and prices it does not carry come from the tables.
     async fn prime_capabilities(&self) -> Result<()> {

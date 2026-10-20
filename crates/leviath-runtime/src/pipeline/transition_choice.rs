@@ -304,10 +304,14 @@ const ANTHROPIC_UPSTREAM: &[&str] = &["anthropic/", "~anthropic/"];
 ///
 /// The Responses routes cache the input alone, so the effort leaves the
 /// cached prefix as it was. Anthropic counts a change to the thinking
-/// settings against the cached messages, and the stage request the routing
-/// call follows sent none. So Anthropic's models get nothing here, directly,
-/// on Bedrock or through OpenRouter, even where the catalogue says they must
-/// reason. They rely on [`ROUTING_ANSWER_TOKENS`].
+/// settings against the cached messages, so Anthropic's models get nothing
+/// here, directly, on Bedrock or through OpenRouter, even where the
+/// catalogue says they must reason. They rely on [`ROUTING_ANSWER_TOKENS`].
+///
+/// A stage's own `effort` is already in the request, spelled the way the
+/// stage's calls spell it, since the routing request is built by the same
+/// code. Where nothing here replaces it, the routing call asks for exactly
+/// what the stage's calls asked for, which is what keeps Anthropic's cache.
 fn routing_reasoning(
     provider_name: &str,
     provider: &dyn Provider,
