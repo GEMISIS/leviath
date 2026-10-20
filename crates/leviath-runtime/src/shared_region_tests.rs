@@ -470,12 +470,12 @@ fn a_key_that_names_no_other_run_lands_as_the_runs_own() {
 
 fn tainted(world: &mut World, e: Entity, level: leviath_core::TaintLevel) {
     let mut w = world.get_mut::<ContextWindow>(e).unwrap();
-    let mut secrets = Region::new("secrets".to_string(), RegionKind::Pinned, 1000);
-    secrets.enable_taint_tracking();
-    secrets
-        .add_typed_tainted_entry("a secret", 1, leviath_core::EntryKind::default(), level)
+    let mut notes = Region::new("notes".to_string(), RegionKind::Pinned, 1000);
+    notes.enable_taint_tracking();
+    notes
+        .add_typed_tainted_entry("a note", 1, leviath_core::EntryKind::default(), level)
         .unwrap();
-    w.add_region(secrets);
+    w.add_region(notes);
 }
 
 fn shared_taint(world: &World, e: Entity) -> Option<leviath_core::TaintLevel> {
