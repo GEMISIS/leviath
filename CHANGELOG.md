@@ -954,7 +954,8 @@ same list.
   token, which elevates just that request. Anything else gets `403`
   (GraphQL `FORBIDDEN`). An admin token wins over `--allow-admin`, must
   differ from the API token, and is never inherited by a daemon `lev`
-  starts. Announced as `admin.token`. A server without an admin token
+  starts. A `--cors` preflight allows the header, so a browser console can
+  send it. Announced as `admin.token`. A server without an admin token
   behaves as before: `--allow-admin` alone still opens the admin routes to
   every holder of the API token, and without it they are not mounted.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an

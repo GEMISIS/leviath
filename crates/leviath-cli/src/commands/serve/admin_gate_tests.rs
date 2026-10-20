@@ -241,3 +241,19 @@ fn the_spec_marks_exactly_the_admin_routes() {
     declared.sort();
     assert_eq!(marked, declared);
 }
+
+/// No route the spec marks as admin is also declared in the open table, where
+/// it would be mounted without the gate.
+#[test]
+fn no_admin_route_is_in_the_open_table() {
+    let source = super::super::production_source();
+    let (open, _) = source
+        .split_once("fn admin_routes() -> Router<AppState> {")
+        .expect("admin_routes is declared");
+    let open = super::super::routes_in(open);
+    let shared: Vec<(String, String)> = declared_admin_routes()
+        .into_iter()
+        .filter(|route| open.contains(route))
+        .collect();
+    assert_eq!(shared, Vec::<(String, String)>::new());
+}
