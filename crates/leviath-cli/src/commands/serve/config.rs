@@ -113,10 +113,15 @@ pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedCo
 /// `PUT /api/config` (admin-only). Loads the on-disk config, applies every
 /// present field, and writes it back with the file's `0600` permissions - the
 /// same file `lev setup` and MCP admin edits. Returns the new redacted config.
+///
+/// The body is read as plain JSON first and as an edit second, by
+/// [`config_edit`], so a field of the wrong type is refused without the value
+/// in the answer.
 pub(super) async fn put_config(
     State(state): State<AppState>,
-    Json(req): Json<WriteConfigReq>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Json<RedactedConfig>, super::core::error::ServeError> {
+    let req = config_edit(body)?;
     let config = super::core::config::write(req).await?;
     // Health read *after* the write, so the answer describes the file this
     // request just left behind. A write this route made always parses - it
@@ -137,6 +142,28 @@ pub(super) async fn put_config(
         keeps_keys,
         &health,
     )))
+}
+
+/// Read a `PUT /api/config` body as an edit, or say which field could not be
+/// read.
+///
+/// Axum's own extractor answers a field of the wrong type with serde's
+/// message, and serde's message quotes the value it refused. On this route
+/// most fields are keys, so that value is the secret. The refusal here names
+/// the field's path and what it takes, and leaves the value out.
+pub(super) fn config_edit(
+    body: serde_json::Value,
+) -> Result<WriteConfigReq, super::core::error::ServeError> {
+    serde_path_to_error::deserialize(body).map_err(|error| {
+        let path = error.path().to_string();
+        let message = error.inner().to_string();
+        let wants = message
+            .split_once(", expected ")
+            .map_or("a different shape", |(_, wants)| wants);
+        super::core::error::ServeError::BadRequest(format!(
+            "`{path}` cannot be read: expected {wants}"
+        ))
+    })
 }
 
 /// `POST /api/models/probe` (admin-only): what an OpenAI-compatible server
@@ -1626,6 +1653,49 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes).to_string();
         assert!(text.contains("openrouter_key"), "{text}");
         assert!(text.contains("null to clear"), "{text}");
+    }
+
+    /// A field of the wrong type is a 400 that names the field and what it
+    /// takes, and never quotes the value: on this route the value is usually a
+    /// key. Axum's own extractor answered 422 with serde's message, which
+    /// carried the number back verbatim, for a provider key as much as for a
+    /// tool credential.
+    #[tokio::test]
+    async fn put_config_refuses_a_mistyped_field_without_echoing_its_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path(&path).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        for (body, field) in [
+            (
+                r#"{"tool_credentials":{"BRAVE_API_KEY":987654321123}}"#,
+                "`tool_credentials.BRAVE_API_KEY`",
+            ),
+            (r#"{"anthropic_key":987654321123}"#, "`anthropic_key`"),
+            (r#"{"gateways":987654321123}"#, "`gateways`"),
+        ] {
+            let resp = put_config_request(state_with_config_path(path.clone()), body).await;
+            assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST, "{body}");
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            assert!(text.contains(field), "names the field: {text}");
+            assert!(text.contains("expected"), "says what it takes: {text}");
+            assert!(!text.contains("987654321123"), "never the value: {text}");
+        }
+        // A refusal serde words without an `expected` part still names the
+        // field and still leaves the value out.
+        let refusal = config_edit(serde_json::json!({ "gateways": [{}] }))
+            .expect_err("a gateway with no name is refused")
+            .to_string();
+        assert!(refusal.contains("`gateways[0]`"), "{refusal}");
+        assert!(refusal.contains("a different shape"), "{refusal}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "nothing was written"
+        );
     }
 
     /// A tool credential is stored, listed back by name only, and removed by

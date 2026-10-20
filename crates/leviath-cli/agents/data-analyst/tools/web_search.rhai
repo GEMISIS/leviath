@@ -12,8 +12,9 @@ let results = [];
 // the daemon's environment. It throws for two very different reasons and the
 // caller has to tell them apart: the key is genuinely unset, or the security
 // layer refused to read the environment because the name looks like a
-// credential (`[security] allow_env_vars`), whether or not it is set there. Collapsing both into "" is what let this tool
-// degrade to Wikipedia for a whole run without anyone noticing.
+// credential (`[security] allow_env_vars`), whether or not it is set there.
+// Collapsing both into "" is what let this tool degrade to Wikipedia for a
+// whole run without anyone noticing.
 let key = "";
 let key_state = "unset";
 try {

@@ -17,9 +17,10 @@ pub(crate) struct UpdateConfigResult {
 
 /// Change the machine's config.
 ///
-/// A partial edit in four parts: `set` names the settings to change, `clear`
+/// A partial edit in six parts: `set` names the settings to change, `clear`
 /// the ones to take back to nothing, `providers` the per-provider settings,
-/// and the two gateway lists what to add and what to remove. What none of them
+/// the two gateway lists what to add and what to remove, and
+/// `toolCredentials` the secrets script tools read by name. What none of them
 /// mentions is left alone. Every refusal happens before anything is written,
 /// so a request that is going to fail leaves the file as it was.
 pub(crate) async fn update_config(

@@ -3095,7 +3095,7 @@
           "config"
         ],
         "summary": "Replace the configuration",
-        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed. The body is validated with the same checks the loader makes, before anything is written, so a request that would produce a config this build refuses to read back answers 400 and leaves the file byte for byte as it was.",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed. The body is validated with the same checks the loader makes, before anything is written, so a request that would produce a config this build refuses to read back answers 400 and leaves the file byte for byte as it was. A field of the wrong type is a 400 too, naming the field and what it takes but never the value sent, since that value is usually a key.",
         "requestBody": {
           "required": false,
           "content": {

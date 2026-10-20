@@ -2103,7 +2103,9 @@ the new values. Announced as the `config.health` capability; a server that does 
 omits the field whether or not the file loads, so its absence proves nothing there.
 
 `PUT /api/config` is checked before it writes, with the same rules the loader applies, so this API
-cannot be the thing that breaks the file. A body that would produce a config this build refuses to
+cannot be the thing that breaks the file. A field of the wrong type is a **400** that names the
+field and what it takes, such as `` `anthropic_key` cannot be read: expected a string ``. It never
+quotes the value you sent, because on this route that value is usually a key. A body that would produce a config this build refuses to
 read back answers **400**, and the file is left byte for byte as it was.
 
 ## Override and fallback models

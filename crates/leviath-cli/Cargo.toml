@@ -92,6 +92,9 @@ serde = { workspace = true }
 # `raw_value`: the run index's refresher carries the summaries of runs that
 # did not change as the index holds them, never read.
 serde_json = { workspace = true, features = ["raw_value"] }
+# Names the field a config edit could not read, without serde's echo of the
+# value, which for a key is the secret itself.
+serde_path_to_error = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 # `lev rage`: the token-shaped patterns its scrubber replaces.
