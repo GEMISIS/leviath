@@ -197,6 +197,9 @@ pub(crate) struct CatalogModel {
     pub(crate) supports_tools: bool,
     /// Whether this machine has its provider set up, so a run can route to it.
     /// False means connecting the provider is what it takes.
+    ///
+    /// For a browser sign-in provider this means turned on, not signed in:
+    /// `providers` says whether a credential is stored (`signedIn`).
     pub(crate) is_configured: bool,
     /// How its provider proves who this machine is, which is what connecting
     /// it takes: an API key, a browser sign-in, or neither.
@@ -206,21 +209,33 @@ pub(crate) struct CatalogModel {
 impl CatalogModel {
     /// One compiled catalogue row, with its provider's standing on this
     /// machine.
+    ///
+    /// `correction` is the config's `[model_capabilities]` entry for the model,
+    /// merged over the compiled answer the way a provider merges it, so a row
+    /// and the runtime agree on what the model takes.
     pub(crate) fn of(
         entry: &leviath_providers::capabilities::CatalogEntry,
+        correction: Option<&leviath_providers::capabilities::ModelCapabilityOverride>,
         is_configured: bool,
         auth: ProviderAuthKind,
     ) -> Self {
         let mime = leviath_providers::mime_tables::builtin_mime(entry.provider, entry.id);
+        let (mime, capabilities) = match correction {
+            Some(over) => (
+                over.apply_mime(mime),
+                over.apply_to(entry.capabilities.clone()),
+            ),
+            None => (mime, entry.capabilities.clone()),
+        };
         Self {
             model_id: entry.id.to_string(),
             provider_name: entry.provider.to_string(),
             display_name: entry.display_name.to_string(),
             input_types: mime.input,
             output_types: mime.output,
-            max_context_tokens: tokens(entry.capabilities.max_context_tokens),
-            max_output_tokens: tokens(entry.capabilities.max_output_tokens),
-            supports_tools: entry.capabilities.supports_tools,
+            max_context_tokens: tokens(capabilities.max_context_tokens),
+            max_output_tokens: tokens(capabilities.max_output_tokens),
+            supports_tools: capabilities.supports_tools,
             is_configured,
             auth,
         }

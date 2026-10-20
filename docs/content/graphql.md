@@ -1609,10 +1609,13 @@ about, on every provider it carries, whether or not that provider is set up here
 
 It is read from the tables built into the binary, so it asks no provider anything, configured or
 not. `isConfigured` says whether a run here can use the model now. When it is false, `auth` says
-what connecting its provider takes: `API_KEY`, `SIGN_IN` for a browser sign-in, or `NONE`.
+what connecting its provider takes: `API_KEY`, `SIGN_IN` for a browser sign-in, or `NONE`. For a
+sign-in provider, `isConfigured` means it is turned on, not that it is signed in. Read `signedIn`
+on `providers` for that.
 
 The rows are the models each provider is known to serve, with the mime types the runtime would use
-for them. A configured provider can serve more than its rows, or newer models, and `models` is the
+for them. A `[model_capabilities]` entry corrects a row the same way it corrects the model a run
+gets. A configured provider can serve more than its rows, or newer models, and `models` is the
 live answer for those. Ollama and custom gateways have no rows, because only a live listing can say
 what they serve. `inputTypes` holds patterns such as `image/*`, and `has` matches a pattern
 exactly, so ask for the pattern rather than for one concrete type under it.

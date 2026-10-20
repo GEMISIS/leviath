@@ -38,6 +38,12 @@ same list.
   `InferenceResponse` with a struct literal must set it; `false` keeps the
   old meaning.
 
+- Codex's models are now part of the built-in model catalogue. `lev models
+  list --all` and `lev models show` list them. Blueprint lint checks and the
+  dashboard's new-run form read a `codex/...` model's context window from
+  its table row, where they used to skip the model or assume 8192 tokens.
+  There is no switch back, since the old figure was a guess; a
+  `[model_capabilities]` entry still overrides it.
 - A stage with `mode = "interactive"` now takes turns with a person. After a
   reply with no tool calls it waits for the next message instead of moving
   on: `waiting_input`, wait reason `awaiting_message` (GraphQL
@@ -941,7 +947,6 @@ same list.
   can name the provider to connect for a model nothing here serves. It is
   read from the tables built into the binary and asks no provider anything.
   Announced as the `models.catalog` capability.
-- `lev models list --all` lists Codex's models beside the other providers'.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is

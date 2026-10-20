@@ -1689,6 +1689,9 @@ input CatalogModelInput {
 	
 	Whether this machine has its provider set up, so a run can route to it.
 	False means connecting the provider is what it takes.
+	
+	For a browser sign-in provider this means turned on, not signed in:
+	`providers` says whether a credential is stored (`signedIn`).
 	"""
 	isConfigured: BooleanFilter
 	"""
@@ -1759,6 +1762,9 @@ type CatalogModelOutput {
 	"""
 	Whether this machine has its provider set up, so a run can route to it.
 	False means connecting the provider is what it takes.
+	
+	For a browser sign-in provider this means turned on, not signed in:
+	`providers` says whether a credential is stored (`signedIn`).
 	"""
 	isConfigured: Boolean!
 	"""
