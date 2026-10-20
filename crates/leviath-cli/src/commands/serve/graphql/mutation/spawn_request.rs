@@ -235,7 +235,9 @@ pub(crate) struct DeliveryWrite {
     /// Where to post when the run finishes.
     pub(crate) callback: Option<CallbackWrite>,
     /// Labels for whoever started the run, such as a ticket or a tenant. The
-    /// run reads none of them, and the run search looks through them.
+    /// run reads one of them: `leviath.context_scope` puts it in a scope whose
+    /// runs share the `shared_intents` region. The run search looks through
+    /// them all.
     pub(crate) metadata: Option<Vec<KeyValueWrite>>,
     /// Your name for this spawn: 1 to 128 letters, digits, `.`, `_`, `:` or
     /// `-`. Sent again with the same key and nothing else changed, the

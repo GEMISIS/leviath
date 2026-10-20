@@ -16,17 +16,18 @@
 //!   nothing, and its region holds only what it writes itself.
 //!
 //! Each run owns one entry, keyed by its run id. `context_write` and
-//! `context_append` on the region write that entry and no other, and
-//! `context_delete` clears it. `sync_shared_regions` copies every live
-//! member's entry into every other member's region, once per tick, and drops
-//! the entry of a run that has finished. The daemon drives every run from one
-//! world on one thread, so the copies never race; a restart rebuilds them
-//! from what each run's own window says it wrote.
+//! `context_append` on the region write that entry, whatever key the model
+//! named, unless the key is another run's; `context_delete` clears it.
+//! `sync_shared_regions` copies every live member's entry into every other
+//! member's region, once per tick, with the taint of the run that wrote it,
+//! and drops the entry of a run that has finished. The daemon drives every
+//! run from one world on one thread, so the copies never race; a restart
+//! rebuilds them from what each run's own window says it wrote.
 
 use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
-use leviath_core::{Region, RegionKind};
+use leviath_core::{Region, RegionEntry, RegionKind, RegionTaint, TaintLevel};
 use serde_json::Value;
 
 use crate::components::{AgentState, ContextWindow, Pushed};
@@ -54,9 +55,10 @@ pub fn scope_of(spec: &RunSpec) -> Option<&str> {
 /// Apply one `context_*` tool call for the run `own`.
 ///
 /// A call on any region but [`SHARED_REGION`] is handled as it always is. On
-/// that region a write lands under the run's own key whatever key it named,
-/// and a call that would write, append to or delete another run's entry is
-/// refused, as is a record bigger than the whole region.
+/// that region a write lands under the run's own key whatever key it named:
+/// a keyed region asks the model for a key, and the model cannot know its run
+/// id. A call naming a key another run's entry holds is refused, as is a
+/// delete by position and a record bigger than the whole region.
 pub(crate) fn handle_context_tool(
     name: &str,
     args: &Value,
@@ -92,8 +94,9 @@ fn own_record_call(
     if !matches!(name, "context_write" | "context_append" | "context_delete") {
         return Ok(args.clone());
     }
+    let region = window.get_region(SHARED_REGION);
     let named = args.get("key").and_then(Value::as_str);
-    if named.is_some_and(|k| k != own) {
+    if named.is_some_and(|k| k != own && region.is_some_and(|r| r.get_by_key(k).is_some())) {
         return Err(not_yours(own));
     }
     // An index or a count names entries by position, and every position but
@@ -103,7 +106,6 @@ fn own_record_call(
     }
     if name != "context_delete" {
         let content = args.get("content").and_then(Value::as_str).unwrap_or("");
-        let region = window.get_region(SHARED_REGION);
         let record = match (name, region.and_then(|r| r.get_by_key(own))) {
             ("context_append", Some(existing)) => format!("{}\n{content}", existing.content),
             _ => content.to_string(),
@@ -133,64 +135,91 @@ pub(crate) struct Record {
     pub(crate) content: String,
     /// What it costs.
     pub(crate) tokens: usize,
+    /// The highest taint anywhere in the writer's window: the model wrote the
+    /// record knowing all of it, so a run reading it is as tainted.
+    pub(crate) taint: TaintLevel,
 }
 
-/// The other runs' entries `region` should hold, when it does not already
-/// hold exactly those: `others` in order, as many as fit beside the run's own
-/// entry and anything unkeyed, by tokens and by the region's entry cap.
+/// An entry the shared region should hold, beside the taint it carries.
+pub(crate) type Laid = (RegionEntry, TaintLevel);
+
+/// The taint `region` records for its entry at `index`, or `Public` where it
+/// records none.
+fn taint_at(region: &Region, index: usize) -> TaintLevel {
+    region
+        .taint
+        .as_ref()
+        .and_then(|t| t.entry_taint(index))
+        .unwrap_or(TaintLevel::Public)
+}
+
+/// What `region` should hold, when it does not already hold exactly that: the
+/// run's own entry first, then anything unkeyed as it stands, then `others`
+/// in order, as many as fit by tokens and by the region's entry cap.
 ///
 /// `None` when the region is already right, so a tick where nothing moved
-/// writes nothing.
-pub(crate) fn plan(region: &Region, own: &str, others: &[&Record]) -> Option<Vec<Record>> {
-    let foreign = |e: &&leviath_core::RegionEntry| e.key.as_deref().is_some_and(|k| k != own);
-    let mine: Vec<&leviath_core::RegionEntry> =
-        region.content.iter().filter(|e| !foreign(e)).collect();
-    let mut used: usize = mine.iter().map(|e| e.tokens).sum();
-    let mut count = mine.len();
+/// writes nothing. A region that tracks taint is also wrong when a copied
+/// entry's taint is not its writer's.
+pub(crate) fn plan(region: &Region, own: &str, others: &[&Record]) -> Option<Vec<Laid>> {
+    let indexed = || region.content.iter().enumerate();
+    let mut laid: Vec<Laid> = indexed()
+        .filter(|(_, e)| e.key.as_deref() == Some(own))
+        .chain(indexed().filter(|(_, e)| e.key.is_none()))
+        .map(|(i, e)| (e.clone(), taint_at(region, i)))
+        .collect();
+    let mut used: usize = laid.iter().map(|(e, _)| e.tokens).sum();
     let cap = match &region.kind {
         RegionKind::HashMap { max_entries } => *max_entries,
         _ => None,
     };
-    let mut keep = Vec::new();
+    let at = chrono::Utc::now().timestamp();
     for r in others {
-        if used + r.tokens <= region.max_tokens && cap.is_none_or(|m| count < m) {
+        if used + r.tokens <= region.max_tokens && cap.is_none_or(|m| laid.len() < m) {
             used += r.tokens;
-            count += 1;
-            keep.push((*r).clone());
+            let entry = RegionEntry {
+                content: r.content.clone().into(),
+                tokens: r.tokens,
+                timestamp: at,
+                metadata: None,
+                kind: leviath_core::EntryKind::default(),
+                key: Some(r.run.clone()),
+                reasoning: None,
+            };
+            laid.push((entry, r.taint));
         }
     }
-    let now: Vec<(&str, &str)> = region
-        .content
-        .iter()
-        .filter(foreign)
-        .map(|e| (e.key.as_deref().unwrap_or(""), e.content.as_str()))
+    let tracked = region.taint.is_some();
+    let now: Vec<_> = indexed()
+        .map(|(i, e)| {
+            let taint = tracked.then(|| taint_at(region, i));
+            (e.key.as_deref(), e.content.as_str(), taint)
+        })
         .collect();
-    let want: Vec<(&str, &str)> = keep
+    let want: Vec<_> = laid
         .iter()
-        .map(|r| (r.run.as_str(), r.content.as_str()))
+        .map(|(e, t)| (e.key.as_deref(), e.content.as_str(), tracked.then_some(*t)))
         .collect();
-    (now != want).then_some(keep)
+    (now != want).then_some(laid)
 }
 
-/// Replace the other runs' entries in `window`'s shared region with `keep`,
-/// which [`plan`] sized to fit, leaving the run's own entry where it stands.
-pub(crate) fn apply(window: &mut ContextWindow, own: &str, keep: Vec<Record>) {
+/// Put `laid`, which [`plan`] sized to fit, in `window`'s shared region.
+///
+/// A region that tracks taint takes each entry's taint with it, so a record
+/// from a run that read something private raises the reader's taint, and the
+/// gate holds the reader's outbound tools as it holds the writer's. The taint
+/// falls again once the record leaves.
+pub(crate) fn apply(window: &mut ContextWindow, laid: Vec<Laid>) {
     let before = window.begin_change(SHARED_REGION);
     let region = window
         .get_region_mut(SHARED_REGION)
         .expect("planned against this region");
-    let stale: Vec<String> = region
-        .content
-        .iter()
-        .filter_map(|e| e.key.clone().filter(|k| k != own))
-        .collect();
-    for key in stale {
-        region.remove_by_key(&key);
-    }
-    for r in keep {
-        // Planned to fit, so this neither fails nor evicts.
-        let _ = region.upsert_by_key(&r.run, r.content, r.tokens);
-    }
+    let (entries, taints): (Vec<RegionEntry>, Vec<TaintLevel>) = laid.into_iter().unzip();
+    region.current_tokens = entries.iter().map(|e| e.tokens).sum();
+    region.content = entries;
+    region.taint = region
+        .taint
+        .take()
+        .map(|_| RegionTaint::from_entry_taints(taints));
     window.current_tokens = window.calculate_tokens();
     window.commit_change(
         leviath_core::ContextCause::Framework,
@@ -241,6 +270,7 @@ pub(crate) fn sync_shared_regions(mut agents: Query<SharedQuery>) {
                 run: state.agent_id.clone(),
                 content: entry.content.as_str().to_string(),
                 tokens: entry.tokens,
+                taint: window.overall_taint().unwrap_or(TaintLevel::Public),
             });
         }
     }
@@ -256,8 +286,8 @@ pub(crate) fn sync_shared_regions(mut agents: Query<SharedQuery>) {
             .iter()
             .filter(|r| r.run != state.agent_id)
             .collect();
-        if let Some(keep) = plan(region, &state.agent_id, &others) {
-            apply(&mut window, &state.agent_id, keep);
+        if let Some(laid) = plan(region, &state.agent_id, &others) {
+            apply(&mut window, laid);
         }
     }
 }

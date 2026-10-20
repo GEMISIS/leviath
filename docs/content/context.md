@@ -793,27 +793,50 @@ its region holds only what it wrote itself. The scope is any text you choose. Na
 it, such as its repository, because every run on this daemon with the same scope sees the records.
 The run's working directory plays no part, so runs in separate copies of one project still share.
 
-Each run owns one record in the region, kept under its run id:
+Each run owns one record in the region, kept under its run id. The model does not need to know
+that id:
 
 | Call | What it does in `shared_intents` |
 |---|---|
-| `context_write` | Replaces the run's own record, whatever key it names |
+| `context_write` | Replaces the run's own record, under whatever key it names |
 | `context_append` | Adds a line to the run's own record |
 | `context_delete` | Clears the run's own record |
 | `context_read`, `context_list` | Read any run's record |
 
-A call that names another run's key, or deletes by `index` or `oldest`, is refused: those records
-belong to other runs. A record bigger than the region's whole budget is refused too.
+A key such as `plan` or `intent` lands on the run's own record, and the reply names the run id it
+was stored under. A call that names a key another run's record holds is refused, and so is a delete
+by `index` or `oldest`: those records belong to other runs. A record bigger than the region's whole
+budget is refused too.
 
 The daemon copies every record into every other run in the scope, so each sees them on its next
-turn. A run that finishes, fails or is cancelled leaves the scope, and its record leaves the other
-runs' regions. Its own window keeps what it wrote. A restart rebuilds the copies from what each run
-wrote. The region's budget holds every record, the run's own first. Records that do not fit are left
-out of that run's view, so size the budget for the number of runs you expect at once.
+turn. Each run sees its own record first, then the others in run id order, each under a
+`### [<run id>]` heading. A run that finishes, fails or is cancelled leaves the scope, and its record
+leaves the other runs' regions. A restart rebuilds the copies from what each run wrote. The region's
+budget holds every record, the run's own first. Records that do not fit are left out of that run's
+view, so size the budget for the number of runs you expect at once.
 
 A stage that should read the region lists it in its layout like any other region. Tell the model in
 the stage's prompt what to write: the files it plans to change and what for. Keep it short; other
 runs read it on every turn.
+
+### What sharing does not cover
+
+- **Records are untrusted text.** Another run's model wrote each one, and nothing checks what it
+  says. A record can carry instructions, or a line that looks like another `### [...]` heading.
+  Treat the region as notes from colleagues, not as orders, and say so in the stage's prompt.
+- **A scope is not a secret.** Any caller of this daemon that knows a scope's text can spawn a run
+  into it and read the records. Use a scope only between runs you would let read each other's plans.
+- **Taint travels with a record.** When the reading run tracks taint, a copied record carries the
+  highest taint anywhere in the writer's window. A record from a run that read something `private`
+  makes the reader `private` too, and the gate holds its outbound tools the same way. The taint goes
+  once the record leaves. A run that tracks no taint has no gate to raise.
+- **The cache moves when a record does.** Every change to any record in the scope changes this
+  region in every run. Leave its `volatility` at the default, `rewritten`, so it sorts last in the
+  prompt and invalidates nothing in front of it. See [what caching costs](#what-caching-costs).
+- **History keeps what was copied.** A run's file records each copy as it landed. A record that was
+  later changed or cleared, or whose run was deleted, still reads in the other runs' context history.
+- **Child runs do not inherit the scope.** A sub-agent or fan-out worker shares only when its own
+  spawn names the scope, and its own graph declares the region.
 
 ## Routing tool output
 

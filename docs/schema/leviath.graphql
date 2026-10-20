@@ -3762,7 +3762,9 @@ input DeliveryWrite {
 	callback: CallbackWrite
 	"""
 	Labels for whoever started the run, such as a ticket or a tenant. The
-	run reads none of them, and the run search looks through them.
+	run reads one of them: `leviath.context_scope` puts it in a scope whose
+	runs share the `shared_intents` region. The run search looks through
+	them all.
 	"""
 	metadata: [KeyValueWrite!]
 	"""
@@ -11789,7 +11791,10 @@ type RunDeliveryOutput {
 	callbackUrl: String
 	"Whether that post is signed. The secret itself is never read back."
 	callbackSigned: Boolean!
-	"The caller's labels, carried through untouched."
+	"""
+	The caller's labels, carried through untouched. The run reads one of
+	them, `leviath.context_scope`, the scope it shares `shared_intents` in.
+	"""
 	metadata: [MetadataEntryOutput!]!
 	"""
 	The `delivery.idempotencyKey` the run was spawned under, which it
@@ -12419,8 +12424,9 @@ input RunInput {
 	Caller-supplied metadata from spawn. Values are always strings.
 	
 	Labels for whoever started the run, such as a ticket or a tenant. They
-	are searched by `filter.query` and read back unchanged, and nothing in
-	the run reads them: not a typed extension point.
+	are searched by `filter.query` and read back unchanged. The run reads
+	one of them, `leviath.context_scope`, which puts it in a scope whose
+	runs share the `shared_intents` region; it reads no other.
 	
 	Sorted by key: the daemon keeps these in a hash map, and a listing
 	whose order changes between two identical requests is a diff nobody
@@ -12969,8 +12975,9 @@ type RunOutput implements Node {
 	Caller-supplied metadata from spawn. Values are always strings.
 	
 	Labels for whoever started the run, such as a ticket or a tenant. They
-	are searched by `filter.query` and read back unchanged, and nothing in
-	the run reads them: not a typed extension point.
+	are searched by `filter.query` and read back unchanged. The run reads
+	one of them, `leviath.context_scope`, which puts it in a scope whose
+	runs share the `shared_intents` region; it reads no other.
 	
 	Sorted by key: the daemon keeps these in a hash map, and a listing
 	whose order changes between two identical requests is a diff nobody
