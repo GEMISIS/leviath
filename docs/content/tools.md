@@ -129,9 +129,11 @@ question.
 
 A target is judged where the shell would put it. A plain `cd <dir>` or `pushd <dir>` earlier on the
 line moves it, and since that may fail, the target has to stay inside from both places. A relative
-redirect on a line that changes directory any other way (`cd -`, `cd $DIR`, `popd`, a `cd` behind
-`{` or `command`, `CDPATH`, `.`, `source`, `eval`) is refused. `>&file` writes `file` like `>`;
-only `>&2` or `>&-` duplicate or close a descriptor.
+redirect on a line that changes directory any other way (`cd -`, `cd $DIR`, `cd ~-`, `popd`, a
+`cd` behind `{` or `command`, `CDPATH`, `.`, `source`, `eval`, a program that is an expansion)
+could land anywhere. It asks every time, and no grant or safe-list entry covers it; in a stage
+with write paths it is refused. `>&file` writes `file` like `>`; only `>&2` or `>&-` duplicate or
+close a descriptor.
 
 Discarded writes cost nothing. `2>/dev/null`, `> /dev/null 2>&1`, `&> /dev/null` and `> NUL` write
 nowhere anyone can read back, so they are neither clamped nor confined.

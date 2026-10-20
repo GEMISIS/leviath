@@ -132,6 +132,11 @@ fn a_windows_redirect_is_read_as_cmd_reads_it() {
 /// Every line the second review wrote outside the fence with, then outside
 /// the workdir with: each changes directory in a way that is not followed.
 const MOVING_LINES: &[&str] = &[
+    "X=cd; { $X src; }; echo x > docs/var.txt",
+    "{ $(printf c)d src; }; echo x > docs/sub.txt",
+    "export OLDPWD=/tmp/x; cd ~-; echo > esc.txt",
+    "cd ~+ && echo > docs/plus.txt",
+    "cd ~root && echo > docs/user.txt",
     "{ cd src; }; echo x > docs/a.txt",
     "command cd src && echo x > docs/a.txt",
     "builtin cd src && echo x > docs/a.txt",
@@ -182,7 +187,8 @@ fn a_redirect_is_judged_where_the_shell_would_put_it() {
 }
 
 /// The workdir's own fence follows `cd` and `>&` the same way, whatever the
-/// stage's write paths, and names where an escaping write would land.
+/// stage's write paths, and names where an escaping write would land. A line
+/// whose moves it cannot follow is not a known escape.
 #[test]
 fn the_workdir_fence_follows_cd_and_a_dup_to_a_name() {
     let (_dir, root) = workdir();
@@ -201,10 +207,30 @@ fn the_workdir_fence_follows_cd_and_a_dup_to_a_name() {
     );
     let dup = refused("echo x >&/tmp/esc.txt").unwrap();
     assert!(dup.contains("outside the working directory"), "{dup}");
+    // Not a known escape: left to the write policy, which asks (see
+    // `tool_service`), rather than refused outright as a fenced stage does.
     for line in MOVING_LINES {
-        let lost = refused(line).unwrap_or_default();
-        assert!(lost.contains("may change directory"), "{line}: {lost}");
+        assert_eq!(refused(line), None, "{line}");
     }
     assert_eq!(refused("cd docs && echo x > a.txt"), None);
     assert_eq!(refused("echo x > $OUT"), None, "left to the write policy");
+}
+
+/// A line that moves in a way not followed is told apart for the approval
+/// layer, which asks about it every time; a placed one is not.
+#[test]
+fn an_unplaced_redirect_is_told_apart() {
+    let (_dir, root) = workdir();
+    let unplaced = |command: &str| {
+        crate::tools::unplaced_redirect("bash", &json!({ "command": command }), &root)
+    };
+    assert!(unplaced("cd $DIR && make > log"));
+    assert!(!unplaced("cd docs && make > log"));
+    assert!(!unplaced("make > log"));
+    assert!(!crate::tools::unplaced_redirect(
+        "write_file",
+        &json!({ "path": "log" }),
+        &root
+    ));
+    assert!(!crate::tools::unplaced_redirect("shell", &json!({}), &root));
 }
