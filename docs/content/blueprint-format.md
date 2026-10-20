@@ -423,6 +423,14 @@ takes one. On OpenRouter, a model that must reason is asked for the least effort
 Anthropic's, which keep their cached context. A reply cut off by that limit, or one that holds only
 the model's reasoning, is read as naming no stage.
 
+An answer that names no stage is not taken as a choice. The question is asked once more with the
+stage names alone, such as `Answer with exactly one of: build, summary.`, plus `DONE` where the
+stage may end the run. That second call is a new routing call, so it gets its own
+`retry_attempts`, and neither call spends the stage's retries. When the second answer names no
+stage either, the run takes the stage's first edge, or ends where the stage may end the run. Both
+steps leave a `[routing]` line in the stage log and a warning in `daemon.log`, and the transition's
+reason is `Fallback`.
+
 With `"fail"`, the run stops with an error that names the routing call, and the stage's finished
 work is kept. With `"error_edge"`, the stage fails, so its `error` edge runs when it has one. Choose
 that only when the recovery stage can fix what made the routing call fail. Otherwise the run

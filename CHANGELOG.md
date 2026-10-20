@@ -81,6 +81,14 @@ same list.
   sets `routing = { retry_attempts = N, on_error = "fail" | "error_edge" }`
   under `[graph]` or on a stage; for the old behaviour, set
   `routing = { on_error = "error_edge" }` under `[graph]`.
+- An answer to "which stage next?" that names no stage is asked once more,
+  with the stage names alone, before the run guesses. The guess is the same
+  as before: the stage's first edge, or the end of the run where the stage
+  may end it. It now leaves a `[routing]` line in the stage log and a warning
+  in `daemon.log`, as the ask once more does. The second call gets its own
+  `routing.retry_attempts` and spends none of the stage's retries. There is
+  no switch back to taking the first edge at once; a model that answers
+  cleanly never sees the second question.
 - `WorldEvent` has two new variants, `OutputSubmitted` and
   `InteractionSettled`, and `ToolCallStarted` has two new fields,
   `arguments` and `arguments_truncated`. An embedder that matches the enum

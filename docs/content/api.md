@@ -2609,7 +2609,7 @@ the restart. The capabilities are `events.tool_arguments`, `events.output_submit
 
 `reason` on `stage_transition` says why the run took that edge, spelled as
 `GET /api/runs/{id}/graph` spells it: `Condition`, `Gate`, `ModelChoice`, `Fallback` (the model
-named no edge it could take, so the run took the first one), `Forced`, `Worker` or `Router`.
+named no edge it could take, asked twice, so the run took the first one), `Forced`, `Worker` or `Router`.
 
 `stage_transition`, `tool_call_started` and `tool_call_finished` used to arrive wrapped as
 `{"type":"world","event":{…}}`. They are flat frames of their own as of API version `0.4.0`,

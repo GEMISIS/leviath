@@ -85,6 +85,8 @@ pub(crate) use transition_choice::{
     AwaitingTransitionResponse, TransitionResults, collect_transition_choice,
     dispatch_transition_choice,
 };
+#[cfg(test)]
+pub(crate) use transition_choice::{RoutingReasked, build_reask_prompt};
 mod tool_stages;
 pub(crate) use tool_stages::{
     poll_dynamic_tool_refresh, refresh_advertised_tools, rescan_before_dispatch, sync_tool_stages,

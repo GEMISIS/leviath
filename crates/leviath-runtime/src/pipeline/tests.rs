@@ -15553,6 +15553,57 @@ async fn dispatch_choice_moves_to_awaiting_response_and_injects_prompt() {
     assert_eq!(outcome.entity, e);
 }
 
+/// Asked once more, the question is the stage names alone, below the reply
+/// that named none, rather than the whole prompt a second time.
+#[tokio::test]
+async fn a_routing_question_asked_once_more_names_the_stages_alone() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    let (ttx, mut trx) = mpsc::unbounded_channel();
+    world.resource_mut::<InferenceStage>().transition_outcomes = ttx;
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        stage_named("b", None, false, None),
+        stage_named("c", None, false, None),
+    ]);
+    let e = spawn_choosing_agent(
+        &mut world,
+        bp,
+        vec![si("m0"), si("m1"), si("m2")],
+        vec![plain_edge("b"), plain_edge("c")],
+    );
+    world.entity_mut(e).insert(RoutingReasked);
+
+    let mut schedule = Schedule::default();
+    schedule.add_systems(dispatch_transition_choice);
+    schedule.run(&mut world);
+
+    assert!(world.get::<AwaitingTransitionResponse>(e).is_some());
+    // Kept until the answer lands, which decides between asking and falling back.
+    assert!(world.get::<RoutingReasked>(e).is_some());
+    let text = conversation_text(&world, e);
+    assert_eq!(
+        text,
+        "Your last reply named no stage. Answer with exactly one of: b, c."
+    );
+    let _ = trx.recv().await.expect("routing outcome");
+}
+
+/// The question asked once more offers `DONE` where the stage may end the
+/// run, and says what it does.
+#[test]
+fn the_question_asked_once_more_offers_done_where_the_stage_may_end() {
+    let edges = edges_of(&[plain_edge("build"), plain_edge("summary")]);
+    assert_eq!(
+        build_reask_prompt(&edges, false),
+        "Your last reply named no stage. Answer with exactly one of: build, summary."
+    );
+    assert_eq!(
+        build_reask_prompt(&edges, true),
+        "Your last reply named no stage. Answer with exactly one of: build, summary, DONE. \
+         DONE ends the run here."
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_panicking_routing_job_reports_an_error_instead_of_vanishing() {
     let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
@@ -16712,14 +16763,16 @@ fn collect_choice_emits_a_stage_transition_event() {
     );
 }
 
-/// A reply that names no edge, in a stage that may not end the run, moves the
-/// run along its first edge: the model chose nothing, and the reason says so.
+/// A second reply that names no edge, in a stage that may not end the run,
+/// moves the run along its first edge: the model chose nothing, the reason
+/// says so on the transition, and the stage log says so in words. A second
+/// reply that does name one is taken.
 #[test]
-fn a_choice_that_names_no_edge_is_recorded_as_a_fallback() {
+fn a_second_choice_that_names_no_edge_is_recorded_as_a_fallback() {
     use crate::host::{WorldEvent, WorldEventSink};
-    for (reply, reason) in [
-        ("DONE", crate::state::TransitionReason::Fallback),
-        ("c", crate::state::TransitionReason::ModelChoice),
+    for (reply, to, reason) in [
+        ("DONE", "b", crate::state::TransitionReason::Fallback),
+        ("c", "c", crate::state::TransitionReason::ModelChoice),
     ] {
         let (mut world, tx) = world_with_transition_results();
         let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
@@ -16735,7 +16788,9 @@ fn a_choice_that_names_no_edge_is_recorded_as_a_fallback() {
             vec![si("m0"), si("m1"), si("m2")],
             vec![plain_edge("b"), plain_edge("c")],
         );
-        world.entity_mut(e).insert(run_metadata());
+        world
+            .entity_mut(e)
+            .insert((run_metadata(), RoutingReasked, StageIoBuffer::default()));
         tx.send(InferenceOutcome {
             latency: std::time::Duration::ZERO,
             entity: e,
@@ -16749,11 +16804,74 @@ fn a_choice_that_names_no_edge_is_recorded_as_a_fallback() {
         run_collect_transition(&mut world);
 
         let ev = sink_rx.try_recv().expect("stage transition event");
-        let WorldEvent::StageTransition { reason: got, .. } = ev else {
+        let WorldEvent::StageTransition {
+            to: entered,
+            reason: got,
+            ..
+        } = ev
+        else {
             panic!("a stage transition");
         };
-        assert_eq!(got, Some(reason), "{reply}");
+        assert_eq!((entered.as_str(), got), (to, Some(reason)), "{reply}");
+        assert!(world.get::<RoutingReasked>(e).is_none(), "{reply}");
+        let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
+        let noted = logs.iter().any(|(i, l)| {
+            *i == 0
+                && l == "[routing] the answer named no stage (\"DONE\"), asked twice; \
+                         took 'b', the first edge"
+        });
+        assert_eq!(
+            noted,
+            reason == crate::state::TransitionReason::Fallback,
+            "{logs:?}"
+        );
     }
+}
+
+/// A second reply that names nothing, in a stage that may end the run, ends
+/// it, and the stage log says why the run ended there.
+#[test]
+fn a_second_choice_that_names_nothing_ends_a_stage_that_may_end_and_says_so() {
+    let (mut world, tx) = world_with_transition_results();
+    let bp = blueprint(vec![
+        stage_named("a", Some(vec![plain_edge("b")]), true, None),
+        stage_named("b", None, false, None),
+    ]);
+    let e = spawn_responding_agent(
+        &mut world,
+        bp,
+        vec![si("m0"), si("m1")],
+        vec![plain_edge("b")],
+    );
+    world
+        .entity_mut(e)
+        .insert((RoutingReasked, StageIoBuffer::default()));
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        attempt_id: String::new(),
+        result: Ok(resp("")),
+        pricing: None,
+        attempt: None,
+    })
+    .unwrap();
+
+    run_collect_transition(&mut world);
+
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Complete
+    );
+    assert!(world.get::<RoutingReasked>(e).is_none());
+    let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
+    assert_eq!(
+        logs,
+        &vec![(
+            0,
+            "[routing] the answer was empty, asked twice; ended the run, as the stage may"
+                .to_string()
+        )]
+    );
 }
 
 /// A routing reply the output cap cut off, or whose text is the model's
@@ -16785,7 +16903,8 @@ fn a_cut_off_or_reasoning_routing_reply_is_no_answer() {
             vec![si("m0"), si("m1"), si("m2")],
             vec![plain_edge("b"), plain_edge("c")],
         );
-        world.entity_mut(e).insert(run_metadata());
+        // Already asked once more, so a reply that gives no answer falls back.
+        world.entity_mut(e).insert((run_metadata(), RoutingReasked));
         let mut response = resp("c");
         response.finish_reason = finish;
         response.content_is_reasoning = from_reasoning;
@@ -16814,6 +16933,91 @@ fn a_cut_off_or_reasoning_routing_reply_is_no_answer() {
             (entered.as_str(), got),
             (to, Some(reason)),
             "{from_reasoning}"
+        );
+    }
+}
+
+/// A routing reply that names no stage is asked once more rather than taken
+/// as the first edge, whether the answer was chatty, empty, cut off or the
+/// model's reasoning. Nothing moves and the stage log says why. A verified
+/// stage went back to `build` this way, and nothing anywhere said so.
+#[test]
+fn a_routing_reply_that_names_no_stage_is_asked_once_more() {
+    use crate::host::WorldEventSink;
+    use leviath_providers::FinishReason::{Complete, TokenLimit};
+    for (text, finish, from_reasoning, why) in [
+        (
+            "Verifying stage requirements and checking if context_append to .",
+            Complete,
+            false,
+            "the answer named no stage (\"Verifying stage requirements",
+        ),
+        ("", Complete, false, "the answer was empty"),
+        (
+            "I have looked at everything this stage wrote and I think the next \n\
+             step is probably the one after this",
+            Complete,
+            false,
+            "(\"I have looked at everything this stage wrote and I think the next step is \
+             probab...\")",
+        ),
+        ("c", TokenLimit, false, "cut off"),
+        ("c", Complete, true, "reasoning"),
+    ] {
+        let (mut world, tx) = world_with_transition_results();
+        let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+        world.insert_resource(WorldEventSink(sink_tx));
+        let bp = blueprint(vec![
+            stage_named("a", None, false, None),
+            stage_named("b", None, false, None),
+            stage_named("c", None, false, None),
+        ]);
+        let e = spawn_responding_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1"), si("m2")],
+            vec![plain_edge("b"), plain_edge("c")],
+        );
+        world
+            .entity_mut(e)
+            .insert((run_metadata(), StageIoBuffer::default()));
+        let no_answer = text.is_empty() || finish == TokenLimit || from_reasoning;
+        let mut response = resp(text);
+        response.finish_reason = finish;
+        response.content_is_reasoning = from_reasoning;
+        tx.send(InferenceOutcome {
+            latency: std::time::Duration::ZERO,
+            entity: e,
+            attempt_id: String::new(),
+            result: Ok(response),
+            pricing: None,
+            attempt: None,
+        })
+        .unwrap();
+
+        run_collect_transition(&mut world);
+
+        assert!(sink_rx.try_recv().is_err(), "{text:?}: no transition yet");
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Active
+        );
+        assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
+        let again = world.get::<AwaitingTransitionChoice>(e);
+        assert_eq!(again.map(|c| c.0.len()), Some(2), "{text:?}: asked again");
+        assert!(world.get::<RoutingReasked>(e).is_some());
+        // The reply is kept as it came, not dressed up as a decision.
+        let said = conversation_text(&world, e);
+        assert!(!said.contains("Transitioning to"), "{said}");
+        assert!(said.ends_with(if no_answer { "(no answer)" } else { text }));
+        let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
+        assert!(
+            logs.iter().any(|(i, l)| *i == 0
+                && l.starts_with("[routing] ")
+                && l.contains(why)
+                && l.contains("asking once more")),
+            "{text:?}: {logs:?}"
         );
     }
 }
