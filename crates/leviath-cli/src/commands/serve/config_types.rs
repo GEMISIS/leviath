@@ -419,9 +419,11 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     "scripts.mime_checks",
     // `POST /api/tools/bundled/{name}` and the `installBundledTool` mutation:
     // write a tool the bundled agents ship, such as `web_search`, into the
-    // global tools directory from this build's own copy. Announced whether or
-    // not `--allow-admin` was passed, the same narrower claim `scripts.write`
-    // makes. Without it a client can only copy the source out of an installed
+    // global tools directory from this build's own copy. Also
+    // `GET /api/tools/bundled` and `bundledTools`, which list what can be
+    // installed and whether each is current. The writes are announced whether
+    // or not `--allow-admin` was passed, the same narrower claim
+    // `scripts.write` makes. Without it a client can only copy the source out of an installed
     // agent, which fails when none is installed and drifts on upgrade.
     "tools.install_bundled",
     "config.gateways",

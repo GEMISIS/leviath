@@ -10,9 +10,9 @@ use super::super::error::IntoGraphql;
 use super::super::paging::order::{OrderDirection, Term};
 use super::super::scalars::Cursor;
 use super::super::types::catalog::{
-    Model, ModelFilter, ModelOrder, ModelOrderField, Provider, ProviderFilter, ProviderOrder,
-    ProviderOrderField, SkippedTool, Tool, ToolFilter, ToolGroup, ToolOrder, ToolOrderField,
-    ToolSkips, provider_id,
+    BundledTool, Model, ModelFilter, ModelOrder, ModelOrderField, Provider, ProviderFilter,
+    ProviderOrder, ProviderOrderField, SkippedTool, Tool, ToolFilter, ToolGroup, ToolOrder,
+    ToolOrderField, ToolSkips, provider_id,
 };
 use super::listing::{Window, connection, terms};
 
@@ -258,6 +258,26 @@ pub(crate) async fn tool_groups() -> Vec<ToolGroup> {
         .map(|(_, token, description)| ToolGroup {
             name: token.to_string(),
             description: description.to_string(),
+        })
+        .collect()
+}
+
+/// The tools this build can install globally, and whether each is.
+///
+/// A bare list for the same reason as [`tool_groups`]: the binary carries the
+/// set, so it is bounded by the build rather than by anything on the machine.
+pub(crate) async fn bundled_tools(ctx: &Context<'_>) -> Vec<BundledTool> {
+    let state = ctx.data_unchecked::<AppState>();
+    // Resolved on this task, read on the blocking pool.
+    let dirs = super::super::super::tools::AgentDirs::of(&*state.current_config().await);
+    blocking(move || super::super::super::bundled_tools::list(&dirs))
+        .await
+        .into_iter()
+        .map(|row| BundledTool {
+            name: row.name,
+            description: row.description,
+            is_installed: row.installed,
+            is_current: row.current,
         })
         .collect()
 }

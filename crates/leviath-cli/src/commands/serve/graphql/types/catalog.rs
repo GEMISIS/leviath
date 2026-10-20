@@ -552,6 +552,22 @@ pub(crate) struct ToolGroup {
     pub(crate) description: String,
 }
 
+/// A tool the bundled agents ship that `installBundledTool` can install
+/// globally, and where this machine stands with it.
+#[mirror]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct BundledTool {
+    /// The name a stage grants it by, and the name `installBundledTool` takes.
+    pub(crate) name: String,
+    /// What the tool says it does.
+    pub(crate) description: String,
+    /// Whether a global tool by this name is on the machine.
+    pub(crate) is_installed: bool,
+    /// Whether that global copy is this build's, byte for byte. False when it
+    /// is missing, older, or edited, which is when an install changes it.
+    pub(crate) is_current: bool,
+}
+
 /// A `.rhai` file that was found and could not be offered as a tool.
 #[mirror]
 #[derive(Debug, SimpleObject)]

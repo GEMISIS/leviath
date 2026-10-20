@@ -32,8 +32,8 @@ use super::scalars::{Cursor, Timestamp};
 use super::script_ref::{ScriptKind, ScriptRef};
 use super::types::blueprint::{Blueprint, BlueprintFilter, BlueprintOrder};
 use super::types::catalog::{
-    Model, ModelFilter, ModelOrder, Provider, ProviderFilter, ProviderOrder, Tool, ToolFilter,
-    ToolGroup, ToolOrder, ToolSkips,
+    BundledTool, Model, ModelFilter, ModelOrder, Provider, ProviderFilter, ProviderOrder, Tool,
+    ToolFilter, ToolGroup, ToolOrder, ToolSkips,
 };
 use super::types::machine::{
     Config, Directory, DoctorReport, McpServer, McpServerFilter, McpServerOrder, MimeRow,
@@ -422,6 +422,16 @@ impl Query {
     /// code rather than by anything on the machine.
     async fn tool_groups(&self) -> Vec<ToolGroup> {
         catalog::tool_groups().await
+    }
+
+    /// The tools the bundled agents ship that `installBundledTool` can
+    /// install globally, with whether each is installed and current.
+    ///
+    /// A bare list: this build carries the set, so it is bounded by the
+    /// binary rather than by anything on the machine. Readable without
+    /// `--allow-admin`, so a console can show what an operator could turn on.
+    async fn bundled_tools(&self, ctx: &Context<'_>) -> Vec<BundledTool> {
+        catalog::bundled_tools(ctx).await
     }
 
     /// Who is on the other end of the control socket.
