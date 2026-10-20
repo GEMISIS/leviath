@@ -161,7 +161,7 @@ async fn a_request_with_several_problems_hears_about_all_of_them() {
         .into(),
     });
     state.limits = Arc::new(ServeLimits {
-        workdir_root: Some(root.path().to_path_buf()),
+        workdir_roots: vec![root.path().to_path_buf()],
         no_remote_yolo: true,
         ..ServeLimits::default()
     });

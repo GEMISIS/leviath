@@ -454,7 +454,7 @@ async fn this_servers_refusals_are_issues_beside_the_daemons() {
     let root = tempfile::tempdir().expect("a workdir root");
     let outside = tempfile::tempdir().expect("a workdir outside it");
     let limits = ServeLimits {
-        workdir_root: Some(root.path().to_path_buf()),
+        workdir_roots: vec![root.path().to_path_buf()],
         no_remote_yolo: true,
         ..Default::default()
     };
@@ -503,7 +503,7 @@ async fn a_refused_workdir_has_none_of_its_attachments_read() {
     let root = tempfile::tempdir().expect("a workdir root");
     let outside = tempfile::tempdir().expect("a workdir outside it");
     let limits = ServeLimits {
-        workdir_root: Some(root.path().to_path_buf()),
+        workdir_roots: vec![root.path().to_path_buf()],
         ..Default::default()
     };
     let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
@@ -526,6 +526,49 @@ async fn a_refused_workdir_has_none_of_its_attachments_read() {
         .filter_map(|issue| issue["path"].as_str())
         .collect();
     assert_eq!(paths, ["workdir"], "{answer}");
+}
+
+/// `validateSpawn` holds a workdir to the same roots `spawnRun` does: on a
+/// server with two `--workdir-root`s, one under the second passes and one
+/// under neither is refused at `workdir`.
+#[tokio::test]
+async fn a_dry_run_takes_a_workdir_under_any_root_and_refuses_one_under_none() {
+    let first = tempfile::tempdir().expect("a first root");
+    let second = tempfile::tempdir().expect("a second root");
+    let outside = tempfile::tempdir().expect("a workdir outside both");
+    let limits = ServeLimits {
+        workdir_roots: vec![first.path().to_path_buf(), second.path().to_path_buf()],
+        ..Default::default()
+    };
+    let checked = |workdir: &std::path::Path| {
+        serde_json::json!({ "request": {
+            "source": { "blueprint": { "name": "coder" } },
+            "workdir": workdir.to_string_lossy(),
+        } })
+    };
+    let summary = brief();
+    let (control, _dir, _srv) = fake_daemon(move |_| ControlResponse::Valid {
+        summary: Box::new(summary.clone()),
+    });
+    let answer = run(
+        state(control, limits.clone()),
+        VALIDATE,
+        checked(second.path()),
+    )
+    .await;
+    assert_eq!(
+        answer["data"]["validateSpawn"]["__typename"], "SpawnSummaryOutput",
+        "{answer}"
+    );
+
+    let summary = brief();
+    let (control, _dir, _srv) = fake_daemon(move |_| ControlResponse::Valid {
+        summary: Box::new(summary.clone()),
+    });
+    let answer = run(state(control, limits), VALIDATE, checked(outside.path())).await;
+    let rejected = &answer["data"]["validateSpawn"];
+    assert_eq!(rejected["issues"][0]["path"], "workdir", "{answer}");
+    assert_eq!(rejected["issues"][0]["code"], "NOT_ALLOWED");
 }
 
 /// A daemon that answers with something that is neither a run nor a refusal,

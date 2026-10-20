@@ -27,15 +27,16 @@ use super::types::*;
 /// `GET /api/fs/dirs?path=<abs>`: list one directory's immediate
 /// subdirectories, so the browser's folder picker can walk the tree.
 ///
-/// Without `path`, lists the serve process's working directory - or
-/// `--workdir-root` itself when a root is set and the cwd falls outside it,
-/// so the picker never *opens* somewhere it cannot stay. A given `path` must
-/// be absolute, and with a root set must resolve inside it under the same
-/// symlink-aware containment the spawn endpoint applies to workdirs
+/// Without `path`, lists the serve process's working directory - or the
+/// first `--workdir-root` when roots are set and the cwd falls outside all of
+/// them, so the picker never *opens* somewhere it cannot stay. A given `path`
+/// must be absolute, and with roots set must resolve inside one of them under
+/// the same symlink-aware containment the spawn endpoint applies to workdirs
 /// ([`leviath_core::resolves_within`]). Dotted names are excluded, unreadable
 /// children are silently skipped, and `parent` is `null` both at the
-/// filesystem root and at the workdir-root - the UI is never led above the
-/// fence. Purely a filesystem read: it works with the daemon down.
+/// filesystem root and wherever "up one level" would leave every root - the
+/// UI is never led above the fence. Purely a filesystem read: it works with
+/// the daemon down.
 pub(super) async fn list_dirs(
     State(state): State<AppState>,
     Query(query): Query<DirsQuery>,
@@ -48,25 +49,25 @@ pub(super) async fn list_dirs(
 
 /// The directories under `path`, for a file picker.
 ///
-/// Confined to `--workdir-root` when the operator set one. That fence is why
-/// `parent` is null at the root rather than leading above it, and why a symlink
-/// child pointing outside is left out: offering it would be offering a workdir
-/// the spawn path refuses.
+/// Confined to the `--workdir-root`s when the operator set any. That fence is
+/// why `parent` is null at a root rather than leading above it, and why a
+/// symlink child pointing outside is left out: offering it would be offering a
+/// workdir the spawn path refuses.
 pub(super) fn dir_listing(
     state: &AppState,
     path: Option<&str>,
     hidden: bool,
 ) -> Result<DirsResp, ServeError> {
-    let root = state.limits.workdir_root.as_deref();
+    let limits = &state.limits;
     let cwd = picker_cwd();
 
     let listed = match path {
-        Some(p) => fenced(root, p)?,
-        // No path: the picker's opening view - the cwd, clamped to the root
-        // when one is set and the cwd falls outside it.
-        None => match root {
-            Some(root) if !leviath_core::resolves_within(&cwd, root) => root.to_path_buf(),
-            _ => cwd.clone(),
+        Some(p) => fenced(limits, p)?,
+        // No path: the picker's opening view - the cwd, or the first root when
+        // roots are set and the cwd is under none of them.
+        None => match limits.fences_in(&cwd) {
+            true => cwd.clone(),
+            false => limits.workdir_roots.first().cloned().unwrap_or(cwd.clone()),
         },
     };
     existing_dir(&listed)?;
@@ -94,11 +95,9 @@ pub(super) fn dir_listing(
         if !meta.is_dir() {
             continue;
         }
-        // With a root set, a symlink child can still point outside the fence;
+        // With roots set, a symlink child can still point outside the fence;
         // offering it would be offering a workdir the spawn endpoint refuses.
-        if let Some(root) = root
-            && !leviath_core::resolves_within(&path, root)
-        {
+        if !limits.fences_in(&path) {
             continue;
         }
         dirs.push(DirEntry {
@@ -108,21 +107,40 @@ pub(super) fn dir_listing(
     }
     dirs.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // `null` at the filesystem root, and at the workdir-root: "up one level"
-    // from the fence would land somewhere every other request here refuses.
-    let parent = match root.is_some_and(|r| same_dir(&listed, r)) {
-        true => None,
-        false => listed.parent().map(|p| p.to_string_lossy().into_owned()),
-    };
+    // `null` at the filesystem root, and where "up one level" leaves every
+    // root: it would land somewhere every other request here refuses. A root
+    // nested in another still leads up into the outer one.
+    let parent = listed
+        .parent()
+        .filter(|up| limits.fences_in(up))
+        .map(|up| up.to_string_lossy().into_owned());
 
     Ok(DirsResp {
         path: listed.to_string_lossy().into_owned(),
         parent,
         home: picker_home(),
         cwd: cwd.to_string_lossy().into_owned(),
-        root: root.map(|r| r.to_string_lossy().into_owned()),
+        root: root_of(limits, &listed),
+        roots: roots_of(limits),
         dirs,
     })
+}
+
+/// The configured root `dir` sits under, as a picker reports it. Reads the
+/// filesystem, so call it off the async workers.
+pub(super) fn root_of(limits: &ServeLimits, dir: &Path) -> Option<String> {
+    limits
+        .root_holding(dir)
+        .map(|r| r.to_string_lossy().into_owned())
+}
+
+/// Every configured root, in the order the operator gave them.
+pub(super) fn roots_of(limits: &ServeLimits) -> Vec<String> {
+    limits
+        .workdir_roots
+        .iter()
+        .map(|r| r.to_string_lossy().into_owned())
+        .collect()
 }
 
 /// The home directory a picker anchors on.
@@ -145,7 +163,7 @@ pub(super) fn picker_cwd() -> PathBuf {
 /// path, so the containment check runs on ground the caller has already proved
 /// it can reach and a `name` carrying separators is malformed input rather
 /// than something the fence has to catch. Every guard mirrors
-/// [`list_dirs`]: absolute parent, inside `--workdir-root` when one is set,
+/// [`list_dirs`]: absolute parent, inside a `--workdir-root` when any is set,
 /// the parent must exist and be a directory. One level, `create_dir` rather
 /// than `create_dir_all`, matching the listing route's one-directory-level
 /// shape - and an existing target is a 409 rather than a silent success, so a
@@ -166,7 +184,7 @@ pub(super) async fn create_dir(
 /// parent that is not there, and a name already taken are three different things
 /// to show somebody.
 pub(super) fn made(state: &AppState, path: &str, name: &str) -> Result<MkdirResp, ServeError> {
-    let parent = fenced(state.limits.workdir_root.as_deref(), path)?;
+    let parent = fenced(&state.limits, path)?;
     existing_dir(&parent)?;
     if let Some(why) = bad_name(name, cfg!(windows)) {
         return Err(ServeError::BadRequest(why));
@@ -262,18 +280,17 @@ fn windows_reserves(name: &str) -> bool {
         || name.ends_with(['.', ' '])
 }
 
-/// `path` as a directory the caller may name: absolute, and inside
-/// `--workdir-root` when one is set.
-fn fenced(root: Option<&Path>, path: &str) -> Result<PathBuf, ServeError> {
+/// `path` as a directory the caller may name: absolute, and inside a
+/// `--workdir-root` when any is set.
+fn fenced(limits: &ServeLimits, path: &str) -> Result<PathBuf, ServeError> {
     let requested = PathBuf::from(path);
     if !requested.is_absolute() {
         return Err(ServeError::BadRequest("path must be absolute".to_string()));
     }
-    if let Some(root) = root
-        && !leviath_core::resolves_within(&requested, root)
-    {
+    if !limits.fences_in(&requested) {
         return Err(ServeError::Forbidden(format!(
-            "path '{path}' is outside the configured --workdir-root"
+            "path '{path}' is outside {}",
+            limits.roots_named()
         )));
     }
     Ok(requested)
@@ -313,14 +330,6 @@ fn known_dir_or_fs_root(dir: Option<PathBuf>) -> PathBuf {
     dir.unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// Whether two paths name the same directory, symlinks resolved - so the
-/// root-fence check holds when the listed path spells the root differently
-/// (e.g. through a symlinked ancestor like macOS's `/tmp`).
-fn same_dir(a: &Path, b: &Path) -> bool {
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    canon(a) == canon(b)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +347,10 @@ mod tests {
     use crate::config::Config;
 
     fn app_with_root(workdir_root: Option<PathBuf>) -> Router {
+        app_with_roots(workdir_root.into_iter().collect())
+    }
+
+    fn app_with_roots(workdir_roots: Vec<PathBuf>) -> Router {
         let (tx, _) = broadcast::channel(64);
         let state = AppState {
             shutdown: Default::default(),
@@ -351,7 +364,7 @@ mod tests {
             mcp: crate::commands::serve::mcp::McpAdmin::default(),
             providers: crate::commands::serve::providers::ProviderAdmin::default(),
             limits: Arc::new(ServeLimits {
-                workdir_root,
+                workdir_roots,
                 ..Default::default()
             }),
         };
@@ -532,10 +545,77 @@ mod tests {
         assert_eq!(
             error_of(&body),
             format!(
-                "path '{}' is outside the configured --workdir-root",
-                outside.path().display()
+                "path '{}' is outside the configured --workdir-root '{}'",
+                outside.path().display(),
+                root.path().display()
             )
         );
+    }
+
+    /// With several roots, a directory under any one of them lists and says
+    /// which root it is under, every root is reported, and a directory under
+    /// none is refused with every root named.
+    #[tokio::test]
+    async fn list_dirs_with_several_roots_accepts_each_and_refuses_the_rest() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(second.path().join("inside")).unwrap();
+        let roots = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+        let named: Vec<String> = roots
+            .iter()
+            .map(|r| r.to_string_lossy().into_owned())
+            .collect();
+
+        let inside = second.path().join("inside");
+        let (status, body) = get_dirs(
+            app_with_roots(roots.clone()),
+            Some(&inside.to_string_lossy()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let got = listing_of(&body);
+        assert_eq!(got.root.as_deref(), Some(named[1].as_str()));
+        assert_eq!(got.roots, named);
+        assert_eq!(got.parent.as_deref(), Some(named[1].as_str()));
+
+        let (status, body) = get_dirs(app_with_roots(roots.clone()), Some(&named[1])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(listing_of(&body).parent.is_none());
+
+        let (status, body) = get_dirs(
+            app_with_roots(roots),
+            Some(&outside.path().to_string_lossy()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error_of(&body),
+            format!(
+                "path '{}' is outside every configured --workdir-root ('{}', '{}')",
+                outside.path().display(),
+                named[0],
+                named[1]
+            )
+        );
+    }
+
+    /// A root nested inside another still leads up into the outer one: only
+    /// a step that leaves every root is withheld.
+    #[tokio::test]
+    async fn list_dirs_a_nested_root_leads_up_into_the_outer_one() {
+        let outer = tempfile::tempdir().unwrap();
+        let inner = outer.path().join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        let app = app_with_roots(vec![inner.clone(), outer.path().to_path_buf()]);
+        let (status, body) = get_dirs(app, Some(&inner.to_string_lossy())).await;
+        assert_eq!(status, StatusCode::OK);
+        let got = listing_of(&body);
+        assert_eq!(
+            got.parent.as_deref(),
+            Some(outer.path().to_string_lossy().as_ref())
+        );
+        assert_eq!(got.root.as_deref(), Some(inner.to_string_lossy().as_ref()));
     }
 
     /// At the workdir-root itself `parent` is `null` - the picker is never
@@ -728,8 +808,9 @@ mod tests {
         assert_eq!(
             error_of(&body),
             format!(
-                "path '{}' is outside the configured --workdir-root",
-                outside.path().display()
+                "path '{}' is outside the configured --workdir-root '{}'",
+                outside.path().display(),
+                root.path().display()
             )
         );
         assert!(!outside.path().join("x").exists());
@@ -866,20 +947,6 @@ mod tests {
             PathBuf::from("/somewhere")
         );
         assert_eq!(known_dir_or_fs_root(None), PathBuf::from("/"));
-    }
-
-    /// `same_dir` falls back to literal comparison when a path cannot be
-    /// canonicalized (it does not exist).
-    #[test]
-    fn same_dir_compares_noncanonicalizable_paths_literally() {
-        assert!(same_dir(
-            Path::new("/no/such/dir/anywhere"),
-            Path::new("/no/such/dir/anywhere")
-        ));
-        assert!(!same_dir(
-            Path::new("/no/such/dir/anywhere"),
-            Path::new("/no/such/dir/elsewhere")
-        ));
     }
 
     /// A child that cannot be stat'd (here: a dangling symlink) is skipped,

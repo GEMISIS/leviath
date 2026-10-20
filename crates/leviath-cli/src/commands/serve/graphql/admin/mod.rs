@@ -258,9 +258,9 @@ impl AdminMutation {
     /// Make one directory, so a picker can offer "New Folder" rather than one
     /// that refuses.
     ///
-    /// The three refusals are told apart on purpose: a path outside
-    /// `--workdir-root`, a parent that is not there, and a name already taken are
-    /// three different things to show somebody.
+    /// The three refusals are told apart on purpose: a path outside every
+    /// `--workdir-root`, a parent that is not there, and a name already taken
+    /// are three different things to show somebody.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
     async fn create_directory(
         &self,
