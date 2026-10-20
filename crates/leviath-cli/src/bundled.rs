@@ -272,6 +272,46 @@ pub(crate) fn install_bundled(agent: &BundledAgent, agents_dir: &Path) -> anyhow
     Ok(())
 }
 
+/// One tool script the bundled agents ship, offered on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BundledTool {
+    /// Its file stem, which is the name a stage's `tools` grants it by.
+    pub(crate) name: &'static str,
+    /// The script, exactly as this build ships it.
+    pub(crate) source: &'static str,
+}
+
+/// Every tool script a bundled agent ships under `tools/`, once each, sorted
+/// by name.
+///
+/// Read out of [`BUNDLED_AGENTS`] rather than embedded a second time, so the
+/// copy a global install writes is the copy the agents run, and it moves with
+/// the binary. Several agents ship the same script (`web_search`, say), and
+/// `a_tool_script_shared_by_several_agents_is_identical_in_all_of_them` holds
+/// every copy byte-identical, so keeping the first one loses nothing. A file
+/// in a subdirectory of `tools/` is left out: the daemon's tool scan does not
+/// descend, so it is not a tool.
+pub(crate) fn bundled_tools() -> Vec<BundledTool> {
+    let mut tools: Vec<BundledTool> = BUNDLED_AGENTS
+        .iter()
+        .flat_map(|agent| agent.files.iter())
+        .filter_map(|(rel, source)| {
+            rel.strip_prefix("tools/")
+                .and_then(|file| file.strip_suffix(".rhai"))
+                .filter(|name| !name.contains('/'))
+                .map(|name| BundledTool { name, source })
+        })
+        .collect();
+    tools.sort_by_key(|tool| tool.name);
+    tools.dedup_by_key(|tool| tool.name);
+    tools
+}
+
+/// The bundled tool called `name`, if this build ships one.
+pub(crate) fn bundled_tool(name: &str) -> Option<BundledTool> {
+    bundled_tools().into_iter().find(|tool| tool.name == name)
+}
+
 #[cfg(test)]
 #[path = "bundled_tests.rs"]
 mod tests;

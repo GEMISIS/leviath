@@ -1452,6 +1452,19 @@ type BuiltinToolOutput implements Tool {
 	origin: ToolOrigin!
 }
 
+"What installing did to the global copy."
+enum BundledToolOutcome {
+	"There was no global tool by that name, and now there is."
+	INSTALLED
+	"The global copy was already this build's, byte for byte."
+	UNCHANGED
+	"""
+	A different global copy was there, an older build's or an edited one,
+	and this build's replaced it.
+	"""
+	REPLACED
+}
+
 "How a failed model call failed, and what happened next."
 type CallFailureOutput {
 	"The kind of failure, as the provider layer names it."
@@ -5612,6 +5625,23 @@ input InputValueWrite @oneOf {
 	record: [InputEntryWrite!]
 }
 
+"Which bundled tool to install."
+input InstallBundledToolRequest {
+	"""
+	The tool, by the name a stage grants it by: `web_search`, say. A name
+	this build ships no tool under is a miss that lists the ones it does.
+	"""
+	name: String!
+}
+
+"The global tool as it now stands."
+type InstallBundledToolResult {
+	"The global script that was written, with `compiles` on it."
+	script: ScriptOutput!
+	"What installing did to the global copy."
+	outcome: BundledToolOutcome!
+}
+
 """
 Filter on `InstallCommandOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -8435,6 +8465,19 @@ type Mutation {
 		"The script to remove."
 		request: DeleteScriptRequest!
 	): DeleteScriptResult!
+	"""
+	Install a tool the bundled agents ship, such as `web_search`, as a
+	global tool every agent and every inline graph can be granted.
+	
+	The source is this build's own copy, so no agent that ships it has to
+	be installed, and calling this again after an upgrade brings the global
+	copy level with the binary. It writes code a run then executes, which
+	is why it sits behind the same flag as `upsertScript`.
+	"""
+	installBundledTool(
+		"The tool to install."
+		request: InstallBundledToolRequest!
+	): InstallBundledToolResult!
 	"""
 	Run the diagnostics that reach the network.
 	

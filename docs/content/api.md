@@ -403,6 +403,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves, before writing a gateway for it. See [below](#gateways) |
 | `GET /api/providers?quota=&refresh=` · `POST …/{name}/login` *(admin)* · `/logout` *(admin)* · `/check` *(admin)* | The providers that sign in with a browser instead of taking a key, and the sign-in itself. See [below](#signing-in-to-a-subscription-provider) |
 | `GET /api/tools?agent=` | What an agent here can actually call. See [below](#tools-and-scripts) |
+| `POST /api/tools/bundled/{name}` *(admin)* | Install a bundled tool such as `web_search` globally. See [below](#installing-a-bundled-tool) |
 | `GET /api/mime` · `PUT /api/mime` *(admin)* · `DELETE /api/mime` *(admin)* | Read the effective [mime registry](/docs/mime#the-registry), and write to it. The writes need admin. See [below](#writing-a-mime-row) |
 | `GET /api/scripts?agent=&include=` · `GET/PUT/DELETE /api/scripts/{kind}/{name}` · `POST /api/scripts/validate` | Read and write the machine's Rhai. Writes need admin. See [below](#tools-and-scripts) |
 | `GET /api/mcp/servers` · `POST …` · `DELETE …/{name}` · `GET …/{name}/status` · `POST …/{name}/login` · `POST …/{name}/test` | List, add, remove, check, log in, test. All but the two `GET`s need admin |
@@ -1799,6 +1800,31 @@ A write that does not compile is still saved, with `compiles: false` and the com
 the response. A draft is worth keeping, and a tool that does not compile is skipped at spawn rather
 than breaking the agent.
 
+### Installing a bundled tool
+
+`web_search` and `web_fetch` ship inside the research agents. `POST /api/tools/bundled/{name}`
+writes this build's copy of one into `~/.leviath/tools/`, so every agent and every inline graph can
+be granted it. No research agent has to be installed, and the source comes from the binary rather
+than from a copy that drifts:
+
+```json
+{
+  "name": "web_search",
+  "path": "/home/you/.leviath/tools/web_search.rhai",
+  "compiles": true,
+  "outcome": "installed"
+}
+```
+
+`outcome` says what happened to the global copy. `installed` means there was none, `unchanged`
+means it already matched this build byte for byte, and `replaced` means an older or edited copy was
+overwritten. Send it again after an upgrade to bring the copy level with the new binary. A name no
+bundled agent ships is a 404 that lists the names it does.
+
+It writes the same file `PUT /api/scripts/tool/{name}` would, so it is mounted only with
+`--allow-admin` and answers 404 without it. Check `tools.install_bundled` in the `capabilities`
+list before offering it. The GraphQL twin is `installBundledTool`.
+
 ### Providers
 
 A [provider](/docs/rhai-providers) is the one kind no agent owns. It lives in `~/.leviath/providers/`
@@ -2292,6 +2318,7 @@ than that feature, not broken.
 | `scripts.providers` | `provider` as a fifth script `kind`, the machine's drop-in model providers |
 | `scripts.candidates` | `?include=candidates` on the script listing, plus `relative_path` and `declared` on every entry |
 | `scripts.mime_checks` | `mime_check` as a sixth script `kind`: the byte checks mime rows name |
+| `tools.install_bundled` | `POST /api/tools/bundled/{name}` and `installBundledTool`; admin only. See [above](#installing-a-bundled-tool) |
 | `config.gateways` | `gateways` on `GET /api/config`, the custom providers this machine has |
 | `config.gateways.kinds` | `kind`, `header_names` and `models` on each gateway, and `kind`, `headers` and `models` accepted by `PUT /api/config` |
 | `models.probe` | `POST /api/models/probe`, which asks an OpenAI-compatible server what it serves before a gateway for it is written; admin only |

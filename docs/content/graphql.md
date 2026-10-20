@@ -1440,6 +1440,24 @@ Adding an MCP server writes a command Leviath then spawns, for this run and ever
 Writing a script writes code a run then executes. That is why the group is behind a flag rather
 than behind the API token alone.
 
+`installBundledTool` writes a tool the bundled agents ship, such as `web_search`, as a global
+script. The source is the copy inside the binary, so no research agent has to be installed, and an
+inline graph can then grant the tool by name:
+
+```graphql
+mutation {
+  installBundledTool(request: { name: "web_search" }) {
+    outcome
+    script { id path compiles compileError }
+  }
+}
+```
+
+`outcome` is `INSTALLED` when there was no global copy, `UNCHANGED` when it already matched this
+build, and `REPLACED` when an older or edited copy was overwritten. Run it again after an upgrade
+to bring the copy level with the new binary. A name no bundled agent ships is `NOT_FOUND`, and the
+message lists the names that are.
+
 Anything that dials out is a mutation, so queries stay side-effect free. `refreshModels`,
 `checkMachine`, `checkProvider`, `checkMcpServer`, `checkEndpoint`, `signInProvider` and
 `signInMcpServer` each cost seconds and a request to somebody else.

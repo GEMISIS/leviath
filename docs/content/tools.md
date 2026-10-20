@@ -424,6 +424,13 @@ Both ship with `data-analyst`, `researcher`, `deep-researcher`, and `wide-resear
 another agent web access, copy them into that agent's `tools/`
 directory, or drop them in `~/.leviath/tools/` to offer them to every agent.
 
+Over the API, `lev serve --allow-admin` installs either one into `~/.leviath/tools/` for you, from
+the copy inside the `lev` binary. Send `POST /api/tools/bundled/web_search` or the
+[`installBundledTool`](/docs/graphql#config-and-admin) mutation. None of the research agents has to
+be installed, and an inline graph can then grant the tool like any other global one. Send it again
+after an upgrade to bring the global copy level with the new binary. See
+[installing a bundled tool](/docs/api#installing-a-bundled-tool).
+
 > [!IMPORTANT]
 > Store the key as a [tool credential](/docs/configuration#tool_credentials). It takes one table
 > in `config.toml`, or one `toolCredentials` write through the config API:

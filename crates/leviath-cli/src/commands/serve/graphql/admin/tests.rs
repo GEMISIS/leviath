@@ -148,6 +148,7 @@ async fn every_admin_mutation_is_gated() {
         r#"mutation { upsertYoloProfile(request: { profile: { name: "x", default: ALLOW } })
              { isNew } }"#,
         r#"mutation { deleteYoloProfile(request: { name: "x" }) { deletedId } }"#,
+        r#"mutation { installBundledTool(request: { name: "web_search" }) { outcome } }"#,
     ];
     for call in calls {
         let answer = schema(false).execute(Request::new(call)).await;
@@ -158,6 +159,55 @@ async fn every_admin_mutation_is_gated() {
             error.message
         );
     }
+}
+
+/// A bundled tool installs as a global script that reads back through
+/// `script(ref:)` exactly as the mutation answered, and a name no bundled
+/// agent ships is a miss.
+#[tokio::test]
+async fn a_bundled_tool_installs_as_a_global_script() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let installed = ask(
+            r#"mutation { installBundledTool(request: { name: "web_search" })
+                 { outcome script { id kind name scope blueprintName path relativePath
+                     isDeclared compiles compileError content } } }"#,
+        )
+        .await;
+        let result = &installed["installBundledTool"];
+        assert_eq!(result["outcome"], "INSTALLED");
+        let script = &result["script"];
+        assert_eq!(script["id"], "script:tool:web_search");
+        assert_eq!(script["kind"], "TOOL");
+        assert_eq!(script["scope"], "GLOBAL");
+        assert!(script["blueprintName"].is_null());
+        assert!(script["relativePath"].is_null());
+        assert_eq!(script["isDeclared"], true);
+        assert_eq!(script["compiles"], true);
+        assert_eq!(
+            script["content"],
+            crate::bundled::bundled_tool("web_search")
+                .expect("web_search ships")
+                .source
+        );
+        let read = ask(r#"{ script(ref: { kind: TOOL, name: "web_search" })
+                 { id path compiles } }"#)
+        .await;
+        assert_eq!(read["script"]["id"], script["id"]);
+        assert_eq!(read["script"]["path"], script["path"]);
+
+        let again =
+            ask(r#"mutation { installBundledTool(request: { name: "web_search" }) { outcome } }"#)
+                .await;
+        assert_eq!(again["installBundledTool"]["outcome"], "UNCHANGED");
+
+        let missing = schema(true)
+            .execute(Request::new(
+                r#"mutation { installBundledTool(request: { name: "nope" }) { outcome } }"#,
+            ))
+            .await;
+        assert_eq!(refusal_code(&missing), "\"NOT_FOUND\"");
+    })
+    .await;
 }
 
 /// An HTTP server is written with its headers, and reads back as it was
@@ -2057,7 +2107,7 @@ fn every_admin_request_round_trips() {
     use super::providers::{
         CheckEndpointRequest, CheckProviderRequest, SignInProviderRequest, SignOutProviderRequest,
     };
-    use super::scripts::{DeleteScriptRequest, UpsertScriptRequest};
+    use super::scripts::{DeleteScriptRequest, InstallBundledToolRequest, UpsertScriptRequest};
     use super::system::{CreateDirectoryRequest, StartUpdateRequest};
     use super::yolo::{
         DeleteYoloProfileRequest, ShellRuleWrite, UpsertYoloProfileRequest, YoloProfileWrite,
@@ -2318,6 +2368,9 @@ fn every_admin_request_round_trips() {
         content: "fn main() {}".to_string(),
     });
     round_trip(&DeleteScriptRequest { script: script() });
+    round_trip(&InstallBundledToolRequest {
+        name: "web_search".to_string(),
+    });
 
     round_trip(&CreateDirectoryRequest {
         parent_path: "/work".to_string(),

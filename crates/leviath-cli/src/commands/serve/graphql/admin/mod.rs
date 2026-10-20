@@ -49,7 +49,10 @@ use providers::{
     CheckEndpointRequest, CheckEndpointResult, CheckProviderRequest, CheckProviderResult,
     SignInProviderRequest, SignInProviderResult, SignOutProviderRequest, SignOutProviderResult,
 };
-use scripts::{DeleteScriptRequest, DeleteScriptResult, UpsertScriptRequest, UpsertScriptResult};
+use scripts::{
+    DeleteScriptRequest, DeleteScriptResult, InstallBundledToolRequest, InstallBundledToolResult,
+    UpsertScriptRequest, UpsertScriptResult,
+};
 use system::{
     CheckMachineResult, CreateDirectoryRequest, CreateDirectoryResult, StartUpdateRequest,
     StartUpdateResult,
@@ -205,6 +208,22 @@ impl AdminMutation {
         #[graphql(desc = "The script to remove.")] request: DeleteScriptRequest,
     ) -> async_graphql::Result<DeleteScriptResult> {
         scripts::delete_script(ctx, request).await
+    }
+
+    /// Install a tool the bundled agents ship, such as `web_search`, as a
+    /// global tool every agent and every inline graph can be granted.
+    ///
+    /// The source is this build's own copy, so no agent that ships it has to
+    /// be installed, and calling this again after an upgrade brings the global
+    /// copy level with the binary. It writes code a run then executes, which
+    /// is why it sits behind the same flag as `upsertScript`.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn install_bundled_tool(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The tool to install.")] request: InstallBundledToolRequest,
+    ) -> async_graphql::Result<InstallBundledToolResult> {
+        scripts::install_bundled_tool(ctx, request).await
     }
 
     /// Run the diagnostics that reach the network.
