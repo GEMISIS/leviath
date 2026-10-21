@@ -376,7 +376,8 @@ mode = { interactive = { idle_timeout_secs = 900 } }
 ```
 
 With no limit the stage waits for as long as it takes. In a run nobody is watching it waits 120
-seconds: one started with `--yolo`, or a sub-agent or fan-out worker, which its parent talks to. A
+seconds: a run that answers its own questions (`--yolo` without `--allow-questions`), or a
+sub-agent or fan-out worker, which its parent talks to. A
 caller that starts runs of an interactive blueprint should set `idle_timeout_secs` rather than rely
 on either. `lev msg <run> --end` ends a conversation from the command line. The limit is checked at least every 30 seconds, so a
 stage can move on up to that much late. Each reply counts against the stage's `max_iterations`,

@@ -298,8 +298,8 @@ approvals, checkpoints and the taint gate go ahead as `unattended` says. The mod
 `ask_user_text`, `ask_user_choice`, `ask_user_confirm`, `edit_document` and `present_for_review`,
 and a question it asks waits for you as in an attended run. Use it when a run should not stop for
 every command but should still ask before a one-way door, such as which account to deploy to. See
-[Agent-raised questions](/docs/interaction#agent-raised-questions) for how long such a question
-waits. An attended run already brings every question to you, so there it changes nothing.
+[Tool approvals and agent questions](/docs/interaction#tool-approvals-and-agent-questions) for how
+long such a question waits. An attended run already brings every question to you, so there it changes nothing.
 
 The operator's settings bound every request. Seed commands run only when the operator allows them,
 whoever asks. A server started with `--no-remote-yolo` refuses `unattended` and `allow` from the

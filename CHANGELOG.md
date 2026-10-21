@@ -1089,8 +1089,9 @@ same list.
   unattended run waives: tool approvals, checkpoints and the taint gate go
   ahead as `unattended` says, while the model keeps `ask_user_*`,
   `edit_document` and `present_for_review`, and a question waits for a
-  person as in an attended run, bounded by `[limits]
-  interaction_timeout_secs` when that is set. Sub-agents and fan-out workers
+  person as in an attended run: until it is answered, unless `[limits]
+  interaction_timeout_secs` is set, which unattended callers should set.
+  There is no built-in cap. Sub-agents and fan-out workers
   of such a run keep their questions too. Denied tools, `outside_workdir =
   "deny"` and `write_paths` still refuse. `--no-remote-yolo` allows it,
   since it only asks a person more. Nothing changes for an attended run.
@@ -1102,8 +1103,9 @@ same list.
 - `mode = { interactive = { idle_timeout_secs = 900 } }`: how long an
   interactive stage waits for the next message before it moves on. With no
   limit it waits for as long as it takes, except in a run nobody is
-  watching (`--yolo`, or a sub-agent or fan-out worker), which waits 120
-  seconds.
+  watching (a run that answers its own questions, as `--yolo` without
+  `--allow-questions` does, or a sub-agent or fan-out worker), which waits
+  120 seconds.
 - `endConversation` (GraphQL) and `POST /api/runs/{id}/end-conversation`
   end an interactive stage's conversation, so it moves on through its
   ordinary transition and a final stage completes the run.

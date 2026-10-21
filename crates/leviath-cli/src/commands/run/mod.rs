@@ -107,8 +107,8 @@ pub struct RunArgs {
     /// ask_user_choice, ask_user_confirm and the like) to you. Tool approvals
     /// stay waived; a question waits for `lev respond` as in an attended run,
     /// for at most `[limits] interaction_timeout_secs`. Sub-agents and fan-out
-    /// workers keep their questions too. Nothing changes without `--yolo`.
-    #[arg(long)]
+    /// workers keep their questions too. Needs `--yolo`.
+    #[arg(long, requires = "yolo")]
     pub allow_questions: bool,
 
     /// Allow a tool outright (repeatable).
@@ -806,6 +806,26 @@ mod tests {
         assert_eq!(p.run.path.as_deref(), Some("coder"));
         let p = Probe::try_parse_from(["lev", "coder"]).expect("no flag");
         assert!(p.run.yolo.is_none());
+    }
+
+    /// `--allow-questions` keeps questions while `--yolo` waives the rest, so
+    /// it is refused without `--yolo` rather than silently doing nothing.
+    #[test]
+    fn allow_questions_needs_the_yolo_flag() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            run: RunArgs,
+        }
+        let p = Probe::try_parse_from(["lev", "coder", "--yolo", "--allow-questions"])
+            .expect("with --yolo");
+        assert!(p.run.allow_questions);
+        let p = Probe::try_parse_from(["lev", "coder", "--yolo=careful", "--allow-questions"])
+            .expect("with a profile");
+        assert!(p.run.allow_questions);
+        let refused = Probe::try_parse_from(["lev", "coder", "--allow-questions"]).is_err();
+        assert!(refused, "--allow-questions without --yolo is refused");
     }
 
     /// The argv pre-scan leaves `--yolo=<name>` alone: `yolo` is a known flag
