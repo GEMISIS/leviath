@@ -1018,7 +1018,10 @@ impl Provider for BedrockProvider {
         // Bedrock's ids are unmistakable, and a bare vendor name such as
         // `claude-sonnet-5` is deliberately not claimed: the same model here
         // bills a different account than it does at Anthropic.
+        // Its own catalogue counts whatever the id's shape: AWS spells Kimi
+        // `moonshot.`, a vendor segment the spelling check does not know.
         (catalog::is_bedrock_id(model_key)
+            || catalog::CATALOG.iter().any(|(id, _)| *id == model_key)
             || self.learned.contains(model_key)
             || self.capability_overrides.contains_key(model_key))
         .then(|| model_key.to_string())
@@ -1058,13 +1061,7 @@ impl Provider for BedrockProvider {
             .get(model)
             .and_then(|o| o.pricing())
             .or_else(|| self.learned.get(model).and_then(|m| m.pricing))
-            .or_else(|| match catalog::vendor_of(model) {
-                catalog::Vendor::Anthropic => {
-                    crate::pricing::published_rates("anthropic", catalog::vendor_model(model))
-                }
-                // An image model's price per image, from the shipped table.
-                _ => crate::pricing::published_rates(PROVIDER_NAME, catalog::bare_id(model)),
-            })
+            .or_else(|| catalog::published_pricing(model))
     }
 }
 

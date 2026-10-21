@@ -1637,6 +1637,28 @@ live answer for those. Ollama and custom gateways have no rows, because only a l
 what they serve. `inputTypes` holds patterns such as `image/*`, and `has` matches a pattern
 exactly, so ask for the pattern rather than for one concrete type under it.
 
+`pricing` on a row is what a run on that provider would be billed by, read from the same price file
+and `[model_capabilities]` rates the provider uses, so offers from a provider you have not set up
+can be ranked beside the ones you have. It is null where nothing prices the model, and for
+OpenRouter, whose rates arrive only with its live listing (`models` has those). The sign-in routes,
+`codex` and `grok`, are a subscription and price at zero.
+
+A media model is often billed by what it makes rather than by the token. `pricing.unit` carries
+that price: `usd` for one `unit`, which is `IMAGE`, `VIDEO_SECOND`, `AUDIO_HOUR`, `MILLION_CHARS`
+or `CLIP`, and a short `label` (`img`, `s`, `hr`, `M chr`, `clip`) to print after the amount. The
+per-million token fields are zero for a model billed by the unit alone, and a run prices such a
+call by the unit:
+
+```graphql
+{
+  catalog(filter: { outputTypes: { has: "video/*" } }, first: 50) {
+    results { providerName modelId isConfigured pricing { outputPerMtok unit { usd unit label } } }
+  }
+}
+```
+
+The same `pricing` shape, `unit` included, is on `models`.
+
 ## Live frames
 
 `GET /ws/graphql` carries subscriptions over `graphql-transport-ws`. Authenticate with `?token=`,

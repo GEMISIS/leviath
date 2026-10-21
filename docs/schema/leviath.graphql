@@ -1697,6 +1697,15 @@ input CatalogModelInput {
 	"""
 	supportsTools: BooleanFilter
 	"""
+	Filter on `CatalogModelOutput.pricing`.
+	
+	What it costs, from the same price file and config a run on its
+	provider is billed by, so offers from a provider not set up here can be
+	ranked. Absent where nothing prices the model, and for a gateway, whose
+	rates come only from its live listing (`models` has those).
+	"""
+	pricing: ModelPricingInput
+	"""
 	Filter on `CatalogModelOutput.isConfigured`.
 	
 	Whether this machine has its provider set up, so a run can route to it.
@@ -1771,6 +1780,13 @@ type CatalogModelOutput {
 	maxOutputTokens: Int!
 	"Whether the model takes tool definitions."
 	supportsTools: Boolean!
+	"""
+	What it costs, from the same price file and config a run on its
+	provider is billed by, so offers from a provider not set up here can be
+	ranked. Absent where nothing prices the model, and for a gateway, whose
+	rates come only from its live listing (`models` has those).
+	"""
+	pricing: ModelPricingOutput
 	"""
 	Whether this machine has its provider set up, so a run can route to it.
 	False means connecting the provider is what it takes.
@@ -8185,7 +8201,7 @@ input ModelPricingInput {
 	"""
 	Filter on `ModelPricingOutput.inputPerMtok`.
 	
-	Input tokens, per million.
+	Input tokens, per million. Zero for a model billed by the unit alone.
 	"""
 	inputPerMtok: DecimalFilter
 	"""
@@ -8203,9 +8219,17 @@ input ModelPricingInput {
 	"""
 	Filter on `ModelPricingOutput.outputPerMtok`.
 	
-	Output tokens, per million.
+	Output tokens, per million. Zero for a model billed by the unit alone.
 	"""
 	outputPerMtok: DecimalFilter
+	"""
+	Filter on `ModelPricingOutput.unit`.
+	
+	What it charges per unit of media it makes or reads, for a model billed
+	that way rather than, or as well as, by the token. A run prices such a
+	call by this.
+	"""
+	unit: UnitPriceInput
 	"Every filter in this list has to hold."
 	and: [ModelPricingInput!]
 	"At least one filter in this list has to hold."
@@ -8221,20 +8245,27 @@ input ModelPricingInput {
 }
 
 """
-What one model costs per million tokens.
+What one model costs: per million tokens, and per unit for a media model
+billed by the image, the second of video, the clip or the character.
 
 Absent where the price file has no entry for the model, which is why a run
 can report an unpriced call rather than a cost of zero.
 """
 type ModelPricingOutput {
-	"Input tokens, per million."
+	"Input tokens, per million. Zero for a model billed by the unit alone."
 	inputPerMtok: Decimal!
 	"Input tokens served from the provider's cache, per million."
 	cachedInputPerMtok: Decimal!
 	"Tokens written to that cache, per million."
 	cacheWritePerMtok: Decimal!
-	"Output tokens, per million."
+	"Output tokens, per million. Zero for a model billed by the unit alone."
 	outputPerMtok: Decimal!
+	"""
+	What it charges per unit of media it makes or reads, for a model billed
+	that way rather than, or as well as, by the token. A run prices such a
+	call by this.
+	"""
+	unit: UnitPriceOutput
 }
 
 """
@@ -9702,6 +9733,34 @@ type PresentForReviewCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: PresentForReviewArgsOutput!
+}
+
+"The unit a media price counts."
+enum PriceUnit {
+	"One generated or edited image."
+	IMAGE
+	"One second of generated video."
+	VIDEO_SECOND
+	"One hour of audio read or written."
+	AUDIO_HOUR
+	"One million characters of text spoken."
+	MILLION_CHARS
+	"One generated clip of music, whatever its length."
+	CLIP
+}
+
+"Exact and set tests on `PriceUnit` (IMAGE, VIDEO_SECOND, AUDIO_HOUR, MILLION_CHARS, CLIP)."
+input PriceUnitFilter {
+	"Exactly this value."
+	eq: PriceUnit
+	"Anything but this value."
+	ne: PriceUnit
+	"One of these values."
+	in: [PriceUnit!]
+	"None of these values."
+	notIn: [PriceUnit!]
+	"Match where there is no value at all."
+	isNull: Boolean
 }
 
 "A file an execution produced."
@@ -19261,6 +19320,58 @@ input UnattendedWrite @oneOf {
 	all: Boolean
 	"Waive the prompts the named profile in `yolo.toml` waives."
 	profile: String
+}
+
+"""
+Filter on `UnitPriceOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
+
+`and`, `or` and `not` compose filters of this same type, and `isNull` asks about the value being absent rather than about its contents.
+"""
+input UnitPriceInput {
+	"""
+	Filter on `UnitPriceOutput.usd`.
+	
+	USD for one `unit`.
+	"""
+	usd: DecimalFilter
+	"""
+	Filter on `UnitPriceOutput.unit`.
+	
+	What is counted.
+	"""
+	unit: PriceUnitFilter
+	"""
+	Filter on `UnitPriceOutput.label`.
+	
+	The short label a price column shows after the amount: `img`, `s`,
+	`hr`, `M chr`, `clip`.
+	"""
+	label: StringFilter
+	"Every filter in this list has to hold."
+	and: [UnitPriceInput!]
+	"At least one filter in this list has to hold."
+	or: [UnitPriceInput!]
+	"This filter must not hold."
+	not: UnitPriceInput
+	"""
+	Match where the value itself is absent.
+	
+	`true` matches only where there is no value, `false` only where there is one.
+	"""
+	isNull: Boolean
+}
+
+"A media model's price for one unit of what it makes or reads."
+type UnitPriceOutput {
+	"USD for one `unit`."
+	usd: Decimal!
+	"What is counted."
+	unit: PriceUnit!
+	"""
+	The short label a price column shows after the amount: `img`, `s`,
+	`hr`, `M chr`, `clip`.
+	"""
+	label: String!
 }
 
 """

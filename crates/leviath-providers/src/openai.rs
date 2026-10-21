@@ -113,9 +113,17 @@ fn is_chat_model_id(model_key: &str) -> bool {
 
 /// Whether this provider runs `model_key`: a chat or reasoning model, or an
 /// image, video, speech or transcription model on its own route.
+///
+/// A media model has to carry one of OpenAI's own family names as well as a
+/// media shape. `-tts` and `transcribe` alone are shapes any vendor's id can
+/// take, and claiming on them alone took `gemini-2.5-flash-preview-tts` and
+/// `muse-voice-transcribe-1.0` for OpenAI.
 #[cfg(feature = "openai")]
 fn serves_id(model_key: &str) -> bool {
-    is_chat_model_id(model_key) || media::kind(model_key).is_some()
+    const MEDIA_FAMILIES: &[&str] = &["gpt-", "chatgpt-", "sora", "tts-", "whisper"];
+    is_chat_model_id(model_key)
+        || (media::kind(model_key).is_some()
+            && MEDIA_FAMILIES.iter().any(|f| model_key.starts_with(f)))
 }
 
 /// `o` followed by a digit: the reasoning line.
@@ -485,7 +493,18 @@ impl Provider for OpenAIProvider {
         // OpenAI's chat models are `gpt-*`, and its reasoning line is `o1`/`o3`
         // and successors. See the note on the Gemini provider for why the
         // capability table is the wrong thing to ask.
-        (serves_id(model_key)
+        self.lists_model(model_key)
+            .or_else(|| serves_id(model_key).then(|| model_key.to_string()))
+    }
+
+    /// The listing once read, this build's chat and media catalogues, and
+    /// the operator's config.
+    fn lists_model(&self, model_key: &str) -> Option<String> {
+        (self.learned.contains(model_key)
+            || CATALOG
+                .iter()
+                .chain(media::CATALOG)
+                .any(|(id, _)| *id == model_key)
             || self.capability_overrides.contains_key(model_key)
             || self.serves.iter().any(|id| id == model_key))
         .then(|| model_key.to_string())

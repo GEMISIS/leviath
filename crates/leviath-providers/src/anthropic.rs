@@ -992,8 +992,20 @@ impl Provider for AnthropicProvider {
     fn serves_model(&self, model_key: &str) -> Option<String> {
         // Anthropic's models are named `claude-*`. See the note on the Gemini
         // provider for why the capability table is the wrong thing to ask.
-        (model_key.starts_with("claude") || self.capability_overrides.contains_key(model_key))
-            .then(|| model_key.to_string())
+        self.lists_model(model_key).or_else(|| {
+            model_key
+                .starts_with("claude")
+                .then(|| model_key.to_string())
+        })
+    }
+
+    /// The listing once read, this build's catalogue, and the operator's
+    /// config.
+    fn lists_model(&self, model_key: &str) -> Option<String> {
+        (self.learned.contains(model_key)
+            || CATALOG.iter().any(|(id, _)| *id == model_key)
+            || self.capability_overrides.contains_key(model_key))
+        .then(|| model_key.to_string())
     }
 
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
@@ -4121,6 +4133,24 @@ mod tests {
         assert!(
             provider.serves_model("not-a-real-model-xyz").is_none(),
             "a model nobody has"
+        );
+        // A Claude the catalogue names is listed; a newer one is a guess
+        // until the listing names it.
+        let (known, _) = CATALOG[0];
+        assert_eq!(provider.lists_model(known).as_deref(), Some(known));
+        assert_eq!(provider.lists_model("claude-opus-99"), None);
+        assert_eq!(
+            provider.serves_model("claude-opus-99").as_deref(),
+            Some("claude-opus-99")
+        );
+        provider.learned.replace(
+            [("claude-opus-99".to_string(), Default::default())]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            provider.lists_model("claude-opus-99").as_deref(),
+            Some("claude-opus-99")
         );
     }
 

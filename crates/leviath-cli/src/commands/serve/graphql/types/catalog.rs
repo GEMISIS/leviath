@@ -45,21 +45,90 @@ impl From<&str> for ModelLimitsSource {
     }
 }
 
-/// What one model costs per million tokens.
+/// What one model costs: per million tokens, and per unit for a media model
+/// billed by the image, the second of video, the clip or the character.
 ///
 /// Absent where the price file has no entry for the model, which is why a run
 /// can report an unpriced call rather than a cost of zero.
 #[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ModelPricing {
-    /// Input tokens, per million.
+    /// Input tokens, per million. Zero for a model billed by the unit alone.
     pub(crate) input_per_mtok: Decimal,
     /// Input tokens served from the provider's cache, per million.
     pub(crate) cached_input_per_mtok: Decimal,
     /// Tokens written to that cache, per million.
     pub(crate) cache_write_per_mtok: Decimal,
-    /// Output tokens, per million.
+    /// Output tokens, per million. Zero for a model billed by the unit alone.
     pub(crate) output_per_mtok: Decimal,
+    /// What it charges per unit of media it makes or reads, for a model billed
+    /// that way rather than, or as well as, by the token. A run prices such a
+    /// call by this.
+    pub(crate) unit: Option<UnitPrice>,
+}
+
+impl From<&leviath_providers::ModelPricing> for ModelPricing {
+    fn from(p: &leviath_providers::ModelPricing) -> Self {
+        Self {
+            input_per_mtok: Decimal(p.input_per_mtok),
+            cached_input_per_mtok: Decimal(p.cached_input_per_mtok),
+            cache_write_per_mtok: Decimal(p.cache_write_per_mtok),
+            output_per_mtok: Decimal(p.output_per_mtok),
+            unit: p.unit.map(UnitPrice::from),
+        }
+    }
+}
+
+/// A media model's price for one unit of what it makes or reads.
+#[mirror]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct UnitPrice {
+    /// USD for one `unit`.
+    pub(crate) usd: Decimal,
+    /// What is counted.
+    pub(crate) unit: PriceUnit,
+    /// The short label a price column shows after the amount: `img`, `s`,
+    /// `hr`, `M chr`, `clip`.
+    pub(crate) label: String,
+}
+
+impl From<leviath_providers::pricing::UnitPrice> for UnitPrice {
+    fn from(price: leviath_providers::pricing::UnitPrice) -> Self {
+        Self {
+            usd: Decimal(price.usd),
+            unit: price.unit.into(),
+            label: price.unit.label().to_string(),
+        }
+    }
+}
+
+/// The unit a media price counts.
+#[mirror]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub(crate) enum PriceUnit {
+    /// One generated or edited image.
+    Image,
+    /// One second of generated video.
+    VideoSecond,
+    /// One hour of audio read or written.
+    AudioHour,
+    /// One million characters of text spoken.
+    MillionChars,
+    /// One generated clip of music, whatever its length.
+    Clip,
+}
+
+impl From<leviath_providers::pricing::PriceUnit> for PriceUnit {
+    fn from(unit: leviath_providers::pricing::PriceUnit) -> Self {
+        use leviath_providers::pricing::PriceUnit as P;
+        match unit {
+            P::Image => Self::Image,
+            P::VideoSecond => Self::VideoSecond,
+            P::AudioHour => Self::AudioHour,
+            P::MillionChars => Self::MillionChars,
+            P::Clip => Self::Clip,
+        }
+    }
 }
 
 /// One provider's node id: `provider:<name>`.
@@ -155,12 +224,7 @@ impl From<&super::super::super::types::ModelEntry> for Model {
             learned: entry.learned,
             released: entry.released.map(Timestamp),
             retires: entry.retires.clone(),
-            pricing: entry.pricing.as_ref().map(|p| ModelPricing {
-                input_per_mtok: Decimal(p.input_per_mtok),
-                cached_input_per_mtok: Decimal(p.cached_input_per_mtok),
-                cache_write_per_mtok: Decimal(p.cache_write_per_mtok),
-                output_per_mtok: Decimal(p.output_per_mtok),
-            }),
+            pricing: entry.pricing.as_ref().map(ModelPricing::from),
             input_types: entry.input_types.clone(),
             output_types: entry.output_types.clone(),
         }
@@ -195,6 +259,11 @@ pub(crate) struct CatalogModel {
     pub(crate) max_output_tokens: i32,
     /// Whether the model takes tool definitions.
     pub(crate) supports_tools: bool,
+    /// What it costs, from the same price file and config a run on its
+    /// provider is billed by, so offers from a provider not set up here can be
+    /// ranked. Absent where nothing prices the model, and for a gateway, whose
+    /// rates come only from its live listing (`models` has those).
+    pub(crate) pricing: Option<ModelPricing>,
     /// Whether this machine has its provider set up, so a run can route to it.
     /// False means connecting the provider is what it takes.
     ///
@@ -236,6 +305,10 @@ impl CatalogModel {
             max_context_tokens: tokens(capabilities.max_context_tokens),
             max_output_tokens: tokens(capabilities.max_output_tokens),
             supports_tools: capabilities.supports_tools,
+            pricing: entry
+                .pricing_with(correction)
+                .as_ref()
+                .map(ModelPricing::from),
             is_configured,
             auth,
         }

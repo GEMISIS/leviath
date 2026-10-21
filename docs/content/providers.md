@@ -290,6 +290,14 @@ one entry per model rather than one per route, and the provider is whichever con
 it. The same spelling works everywhere: write `gpt-5.5`, and OpenAI serves it as `gpt-5.5` while
 OpenRouter serves it as `openai/gpt-5.5`, without the blueprint knowing either id.
 
+A provider answers "do you serve this?" from what it lists: its model list once read, the models
+built into this build, and the models you configured for it. A few also recognise their own family
+by name, so a `gemini-*`, `claude-*` or `gpt-*` newer than this build still routes. That
+recognition is a guess, and it gives way to a list. When any provider in your order lists a model,
+a provider that would only be guessing is not offered it, wherever it sits in `provider_order`. No
+provider claims a model because its name looks like an image, speech or video model: a bare
+`muse-image-1.0` goes to Meta, which lists it, even with Google ahead of Meta in your order.
+
 ### When a gateway's model list cannot be read
 
 A gateway knows what it serves only once its model list has been read. The daemon reads each list

@@ -189,6 +189,58 @@ fn it_claims_its_own_models_and_no_one_elses() {
     }
 }
 
+/// `muse-image-1.0` is Meta's, and the `-image` in it used to be enough for
+/// Google to claim it, so a bare name ran on Google first and failed there.
+/// Google claims a media model only once a list it holds names it.
+#[test]
+fn a_media_shape_alone_is_not_a_claim() {
+    let provider = GeminiProvider::new(client(), "k".to_string());
+    for other in [
+        "muse-image-1.0",
+        "muse-voice-transcribe-1.0",
+        "gpt-4o-mini-tts",
+        "lyria-9",
+        "veo-9",
+    ] {
+        assert!(provider.serves_model(other).is_none(), "{other}");
+    }
+    // Its own catalogue, media included, is listed rather than guessed.
+    for own in [
+        "veo-3.1-generate-preview",
+        "nano-banana-pro-preview",
+        "gemini-2.5-pro",
+    ] {
+        assert_eq!(provider.lists_model(own).as_deref(), Some(own), "{own}");
+    }
+    // A Gemini newer than the catalogue is still Google's, but only a guess.
+    assert_eq!(
+        provider.serves_model("gemini-9-ultra").as_deref(),
+        Some("gemini-9-ultra")
+    );
+    assert_eq!(provider.lists_model("gemini-9-ultra"), None);
+
+    // What the listing names is listed, whatever its shape.
+    provider.learned.replace(
+        [("veo-9".to_string(), LearnedModel::default())]
+            .into_iter()
+            .collect(),
+    );
+    assert_eq!(provider.lists_model("veo-9").as_deref(), Some("veo-9"));
+    // And so is what the operator configured.
+    let configured = GeminiProvider::with_overrides(
+        client(),
+        "k".to_string(),
+        [("my-tuned".to_string(), Default::default())]
+            .into_iter()
+            .collect(),
+        None,
+    );
+    assert_eq!(
+        configured.lists_model("my-tuned").as_deref(),
+        Some("my-tuned")
+    );
+}
+
 // ── Inference ───────────────────────────────────────────────────────────────
 
 #[tokio::test]

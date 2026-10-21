@@ -497,6 +497,16 @@ same list.
 
 ### Fixed
 
+- A bare model name goes to a provider that lists it. Google claimed any id
+  with `-image` or `-tts` in it, so a bare `muse-image-1.0` ran on Google
+  first, which does not serve it, when Google came before Meta in
+  `provider_order`. OpenAI likewise claimed `muse-voice-transcribe-1.0` and
+  Google's speech models. Providers now answer from their model list, the
+  models built in and the models you configured. A provider that only
+  recognises its own family by name (`gemini-*`, `claude-*`, `gpt-*`) is
+  passed over for a model another provider in the order lists. Bedrock
+  claims every model in its own built-in list, including Kimi
+  (`moonshot.kimi-k2-thinking`), which it did not.
 - `GET /api/runs/{id}/tree-status` no longer crashes `lev serve` on a run
   record that names its own descendant as its parent. The walk recursed
   until the stack ran out and aborted the whole server; GraphQL
@@ -1064,6 +1074,16 @@ same list.
 
 ### Added
 
+- GraphQL `catalog` rows carry `pricing`, from the same price file and
+  `[model_capabilities]` rates a run on that provider is billed by, so offers
+  from a provider not set up here can be ranked.
+- GraphQL `ModelPricingOutput` carries `unit`, the price of a media model
+  billed per image, second of video, hour of audio, million characters or
+  music clip (`usd`, `unit`, `label`). Veo, Sora, Muse Image, Lyria and the
+  text-to-speech models report what they cost instead of only token rates.
+- `Provider::lists_model` in `leviath-providers`: whether a list the provider
+  holds names a model, as opposed to `serves_model`, which also answers from
+  a family name. Defaults to `serves_model`.
 - `routing.on_unmatched` in a blueprint, for the graph or one stage. Set to
   `"fail"`, a routing answer that names no stage, asked twice, ends the run
   with an error that names the stage and quotes the answer, instead of

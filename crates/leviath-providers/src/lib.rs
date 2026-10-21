@@ -96,3 +96,6 @@ pub use rhai_provider::RhaiProvider;
 
 #[cfg(all(test, feature = "providers"))]
 mod gateway_tests;
+
+#[cfg(all(test, feature = "providers"))]
+mod catalog_tests;

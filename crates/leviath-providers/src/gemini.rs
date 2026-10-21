@@ -364,12 +364,27 @@ impl Provider for GeminiProvider {
     }
 
     fn serves_model(&self, model_key: &str) -> Option<String> {
-        // Google's models are named `gemini-*`, which is a surer signal than
-        // the capability table's shape: that table answers how big a window to
-        // assume, and its fallback for an unknown model is a guess that can
-        // look exactly like a real entry.
-        (model_key.starts_with("gemini")
-            || media::kind(model_key).is_some()
+        // What a list names, and then Google's own `gemini-*` family, which no
+        // other vendor uses: a newer Gemini than this build's catalogue is
+        // still Google's. The capability table is not asked, since its
+        // fallback for an unknown model is a guess that looks exactly like a
+        // real entry; nor is the media kind, since `-image` and `-tts` are
+        // shapes any vendor's id can take (`muse-image-1.0` is Meta's).
+        self.lists_model(model_key).or_else(|| {
+            model_key
+                .starts_with("gemini")
+                .then(|| model_key.to_string())
+        })
+    }
+
+    /// The native listing once read, this build's chat and media
+    /// catalogues, and the operator's `[model_capabilities]`.
+    fn lists_model(&self, model_key: &str) -> Option<String> {
+        (self.learned.contains(model_key)
+            || CATALOG
+                .iter()
+                .chain(media::CATALOG)
+                .any(|(id, _)| *id == model_key)
             || self.capability_overrides.contains_key(model_key))
         .then(|| model_key.to_string())
     }

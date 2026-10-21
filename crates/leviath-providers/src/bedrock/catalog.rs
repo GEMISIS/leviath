@@ -129,6 +129,21 @@ pub(super) fn vendor_model(model: &str) -> &str {
         .map_or(model, |(_, rest)| rest)
 }
 
+/// What the shipped price file says `model` costs on Bedrock: Anthropic's
+/// list price for a Claude, since AWS bills Claude through Marketplace at the
+/// rates Anthropic publishes and the price file leaves it out, and the
+/// file's own Bedrock rows (an image model's price per image) for the rest.
+///
+/// The provider falls back to this after config and the live listing, and
+/// `catalog` answers from it for a machine with no Bedrock set up, so the two
+/// cannot disagree about a model nobody has configured.
+pub(crate) fn published_pricing(model: &str) -> Option<crate::ModelPricing> {
+    match vendor_of(model) {
+        Vendor::Anthropic => crate::pricing::published_rates("anthropic", vendor_model(model)),
+        _ => crate::pricing::published_rates("bedrock", bare_id(model)),
+    }
+}
+
 /// The rows of `bedrock/windows.toml`, parsed once.
 ///
 /// A parse failure is a panic on first use rather than an error: the file is
