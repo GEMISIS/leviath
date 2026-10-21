@@ -28,6 +28,11 @@ fn goto(dash: &mut Dashboard, id: FieldId) {
 /// Open the editor on `agent`, select `stage` and land on its `tab`.
 fn open_stage(dash: &mut Dashboard, agent: &str, stage: &str, tab: StageTab) {
     open_editor_on(dash, agent);
+    open_stage_tab(dash, stage, tab);
+}
+
+/// Select `stage` in the open editor and land on its `tab`.
+fn open_stage_tab(dash: &mut Dashboard, stage: &str, tab: StageTab) {
     let editor = dash.agents().editor.as_mut().unwrap();
     editor.view.select_stage(stage);
     editor.sync_panel();
@@ -2689,6 +2694,40 @@ fn a_stage_that_inherits_lists_the_shared_regions_and_a_table_seed_reads_as_such
             .region(None, "conventions")
             .is_none()
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A region a stage adds beside the shared layout is listed with the shared
+/// ones, marked as added, and Enter on it opens no shared region panel.
+#[test]
+fn a_stage_lists_the_regions_its_add_lays_over_the_shared_ones() {
+    let (mut dash, root) = dashboard("coder_add");
+    open_editor_on(&mut dash, "coder");
+    let editor = dash.agents().editor.as_mut().unwrap();
+    editor.doc = crate::blueprint_edit::ManifestDoc::parse(
+        "[blueprint]\nname = \"coder\"\nversion = \"1\"\n\n[graph]\n\
+         layout = { total_budget_tokens = 0, regions = [{ name = \"task\", kind = \"pinned\", budget = 100 }] }\n\n\
+         [[graph.stages]]\nname = \"work\"\nadd = { scratch = { kind = \"pinned\", budget = \"10%\" } }\n",
+    )
+    .unwrap();
+    editor.refresh();
+    open_stage_tab(&mut dash, "work", StageTab::Context);
+    let rows = dash.agents().editor.as_ref().unwrap().fields();
+    let added = rows
+        .iter()
+        .find(|f| f.id == FieldId::AddedRegionRow("scratch".into()))
+        .unwrap();
+    assert_eq!(added.label, "  added");
+    assert!(
+        rows.iter()
+            .any(|f| f.id == FieldId::StageRegionRow("task".into()))
+    );
+    goto(&mut dash, FieldId::AddedRegionRow("scratch".into()));
+    dash.handle_key(key(KeyCode::Enter));
+    assert!(matches!(
+        &dash.agents().editor.as_ref().unwrap().panel,
+        Panel::Stage { .. }
+    ));
     let _ = std::fs::remove_dir_all(&root);
 }
 

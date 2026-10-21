@@ -129,6 +129,9 @@ pub(in crate::commands::dashboard) enum FieldId {
     ContextStatus,
     /// A region of the stage's effective layout, by name.
     StageRegionRow(String),
+    /// A region the stage's `add` lays over the shared layout, by name: a
+    /// row to read, edited in the file.
+    AddedRegionRow(String),
     AddRegion,
     /// Give the stage its own layout, or drop it.
     OwnLayout,
@@ -558,6 +561,15 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
                 },
             )];
             for region in &layout.regions {
+                if layout.added.contains(&region.name) {
+                    out.push(Field::new(
+                        FieldId::AddedRegionRow(region.name.clone()),
+                        "  added",
+                        FieldValue::Row(format!("{}  {}{}", region.name, region.kind, region_size(region))),
+                        "Added by this stage's `add`, beside the shared layout; only this stage sees it.",
+                    ));
+                    continue;
+                }
                 out.push(Field::new(
                     FieldId::StageRegionRow(region.name.clone()),
                     if layout.inherited { "  shared" } else { "  own" },

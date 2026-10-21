@@ -2742,3 +2742,57 @@ fn renaming_an_agent_moves_its_directory_and_the_name_in_its_file() {
     assert!(moved.contains("name = \"mine\""), "{moved}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A stage's `add` shows in the regions it runs with, laid over the shared
+/// ones the way the loader lays them, and giving the stage its own layout
+/// moves the added regions into it.
+#[test]
+fn a_stage_add_is_part_of_its_effective_layout() {
+    let body = "[[graph.stages]]\nname = \"a\"\nhide = [\"r\", \"q\"]\n\
+                add = { r = { kind = \"clearable\", budget = 10 }, pad = { kind = \"pinned\", budget = 5 }, odd = 3 }\n\n\
+                [[graph.stages]]\nname = \"b\"\n\n\
+                [graph.stages.add.extra]\nkind = \"temporary\"\nbudget = 7\n";
+    let names = |doc: &ManifestDoc, stage: &str| -> Vec<String> {
+        doc.effective_regions(Some(stage))
+            .regions
+            .into_iter()
+            .map(|r| r.name)
+            .collect()
+    };
+    let mut doc = small(body);
+    let a = doc.effective_regions(Some("a"));
+    assert!(a.inherited);
+    assert_eq!(
+        a.added,
+        ["r", "pad"],
+        "a value that is not a table is skipped"
+    );
+    assert_eq!(names(&doc, "a"), ["r", "pad"]);
+    assert_eq!(
+        a.regions[0].kind, "clearable",
+        "the stage's definition wins"
+    );
+    assert_eq!(names(&doc, "b"), ["r", "extra"]);
+    assert!(doc.effective_regions(None).added.is_empty());
+    assert!(doc.added_regions("ghost").is_empty());
+
+    doc.create_stage_override("a").unwrap();
+    let own = doc.effective_regions(Some("a"));
+    assert!(!own.inherited);
+    assert!(own.added.is_empty());
+    assert_eq!(names(&doc, "a"), ["r", "pad"]);
+    let text = doc.to_toml();
+    assert!(!text.contains("add = {"), "{text}");
+    assert!(text.contains("hide = [\"q\"]"), "{text}");
+    doc.create_stage_override("b").unwrap();
+    assert_eq!(names(&doc, "b"), ["r", "extra"]);
+    let file = doc
+        .file()
+        .unwrap_or_else(|e| panic!("{e}\n{}", doc.to_toml()));
+    let b = file.graph.stages[1].layout.as_ref().unwrap();
+    assert_eq!(b.regions.len(), 2);
+    // An `add` that is not a table moves nothing.
+    let mut flat = small("[[graph.stages]]\nname = \"c\"\nadd = 1\n");
+    flat.create_stage_override("c").unwrap();
+    assert_eq!(names(&flat, "c"), ["r"]);
+}

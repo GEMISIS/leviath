@@ -1,5 +1,95 @@
 {
   "$defs": {
+    "AddedRegionDef": {
+      "additionalProperties": false,
+      "description": "One region a stage adds, named by its key.",
+      "properties": {
+        "accepts": {
+          "default": [],
+          "description": "Mime types a part placed in it may carry. Empty accepts any.",
+          "items": {
+            "description": "A mime pattern.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "admission": {
+          "$ref": "#/$defs/Admission",
+          "default": "evict",
+          "description": "What happens to an entry that does not fit."
+        },
+        "budget": {
+          "$ref": "#/$defs/Budget",
+          "description": "How big it may grow."
+        },
+        "compact_at": {
+          "default": null,
+          "description": "The fraction of its budget at which it is summarized, when it is one\nthat can be.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "describe_in_prompt": {
+          "default": false,
+          "description": "Whether the description is shown to the model.",
+          "type": "boolean"
+        },
+        "description": {
+          "default": null,
+          "description": "What it is for.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/RegionKind",
+          "description": "How it keeps and drops entries."
+        },
+        "required": {
+          "default": false,
+          "description": "Whether a spawn that leaves it empty is refused.",
+          "type": "boolean"
+        },
+        "required_message": {
+          "default": null,
+          "description": "What that refusal says.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Seed"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What fills it at spawn, besides inputs bound to it."
+        },
+        "summarizable": {
+          "default": true,
+          "description": "Whether it may be summarized when the context is compacted.",
+          "type": "boolean"
+        },
+        "volatility": {
+          "$ref": "#/$defs/Volatility",
+          "default": "rewritten",
+          "description": "How often its contents change, for prompt caching."
+        }
+      },
+      "required": [
+        "kind",
+        "budget"
+      ],
+      "type": "object"
+    },
     "Admission": {
       "description": "What a region does when a write does not fit.\n\nThe default is what every region did before this existed: make room. That\nis the right behaviour for a transcript, where the oldest turn is the least\nuseful thing present and losing it costs nothing anyone will notice.\n\nIt is the wrong behaviour for a region holding material the agent chose to\nkeep. There, silently dropping the oldest entry is a decision about what\nmatters, taken by whichever write happened to arrive when the region was\nfull - and the agent never learns it happened. [`Admission::Reject`] hands\nthat decision back: the write fails, the agent is told the region is full,\nand it releases what it is finished with before adding more.",
       "oneOf": [
@@ -2866,6 +2956,14 @@
           "default": true,
           "description": "Whether messages sent to the run reach this stage.",
           "type": "boolean"
+        },
+        "add": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AddedRegionDef"
+          },
+          "default": {},
+          "description": "Regions this stage shows beside the shared layout, keyed by name. A name the shared layout declares is refused unless the stage also hides it, which gives that region this definition for this stage. Not allowed beside `layout`.",
+          "type": "object"
         },
         "allow_as_worker": {
           "default": false,

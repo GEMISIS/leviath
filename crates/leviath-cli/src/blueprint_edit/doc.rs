@@ -423,6 +423,9 @@ pub(crate) struct EffectiveRegions {
     /// `true` when they are the graph's shared regions, `false` when the
     /// stage has a `layout` of its own.
     pub inherited: bool,
+    /// The names of the regions the stage's `add` lays over the shared ones,
+    /// in its order. Empty for a stage with a layout of its own.
+    pub added: Vec<String>,
 }
 
 /// A stage's `tool_routing`.
@@ -660,18 +663,43 @@ impl ManifestDoc {
     }
 
     /// The layout a stage runs with: its own when it declares one, the
-    /// graph's otherwise. `None` asks for the graph's.
+    /// graph's otherwise, with whatever its `add` lays over that. `None` asks
+    /// for the graph's.
     pub(crate) fn effective_regions(&self, stage: Option<&str>) -> EffectiveRegions {
         match stage {
             Some(name) if self.layout_table(Some(name)).is_some() => EffectiveRegions {
                 regions: self.regions(Some(name)),
                 inherited: false,
+                added: Vec::new(),
             },
-            _ => EffectiveRegions {
-                regions: self.regions(None),
-                inherited: true,
-            },
+            _ => {
+                let added = stage.map(|s| self.added_regions(s)).unwrap_or_default();
+                EffectiveRegions {
+                    added: added.iter().map(|r| r.name.clone()).collect(),
+                    regions: leviath_blueprint::merge_regions(&self.regions(None), added, |r| {
+                        r.name.as_str()
+                    }),
+                    inherited: true,
+                }
+            }
         }
+    }
+
+    /// The regions a stage's `add` declares, in document order; empty when
+    /// it has none.
+    pub(crate) fn added_regions(&self, stage: &str) -> Vec<RegionView> {
+        let bindings = self.region_bindings();
+        self.stage_table(stage)
+            .and_then(|s| sub(s, "add"))
+            .map(|add| {
+                add.iter()
+                    .filter_map(|(name, item)| {
+                        let table = item.as_table_like()?;
+                        Some(named_region_view(name, table, &bindings))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Each input's name with the regions it fills, in declaration order.
@@ -920,7 +948,18 @@ fn edge_view(table: &dyn TableLike) -> Option<EdgeView> {
 }
 
 fn region_view(table: &dyn TableLike, bindings: &[(String, Vec<String>)]) -> Option<RegionView> {
-    let name = get_str(table, "name")?.to_string();
+    let name = get_str(table, "name")?;
+    Some(named_region_view(name, table, bindings))
+}
+
+/// A region's view, named by `name` rather than its table's `name` key: a
+/// region of a stage's `add` is named by its key.
+fn named_region_view(
+    name: &str,
+    table: &dyn TableLike,
+    bindings: &[(String, Vec<String>)],
+) -> RegionView {
+    let name = name.to_string();
     let kind = table.get("kind");
     let kind_table = kind.and_then(Item::as_table_like);
     let kind_name = kind
@@ -955,7 +994,7 @@ fn region_view(table: &dyn TableLike, bindings: &[(String, Vec<String>)]) -> Opt
         .find(|(_, regions)| regions.contains(&name))
         .map(|(input, _)| input.clone())
         .unwrap_or_default();
-    Some(RegionView {
+    RegionView {
         kind: kind_name,
         budget_percent: percent_text.and_then(parse_percent),
         max_tokens: budget_table.and_then(|b| get_count(b, "max")),
@@ -974,7 +1013,7 @@ fn region_view(table: &dyn TableLike, bindings: &[(String, Vec<String>)]) -> Opt
             .to_string(),
         accepts: get_strings(table, "accepts"),
         name,
-    })
+    }
 }
 
 /// `"35%"` as 35.0; anything else as `None`.

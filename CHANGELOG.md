@@ -1014,6 +1014,17 @@ same list.
   accepts. Point Taplo or Even Better TOML at it to get completion and
   checks while editing; see "Editor setup" in the blueprint docs.
 
+- A stage can inherit the shared context layout and add regions to it with
+  `add`, a table of region definitions keyed by name:
+  `add = { scratch = { kind = "pinned", budget = "10%" } }`, or
+  `[graph.stages.add.scratch]`. It composes with `hide`, and `hide = ["x"]`
+  beside `add.x` gives one shared region a definition of its own for that
+  stage. `add` beside the stage's own `layout`, an added name the shared
+  layout already declares but the stage does not hide, and an always-visible
+  region are refused when the blueprint loads. Reading the blueprint folds
+  `add` into the stage's layout, so `lev validate`, the API, the dashboard
+  and the runtime all see the merged regions, budgets are checked as for any
+  stage layout, and the run file layout does not change.
 - `effort = "low" | "medium" | "high"` on a stage's model block: one
   provider-neutral reasoning effort that each provider sends in its own
   field, per request, so a fallback on another provider gets its own

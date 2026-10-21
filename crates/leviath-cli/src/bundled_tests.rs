@@ -716,6 +716,14 @@ fn the_blueprint_schema_rejects_what_the_reader_rejects() {
     // rejecting everything.
     assert!(!rejects(&minimal), "a minimal blueprint");
     assert!(BlueprintFile::parse(&minimal).is_ok());
+    // A stage that adds a region to the shared layout is in the schema too,
+    // though the graph's types never hold `add`.
+    let adding = minimal.replace(
+        "system_prompt = \"work\"",
+        "system_prompt = \"work\", add = { scratch = { kind = \"pinned\", budget = \"10%\" } }",
+    );
+    assert!(!rejects(&adding), "a stage adding a region");
+    assert!(BlueprintFile::parse(&adding).is_ok());
 
     for (bad, why) in [
         (
@@ -725,6 +733,20 @@ fn the_blueprint_schema_rejects_what_the_reader_rejects() {
         (
             minimal.replace("kind = \"pinned\"", "kind = \"pinned\", bugdet = 3"),
             "a typo'd region key",
+        ),
+        (
+            minimal.replace(
+                "system_prompt = \"work\"",
+                "add = { scratch = { kind = \"pinned\", bugdet = 3 } }",
+            ),
+            "a typo'd key in an added region",
+        ),
+        (
+            minimal.replace(
+                "system_prompt = \"work\"",
+                "add = { scratch = { name = \"scratch\", kind = \"pinned\", budget = 3 } }",
+            ),
+            "an added region that names itself",
         ),
         (
             minimal.replace("system_prompt = \"work\"", "max_iteratoins = 5"),
@@ -774,6 +796,38 @@ fn docs_blueprint_blocks() -> Vec<(String, String)> {
     blocks
 }
 
+/// Blueprints whose stages `add` regions, inline and as tables, with an
+/// override (`hide` beside an `add` of the same name). No bundled file uses
+/// `add`, and a key the graph's types never hold is the one a schema
+/// generated from them would forget.
+fn stage_add_blueprints() -> Vec<(String, String)> {
+    let inline = crate::test_support::tiny_blueprint("a").replace(
+        "system_prompt = \"work\"",
+        "system_prompt = \"work\", add = { scratch = { kind = \"pinned\", budget = \"10%\" } }",
+    );
+    let tables = "[blueprint]\nname = \"b\"\nversion = \"1.0.0\"\n\n\
+        [graph.layout]\ntotal_budget_tokens = 1000\n\n\
+        [[graph.layout.regions]]\nname = \"task\"\nkind = \"pinned\"\nbudget = 500\n\n\
+        [[graph.layout.regions]]\nname = \"notes\"\nkind = \"clearable\"\nbudget = 200\n\n\
+        [[graph.stages]]\nname = \"main\"\nsystem_prompt = \"work\"\nhide = [\"notes\"]\n\n\
+        [graph.stages.add.notes]\nkind = \"pinned\"\nbudget = 300\n\n\
+        [graph.stages.add.scratch]\nkind = { kind = \"sliding_window\", max_items = 4 }\nbudget = 100\n"
+        .to_string();
+    vec![
+        ("stage add (inline)".to_string(), inline),
+        ("stage add (tables, override)".to_string(), tables),
+    ]
+}
+
+#[test]
+fn the_stage_add_examples_are_ones_validate_accepts() {
+    // Otherwise the corpus would leave them out and the schema checks over it
+    // would say nothing about `add`.
+    for (label, text) in stage_add_blueprints() {
+        assert!(validate_accepts(&text).is_some(), "{label}\n{text}");
+    }
+}
+
 /// Blueprints `lev validate` accepts, as JSON, labelled: every bundled file,
 /// each rewritten by the writer into its readable short forms, each as serde
 /// writes it in full, and every docs example the reader takes. Different
@@ -789,6 +843,7 @@ pub(crate) fn accepted_blueprints() -> Vec<(String, serde_json::Value)> {
         sources.push((format!("{} (rewritten)", agent.name), rewritten));
     }
     sources.extend(docs_blueprint_blocks());
+    sources.extend(stage_add_blueprints());
     let mut accepted = Vec::new();
     for (label, text) in sources {
         let Some(file) = validate_accepts(&text) else {
