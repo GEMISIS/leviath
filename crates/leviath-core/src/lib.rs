@@ -12,6 +12,7 @@
 
 pub mod cache;
 pub mod config;
+pub mod context;
 pub mod context_cause;
 pub mod credentials;
 pub mod duration;

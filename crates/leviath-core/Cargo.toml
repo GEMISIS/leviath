@@ -30,7 +30,8 @@ hex = { workspace = true }
 # Hashes stored or compared across builds (`leviath_core::hash`).
 siphasher = { workspace = true }
 # A part's bytes on the control socket and in a JSON request
-# (`leviath_core::mime::inbound`), which are text transports.
+# (`leviath_core::mime::inbound`), which are text transports, and in a request
+# a model is sent (`leviath_core::mime::hydrate`).
 base64 = { workspace = true }
 # The run graph reuses a few enums from here, and it exports a JSON Schema.
 schemars = { workspace = true }

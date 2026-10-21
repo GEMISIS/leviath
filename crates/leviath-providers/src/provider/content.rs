@@ -165,33 +165,10 @@ impl ContentBlock {
     }
 }
 
-/// A system prompt block, separated from conversation messages.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemBlock {
-    /// The text content of this system block.
-    pub text: String,
-    /// Cache hint for this system block.
-    pub cache_hint: leviath_core::CacheHint,
-    /// The region this block was rendered from, for diagnostics.
-    ///
-    /// Empty for a block that is not a region - a hint, a tool preamble - which
-    /// is exactly the set of blocks no volatility warning could be about.
-    ///
-    /// Defaulted on the wire so a request serialized before these fields
-    /// existed still deserializes - a script provider that round-trips one, or
-    /// a dumped body replayed later, must not fail on a field it predates.
-    #[serde(default)]
-    pub region: String,
-    /// How much the region this block came from moves between requests.
-    ///
-    /// Carried so assembly can order blocks by it: a provider caches by prefix,
-    /// so a block that moves invalidates everything behind it, and the
-    /// arrangement that pays is stable content first and churn last. The
-    /// region's *kind* cannot answer this - a pinned region is written
-    /// constantly - so the blueprint says and this carries the answer.
-    #[serde(default)]
-    pub volatility: leviath_core::Volatility,
-}
+/// A system prompt block. Defined beside the region assembly that produces
+/// it, in [`leviath_core::context`], and re-exported here where requests are
+/// built from it.
+pub use leviath_core::context::SystemBlock;
 
 /// An `f32` as JSON, at the precision it was written with.
 ///

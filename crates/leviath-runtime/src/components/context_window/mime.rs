@@ -6,9 +6,14 @@
 //! fills the bytes in or drops the block right before the request is sent,
 //! so the assembled request stays small and every lane that skips hydration
 //! still sends a correct, text-only version of the same turn.
+//!
+//! The layout itself (which pieces, in what order, with which pointer text)
+//! is [`leviath_core::context`]'s; this file turns its pieces into this
+//! crate's provider blocks.
 
-use leviath_core::mime::{Part, PartBody};
-use leviath_core::region::{EntryContent, Region};
+use leviath_core::context::PartBlock;
+use leviath_core::mime::Part;
+use leviath_core::region::EntryContent;
 use leviath_providers::{ContentBlock, MessageContent};
 
 impl super::ContextWindow {
@@ -69,25 +74,21 @@ impl super::ContextWindow {
     }
 }
 
+/// Pieces laid out by [`leviath_core::context`] as provider blocks: text as a
+/// `Text` block, a stored part as an unhydrated `Mime` block.
+pub(super) fn provider_blocks(pieces: Vec<PartBlock<'_>>) -> Vec<ContentBlock> {
+    pieces
+        .into_iter()
+        .filter_map(|piece| match piece {
+            PartBlock::Text(text) => Some(ContentBlock::Text { text }),
+            PartBlock::Stored(part) => ContentBlock::mime(part),
+        })
+        .collect()
+}
+
 /// Every part of `content` as blocks, in order.
 pub(super) fn content_blocks(content: &EntryContent) -> Vec<ContentBlock> {
-    let mut blocks = Vec::new();
-    for part in content.parts() {
-        match &part.body {
-            PartBody::Inline(text) => {
-                if !text.is_empty() {
-                    blocks.push(ContentBlock::Text { text: text.clone() });
-                }
-            }
-            PartBody::Stored(blob) => {
-                blocks.push(ContentBlock::Text {
-                    text: blob.stand_in.clone(),
-                });
-                blocks.extend(ContentBlock::mime(part));
-            }
-        }
-    }
-    blocks
+    provider_blocks(leviath_core::context::content_blocks(content))
 }
 
 /// Only the mime blocks of `content`, for a turn whose text has already
@@ -136,36 +137,11 @@ pub(super) fn message_content(content: &EntryContent) -> MessageContent {
     }
 }
 
-/// The stored parts of a region that renders into the system prompt, as
-/// blocks for the one leading user message that carries them.
-///
-/// A system block is text, so a region's stored parts cannot travel inside
-/// it. They are lifted into a user message placed before the conversation,
-/// each after a pointer naming the region, the key and the part, so the
-/// model can tie the bytes to the stand-in it reads in the system prompt.
-pub(super) fn lifted_blocks(region: &Region) -> Vec<ContentBlock> {
-    let mut blocks = Vec::new();
-    for entry in &region.content {
-        for part in entry.content.parts() {
-            let PartBody::Stored(blob) = &part.body else {
-                continue;
-            };
-            let pointer = match &entry.key {
-                Some(key) => format!("[{} / {key}] {}", region.name, blob.stand_in),
-                None => format!("[{}] {}", region.name, blob.stand_in),
-            };
-            blocks.push(ContentBlock::Text { text: pointer });
-            blocks.extend(ContentBlock::mime(part));
-        }
-    }
-    blocks
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use leviath_core::mime::{Blob, MimeRegistry, MimeType, Part};
-    use leviath_core::region::RegionKind;
+    use leviath_core::region::{Region, RegionKind};
 
     fn stored(name: &str) -> Part {
         let reg = MimeRegistry::builtin();
@@ -395,7 +371,7 @@ mod tests {
         region
             .add_entry(EntryContent::text("just text"), 1)
             .unwrap();
-        let blocks = lifted_blocks(&region);
+        let blocks = provider_blocks(leviath_core::context::lifted_blocks(&region));
         assert_eq!(blocks.len(), 4);
         assert_eq!(
             blocks[0],

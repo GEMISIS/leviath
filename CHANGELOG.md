@@ -987,6 +987,23 @@ same list.
 
 ### Added
 
+- **Library.** `leviath-core` gains the provider-neutral half of context
+  assembly, so a program that calls a model API itself can lay out its
+  context the way a run does without depending on `leviath-runtime` or
+  `leviath-providers`. `leviath_core::context` renders regions as system
+  blocks (labels, chunking, volatility order, cache hints, the message
+  breakpoint) and lifts their stored parts; `assemble_system` is the whole
+  system side. `leviath_core::mime::hydrate` decides per stored part whether
+  a model is sent its bytes, its text or its stand-in, from a plain list of
+  input mime patterns. `SystemBlock` moved there (still re-exported as
+  `leviath_providers::SystemBlock`), and `leviath_providers::mime` re-exports
+  `Family`, `family_of`, `data_uri` and `HydrationReport` from it. What a
+  run sends does not change.
+- **Library.** `leviath_core::mime::parse_pattern` checks a mime pattern
+  (`image/png`, `image/*`, `*/*`) by the rule the registry reads its keys
+  with, and returns a `MimePattern` whose `matches` answers as
+  `MimeType::matches` does. The registry now reads its keys through it; what
+  it accepts does not change.
 - `effort = "low" | "medium" | "high"` on a stage's model block: one
   provider-neutral reasoning effort that each provider sends in its own
   field, per request, so a fallback on another provider gets its own

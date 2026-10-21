@@ -11,6 +11,12 @@
 //!   file is UTF-8) or the part asks for text, whatever the model declares;
 //! - the stand-in line otherwise.
 //!
+//! The decision itself lives in [`leviath_core::mime::hydrate`], which works on
+//! a plain list of input patterns and knows nothing of providers, so a program
+//! that calls a model API itself makes the same choice. What stays here is
+//! what needs this crate's types: reading a request's blocks, writing each
+//! outcome back into them, the [`WireShape`]s and the vendor encoders.
+//!
 //! A vendor encoder then turns a hydrated block into that vendor's shape. A
 //! block that reaches an encoder unhydrated is written as its stand-in, so a
 //! lane that never hydrates (routing, compaction) still sends a correct
@@ -18,37 +24,12 @@
 
 use std::sync::Arc;
 
-use base64::Engine;
-use leviath_core::mime::{BlobRef, Delivery, MimeRegistry, MimeType};
+use leviath_core::mime::hydrate::{self as core_hydrate, MimeSlot, Outcome};
+pub use leviath_core::mime::hydrate::{Family, HydrationReport, data_uri, family_of};
+use leviath_core::mime::{BlobRef, MimeRegistry, MimeType};
 
 use crate::capabilities::ModelMime;
 use crate::provider::{ContentBlock, InferenceRequest, MessageContent};
-
-/// The families the built-in encoders know how to send.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Family {
-    /// `image/*`.
-    Image,
-    /// `audio/*`.
-    Audio,
-    /// `video/*`.
-    Video,
-    /// `application/pdf`.
-    Document,
-    /// Anything else, which no built-in encoder has a shape for.
-    Other,
-}
-
-/// The encoder family a type belongs to, by the vendors' own grouping.
-pub fn family_of(mime_type: &MimeType) -> Family {
-    match (mime_type.kind(), mime_type.subtype()) {
-        ("image", _) => Family::Image,
-        ("audio", _) => Family::Audio,
-        ("video", _) => Family::Video,
-        ("application", "pdf") => Family::Document,
-        _ => Family::Other,
-    }
-}
 
 /// The request shapes this crate encodes a mime block into, and so what each
 /// can carry beside text.
@@ -102,22 +83,7 @@ impl WireShape {
     }
 }
 
-/// The family a mime pattern names: `None` for text and for `*/*`, which
-/// every shape carries; a pattern that names no built-in family is `Other`.
-fn family_of_pattern(pattern: &str) -> Option<Family> {
-    let (kind, _) = pattern.split_once('/')?;
-    match kind {
-        "text" | "*" => None,
-        "image" => Some(Family::Image),
-        "audio" => Some(Family::Audio),
-        "video" => Some(Family::Video),
-        _ => Some(
-            MimeType::parse(pattern)
-                .map(|t| family_of(&t))
-                .unwrap_or(Family::Other),
-        ),
-    }
-}
+use leviath_core::mime::hydrate::family_of_pattern;
 
 #[cfg(test)]
 mod shape_tests {
@@ -167,23 +133,19 @@ mod shape_tests {
     }
 }
 
-/// `data:<type>;base64,<bytes>` for a hydrated mime block.
-pub fn data_uri(mime_type: &MimeType, data: &str) -> String {
-    format!("data:{mime_type};base64,{data}")
-}
-
 /// How much stored media a request may carry, and what fetches its bytes.
+///
+/// The provider-side form of [`core_hydrate::Hydration`]: it names the model
+/// by its [`ModelMime`] and the provider by its [`crate::files::MediaLimits`],
+/// and [`hydrate_request`] reads the plain lists the decision takes out of
+/// them.
 pub struct Hydration<'a> {
     /// What the model takes.
     pub mime: &'a ModelMime,
     /// The registry, for the text flag.
     pub registry: &'a MimeRegistry,
     /// The bytes of stored media the request may carry before the oldest parts
-    /// become stand-ins. This is the raw part size, not the base64 on the wire,
-    /// and it is a backstop for vendor request-size limits a token budget
-    /// cannot see: an image's token estimate is the same whatever its byte
-    /// size, so a request can sit inside its context window and still be
-    /// megabytes of media.
+    /// become stand-ins. See [`core_hydrate::Hydration::max_media_bytes`].
     pub max_media_bytes: u64,
     /// The bytes for a reference, or `None` when they are missing.
     pub fetch: &'a dyn Fn(&BlobRef) -> Option<Arc<[u8]>>,
@@ -196,40 +158,6 @@ pub struct Hydration<'a> {
     pub why_inline: &'a str,
 }
 
-/// What hydration did, for the run's log.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HydrationReport {
-    /// Blocks sent with their bytes.
-    pub sent: usize,
-    /// Blocks sent as text, through the bypass.
-    pub as_text: usize,
-    /// Blocks sent as their stand-in because the model does not take them.
-    pub stand_ins: usize,
-    /// Blocks sent as their stand-in because the request was over its
-    /// media-byte cap.
-    pub capped: usize,
-    /// Hashes whose bytes could not be read.
-    pub missing: Vec<String>,
-    /// Blocks sent by the id of the vendor's copy.
-    pub by_file: usize,
-    /// Blocks sent as their stand-in because they were over the provider's
-    /// inline limit for their type.
-    pub too_large: usize,
-    /// Blocks sent as their stand-in because the provider takes their type
-    /// only by file id and they were not uploaded.
-    pub not_uploaded: usize,
-}
-
-/// What one block should become.
-enum Fate {
-    Bytes,
-    Remote,
-    TooLarge(u64),
-    NotUploaded,
-    Text,
-    StandIn,
-}
-
 /// Whether the model is sent `block`'s bytes natively (inline or by file id),
 /// as opposed to text or its stand-in. What the runtime asks before it
 /// uploads anything.
@@ -237,169 +165,61 @@ pub fn sends_natively(block: &ContentBlock, mime: &ModelMime) -> bool {
     let ContentBlock::Mime { part, deliver, .. } = block else {
         return false;
     };
-    match deliver {
-        Some(Delivery::Text) | Some(Delivery::StandIn) => false,
-        Some(Delivery::Native) | None => mime.accepts(&part.mime_type),
-    }
+    core_hydrate::sends_natively(part, *deliver, &mime.input)
 }
 
-fn fate(block: &ContentBlock, h: &Hydration<'_>) -> Fate {
-    let ContentBlock::Mime {
-        part,
-        deliver,
-        remote,
-        ..
-    } = block
-    else {
-        return Fate::StandIn;
-    };
-    if sends_natively(block, h.mime) {
-        return match (remote, h.limits.inline_part_limit(&part.mime_type)) {
-            (Some(_), _) => Fate::Remote,
-            // A type the provider takes only by file id never goes inline: it
-            // is refused with its reason instead. Muse Spark's audio is one,
-            // because Meta answers inline audio with a 200 and drops it unread
-            // (https://github.com/meta-models/meta-model-cookbook/issues/59).
-            (None, _) if part.mime_type.matches_any(h.limits.file_only) => Fate::NotUploaded,
-            (None, Some(max)) if part.size > max => Fate::TooLarge(max),
-            (None, _) => Fate::Bytes,
-        };
-    }
-    match deliver {
-        Some(Delivery::StandIn) => Fate::StandIn,
-        _ if h.registry.info(&part.mime_type).text => Fate::Text,
-        Some(Delivery::Text) => Fate::Text,
-        _ => Fate::StandIn,
-    }
-}
-
-/// A byte count the way a person reads one: `5.0 MiB`.
-fn human_bytes(bytes: u64) -> String {
-    format!("{:.1} MiB", bytes as f64 / crate::files::MIB as f64)
-}
-
-/// Fill every mime block in `request` with what the model should get.
+/// Fill every mime block in `request` with what the model should get, as
+/// [`core_hydrate::hydrate`] decides it.
 pub fn hydrate_request(request: &mut InferenceRequest, h: &Hydration<'_>) -> HydrationReport {
-    let mut report = HydrationReport::default();
-    // Sum the raw bytes that would be sent natively, so the cap can shed the
-    // oldest first: messages are in conversation order, so the first blocks
-    // seen are the oldest. The newest media is the media a stage most likely
-    // still needs, so it is what the cap keeps.
-    let total_bytes: u64 = request
+    let decide = core_hydrate::Hydration {
+        input: &h.mime.input,
+        registry: h.registry,
+        max_media_bytes: h.max_media_bytes,
+        fetch: h.fetch,
+        inline_part_bytes: h.limits.inline_part_bytes,
+        file_only: h.limits.file_only,
+        why_inline: h.why_inline,
+    };
+    // Messages are in conversation order, so the first slots are the oldest,
+    // which is the order the media-byte cap sheds in.
+    let slots: Vec<MimeSlot<'_>> = request
         .messages
         .iter()
-        .flat_map(|m| match &m.content {
-            MessageContent::Blocks(blocks) => blocks.iter().collect::<Vec<_>>(),
-            MessageContent::Text(_) => Vec::new(),
+        .filter_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => Some(blocks),
+            MessageContent::Text(_) => None,
         })
-        .map(|b| match (fate(b, h), b) {
-            (Fate::Bytes, ContentBlock::Mime { part, .. }) => part.size,
-            _ => 0,
-        })
-        .sum();
-    let mut to_shed = total_bytes.saturating_sub(h.max_media_bytes);
-    for message in &mut request.messages {
-        let MessageContent::Blocks(blocks) = &mut message.content else {
-            continue;
-        };
-        for block in blocks.iter_mut() {
-            let ContentBlock::Mime {
+        .flatten()
+        .filter_map(|b| match b {
+            ContentBlock::Mime {
                 part,
-                name,
                 deliver,
+                remote,
                 ..
-            } = &*block
-            else {
-                continue;
-            };
-            let (part, name, deliver) = (part.clone(), name.clone(), *deliver);
-            let outcome = match fate(block, h) {
-                Fate::Bytes if to_shed > 0 => {
-                    to_shed = to_shed.saturating_sub(part.size);
-                    report.capped += 1;
-                    Fate::StandIn
-                }
-                other => other,
-            };
-            match outcome {
-                Fate::Remote => report.by_file += 1,
-                Fate::TooLarge(max) => {
-                    report.too_large += 1;
-                    let why = match h.why_inline {
-                        "" => String::new(),
-                        why => format!("; {why}"),
-                    };
-                    *block = ContentBlock::Text {
-                        text: format!(
-                            "{} [not sent: {} is over the {} this provider takes inline{why}]",
-                            part.stand_in,
-                            human_bytes(part.size),
-                            human_bytes(max)
-                        ),
-                    };
-                }
-                Fate::NotUploaded => {
-                    report.not_uploaded += 1;
-                    let why = match h.why_inline {
-                        "" => "it could not be uploaded",
-                        why => why,
-                    };
-                    *block = ContentBlock::Text {
-                        text: format!(
-                            "{} [not sent: this provider takes {} only as an uploaded file, \
-                             because inline it is dropped unread \
-                             (meta-model-cookbook#59), and {why}]",
-                            part.stand_in, part.mime_type
-                        ),
-                    };
-                }
-                Fate::Bytes => match (h.fetch)(&part) {
-                    Some(bytes) => {
-                        *block = ContentBlock::Mime {
-                            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                            part,
-                            name,
-                            deliver,
-                            remote: None,
-                        };
-                        report.sent += 1;
-                    }
-                    None => {
-                        report.missing.push(part.sha256.clone());
-                        *block = ContentBlock::Text {
-                            text: part.stand_in.clone(),
-                        };
-                    }
-                },
-                Fate::Text => match (h.fetch)(&part) {
-                    Some(bytes) => match std::str::from_utf8(&bytes) {
-                        Ok(text) => {
-                            *block = ContentBlock::Text {
-                                text: text.to_string(),
-                            };
-                            report.as_text += 1;
-                        }
-                        Err(_) => {
-                            report.stand_ins += 1;
-                            *block = ContentBlock::Text {
-                                text: part.stand_in.clone(),
-                            };
-                        }
-                    },
-                    None => {
-                        report.missing.push(part.sha256.clone());
-                        *block = ContentBlock::Text {
-                            text: part.stand_in.clone(),
-                        };
-                    }
-                },
-                Fate::StandIn => {
-                    report.stand_ins += 1;
-                    *block = ContentBlock::Text {
-                        text: part.stand_in.clone(),
-                    };
-                }
-            }
+            } => Some(MimeSlot {
+                part,
+                deliver: *deliver,
+                remote: remote.is_some(),
+            }),
+            _ => None,
+        })
+        .collect();
+    let (outcomes, report) = core_hydrate::hydrate(&slots, &decide);
+    // The same blocks in the same order, now to write each outcome into.
+    let blocks = request
+        .messages
+        .iter_mut()
+        .filter_map(|m| match &mut m.content {
+            MessageContent::Blocks(blocks) => Some(blocks),
+            MessageContent::Text(_) => None,
+        })
+        .flatten()
+        .filter(|b| matches!(b, ContentBlock::Mime { .. }));
+    for (block, outcome) in blocks.zip(outcomes) {
+        match (outcome, &mut *block) {
+            (Outcome::Data(bytes), ContentBlock::Mime { data, .. }) => *data = bytes,
+            (Outcome::Text(text), _) => *block = ContentBlock::Text { text },
+            _ => {}
         }
     }
     report
@@ -604,7 +424,7 @@ fn audio_format(mime_type: &MimeType) -> &'static str {
 mod tests {
     use super::*;
     use crate::provider::Message;
-    use leviath_core::mime::{Blob, Part};
+    use leviath_core::mime::{Blob, Delivery, Part};
 
     fn reg() -> MimeRegistry {
         MimeRegistry::builtin()

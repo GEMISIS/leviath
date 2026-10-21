@@ -21,9 +21,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod cell;
 pub mod check;
+pub mod hydrate;
 pub mod inbound;
 pub mod inline_refs;
 pub mod part;
+pub mod pattern;
 pub mod probe;
 pub mod registry;
 pub mod store;
@@ -32,6 +34,7 @@ pub use cell::RegistryCell;
 pub use check::{FnCheck, MimeCheck};
 pub use inbound::InboundPart;
 pub use part::{Blob, BlobRef, Delivery, Part, PartBody};
+pub use pattern::{MimePattern, parse_pattern};
 pub use registry::{MimeInfo, MimeRegistry, TokenRule};
 pub use store::{BlobStore, MemoryBlobStore, is_sha256_hex, sha256_hex, verify_blob};
 
@@ -58,6 +61,11 @@ pub enum MimeTypeError {
     Character(String),
 }
 
+/// Whether `c` may appear in a mime type's `type` or `subtype`.
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "!#$&-^_.+*".contains(c)
+}
+
 impl MimeType {
     /// Parse and normalise: trims, lowercases, refuses parameters.
     pub fn parse(raw: &str) -> Result<Self, MimeTypeError> {
@@ -72,8 +80,7 @@ impl MimeType {
         if kind.is_empty() || sub.is_empty() || sub.contains('/') {
             return Err(MimeTypeError::Shape(raw.to_string()));
         }
-        let ok = |c: char| c.is_ascii_alphanumeric() || "!#$&-^_.+*".contains(c);
-        if !lower.chars().all(|c| c == '/' || ok(c)) {
+        if !lower.chars().all(|c| c == '/' || is_token_char(c)) {
             return Err(MimeTypeError::Character(raw.to_string()));
         }
         Ok(Self(lower))
@@ -96,14 +103,11 @@ impl MimeType {
 
     /// Whether this type matches `pattern`, which may be exact (`image/png`),
     /// a family wildcard (`image/*`) or the catch-all (`*/*`).
+    ///
+    /// Lenient: a malformed pattern matches nothing rather than failing. To
+    /// check a pattern someone wrote, parse it with [`parse_pattern`].
     pub fn matches(&self, pattern: &str) -> bool {
-        let pattern = pattern.trim().to_ascii_lowercase();
-        match pattern.split_once('/') {
-            Some(("*", "*")) => true,
-            Some((kind, "*")) => self.kind() == kind,
-            Some(_) => self.0 == pattern,
-            None => false,
-        }
+        crate::mime::pattern::matches_normalised(&pattern.trim().to_ascii_lowercase(), self)
     }
 
     /// Whether any pattern in `patterns` matches, as [`Self::matches`].
