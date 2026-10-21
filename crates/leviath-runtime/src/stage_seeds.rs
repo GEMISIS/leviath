@@ -28,7 +28,7 @@ use bevy_ecs::prelude::*;
 use crate::components::ContextWindow;
 use crate::insert::RunSpecC;
 use crate::pipeline::{ReadyToInfer, StageJustEntered};
-use crate::spec::graph::{RegionLayoutDef, Seed, SeedRefresh, SeedToolCall};
+use crate::spec::graph::{RegionLayoutDef, RunGraph, Seed, SeedRefresh, SeedToolCall};
 
 /// One dispatched stage-entry seed call, and where its answer belongs.
 ///
@@ -69,6 +69,24 @@ pub(crate) fn refreshing_regions(layout: &RegionLayoutDef) -> Vec<(&str, &[SeedT
         .collect()
 }
 
+/// The regions that re-seed as the stage at `idx` is entered: the graph
+/// layout's, then those of the stage's own layout the graph's does not
+/// already name. A region only one stage declares refreshes on entry to that
+/// stage, as one in the graph's layout does on every entry.
+pub(crate) fn entry_refreshing_regions(
+    graph: &RunGraph,
+    idx: usize,
+) -> Vec<(&str, &[SeedToolCall])> {
+    let mut regions = refreshing_regions(&graph.layout);
+    let own = graph.stages.get(idx).and_then(|s| s.layout.as_ref());
+    for (name, calls) in own.map(refreshing_regions).unwrap_or_default() {
+        if regions.iter().all(|(seen, _)| *seen != name) {
+            regions.push((name, calls));
+        }
+    }
+    regions
+}
+
 /// The call sites for one stage entry, numbered in dispatch order.
 ///
 /// Ids are prefixed so they cannot collide with a provider-minted one, and
@@ -96,8 +114,8 @@ pub(crate) fn call_sites(regions: &[(&str, &[SeedToolCall])]) -> Vec<SeedCallSit
 type StageSeedQuery<'w, 's> = Query<
     'w,
     's,
-    (Entity, &'static RunSpecC),
-    (With<StageJustEntered>, Without<PendingStageSeeds>),
+    (Entity, &'static RunSpecC, &'static StageJustEntered),
+    Without<PendingStageSeeds>,
 >;
 
 /// Dispatch every refreshing region's calls for an agent that just entered a
@@ -107,9 +125,9 @@ type StageSeedQuery<'w, 's> = Query<
 /// consumes that marker.
 pub(crate) fn start_stage_seeds(agents: StageSeedQuery, mut commands: Commands) {
     crate::tick_scope::clear();
-    for (entity, spec) in agents.iter() {
+    for (entity, spec, entered) in agents.iter() {
         crate::tick_scope::enter(entity);
-        let regions = refreshing_regions(&spec.0.graph.layout);
+        let regions = entry_refreshing_regions(&spec.0.graph, entered.index);
         let sites = call_sites(&regions);
         if sites.is_empty() {
             continue;
@@ -251,6 +269,35 @@ mod tests {
         assert_eq!(picked[0].0, "clock");
         assert_eq!(picked[0].1.len(), 1);
         assert_eq!(picked[0].1[0].tool.as_str(), "current_time");
+    }
+
+    /// A stage's own layout refreshes its regions on entry to that stage, after
+    /// the graph's, and a region both layouts name refreshes once.
+    #[test]
+    fn a_stage_layout_adds_its_own_refreshing_regions() {
+        let each = |n: &str| Some(tools(&[n], SeedRefresh::EachStage));
+        let mut own = crate::test_graph::stage("own");
+        own.layout = Some(layout_with(vec![
+            ("clock", each("system_info")),
+            ("local", each("locale_info")),
+        ]));
+        let graph = crate::test_graph::graph(
+            vec![own, crate::test_graph::stage("plain")],
+            layout_with(vec![("clock", each("current_time"))]),
+        );
+        let names = |idx| -> Vec<(String, String)> {
+            entry_refreshing_regions(&graph, idx)
+                .into_iter()
+                .map(|(r, calls)| (r.to_string(), calls[0].tool.to_string()))
+                .collect()
+        };
+        let pair = |r: &str, t: &str| (r.to_string(), t.to_string());
+        assert_eq!(
+            names(0),
+            [pair("clock", "current_time"), pair("local", "locale_info")]
+        );
+        assert_eq!(names(1), [pair("clock", "current_time")]);
+        assert_eq!(names(9), [pair("clock", "current_time")]);
     }
 
     #[test]

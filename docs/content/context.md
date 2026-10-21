@@ -322,6 +322,10 @@ are exactly the ones in the left column. Anything else, such as `{ caller_input 
 parse error naming the six forms, so `lev validate` catches it instead of a region coming out
 blank.
 
+A seed can sit on a region in a stage's own `layout` or `add` too. It still runs at spawn, and its
+text lands the first time a stage that declares the region is entered. Like a seed in the shared
+layout, it lands once per run: leaving the stage and coming back keeps what the region holds.
+
 > [!WARNING]
 > A `command` seed runs at spawn, before the first inference and therefore before any tool-approval
 > prompt. Because there is nobody to ask in the moment, it must also be covered by
@@ -436,7 +440,8 @@ A failed call is skipped with a warning and the other calls still fill the regio
 #### Refreshing on every stage
 
 Seeds resolve once, at spawn, like every other kind. `refresh = "each_stage"` resolves them again
-whenever a stage is entered:
+whenever a stage is entered, or, for a region only a stage's own layout declares, whenever that
+stage is entered:
 
 ```toml
 seed = { tools = { calls = [{ tool = "current_time", args = {} }], refresh = "each_stage" } }

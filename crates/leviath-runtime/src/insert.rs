@@ -116,11 +116,10 @@ pub fn initial_state(spec: &RunSpec) -> RunState {
     initial_state_from(spec, &window)
 }
 
-/// A window laid out from the graph's layout and filled from the spec's seeds:
-/// each seeded region gets its text (trimmed to the region's budget) and then
-/// each seeded part as an entry of its own. A seed with parts and no text adds
-/// no empty text entry. Taint tracking is on from the start when the graph
-/// asks for it.
+/// A window laid out from the graph's layout and filled from the spec's seeds
+/// (see [`seed_region`]). A seeded region only a stage's own layout declares
+/// is seeded when that stage is entered, by [`enter_stage_context`]. Taint
+/// tracking is on from the start when the graph asks for it.
 pub(crate) fn seeded_window(
     spec: &RunSpec,
     scripts: &HashMap<String, Arc<leviath_scripting::region_hook::RegionScript>>,
@@ -135,45 +134,78 @@ pub(crate) fn seeded_window(
         window.enable_taint_tracking();
     }
     for (name, seeded) in &spec.seeded {
-        let budget = window.get_region(name.as_str()).map_or(0, |r| r.max_tokens);
-        if !seeded.text.is_empty() || seeded.parts.is_empty() {
-            let fitted = crate::context_setup::fit_seed_to_budget(&seeded.text, budget);
-            let tokens = leviath_core::estimate_tokens(&fitted);
-            let _ = window.add_to_region_caused(
-                leviath_core::ContextCause::Seed,
-                name.as_str(),
-                fitted,
-                tokens,
-            );
-        }
-        for part in &seeded.parts {
-            let content = leviath_core::region::EntryContent::from_parts(vec![
-                crate::components::part_from_state(part),
-            ]);
-            let tokens = content.tokens(None);
-            let _ = window.add_content_entry(
-                leviath_core::ContextCause::Seed,
-                name.as_str(),
-                leviath_core::EntryKind::Text,
-                content,
-                tokens,
-            );
-        }
+        seed_region(&mut window, name.as_str(), seeded);
     }
     window
 }
 
+/// Write one region's seed into `window`: its text (trimmed to the region's
+/// budget), then each seeded part as an entry of its own. A seed with parts
+/// and no text adds no empty text entry. A region the window does not hold
+/// takes nothing.
+fn seed_region(
+    window: &mut ContextWindow,
+    name: &str,
+    seeded: &crate::spec::run_spec::SeededContent,
+) {
+    let Some(budget) = window.get_region(name).map(|r| r.max_tokens) else {
+        return;
+    };
+    if !seeded.text.is_empty() || seeded.parts.is_empty() {
+        let fitted = crate::context_setup::fit_seed_to_budget(&seeded.text, budget);
+        let tokens = leviath_core::estimate_tokens(&fitted);
+        let _ = window.add_to_region_caused(leviath_core::ContextCause::Seed, name, fitted, tokens);
+    }
+    for part in &seeded.parts {
+        let content = leviath_core::region::EntryContent::from_parts(vec![
+            crate::components::part_from_state(part),
+        ]);
+        let tokens = content.tokens(None);
+        let _ = window.add_content_entry(
+            leviath_core::ContextCause::Seed,
+            name,
+            leviath_core::EntryKind::Text,
+            content,
+            tokens,
+        );
+    }
+}
+
+/// Apply a stage's context setup to `window` as the stage is entered, and
+/// seed each region the stage's own layout brings into the window.
+///
+/// A region only a stage layout declares is not in the window a run starts
+/// with, so its seed lands the first time a stage that declares it is
+/// entered. Like a seed in the graph's layout, it lands once per run: a
+/// region the window already holds (from the graph's layout, or from an
+/// earlier entry, which leaves it hidden rather than gone) keeps what it has.
+pub(crate) fn enter_stage_context(
+    spec: &RunSpec,
+    setup: &crate::pipeline::StageSetup,
+    window: &mut ContextWindow,
+) -> Result<(), String> {
+    let held: std::collections::HashSet<String> =
+        window.regions.iter().map(|r| r.name.clone()).collect();
+    let entered = crate::pipeline::apply_stage_context(setup, window);
+    for (name, seeded) in &spec.seeded {
+        if !held.contains(name.as_str()) {
+            seed_region(window, name.as_str(), seeded);
+        }
+    }
+    entered
+}
+
 /// Enter the run's entry stage in `window`: give stage prompts a region of
 /// their own when the layout has none, then apply the entry stage's layout,
-/// hidden and reset regions and instructions. `Err` when the instructions do
-/// not fit their region.
+/// hidden and reset regions and instructions, and seed the regions its layout
+/// adds. `Err` when the instructions do not fit their region.
 pub(crate) fn enter_first_stage(spec: &RunSpec, window: &mut ContextWindow) -> Result<(), String> {
     let prompts: Vec<Option<String>> = (0..spec.graph.stages.len())
         .map(|i| spec_view::stage_setup(spec, i).system_prompt)
         .collect();
     crate::context_setup::ensure_stage_instructions_region(window, &prompts);
     let entry = start_index(spec);
-    crate::pipeline::apply_stage_context(&spec_view::stage_setup(spec, entry), window)
+    enter_stage_context(spec, &spec_view::stage_setup(spec, entry), window)
 }
 
 /// The stage a new run starts in: for a fan-out worker, the stage of its
