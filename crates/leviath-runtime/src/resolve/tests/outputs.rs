@@ -22,6 +22,11 @@ fn declared() -> OutputDef {
         schema: Some(JsonDoc::new(serde_json::json!({"type": "object"}))),
         validator: Some(CodeRef::Inline("fn validate(x) {}".into())),
         on_validator_error: Some(OnValidatorError::Accept),
+        validator_tool: Some(crate::spec::graph::ValidatorToolDef {
+            tool: crate::spec::names::ToolName::new("check_panel").unwrap(),
+            content_arg: "content".into(),
+            args: JsonDoc::new(serde_json::json!({})),
+        }),
         overwrite_artifacts: Some(false),
         artifacts: vec![artifact("chart")],
     }
@@ -50,6 +55,7 @@ fn later_levels_win_field_by_field() {
     assert_eq!(out.example.as_deref(), Some("{\"a\": 1}"));
     assert!(out.schema.is_some());
     assert!(out.validator.is_some());
+    assert!(out.validator_tool.is_some());
     assert_eq!(out.on_validator_error, Some(OnValidatorError::Accept));
     assert_eq!(out.overwrite_artifacts, Some(true));
     assert_eq!(
@@ -81,6 +87,7 @@ fn a_caller_asking_for_another_format_retires_the_declared_checks() {
     assert_eq!(out.instructions.as_deref(), Some("be brief"));
     assert_eq!(out.schema, None);
     assert_eq!(out.validator, None);
+    assert_eq!(out.validator_tool, None);
     assert_eq!(out.on_validator_error, None);
     assert!(out.artifacts.is_empty());
 
@@ -105,5 +112,94 @@ async fn the_request_output_is_kept_as_asked_and_applied_to_every_stage() {
     assert_eq!(resolved.spec.requested_output, request.output);
     for stage in &resolved.spec.stages {
         assert_eq!(stage.output, request.output);
+    }
+}
+
+/// An output spec's validator tool reads into the run's form when its name
+/// is a tool's name, and is an issue at its place when it is not.
+#[test]
+fn an_output_specs_validator_tool_is_named_like_a_tool() {
+    let mut spec = leviath_core::output::OutputSpec {
+        validator_tool: Some(leviath_core::output::ValidatorTool {
+            tool: "not a tool".into(),
+            content_arg: "panel".into(),
+            args: serde_json::Map::from_iter([("strict".into(), serde_json::json!(true))]),
+        }),
+        ..Default::default()
+    };
+    let issues = OutputDef::from_output_spec(&spec).unwrap_err();
+    assert_eq!(found(&issues), ["output.validator_tool.tool Invalid"]);
+    if let Some(tool) = spec.validator_tool.as_mut() {
+        tool.tool = "check".into();
+    }
+    let def = OutputDef::from_output_spec(&spec).unwrap();
+    assert_eq!(def.validator_tool.map(|t| t.spec()), spec.validator_tool);
+}
+
+/// A validator tool named `tool`, its arguments `args`, the answer under
+/// `content_arg`.
+fn checker(tool: &str, content_arg: &str, args: serde_json::Value) -> OutputDef {
+    OutputDef {
+        validator_tool: Some(crate::spec::graph::ValidatorToolDef {
+            tool: n(tool),
+            content_arg: content_arg.into(),
+            args: JsonDoc::new(args),
+        }),
+        ..OutputDef::default()
+    }
+}
+
+/// A stage whose answers a tool judges must be given that tool: one the
+/// machine does not offer the stage is refused at spawn, with what it does
+/// offer, and so are arguments that are not an object, that take the
+/// answer's place, or a blank place for it. A stage that never submits is
+/// never asked about.
+#[tokio::test]
+async fn a_validator_tool_must_be_one_the_stage_is_given() {
+    let submits = vec![
+        tool("read_file"),
+        tool("pw__check_panel"),
+        tool(leviath_tools::SUBMIT_OUTPUT_TOOL),
+    ];
+    let env = || Fake {
+        tools: [
+            ("plan".to_string(), Ok(vec![tool("read_file")])),
+            ("build".to_string(), Ok(submits.clone())),
+        ]
+        .into(),
+        ..Fake::default()
+    };
+    let mut g = graph();
+    g.output = Some(checker("pw__check_panel", "panel", serde_json::json!({})));
+    let resolved = spawn(&raw(g.clone()), &env()).await.unwrap();
+    let tool_of = |i: usize| {
+        resolved.spec.stages[i]
+            .output
+            .as_ref()
+            .and_then(|o| o.validator_tool.clone())
+    };
+    assert!(tool_of(0).is_some() && tool_of(1).is_some());
+
+    g.output = Some(checker("pw__missing", "panel", serde_json::json!({})));
+    let issues = spawn(&raw(g.clone()), &env()).await.unwrap_err();
+    assert_eq!(
+        found(&issues),
+        ["source.raw.stages.build.output.validator_tool.tool Unresolvable"]
+    );
+    assert!(issues.0[0].known.iter().any(|k| k == "pw__check_panel"));
+
+    for (content_arg, args, field) in [
+        ("panel", serde_json::json!([1]), "args"),
+        ("panel", serde_json::json!({"panel": "x"}), "args"),
+        (" ", serde_json::json!({}), "content_arg"),
+    ] {
+        g.output = Some(checker("pw__check_panel", content_arg, args));
+        let issues = spawn(&raw(g.clone()), &env()).await.unwrap_err();
+        assert_eq!(
+            found(&issues),
+            [format!(
+                "source.raw.stages.build.output.validator_tool.{field} Invalid"
+            )]
+        );
     }
 }

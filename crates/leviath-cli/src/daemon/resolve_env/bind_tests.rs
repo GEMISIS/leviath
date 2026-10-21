@@ -201,6 +201,75 @@ async fn an_unattended_run_with_its_own_entry_sandbox_and_grants_binds() {
     );
 }
 
+/// A validator tool is decided at spawn as a mid-run call from its stage
+/// would be, and only one that would simply run binds: `deny`, `ask` and a
+/// question for a person each refuse the spawn, naming the tool. A stage that
+/// never submits is not asked about.
+#[tokio::test]
+async fn a_validator_tool_that_would_not_simply_run_refuses_the_spawn() {
+    let (env, _agents) = env();
+    let dir = tempfile::tempdir().unwrap();
+    let judged_by = |tool: &str, submits: bool| {
+        let mut s = spec(dir.path());
+        s.graph.tool_permissions = [
+            (ToolName::new("read_file").unwrap(), ToolPolicy::Allow),
+            (ToolName::new("web_fetch").unwrap(), ToolPolicy::Deny),
+            (ToolName::new("edit_file").unwrap(), ToolPolicy::Ask),
+        ]
+        .into();
+        let given = |name: &str| ToolDef {
+            name: ToolName::new(name).unwrap(),
+            description: String::new(),
+            schema: JsonDoc::default(),
+            source: ToolSource::Builtin,
+        };
+        s.stages[0].tools.push(given(tool));
+        if submits {
+            s.stages[0]
+                .tools
+                .push(given(leviath_tools::SUBMIT_OUTPUT_TOOL));
+        }
+        s.stages[0].output = Some(leviath_runtime::spec::graph::OutputDef {
+            validator_tool: Some(leviath_runtime::spec::graph::ValidatorToolDef {
+                tool: ToolName::new(tool).unwrap(),
+                content_arg: "content".into(),
+                args: JsonDoc::new(serde_json::json!({})),
+            }),
+            ..Default::default()
+        });
+        s
+    };
+    assert!(
+        env.bind(&judged_by("read_file", true), &CodeFiles::new())
+            .await
+            .is_ok()
+    );
+    assert!(
+        env.bind(&judged_by("web_fetch", false), &CodeFiles::new())
+            .await
+            .is_ok()
+    );
+    for (tool, says) in [
+        ("web_fetch", "denied"),
+        ("edit_file", "set to ask"),
+        ("ask_user_text", "question to a person"),
+    ] {
+        let issues = env
+            .bind(&judged_by(tool, true), &CodeFiles::new())
+            .await
+            .unwrap_err();
+        assert_eq!(issues.0.len(), 1, "{tool}: {issues:?}");
+        let issue = &issues.0[0];
+        assert_eq!(
+            issue.path.to_string(),
+            "stages.plan.output.validator_tool.tool"
+        );
+        assert_eq!(issue.code, IssueCode::NotAllowed);
+        assert!(issue.message.contains(tool), "{}", issue.message);
+        assert!(issue.message.contains(says), "{tool}: {}", issue.message);
+    }
+}
+
 /// Each stage's write paths are what the run inherited, then its graph's,
 /// then its own; the script host starts on the entry stage's.
 #[tokio::test]

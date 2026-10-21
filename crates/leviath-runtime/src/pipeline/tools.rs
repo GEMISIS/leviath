@@ -450,6 +450,8 @@ type DispatchToolsQuery = (
         Option<&'static crate::persistence::FinalOutput>,
         Option<&'static super::submission::VisitSubmissions>,
         Option<&'static mut StageLedger>,
+        // What the stage's validator tool said about this batch's answers.
+        Option<&'static super::validator_tool::ValidatorVerdicts>,
     ),
     Option<&'static crate::components::OutputValidators>,
     // For the submit_output guard: a submission that is exactly the name of a
@@ -477,28 +479,6 @@ pub(crate) struct DaemonServices<'w> {
     pub persist: Option<Res<'w, super::JournalSender>>,
     /// Where subscribers hear about what a run does as it does it.
     pub sink: Option<Res<'w, crate::host::WorldEventSink>>,
-}
-
-/// Tell subscribers that a run's answer was recorded: a `submit_output` call
-/// accepted, or an output stage's produced parts taken as its answer.
-///
-/// Nothing for a batch that submitted nothing or had its submission refused,
-/// and nothing in a world with no subscribers or no run behind the agent. The
-/// content is cut to [`crate::host::MAX_EVENT_OUTPUT_BYTES`] on the frame.
-pub(crate) fn announce_submission(
-    sink: Option<&crate::host::WorldEventSink>,
-    metadata: Option<&RunMetadata>,
-    agent_id: &str,
-    submitted: Option<leviath_core::output::FinalOutput>,
-) {
-    if let (Some(sink), Some(md), Some(output)) = (sink, metadata, submitted) {
-        let _ = sink.0.send(crate::host::WorldEvent::OutputSubmitted {
-            run_id: md.run_id.clone(),
-            agent_id: agent_id.to_string(),
-            stage: output.stage.clone(),
-            output: crate::host::capped_output(output),
-        });
-    }
 }
 
 /// Tool-dispatch system: for each `ReadyForTools` agent, apply its `context_*`
@@ -554,7 +534,7 @@ pub(crate) fn dispatch_tools(
         resolved,
         auto_gate,
         cursor,
-        (metadata, stage_progress, mut io_buffer, recorded, kept, mut ledger),
+        (metadata, stage_progress, mut io_buffer, recorded, kept, mut ledger, judged),
         validators,
         blueprint,
     ) in agents.iter_mut()
@@ -654,6 +634,49 @@ pub(crate) fn dispatch_tools(
         // that already ran is never run again.
         let recovered: Vec<crate::tool_bridge::ToolResult> =
             recovered.map(|r| r.0.clone()).unwrap_or_default();
+        // What a `submit_output` in this batch is judged against.
+        let stage_names = super::validator_tool::stage_names(blueprint);
+        let output_ctx = crate::output_tool::OutputContext {
+            write_fence: Some(&write_fence),
+            spec: stage_inf.output.as_ref(),
+            validators,
+            stage: &state.current_stage,
+            stage_names: &stage_names,
+            workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
+            sink: part_sink.as_ref(),
+            overwrite_artifacts: (stage_inf.output.as_ref())
+                .and_then(|s| s.overwrite_artifacts)
+                .unwrap_or_else(|| mime.overwrite_artifacts()),
+            tool_verdict: None,
+        };
+        // A validator tool judges an answer before anything in the batch runs.
+        let look = super::validator_tool::GateLook {
+            agent_id: &state.agent_id,
+            stage: cursor.map_or(0, |c| c.index),
+            window: &window,
+            policy: policy_ref,
+            rules: script_checker,
+            waived: auto_approve_gates,
+        };
+        let candidates = super::validator_tool::Candidates {
+            calls: &result.tool_calls,
+            stage: stage_inf,
+            recovered: &recovered,
+            resolved,
+            submissions: &submissions,
+            ctx: &output_ctx,
+        };
+        let verdicts = match super::validator_tool::validate_first(
+            entity,
+            &result.attempt_id,
+            &candidates,
+            judged,
+            &mut |tool| super::validator_tool::gate_word(gate.as_deref_mut(), &look, tool),
+            &mut commands,
+        ) {
+            super::validator_tool::Validation::Hold => continue,
+            super::validator_tool::Validation::Ready(verdicts) => verdicts,
+        };
         for c in &result.tool_calls {
             if let Some((_, done)) = recovered.iter().find(|(id, _)| id == &c.tool_id) {
                 submissions.recovered(&c.name, done.as_str());
@@ -891,29 +914,9 @@ pub(crate) fn dispatch_tools(
             // the gate, a Private region reaches a remote reader with no
             // prompt however it was classified.
             if crate::output_tool::is_output_tool(&c.name) {
-                let stage_names: Vec<String> = blueprint
-                    .map(|spec| {
-                        spec.0
-                            .graph
-                            .stages
-                            .iter()
-                            .map(|s| s.name.to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default();
                 let ctx = crate::output_tool::OutputContext {
-                    write_fence: Some(&write_fence),
-                    spec: stage_inf.output.as_ref(),
-                    validators,
-                    stage: &state.current_stage,
-                    stage_names: &stage_names,
-                    workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
-                    sink: part_sink.as_ref(),
-                    overwrite_artifacts: stage_inf
-                        .output
-                        .as_ref()
-                        .and_then(|s| s.overwrite_artifacts)
-                        .unwrap_or_else(|| mime.overwrite_artifacts()),
+                    tool_verdict: verdicts.get(&c.tool_id),
+                    ..output_ctx
                 };
                 let text = submissions.apply(c, executions.get(&c.tool_id), &ctx, &mut window);
                 context_results.push((c.tool_id.clone(), text));
@@ -980,10 +983,12 @@ pub(crate) fn dispatch_tools(
             continue; // re-run after the prompts resolve
         }
 
-        // Dispatching the batch consumes any resolution state from a prior round.
-        commands
-            .entity(entity)
-            .remove::<crate::gate_prompt::GateResolved>();
+        // Dispatching the batch consumes any resolution state from a prior
+        // round, and the verdicts its answers were judged by.
+        commands.entity(entity).remove::<(
+            crate::gate_prompt::GateResolved,
+            super::validator_tool::ValidatorVerdicts,
+        )>();
 
         // Announced here, past the hold above rather than where it was
         // committed: a batch held for a gate prompt runs again once the
@@ -1005,7 +1010,12 @@ pub(crate) fn dispatch_tools(
             produced,
             ..
         } = submissions;
-        announce_submission(sink.as_deref(), metadata, &state.agent_id, submitted);
+        super::submission::announce_submission(
+            sink.as_deref(),
+            metadata,
+            &state.agent_id,
+            submitted,
+        );
 
         // A fan-out parks this agent, so it cannot share a batch with lane calls
         // that would still be running when it does. Refused rather than

@@ -2251,6 +2251,45 @@ budget = 10000
     assert!(fix.contains("ask"), "{fix}");
 }
 
+/// A tool that judges a stage's answers is called with every submission and
+/// without a prompt, so it gets the same audit line a tool seed does: which
+/// output, which tool, and what `tool_permissions` has to say.
+#[test]
+fn validator_tools_are_listed_per_output() {
+    let toml = manifest(
+        r#"
+output = { format = "json", validator_tool = { tool = "pw__check_panel", content_arg = "panel" } }
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Main"
+max_iterations = 10
+tools = ["read_file"]
+output = { validator_tool = { tool = "check_report" } }
+
+[[graph.stages]]
+name = "plain"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+description = "Plain"
+max_iterations = 10
+tools = ["read_file"]
+output = { format = "markdown" }
+"#,
+    );
+    let findings = lint(&toml, &LintEnv::default());
+    let notes = with_code(&findings, "validator-tool");
+    assert_eq!(notes.len(), 1, "{:?}", codes(&findings));
+    let message = &notes[0].message;
+    assert!(message.contains("2 output(s)"), "{message}");
+    assert!(message.contains("the graph: pw__check_panel"), "{message}");
+    assert!(message.contains("main: check_report"), "{message}");
+    assert!(!message.contains("plain"), "{message}");
+    let fix = notes[0].fix.as_deref().expect("a fix");
+    assert!(fix.contains("allow") && fix.contains("idempotent"), "{fix}");
+    assert!(!codes(&lint(&manifest(CLEAN_STAGE), &LintEnv::default())).contains(&"validator-tool"));
+}
+
 #[test]
 fn no_tool_seeds_means_no_note() {
     assert!(!codes(&lint(&manifest(CLEAN_STAGE), &LintEnv::default())).contains(&"tool-seed"));

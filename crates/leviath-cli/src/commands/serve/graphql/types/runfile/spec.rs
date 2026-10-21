@@ -17,7 +17,7 @@ use leviath_runtime::spec::run_spec::{
 use leviath_runtime::spec::summary::{SpawnSummary as CoreSummary, StageSummary as CoreStage};
 
 use super::super::super::scalars::{Json, Timestamp};
-use super::super::manifest::output::ValidatorErrorPolicy;
+use super::super::manifest::output::{ValidatorErrorPolicy, ValidatorTool};
 use super::super::manifest::runtime::SandboxKind;
 use super::super::run::MetadataEntry;
 use super::state::StatePart;
@@ -355,8 +355,12 @@ pub(crate) struct OutputShape {
     pub(crate) schema: Option<Json>,
     /// Code that checks the answer.
     pub(crate) validator: Option<CodeRef>,
-    /// What happens when that code refuses an answer. Null is `REJECT`.
+    /// What happens when that code, or the validator tool, cannot check an
+    /// answer. Null is `REJECT`.
     pub(crate) on_validator_error: Option<ValidatorErrorPolicy>,
+    /// A tool the stage can call that judges the answer before it is
+    /// recorded.
+    pub(crate) validator_tool: Option<ValidatorTool>,
     /// Whether a later answer may replace files an earlier one wrote.
     pub(crate) overwrite_artifacts: Option<bool>,
     /// Files the answer hands back beside its text.
@@ -372,6 +376,7 @@ impl From<&OutputDef> for OutputShape {
             schema: output.schema.as_ref().map(|doc| Json(doc.value().clone())),
             validator: output.validator.as_ref().map(CodeRef::from),
             on_validator_error: output.on_validator_error.map(ValidatorErrorPolicy::from),
+            validator_tool: output.validator_tool.as_ref().map(ValidatorTool::from),
             overwrite_artifacts: output.overwrite_artifacts,
             artifacts: output
                 .artifacts

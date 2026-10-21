@@ -111,16 +111,79 @@ checked looks exactly like an answer that passed. Check it before trusting those
 `lev validate` compiles the machine's global tools and script providers as well as the blueprint's
 own, so a script that will not load is something you can find before a run needs it.
 
+## When a script cannot judge it: a validator tool
+
+Some answers can only be judged against the workspace. A panel builder submits
+`{"id": "...", "title": "..."}`, and the panel itself is a file that only your own checker can
+verify. A Rhai validator cannot open that file, by design.
+
+Name a tool to do it instead. The engine calls it with the submission before recording anything:
+
+```toml
+[graph.stages.output]   # on the build stage, after its [[graph.stages]] entry
+format = "json"
+validator_tool = { tool = "polywright__validate_panel", content_arg = "submission", args = { strict = true } }
+on_validator_error = "reject"
+```
+
+| Key | Meaning |
+|---|---|
+| `tool` | The tool, spelled as the agent would call it: a built-in, `<server>__<tool>`, or a script tool |
+| `content_arg` | The argument the submission is passed as. Defaults to `content` |
+| `args` | Fixed arguments passed beside it. Defaults to none |
+
+The tool answers with a JSON verdict:
+
+| Answer | Meaning |
+|---|---|
+| `{"ok": true}` | The answer is fine, and it is recorded |
+| `{"ok": false, "reason": "..."}` | The answer is wrong. The reason goes back as the `submit_output` result |
+
+A refusal reaches the model as `[error] the final output was rejected: <reason>`, the same way a
+Rhai validator's does. The same stage fixes the answer and submits again, with its context intact.
+Nothing is recorded until the tool passes one.
+
+Anything else means the tool could not run. That covers an MCP error, a timeout, a server that is
+down, a refusal by policy, and an answer that is not a verdict. `on_validator_error` decides what
+happens then, as it does for a script: `reject` by default, `accept` to record the answer
+unchecked. The run names the tool in `flags.broken_scripts` either way.
+
+### What it may call
+
+Nothing the stage could not call already. The tool must be one the stage is given, so list it in
+the stage's tools if they are narrowed. The call answers to the same `tool_permissions`, launch
+`--allow` and taint gate as a call the model makes. A tool the stage is not given refuses the spawn,
+naming it.
+
+Nobody can approve a call in the middle of a submission. So a validator tool set to `deny` or
+`ask` refuses the spawn too. Set it to `allow`. A prompt that only arises at run time, from the
+taint gate or a permission changed under a resumed run, is never put to anyone: the tool could not
+run, and `on_validator_error` decides.
+
+### Read-only and idempotent
+
+A validator tool must only read, and must answer the same submission the same way every time. A
+daemon restart while the tool is judging brings the turn back undispatched, and the tool is asked
+again. A tool that writes, or that counts its calls, will see some submissions twice.
+
+The call runs on the tool lane, like the model's own calls, so a slow check holds back only the
+stage that asked for it. Every other run carries on.
+
+`lev validate` lists every tool a blueprint's answers are judged by, as `validator-tool`.
+
 ## When it runs
 
 Only when the format it was written for is the one in effect.
 
 A validator describes one format. If a caller overrides the format at launch, your validator is
-retired along with any JSON Schema, because neither describes what is now being produced. The
-caller can bring checks of their own in the request's `output`: a JSON Schema (`--output-schema`
-on the CLI, `output.schema` in a [spawn request](/docs/starting-a-run)), or a validator written
-inline as `output.validator = { inline = "..." }`. A reshaped run keeps only the checks that came
-with the request.
+retired along with any validator tool and JSON Schema, because none of them describes what is now
+being produced. The caller can bring checks of their own in the request's `output`: a JSON Schema
+(`--output-schema` on the CLI, `output.schema` in a [spawn request](/docs/starting-a-run)), a
+validator written inline as `output.validator = { inline = "..." }`, or a `validator_tool`. A
+reshaped run keeps only the checks that came with the request.
+
+The checks run cheapest first, so an answer a cheap check refuses never costs a tool call, and a
+refused answer writes nothing:
 
 ```mermaid
 flowchart TB
@@ -133,8 +196,12 @@ flowchart TB
   E -->|no| G
   F --> G{"validator<br/>declared?"}
   G -->|yes| H["must satisfy it"]
-  G -->|no| I["recorded"]
-  H --> I
+  G -->|no| J
+  H --> J{"validator tool<br/>declared?"}
+  J -->|yes| K["must pass it"]
+  J -->|no| L["artifacts checked"]
+  K --> L
+  L --> I["recorded"]
 ```
 
 ## Failing early

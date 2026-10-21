@@ -102,5 +102,6 @@ impl PipelineWorld {
             || self.count::<With<AwaitingCompaction>>() > 0
             || self.count::<With<crate::title::AwaitingTitle>>() > 0
             || self.count::<With<crate::fanout::ReadingWorkerInputs>>() > 0
+            || self.count::<With<crate::pipeline::validator_tool::PendingValidation>>() > 0
     }
 }

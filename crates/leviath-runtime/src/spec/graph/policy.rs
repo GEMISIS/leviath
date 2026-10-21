@@ -15,8 +15,11 @@ use crate::spec::names::{
 };
 
 /// The shape a run's final output must take.
+// The run file's binary frames keep the eight fields this had before
+// `validator_tool` (see `spec::readable::output`); readable formats write them
+// all.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct OutputDef {
     /// The format, as an opaque label the model is told: `markdown`, `json`,
     /// a house format.
@@ -35,9 +38,13 @@ pub struct OutputDef {
     /// Code that checks the answer.
     #[serde(default)]
     pub validator: Option<CodeRef>,
-    /// What happens when that code itself fails.
+    /// What happens when that code, or the validator tool, itself fails.
     #[serde(default)]
     pub on_validator_error: Option<OnValidatorError>,
+    /// A tool the stage can call, called with the answer before it is
+    /// recorded, which says whether it passes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validator_tool: Option<ValidatorToolDef>,
     /// Whether a later answer may replace files an earlier one wrote.
     #[serde(default)]
     pub overwrite_artifacts: Option<bool>,
@@ -90,8 +97,94 @@ impl OutputDef {
             schema: spec.schema.clone().map(JsonDoc::new),
             validator: spec.validator.clone().map(CodeRef::File),
             on_validator_error: spec.on_validator_error,
+            validator_tool: spec
+                .validator_tool
+                .as_ref()
+                .and_then(|v| ValidatorToolDef::read(v, &at.field("validator_tool"), issues)),
             overwrite_artifacts: spec.overwrite_artifacts,
             artifacts,
+        }
+    }
+}
+
+/// A tool that judges an answer before it is recorded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ValidatorToolDef {
+    /// The tool, spelled as the agent would call it.
+    pub tool: ToolName,
+    /// The argument the answer is passed as.
+    #[serde(default = "default_content_arg")]
+    pub content_arg: String,
+    /// Fixed arguments passed beside the answer: a JSON object.
+    #[serde(default = "empty_args")]
+    #[schemars(with = "serde_json::Map<String, serde_json::Value>")]
+    pub args: JsonDoc,
+}
+
+fn default_content_arg() -> String {
+    leviath_core::output::DEFAULT_CONTENT_ARG.to_string()
+}
+
+fn empty_args() -> JsonDoc {
+    JsonDoc::new(serde_json::Value::Object(serde_json::Map::new()))
+}
+
+impl ValidatorToolDef {
+    /// `spec` as a validator tool, or `None` with its issue pushed under `at`
+    /// when the tool's name does not read.
+    pub fn read(
+        spec: &leviath_core::output::ValidatorTool,
+        at: &SpecPath,
+        issues: &mut SpawnIssues,
+    ) -> Option<Self> {
+        match ToolName::new(spec.tool.as_str()) {
+            Ok(tool) => Some(Self {
+                tool,
+                content_arg: spec.content_arg.clone(),
+                args: JsonDoc::new(serde_json::Value::Object(spec.args.clone())),
+            }),
+            Err(e) => {
+                issues.push(SpawnIssue::new(
+                    at.field("tool"),
+                    IssueCode::Invalid,
+                    e.to_string(),
+                ));
+                None
+            }
+        }
+    }
+
+    /// What is wrong with it as written, if anything, and the field it is
+    /// wrong in: a blank content argument, arguments that are not a JSON
+    /// object, or arguments that set the content argument themselves.
+    pub fn problem(&self) -> Option<(&'static str, String)> {
+        if self.content_arg.trim().is_empty() {
+            return Some(("content_arg", "the content argument is blank".to_string()));
+        }
+        let Some(args) = self.args.value().as_object() else {
+            return Some((
+                "args",
+                format!("the arguments for \"{}\" are not a JSON object", self.tool),
+            ));
+        };
+        args.contains_key(&self.content_arg).then(|| {
+            (
+                "args",
+                format!(
+                    "the arguments set \"{}\", which is where the answer goes",
+                    self.content_arg
+                ),
+            )
+        })
+    }
+
+    /// The validator tool in the vocabulary the output tool reads.
+    pub fn spec(&self) -> leviath_core::output::ValidatorTool {
+        leviath_core::output::ValidatorTool {
+            tool: self.tool.to_string(),
+            content_arg: self.content_arg.clone(),
+            args: self.args.value().as_object().cloned().unwrap_or_default(),
         }
     }
 }

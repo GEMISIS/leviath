@@ -1,7 +1,7 @@
 //! Tests for what a run or a stage is asked to hand back, and the mirrors of
 //! those types.
 
-use super::{OutputArtifact, OutputSpec, StageParts, ValidatorErrorPolicy};
+use super::{OutputArtifact, OutputSpec, StageParts, ValidatorErrorPolicy, ValidatorTool};
 use crate::commands::serve::graphql::filter::testkit::{exercise, exercise_enum, exercise_list};
 use crate::commands::serve::graphql::scalars::Json;
 
@@ -12,6 +12,15 @@ fn artifact() -> OutputArtifact {
         mime_type: "text/markdown".to_string(),
         required: true,
         description: Some("the write-up".to_string()),
+    }
+}
+
+/// A validator tool, as a manifest would declare it.
+fn checker() -> ValidatorTool {
+    ValidatorTool {
+        tool: "pw__check_panel".to_string(),
+        content_arg: "submission".to_string(),
+        args: Json(serde_json::json!({ "strict": true })),
     }
 }
 
@@ -33,10 +42,12 @@ async fn every_mirrored_function_runs() {
         schema: Some(Json(serde_json::json!({ "type": "object" }))),
         validator: Some("checks/output.rhai".to_string()),
         on_validator_error: Some(ValidatorErrorPolicy::Accept),
+        validator_tool: Some(checker()),
         overwrite_artifacts: Some(true),
         artifacts: vec![artifact()],
     }])
     .await;
+    exercise(&[checker()]).await;
 
     exercise(&[StageParts {
         accepts: vec!["image/*".to_string()],
@@ -89,4 +100,18 @@ fn the_conversion_carries_artifacts_and_the_validator_policy() {
         OutputSpec::from(&inline).validator.as_deref(),
         Some("fn validate(o) { true }")
     );
+    assert!(OutputSpec::from(&inline).validator_tool.is_none());
+
+    let checked = OutputDef {
+        validator_tool: Some(leviath_runtime::spec::graph::ValidatorToolDef {
+            tool: leviath_runtime::spec::names::ToolName::new("pw__check_panel").unwrap(),
+            content_arg: "submission".to_string(),
+            args: leviath_core::JsonDoc::new(serde_json::json!({ "strict": true })),
+        }),
+        ..OutputDef::default()
+    };
+    let tool = OutputSpec::from(&checked).validator_tool.expect("carried");
+    assert_eq!(tool.tool, "pw__check_panel");
+    assert_eq!(tool.content_arg, "submission");
+    assert_eq!(tool.args.0, serde_json::json!({ "strict": true }));
 }

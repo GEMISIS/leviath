@@ -546,14 +546,20 @@ pub(crate) fn part_from(part: &PartState) -> Option<Part> {
 /// that made them is written to the window only once every result is in. A
 /// batch waiting to be dispatched (a paused run's, say) is in flight too, and
 /// so is one held on a person before any of its calls is sent: waiting on
-/// an approval, or on the taint gate.
+/// an approval, on the taint gate, or on a validator tool's verdict.
 pub(crate) fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> {
     let dispatched = world
         .get::<crate::pipeline::AwaitingTools>(entity)
         .is_some();
+    // A batch held while a validator tool judges its answer has not been
+    // sent: a run resumed from here dispatches it, and asks again.
+    let validating = world
+        .get::<crate::pipeline::validator_tool::PendingValidation>(entity)
+        .is_some();
     let to_dispatch = world
         .get::<crate::pipeline::ReadyForTools>(entity)
-        .is_some();
+        .is_some()
+        || validating;
     let lane_held = world
         .get::<crate::pipeline::lane_batch::PendingBatch>(entity)
         .and_then(|b| b.held(world.get(entity)));
@@ -623,7 +629,9 @@ pub(crate) fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> 
     .into_iter()
     .collect();
     // A batch brought back held, not yet dispatched again, holds what it held.
-    let held = match gate_held {
+    // One held on a validator tool was not sent either, so it is recorded as
+    // held: a daemon that dies under it leaves nothing in it interrupted.
+    let held = match gate_held || validating {
         true => Some(gate_hold(world, entity, &mut done)),
         false => world
             .get::<crate::pipeline::lane_batch::ResumedHold>(entity)

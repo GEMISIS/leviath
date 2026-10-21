@@ -215,6 +215,14 @@ fn every_phase_marker_exempts_its_agent() {
         ("AwaitingMessage", |w, e| {
             w.entity_mut(e).insert(crate::pipeline::AwaitingMessage);
         }),
+        ("PendingValidation", |w, e| {
+            w.entity_mut(e)
+                .insert(crate::pipeline::validator_tool::PendingValidation {
+                    attempt: String::new(),
+                    sites: vec![],
+                    known: Default::default(),
+                });
+        }),
         ("PanickedInParallel", |w, e| {
             w.entity_mut(e)
                 .insert(crate::tick_scope::PanickedInParallel {

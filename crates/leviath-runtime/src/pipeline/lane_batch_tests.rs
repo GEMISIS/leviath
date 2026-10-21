@@ -578,3 +578,41 @@ async fn the_judges_plain_exec_runs_nothing() {
     let exec = judge.exec_decided(Entity::PLACEHOLDER, Vec::new(), 0, noop_progress());
     assert!(exec().await.is_empty());
 }
+
+/// A validator tool's calls are never put to a person, even with someone
+/// there to ask: a call that would ask, or that is itself a question, is
+/// refused, and the refusal is the tool's verdict. The batch is no turn's,
+/// so it waits as no turn does and reads back as nothing held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_validator_batch_asks_nobody() {
+    let judge = Arc::new(Judge::default());
+    let (mut world, mut jobs) = world_with(judge.clone());
+    with_prompts(&mut world);
+    let calls: Vec<leviath_providers::ToolCall> = ["ask", "q", "ok"]
+        .iter()
+        .map(|name| leviath_providers::ToolCall {
+            id: format!("validator-{name}"),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+            thought_signature: None,
+        })
+        .collect();
+    let batch = PendingBatch::validation(calls);
+    assert!(batch.held(None).is_none());
+    let e = agent(&mut world, &[]);
+    world.entity_mut(e).insert(batch);
+    run(&mut world);
+    assert!(world.get::<AwaitingApproval>(e).is_none());
+    assert!(world.get::<AwaitingTools>(e).is_none());
+    assert!(jobs.try_recv().is_ok(), "sent");
+    let ran = ran(&judge);
+    assert_eq!(ran.len(), 3);
+    for (name, decision) in [("ask", &ran[0].1), ("q", &ran[1].1)] {
+        let Decision::Refuse(text) = decision else {
+            panic!("{name}: {decision:?}");
+        };
+        assert!(text.starts_with("[denied]"), "{text}");
+        assert!(text.contains("nobody to ask"), "{text}");
+    }
+    assert_eq!(ran[2].1, Decision::Run);
+}

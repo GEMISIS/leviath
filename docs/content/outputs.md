@@ -66,7 +66,8 @@ requires the stage to call it, and it lets the run end there.
 An accepted answer ends a stage that has nowhere else to go: one that no `always` or
 `llm_choice` edge leaves, or the stage a fan-out worker was started to run. Leviath does not ask the
 model again. Some models call a tool on every turn and never send a plain reply, so without this
-they would hand back the same answer until the stage ran out of iterations.
+they would hand back the same answer until the stage ran out of iterations. With a validator tool,
+accepted means the tool passed it, so the stage ends once the verdict is in, never before.
 
 A stage with somewhere to go keeps working after it submits, so it can still revise its answer. A
 changed answer replaces the old one. The same answer again records nothing: the model is told its
@@ -132,6 +133,13 @@ For JSON, use a JSON Schema. For anything else, ship a [Rhai validator](/docs/rh
 your agent. A validator that cannot run rejects the submission by default, sending the script's
 error back to the model as feedback. Set `on_validator_error = "accept"` on the output block if you
 would rather record the answer unchecked.
+
+**Does it hold up against the workspace?** A script cannot open a file, so name a
+[validator tool](/docs/rhai-validators#when-a-script-cannot-judge-it-a-validator-tool):
+`validator_tool = { tool = "...", content_arg = "..." }`. Leviath calls it with each submission
+after the cheaper checks pass, and its `{"ok": false, "reason": "..."}` goes back to the model as
+the `submit_output` result. The tool must be one the stage is given and set to `allow`. It must
+also be read-only and idempotent, because a restart asks it again.
 
 ## Asking for a shape at launch
 
@@ -206,7 +214,8 @@ flowchart LR
 ```
 
 One rule breaks that pattern on purpose. If you name a `format` other than the one the blueprint
-declares, any Rhai validator, JSON schema and declared artifacts are retired together. A check
+declares, any Rhai validator, validator tool, JSON schema and declared artifacts are retired
+together. A check
 written for one shape says nothing about another. `lev run` warns on stderr, naming what was
 retired. Re-stating the format the blueprint already declares retires nothing.
 Supply your own schema alongside your format when you want the answer validated.
@@ -521,6 +530,7 @@ unreachable.
 | `output-stage-can-modify` | An output stage can also write files |
 | `output-stage-cannot-answer` | An output stage can neither call `submit_output` nor hand a file back. See below |
 | `mime-unseen` | A stage's regions take a mime type its listed models cannot see. See below |
+| `validator-tool` | A note listing every tool the blueprint's answers are judged by |
 
 `output-stage-cannot-answer` fires when the stage's models cannot call tools at all, such as an
 image model or a 3D generator, so `submit_output` is out of their reach. The stage then has to hand

@@ -1064,6 +1064,24 @@ same list.
   `subtree_working_secs` on every node. Both surfaces compute these in one
   walk, so they cannot disagree.
 
+- An output can be judged by a tool: `validator_tool = { tool, content_arg,
+  args }` on a graph's or a stage's output names a tool the stage is given,
+  which Leviath calls with each submission after the format, schema and Rhai
+  checks and before the artifacts. It answers `{"ok": true}` or
+  `{"ok": false, "reason": "..."}`, and a refusal reaches the model as the
+  `submit_output` result, so the same stage fixes its answer. A tool that
+  cannot answer follows `on_validator_error` and is named in the run's
+  `flags.broken_scripts`. The call goes out on the tool lane, so a slow check
+  never holds back another run, and a stage that ends on its answer ends once
+  the verdict is in. It answers to the stage's `tool_permissions`, the
+  launch's `allow` and the taint gate; a tool the stage is not given, or one
+  set to `deny` or `ask`, refuses the spawn, and nobody is ever prompted for
+  it. A restart while it judges asks it again, so it must be read-only and
+  idempotent. A caller's different format retires it with the validator.
+  `lev validate` lists it as `validator-tool`, GraphQL takes it as
+  `OutputShapeWrite.validatorTool` (`ValidatorToolWrite`) and serves it on
+  both output types, and the blueprint, spawn-request and run-file schemas
+  describe it. The run file keeps layout 8.
 - **Library.** `leviath-core` gains the provider-neutral half of context
   assembly, so a program that calls a model API itself can lay out its
   context the way a run does without depending on `leviath-runtime` or

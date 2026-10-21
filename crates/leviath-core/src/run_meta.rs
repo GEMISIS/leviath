@@ -755,7 +755,8 @@ pub struct RunFlags {
     /// submission is rejected and the script's own error goes back to the
     /// model as retry feedback, while `on_validator_error = "accept"` records
     /// the submission unchecked and leaves this list as the only trace of an
-    /// answer nothing checked. The script is named here in both modes.
+    /// answer nothing checked. The script is named here in both modes, and so
+    /// is a validator tool that could not answer, by the tool's name.
     ///
     /// Named rather than counted, because the useful question is which one -
     /// the answer tells you which file to open.

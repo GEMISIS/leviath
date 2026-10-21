@@ -39,6 +39,7 @@ fn ctx() -> OutputContext<'static> {
         workdir: None,
         sink: None,
         overwrite_artifacts: false,
+        tool_verdict: None,
     }
 }
 

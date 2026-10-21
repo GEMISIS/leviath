@@ -42,6 +42,29 @@ pub(crate) struct OutputArtifact {
     pub(crate) description: Option<String>,
 }
 
+/// A tool that judges an answer before it is recorded. It answers
+/// `{"ok": true}` or `{"ok": false, "reason": "..."}`.
+#[mirror]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct ValidatorTool {
+    /// The tool, spelled as the agent would call it.
+    pub(crate) tool: String,
+    /// The argument the answer is passed as.
+    pub(crate) content_arg: String,
+    /// Fixed arguments passed beside the answer.
+    pub(crate) args: Json,
+}
+
+impl From<&leviath_runtime::spec::graph::ValidatorToolDef> for ValidatorTool {
+    fn from(def: &leviath_runtime::spec::graph::ValidatorToolDef) -> Self {
+        Self {
+            tool: def.tool.to_string(),
+            content_arg: def.content_arg.clone(),
+            args: Json(def.args.value().clone()),
+        }
+    }
+}
+
 /// The shape an output must take.
 ///
 /// Declaring a shape does not by itself demand an output: that is
@@ -61,9 +84,13 @@ pub(crate) struct OutputSpec {
     /// A script that checks the answer, beyond the schema: a path beside the
     /// blueprint, or the script itself when the blueprint writes it inline.
     pub(crate) validator: Option<String>,
-    /// What happens when that script refuses an answer. Null leaves the default,
-    /// which is to refuse the output and ask again.
+    /// What happens when that script, or the validator tool, cannot check an
+    /// answer. Null leaves the default, which is to refuse the output and ask
+    /// again.
     pub(crate) on_validator_error: Option<ValidatorErrorPolicy>,
+    /// A tool the stage can call that judges the answer before it is
+    /// recorded, after the schema and the script.
+    pub(crate) validator_tool: Option<ValidatorTool>,
     /// Whether an artifact may replace a file of the same name in the working
     /// directory.
     pub(crate) overwrite_artifacts: Option<bool>,
@@ -80,6 +107,7 @@ impl From<&leviath_runtime::spec::graph::OutputDef> for OutputSpec {
             schema: spec.schema.as_ref().map(|doc| Json(doc.value().clone())),
             validator: spec.validator.as_ref().map(super::code_text),
             on_validator_error: spec.on_validator_error.map(ValidatorErrorPolicy::from),
+            validator_tool: spec.validator_tool.as_ref().map(ValidatorTool::from),
             overwrite_artifacts: spec.overwrite_artifacts,
             artifacts: spec
                 .artifacts

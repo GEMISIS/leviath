@@ -514,6 +514,8 @@ fn output(o: &OutputSpec, report: &mut Report) -> OutputDef {
         schema: o.schema.clone().map(JsonDoc::new),
         validator: o.validator.clone().map(CodeRef::File),
         on_validator_error: o.on_validator_error,
+        // Old runs never asked for a validator tool.
+        validator_tool: None,
         overwrite_artifacts: o.overwrite_artifacts,
         artifacts: o
             .artifacts

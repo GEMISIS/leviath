@@ -18,9 +18,18 @@
 //! argument refusal, down to the `[error]` prefix, which is already in the
 //! no-effect list and so keeps a rejected submission from counting as work.
 //!
+//! # Checks, in order
+//!
+//! The format, the schema and the Rhai validator ([`precheck`]), then the
+//! validator tool's verdict, then the artifacts ([`record`]), so the cheap
+//! checks go first and a refused answer writes nothing. A validator tool runs
+//! on the tool lane, so its verdict is asked for before the batch is applied
+//! (see `pipeline::validator_tool`) and handed in on [`OutputContext`].
+//!
 //! [`OutputSpec`]: leviath_core::output::OutputSpec
 
 use leviath_core::output::{FinalOutput, OutputSpec};
+use leviath_scripting::output_validator::Verdict;
 
 use crate::components::ContextWindow;
 
@@ -88,6 +97,7 @@ pub(crate) fn is_output_tool(name: &str) -> bool {
 /// going to notice. Adding the stage-name list as a seventh positional argument
 /// is what pushed this over the workspace's argument-count lint, which does not
 /// permit a suppression.
+#[derive(Clone, Copy)]
 pub(crate) struct OutputContext<'a> {
     /// The shape this stage asked for: format, schema, validator.
     pub spec: Option<&'a OutputSpec>,
@@ -110,6 +120,9 @@ pub(crate) struct OutputContext<'a> {
     /// to disk as an artifact is held to. `None` limits nothing beyond the
     /// workdir.
     pub write_fence: Option<&'a leviath_core::write_paths::WriteFence>,
+    /// What the spec's validator tool said about this submission, when it
+    /// has one and has answered.
+    pub tool_verdict: Option<&'a Verdict>,
 }
 
 /// Apply a `submit_output` call.
@@ -128,36 +141,50 @@ pub(crate) fn handle_output_tool(
     now: i64,
     window: &mut ContextWindow,
 ) -> (String, Option<FinalOutput>) {
+    let content = match precheck(args, ctx) {
+        Ok(content) => content,
+        Err(refusal) => return (refusal, None),
+    };
+    if let Some(refusal) = tool_refusal(ctx) {
+        return (refusal, None);
+    }
+    record(args, content, ctx, now, window)
+}
+
+/// The submission's content, once every check that needs nothing beyond the
+/// submission has passed: it is there and not blank, it is not a stage's name,
+/// it is of its format, it meets its schema, and the Rhai validator passes it.
+/// Otherwise the refusal the model reads.
+///
+/// Pure, so a batch asks it twice at no cost: once to decide whether a
+/// validator tool has anything to judge, and again when the verdict is in.
+pub(crate) fn precheck<'v>(
+    args: &'v serde_json::Value,
+    ctx: &OutputContext<'_>,
+) -> Result<&'v str, String> {
     let OutputContext {
-        write_fence,
         spec,
         validators,
         stage,
         stage_names,
-        workdir,
-        sink,
-        overwrite_artifacts,
+        ..
     } = *ctx;
     let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
-        return ("[error] missing 'content' argument".to_string(), None);
+        return Err("[error] missing 'content' argument".to_string());
     };
     if content.trim().is_empty() {
-        return (
+        return Err(
             "[error] final output is empty - submit the answer itself, not a placeholder"
                 .to_string(),
-            None,
         );
     }
 
     // A routing token is not an answer, however well-formed it is.
     if let Some(token) = routing_token(content, stage_names) {
-        return (
-            format!(
-                "[error] '{token}' is the name of a stage in this agent, not an answer. \
-                 Submit the finished work itself - the whole thing, as the reader will see it."
-            ),
-            None,
-        );
+        return Err(format!(
+            "[error] '{token}' is the name of a stage in this agent, not an answer. \
+             Submit the finished work itself - the whole thing, as the reader will see it."
+        ));
     }
 
     // Is it the format it claims to be? Well-formedness only, and only for the
@@ -168,17 +195,16 @@ pub(crate) fn handle_output_tool(
     if let Some(format) = spec.and_then(|s| s.format.as_deref())
         && let Err(reason) = leviath_tools::validate::format::check(Some(format), content)
     {
-        return (
-            format!("[error] the final output is not valid {format}: {reason}"),
-            None,
-        );
+        return Err(format!(
+            "[error] the final output is not valid {format}: {reason}"
+        ));
     }
 
     // Does it have the shape the author asked for? Only when they supplied a
     // schema to check against.
     if let Some(schema) = spec.and_then(|s| s.schema.as_ref()) {
         match leviath_tools::validate_output(schema, content) {
-            leviath_tools::ArgValidation::Invalid(message) => return (message, None),
+            leviath_tools::ArgValidation::Invalid(message) => return Err(message),
             // A schema that will not compile skips the check rather than
             // refusing every submission, matching how tool-argument validation
             // treats the same situation. Refusing here would let one bad schema
@@ -206,38 +232,83 @@ pub(crate) fn handle_output_tool(
         && let Some(held) = validators
         && let Some(validator) = held.compiled.get(script)
     {
-        match leviath_scripting::output_validator::validate(validator, content) {
-            leviath_scripting::output_validator::Verdict::Invalid(reason) => {
-                return (
-                    format!("[error] the final output was rejected: {reason}"),
-                    None,
-                );
-            }
-            leviath_scripting::output_validator::Verdict::Unusable(reason) => {
-                let policy = spec.and_then(|s| s.on_validator_error).unwrap_or_default();
-                // Once per script, not once per retry: a validator that throws
-                // throws every time, and the same stage submitting again would
-                // otherwise repeat the same line.
-                if held.note_broken(script) {
-                    tracing::warn!(
-                        stage = %stage,
-                        script = %script,
-                        error = %reason,
-                        policy = ?policy,
-                        "output validator failed to run; flagging the script on this run"
-                    );
-                }
-                if policy == leviath_core::output::OnValidatorError::Reject {
-                    return (
-                        format!("[error] the final output was rejected: {reason}"),
-                        None,
-                    );
-                }
-            }
-            leviath_scripting::output_validator::Verdict::Valid => {}
+        let verdict = leviath_scripting::output_validator::validate(validator, content);
+        if let Some(refusal) = judged(ctx, script, &verdict) {
+            return Err(refusal);
         }
     }
+    Ok(content)
+}
 
+/// The refusal a validator's `verdict` comes to, if any: its reason when it
+/// refused the answer, and, when it could not run, its error under
+/// `on_validator_error = "reject"`. A validator that could not run is flagged
+/// on the run under `name` either way, once.
+fn judged(ctx: &OutputContext<'_>, name: &str, verdict: &Verdict) -> Option<String> {
+    match verdict {
+        Verdict::Invalid(reason) => {
+            Some(format!("[error] the final output was rejected: {reason}"))
+        }
+        Verdict::Unusable(reason) => {
+            let policy = ctx
+                .spec
+                .and_then(|s| s.on_validator_error)
+                .unwrap_or_default();
+            // Once per validator, not once per retry: a validator that fails
+            // fails every time, and the same stage submitting again would
+            // otherwise repeat the same line.
+            if ctx.validators.is_some_and(|held| held.note_broken(name)) {
+                tracing::warn!(
+                    stage = %ctx.stage,
+                    validator = %name,
+                    error = %reason,
+                    policy = ?policy,
+                    "output validator failed to run; flagging it on this run"
+                );
+            }
+            (policy == leviath_core::output::OnValidatorError::Reject)
+                .then(|| format!("[error] the final output was rejected: {reason}"))
+        }
+        Verdict::Valid => None,
+    }
+}
+
+/// The refusal the spec's validator tool comes to, if it has one: its
+/// verdict, judged like a Rhai validator's. A tool with no verdict in hand
+/// could not run.
+fn tool_refusal(ctx: &OutputContext<'_>) -> Option<String> {
+    let tool = ctx.spec.and_then(|s| s.validator_tool.as_ref())?;
+    let unrun;
+    let verdict = match ctx.tool_verdict {
+        Some(verdict) => verdict,
+        None => {
+            unrun = Verdict::Unusable(format!("{}: the check was not run", tool.tool));
+            &unrun
+        }
+    };
+    judged(ctx, &tool.tool, verdict)
+}
+
+/// Record a submission that every check has passed: its artifacts are
+/// resolved (and refused when one is missing or of the wrong type), the
+/// answer mirrored into the context, and the acknowledgement the model reads
+/// returned beside it.
+pub(crate) fn record(
+    args: &serde_json::Value,
+    content: &str,
+    ctx: &OutputContext<'_>,
+    now: i64,
+    window: &mut ContextWindow,
+) -> (String, Option<FinalOutput>) {
+    let OutputContext {
+        write_fence,
+        spec,
+        stage,
+        workdir,
+        sink,
+        overwrite_artifacts,
+        ..
+    } = *ctx;
     // Refused rather than silently dropped: an answer whose artifact list
     // quietly lost an entry sends the caller looking for a file that was named
     // and then forgotten.

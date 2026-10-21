@@ -57,7 +57,7 @@ pub use json_doc::JsonDoc;
 pub use lifecycle::CompactionConfig;
 pub use output::{
     FINAL_OUTPUT_FILE, FinalOutput, FinalOutputDescriptor, MAX_FINAL_OUTPUT_BYTES, OutputSpec,
-    describe_spec, resolve_output_spec,
+    ValidatorTool, describe_spec, resolve_output_spec,
 };
 pub use panic_payload::panic_message;
 pub use paths::{

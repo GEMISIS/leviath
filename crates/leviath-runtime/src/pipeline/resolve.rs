@@ -3155,6 +3155,7 @@ mod tests {
                 schema: None,
                 validator: None,
                 on_validator_error: None,
+                validator_tool: None,
                 overwrite_artifacts: None,
                 artifacts: Vec::new(),
             }),

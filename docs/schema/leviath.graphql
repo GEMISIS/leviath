@@ -9192,8 +9192,16 @@ type OutputShapeOutput {
 	schema: JSON
 	"Code that checks the answer."
 	validator: CodeRefOutput
-	"What happens when that code refuses an answer. Null is `REJECT`."
+	"""
+	What happens when that code, or the validator tool, cannot check an
+	answer. Null is `REJECT`.
+	"""
 	onValidatorError: ValidatorErrorPolicy
+	"""
+	A tool the stage can call that judges the answer before it is
+	recorded.
+	"""
+	validatorTool: ValidatorToolOutput
 	"Whether a later answer may replace files an earlier one wrote."
 	overwriteArtifacts: Boolean
 	"Files the answer hands back beside its text."
@@ -9215,8 +9223,13 @@ input OutputShapeWrite {
 	schema: JSON
 	"Code that checks the answer."
 	validator: CodeRefWrite
-	"What happens when that code refuses an answer. Absent is `REJECT`."
+	"""
+	What happens when that code, or the validator tool, cannot check an
+	answer. Absent is `REJECT`.
+	"""
 	onValidatorError: ValidatorErrorPolicy
+	"A tool that judges the answer after the schema and the code."
+	validatorTool: ValidatorToolWrite
 	"Whether a later answer may replace files an earlier one wrote."
 	overwriteArtifacts: Boolean
 	"Files the answer hands back beside its text."
@@ -9263,10 +9276,18 @@ input OutputSpecInput {
 	"""
 	Filter on `OutputSpecOutput.onValidatorError`.
 	
-	What happens when that script refuses an answer. Null leaves the default,
-	which is to refuse the output and ask again.
+	What happens when that script, or the validator tool, cannot check an
+	answer. Null leaves the default, which is to refuse the output and ask
+	again.
 	"""
 	onValidatorError: ValidatorErrorPolicyFilter
+	"""
+	Filter on `OutputSpecOutput.validatorTool`.
+	
+	A tool the stage can call that judges the answer before it is
+	recorded, after the schema and the script.
+	"""
+	validatorTool: ValidatorToolInput
 	"""
 	Filter on `OutputSpecOutput.overwriteArtifacts`.
 	
@@ -9316,10 +9337,16 @@ type OutputSpecOutput {
 	"""
 	validator: String
 	"""
-	What happens when that script refuses an answer. Null leaves the default,
-	which is to refuse the output and ask again.
+	What happens when that script, or the validator tool, cannot check an
+	answer. Null leaves the default, which is to refuse the output and ask
+	again.
 	"""
 	onValidatorError: ValidatorErrorPolicy
+	"""
+	A tool the stage can call that judges the answer before it is
+	recorded, after the schema and the script.
+	"""
+	validatorTool: ValidatorToolOutput
 	"""
 	Whether an artifact may replace a file of the same name in the working
 	directory.
@@ -19846,6 +19873,74 @@ input ValidatorErrorPolicyFilter {
 	notIn: [ValidatorErrorPolicy!]
 	"Match where there is no value at all."
 	isNull: Boolean
+}
+
+"""
+Filter on `ValidatorToolOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
+
+`and`, `or` and `not` compose filters of this same type, and `isNull` asks about the value being absent rather than about its contents.
+"""
+input ValidatorToolInput {
+	"""
+	Filter on `ValidatorToolOutput.tool`.
+	
+	The tool, spelled as the agent would call it.
+	"""
+	tool: StringFilter
+	"""
+	Filter on `ValidatorToolOutput.contentArg`.
+	
+	The argument the answer is passed as.
+	"""
+	contentArg: StringFilter
+	"""
+	Filter on `ValidatorToolOutput.args`.
+	
+	Fixed arguments passed beside the answer.
+	"""
+	args: JSONFilter
+	"Every filter in this list has to hold."
+	and: [ValidatorToolInput!]
+	"At least one filter in this list has to hold."
+	or: [ValidatorToolInput!]
+	"This filter must not hold."
+	not: ValidatorToolInput
+	"""
+	Match where the value itself is absent.
+	
+	`true` matches only where there is no value, `false` only where there is one.
+	"""
+	isNull: Boolean
+}
+
+"""
+A tool that judges an answer before it is recorded. It answers
+`{"ok": true}` or `{"ok": false, "reason": "..."}`.
+"""
+type ValidatorToolOutput {
+	"The tool, spelled as the agent would call it."
+	tool: String!
+	"The argument the answer is passed as."
+	contentArg: String!
+	"Fixed arguments passed beside the answer."
+	args: JSON!
+}
+
+"""
+A tool that judges the answer before it is recorded. It answers
+`{"ok": true}` or `{"ok": false, "reason": "..."}`, and the stage must be
+given it.
+"""
+input ValidatorToolWrite {
+	"The tool, spelled as the agent would call it."
+	tool: String!
+	"""
+	Fixed arguments passed beside the answer: a JSON object. Absent is
+	none.
+	"""
+	args: JSON
+	"The argument the answer is passed as. Absent is `content`."
+	contentArg: String
 }
 
 "A stage was entered again."

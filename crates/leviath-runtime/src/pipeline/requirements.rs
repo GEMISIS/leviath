@@ -380,7 +380,7 @@ pub(crate) fn require_final_output(
         ) {
             // Announced like a submission: it is the run's answer, recorded
             // before the run ends.
-            super::tools::announce_submission(
+            super::submission::announce_submission(
                 sink.as_deref(),
                 metadata,
                 &state.agent_id,

@@ -121,7 +121,8 @@ pub struct GateAutoApprove;
 ///
 /// Compiled once at spawn (a broken script is a spawn error, not a surprise at
 /// the end of a long run) and looked up when a submission arrives. Absent when
-/// the blueprint names none, which is nearly every agent.
+/// the blueprint names none and no stage's output names a validator tool,
+/// which is nearly every agent.
 #[derive(Component, Clone, Default)]
 pub struct OutputValidators {
     /// The compiled validators, by the script path a stage names.
@@ -129,7 +130,8 @@ pub struct OutputValidators {
         String,
         std::sync::Arc<leviath_scripting::output_validator::OutputValidator>,
     >,
-    /// Which of them threw, so the run can say a script it needed did not work.
+    /// Which of them threw, and which validator tools could not answer, so
+    /// the run can say a check it needed did not work.
     ///
     /// Recorded here rather than handed back through
     /// `crate::output_tool::handle_output_tool`, which answers the model and

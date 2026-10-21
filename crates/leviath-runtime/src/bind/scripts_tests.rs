@@ -112,6 +112,26 @@ fn a_run_with_no_code_gets_no_script_components() {
     assert!(compile(&s, &code).unwrap().is_empty());
 }
 
+/// A run whose answers a tool judges carries the component a tool that could
+/// not answer is flagged on, though it names no script.
+#[test]
+fn a_validator_tool_alone_gets_the_component_its_breakage_is_flagged_on() {
+    let (mut s, code) = bare();
+    s.stages[0].output = Some(OutputDef {
+        validator_tool: Some(crate::spec::graph::ValidatorToolDef {
+            tool: crate::spec::names::ToolName::new("check").unwrap(),
+            content_arg: "content".into(),
+            args: leviath_core::JsonDoc::new(serde_json::json!({})),
+        }),
+        ..Default::default()
+    });
+    let bindings = compile(&s, &code).unwrap();
+    assert_eq!(bindings.len(), 1);
+    let (world, e) = place(bindings);
+    let validators = world.get::<OutputValidators>(e).unwrap();
+    assert!(validators.compiled.is_empty());
+}
+
 #[test]
 fn hooks_validators_and_regions_compile_once_each_from_the_run_file() {
     let (mut s, mut code) = bare();

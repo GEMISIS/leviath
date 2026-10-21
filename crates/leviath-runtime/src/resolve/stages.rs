@@ -67,7 +67,9 @@ pub(super) async fn plan_all(
         let budgets = budgets(graph, i, &windows);
         working_room(graph, stage, windows[i], &budgets, at, issues);
         let tools = stage_tools(stage, tools, auto, &sat, issues);
-        plans.push(plan(graph, stage, request, model, tools, budgets));
+        let plan = plan(graph, stage, request, model, tools, budgets);
+        output::check_validator_tool(&plan, &sat, issues);
+        plans.push(plan);
     }
     Some((plans, found))
 }

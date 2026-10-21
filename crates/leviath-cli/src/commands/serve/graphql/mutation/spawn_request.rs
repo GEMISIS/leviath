@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use async_graphql::{
     InputObject, InputValueError, InputValueResult, OneofObject, Scalar, ScalarType, Value,
 };
-use leviath_runtime::spec::graph::{ArtifactDef, CodeRef, OutputDef, RunGraph};
+use leviath_runtime::spec::graph::{ArtifactDef, CodeRef, OutputDef, RunGraph, ValidatorToolDef};
 use leviath_runtime::spec::inputs::RawInput;
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use leviath_runtime::spec::launch::{
@@ -154,6 +154,20 @@ pub(crate) struct OutputArtifactWrite {
     pub(crate) description: Option<String>,
 }
 
+/// A tool that judges the answer before it is recorded. It answers
+/// `{"ok": true}` or `{"ok": false, "reason": "..."}`, and the stage must be
+/// given it.
+#[derive(Debug, InputObject)]
+pub(crate) struct ValidatorToolWrite {
+    /// The tool, spelled as the agent would call it.
+    pub(crate) tool: String,
+    /// Fixed arguments passed beside the answer: a JSON object. Absent is
+    /// none.
+    pub(crate) args: Option<Json>,
+    /// The argument the answer is passed as. Absent is `content`.
+    pub(crate) content_arg: Option<String>,
+}
+
 /// The shape a caller wants the run's final output in, over the graph's.
 #[derive(Debug, InputObject)]
 pub(crate) struct OutputShapeWrite {
@@ -168,8 +182,11 @@ pub(crate) struct OutputShapeWrite {
     pub(crate) schema: Option<Json>,
     /// Code that checks the answer.
     pub(crate) validator: Option<CodeRefWrite>,
-    /// What happens when that code refuses an answer. Absent is `REJECT`.
+    /// What happens when that code, or the validator tool, cannot check an
+    /// answer. Absent is `REJECT`.
     pub(crate) on_validator_error: Option<ValidatorErrorPolicy>,
+    /// A tool that judges the answer after the schema and the code.
+    pub(crate) validator_tool: Option<ValidatorToolWrite>,
     /// Whether a later answer may replace files an earlier one wrote.
     pub(crate) overwrite_artifacts: Option<bool>,
     /// Files the answer hands back beside its text.
@@ -499,6 +516,23 @@ fn output(write: OutputShapeWrite, issues: &mut SpawnIssues) -> OutputDef {
         on_validator_error: write.on_validator_error.map(|policy| match policy {
             ValidatorErrorPolicy::Reject => leviath_core::output::OnValidatorError::Reject,
             ValidatorErrorPolicy::Accept => leviath_core::output::OnValidatorError::Accept,
+        }),
+        validator_tool: write.validator_tool.and_then(|v| {
+            Some(ValidatorToolDef {
+                tool: name(
+                    issues,
+                    at.field("validator_tool").field("tool"),
+                    ToolName::new(v.tool.as_str()),
+                    &v.tool,
+                )?,
+                content_arg: v
+                    .content_arg
+                    .unwrap_or_else(|| leviath_core::output::DEFAULT_CONTENT_ARG.to_string()),
+                args: leviath_core::JsonDoc::new(
+                    v.args
+                        .map_or_else(|| serde_json::Value::Object(Default::default()), |a| a.0),
+                ),
+            })
         }),
         overwrite_artifacts: write.overwrite_artifacts,
         artifacts: write
