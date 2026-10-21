@@ -302,15 +302,17 @@ impl ManifestDoc {
     }
 
     /// Give a stage its own layout: a copy of the shared layout as it is
-    /// now, so it starts from what it inherited. A stage that already has
-    /// one is left alone.
+    /// now, so it starts from what it inherited. The regions of its `add`
+    /// move into the copy, laid over the shared ones as the loader lays
+    /// them, since a stage cannot have both. A stage that already has one
+    /// is left alone.
     pub(crate) fn create_stage_override(&mut self, stage: &str) -> Result<(), EditError> {
         self.require_stage(stage)?;
         if self.layout_table(Some(stage)).is_some() {
             return Ok(());
         }
         let shared: Option<Item> = self.graph().get("layout").cloned();
-        let layout = match shared.and_then(|item| item.into_value().ok()) {
+        let mut layout = match shared.and_then(|item| item.into_value().ok()) {
             Some(Value::InlineTable(mut copy)) => {
                 copy.decor_mut().clear();
                 copy
@@ -318,6 +320,33 @@ impl ManifestDoc {
             _ => starter_layout(),
         };
         let table = self.stage_table_mut(stage).expect("checked just above");
+        let added = table
+            .remove("add")
+            .and_then(|item| item.into_value().ok())
+            .map(added_regions)
+            .unwrap_or_default();
+        if !added.is_empty() {
+            if let Some(hide) = table.get_mut("hide").and_then(Item::as_array_mut) {
+                hide.retain(|name| !added.iter().any(|r| Some(region_name(r)) == name.as_str()));
+                hide.fmt();
+            }
+            let shared_regions: Vec<InlineTable> = layout
+                .get("regions")
+                .and_then(Value::as_array)
+                .map(|regions| {
+                    regions
+                        .iter()
+                        .filter_map(Value::as_inline_table)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut regions = Array::new();
+            for region in leviath_blueprint::merge_regions(&shared_regions, added, region_name) {
+                regions.push(Value::InlineTable(region));
+            }
+            layout.insert("regions", Value::Array(regions));
+        }
         table.insert("layout", inline_item(layout));
         Ok(())
     }
@@ -546,6 +575,36 @@ impl ManifestDoc {
 
 /// A layout with no regions and no fixed budget: every region sizes itself
 /// as a share of the model's window.
+/// A stage's `add` table as the region tables of a layout, each named by its
+/// key; empty when it is not a table.
+fn added_regions(add: Value) -> Vec<InlineTable> {
+    let Value::InlineTable(add) = add else {
+        return Vec::new();
+    };
+    add.into_iter()
+        .filter_map(|(name, value)| {
+            let Value::InlineTable(fields) = value else {
+                return None;
+            };
+            let mut region = InlineTable::new();
+            region.insert("name", Value::from(name.as_str()));
+            for (key, value) in fields {
+                region.insert(&key, value);
+            }
+            region.fmt();
+            Some(region)
+        })
+        .collect()
+}
+
+/// A layout region table's `name`, or empty.
+fn region_name(region: &InlineTable) -> &str {
+    region
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
 fn starter_layout() -> InlineTable {
     let mut layout = InlineTable::new();
     layout.insert("total_budget_tokens", Value::from(0));

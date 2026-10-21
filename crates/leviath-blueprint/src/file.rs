@@ -55,9 +55,11 @@ pub struct BlueprintFile {
 
 impl BlueprintFile {
     /// Read a blueprint from the text of an `agent.toml`. Unknown keys are
-    /// refused, and the message names the line and the key.
+    /// refused, and the message names the line and the key. A stage's `add`
+    /// is folded into its layout here (see [`crate::merge_regions`]), so the
+    /// graph read is the one every stage runs with.
     pub fn parse(text: &str) -> Result<Self, String> {
-        toml::from_str(text).map_err(|e| e.to_string())
+        crate::add::parse(text)
     }
 
     /// The run graph, with its title and description filled in from
@@ -85,8 +87,36 @@ impl BlueprintFile {
 /// `docs/schema/blueprint.schema.json`. Generated from the types the file is
 /// read into, so it takes exactly what [`BlueprintFile::parse`] takes,
 /// including the short forms.
+///
+/// A stage's `add` is the one key the graph's types do not hold, since it is
+/// folded into the stage's layout as the file is read. It is described here
+/// in their place: a table of region definitions keyed by name, each a region
+/// without its `name`.
 pub fn schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(BlueprintFile)).expect("a schema is plain JSON")
+    let mut schema =
+        serde_json::to_value(schemars::schema_for!(BlueprintFile)).expect("a schema is plain JSON");
+    let defs = &mut schema["$defs"];
+    let mut added = defs["RegionDef"].clone();
+    added["description"] = "One region a stage adds, named by its key.".into();
+    added["properties"]
+        .as_object_mut()
+        .expect("a region's schema lists its keys")
+        .remove("name");
+    added["required"]
+        .as_array_mut()
+        .expect("a region's schema lists the keys it needs")
+        .retain(|key| key != "name");
+    defs["AddedRegionDef"] = added;
+    defs["StageDef"]["properties"]["add"] = serde_json::json!({
+        "default": {},
+        "description": "Regions this stage shows beside the shared layout, keyed by name. \
+            A name the shared layout declares is refused unless the stage also hides it, \
+            which gives that region this definition for this stage. Not allowed beside \
+            `layout`.",
+        "additionalProperties": { "$ref": "#/$defs/AddedRegionDef" },
+        "type": "object",
+    });
+    schema
 }
 
 /// Names a machine knows, offered as completions in a schema written for it.

@@ -369,6 +369,42 @@ call of every later stage; a report-polishing stage in the bundled deep-research
 the load, and the always-visible regions above cannot be hidden. The hidden set is decided afresh
 by each stage: a stage that declares neither its own `layout` nor `hide` carries everything.
 
+The other light form goes the opposite way. When a stage needs everything the graph's layout has
+and one region more, `add` it:
+
+```toml
+[[graph.stages]]
+name = "plan"
+system_prompt = "Plan."
+add = { scratch = { kind = "pinned", budget = "10%" } }
+
+# or, as its own table, after the stage's other keys:
+[graph.stages.add.scratch]
+kind = "pinned"
+budget = "10%"
+```
+
+`add` takes region definitions keyed by name, with every key a region in `[graph.layout]` takes
+except `name`. The stage runs with the graph's regions in their order, with the added ones after
+them. Its budget counts the added regions the way it counts any stage layout's, and `lev validate`
+names a problem with one under `graph.stages.<stage>.layout`, where the merged layout lives.
+
+`add` and `hide` compose: inherit, minus these, plus those. Together they also give one shared
+region a different definition for one stage. Hide it and add it again under the same name:
+
+```toml
+[[graph.stages]]
+name = "draft"
+system_prompt = "Draft."
+hide = ["notes"]
+add = { notes = { kind = "pinned", budget = 4000 } }   # this stage's notes, shown in their place
+```
+
+Three things fail the load. `add` beside the stage's own `layout` is one, because `layout`
+already says what the whole layout is. Adding a name the graph's layout declares without hiding
+it is another, since it is the override above written by mistake. The third is adding one of
+the always-visible regions.
+
 ## Seed commands
 
 A region can be filled before the run starts. An input bound to the region fills it from the

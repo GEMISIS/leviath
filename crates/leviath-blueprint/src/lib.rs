@@ -20,14 +20,20 @@
 //!   blueprint by name, for a host's `ResolveEnv::blueprint`.
 //! - [`lint`] is what the checks beyond validation report in.
 
+mod add;
 mod file;
 pub mod lint;
 mod load;
 mod write;
 
+pub use add::merge_regions;
 pub use file::{BlueprintFile, BlueprintMeta, FILE_NAME, SchemaHints, schema, schema_with};
 pub use leviath_runtime::spec::env::LoadedBlueprint;
 pub use load::{BlueprintError, find, installed, load, validate};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "add_tests.rs"]
+mod add_tests;
