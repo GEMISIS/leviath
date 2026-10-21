@@ -16741,6 +16741,7 @@ async fn the_routing_call_is_tried_as_often_as_the_blueprint_or_the_operator_say
         Some(RoutingDef {
             retry_attempts: std::num::NonZeroU32::new(n),
             on_error: None,
+            on_unmatched: None,
         })
     };
     // (graph, stage, operator's attempts, answered)
@@ -16808,6 +16809,7 @@ fn a_failed_routing_call_takes_the_error_edge_only_when_the_blueprint_asks() {
         Some(RoutingDef {
             retry_attempts: None,
             on_error: Some(on_error),
+            on_unmatched: None,
         })
     };
     // (graph, stage, takes the edge)
@@ -17260,6 +17262,115 @@ fn a_second_choice_that_names_nothing_ends_a_stage_that_may_end_and_says_so() {
                 .to_string()
         )]
     );
+}
+
+/// `routing.on_unmatched = "fail"` fails the run on a second answer that
+/// names no stage, whether or not the stage may end the run. The error names
+/// the stage and quotes the answer, the stage log carries it, and neither
+/// the stage's `error` edge nor its retries are touched. The stage's own
+/// setting wins over the graph's, and a second answer that names a stage is
+/// taken as usual.
+#[test]
+fn a_second_unmatched_answer_fails_the_run_only_where_routing_says_fail() {
+    use crate::spec::graph::{OnUnmatched, RoutingDef};
+    let unmatched = |on_unmatched| {
+        Some(RoutingDef {
+            on_unmatched: Some(on_unmatched),
+            ..RoutingDef::default()
+        })
+    };
+    let long = format!("I think {} keep going", "we should ".repeat(10));
+    // (graph, stage, may end, second reply, fails)
+    let cases = [
+        (
+            unmatched(OnUnmatched::Fail),
+            None,
+            false,
+            long.as_str(),
+            true,
+        ),
+        (None, unmatched(OnUnmatched::Fail), true, "", true),
+        (
+            unmatched(OnUnmatched::Fail),
+            unmatched(OnUnmatched::FirstEdge),
+            false,
+            "nothing",
+            false,
+        ),
+        (unmatched(OnUnmatched::Fail), None, false, "c", false),
+        (None, None, false, "nothing", false),
+    ];
+    for (graph, stage, may_end, reply, fails) in cases {
+        let (mut world, tx) = world_with_transition_results();
+        let mut bp = blueprint(vec![
+            stage_named("a", None, may_end, None),
+            stage_named("b", None, false, None),
+            stage_named("c", None, false, None),
+        ]);
+        bp.routing = graph;
+        bp.stages[0].routing = stage;
+        let e = spawn_responding_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1"), si("m2")],
+            vec![plain_edge("b"), plain_edge("c")],
+        );
+        // The stage that may end has no stage log to write to; the run
+        // fails all the same.
+        world.entity_mut(e).insert(RoutingReasked);
+        if !may_end {
+            world.entity_mut(e).insert(StageIoBuffer::default());
+        }
+        tx.send(InferenceOutcome {
+            latency: std::time::Duration::ZERO,
+            entity: e,
+            attempt_id: String::new(),
+            result: Ok(resp(reply)),
+            pricing: None,
+            attempt: None,
+        })
+        .unwrap();
+
+        run_collect_transition(&mut world);
+
+        let state = world.get::<AgentState>(e).unwrap();
+        assert!(
+            world.get::<AwaitingTransitionResponse>(e).is_none(),
+            "{reply}"
+        );
+        assert!(world.get::<RoutingReasked>(e).is_none(), "{reply}");
+        assert!(world.get::<ResolveTransition>(e).is_none(), "{reply}");
+        assert!(world.get::<StageOutcome>(e).is_none(), "{reply}");
+        let logs = world.get::<StageIoBuffer>(e).map(|b| b.logs.clone());
+        if !fails {
+            assert!(
+                !matches!(state.status, AgentStatus::Error { .. }),
+                "{reply}: {:?}",
+                state.status
+            );
+            continue;
+        }
+        let AgentStatus::Error { message } = &state.status else {
+            panic!("{reply}: {:?}", state.status);
+        };
+        let why = match reply {
+            "" => "the answer was empty".to_string(),
+            _ => format!(
+                "the answer named no stage (\"I think {}...\")",
+                "we should ".repeat(10).chars().take(72).collect::<String>()
+            ),
+        };
+        assert_eq!(
+            message,
+            &format!(
+                "the stage after 'a' could not be picked: {why}, asked twice. \
+                 routing.on_unmatched = \"fail\" ends the run here; the stage's work is kept"
+            )
+        );
+        if !may_end {
+            assert_eq!(logs, Some(vec![(0, format!("[routing] {message}"))]));
+        }
+    }
 }
 
 /// A routing reply the output cap cut off, or whose text is the model's

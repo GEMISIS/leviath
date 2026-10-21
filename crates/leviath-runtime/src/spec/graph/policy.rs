@@ -255,8 +255,11 @@ impl NudgeDef {
 /// failure there says nothing about the work, so by default the run stops
 /// with the routing error rather than redoing the stage down its `error`
 /// edge.
+// The run file's binary frames keep the two fields this had before
+// `on_unmatched` (see `spec::readable::routing`); readable formats write
+// them all.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct RoutingDef {
     /// Tries per routing call, the first one included. Unset takes the
     /// operator's `[limits] routing_retry_attempts`.
@@ -265,6 +268,25 @@ pub struct RoutingDef {
     /// What happens once the tries are spent.
     #[serde(default)]
     pub on_error: Option<OnRoutingError>,
+    /// What happens when the answer names no stage, asked twice: unset or
+    /// `first_edge` falls back to the first edge, `fail` fails the run.
+    #[serde(default)]
+    pub on_unmatched: Option<OnUnmatched>,
+}
+
+/// What a run does when the routing answer names no stage a second time.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OnUnmatched {
+    /// The run takes the stage's first edge, or ends where the stage may end
+    /// the run.
+    #[default]
+    FirstEdge,
+    /// The run fails, naming the stage and the answer. The stage's work is
+    /// kept and its `error` edge is not taken.
+    Fail,
 }
 
 /// What a run does when the call that picks its next stage fails for good.
@@ -298,6 +320,16 @@ impl RoutingDef {
             .into_iter()
             .flatten()
             .find_map(|d| d.on_error)
+            .unwrap_or_default()
+    }
+
+    /// What a stage does with a second answer that names no stage, from the
+    /// stage, then the graph, then [`OnUnmatched::FirstEdge`].
+    pub fn on_unmatched(graph: Option<&RoutingDef>, stage: Option<&RoutingDef>) -> OnUnmatched {
+        [stage, graph]
+            .into_iter()
+            .flatten()
+            .find_map(|d| d.on_unmatched)
             .unwrap_or_default()
     }
 }

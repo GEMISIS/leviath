@@ -477,6 +477,7 @@ fn routing_is_read_checked_and_kept_in_every_form() {
     let expected = RoutingDef {
         retry_attempts: std::num::NonZeroU32::new(4),
         on_error: None,
+        on_unmatched: None,
     };
     assert_eq!(g.routing, Some(expected.clone()));
     assert_eq!(
@@ -500,9 +501,105 @@ fn routing_is_read_checked_and_kept_in_every_form() {
         "routing = { retry_attempts = 0 }",
         "routing = { on_error = \"retry\" }",
         "routing = { tries = 2 }",
+        "routing = { on_unmatched = \"guess\" }",
     ] {
         assert!(toml::from_str::<RunGraph>(&graph(bad)).is_err(), "{bad}");
     }
+}
+
+/// `on_unmatched` reads from a blueprint at either level, the stage's value
+/// winning, and an unknown value is refused with the values it takes.
+#[test]
+fn on_unmatched_is_read_resolved_and_checked() {
+    let graph = |graph: &str, stage: &str| {
+        format!(
+            "{graph}\nlayout = {{ regions = [], total_budget_tokens = 1 }}\n\
+             [[stages]]\nname = \"a\"\n{stage}\n"
+        )
+    };
+    let resolved = |g: &str, s: &str| {
+        let g: RunGraph = toml::from_str(&graph(g, s)).unwrap();
+        RoutingDef::on_unmatched(g.routing.as_ref(), g.stages[0].routing.as_ref())
+    };
+    assert_eq!(resolved("", ""), OnUnmatched::FirstEdge);
+    assert_eq!(
+        resolved("routing = { on_unmatched = \"fail\" }", ""),
+        OnUnmatched::Fail
+    );
+    assert_eq!(
+        resolved("", "routing = { on_unmatched = \"fail\" }"),
+        OnUnmatched::Fail
+    );
+    assert_eq!(
+        resolved(
+            "routing = { on_unmatched = \"fail\" }",
+            "routing = { on_unmatched = \"first_edge\" }"
+        ),
+        OnUnmatched::FirstEdge
+    );
+    let err = toml::from_str::<RunGraph>(&graph("routing = { on_unmatched = \"guess\" }", ""))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unknown variant `guess`, expected `first_edge` or `fail`"),
+        "{err}"
+    );
+}
+
+/// The run file keeps `on_unmatched` without a new binary layout. A routing
+/// block that does not set it is written byte for byte as it was before the
+/// key existed, so every run file already on disk reads the same; one that
+/// sets it keeps every combination through the binary form and the readable
+/// one.
+#[test]
+fn on_unmatched_rides_in_the_binary_form_routing_always_had() {
+    use std::num::NonZeroU32;
+    /// `RoutingDef` as the run file wrote it before `on_unmatched`.
+    #[derive(Serialize)]
+    struct Before {
+        retry_attempts: Option<NonZeroU32>,
+        on_error: Option<OnRoutingError>,
+    }
+    let errors = [
+        None,
+        Some(OnRoutingError::Fail),
+        Some(OnRoutingError::ErrorEdge),
+    ];
+    for retry_attempts in [None, NonZeroU32::new(3)] {
+        for on_error in errors {
+            let before = postcard::to_stdvec(&Before {
+                retry_attempts,
+                on_error,
+            })
+            .unwrap();
+            let def = RoutingDef {
+                retry_attempts,
+                on_error,
+                on_unmatched: None,
+            };
+            assert_eq!(postcard::to_stdvec(&def).unwrap(), before);
+            assert_eq!(postcard::from_bytes::<RoutingDef>(&before).unwrap(), def);
+            for on_unmatched in [OnUnmatched::FirstEdge, OnUnmatched::Fail] {
+                let def = RoutingDef {
+                    on_unmatched: Some(on_unmatched),
+                    ..def.clone()
+                };
+                let bin = postcard::to_stdvec(&def).unwrap();
+                assert_eq!(postcard::from_bytes::<RoutingDef>(&bin).unwrap(), def);
+                let json = serde_json::to_string(&def).unwrap();
+                assert_eq!(serde_json::from_str::<RoutingDef>(&json).unwrap(), def);
+            }
+        }
+    }
+    // The settings variant's bytes are held still too: `Some(3)`, then
+    // `Some` of the variant after `ErrorEdge`, holding `Some(ErrorEdge)` and
+    // `Fail`.
+    let set = RoutingDef {
+        retry_attempts: NonZeroU32::new(3),
+        on_error: Some(OnRoutingError::ErrorEdge),
+        on_unmatched: Some(OnUnmatched::Fail),
+    };
+    assert_eq!(postcard::to_stdvec(&set).unwrap(), [1, 3, 1, 2, 1, 1, 1]);
 }
 
 /// The `[graph]` table of each bundled blueprint's `agent.toml`, by

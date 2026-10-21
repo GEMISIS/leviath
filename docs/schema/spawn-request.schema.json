@@ -1950,6 +1950,21 @@
         }
       ]
     },
+    "OnUnmatched": {
+      "description": "What a run does when the routing answer names no stage a second time.",
+      "oneOf": [
+        {
+          "const": "first_edge",
+          "description": "The run takes the stage's first edge, or ends where the stage may end\nthe run.",
+          "type": "string"
+        },
+        {
+          "const": "fail",
+          "description": "The run fails, naming the stage and the answer. The stage's work is\nkept and its `error` edge is not taken.",
+          "type": "string"
+        }
+      ]
+    },
     "OnValidatorError": {
       "description": "What happens to a submission when its Rhai validator cannot run: the script\nthrew, exhausted its operation budget, or returned something that is neither\n`()` nor a string.\n\nDistinct from the validator *rejecting* the answer, which always refuses the\nsubmission back to the model. This knob is only about the script itself\nfailing.",
       "oneOf": [
@@ -2383,6 +2398,18 @@
           ],
           "default": null,
           "description": "What happens once the tries are spent."
+        },
+        "on_unmatched": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnUnmatched"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What happens when the answer names no stage, asked twice: unset or\n`first_edge` falls back to the first edge, `fail` fails the run."
         },
         "retry_attempts": {
           "default": null,

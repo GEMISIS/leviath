@@ -1039,6 +1039,14 @@ same list.
 
 ### Added
 
+- `routing.on_unmatched` in a blueprint, for the graph or one stage. Set to
+  `"fail"`, a routing answer that names no stage, asked twice, ends the run
+  with an error that names the stage and quotes the answer, instead of
+  taking the first edge. The stage's work is kept, and its `error` edge and
+  retries are not used. The default, `"first_edge"`, is the fallback runs
+  already take. Run files keep their layout: a run file already on disk
+  reads and resumes as before.
+
 - **Library.** `leviath-core` gains the provider-neutral half of context
   assembly, so a program that calls a model API itself can lay out its
   context the way a run does without depending on `leviath-runtime` or

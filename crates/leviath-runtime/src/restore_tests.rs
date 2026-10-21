@@ -593,10 +593,12 @@ fn a_resumed_run_keeps_its_blueprints_routing() {
     routed.graph.routing = Some(RoutingDef {
         retry_attempts: std::num::NonZeroU32::new(5),
         on_error: Some(OnRoutingError::ErrorEdge),
+        on_unmatched: None,
     });
     routed.graph.stages[0].routing = Some(RoutingDef {
         retry_attempts: None,
         on_error: Some(OnRoutingError::Fail),
+        on_unmatched: None,
     });
     crate::runfile::RunFileWriter::create(
         &path,
@@ -614,5 +616,52 @@ fn a_resumed_run_keeps_its_blueprints_routing() {
     assert_eq!(
         RoutingDef::on_error(graph.routing.as_ref(), stage),
         OnRoutingError::Fail
+    );
+}
+
+/// A layout-8 run file written before `routing.on_unmatched` existed, held
+/// mid-stage when its daemon was killed, resumes with its routing as it was
+/// and the default for the new key. Its spec frame encodes again to exactly
+/// the bytes on disk, so the key did not move the binary layout.
+///
+/// The fixture's blueprint sets `[graph] routing = { retry_attempts = 2 }`
+/// and `routing = { on_error = "fail" }` on its `verify` stage.
+#[test]
+fn a_layout_8_run_file_from_before_on_unmatched_resumes_unchanged() {
+    use crate::runfile::codec::{FrameKind, encode, frame_at};
+    use crate::spec::graph::{OnRoutingError, OnUnmatched, RoutingDef};
+    let bytes = include_bytes!("runfile/fixtures/layout-8-routing.lvr");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(leviath_core::files::RUN_FILE), bytes).unwrap();
+
+    let run = read_for_resume(dir.path()).unwrap().expect("a run file");
+    let graph = &run.spec.graph;
+    assert_eq!(
+        graph.routing,
+        Some(RoutingDef {
+            retry_attempts: std::num::NonZeroU32::new(2),
+            on_error: None,
+            on_unmatched: None,
+        })
+    );
+    let stage = graph.stage("verify").unwrap().routing.as_ref();
+    assert_eq!(
+        stage,
+        Some(&RoutingDef {
+            retry_attempts: None,
+            on_error: Some(OnRoutingError::Fail),
+            on_unmatched: None,
+        })
+    );
+    assert_eq!(
+        RoutingDef::on_unmatched(graph.routing.as_ref(), stage),
+        OnUnmatched::FirstEdge
+    );
+
+    let header = crate::runfile::codec::header(crate::runfile::fingerprint()).len();
+    let frame = frame_at(bytes, header).unwrap();
+    assert_eq!(
+        encode(FrameKind::Spec, &*run.spec).unwrap(),
+        bytes[header..frame.end()]
     );
 }
