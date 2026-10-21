@@ -65,6 +65,15 @@ pub fn capability_cache_path() -> Option<PathBuf> {
     data_dir().map(|d| d.join("model_capabilities.json"))
 }
 
+/// Where the daemon records the shell commands it is running:
+/// `<home>/.leviath/running`, one small file per command, removed when the
+/// command ends. A daemon starting after a crash reads what is left here and
+/// stops those commands before it recovers any run. Read and written through
+/// `leviath_sys::lifetime::Ledger`.
+pub fn running_commands_dir() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("running"))
+}
+
 /// Whether `name` is safe to use as a single path component.
 ///
 /// Accepts `[A-Za-z0-9._-]+` and nothing else. Everything a caller supplies as
@@ -254,6 +263,7 @@ mod tests {
                 capability_cache_path(),
                 Some(data.join("model_capabilities.json"))
             );
+            assert_eq!(running_commands_dir(), Some(data.join("running")));
         });
     }
 

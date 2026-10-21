@@ -66,3 +66,25 @@ pub(crate) fn kill_process_group(_pgid: u32) -> io::Result<()> {
 pub(crate) fn hostname() -> Option<String> {
     None
 }
+
+/// Nothing to tie a command to on such a target: the guard still kills the
+/// direct child when it is dropped, and that is all this platform offers.
+pub(crate) struct Tie;
+
+pub(crate) fn tie_child(_child: &tokio::process::Child) -> Option<Tie> {
+    None
+}
+
+/// No way to ask when a process started, so every record a crashed daemon left
+/// reads as gone and nothing is killed on a guess.
+pub(crate) fn process_started_ms(_pid: u32) -> Option<u64> {
+    None
+}
+
+pub(crate) fn process_group_of(_pid: u32) -> Option<u32> {
+    None
+}
+
+pub(crate) fn kill_tree(_pid: u32, _pgid: u32) -> io::Result<()> {
+    Ok(())
+}

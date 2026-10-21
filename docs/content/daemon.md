@@ -135,7 +135,9 @@ it arrives. On reload the daemon uses the journal to work out what actually happ
 - **A call that finished** is replayed from the journal, not run again. A file write that already
   landed does not land twice.
 - **A call that was still running** comes back to the model as an error saying the effect may or may
-  not have happened, with instructions to check before re-running anything with side effects.
+  not have happened, with instructions to check before re-running anything with side effects. A
+  shell command that call started does not keep running after the daemon that started it is gone,
+  even after `kill -9`. See [shell commands end with the daemon](#shell-commands-end-with-the-daemon).
 - **An interrupted `spawn_agent`** also lists the run's existing children, so the model looks for
   the child it may already have created instead of spawning a duplicate.
 - **A question that was waiting on you** (`ask_user_*`, `present_for_review`, `edit_document`) is
@@ -153,6 +155,24 @@ it arrives. On reload the daemon uses the journal to work out what actually happ
 A reloaded run is not resolved again. It carries on with the models, tools, launch policy and
 inputs its spec recorded when it started, including `--yolo`, the output format it was asked for,
 and each stage's failover list.
+
+### Shell commands end with the daemon
+
+A shell command runs in its own process group, so a timeout or a cancel stops everything it
+started. Two things stop it when the daemon itself dies:
+
+- **While the daemon dies.** On Windows each command runs in a job object that closes with the
+  daemon and ends every process in it. On macOS and Linux a small watchdog process waits on a pipe
+  from the daemon. The pipe closes however the daemon ends, and the watchdog then kills the
+  command's process group.
+- **At the next start.** While a command runs, the daemon keeps a small file for it in
+  `~/.leviath/running/` with its pid, its process group and when it started. A daemon starting
+  after a crash reads what is left there and stops those commands before it reloads any run. It
+  checks each one's start time first, so a pid the system has since given to another program is
+  left alone.
+
+Either way the run's reloaded call still comes back with the check-first error above, because the
+command may have done part of its work before it was stopped.
 
 If something on your end consumes completion webhooks, deduplicate on `delivery_id`, described in
 the [API guide](/docs/api). A completion that re-fires after a restart carries the same id as the

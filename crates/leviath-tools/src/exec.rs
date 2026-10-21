@@ -607,15 +607,17 @@ impl BuiltinTools {
         let mut stderr = Captured::default();
         let mut cut = false;
 
-        // Spawn *inside* the timed future so the reaper guard lives exactly as
-        // long as the command does: dropping this future (timeout, or the whole
-        // batch dropped because the agent was cancelled) drops the guard, which
+        // Spawn *inside* the timed future so the guard lives exactly as long as
+        // the command does: dropping this future (timeout, or the whole batch
+        // dropped because the agent was cancelled) drops the guard, which
         // signals the group. Keeping spawn and wait in one fallible block also
         // keeps a single error arm, as `Command::output()` had.
         let run = async {
             let mut child = cmd.spawn()?;
-            // The child leads its own group, so its pid is the group id.
-            let _reaper = child.id().map(ProcessGroupReaper);
+            // The child leads its own group. The guard also ties the group to
+            // the daemon and records it, so a daemon killed mid-command does
+            // not leave it running.
+            let _guard = leviath_sys::ChildGuard::adopt(&child);
             // Taken before the join so both pipes are drained concurrently with
             // each other and with the wait. `piped()` above guarantees both.
             let mut out = child.stdout.take().expect("stdout was piped");

@@ -33,6 +33,7 @@ pub mod browser;
 pub mod disk;
 pub mod editor;
 pub mod keychain;
+pub mod lifetime;
 pub mod locale;
 pub mod osinfo;
 pub mod perms;
@@ -42,6 +43,7 @@ pub mod tty;
 
 pub use browser::open_url;
 pub use editor::launch as launch_editor;
+pub use lifetime::ChildGuard;
 pub use perms::{
     create_private_dir_all, ensure_file_private, open_private_append, secure_dir_perms,
     secure_file_perms, write_atomic, write_private,

@@ -13,11 +13,19 @@
 mod unix;
 #[cfg(unix)]
 pub(crate) use unix::*;
+#[cfg(unix)]
+mod lifetime_unix;
+#[cfg(unix)]
+pub(crate) use lifetime_unix::*;
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub(crate) use windows::*;
+#[cfg(windows)]
+mod lifetime_windows;
+#[cfg(windows)]
+pub(crate) use lifetime_windows::*;
 
 #[cfg(not(any(unix, windows)))]
 mod fallback;

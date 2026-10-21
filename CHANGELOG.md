@@ -493,6 +493,17 @@ same list.
 
 ### Fixed
 
+- A shell command a run started no longer keeps running after the daemon
+  is killed (`kill -9`, a crash). It could go on changing files after the
+  run had moved on, and a model that re-ran it got two copies. The command
+  is now tied to the daemon: a job object on Windows, and on macOS and
+  Linux a watchdog that kills its process group when the daemon's pipe to
+  it closes. The daemon also records each running command under
+  `~/.leviath/running/`, and a daemon starting after a crash stops any
+  command left there before it reloads runs, checking the process's start
+  time so a reused pid is never killed. On Windows a shell command's own
+  child processes now end with it on a timeout or a cancel too, where only
+  `cmd.exe` was stopped before.
 - The title call no longer fails on an OpenRouter model that always reasons,
   such as `meta/muse-spark-1.3`. It asked every OpenRouter model to turn
   reasoning off, which Muse Spark refuses with a 400 ("Reasoning is
