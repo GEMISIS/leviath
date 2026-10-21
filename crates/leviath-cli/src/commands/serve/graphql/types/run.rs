@@ -15,6 +15,7 @@ use super::super::super::blocking::blocking;
 use super::super::super::core::blueprints;
 use super::super::super::core::error::ServeError;
 use super::super::super::core::{files, history};
+use super::super::super::tree;
 use super::super::super::types::AppState;
 use super::super::connection::{
     Connection, Paged, PositionQuery, Total, position_order, position_page,
@@ -423,52 +424,36 @@ impl Run {
         .await
     }
 
-    /// How deep and how wide this run's sub-agent tree is, without walking it.
+    /// How deep and how wide this run's sub-agent tree is, and what it all
+    /// added up to, without walking it.
     ///
-    /// The roll-up covers the whole subtree, which is the figure a fan-out is
-    /// judged by: a parent that spent little and whose fifty workers spent a
-    /// great deal is not a cheap run.
+    /// The tokens, spend and working time cover the whole subtree, which is
+    /// the figure a fan-out is judged by: a parent that spent little and whose
+    /// fifty workers spent a great deal is not a cheap run.
     #[filter(skip)]
     async fn tree_status(&self, ctx: &Context<'_>) -> RunTreeStatus {
         let state = ctx.data_unchecked::<AppState>();
         let snapshot = state.caches.run_index.snapshot().await;
-        let mut depth = 0;
-        let mut descendants = 0;
-        let mut prompt_tokens = 0usize;
-        let mut completion_tokens = 0usize;
-        let mut cached_tokens = 0usize;
-        let mut cache_write_tokens = 0usize;
-        // Breadth-first over the index's own parent map, which is why this is a
-        // walk of the subtree rather than of the store.
-        let mut level: Vec<String> = vec![self.meta.run_id.clone()];
-        while !level.is_empty() {
-            let mut next = Vec::new();
-            for run_id in &level {
-                for child in snapshot.under(Some(run_id.as_str())) {
-                    descendants += 1;
-                    prompt_tokens += child.prompt_tokens;
-                    completion_tokens += child.completion_tokens;
-                    cached_tokens += child.cached_tokens;
-                    cache_write_tokens += child.cache_write_tokens;
-                    next.push(child.run_id.clone());
-                }
-            }
-            if !next.is_empty() {
-                depth += 1;
-            }
-            level = next;
-        }
+        // The same walk REST's `tree-status` takes, over the index's own
+        // parent map, so it visits the subtree rather than the store.
+        let (rollup, ()) = tree::walk(&snapshot, &self.meta, self.now, &mut |_, _, _| ());
         RunTreeStatus {
             rollup: TokenUsage {
-                prompt_tokens: BigInt((self.meta.prompt_tokens + prompt_tokens) as i64),
-                completion_tokens: BigInt((self.meta.completion_tokens + completion_tokens) as i64),
-                cached_tokens: BigInt((self.meta.cached_tokens + cached_tokens) as i64),
-                cache_write_tokens: BigInt(
-                    (self.meta.cache_write_tokens + cache_write_tokens) as i64,
-                ),
+                prompt_tokens: BigInt(rollup.prompt_tokens as i64),
+                completion_tokens: BigInt(rollup.completion_tokens as i64),
+                cached_tokens: BigInt(rollup.cached_tokens as i64),
+                cache_write_tokens: BigInt(rollup.cache_write_tokens as i64),
             },
-            depth: as_i32(depth),
-            descendant_count: as_i32(descendants),
+            cost: CostBreakdown {
+                cost_usd: rollup.cost_usd.map(Decimal),
+                cost_priced_usd: Decimal(rollup.cost_priced_usd),
+                cost_is_exact: rollup.cost_is_exact,
+                unpriced_calls: as_i32(rollup.unpriced_calls),
+            },
+            working_secs: BigInt(rollup.working_secs as i64),
+            working_now: as_i32(rollup.working_now),
+            depth: as_i32(rollup.depth),
+            descendant_count: as_i32(rollup.descendants),
         }
     }
 

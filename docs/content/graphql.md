@@ -486,7 +486,14 @@ That is not the same question as "no stage ran on anything else", which is `none
 ```graphql
 {
   run(id: "coder-1788924523-abc123") {
-    treeStatus { depth descendantCount rollup { promptTokens completionTokens } }
+    treeStatus {
+      depth
+      descendantCount
+      rollup { promptTokens completionTokens }
+      cost { costUsd costPricedUsd unpricedCalls }
+      workingSecs
+      workingNow
+    }
     children(first: 25, orderBy: [{ field: STARTED_AT, direction: ASC }]) {
       results { id title status cost { costUsd } }
       cursor
@@ -504,6 +511,15 @@ That is not the same question as "no stage ran on anything else", which is `none
 same sort keys and the same cursors. `treeStatus` answers "what did this fan-out cost" without
 walking it: the roll-up covers every run below, at any depth. A parent that spent little and whose
 fifty workers spent a great deal is not a cheap run.
+
+`cost` is the whole subtree's spend. `costUsd` is null once any run in it has an unpriced call,
+because a sum of only the priced part would look right and be too low. `costPricedUsd` and
+`unpricedCalls` still add up, so the priced part and what is missing are both there.
+
+`workingSecs` adds up every run's own `workingSecs` at the moment of the request. It counts
+agent-seconds, so two workers busy side by side for a minute count two minutes. `workingNow` is how
+many of those runs are working right now. Add that many seconds per second to keep a live total
+between requests.
 
 ### What a run did
 

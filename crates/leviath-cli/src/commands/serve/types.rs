@@ -987,6 +987,10 @@ pub(super) struct TreeStatusNode {
     /// Calls in this subtree that carried no price. Non-zero is why
     /// `subtree_cost_usd` is `null`, and says how much of the total is missing.
     pub(super) subtree_unpriced_calls: usize,
+    /// Every run in this subtree's working seconds, added up at the moment
+    /// the request was answered. Agent-seconds: two workers busy side by side
+    /// for a minute count two minutes.
+    pub(super) subtree_working_secs: u64,
     pub(super) children: Vec<TreeStatusNode>,
 }
 
