@@ -837,6 +837,32 @@ pub(crate) fn collect_transition_choice(
                         .insert(RoutingReasked);
                     continue;
                 }
+                // A blueprint that would rather stop than guess fails the run
+                // here. The stage's work is kept, and its `error` edge and
+                // retries are for failed work, which this is not.
+                let on_unmatched = crate::spec::graph::RoutingDef::on_unmatched(
+                    graph.routing.as_ref(),
+                    stage.routing.as_ref(),
+                );
+                if on_unmatched == crate::spec::graph::OnUnmatched::Fail {
+                    let message = format!(
+                        "the stage after '{}' could not be picked: {why}, asked twice. \
+                         routing.on_unmatched = \"fail\" ends the run here; the stage's \
+                         work is kept",
+                        stage.name
+                    );
+                    tracing::warn!(stage = %stage.name, "routing: {message}");
+                    if let Some(buffer) = buffer.as_mut() {
+                        buffer
+                            .logs
+                            .push((cursor.index, format!("[routing] {message}")));
+                    }
+                    state.status = AgentStatus::Error { message };
+                    commands
+                        .entity(outcome.entity)
+                        .remove::<AwaitingTransitionResponse>();
+                    continue;
+                }
                 let fallback = fallback_choice(&resp.0, allow_complete);
                 let took = match &fallback {
                     Routed::To(to, _) => format!("took '{to}', the first edge"),

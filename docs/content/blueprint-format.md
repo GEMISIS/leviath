@@ -435,6 +435,7 @@ routing = { on_error = "error_edge" }
 |---|---|---|
 | `retry_attempts` | the operator's `routing_retry_attempts`, `3` | Tries, the first one included. At least `1`. |
 | `on_error` | `"fail"` | `"fail"` ends the run with the error; `"error_edge"` fails the stage. |
+| `on_unmatched` | `"first_edge"` | What a second answer that names no stage does. `"first_edge"` falls back; `"fail"` ends the run. See below. |
 
 Only a transient failure is tried again, as with any model call. A stage's setting wins over the
 graph's, key by key. The run file records `routing`, so a run resumed after the daemon restarts
@@ -457,6 +458,22 @@ stage may end the run. That second call is a new routing call, so it gets its ow
 stage either, the run takes the stage's first edge, or ends where the stage may end the run. Both
 steps leave a `[routing]` line in the stage log and a warning in `daemon.log`, and the transition's
 reason is `Fallback`.
+
+A blueprint that would rather stop than guess sets `on_unmatched = "fail"`, for the graph or for
+one stage:
+
+```toml
+[[graph.stages]]
+name = "verify"
+routing = { on_unmatched = "fail" }
+```
+
+Then the second miss ends the run with an error that names the stage and quotes the answer, cut to
+80 characters, such as `the stage after 'verify' could not be picked: the answer named no stage
+("I think we should keep going"), asked twice`. The stage log and `daemon.log` carry the same line.
+The stage's work is kept, and neither its `error` edge nor its retries are used, because the work
+did not fail. An answer that names a stage, first or second, is taken as usual. Any other value is
+refused when the blueprint loads.
 
 With `"fail"`, the run stops with an error that names the routing call, and the stage's finished
 work is kept. With `"error_edge"`, the stage fails, so its `error` edge runs when it has one. Choose

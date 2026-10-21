@@ -29,8 +29,8 @@ pub use policy::{
     ArtifactDef, CompactionDef, ContentTransform, ContextTransformDef, DEFAULT_MAX_NUDGES,
     DEFAULT_NUDGE_TEXT, DependencyDef, FileTrackingDef, InstallDef, McpServerDef,
     McpServerTemplate, McpTransport, MimeRowDef, MimeRows, Needs, NudgeDef, OnRoutingError,
-    OutputDef, RegionMappingDef, RepetitionDef, ResolvedNudge, RoutingDef, SafeCommandsDef,
-    SandboxDef, ScriptPermission, ScriptPermissionsDef, TokenRule, ToolRescan,
+    OnUnmatched, OutputDef, RegionMappingDef, RepetitionDef, ResolvedNudge, RoutingDef,
+    SafeCommandsDef, SandboxDef, ScriptPermission, ScriptPermissionsDef, TokenRule, ToolRescan,
 };
 pub use region::{
     ALWAYS_VISIBLE_REGIONS, Budget, Eviction, RegionDef, RegionKind, RegionLayoutDef,

@@ -51,6 +51,7 @@ fn layout_samples() -> Vec<u8> {
     let routing = crate::spec::graph::RoutingDef {
         retry_attempts: std::num::NonZeroU32::new(4),
         on_error: Some(crate::spec::graph::OnRoutingError::ErrorEdge),
+        on_unmatched: None,
     };
     spec.graph.routing = Some(routing.clone());
     spec.graph.stages[0].routing = Some(routing);
@@ -137,7 +138,7 @@ fn the_binary_layout_matches_its_version() {
 /// The hash of [`structure`] over every frame type's schema, the frame kinds
 /// and the layout version. When it changes, a frame type changed shape: the
 /// message in [`the_frame_types_keep_their_structure`] says what to do.
-const STRUCTURE_HASH: &str = "bdff0105568ec72c8e904fc733c7f59f30829c0c282902fb5a4c95335c333534";
+const STRUCTURE_HASH: &str = "959c0726068e167e9392f02c400aa9784428795d91e0a74b55097cd5e6b15436";
 
 /// Keywords that only document a schema: how the readable form reads and what
 /// a field means. Postcard writes none of them.
