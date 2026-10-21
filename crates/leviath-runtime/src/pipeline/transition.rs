@@ -509,7 +509,7 @@ pub(crate) fn resolve_transition(
                 let from = state.current_stage.clone();
                 match enter_stage(
                     idx,
-                    graph,
+                    &spec.0,
                     &setup,
                     StageEntry {
                         cursor: &mut cursor,
@@ -657,10 +657,11 @@ pub(crate) struct StageEntry<'a> {
 
 pub(crate) fn enter_stage(
     idx: usize,
-    graph: &RunGraph,
+    spec: &crate::spec::run_spec::RunSpec,
     setup: &StageSetup,
     entry: StageEntry<'_>,
 ) -> Result<usize, String> {
+    let graph = &spec.graph;
     let StageEntry {
         cursor,
         state,
@@ -696,7 +697,7 @@ pub(crate) fn enter_stage(
     *visit += 1;
     let visit = *visit;
 
-    let result = apply_stage_context(setup, window).map(|()| visit);
+    let result = crate::insert::enter_stage_context(spec, setup, window).map(|()| visit);
     // After the layout swap, so the digest is of the region this stage will
     // actually work on rather than the one the previous stage left behind.
     progress.entry_region_digests = watched_region_digests(graph, &graph.stages[idx], window);
@@ -962,7 +963,7 @@ pub fn force_transition(world: &mut World, agent: crate::world::AgentId, target_
         let from = state.current_stage.clone();
         match enter_stage(
             target_idx,
-            &spec.graph,
+            &spec,
             &setup,
             StageEntry {
                 cursor: &mut cursor,

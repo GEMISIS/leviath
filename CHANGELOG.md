@@ -513,6 +513,15 @@ same list.
   Such a run's oldest entries are now evicted as it nears the model's
   window, like any other run's. A nonzero `total_budget_tokens` is
   unchanged.
+
+- A `seed` on a region only a stage's own `layout` or `add` declares now
+  reaches the model. The seed ran at spawn, but the window it was written
+  into held only the shared layout's regions, so the stage's region came
+  out empty. Its seed now lands the first time a stage that declares it is
+  entered, including the entry stage, a stage entered after a daemon
+  restart, and a fan-out worker's stage. It lands once per run, like a
+  seed in the shared layout. A `refresh = "each_stage"` tool seed on such a
+  region also refreshes on entry to its stage.
 - A shell command a run started no longer keeps running after the daemon
   is killed (`kill -9`, a crash). It could go on changing files after the
   run had moved on, and a model that re-ran it got two copies. The command

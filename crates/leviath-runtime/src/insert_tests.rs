@@ -1623,3 +1623,135 @@ fn grants_and_writes_survive_being_placed_again() {
     assert!(!moved.granted("ls"), "and still ends with its stage");
     assert_eq!(world.get::<WriteLedger>(again).unwrap().written, 600);
 }
+
+/// A seeded region only a stage's own layout declares, in each of two stages,
+/// as the resolver leaves them: seeded once, in the spec.
+fn stage_seeded_spec() -> RunSpec {
+    let graph = crate::test_graph::graph_of(
+        "entry = \"a\"\n\
+         edges = [{ name = \"next\", from = \"a\", to = \"b\" }, \
+                  { name = \"back\", from = \"b\", to = \"a\" }]\n\
+         layout = { total_budget_tokens = 1000, regions = [\
+           { name = \"scratch\", kind = \"temporary\", budget = 500 },\
+         ] }\n\
+         [[stages]]\nname = \"a\"\n\
+         [stages.layout]\ntotal_budget_tokens = 1000\n\
+         regions = [{ name = \"rules\", kind = \"pinned\", budget = 200, seed = { literal = \"x\" } }]\n\
+         [[stages]]\nname = \"b\"\n\
+         [stages.layout]\ntotal_budget_tokens = 1000\n\
+         regions = [{ name = \"brief\", kind = \"pinned\", budget = 200, seed = { literal = \"x\" } }]\n",
+    );
+    let mut spec = crate::test_graph::spec_named("t", graph);
+    for (region, text) in [("rules", "RULES TEXT"), ("brief", "BRIEF TEXT")] {
+        spec.seeded.insert(
+            crate::spec::names::RegionName::new(region).unwrap(),
+            crate::spec::run_spec::SeededContent {
+                text: text.into(),
+                parts: vec![],
+            },
+        );
+    }
+    spec
+}
+
+/// The text of every entry in `region` of the run's window.
+fn region_texts(world: &World, e: Entity, region: &str) -> Vec<String> {
+    world
+        .get::<ContextWindow>(e)
+        .unwrap()
+        .get_region(region)
+        .map(|r| {
+            r.content
+                .iter()
+                .map(|c| c.content.as_str().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A region only the entry stage's layout declares gets its seed when the
+/// run starts, as a graph-layout region does. A fan-out worker's entry stage
+/// is the one it was started in.
+#[test]
+fn an_entry_stage_only_region_gets_its_seed() {
+    let spec = Arc::new(stage_seeded_spec());
+    let mut world = World::new();
+    let e = insert(
+        &mut world,
+        spec.clone(),
+        Bindings::new(),
+        &initial_state(&spec),
+    );
+    assert_eq!(region_texts(&world, e, "rules"), ["RULES TEXT"]);
+
+    let mut worker = stage_seeded_spec();
+    worker.placement.worker_stage = Some(sn("b"));
+    let worker = Arc::new(worker);
+    let w = insert(
+        &mut world,
+        worker.clone(),
+        Bindings::new(),
+        &initial_state(&worker),
+    );
+    assert_eq!(
+        region_texts(&world, w, "brief"),
+        ["BRIEF TEXT"],
+        "a worker started in `b`"
+    );
+    assert!(region_texts(&world, w, "rules").is_empty());
+}
+
+/// A region only a later stage's layout declares gets its seed when that
+/// stage is entered, once: leaving and entering it again, or being placed
+/// again from the state a restart reads, does not seed it a second time.
+#[test]
+fn a_later_stage_only_region_gets_its_seed_once_on_entry() {
+    let spec = Arc::new(stage_seeded_spec());
+    let mut world = World::new();
+    let e = insert(
+        &mut world,
+        spec.clone(),
+        Bindings::new(),
+        &initial_state(&spec),
+    );
+    let agent = crate::world::AgentId::in_world(&world, e);
+    crate::pipeline::force_transition(&mut world, agent, 1);
+    assert_eq!(region_texts(&world, e, "brief"), ["BRIEF TEXT"]);
+    crate::pipeline::force_transition(&mut world, agent, 0);
+    crate::pipeline::force_transition(&mut world, agent, 1);
+    assert_eq!(
+        region_texts(&world, e, "brief"),
+        ["BRIEF TEXT"],
+        "re-entered"
+    );
+    assert_eq!(
+        region_texts(&world, e, "rules"),
+        ["RULES TEXT"],
+        "re-entered"
+    );
+
+    let state = crate::state::inspect::inspect(&world, e).expect("a run");
+    let again = insert(&mut world, spec, Bindings::new(), &state);
+    let agent = crate::world::AgentId::in_world(&world, again);
+    crate::pipeline::force_transition(&mut world, agent, 1);
+    assert_eq!(
+        region_texts(&world, again, "brief"),
+        ["BRIEF TEXT"],
+        "placed again"
+    );
+}
+
+/// A run placed again before it ever reached the stage, as a restart places
+/// one, seeds the stage's region when it gets there.
+#[test]
+fn a_restarted_run_seeds_a_stage_only_region_on_first_entry() {
+    let spec = Arc::new(stage_seeded_spec());
+    let mut world = World::new();
+    let mut state = initial_state(&spec);
+    state.seq = 4;
+    let e = insert(&mut world, spec, Bindings::new(), &state);
+    assert!(region_texts(&world, e, "brief").is_empty());
+    let agent = crate::world::AgentId::in_world(&world, e);
+    crate::pipeline::force_transition(&mut world, agent, 1);
+    assert_eq!(region_texts(&world, e, "brief"), ["BRIEF TEXT"]);
+}

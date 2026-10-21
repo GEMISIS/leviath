@@ -920,7 +920,7 @@ pub(crate) fn collect_transition_choice(
                 let edge_name = edge.map(|e| e.name.clone());
                 match enter_stage(
                     idx,
-                    graph,
+                    &spec.0,
                     &setup,
                     StageEntry {
                         cursor: &mut cursor,
