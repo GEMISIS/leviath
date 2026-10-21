@@ -1032,7 +1032,6 @@ mod tests {
             cors: None,
             token: Some("test-token".to_string()),
             allow_admin: false,
-            admin_token: None,
             print_graphql_schema,
             workdir_roots: Vec::new(),
             no_remote_yolo: false,

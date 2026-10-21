@@ -46,7 +46,7 @@ pub(crate) async fn config(ctx: &Context<'_>) -> Config {
         &state.limits.request_limits,
         state.daemon_keeps_keys() == Some(true),
         &health,
-        super::super::admin::admin_admitted(ctx),
+        super::super::admin::admin_visible(ctx),
         yolo_file().await,
     )
 }

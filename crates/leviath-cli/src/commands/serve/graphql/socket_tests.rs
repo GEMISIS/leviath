@@ -21,8 +21,7 @@ async fn server(timing: WsTiming) -> (SocketAddr, EventBus) {
     let state = super::super::super::testutil::state_with_agent_paths(vec![dir.keep()]);
     let bus = state.event_tx.clone();
     let shutdown = state.shutdown.clone();
-    let schema =
-        super::super::build_schema(state, crate::commands::serve::admin_gate::AdminGate::Off);
+    let schema = super::super::build_schema(state, false);
     let app = Router::new().route(
         "/ws/graphql",
         get(
@@ -30,14 +29,7 @@ async fn server(timing: WsTiming) -> (SocketAddr, EventBus) {
                 upgrade
                     .protocols(ALL_WEBSOCKET_PROTOCOLS)
                     .on_upgrade(move |socket| {
-                        super::serve(
-                            socket,
-                            schema,
-                            protocol,
-                            Default::default(),
-                            timing,
-                            shutdown,
-                        )
+                        super::serve(socket, schema, protocol, timing, shutdown)
                     })
             },
         ),

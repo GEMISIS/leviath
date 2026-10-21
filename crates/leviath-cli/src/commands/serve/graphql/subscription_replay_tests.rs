@@ -54,10 +54,7 @@ async fn a_resumed_subscription_replays_what_it_missed_then_goes_live() {
         send(&tx, log("run-a", line));
     }
     let seqs = numbers(&mut raw);
-    let schema = crate::commands::serve::graphql::build_schema(
-        state,
-        crate::commands::serve::admin_gate::AdminGate::Off,
-    );
+    let schema = crate::commands::serve::graphql::build_schema(state, false);
     let mut stream = schema.execute_stream(Request::new(format!(
         r#"subscription {{ runEvents(since: {}, serverInstance: "{}") {{ {LINES} }} }}"#,
         seqs[0],
@@ -105,10 +102,7 @@ async fn the_seam_between_replay_and_live_has_no_gap_and_no_repeat() {
     halfway.await.expect("the producer gets halfway");
     let early = numbers(&mut raw);
     let since = early[50];
-    let schema = crate::commands::serve::graphql::build_schema(
-        state,
-        crate::commands::serve::admin_gate::AdminGate::Off,
-    );
+    let schema = crate::commands::serve::graphql::build_schema(state, false);
     let mut stream = schema.execute_stream(Request::new(format!(
         "subscription {{ runEvents(since: {since}) {{ {LINES} }} }}"
     )));
@@ -142,10 +136,7 @@ async fn a_stream_numbered_by_another_server_opens_with_a_gap() {
     let state = test_state(dir.path());
     let tx = state.event_tx.clone();
     send(&tx, log("run-a", "before"));
-    let schema = crate::commands::serve::graphql::build_schema(
-        state,
-        crate::commands::serve::admin_gate::AdminGate::Off,
-    );
+    let schema = crate::commands::serve::graphql::build_schema(state, false);
     let mut stream = schema.execute_stream(Request::new(format!(
         r#"subscription {{ runEvents(since: 1, serverInstance: "another") {{ {LINES} }} }}"#
     )));
@@ -178,10 +169,7 @@ async fn a_since_older_than_the_ring_opens_with_a_gap_then_replays_what_is_kept(
         send(&tx, log("run-a", line));
     }
     let seqs = numbers(&mut raw);
-    let schema = crate::commands::serve::graphql::build_schema(
-        state,
-        crate::commands::serve::admin_gate::AdminGate::Off,
-    );
+    let schema = crate::commands::serve::graphql::build_schema(state, false);
     let mut stream = schema.execute_stream(Request::new(format!(
         "subscription {{ runEvents(since: {}) {{ {LINES} }} }}",
         seqs[0]
@@ -228,10 +216,7 @@ async fn the_machine_stream_resumes_too() {
         );
     }
     let seqs = numbers(&mut raw);
-    let schema = crate::commands::serve::graphql::build_schema(
-        state,
-        crate::commands::serve::admin_gate::AdminGate::Off,
-    );
+    let schema = crate::commands::serve::graphql::build_schema(state, false);
     let mut stream = schema.execute_stream(Request::new(format!(
         r#"subscription {{ machineEvents(since: {}, serverInstance: "{}") {{ __typename
              ... on EventsDroppedEvent {{ count }}
@@ -267,7 +252,7 @@ async fn a_spawn_says_where_its_frames_start() {
             }
         });
         state.control = control;
-        let schema = crate::commands::serve::graphql::build_schema(state, crate::commands::serve::admin_gate::AdminGate::Off);
+        let schema = crate::commands::serve::graphql::build_schema(state, false);
         let graph = "title = \"raw\"\n\n[[stages]]\nname = \"only\"\n\n[layout]\n\
                      total_budget_tokens = 100\nregions = [{ name = \"plan\", kind = \"pinned\", budget = 100 }]\n";
         let graph: leviath_runtime::spec::graph::RunGraph =
@@ -345,10 +330,7 @@ async fn window_stream(
     let dir = tempfile::tempdir().expect("an agents dir");
     let state = state_keeping(dir.path(), 256, 16);
     let tx = state.event_tx.clone();
-    let schema = crate::commands::serve::graphql::build_schema(
-        state,
-        crate::commands::serve::admin_gate::AdminGate::Off,
-    );
+    let schema = crate::commands::serve::graphql::build_schema(state, false);
     let mut stream = schema.execute_stream(Request::new(window_subscription("w1", types)));
     next(&mut stream, "runEvents").await;
     (tx, stream, dir)

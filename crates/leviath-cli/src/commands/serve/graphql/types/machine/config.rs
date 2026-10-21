@@ -356,9 +356,8 @@ pub(crate) struct ServerInfo {
     /// What this server can do. Check these rather than calling a route and
     /// reading a 404, which also means "no such run".
     pub(crate) capabilities: Vec<String>,
-    /// Whether this request may run the mutations that change the machine,
-    /// rather than have them answer `FORBIDDEN`: the server was started with
-    /// `--allow-admin`, or with an admin token this request presented. Worth
+    /// Whether this server was started with `--allow-admin`, so the mutations
+    /// that change the machine will run rather than answer `FORBIDDEN`. Worth
     /// asking before offering a settings screen that cannot save.
     pub(crate) is_admin_enabled: bool,
     /// The numbers a client should never hardcode.

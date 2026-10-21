@@ -40,13 +40,12 @@ a test, so a client generator or an agent can consume the contract directly.
 - **`GET /` needs no token.** It returns a fixed "Leviath is running." page and nothing else: no
   version, no run counts, no endpoint list. It exists so a certificate can be accepted in a browser
   tab; see the section below.
-- **`--allow-admin`** mounts the mutating admin routes, for every holder of the API token.
-  `GET /api/config` and `GET /api/mcp/servers` are always available. The writes are only mounted
-  with `--allow-admin` or an [admin token](#scoping-admin-requests-to-a-token), and the route is
-  genuinely absent without either rather than gated by a check inside the handler. What you get
-  back depends on whether the path exists at all for another method:
+- **`--allow-admin`** mounts the mutating admin routes. `GET /api/config` and
+  `GET /api/mcp/servers` are always available. The writes are only mounted with `--allow-admin`, and
+  the route is genuinely absent without it rather than gated by a check inside the handler. What you
+  get back depends on whether the path exists at all for another method:
 
-  | Without `--allow-admin` or an admin token | Response |
+  | Without `--allow-admin` | Response |
   |---|---|
   | `PUT /api/config` | 405, because `GET /api/config` is mounted |
   | `PUT /api/mime` · `DELETE /api/mime` | 405, because `GET /api/mime` is mounted |
@@ -67,44 +66,6 @@ a test, so a client generator or an agent can consume the contract directly.
 > [!CAUTION]
 > `lev serve` runs LLM-driven tools with whatever permissions the blueprint grants. Treat it as
 > trusted-network only unless hardened. See [Security](/docs/security).
-
-### Scoping admin requests to a token
-
-`--allow-admin` is all or nothing: every client holding the API token can write the config and
-install scripts for as long as the server runs. An admin token narrows that. Start the server with
-a second secret, and only a request that presents it may use the admin routes:
-
-```bash
-LEVIATH_API_TOKEN=$(openssl rand -hex 32) \
-LEVIATH_API_ADMIN_TOKEN=$(openssl rand -hex 32) \
-lev serve
-```
-
-A request presents the admin token in one of two ways:
-
-- **As its bearer token.** `Authorization: Bearer <admin token>` authenticates the request and
-  elevates it, so a client that only makes admin writes needs nothing else.
-- **Beside the API token.** `X-Leviath-Admin-Token: <admin token>` on a request that authenticates
-  with the API token elevates that one request. A client keeps its ordinary session open and adds
-  the header only to the writes its user approved.
-
-WebSocket clients can pass the admin token as `?token=`, as they would the API token, since a
-browser cannot set headers there.
-
-| Server started with | Admin routes | Who may use them |
-|---|---|---|
-| Neither | Not mounted (404 or 405) | Nobody |
-| `--allow-admin` | Mounted | Any request with the API token |
-| An admin token, with or without `--allow-admin` | Mounted | Only a request presenting the admin token |
-
-A request without the admin token gets `403` from a server that has one. The error names where the
-token goes and never echoes it. GraphQL applies the same rule to the admin mutations, answering
-`FORBIDDEN`, and `isAdminEnabled` says whether the request asking may run them.
-
-`--admin-token <t>` overrides the environment variable, and is visible in `ps` like `--token`. The
-server refuses to start when the admin token is blank, or when it is the same as the API token. A
-daemon that `lev` starts never inherits `LEVIATH_API_ADMIN_TOKEN`, just as it never inherits
-`LEVIATH_API_TOKEN`. Servers that announce `admin.token` support all of this.
 
 ## Limits
 
@@ -2431,7 +2392,6 @@ than that feature, not broken.
 | `runs.blueprint_snapshot` | `blueprint_digest` on every run, so a client can tell whether the installed blueprint is the one that ran |
 | `runs.export` | `startRunExport` and `GET /api/exports/{id}`, the whole store as one file. See [below](#exporting-the-whole-store) |
 | `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. See [below](#when-the-config-file-will-not-load) |
-| `admin.token` | `--admin-token` and the `X-Leviath-Admin-Token` header, scoping admin requests to a second token. See [scoping admin requests](#scoping-admin-requests-to-a-token) |
 
 A few of those promises carry a consequence worth spelling out.
 
@@ -2446,8 +2406,7 @@ and beside the agent for a blueprint's. `config.gateways.kinds` is how you tell 
 be an OpenAI-compatible endpoint rather than a script.
 
 `update.apply` and `scripts.write` say what this build serves, not what *this* daemon mounts. That
-is `--allow-admin` or an admin token, which you find out by calling one of the routes and reading
-the status.
+is `--allow-admin`, which you find out by calling one of the routes and reading the status.
 
 `graphql.subscriptions.replay` also covers `seq` and `server_instance` on the `POST /api/runs`
 answer. Send `since` only where it is announced: an older server refuses the whole subscription

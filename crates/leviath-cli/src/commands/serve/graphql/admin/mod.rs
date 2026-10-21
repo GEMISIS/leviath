@@ -1,18 +1,15 @@
-//! The mutations `--allow-admin` or an admin token opens, and the gate in
-//! front of them.
+//! The mutations `--allow-admin` opens, and the gate in front of them.
 //!
 //! These change the machine rather than a run: adding an MCP server writes a
 //! command into the config that Leviath then spawns, for this run and every
-//! future one. The REST side answers 404 for them without an admin surface,
+//! future one. The REST side answers 404 for them without `--allow-admin`,
 //! because an unmounted route cannot be reached at all.
 //!
 //! A GraphQL schema has no "unmounted": a field is in the type or it is not,
 //! and the type is built once. So the gate is two things together. The field is
-//! invisible to introspection on a server with no admin surface, so a client
-//! cannot discover it, and the guard refuses it during execution unless
-//! [`AdminGate::admits`] the request, so a client that knows the name anyway
-//! gets `FORBIDDEN` rather than the act. That is the same decision the REST
-//! admin routes take, with what the request presented.
+//! invisible to introspection without the flag, so a client cannot discover it,
+//! and the guard refuses it during execution, so a client that knows the name
+//! anyway gets `FORBIDDEN` rather than the act.
 //!
 //! One file per concern: [`config`] for the one write onto the daemon's own
 //! config, [`mcp`] for an MCP server's config entry, [`mime`] for the mime
@@ -31,7 +28,6 @@ use async_graphql::{Context, Guard, Object};
 use super::config_input::UpdateConfigRequest;
 use super::error::graphql_error;
 
-use super::super::admin_gate::{ADMIN_TOKEN_REQUIRED, AdminGate, Presented};
 use super::super::core::error::ServeError;
 
 pub(crate) mod config;
@@ -41,10 +37,6 @@ pub(crate) mod providers;
 pub(crate) mod scripts;
 pub(crate) mod system;
 pub(crate) mod yolo;
-
-#[cfg(test)]
-#[path = "gate_tests.rs"]
-mod gate_tests;
 
 use config::UpdateConfigResult;
 use mcp::{
@@ -70,40 +62,33 @@ use yolo::{
     UpsertYoloProfileResult,
 };
 
-/// Whether the admin fields are visible to introspection: whether this server
-/// offers them at all, with `--allow-admin` or an admin token.
+/// Whether this server was started with `--allow-admin`.
+///
+/// Decided once, at startup, and put into the schema then. The flag is not on
+/// `AppState` on purpose: a handler that consults a field is one refactor away
+/// from forgetting to, where a decision made at build time is made once.
+#[derive(Clone, Copy)]
+pub(crate) struct AdminAccess(pub(crate) bool);
+
+/// Whether the admin fields are visible to introspection.
 ///
 /// Invisible is not a security boundary, the guard is. It is so a client
 /// exploring the schema is not shown acts this server will refuse.
 pub(crate) fn admin_visible(ctx: &Context<'_>) -> bool {
-    ctx.data_opt::<AdminGate>().is_some_and(AdminGate::mounted)
+    ctx.data_opt::<AdminAccess>().is_some_and(|access| access.0)
 }
 
-/// Whether this request may run the admin mutations.
-///
-/// Asks [`AdminGate::admits`], the same decision the REST admin routes take,
-/// with what the request presented. A request that brought nothing presents
-/// nothing, so a server that wants the admin token refuses it.
-pub(crate) fn admin_admitted(ctx: &Context<'_>) -> bool {
-    let presented = ctx.data_opt::<Presented>().cloned().unwrap_or_default();
-    ctx.data_opt::<AdminGate>()
-        .is_some_and(|gate| gate.admits(&presented))
-}
-
-/// Refuses an admin mutation to a request the admin gate does not admit.
+/// Refuses an admin mutation on a server that was not started for them.
 pub(crate) struct AdminGuard;
 
 impl Guard for AdminGuard {
     async fn check(&self, ctx: &Context<'_>) -> async_graphql::Result<()> {
-        match (admin_visible(ctx), admin_admitted(ctx)) {
-            (_, true) => Ok(()),
-            (false, false) => Err(graphql_error(&ServeError::Forbidden(
-                "this server was not started with --allow-admin or an admin token, which is \
-                 what opens the mutations that change the machine rather than a run"
+        match admin_visible(ctx) {
+            true => Ok(()),
+            false => Err(graphql_error(&ServeError::Forbidden(
+                "this server was not started with --allow-admin, which is what opens the \
+                 mutations that change the machine rather than a run"
                     .to_string(),
-            ))),
-            (true, false) => Err(graphql_error(&ServeError::Forbidden(
-                ADMIN_TOKEN_REQUIRED.to_string(),
             ))),
         }
     }
