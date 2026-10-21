@@ -759,7 +759,10 @@ fn docs_blueprint_blocks() -> Vec<(String, String)> {
     let mut blocks = Vec::new();
     for entry in std::fs::read_dir(&dir).expect("the docs pages") {
         let path = entry.expect("a docs entry").path();
-        let page = std::fs::read_to_string(&path).unwrap_or_default();
+        // A Windows checkout may turn the page's newlines into CRLF.
+        let page = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         for (i, block) in page.split("```toml\n").skip(1).enumerate() {
             let body = block.split("\n```").next().unwrap_or_default();
