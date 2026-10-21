@@ -5,10 +5,7 @@
 //! from the rest of `components` because "what an agent *is*" and "what an
 //! agent *remembers*" are different questions to arrive with.
 
-use super::block_cache::{
-    block_hash, block_sort_priority, lifecycle_cache_hint, mark_recently_changed_run,
-    push_bracketed, push_chunked, system_prefix_hash, warn_on_unstable_declaration,
-};
+use super::block_cache::warn_on_unstable_declaration;
 use super::*;
 
 mod eviction;
@@ -214,30 +211,6 @@ pub struct ContextWindow {
     pub eviction_order: Vec<String>,
 }
 
-/// Put a region's own name above its contents, and its description under that
-/// when it has one.
-///
-/// The name is the part that earns its tokens. An agent writes to a region *by
-/// name* - `context_write { region: "sources_index", .. }` - so the contents it
-/// reads must say which region they are, or it cannot tell that what it reads
-/// as `sources_index` is the place it writes to by that name. Three tokens of
-/// heading say it.
-///
-/// The description is opt-in and usually absent, because most regions are named
-/// well enough that a sentence would only cost tokens. It is for the ones whose
-/// contents do not explain themselves - a bibliography with a required format,
-/// a scratch area with a convention.
-pub(super) fn labelled(region: &Region, body: &str) -> String {
-    match region
-        .description
-        .as_deref()
-        .filter(|_| region.describe_in_prompt)
-    {
-        Some(description) => format!("## {}\n{}\n\n{}", region.name, description, body),
-        None => format!("## {}\n{}", region.name, body),
-    }
-}
-
 impl ContextWindow {
     /// Create a new context window with the specified budget.
     pub fn new(max_tokens: usize) -> Self {
@@ -300,224 +273,26 @@ impl ContextWindow {
         &self,
         meta: &crate::custom_region::AssembleMeta,
     ) -> AssembledContext {
-        use leviath_core::{CacheHint, EntryKind};
-
-        let mut system_blocks = Vec::new();
         let mut messages: Vec<leviath_providers::Message> = Vec::new();
         // Messages a custom region rendered. Held apart from the conversation
-        // and spliced in front of it after the loop.
+        // and spliced in front of it once the regions are laid out.
         let mut preamble: Vec<leviath_providers::Message> = Vec::new();
-        // One entry per `UntilChanged` system block, in assembly order, holding
-        // the newest entry timestamp of the region that produced it. Feeds the
-        // cache-breakpoint split after the sort.
-        let mut volatile_recency: Vec<i64> = Vec::new();
-        // The stored parts of every region that renders into the system
-        // prompt, which is text. They travel in one user message ahead of the
-        // conversation instead; see `mime::lifted_blocks`.
-        let mut lifted: Vec<leviath_providers::ContentBlock> = Vec::new();
 
-        for region in &self.regions {
-            // A region this stage does not attend to is held but not shown.
-            // Skipped here rather than dropped from the window, so a later
-            // stage that declares it again gets its contents back.
-            if self.hidden.contains(&region.name) {
-                continue;
-            }
-            // Custom regions render even when empty - a script may emit
-            // static scaffolding. Every other kind skips an empty region.
-            let is_custom = matches!(region.kind, leviath_core::RegionKind::Custom { .. });
-            if region.content.is_empty() && !is_custom {
-                continue;
-            }
-            if !matches!(region.kind, leviath_core::RegionKind::SlidingWindow { .. }) {
-                lifted.extend(mime::lifted_blocks(region));
-            }
-
-            // Where this region's system blocks begin, so the recency mapping
-            // below covers exactly the blocks this region adds.
-            let first_new_block = system_blocks.len();
-
+        // The system side - which regions render, under what label, in what
+        // order, split where, with which cache hints - is provider-neutral and
+        // lives in `leviath_core::context`. The two kinds it cannot render come
+        // back here: the conversation becomes typed messages, and a custom
+        // region runs its script.
+        //
+        // A region this stage does not attend to is held but not shown. Left
+        // out here rather than dropped from the window, so a later stage that
+        // declares it again gets its contents back.
+        let visible = self
+            .regions
+            .iter()
+            .filter(|r| !self.hidden.contains(&r.name));
+        let system = leviath_core::context::assemble_system(visible, |region, system_blocks| {
             match &region.kind {
-                // System-level content → system blocks
-                leviath_core::RegionKind::Pinned => {
-                    let body = region
-                        .content
-                        .iter()
-                        .map(|e| e.content.to_string())
-                        .collect::<Vec<_>>();
-                    push_chunked(&mut system_blocks, region, &body, CacheHint::Always);
-                }
-                // A checklist renders as instruction rather than history: one
-                // stable block, open items first, so what is left to do is at
-                // the top of what the model reads every turn. The whole value
-                // of the state being real is that this block is derived from
-                // it rather than from whatever prose the model last wrote.
-                leviath_core::RegionKind::Checklist => {
-                    let body = region.render_checklist();
-                    if !body.is_empty() {
-                        system_blocks.push(leviath_providers::SystemBlock {
-                            text: labelled(region, &body),
-                            cache_hint: CacheHint::UntilChanged,
-                            volatility: region.volatility,
-                            region: region.name.clone(),
-                        });
-                    }
-                }
-                leviath_core::RegionKind::CompactHistory { .. } => {
-                    let body = region
-                        .content
-                        .iter()
-                        .map(|e| e.content.to_string())
-                        .collect::<Vec<_>>();
-                    push_chunked(&mut system_blocks, region, &body, CacheHint::Always);
-                }
-
-                // Messages region → Vec<Message> with proper typed entries.
-                // Consecutive ToolResult entries are merged into a single user
-                // message with multiple tool_result content blocks (required by
-                // Anthropic: one assistant tool_use msg → one user tool_result msg).
-                leviath_core::RegionKind::SlidingWindow { .. } => {
-                    let mut pending_tool_results: Vec<leviath_providers::ContentBlock> = Vec::new();
-
-                    for entry in &region.content {
-                        // Flush any pending tool results when we hit a non-ToolResult entry
-                        if !matches!(entry.kind, EntryKind::ToolResult { .. })
-                            && !pending_tool_results.is_empty()
-                        {
-                            messages.push(leviath_providers::Message {
-                                role: "user".to_string(),
-                                content: leviath_providers::MessageContent::Blocks(std::mem::take(
-                                    &mut pending_tool_results,
-                                )),
-                                cache_breakpoint: false,
-                                reasoning: None,
-                            });
-                        }
-
-                        match &entry.kind {
-                            EntryKind::UserMessage => {
-                                messages.push(leviath_providers::Message {
-                                    role: "user".to_string(),
-                                    content: mime::message_content(&entry.content),
-                                    cache_breakpoint: false,
-                                    reasoning: None,
-                                });
-                            }
-                            EntryKind::AssistantTurn { tool_calls } => {
-                                // Media a stage produced (an image a model drew)
-                                // cannot ride the assistant turn that made it: a
-                                // provider rejects an image inside an assistant
-                                // turn (Anthropic answers 400), so a later stage
-                                // that should see it never would. The assistant
-                                // turn keeps its text and the stand-ins that name
-                                // the media; the bytes follow in a user turn.
-                                let lifted_media = mime::mime_blocks(&entry.content);
-                                if tool_calls.is_empty() {
-                                    messages.push(leviath_providers::Message {
-                                        role: "assistant".to_string(),
-                                        content: leviath_providers::MessageContent::Text(
-                                            entry.content.to_string(),
-                                        ),
-                                        cache_breakpoint: false,
-                                        reasoning: entry.reasoning.clone(),
-                                    });
-                                } else {
-                                    let mut blocks = mime::text_blocks(&entry.content);
-                                    blocks.extend(tool_calls.iter().map(mime::tool_use_block));
-                                    messages.push(leviath_providers::Message {
-                                        role: "assistant".to_string(),
-                                        content: leviath_providers::MessageContent::Blocks(blocks),
-                                        cache_breakpoint: false,
-                                        reasoning: entry.reasoning.clone(),
-                                    });
-                                }
-                                // Only when the turn has no tool calls: inserting
-                                // a user turn between a tool_use and its
-                                // tool_result would break the pairing a provider
-                                // requires, and that rare turn's media stays a
-                                // stand-in rather than risk it.
-                                if tool_calls.is_empty() && !lifted_media.is_empty() {
-                                    messages.push(leviath_providers::Message {
-                                        role: "user".to_string(),
-                                        content: leviath_providers::MessageContent::Blocks(
-                                            lifted_media,
-                                        ),
-                                        cache_breakpoint: false,
-                                        reasoning: None,
-                                    });
-                                }
-                            }
-                            EntryKind::ToolResult {
-                                tool_call_id,
-                                is_error,
-                                ..
-                            } => {
-                                // Accumulate - will be flushed on next non-ToolResult or end
-                                pending_tool_results.push(
-                                    leviath_providers::ContentBlock::ToolResult {
-                                        tool_use_id: tool_call_id.clone(),
-                                        content: entry.content.to_string(),
-                                        is_error: *is_error,
-                                    },
-                                );
-                                // A tool result is text on every wire; the
-                                // parts it produced follow it in the same user
-                                // turn, after every result block.
-                                pending_tool_results.extend(mime::mime_blocks(&entry.content));
-                            }
-                            EntryKind::Text => {
-                                let trimmed = entry.content.trim();
-                                if let Some(rest) = trimmed.strip_prefix("Assistant: ") {
-                                    messages.push(leviath_providers::Message {
-                                        role: "assistant".to_string(),
-                                        content: rest.to_string().into(),
-                                        cache_breakpoint: false,
-                                        reasoning: None,
-                                    });
-                                } else if let Some(rest) = trimmed.strip_prefix("User: ") {
-                                    messages.push(leviath_providers::Message {
-                                        role: "user".to_string(),
-                                        content: rest.to_string().into(),
-                                        cache_breakpoint: false,
-                                        reasoning: None,
-                                    });
-                                } else {
-                                    messages.push(leviath_providers::Message {
-                                        role: "user".to_string(),
-                                        content: mime::message_content(&entry.content),
-                                        cache_breakpoint: false,
-                                        reasoning: None,
-                                    });
-                                }
-                            }
-                        }
-                    }
-
-                    // Flush any remaining tool results at the end of the region
-                    if !pending_tool_results.is_empty() {
-                        messages.push(leviath_providers::Message {
-                            role: "user".to_string(),
-                            content: leviath_providers::MessageContent::Blocks(std::mem::take(
-                                &mut pending_tool_results,
-                            )),
-                            cache_breakpoint: false,
-                            reasoning: None,
-                        });
-                    }
-                }
-
-                // Compacting / Temporary / Clearable → system blocks
-                leviath_core::RegionKind::Compacting { .. } => {
-                    push_bracketed(&mut system_blocks, region, CacheHint::UntilChanged);
-                }
-                // Both say when the region is thrown away, not how it moves
-                // in between, so the hint comes from the declaration - see
-                // `lifecycle_cache_hint`.
-                leviath_core::RegionKind::Temporary | leviath_core::RegionKind::Clearable => {
-                    let hint = lifecycle_cache_hint(region.volatility);
-                    push_bracketed(&mut system_blocks, region, hint);
-                }
-
                 // Custom (script-backed) regions render through their Rhai
                 // hook; a missing script or any hook failure falls back to
                 // the Temporary-style block inside `render_custom_region`,
@@ -533,7 +308,7 @@ impl ContextWindow {
                             window_max: self.max_tokens,
                         },
                         crate::custom_region::RenderSink {
-                            system_blocks: &mut system_blocks,
+                            system_blocks,
                             // Not into the conversation directly: wherever this
                             // region sits in the manifest, what it renders comes
                             // before the dialogue. See the splice below.
@@ -541,46 +316,16 @@ impl ContextWindow {
                         },
                     );
                 }
-
-                // HashMap regions → system blocks with key headers
-                leviath_core::RegionKind::HashMap { .. } => {
-                    let text = region
-                        .content
-                        .iter()
-                        .map(|e| {
-                            if let Some(key) = &e.key {
-                                format!("### [{}]\n{}", key, e.content)
-                            } else {
-                                e.content.to_string()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    system_blocks.push(leviath_providers::SystemBlock {
-                        text: format!("[{}]:\n{}", region.name, text),
-                        cache_hint: CacheHint::UntilChanged,
-                        volatility: region.volatility,
-                        region: region.name.clone(),
-                    });
-                }
+                // The only other kind handed back: the conversation.
+                _ => push_conversation(region, &mut messages),
             }
-
-            // The newest entry timestamp stands in for "when did this region
-            // last change". Regions are append-mostly and timestamps only move
-            // forward, so the block holding the newest entry is the one that
-            // mutated most recently.
-            let mut newest = i64::MIN;
-            for entry in &region.content {
-                if entry.timestamp > newest {
-                    newest = entry.timestamp;
-                }
-            }
-            for block in &system_blocks[first_new_block..] {
-                if block.cache_hint == CacheHint::UntilChanged {
-                    volatile_recency.push(newest);
-                }
-            }
-        }
+        });
+        // The stored parts of every region that renders into the system
+        // prompt, which is text. They travel in one user message ahead of the
+        // conversation instead.
+        let lifted = mime::provider_blocks(system.lifted);
+        let (system_blocks, block_hashes, system_hash) =
+            (system.blocks, system.block_hashes, system.system_hash);
 
         // ── The conversation ends the request ────────────────────────────
         //
@@ -618,16 +363,6 @@ impl ContextWindow {
             );
         }
 
-        // ── Sort system blocks for optimal prefix caching ────────────────
-        //
-        // A provider caches by prefix, so a block that changes invalidates
-        // every block behind it: the arrangement that pays is stable content
-        // first and churn last. That is what the region declared, not what its
-        // kind implies - see [`leviath_core::Volatility`].
-        system_blocks.sort_by_key(block_sort_priority);
-        // After the sort, because the order is part of what Anthropic matches.
-        let system_hash = system_prefix_hash(&system_blocks);
-        let block_hashes: Vec<u64> = system_blocks.iter().map(|b| block_hash(&b.text)).collect();
         // A declaration is a hint we can falsify, not a promise: `stable` sorts a
         // region to the front, so one that is really churning does the most
         // damage possible and does it because we believed the label.
@@ -636,12 +371,6 @@ impl ContextWindow {
             &meta.previous_block_hashes,
             &mut leviath_core::sync::lock(&self.unstable_declarations),
         );
-
-        // ── Spend a cache breakpoint on the volatile boundary ────────────
-        //
-        // Runs strictly after the sort, so it can only change breakpoint
-        // metadata: the block order and the block text are already final.
-        mark_recently_changed_run(&mut system_blocks, &volatile_recency);
 
         // ── Sanitize orphaned tool_use / tool_result blocks ──────────────
         //
@@ -727,7 +456,8 @@ impl ContextWindow {
         //
         // Anthropic allows up to 4 breakpoints. Exactly 1 lands on the
         // messages; the system blocks get theirs from their cache hints, and
-        // [`MAX_SYSTEM_CACHE_RUNS`] caps those at 3 so this one always fits.
+        // `leviath_core::context::MAX_SYSTEM_CACHE_RUNS` caps those at 3 so this
+        // one always fits.
         // Place it on the 4th-from-last message to give a buffer for the
         // new messages added each iteration (typically 2-3).
         //
@@ -745,14 +475,9 @@ impl ContextWindow {
         let prefix_moved = meta
             .previous_system_hash
             .is_some_and(|previous| previous != system_hash);
-        if prefix_moved {
-            // Nothing to place: the entry could not be read back.
-        } else if messages.len() >= 5 {
-            let bp_idx = messages.len() - 4;
-            messages[bp_idx].cache_breakpoint = true;
-        } else if messages.len() >= 2 {
-            // Small conversation - cache at least the first message
-            messages[0].cache_breakpoint = true;
+        if let Some(index) = leviath_core::context::message_breakpoint(messages.len(), prefix_moved)
+        {
+            messages[index].cache_breakpoint = true;
         }
 
         // ── Drop any message with nothing in it ─────────────────────────
@@ -835,21 +560,140 @@ impl ContextWindow {
     }
 }
 
+/// A `sliding_window` region as typed messages, appended to `messages`.
+///
+/// Consecutive ToolResult entries are merged into a single user message with
+/// multiple tool_result content blocks (required by Anthropic: one assistant
+/// tool_use msg → one user tool_result msg).
+fn push_conversation(region: &Region, messages: &mut Vec<leviath_providers::Message>) {
+    use leviath_core::EntryKind;
+
+    let mut pending_tool_results: Vec<leviath_providers::ContentBlock> = Vec::new();
+
+    for entry in &region.content {
+        // Flush any pending tool results when we hit a non-ToolResult entry
+        if !matches!(entry.kind, EntryKind::ToolResult { .. }) && !pending_tool_results.is_empty() {
+            messages.push(leviath_providers::Message {
+                role: "user".to_string(),
+                content: leviath_providers::MessageContent::Blocks(std::mem::take(
+                    &mut pending_tool_results,
+                )),
+                cache_breakpoint: false,
+                reasoning: None,
+            });
+        }
+
+        match &entry.kind {
+            EntryKind::UserMessage => {
+                messages.push(leviath_providers::Message {
+                    role: "user".to_string(),
+                    content: mime::message_content(&entry.content),
+                    cache_breakpoint: false,
+                    reasoning: None,
+                });
+            }
+            EntryKind::AssistantTurn { tool_calls } => {
+                // Media a stage produced (an image a model drew)
+                // cannot ride the assistant turn that made it: a
+                // provider rejects an image inside an assistant
+                // turn (Anthropic answers 400), so a later stage
+                // that should see it never would. The assistant
+                // turn keeps its text and the stand-ins that name
+                // the media; the bytes follow in a user turn.
+                let lifted_media = mime::mime_blocks(&entry.content);
+                if tool_calls.is_empty() {
+                    messages.push(leviath_providers::Message {
+                        role: "assistant".to_string(),
+                        content: leviath_providers::MessageContent::Text(entry.content.to_string()),
+                        cache_breakpoint: false,
+                        reasoning: entry.reasoning.clone(),
+                    });
+                } else {
+                    let mut blocks = mime::text_blocks(&entry.content);
+                    blocks.extend(tool_calls.iter().map(mime::tool_use_block));
+                    messages.push(leviath_providers::Message {
+                        role: "assistant".to_string(),
+                        content: leviath_providers::MessageContent::Blocks(blocks),
+                        cache_breakpoint: false,
+                        reasoning: entry.reasoning.clone(),
+                    });
+                }
+                // Only when the turn has no tool calls: inserting
+                // a user turn between a tool_use and its
+                // tool_result would break the pairing a provider
+                // requires, and that rare turn's media stays a
+                // stand-in rather than risk it.
+                if tool_calls.is_empty() && !lifted_media.is_empty() {
+                    messages.push(leviath_providers::Message {
+                        role: "user".to_string(),
+                        content: leviath_providers::MessageContent::Blocks(lifted_media),
+                        cache_breakpoint: false,
+                        reasoning: None,
+                    });
+                }
+            }
+            EntryKind::ToolResult {
+                tool_call_id,
+                is_error,
+                ..
+            } => {
+                // Accumulate - will be flushed on next non-ToolResult or end
+                pending_tool_results.push(leviath_providers::ContentBlock::ToolResult {
+                    tool_use_id: tool_call_id.clone(),
+                    content: entry.content.to_string(),
+                    is_error: *is_error,
+                });
+                // A tool result is text on every wire; the
+                // parts it produced follow it in the same user
+                // turn, after every result block.
+                pending_tool_results.extend(mime::mime_blocks(&entry.content));
+            }
+            EntryKind::Text => {
+                let trimmed = entry.content.trim();
+                if let Some(rest) = trimmed.strip_prefix("Assistant: ") {
+                    messages.push(leviath_providers::Message {
+                        role: "assistant".to_string(),
+                        content: rest.to_string().into(),
+                        cache_breakpoint: false,
+                        reasoning: None,
+                    });
+                } else if let Some(rest) = trimmed.strip_prefix("User: ") {
+                    messages.push(leviath_providers::Message {
+                        role: "user".to_string(),
+                        content: rest.to_string().into(),
+                        cache_breakpoint: false,
+                        reasoning: None,
+                    });
+                } else {
+                    messages.push(leviath_providers::Message {
+                        role: "user".to_string(),
+                        content: mime::message_content(&entry.content),
+                        cache_breakpoint: false,
+                        reasoning: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // Flush any remaining tool results at the end of the region
+    if !pending_tool_results.is_empty() {
+        messages.push(leviath_providers::Message {
+            role: "user".to_string(),
+            content: leviath_providers::MessageContent::Blocks(std::mem::take(
+                &mut pending_tool_results,
+            )),
+            cache_breakpoint: false,
+            reasoning: None,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use leviath_core::{CacheHint, Region, RegionKind};
     use leviath_providers::SystemBlock;
-
-    /// A system block carrying only the hint under test.
-    fn block(hint: CacheHint) -> SystemBlock {
-        SystemBlock {
-            text: "x".to_string(),
-            cache_hint: hint,
-            volatility: leviath_core::Volatility::default(),
-            region: String::new(),
-        }
-    }
 
     /// The number of cache breakpoints the Anthropic provider would place on
     /// these system blocks: one per contiguous run of same-hint cacheable
@@ -883,127 +727,6 @@ mod tests {
             },
             timestamp,
         )
-    }
-
-    #[test]
-    fn recently_changed_sorts_with_until_changed() {
-        assert_eq!(
-            super::block_cache::cache_hint_sort_priority(CacheHint::RecentlyChanged),
-            super::block_cache::cache_hint_sort_priority(CacheHint::UntilChanged)
-        );
-        assert_eq!(
-            super::block_cache::cache_hint_sort_priority(CacheHint::RecentlyChanged),
-            2
-        );
-    }
-
-    #[test]
-    fn mark_recently_changed_run_splits_at_the_newest_block() {
-        // Always, three volatile blocks, and a trailing uncacheable block. The
-        // third volatile block is the one that just changed.
-        let mut blocks = vec![
-            block(CacheHint::Always),
-            block(CacheHint::UntilChanged),
-            block(CacheHint::UntilChanged),
-            block(CacheHint::UntilChanged),
-            block(CacheHint::Never),
-        ];
-        mark_recently_changed_run(&mut blocks, &[10, 20, 90]);
-
-        let hints: Vec<CacheHint> = blocks.iter().map(|b| b.cache_hint).collect();
-        assert_eq!(
-            hints,
-            vec![
-                CacheHint::Always,
-                CacheHint::UntilChanged,
-                CacheHint::UntilChanged,
-                CacheHint::RecentlyChanged,
-                CacheHint::Never,
-            ]
-        );
-        // Always run, stable volatile head, changed volatile tail. The
-        // uncacheable trailing block claims nothing.
-        assert_eq!(provider_system_breakpoints(&blocks), 3);
-    }
-
-    #[test]
-    fn mark_recently_changed_run_retags_every_block_after_the_boundary() {
-        let mut blocks = vec![
-            block(CacheHint::UntilChanged),
-            block(CacheHint::UntilChanged),
-            block(CacheHint::UntilChanged),
-        ];
-        mark_recently_changed_run(&mut blocks, &[1, 7, 5]);
-
-        let hints: Vec<CacheHint> = blocks.iter().map(|b| b.cache_hint).collect();
-        assert_eq!(
-            hints,
-            vec![
-                CacheHint::UntilChanged,
-                CacheHint::RecentlyChanged,
-                CacheHint::RecentlyChanged,
-            ]
-        );
-    }
-
-    #[test]
-    fn mark_recently_changed_run_ties_resolve_to_the_earliest_block() {
-        // Two regions written in the same second both changed, so the boundary
-        // belongs ahead of the earlier one.
-        let mut blocks = vec![
-            block(CacheHint::UntilChanged),
-            block(CacheHint::UntilChanged),
-            block(CacheHint::UntilChanged),
-        ];
-        mark_recently_changed_run(&mut blocks, &[1, 9, 9]);
-
-        assert_eq!(blocks[0].cache_hint, CacheHint::UntilChanged);
-        assert_eq!(blocks[1].cache_hint, CacheHint::RecentlyChanged);
-        assert_eq!(blocks[2].cache_hint, CacheHint::RecentlyChanged);
-    }
-
-    #[test]
-    fn mark_recently_changed_run_leaves_a_headless_tier_alone() {
-        // The newest block is already first, so there is no stable head to put
-        // behind a breakpoint.
-        let mut blocks = vec![
-            block(CacheHint::UntilChanged),
-            block(CacheHint::UntilChanged),
-        ];
-        mark_recently_changed_run(&mut blocks, &[42, 1]);
-        assert!(
-            blocks
-                .iter()
-                .all(|b| b.cache_hint == CacheHint::UntilChanged)
-        );
-    }
-
-    #[test]
-    fn mark_recently_changed_run_leaves_a_tierless_prompt_alone() {
-        // No volatile blocks at all means an empty recency list.
-        let mut blocks = vec![block(CacheHint::Always), block(CacheHint::Never)];
-        mark_recently_changed_run(&mut blocks, &[]);
-        assert_eq!(blocks[0].cache_hint, CacheHint::Always);
-        assert_eq!(blocks[1].cache_hint, CacheHint::Never);
-    }
-
-    #[test]
-    fn mark_recently_changed_run_refuses_when_the_run_budget_is_full() {
-        // Always, SlidingPrefix and UntilChanged already claim three
-        // breakpoints. Splitting further would take the messages' one.
-        let mut blocks = vec![
-            block(CacheHint::Always),
-            block(CacheHint::SlidingPrefix),
-            block(CacheHint::UntilChanged),
-            block(CacheHint::UntilChanged),
-        ];
-        assert_eq!(provider_system_breakpoints(&blocks), 3);
-
-        mark_recently_changed_run(&mut blocks, &[1, 99]);
-
-        assert_eq!(blocks[2].cache_hint, CacheHint::UntilChanged);
-        assert_eq!(blocks[3].cache_hint, CacheHint::UntilChanged);
-        assert_eq!(provider_system_breakpoints(&blocks), 3);
     }
 
     #[test]
@@ -1212,7 +935,7 @@ mod tests {
             .count();
 
         assert!(
-            system <= super::block_cache::MAX_SYSTEM_CACHE_RUNS,
+            system <= leviath_core::context::MAX_SYSTEM_CACHE_RUNS,
             "system runs: {system}"
         );
         assert_eq!(message, 1);

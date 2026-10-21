@@ -3721,27 +3721,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_hint_sort_priority_orders_by_stability() {
-        use leviath_core::CacheHint;
-        // Most stable first (lowest priority), volatile last.
-        assert_eq!(block_cache::cache_hint_sort_priority(CacheHint::Always), 0);
-        assert_eq!(
-            block_cache::cache_hint_sort_priority(CacheHint::SlidingPrefix),
-            1
-        );
-        assert_eq!(
-            block_cache::cache_hint_sort_priority(CacheHint::UntilChanged),
-            2
-        );
-        assert_eq!(block_cache::cache_hint_sort_priority(CacheHint::Never), 3);
-        // The four priorities are strictly increasing by volatility.
-        assert!(
-            block_cache::cache_hint_sort_priority(CacheHint::Always)
-                < block_cache::cache_hint_sort_priority(CacheHint::SlidingPrefix)
-        );
-    }
-
-    #[test]
     fn test_assemble_empty_regions_skipped() {
         let mut window = ContextWindow::new(100_000);
         window.add_region(Region::new(

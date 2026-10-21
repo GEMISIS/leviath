@@ -76,10 +76,7 @@ impl MediaLimits {
 
     /// The largest inline part of `mime_type`, when the vendor names one.
     pub fn inline_part_limit(&self, mime_type: &MimeType) -> Option<u64> {
-        self.inline_part_bytes
-            .iter()
-            .find(|(pattern, _)| mime_type.matches(pattern))
-            .map(|(_, bytes)| *bytes)
+        leviath_core::mime::hydrate::inline_limit(self.inline_part_bytes, mime_type)
     }
 
     /// Whether a part of `mime_type` and `size` bytes can go by file id.

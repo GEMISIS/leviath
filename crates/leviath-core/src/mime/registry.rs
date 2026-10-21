@@ -613,17 +613,10 @@ impl MimeRegistry {
     }
 }
 
-/// `image/png` or `image/*`, lowercase, or `None` for anything else.
+/// `image/png` or `image/*`, lowercase, or `None` for anything else: a key
+/// is read by the same rule as any other pattern, [`super::parse_pattern`].
 fn normalise_key(key: &str) -> Option<String> {
-    let k = key.trim().to_ascii_lowercase();
-    let (kind, sub) = k.split_once('/')?;
-    if kind.is_empty() || sub.is_empty() || sub.contains('/') {
-        return None;
-    }
-    if sub == "*" {
-        return (kind == "*" || MimeType::parse(&format!("{kind}/x")).is_ok()).then_some(k);
-    }
-    MimeType::parse(&k).ok().map(|t| t.as_str().to_string())
+    super::parse_pattern(key).ok().map(String::from)
 }
 
 /// `over` on top of `under`, field by field.
