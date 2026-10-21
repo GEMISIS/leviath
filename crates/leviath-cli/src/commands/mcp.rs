@@ -123,6 +123,16 @@ pub struct McpEnv {
     pub connect_timeout: std::time::Duration,
 }
 
+impl McpEnv {
+    /// The data directory, where the blueprint schema editors read is kept
+    /// up to date with the configured servers: the parent of
+    /// [`tools_dir`](Self::tools_dir), so a test with no tools directory
+    /// writes no schema either.
+    fn data_dir(&self) -> Option<&std::path::Path> {
+        self.tools_dir.as_deref().and_then(std::path::Path::parent)
+    }
+}
+
 /// Run a `lev mcp` subcommand against the injected environment.
 pub async fn execute_with(args: McpArgs, env: &McpEnv) -> anyhow::Result<()> {
     match args.command {
@@ -184,6 +194,7 @@ async fn add_server(add: AddArgs, env: &McpEnv) -> anyhow::Result<()> {
     config.mcp_servers.push(server.clone());
     config.save_to_path(&env.config_path)?;
     println!("Added MCP server '{}'.", server.name);
+    crate::blueprint_schema::refresh(env.data_dir(), &config, None);
 
     // Auto-login for an HTTP server that isn't opted out - this is what makes
     // `add` a one-step setup for an authenticated server.
@@ -260,6 +271,7 @@ fn remove_server(remove: RemoveArgs, env: &McpEnv) -> anyhow::Result<()> {
     // Drop any stored credentials too, so a removed server leaves nothing behind.
     env.grants.forget(&remove.name)?;
     println!("Removed MCP server '{}'.", remove.name);
+    crate::blueprint_schema::refresh(env.data_dir(), &config, None);
     Ok(())
 }
 
@@ -278,6 +290,9 @@ async fn test(name: &str, env: &McpEnv) -> anyhow::Result<()> {
     for tool in &tools {
         println!("  - {tool}");
     }
+    // The one moment a server's tool names are known, so the schema keeps
+    // them for an editor to complete as `<server>__<tool>`.
+    crate::blueprint_schema::refresh(env.data_dir(), &config, Some((name, &tools)));
     Ok(())
 }
 
@@ -1049,7 +1064,16 @@ for line in sys.stdin:
     #[tokio::test]
     async fn test_command_connects_and_lists_tools() {
         let dir = tempfile::tempdir().unwrap();
-        let env = env_at(dir.path(), never_opens, 0);
+        let mut env = env_at(dir.path(), never_opens, 0);
+        // A data directory, so the blueprint schema is kept up to date there.
+        let data = dir.path().join("home");
+        env.tools_dir = Some(data.join("tools"));
+        let schema = data.join(crate::blueprint_schema::FILE_NAME);
+        let tool_names = || -> String {
+            let text = std::fs::read_to_string(&schema).expect("the schema is written");
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            value["$defs"]["ToolSelector"]["examples"].to_string()
+        };
         let mut add = add_args("local", None, Some("python3"));
         add.args = vec!["-c".to_string(), STUB.to_string()];
         execute_with(
@@ -1072,6 +1096,17 @@ for line in sys.stdin:
         )
         .await
         .expect("test should connect and list tools");
+        assert!(tool_names().contains("\"local__ping\""));
+
+        // Removing the server takes its tools out of the schema.
+        remove_server(
+            RemoveArgs {
+                name: "local".to_string(),
+            },
+            &env,
+        )
+        .unwrap();
+        assert!(!tool_names().contains("local__ping"));
     }
 
     #[tokio::test]

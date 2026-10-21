@@ -187,6 +187,14 @@ impl SetupEnv {
             .as_deref()
             .map(|p| p.with_file_name("model_capabilities.json"))
     }
+
+    /// The data directory, where setup writes the blueprint schema editors
+    /// read. The UI state file's directory, for the same reason as
+    /// [`capability_cache_path`](Self::capability_cache_path): a test with no
+    /// UI state path writes no schema either.
+    pub fn data_dir(&self) -> Option<&Path> {
+        self.ui_state_path.as_deref().and_then(Path::parent)
+    }
 }
 
 // The real `SetupEnv` - the user's actual home, a real `std::env` lookup, and
@@ -228,22 +236,32 @@ pub fn run_non_interactive(args: &SetupArgs, env: &SetupEnv) -> anyhow::Result<(
         Vec::new()
     };
 
-    let mut applied = plan::apply(
-        // Nothing was offered here, so nothing was declined: the headless arm
-        // takes its answer from flags and must not rewrite what the wizard
-        // remembered about a person's choices.
-        &plan::SetupPlan {
-            config,
-            agents,
-            declined: Default::default(),
-        },
-        &env.config_path,
-        &env.agents_dir,
-        None,
-    )?;
+    // Nothing was offered here, so nothing was declined: the headless arm
+    // takes its answer from flags and must not rewrite what the wizard
+    // remembered about a person's choices.
+    let plan = plan::SetupPlan {
+        config,
+        agents,
+        declined: Default::default(),
+    };
+    let mut applied = plan::apply(&plan, &env.config_path, &env.agents_dir, None)?;
     applied.warnings.extend(unbuilt);
     report(&applied);
+    write_schema(env, &plan.config);
     Ok(())
+}
+
+/// Write the blueprint schema for this machine into the data directory, so
+/// an editor completes the tools and providers just set up. A failure is a
+/// warning: the config is already saved.
+fn write_schema(env: &SetupEnv, config: &Config) {
+    let Some(dir) = env.data_dir() else {
+        return;
+    };
+    match crate::blueprint_schema::write(dir, config, None) {
+        Ok(path) => println!("Blueprint schema for editors: {}", path.display()),
+        Err(e) => println!("  Warning: could not write the blueprint schema: {e}"),
+    }
 }
 
 /// Print what happened. Shared by both arms so the closing summary reads the
@@ -532,6 +550,7 @@ pub async fn execute_core<S: TerminalSetup, E: EventSource>(
                 env.ui_state_path.as_deref(),
             )?;
             report(&applied);
+            write_schema(env, &plan.config);
             print_next_steps(&applied);
         }
         None => println!("Setup cancelled. Nothing was written."),
@@ -1017,6 +1036,47 @@ mod tests {
     }
 
     // ─── the non-interactive path ───────────────────────────────────────────
+
+    #[test]
+    fn setup_writes_the_blueprint_schema_into_the_data_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_in(dir.path());
+        run_non_interactive(&args(), &env).unwrap();
+        let path = dir.path().join(crate::blueprint_schema::FILE_NAME);
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(schema["$defs"]["ToolSelector"]["examples"].is_array());
+
+        // A data directory that cannot be written to is a warning, not a
+        // failed setup: the config is already saved by then.
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "").unwrap();
+        let env = SetupEnv {
+            ui_state_path: Some(blocked.join("ui-state.json")),
+            ..env_in(dir.path())
+        };
+        write_schema(&env, &Config::default());
+        assert!(blocked.is_file());
+
+        // No data directory, as every other test's environment: nothing.
+        let env = SetupEnv {
+            ui_state_path: None,
+            ..env_in(dir.path())
+        };
+        assert_eq!(env.data_dir(), None);
+        write_schema(&env, &Config::default());
+    }
+
+    #[test]
+    fn setup_without_a_data_directory_writes_no_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = SetupEnv {
+            ui_state_path: None,
+            ..env_in(dir.path())
+        };
+        run_non_interactive(&args(), &env).unwrap();
+        assert!(!dir.path().join(crate::blueprint_schema::FILE_NAME).exists());
+    }
 
     #[test]
     fn flags_are_written_to_the_config() {

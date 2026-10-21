@@ -533,6 +533,39 @@ TOML's own inline tables help too. `[graph] edges = [{ name = "write", from = "g
 is the same as the `[[graph.edges]]` block above. `lev blueprint migrate` writes short tables inline
 and leaves out every key that holds its default.
 
+## Editor setup
+
+An editor that reads JSON Schema can complete keys, explain them on hover and underline a typo
+before you run `lev validate`. Leviath gives you two schemas for `agent.toml`:
+
+| Schema | What it holds |
+|---|---|
+| [`blueprint.schema.json`](https://leviath.dev/docs/stable/blueprint.schema.json) | The format itself, the same on every machine |
+| `~/.leviath/agent.schema.json` | The same rules, plus your tool, MCP tool and provider names as completions |
+
+`lev setup`, `lev mcp add` and `lev mcp remove` rewrite the second file. An MCP server's tool names
+are known only once Leviath has reached it, so `lev mcp test <name>` adds them as
+`<server>__<tool>`. After you add a script tool or provider, run `lev schema blueprint --write` to
+refresh it. The names are suggestions only, so a name the file does not list is never marked wrong.
+
+For VS Code with Even Better TOML, or any editor that uses Taplo, put a `.taplo.toml` in your
+project, with your home directory written out in full rather than as `~`:
+
+```toml
+[[rule]]
+include = ["**/agent.toml"]
+
+[rule.schema]
+path = "/home/you/.leviath/agent.schema.json"
+```
+
+A single file can name its schema in a first-line comment instead:
+`#:schema /home/you/.leviath/agent.schema.json`. Taplo reads a schema once, so reload the editor
+window after the file changes.
+
+`lev schema blueprint` prints the same schema to stdout, which is handy when an agent writes a
+blueprint.
+
 ## Migrating from `agent.leviath`
 
 `lev blueprint migrate` converts an `agent.leviath` into an `agent.toml` that describes the same

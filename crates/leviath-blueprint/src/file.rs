@@ -89,6 +89,54 @@ pub fn schema() -> serde_json::Value {
     serde_json::to_value(schemars::schema_for!(BlueprintFile)).expect("a schema is plain JSON")
 }
 
+/// Names a machine knows, offered as completions in a schema written for it.
+///
+/// Hints only: each list becomes the `examples` of the place that name goes,
+/// so an editor suggests them while every other name still passes. A name the
+/// loader takes is never refused for being missing here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SchemaHints {
+    /// Tool names a stage's `tools` or a `tool_permissions` key may use.
+    pub tools: Vec<String>,
+    /// Provider names a model's `provider` may use.
+    pub providers: Vec<String>,
+}
+
+/// [`schema`], with `hints` added as completions: the tool groups and
+/// `hints.tools` as a tool grant's examples and as `tool_permissions` keys,
+/// and `hints.providers` as a model's `provider` examples. Accepts exactly
+/// what [`schema`] accepts.
+pub fn schema_with(hints: &SchemaHints) -> serde_json::Value {
+    let mut schema = schema();
+    let mut tools: Vec<String> = leviath_runtime::spec::graph::ToolGroup::ALL
+        .iter()
+        .map(|g| g.token().to_string())
+        .collect();
+    tools.extend(sorted(&hints.tools));
+    let defs = &mut schema["$defs"];
+    defs["ToolSelector"]["examples"] = serde_json::json!(tools);
+    defs["ModelRef"]["properties"]["provider"]["examples"] =
+        serde_json::json!(sorted(&hints.providers));
+    // A `properties` entry per tool, each the same policy `additionalProperties`
+    // already allows any key, so the keys complete and nothing new is refused.
+    let policy = serde_json::json!({ "$ref": "#/$defs/ToolPolicy" });
+    let keys: serde_json::Map<String, serde_json::Value> = sorted(&hints.tools)
+        .into_iter()
+        .map(|tool| (tool, policy.clone()))
+        .collect();
+    for owner in ["RunGraph", "StageDef"] {
+        defs[owner]["properties"]["tool_permissions"]["properties"] =
+            serde_json::Value::Object(keys.clone());
+    }
+    schema
+}
+
+/// `names` sorted, each once.
+fn sorted(names: &[String]) -> Vec<String> {
+    let set: std::collections::BTreeSet<&String> = names.iter().collect();
+    set.into_iter().cloned().collect()
+}
+
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod schema_tests;
