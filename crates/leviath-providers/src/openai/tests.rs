@@ -452,6 +452,38 @@ fn it_claims_its_own_models_and_no_one_elses() {
     assert!(provider.serves_model("not-a-real-model-xyz").is_none());
 }
 
+/// `-tts` and `transcribe` are shapes, not OpenAI's names: Google's and
+/// Meta's speech models carry them too, and OpenAI claimed both.
+#[test]
+fn a_media_shape_alone_is_not_a_claim() {
+    let provider = OpenAIProvider::new(client(), "k".to_string());
+    for other in [
+        "gemini-2.5-flash-preview-tts",
+        "muse-voice-transcribe-1.0",
+        "muse-image-1.0",
+    ] {
+        assert!(provider.serves_model(other).is_none(), "{other}");
+    }
+    // Its own media families still route before any listing is read.
+    for own in ["gpt-image-1", "sora-2-pro", "tts-1-hd", "whisper-1"] {
+        assert_eq!(provider.serves_model(own).as_deref(), Some(own), "{own}");
+    }
+    // The catalogue lists; a newer name in its families is only a guess.
+    assert_eq!(provider.lists_model("sora-2").as_deref(), Some("sora-2"));
+    assert_eq!(provider.lists_model("gpt-5.5").as_deref(), Some("gpt-5.5"));
+    assert_eq!(provider.lists_model("gpt-9"), None);
+    assert_eq!(provider.serves_model("gpt-9").as_deref(), Some("gpt-9"));
+    // The listing and the config list too.
+    provider.learned.replace(
+        [("gpt-9".to_string(), Default::default())]
+            .into_iter()
+            .collect(),
+    );
+    assert_eq!(provider.lists_model("gpt-9").as_deref(), Some("gpt-9"));
+    let served = OpenAIProvider::new(client(), "k".to_string()).with_serves(vec!["local".into()]);
+    assert_eq!(served.lists_model("local").as_deref(), Some("local"));
+}
+
 // ── The listing ─────────────────────────────────────────────────────────────
 
 #[tokio::test]

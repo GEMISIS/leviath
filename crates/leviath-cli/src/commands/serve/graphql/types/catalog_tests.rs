@@ -1,8 +1,9 @@
 //! Tests for the catalogue types: models, providers and tools.
 
 use super::{
-    BuiltinTool, BundledTool, Model, ModelLimitsSource, ModelOrderField, ModelPricing, Provider,
-    ProviderOrderField, ScriptTool, SkippedTool, Tool, ToolGroup, ToolOrderField, ToolOrigin,
+    BuiltinTool, BundledTool, Model, ModelLimitsSource, ModelOrderField, ModelPricing, PriceUnit,
+    Provider, ProviderOrderField, ScriptTool, SkippedTool, Tool, ToolGroup, ToolOrderField,
+    ToolOrigin, UnitPrice,
 };
 use crate::commands::serve::graphql::filter::testkit::{
     exercise, exercise_enum, exercise_list, exercise_order,
@@ -58,7 +59,35 @@ fn a_model_carries_its_limits_and_its_prices() {
     assert_eq!(pricing.cached_input_per_mtok.0, 0.125);
     assert_eq!(pricing.cache_write_per_mtok.0, 1.5);
     assert_eq!(pricing.output_per_mtok.0, 10.0);
+    assert!(pricing.unit.is_none());
     assert_eq!(model.input_types, vec!["text/*", "image/*"]);
+}
+
+/// A media model billed by the unit carries that price, in every unit the
+/// price file knows, beside token columns that are zero.
+#[test]
+fn a_unit_priced_model_carries_its_unit() {
+    use leviath_providers::pricing::{PriceUnit as P, UnitPrice as U};
+    for (unit, want, label) in [
+        (P::Image, PriceUnit::Image, "img"),
+        (P::VideoSecond, PriceUnit::VideoSecond, "s"),
+        (P::AudioHour, PriceUnit::AudioHour, "hr"),
+        (P::MillionChars, PriceUnit::MillionChars, "M chr"),
+        (P::Clip, PriceUnit::Clip, "clip"),
+    ] {
+        let mut media = entry();
+        media.pricing = Some(leviath_providers::ModelPricing::per_unit(U {
+            usd: 0.4,
+            unit,
+        }));
+        let pricing = Model::from(&media).pricing.expect("a priced model");
+        assert_eq!(pricing.output_per_mtok.0, 0.0);
+        let price = pricing.unit.expect("a unit price");
+        assert_eq!(price.usd.0, 0.4);
+        assert_eq!(price.unit, want);
+        assert_eq!(price.label, label);
+        assert!(format!("{price:?}").contains(label), "{price:?}");
+    }
 }
 
 /// A model nobody has priced says so with an absent price, which is why a run
@@ -222,9 +251,21 @@ async fn every_mirrored_function_runs() {
             cached_input_per_mtok: Decimal(0.125),
             cache_write_per_mtok: Decimal(1.5),
             output_per_mtok: Decimal(10.0),
+            unit: Some(UnitPrice {
+                usd: Decimal(0.4),
+                unit: PriceUnit::VideoSecond,
+                label: "s".to_string(),
+            }),
         }
     }
     exercise(&[pricing()]).await;
+    exercise_enum(&[PriceUnit::Image, PriceUnit::Clip]).await;
+    exercise(&[UnitPrice {
+        usd: Decimal(0.02),
+        unit: PriceUnit::Image,
+        label: "img".to_string(),
+    }])
+    .await;
 
     let model = Model::from(&entry());
     exercise(std::slice::from_ref(&model)).await;
@@ -395,7 +436,64 @@ async fn a_catalogue_row_carries_its_types_and_its_providers_standing() {
     assert_eq!(row.supports_tools, entry.capabilities.supports_tools);
     assert!(!row.is_configured);
     assert_eq!(row.auth, ProviderAuthKind::ApiKey);
+    assert!(
+        row.pricing.is_none(),
+        "Meshy bills in credits, which no table prices"
+    );
 
     exercise(std::slice::from_ref(&row)).await;
     exercise_order(&row, CatalogModelOrderField::ALL);
+}
+
+/// A catalogue row is priced from the same table a run on its provider is,
+/// unit prices included, so a client can rank offers from a provider nobody
+/// has set up here. A `[model_capabilities]` rate comes first, as it does for
+/// the provider.
+#[test]
+fn a_catalogue_row_carries_its_providers_price() {
+    use super::super::machine::ProviderAuthKind;
+    use super::CatalogModel;
+
+    let catalogue = leviath_providers::capabilities::builtin_catalog();
+    let find = |provider: &str, id: &str| {
+        catalogue
+            .iter()
+            .find(|e| e.provider == provider && e.id == id)
+            .unwrap_or_else(|| panic!("{provider}/{id} is compiled in"))
+    };
+
+    let muse = find("meta", "muse-image-1.0");
+    let row = CatalogModel::of(muse, None, false, ProviderAuthKind::ApiKey);
+    let unit = row
+        .pricing
+        .and_then(|p| p.unit)
+        .expect("Muse Image is priced per image");
+    assert_eq!(unit.unit, PriceUnit::Image);
+    let table = leviath_providers::pricing::published_rates("meta", "muse-image-1.0")
+        .and_then(|p| p.unit)
+        .expect("the price file prices it");
+    assert_eq!(unit.usd.0, table.usd);
+
+    let veo = find("google", "veo-3.1-generate-preview");
+    let row = CatalogModel::of(veo, None, false, ProviderAuthKind::ApiKey);
+    assert_eq!(
+        row.pricing.and_then(|p| p.unit).map(|u| u.unit),
+        Some(PriceUnit::VideoSecond)
+    );
+
+    let negotiated = leviath_providers::ModelCapabilityOverride {
+        input_per_mtok: Some(2.0),
+        output_per_mtok: Some(3.0),
+        ..Default::default()
+    };
+    let claude = &catalogue
+        .iter()
+        .find(|e| e.provider == "anthropic")
+        .expect("Anthropic names a model");
+    let row = CatalogModel::of(claude, Some(&negotiated), true, ProviderAuthKind::ApiKey);
+    let pricing = row.pricing.expect("configured");
+    assert_eq!(
+        (pricing.input_per_mtok.0, pricing.output_per_mtok.0),
+        (2.0, 3.0)
+    );
 }

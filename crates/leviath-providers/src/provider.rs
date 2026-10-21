@@ -858,6 +858,23 @@ pub trait Provider: Send + Sync {
         self.serves_model_from_table(model_key)
     }
 
+    /// [`Self::serves_model`], but only when a list this provider holds names
+    /// `model_key`: its live listing, its compiled catalogue, or the operator's
+    /// config. `None` when the claim would rest on the id's shape alone.
+    ///
+    /// A provider that also claims ids by family (`gemini-*`, `claude-*`, a
+    /// `gpt-*` it has not listed yet) answers `serves_model` for those and
+    /// `None` here. The resolver asks this first: when any provider on an
+    /// open route *lists* a model, a provider that only guesses at it is not
+    /// offered it, so a guess can never send `muse-image-1.0` to a provider
+    /// that has never heard of it while the one that lists it waits behind.
+    ///
+    /// Defaults to [`Self::serves_model`], which is right for every provider
+    /// whose answer already comes from a list.
+    fn lists_model(&self, model_key: &str) -> Option<String> {
+        self.serves_model(model_key)
+    }
+
     /// What this provider has *read* about its retention of `model`'s
     /// requests, when it can read anything: Bedrock keeps a data retention
     /// mode on the account and answers from it once primed. `None`, the
@@ -2161,6 +2178,11 @@ mod tests {
             MinimalProvider.serves_model("some-other-model"),
             None,
             "a model the table does not name is not claimed"
+        );
+        assert_eq!(
+            MinimalProvider.lists_model("only-this-one"),
+            MinimalProvider.serves_model("only-this-one"),
+            "a provider that answers from a list lists what it serves"
         );
     }
 

@@ -378,11 +378,11 @@ fn resolve_candidates_in_order(
         }
         let key = model_key(&model);
         let mut routed = false;
-        for (name, provider) in open_route_providers(model_cfg, defaults, registry) {
-            if let Some(id) = provider.serves_model(key) {
-                push(name, id);
-                routed = true;
-            }
+        for (name, id) in
+            open_route_claims(open_route_providers(model_cfg, defaults, registry), key)
+        {
+            push(name, id);
+            routed = true;
         }
         // Say so when nothing serves it. The chain carries on to the next model,
         // which is what a fallback list is for, but an unroutable name is worth
@@ -558,6 +558,32 @@ fn open_route_providers(
     // named model's routes do.
     providers.sort_by_key(|(name, _)| defaults.rank(name));
     providers
+}
+
+/// The providers in `providers` that take `key` on an open route, in order,
+/// with the id each wants.
+///
+/// The ones that *list* it, when any does: a provider that only recognises
+/// the id's shape (a `gemini-*` its catalogue does not name yet) is a guess,
+/// and a guess ranked ahead of the provider whose catalogue names the model
+/// sends the stage somewhere that cannot answer it first. Only when nobody
+/// lists the model do the guesses stand, which is what keeps a model newer
+/// than every table routable at all.
+fn open_route_claims(
+    providers: Vec<(String, Arc<dyn Provider>)>,
+    key: &str,
+) -> Vec<(String, String)> {
+    let listed: Vec<(String, String)> = providers
+        .iter()
+        .filter_map(|(name, p)| p.lists_model(key).map(|id| (name.clone(), id)))
+        .collect();
+    if !listed.is_empty() {
+        return listed;
+    }
+    providers
+        .into_iter()
+        .filter_map(|(name, p)| p.serves_model(key).map(|id| (name, id)))
+        .collect()
 }
 
 /// The first model the stage names that nothing can be said about, with the
@@ -3860,6 +3886,102 @@ mod tests {
             picked.iter().all(|e| e.provider != "openai"),
             "got {picked:?}"
         );
+    }
+
+    /// A provider that claims every id by its shape and lists none, the way
+    /// `google` claimed anything with `-image` in it.
+    struct Guessing;
+
+    #[async_trait::async_trait]
+    impl leviath_providers::Provider for Guessing {
+        async fn infer(
+            &self,
+            _: &leviath_providers::InferenceRequest,
+        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+            Err(leviath_providers::ProviderError::Other("stub".to_string()))
+        }
+        async fn count_tokens(&self, _: &str, _: &str) -> usize {
+            1
+        }
+        fn max_context_tokens(&self, _: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "guessing"
+        }
+        fn capabilities(&self, _: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+        fn serves_model(&self, model_key: &str) -> Option<String> {
+            Some(model_key.to_string())
+        }
+        fn lists_model(&self, _: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn the_guessing_stub_answers_the_whole_trait() {
+        use leviath_providers::Provider as _;
+        let p = Guessing;
+        assert_eq!(p.name(), "guessing");
+        assert_eq!(p.max_context_tokens("m"), 100_000);
+        let _ = p.capabilities("m");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime");
+        assert_eq!(runtime.block_on(p.count_tokens("t", "m")), 1);
+        let request = leviath_providers::InferenceRequest {
+            system: Vec::new(),
+            messages: Vec::new(),
+            model: "m".to_string(),
+            max_tokens: 1,
+            temperature: 0.0,
+            tools: Vec::new(),
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+        assert!(runtime.block_on(p.infer(&request)).is_err());
+    }
+
+    /// `google` first in the order, `meta` second, and a bare `muse-image-1.0`:
+    /// Google claimed it by the `-image` in its name and the stage went there
+    /// first, to a provider that has never served it. A provider whose list
+    /// names the model outranks one that only recognises its shape.
+    #[test]
+    fn a_provider_that_lists_the_model_outranks_one_that_guesses() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("google".to_string(), Arc::new(Guessing));
+        registry.register(
+            "meta".to_string(),
+            Arc::new(Named {
+                model: "muse-image-1.0".to_string(),
+            }),
+        );
+        let defaults = defaults_ordered("google", &["google", "meta"]);
+        let picked = resolve_stage_candidates(
+            &model_cfg_open(vec!["muse-image-1.0"]),
+            None,
+            &defaults,
+            &registry,
+        );
+        assert_eq!(
+            picked
+                .iter()
+                .map(|c| (c.provider.as_str(), c.model.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("meta", "muse-image-1.0")],
+        );
+
+        // Nobody lists a model newer than every table, so the guess stands.
+        let picked = resolve_stage_candidates(
+            &model_cfg_open(vec!["gemini-9-ultra"]),
+            None,
+            &defaults,
+            &registry,
+        );
+        assert_eq!(picked[0].provider, "google", "{picked:?}");
+        assert_eq!(picked[0].model, "gemini-9-ultra");
     }
 
     fn defaults_ordered(default_provider: &str, order: &[&str]) -> ModelDefaults {

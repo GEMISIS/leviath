@@ -144,6 +144,40 @@ pub struct CatalogEntry {
     pub capabilities: ModelCapabilities,
 }
 
+impl CatalogEntry {
+    /// What this model costs, as its provider prices it before any listing has
+    /// been read or any config consulted: the same shipped table, so a client
+    /// ranking offers from a provider not set up here sees the figure a run
+    /// there would be billed by.
+    ///
+    /// A sign-in route (`codex`, `grok`) is a flat subscription and prices
+    /// every call at a known zero, the way the provider does. A gateway
+    /// (`openrouter`) quotes rates only through its live listing, so a row for
+    /// one is `None`, as is any model the table has no row for.
+    pub fn pricing(&self) -> Option<crate::ModelPricing> {
+        self.pricing_with(None)
+    }
+
+    /// [`Self::pricing`] with the operator's `[model_capabilities]` entry for
+    /// the model, which comes first wherever the provider reads it: it is the
+    /// only source that can know a negotiated rate. The sign-in routes and the
+    /// gateway do not read it, so neither does their row.
+    pub fn pricing_with(
+        &self,
+        correction: Option<&ModelCapabilityOverride>,
+    ) -> Option<crate::ModelPricing> {
+        let configured = || correction.and_then(ModelCapabilityOverride::pricing);
+        match self.provider {
+            "codex" | "grok" => Some(crate::ModelPricing::flat(0.0, 0.0)),
+            "openrouter" => None,
+            "bedrock" => {
+                configured().or_else(|| crate::bedrock::catalog::published_pricing(self.id))
+            }
+            provider => configured().or_else(|| crate::pricing::published_rates(provider, self.id)),
+        }
+    }
+}
+
 /// Every model this build names outright, across the providers that name any.
 ///
 /// Ollama names none: it serves whatever has been pulled, and nothing compiled
