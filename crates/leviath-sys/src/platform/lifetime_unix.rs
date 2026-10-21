@@ -27,7 +27,10 @@ use std::process::{Child, Command, Stdio};
 /// a Ctrl-C meant for a foreground daemon cannot take the watchdog down before
 /// it has done its job. `read` returns on end of file, which is the only thing
 /// that ever arrives: nothing writes to the pipe.
-const WATCHDOG: &str = "trap '' HUP INT QUIT TERM; read -r line; kill -KILL -- -\"$1\" 2>/dev/null";
+///
+/// `kill -9 -<pgid>` with no `--`: dash, which is `/bin/sh` on Debian and
+/// Ubuntu, refuses `--` as an "Illegal number" and would kill nothing.
+const WATCHDOG: &str = "trap '' HUP INT QUIT TERM; read -r line; kill -9 -\"$1\" 2>/dev/null";
 
 /// A running watchdog for one command's process group.
 ///
@@ -172,6 +175,17 @@ mod tests {
         drop(tie.watchdog.stdin.take());
         assert!(exits_soon(command), "the watchdog killed the group");
         assert!(tie.watchdog.wait().is_ok(), "and then exited");
+    }
+
+    /// The same under dash, the strictest `/bin/sh` the daemon meets (it is
+    /// the one on Debian and Ubuntu, and macOS ships it too), so a spelling
+    /// only bash or zsh accepts cannot pass here and fail on Linux.
+    #[test]
+    fn the_watchdog_script_works_under_dash() {
+        let command = grouped_sleep();
+        let mut tie = tie_with(Command::new("/bin/dash"), command.id()).expect("dash starts");
+        drop(tie.watchdog.stdin.take());
+        assert!(exits_soon(command), "dash's watchdog killed the group");
     }
 
     /// The ordinary end of a command: the watchdog is stopped before the pipe
