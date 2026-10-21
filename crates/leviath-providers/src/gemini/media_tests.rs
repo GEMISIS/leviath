@@ -161,6 +161,97 @@ async fn a_veo_video_is_started_polled_downloaded_and_priced_by_the_second() {
     assert_eq!(body["parameters"]["negativePrompt"], "rain");
 }
 
+/// A length written `"4s"` is four seconds, not "unset": Veo answered it
+/// with its eight-second default, twice the clip and twice the bill.
+/// Resolutions and aspect ratios are sent in Google's spelling.
+#[tokio::test]
+async fn a_veo_length_written_with_its_unit_is_sent_as_seconds() {
+    for (extra, seconds) in [
+        (
+            serde_json::json!({ "duration": "4s", "resolution": "1080P" }),
+            4,
+        ),
+        (serde_json::json!({ "duration_seconds": " 6 " }), 6),
+        (
+            serde_json::json!({ "duration": 8.0, "aspect_ratio": "9:16" }),
+            8,
+        ),
+    ] {
+        let video = spawn_mock_server_with_headers(
+            200,
+            "OK",
+            "Content-Type: video/mp4\r\n",
+            b"MP4".to_vec(),
+        )
+        .await;
+        let done = serde_json::json!({
+            "done": true,
+            "response": { "generateVideoResponse": { "generatedSamples": [{ "video": { "uri": video } }] } }
+        });
+        let (url, bodies) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"name":"op"}"#.to_vec()),
+            (200, "OK", done.to_string().into_bytes()),
+        ])
+        .await;
+        provider(&url)
+            .infer(&request(
+                "veo-3.1-generate-preview",
+                "a paper boat",
+                vec![],
+                extra.clone(),
+            ))
+            .await
+            .expect("a video");
+        let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
+        assert_eq!(body["parameters"]["durationSeconds"], seconds, "{extra}");
+        if extra.get("resolution").is_some() {
+            assert_eq!(body["parameters"]["resolution"], "1080p");
+        }
+        if extra.get("aspect_ratio").is_some() {
+            assert_eq!(body["parameters"]["aspectRatio"], "9:16");
+        }
+    }
+}
+
+/// A paid parameter that does not read is refused before anything is sent,
+/// never dropped for Veo to answer at its default.
+#[tokio::test]
+async fn a_veo_parameter_that_does_not_read_is_refused_before_sending() {
+    let nothing_listens = provider("http://127.0.0.1:9");
+    for (extra, named) in [
+        (serde_json::json!({ "duration": "4.5s" }), "`duration`"),
+        (serde_json::json!({ "duration": 4.5 }), "`duration`"),
+        (serde_json::json!({ "duration": "four" }), "`duration`"),
+        (serde_json::json!({ "duration": 0 }), "`duration`"),
+        (
+            serde_json::json!({ "duration_seconds": true }),
+            "`duration_seconds`",
+        ),
+        (
+            serde_json::json!({ "resolution": "lowest" }),
+            "`resolution`",
+        ),
+        (serde_json::json!({ "resolution": 720 }), "`resolution`"),
+        (
+            serde_json::json!({ "aspect_ratio": "1:1" }),
+            "`aspect_ratio`",
+        ),
+    ] {
+        let err = nothing_listens
+            .infer(&request(
+                "veo-3.1-generate-preview",
+                "a paper boat",
+                vec![],
+                extra.clone(),
+            ))
+            .await
+            .unwrap_err();
+        let said = err.to_string();
+        assert!(said.contains(named), "{extra}: {said}");
+        assert!(said.contains("must be"), "{extra}: {said}");
+    }
+}
+
 #[tokio::test]
 async fn veo_refusals_failures_and_bad_answers_are_errors() {
     let refused = serde_json::json!({

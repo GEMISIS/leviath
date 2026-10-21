@@ -160,12 +160,13 @@ pub struct Hydration<'a> {
 
 /// Whether the model is sent `block`'s bytes natively (inline or by file id),
 /// as opposed to text or its stand-in. What the runtime asks before it
-/// uploads anything.
-pub fn sends_natively(block: &ContentBlock, mime: &ModelMime) -> bool {
+/// uploads anything. A type `registry` says is text never is: see
+/// [`core_hydrate::sends_natively`].
+pub fn sends_natively(block: &ContentBlock, mime: &ModelMime, registry: &MimeRegistry) -> bool {
     let ContentBlock::Mime { part, deliver, .. } = block else {
         return false;
     };
-    core_hydrate::sends_natively(part, *deliver, &mime.input)
+    core_hydrate::sends_natively(part, *deliver, &mime.input, registry)
 }
 
 /// Fill every mime block in `request` with what the model should get, as
@@ -692,6 +693,35 @@ mod tests {
             },
         );
         assert_eq!(report.sent, 1);
+    }
+
+    /// A model whose inputs name a text type (Meta's take `text/*`) is still
+    /// sent a text file's text: no encoder has a native block for one, so
+    /// sent as bytes it reached the model as its stand-in, or as an
+    /// `input_file` Meta refused with 400 "Invalid upload request".
+    #[test]
+    fn a_text_file_reaches_a_model_that_takes_its_type_as_text() {
+        let parts = [obj_part()];
+        let fetch = bytes_of(&parts);
+        let takes = ModelMime::new(&["text/*", "model/*", "image/*"], &["text/*"]);
+        let native = ContentBlock::mime(&parts[0].clone().delivered(Delivery::Native)).unwrap();
+        let mut req = request(vec![ContentBlock::mime(&parts[0]).unwrap(), native]);
+        let report = hydrate_request(
+            &mut req,
+            &Hydration {
+                limits: crate::files::provider_limits("meta"),
+                why_inline: "",
+                mime: &takes,
+                registry: &reg(),
+                max_media_bytes: 1024,
+                fetch: &fetch,
+            },
+        );
+        assert_eq!((report.as_text, report.sent), (2, 0));
+        for block in blocks_of(&req.messages[1].content) {
+            assert!(responses_part(block).is_none(), "{block:?}");
+            assert!(matches!(block, ContentBlock::Text { text } if text == "v 1 2 3\n"));
+        }
     }
 
     #[test]

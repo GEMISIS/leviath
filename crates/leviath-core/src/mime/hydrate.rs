@@ -6,9 +6,13 @@
 //! before a request is sent, [`hydrate`] decides per part what the model
 //! gets:
 //!
-//! - the bytes, base64, when the model's input patterns cover the type;
 //! - the bytes as text, when the registry says the type is text (a `model/obj`
-//!   file is UTF-8) or the part asks for text, whatever the model declares;
+//!   file is UTF-8, so is `text/markdown`) or the part asks for text, whatever
+//!   the model declares. A model whose input patterns name `text/*` has no
+//!   native block for a text file: an encoder would write its stand-in, and a
+//!   vendor handed one as an uploaded file refuses it (Meta's Responses API
+//!   answers a `text/markdown` `input_file` with 400 "Invalid upload request");
+//! - the bytes, base64, when the model's input patterns cover the type;
 //! - the stand-in line otherwise, with the reason when a documented limit is
 //!   what held it back.
 //!
@@ -175,16 +179,26 @@ enum Fate {
 /// Whether a model accepting `input` is sent a part of this type natively
 /// (inline or by file id), as opposed to text or its stand-in. What a caller
 /// asks before it uploads anything.
-pub fn sends_natively(part: &BlobRef, deliver: Option<Delivery>, input: &[String]) -> bool {
+///
+/// A type `registry` says is text never is, whatever `input` names and even
+/// when the part asks to go natively: no request shape has a native block
+/// for a text file, so its text is what the model can read.
+pub fn sends_natively(
+    part: &BlobRef,
+    deliver: Option<Delivery>,
+    input: &[String],
+    registry: &MimeRegistry,
+) -> bool {
     match deliver {
         Some(Delivery::Text) | Some(Delivery::StandIn) => false,
+        _ if registry.info(&part.mime_type).text => false,
         Some(Delivery::Native) | None => part.mime_type.matches_any(input),
     }
 }
 
 fn fate(slot: &MimeSlot<'_>, h: &Hydration<'_>) -> Fate {
     let part = slot.part;
-    if sends_natively(part, slot.deliver, h.input) {
+    if sends_natively(part, slot.deliver, h.input, h.registry) {
         return match (
             slot.remote,
             inline_limit(h.inline_part_bytes, &part.mime_type),

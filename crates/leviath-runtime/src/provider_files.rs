@@ -281,7 +281,7 @@ pub(crate) async fn attach(
             continue;
         };
         for block in blocks.iter_mut() {
-            let native = leviath_providers::mime::sends_natively(block, mime);
+            let native = leviath_providers::mime::sends_natively(block, mime, registry);
             let ContentBlock::Mime {
                 part, name, remote, ..
             } = block
@@ -423,6 +423,11 @@ pub async fn delete_entries(entries: &[Entry], registry: &crate::ProviderRegistr
         };
         match provider.delete_file(&entry.file).await {
             Ok(()) => deleted += 1,
+            // Nothing to warn about: the vendor deletes no file, and every
+            // later one would say the same. The upload's own expiry ends it.
+            Err(e) if leviath_providers::files::deletion_unsupported(&e) => {
+                tracing::debug!(provider = %entry.provider, file = %entry.file.id, "the provider does not delete files; the upload expires at the vendor")
+            }
             Err(e) => {
                 tracing::warn!(provider = %entry.provider, file = %entry.file.id, error = %e, "an uploaded file could not be deleted; it expires at the vendor")
             }

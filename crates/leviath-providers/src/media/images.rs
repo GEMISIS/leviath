@@ -105,6 +105,11 @@ pub(crate) async fn run(
     let reply: Value = crate::provider::decode_json(response).await?;
 
     let mut parts: Vec<Blob> = Vec::new();
+    // The bytes say what an image is. What the reply says is only the
+    // fallback for bytes no row recognises: Meta's reply names
+    // `output_format: "webp"` (its default) for an edit that hands back a PNG,
+    // and a part typed by that label failed the stage's `image/png` artifact.
+    let registry = leviath_core::mime::MimeRegistry::builtin();
     // OpenAI names the format once for the whole reply (`output_format:
     // "png"`); xAI and Meta name a type on each image.
     let reply_mime = reply
@@ -113,7 +118,7 @@ pub(crate) async fn run(
         .map(|format| format!("image/{format}"));
     let entries = reply.get("data").and_then(Value::as_array);
     for (index, entry) in entries.into_iter().flatten().enumerate() {
-        let mime = entry
+        let said = entry
             .get("mime_type")
             .or_else(|| entry.get("mime"))
             .and_then(Value::as_str)
@@ -132,6 +137,9 @@ pub(crate) async fn run(
             (None, Some(url)) => super::download(&endpoint.client, url).await?.0,
             (None, None) => continue,
         };
+        let mime = registry
+            .sniff(&bytes)
+            .map_or(said, |sniffed| sniffed.as_str().to_string());
         let name = format!("image-{}.{}", index + 1, super::extension(&mime));
         parts.push(super::blob(&mime, bytes, &name)?);
     }

@@ -828,7 +828,8 @@ A large image, PDF, video or recording is uploaded to the provider's own file st
 time a request carries it, and every later turn, retry and stage names it by id. Anthropic, OpenAI,
 Google, xAI, Grok and Meta take files this way; the rest are sent the bytes on each request.
 Nothing is uploaded with zero data retention on, or with `[providers] file_uploads = false`. A
-run's uploads are deleted when it finishes or is deleted. The limits each provider takes, and what
+run's uploads are deleted when it finishes or is deleted, except at Meta, which deletes no file
+(see [Meta](#meta)). The limits each provider takes, and what
 happens to a part that is too large, are in [Files and size limits](/docs/mime#files-and-size-limits).
 
 ## OpenAI and Google request shapes
@@ -868,12 +869,17 @@ params = { extra = { size = "1536x1024", quality = "medium" } }
 A video is made in the background at the vendor and waited for. Give a video stage a generous
 `request_timeout_secs`. Leviath waits up to 900 seconds by default.
 
+A video's length, size and resolution are billed, so Leviath never leaves one out: a value it
+cannot read (`duration = "4.5s"`, `resolution = "lowest"`) fails the stage before anything is
+sent, naming the parameter and what it takes, rather than letting the vendor answer at its own
+default.
+
 **OpenAI**
 
 | Model | Takes | Makes | Parameters |
 |---|---|---|---|
 | `gpt-image-2`, `gpt-image-1.5`, `gpt-image-1`, `gpt-image-1-mini`, `chatgpt-image-latest` | text, and images to edit | PNG images | `size`, `quality`, `background`, `output_format`, `moderation`, `n` |
-| `sora-2`, `sora-2-pro` | text, and an image to start from | an MP4 video | `seconds` (4, 8 or 12), `size` (`1280x720`, `720x1280` and the larger sizes on pro) |
+| `sora-2`, `sora-2-pro` | text, and an image to start from | an MP4 video | `seconds` (4, 8 or 12, written `4`, `"4"` or `"4s"`), `size` (`1280x720`, `720x1280` and the larger sizes on pro) |
 | `gpt-4o-mini-tts`, `tts-1`, `tts-1-hd` | text | speech, MP3 unless `response_format` says otherwise | `voice` (`alloy` unless set), `response_format`, `instructions`, `speed` |
 | `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `gpt-4o-transcribe-diarize` | audio | the transcript as text, with a `transcript.json` part (segments, and speakers from the diarize model) | `language`, `prompt`, `response_format` |
 
@@ -882,7 +888,7 @@ A video is made in the background at the vendor and waited for. Give a video sta
 | Model | Takes | Makes | Parameters |
 |---|---|---|---|
 | `gemini-3.1-flash-image`, `gemini-3-pro-image`, `nano-banana-pro-preview` | text, and images to edit | JPEG images, and a line of text | `aspect_ratio`, `image_size` |
-| `veo-3.1-generate-preview`, `veo-3.1-fast-generate-preview`, `veo-3.1-lite-generate-preview` | text, and an image to start from | an MP4 video with sound | `duration` (4, 6 or 8 seconds; 8 unless set), `aspect_ratio`, `resolution`, `negative_prompt` |
+| `veo-3.1-generate-preview`, `veo-3.1-fast-generate-preview`, `veo-3.1-lite-generate-preview` | text, and an image to start from | an MP4 video with sound | `duration` (4, 6 or 8 seconds, written `4`, `"4"` or `"4s"`; 8 unless set), `aspect_ratio` (`16:9` or `9:16`), `resolution` (`720p`, `1080p` or `4k`), `negative_prompt` |
 | `gemini-3.1-flash-tts-preview`, `gemini-2.5-flash-preview-tts`, `gemini-2.5-pro-preview-tts` | text to read aloud | speech as a 24 kHz WAV | `voice` (`Kore`, `Puck` and the rest), `language` |
 | `lyria-3.5`, `lyria-3-pro-preview`, `lyria-3-clip-preview` | a description of the music | an MP3, and its lyrics with timings as text | none |
 
@@ -1027,6 +1033,17 @@ upload), the part is not sent: the model gets its stand-in with the reason, and 
 says so. Other parts are sent as usual. Meta's docs also say audio on 1.3 is not fully supported
 yet and suggest 1.2 for it. OpenRouter lists no audio input for any Muse Spark, so audio reaches
 it only through the `meta` provider.
+
+**Meta does not delete uploads.** Meta documents `DELETE /v1/files/{id}` but answers it with
+`501 Not Implemented`, so a run's uploads stay in Meta's storage until the expiry they were
+uploaded with, at most 30 days. Leviath asks once per file when the run ends, and logs the 501 at
+debug level rather than as a warning.
+
+**Muse Image** takes `size` (which Meta reduces to an aspect ratio), `output_format` (`png`,
+`jpeg` or `webp`; `webp` unless set), `reasoning_strength` (`low` or `high`) and `moderation`, and
+`n`. Each image is typed by its bytes, not by the format the reply names: an edit can answer a PNG
+while the reply says `webp`. A stage that declares an `image/png` artifact should set
+`output_format = "png"`, since a WebP does not satisfy it and the stage fails saying so.
 
 **Transcription takes WAV only:** mono, 16-bit, 16 or 24 kHz, at most 32 MB and ten minutes.
 Leviath does not convert audio, and refuses anything else with a message naming the format.

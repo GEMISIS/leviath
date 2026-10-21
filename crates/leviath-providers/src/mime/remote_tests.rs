@@ -184,8 +184,9 @@ fn hydration_leaves_a_held_part_alone_and_holds_back_one_over_the_inline_limit()
 #[test]
 fn a_part_sent_natively_is_one_the_model_takes_and_no_override_turns_aside() {
     let mime = ModelMime::new(&["text/*", "image/*"], &["text/*"]);
+    let reg = leviath_core::mime::MimeRegistry::builtin();
     let png = ContentBlock::mime(&part("image/png", b"\x89PNG\r\n\x1a\n", "b.png")).unwrap();
-    assert!(sends_natively(&png, &mime));
+    assert!(sends_natively(&png, &mime, &reg));
     let as_text = match png.clone() {
         ContentBlock::Mime {
             part,
@@ -202,13 +203,18 @@ fn a_part_sent_natively_is_one_the_model_takes_and_no_override_turns_aside() {
         },
         other => other,
     };
-    assert!(!sends_natively(&as_text, &mime));
+    assert!(!sends_natively(&as_text, &mime, &reg));
     let pdf = ContentBlock::mime(&part("application/pdf", b"%PDF", "a.pdf")).unwrap();
-    assert!(!sends_natively(&pdf, &mime));
+    assert!(!sends_natively(&pdf, &mime, &reg));
     assert!(!sends_natively(
         &ContentBlock::Text { text: "t".into() },
-        &mime
+        &mime,
+        &reg
     ));
+    // A text file is read as text, never sent as a file, whatever the model's
+    // inputs say.
+    let notes = ContentBlock::mime(&part("text/markdown", b"# notes", "n.md")).unwrap();
+    assert!(!sends_natively(&notes, &mime, &reg));
 }
 
 #[test]

@@ -72,6 +72,55 @@ pub(crate) fn try_emit_for(
     Some(output)
 }
 
+/// Why a media stage's produced parts are not its answer, when it made parts
+/// of `family` into the regions `targets` but they do not satisfy the
+/// artifacts it declares. `None` when it declares none, made nothing of its
+/// family, or what it made matches.
+///
+/// The question [`try_emit_for`] leaves open when it answers `None`. A stage
+/// that made the wrong type has nowhere to go: the nudge for `submit_output`
+/// reaches an image or video model as its next prompt, which pays for another
+/// generation of the same type and never a tool call. So the stage fails with
+/// this instead, naming what was declared and what was made.
+pub(crate) fn mismatch(
+    stage: &str,
+    family: &str,
+    targets: &[&str],
+    spec: Option<&OutputSpec>,
+    window: &ContextWindow,
+) -> Option<String> {
+    let specs = spec.map(|s| s.artifacts.as_slice()).unwrap_or_default();
+    let pattern = format!("{family}/*");
+    let made: Vec<Part> = window
+        .stored_parts_in(targets)
+        .into_iter()
+        .filter(|p| p.mime_type.matches(&pattern))
+        .collect();
+    if specs.is_empty() || made.is_empty() || match_artifacts(specs, &made).is_some() {
+        return None;
+    }
+    let declared: Vec<String> = specs
+        .iter()
+        .filter(|s| s.required || specs.iter().all(|s| !s.required))
+        .map(|s| format!("'{}' as {}", s.name, s.mime_type))
+        .collect();
+    let produced: Vec<String> = made
+        .iter()
+        .map(|p| match &p.name {
+            Some(name) => format!("{} ({name})", p.mime_type),
+            None => p.mime_type.to_string(),
+        })
+        .collect();
+    Some(format!(
+        "stage '{stage}' made {}, which does not match the artifact it declares ({}). A media \
+         model is not asked again: it would only make another of the same. Set the model's \
+         output format to the declared type (`output_format` on Meta's and OpenAI's \
+         image models), or declare the artifact as `{pattern}`.",
+        produced.join(", "),
+        declared.join(", ")
+    ))
+}
+
 /// Match each declared artifact to a produced part by type, each part used at
 /// most once and in declaration order. `None` if any `required` artifact goes
 /// unmatched, or nothing matched at all (an output stage that emitted no part
@@ -178,6 +227,62 @@ mod tests {
             )
             .unwrap();
         window
+    }
+
+    #[test]
+    fn a_media_part_of_the_wrong_type_is_named_against_what_was_declared() {
+        let spec = spec_with(vec![
+            artifact_spec("picture", "image/png", true),
+            artifact_spec("thumb", "image/jpeg", false),
+        ]);
+        let window = window_with("art", "image/webp", "image-1.webp");
+        let why = mismatch("edit", "image", &["art"], Some(&spec), &window).expect("a mismatch");
+        assert!(why.contains("stage 'edit'"), "{why}");
+        assert!(why.contains("image/webp (image-1.webp)"), "{why}");
+        assert!(why.contains("'picture' as image/png"), "{why}");
+        assert!(!why.contains("thumb"), "only the required artifacts: {why}");
+        assert!(why.contains("`image/*`"), "{why}");
+        // With nothing required, every declared artifact is named.
+        let optional = spec_with(vec![artifact_spec("thumb", "image/jpeg", false)]);
+        let why = mismatch("edit", "image", &["art"], Some(&optional), &window).unwrap();
+        assert!(why.contains("'thumb' as image/jpeg"), "{why}");
+    }
+
+    #[test]
+    fn no_mismatch_when_nothing_is_declared_nothing_was_made_or_it_matches() {
+        let png = spec_with(vec![artifact_spec("picture", "image/png", true)]);
+        let any = spec_with(vec![artifact_spec("picture", "image/*", true)]);
+        let webp = window_with("art", "image/webp", "image-1.webp");
+        assert_eq!(mismatch("s", "image", &["art"], None, &webp), None);
+        assert_eq!(mismatch("s", "image", &["art"], Some(&any), &webp), None);
+        assert_eq!(mismatch("s", "video", &["art"], Some(&png), &webp), None);
+        assert_eq!(
+            mismatch("s", "image", &["elsewhere"], Some(&png), &webp),
+            None
+        );
+        let matching = window_with("art", "image/png", "image-1.png");
+        assert_eq!(
+            mismatch("s", "image", &["art"], Some(&png), &matching),
+            None
+        );
+        // A part with no name is named by its type.
+        let mut unnamed = ContextWindow::new(100_000);
+        unnamed.add_region(Region::new("art".to_string(), RegionKind::Pinned, 100_000));
+        let blob = Blob::new(MimeType::parse("image/gif").unwrap(), vec![1]);
+        let part = Part::stored(blob.describe(&MimeRegistry::builtin()));
+        let content = leviath_core::region::EntryContent::from_parts(vec![part]);
+        let tokens = content.tokens(None);
+        unnamed
+            .add_content_entry(
+                leviath_core::ContextCause::ProducedPart,
+                "art",
+                leviath_core::EntryKind::Text,
+                content,
+                tokens,
+            )
+            .unwrap();
+        let why = mismatch("s", "image", &["art"], Some(&png), &unnamed).unwrap();
+        assert!(why.contains("made image/gif, which"), "{why}");
     }
 
     #[test]

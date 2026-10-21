@@ -316,6 +316,70 @@ pub(crate) fn extra_f64(request: &InferenceRequest, key: &str) -> Option<f64> {
     request.extra.get(key).and_then(Value::as_f64)
 }
 
+/// A whole number of seconds from `request.extra`, under the first of `keys`
+/// the stage sets: `4`, `4.0`, `"4"` or `"4s"`. `Ok(None)` when it sets none.
+///
+/// Anything else is refused, naming the key. A length is a paid parameter: one
+/// read as "not set" runs at the vendor's default, which can be longer than
+/// what was asked for and cost more (Veo dropped `"4s"` and made eight
+/// seconds).
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "google"
+))]
+pub(crate) fn extra_seconds(request: &InferenceRequest, keys: &[&str]) -> Result<Option<u64>> {
+    let Some((key, value)) = keys
+        .iter()
+        .find_map(|k| request.extra.get(*k).map(|v| (*k, v)))
+    else {
+        return Ok(None);
+    };
+    let seconds = match value {
+        Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as u64)),
+        Value::String(text) => {
+            let text = text.trim();
+            text.strip_suffix('s').unwrap_or(text).trim().parse().ok()
+        }
+        _ => None,
+    };
+    match seconds {
+        Some(seconds) if seconds > 0 => Ok(Some(seconds)),
+        _ => Err(ProviderError::Other(format!(
+            "`{key}` must be a whole number of seconds, such as 4, \"4\" or \"4s\", not {value}"
+        ))),
+    }
+}
+
+/// One of `allowed` from `request.extra[key]`, matched without regard to
+/// case and answered in `allowed`'s spelling. `Ok(None)` when the stage does
+/// not set it; any other value is refused naming the key and what it takes,
+/// rather than passed on for the vendor to drop or answer at its default.
+#[cfg(feature = "google")]
+pub(crate) fn extra_choice(
+    request: &InferenceRequest,
+    key: &str,
+    allowed: &[&'static str],
+) -> Result<Option<&'static str>> {
+    let Some(value) = request.extra.get(key) else {
+        return Ok(None);
+    };
+    value
+        .as_str()
+        .map(str::trim)
+        .and_then(|text| allowed.iter().find(|a| a.eq_ignore_ascii_case(text)))
+        .map(|choice| Some(*choice))
+        .ok_or_else(|| {
+            ProviderError::Other(format!(
+                "`{key}` must be one of {}, not {value}",
+                allowed.join(", ")
+            ))
+        })
+}
+
 /// A boolean hint from `request.extra`.
 #[cfg(any(feature = "xai", feature = "xai-subscription", feature = "meshy"))]
 pub(crate) fn extra_bool(request: &InferenceRequest, key: &str) -> Option<bool> {

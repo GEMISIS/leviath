@@ -288,7 +288,7 @@ type FinalOutputQuery = (
     Entity,
     &'static RunSpecC,
     &'static StageCursor,
-    &'static AgentState,
+    &'static mut AgentState,
     &'static mut ContextWindow,
     Option<&'static OutputReentries>,
     Option<&'static StageOutcome>,
@@ -325,7 +325,7 @@ pub(crate) fn require_final_output(
         entity,
         spec,
         cursor,
-        state,
+        mut state,
         mut window,
         reentries,
         outcome,
@@ -389,6 +389,26 @@ pub(crate) fn require_final_output(
             commands
                 .entity(entity)
                 .insert(crate::persistence::FinalOutput(output));
+            continue;
+        }
+        // A media stage that made the wrong type fails here, never nudged: the
+        // nudge would be the next prompt an image or video model is sent, and
+        // it answers with another paid generation of the same type, not a
+        // `submit_output` call.
+        if let Some(family) = super::stage_expected_media(Some(stage))
+            && let Some(why) = crate::output_tool::auto_emit::mismatch(
+                stage.name.as_str(),
+                family,
+                &targets,
+                stage_inf.and_then(|si| si.output.as_ref()),
+                &window,
+            )
+        {
+            tracing::warn!(stage = %stage.name, "{why}");
+            if let Some(flags) = flags.as_mut() {
+                flags.0.output_forced += 1;
+            }
+            super::transition::fail_stage(&mut commands, entity, &mut state, why);
             continue;
         }
         // Its own budget, not the stage's `max_revisits`. Those are different

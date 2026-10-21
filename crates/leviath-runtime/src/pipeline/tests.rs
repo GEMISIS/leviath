@@ -10209,6 +10209,109 @@ fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
     assert!(world.get::<ReadyToInfer>(e).is_none());
 }
 
+/// The live failure: an image stage declared an `image/png` artifact and its
+/// model made a WebP. The stage used to be nudged for `submit_output`, and
+/// that nudge became the image model's next prompt, three more paid edits
+/// before the run gave up. Now the stage fails at once, saying what it made
+/// and what it declared, and the model is not called again.
+/// An image stage that declared an `image/png` artifact, whose model made a
+/// WebP, about to transition; with the run's outcome flags when `flags`.
+fn wrong_type_media_stage(world: &mut World, flags: bool) -> Entity {
+    let mut stage = stage_named("edit", None, false, None);
+    stage.require_output = true;
+    stage
+        .output_routing
+        .insert("image/*".to_string(), tg::region_name("art"));
+    let bp = blueprint(vec![stage]);
+    let mut window = ContextWindow::new(100_000);
+    window.add_region(Region::new("art".to_string(), RegionKind::Pinned, 100_000));
+    window.add_region(Region::new(
+        "conversation".to_string(),
+        RegionKind::Pinned,
+        100_000,
+    ));
+    let reg = leviath_core::mime::MimeRegistry::builtin();
+    let blob = leviath_core::mime::Blob::new(
+        leviath_core::mime::MimeType::parse("image/webp").unwrap(),
+        vec![1, 2, 3, 4],
+    )
+    .named("image-1.webp");
+    let part = leviath_core::mime::Part::stored(blob.describe(&reg)).named("image-1.webp");
+    let content = leviath_core::region::EntryContent::from_parts(vec![part]);
+    let tokens = content.tokens(None);
+    window
+        .add_content_entry(
+            leviath_core::ContextCause::ProducedPart,
+            "art",
+            leviath_core::EntryKind::Text,
+            content,
+            tokens,
+        )
+        .unwrap();
+    let mut stage_inf = si("edit");
+    stage_inf.output = Some(leviath_core::output::OutputSpec {
+        artifacts: vec![leviath_core::output::ArtifactSpec {
+            name: "picture".to_string(),
+            mime_type: "image/png".to_string(),
+            required: true,
+            description: None,
+        }],
+        ..Default::default()
+    });
+    let mut entity = world.spawn((
+        spec_of(bp),
+        StageCursor { index: 0 },
+        agent_state(),
+        window,
+        stage_inf,
+        ResolveTransition,
+    ));
+    if flags {
+        entity.insert(crate::persistence::RunOutcomeFlags::default());
+    }
+    entity.id()
+}
+
+#[test]
+fn a_media_stage_that_made_the_wrong_type_fails_rather_than_being_nudged() {
+    let mut world = World::new();
+    let e = wrong_type_media_stage(&mut world, true);
+    let unflagged = wrong_type_media_stage(&mut world, false);
+
+    run_require_final_output(&mut world);
+
+    assert!(matches!(
+        world.get::<StageOutcome>(unflagged),
+        Some(StageOutcome::Errored(_))
+    ));
+    assert!(world.get::<ReadyToInfer>(e).is_none(), "not asked again");
+    assert!(world.get::<OutputReentries>(e).is_none());
+    assert!(world.get::<crate::persistence::FinalOutput>(e).is_none());
+    let Some(StageOutcome::Errored(why)) = world.get::<StageOutcome>(e) else {
+        panic!("the stage fails");
+    };
+    assert!(why.contains("image/webp (image-1.webp)"), "{why}");
+    assert!(why.contains("'picture' as image/png"), "{why}");
+    let AgentStatus::Error { message } = &world.get::<AgentState>(e).unwrap().status else {
+        panic!("the status carries the reason");
+    };
+    assert_eq!(message, why);
+    assert_eq!(
+        world
+            .get::<crate::persistence::RunOutcomeFlags>(e)
+            .unwrap()
+            .0
+            .output_forced,
+        1
+    );
+    let window = world.get::<ContextWindow>(e).unwrap();
+    let conversation = window.get_region("conversation").unwrap();
+    assert!(
+        conversation.content.is_empty(),
+        "no submit_output nudge is written for the image model to read"
+    );
+}
+
 #[test]
 fn transition_visit_exhausted_edge_is_a_dead_end_error() {
     let bp = blueprint(vec![

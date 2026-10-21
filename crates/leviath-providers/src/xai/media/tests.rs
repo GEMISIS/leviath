@@ -88,7 +88,7 @@ async fn a_video_is_submitted_polled_downloaded_and_priced_by_the_second() {
             "grok-imagine-video",
             "a cat surfing",
             vec![part("image/png", "start.png")],
-            serde_json::json!({ "duration": 8, "resolution": "720p" }),
+            serde_json::json!({ "duration": "8s", "resolution": "720p" }),
         ),
         &billing(PriceUnit::VideoSecond, 0.05),
         FAST,
@@ -99,8 +99,27 @@ async fn a_video_is_submitted_polled_downloaded_and_priced_by_the_second() {
     assert_eq!(response.parts[0].name.as_deref(), Some("video.mp4"));
     assert!((response.tokens_used.reported_cost_usd.unwrap() - 0.4).abs() < 1e-9);
     let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
-    assert_eq!(body["duration"], 8);
+    assert_eq!(body["duration"], 8, "\"8s\" is eight seconds");
     assert_eq!(body["resolution"], "720p");
+    let refused = run(
+        &endpoint("http://127.0.0.1:9"),
+        "xai",
+        Kind::Video,
+        &request(
+            "grok-imagine-video",
+            "a cat surfing",
+            vec![],
+            serde_json::json!({ "duration": "a while" }),
+        ),
+        &billing(PriceUnit::VideoSecond, 0.05),
+        FAST,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused.to_string().contains("`duration` must be"),
+        "{refused}"
+    );
     assert!(
         body["image"]["url"]
             .as_str()
