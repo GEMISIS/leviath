@@ -31,6 +31,7 @@ pub use policy::{
     McpServerTemplate, McpTransport, MimeRowDef, MimeRows, Needs, NudgeDef, OnRoutingError,
     OnUnmatched, OutputDef, RegionMappingDef, RepetitionDef, ResolvedNudge, RoutingDef,
     SafeCommandsDef, SandboxDef, ScriptPermission, ScriptPermissionsDef, TokenRule, ToolRescan,
+    ValidatorToolDef,
 };
 pub use region::{
     ALWAYS_VISIBLE_REGIONS, Budget, Eviction, RegionDef, RegionKind, RegionLayoutDef,

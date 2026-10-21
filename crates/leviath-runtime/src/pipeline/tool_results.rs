@@ -836,6 +836,8 @@ pub(crate) fn collect_tools(
         ),
         Without<AwaitingTools>,
     >,
+    // A validator tool's calls ride the lane too, for the same reason.
+    validating: Query<&super::validator_tool::PendingValidation, Without<AwaitingTools>>,
     sink: Option<Res<crate::host::WorldEventSink>>,
     mime: crate::blob_store::MimeParams,
     mut commands: Commands,
@@ -852,6 +854,18 @@ pub(crate) fn collect_tools(
                 pending,
                 &outcome.results,
                 &mut window,
+                &mut commands,
+            );
+            continue;
+        }
+        // Nor is a validator's: its answers are verdicts on a batch that is
+        // still to be applied, not results for the model to read.
+        if let Ok(pending) = validating.get(outcome.entity) {
+            crate::tick_scope::enter(outcome.entity);
+            super::validator_tool::apply_validation(
+                outcome.entity,
+                pending,
+                &outcome.results,
                 &mut commands,
             );
             continue;

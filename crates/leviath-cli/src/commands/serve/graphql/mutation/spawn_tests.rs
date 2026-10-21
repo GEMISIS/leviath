@@ -12,7 +12,7 @@ use super::super::Mutation;
 use super::super::spawn_request::{
     AttachmentContentWrite, CallbackWrite, CodeRefWrite, DeliveryWrite, GraphDocument,
     InputEntryWrite, InputValueWrite, LaunchWrite, OutputArtifactWrite, OutputShapeWrite,
-    SpawnAttachmentWrite, SpawnRunRequest, SpawnSourceWrite, UnattendedWrite,
+    SpawnAttachmentWrite, SpawnRunRequest, SpawnSourceWrite, UnattendedWrite, ValidatorToolWrite,
 };
 use super::SpawnIssueCode;
 use crate::commands::serve::graphql::filter::testkit::round_trip;
@@ -145,6 +145,10 @@ async fn a_spawn_carries_every_field_it_was_given() {
                 output.on_validator_error,
                 Some(leviath_core::output::OnValidatorError::Accept)
             );
+            let checker = output.validator_tool.as_ref().expect("a validator tool");
+            assert_eq!(checker.tool.as_str(), "pw__check_panel");
+            assert_eq!(checker.content_arg, "submission");
+            assert_eq!(checker.args.value(), &serde_json::json!({ "strict": true }));
             assert_eq!(request.launch.unattended, Unattended::All);
             assert_eq!(request.launch.max_depth, Some(2));
             assert_eq!(request.launch.allow.len(), 1);
@@ -205,6 +209,11 @@ async fn a_spawn_carries_every_field_it_was_given() {
                     "schema": { "type": "object" },
                     "validator": { "inline": "true" },
                     "onValidatorError": "ACCEPT",
+                    "validatorTool": {
+                        "tool": "pw__check_panel",
+                        "contentArg": "submission",
+                        "args": { "strict": true },
+                    },
                     "overwriteArtifacts": true,
                     "artifacts": [{ "name": "out", "mimeType": "text/plain" }],
                 },
@@ -265,6 +274,11 @@ async fn a_raw_graph_is_sent_whole_and_a_run_not_yet_written_is_null() {
                 output.on_validator_error,
                 Some(leviath_core::output::OnValidatorError::Reject)
             );
+            // A validator tool named alone takes the answer as `content`,
+            // with nothing beside it.
+            let checker = output.validator_tool.as_ref().expect("a validator tool");
+            assert_eq!(checker.content_arg, "content");
+            assert_eq!(checker.args.value(), &serde_json::json!({}));
             ControlResponse::Spawned {
                 run_id: "raw-1".to_string(),
                 warnings: Default::default(),
@@ -280,6 +294,7 @@ async fn a_raw_graph_is_sent_whole_and_a_run_not_yet_written_is_null() {
                 "output": {
                     "validator": { "file": "check.rhai" },
                     "onValidatorError": "REJECT",
+                    "validatorTool": { "tool": "check_panel" },
                 },
             } }),
         )
@@ -479,6 +494,7 @@ async fn this_servers_refusals_are_issues_beside_the_daemons() {
             "workdir": outside.path().to_string_lossy(),
             "launch": { "unattended": { "all": true } },
             "delivery": { "callback": { "url": "http://127.0.0.1/hook" } },
+            "output": { "validatorTool": { "tool": "not a tool" } },
         } }),
     )
     .await;
@@ -494,6 +510,7 @@ async fn this_servers_refusals_are_issues_beside_the_daemons() {
         "workdir",
         "launch.unattended",
         "delivery.callback.url",
+        "output.validator_tool.tool",
         "inputs.task",
     ] {
         assert!(paths.contains(&path), "{path} missing: {answer}");
@@ -873,6 +890,11 @@ fn every_spawn_write_shape_round_trips() {
         required: true,
         description: Some("d".to_string()),
     });
+    round_trip(&ValidatorToolWrite {
+        tool: "check".to_string(),
+        content_arg: Some("panel".to_string()),
+        args: Some(Json(serde_json::json!({ "strict": true }))),
+    });
     round_trip(&OutputShapeWrite {
         format: Some("json".to_string()),
         instructions: Some("i".to_string()),
@@ -880,6 +902,11 @@ fn every_spawn_write_shape_round_trips() {
         schema: Some(Json(serde_json::json!({}))),
         validator: Some(CodeRefWrite::Inline("true".to_string())),
         on_validator_error: Some(ValidatorErrorPolicy::Reject),
+        validator_tool: Some(ValidatorToolWrite {
+            tool: "check".to_string(),
+            content_arg: Some("submission".to_string()),
+            args: Some(Json(serde_json::json!({ "strict": true }))),
+        }),
         overwrite_artifacts: Some(false),
         artifacts: Some(Vec::new()),
     });

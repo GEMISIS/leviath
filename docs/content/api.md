@@ -579,7 +579,7 @@ from a healthy one without parsing its logs. Counters like `modified_file_count`
 beside `searches_empty`, and `gates_forced` say whether the run actually did anything, and
 `empty_output` sums up the verdict. `flags.broken_scripts` names each Rhai script the run needed
 but could not use, such as an [output validator](/docs/rhai-validators#when-the-validator-itself-fails)
-that threw. It is the same list `lev ps` renders as `(broken script)`, and the key is omitted
+that threw, and each validator tool that could not answer. It is the same list `lev ps` renders as `(broken script)`, and the key is omitted
 while the list is empty. The flags are part of the run's record, so they come back wherever a run
 object does.
 
@@ -2660,7 +2660,7 @@ curl -X POST http://localhost:3000/api/runs \
 Then read it back from `GET /api/runs/{id}/result`, where `final_output` carries the answer, its
 format label, and the stage that produced it. Add `schema` beside `format` when you want the answer
 validated against a JSON Schema. A format that differs from the blueprint's retires any Rhai
-validator and JSON schema the blueprint declared. `lev run` names each retired check when it starts
+validator, validator tool and JSON schema the blueprint declared. `lev run` names each retired check when it starts
 the run; the REST answer carries only the run id. [Final outputs](/docs/outputs) covers the whole
 cascade.
 

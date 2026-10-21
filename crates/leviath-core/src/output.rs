@@ -37,12 +37,13 @@ use serde::{Deserialize, Serialize};
 /// file and say where it is.
 pub const MAX_FINAL_OUTPUT_BYTES: usize = 256 * 1024;
 
-/// What happens to a submission when its Rhai validator cannot run: the script
+/// What happens to a submission when its validator cannot run: the Rhai script
 /// threw, exhausted its operation budget, or returned something that is neither
-/// `()` nor a string.
+/// `()` nor a string; or the validator tool failed, timed out, was refused, or
+/// answered something that is not a verdict.
 ///
 /// Distinct from the validator *rejecting* the answer, which always refuses the
-/// submission back to the model. This knob is only about the script itself
+/// submission back to the model. This knob is only about the check itself
 /// failing.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
@@ -115,12 +116,22 @@ pub struct OutputSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validator: Option<String>,
 
-    /// What to do when the validator itself cannot run. `None` means the
-    /// default, [`OnValidatorError::Reject`]. Travels with the validator: a
-    /// caller who retires the validator by overriding the format retires this
-    /// setting along with it.
+    /// What to do when the validator or the validator tool cannot run. `None`
+    /// means the default, [`OnValidatorError::Reject`]. Travels with the
+    /// validators: a caller who retires them by overriding the format retires
+    /// this setting along with them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_validator_error: Option<OnValidatorError>,
+
+    /// A tool the run can already call, called with the submission before it
+    /// is recorded: for an answer only something outside the Rhai sandbox can
+    /// judge, a file the workspace holds, say. It answers `{"ok": true}` or
+    /// `{"ok": false, "reason": "..."}`. Runs after the format, schema and
+    /// Rhai checks and before the artifacts, and a tool that cannot answer
+    /// follows [`on_validator_error`](Self::on_validator_error). Retired with
+    /// the validator when a caller overrides the format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validator_tool: Option<ValidatorTool>,
 
     /// Whether an artifact named after a part the run produced may replace a
     /// different file already at that path in the working directory. `None`
@@ -147,8 +158,45 @@ impl OutputSpec {
             && self.schema.is_none()
             && self.validator.is_none()
             && self.on_validator_error.is_none()
+            && self.validator_tool.is_none()
             && self.overwrite_artifacts.is_none()
             && self.artifacts.is_empty()
+    }
+}
+
+/// The argument a [`ValidatorTool`] is handed the submission under when the
+/// blueprint names none: the one `submit_output` takes it under.
+pub const DEFAULT_CONTENT_ARG: &str = "content";
+
+fn default_content_arg() -> String {
+    DEFAULT_CONTENT_ARG.to_string()
+}
+
+/// A tool that judges a submission: which one, the argument the submission
+/// goes in, and any fixed arguments beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidatorTool {
+    /// The tool, spelled as the agent would call it: a built-in, an MCP
+    /// server's `<server>__<tool>`, or a Rhai script tool.
+    pub tool: String,
+    /// The argument the submission's content is passed as.
+    #[serde(default = "default_content_arg")]
+    pub content_arg: String,
+    /// Fixed arguments passed beside the content.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub args: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ValidatorTool {
+    /// The arguments one call is made with: the fixed ones, and `content`
+    /// under [`content_arg`](Self::content_arg).
+    pub fn arguments(&self, content: &str) -> serde_json::Value {
+        let mut args = self.args.clone();
+        args.insert(
+            self.content_arg.clone(),
+            serde_json::Value::String(content.to_string()),
+        );
+        serde_json::Value::Object(args)
     }
 }
 
@@ -443,6 +491,11 @@ pub fn resolve_output_spec(
         true => request.and_then(|r| r.on_validator_error),
         false => field(agent, stage, request, |s| s.on_validator_error),
     };
+    // A validator tool judges the declared shape too, so it goes the same way.
+    let validator_tool = match reshaped {
+        true => request.and_then(|r| r.validator_tool.clone()),
+        false => field(agent, stage, request, |s| s.validator_tool.clone()),
+    };
 
     // Declared artifacts describe the declared shape, so they go with the
     // schema and the validator when a caller reshapes. Otherwise the nearest
@@ -463,6 +516,7 @@ pub fn resolve_output_spec(
         schema: shape_field(|s| s.schema.clone()),
         validator,
         on_validator_error,
+        validator_tool,
         overwrite_artifacts: field(agent, stage, request, |s| s.overwrite_artifacts),
         artifacts,
     })
@@ -681,6 +735,55 @@ mod tests {
         );
     }
 
+    fn panel_check() -> ValidatorTool {
+        ValidatorTool {
+            tool: "polywright__validate_panel".to_string(),
+            content_arg: "submission".to_string(),
+            args: serde_json::Map::from_iter([("strict".to_string(), json!(true))]),
+        }
+    }
+
+    /// A validator tool cascades like the Rhai validator: inherited field by
+    /// field, and retired with it when a caller asks for another format.
+    #[test]
+    fn a_validator_tool_cascades_and_retires_on_a_reshape() {
+        let agent = OutputSpec {
+            format: Some("json".to_string()),
+            validator_tool: Some(panel_check()),
+            ..OutputSpec::default()
+        };
+        assert!(!agent.is_empty());
+        let resolved = resolve_output_spec(Some(&agent), None, None).unwrap();
+        assert_eq!(resolved.validator_tool, Some(panel_check()));
+        let same = OutputSpec {
+            format: Some("json".to_string()),
+            ..OutputSpec::default()
+        };
+        let resolved = resolve_output_spec(Some(&agent), None, Some(&same)).unwrap();
+        assert_eq!(resolved.validator_tool, Some(panel_check()));
+        let reshaped = OutputSpec {
+            format: Some("xml".to_string()),
+            ..OutputSpec::default()
+        };
+        let resolved = resolve_output_spec(Some(&agent), None, Some(&reshaped)).unwrap();
+        assert_eq!(resolved.validator_tool, None);
+    }
+
+    /// The submission goes under the named argument, beside the fixed ones,
+    /// and an unnamed argument is `content`, as `submit_output` takes it.
+    #[test]
+    fn a_validator_tool_is_called_with_the_content_beside_its_arguments() {
+        assert_eq!(
+            panel_check().arguments("{}"),
+            json!({"strict": true, "submission": "{}"})
+        );
+        let bare: ValidatorTool = serde_json::from_value(json!({"tool": "check"})).expect("reads");
+        assert_eq!(bare.content_arg, DEFAULT_CONTENT_ARG);
+        assert_eq!(bare.arguments("x"), json!({"content": "x"}));
+        let text = serde_json::to_value(&bare).unwrap();
+        assert!(text.get("args").is_none(), "{text}");
+    }
+
     #[test]
     fn no_level_asking_for_output_resolves_to_none() {
         assert_eq!(resolve_output_spec(None, None, None), None);
@@ -695,6 +798,7 @@ mod tests {
             schema: None,
             validator: None,
             on_validator_error: None,
+            validator_tool: None,
             overwrite_artifacts: None,
             artifacts: Vec::new(),
         };
@@ -951,6 +1055,7 @@ mod tests {
             schema: Some(json!({"type": "object"})),
             validator: None,
             on_validator_error: None,
+            validator_tool: None,
             overwrite_artifacts: None,
             artifacts: Vec::new(),
         });

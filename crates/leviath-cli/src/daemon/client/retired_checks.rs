@@ -3,7 +3,7 @@
 //!
 //! [`resolve_output_spec`](leviath_core::output::resolve_output_spec) lets a
 //! caller's format replace a graph's declared one, and with it the declared
-//! validator and schema. This walks a graph's stages ahead of time so the
+//! validator, validator tool and schema. This walks a graph's stages ahead of time so the
 //! caller hears about it before the run starts.
 
 use leviath_core::output::OutputSpec;
@@ -13,7 +13,8 @@ use leviath_runtime::spec::graph::{CodeRef, OutputDef, RunGraph};
 /// [`resolve_output_spec`](leviath_core::output::resolve_output_spec) will
 /// retire, said out loud before it happens.
 ///
-/// Retiring the declared Rhai validator and JSON schema when the request names
+/// Retiring the declared Rhai validator, validator tool and JSON schema when
+/// the request names
 /// a different format is deliberate and stays: a check written for one shape
 /// cannot judge another. These warnings say so out loud, so a caller who types
 /// `--output-format json` over a blueprint with a validator does not go on
@@ -65,6 +66,8 @@ struct RetiredChecks {
     /// The retired Rhai validator, as the warning names it, when one was
     /// declared.
     validator: Option<String>,
+    /// The retired validator tool, by name, when one was declared.
+    validator_tool: Option<String>,
     /// Whether a declared JSON schema is retired with nothing in its place.
     schema: bool,
 }
@@ -98,17 +101,22 @@ fn retired_checks_for_stage(
     let validator = stage
         .and_then(|s| s.validator.as_ref())
         .or_else(|| graph.and_then(|g| g.validator.as_ref()));
+    let validator_tool = stage
+        .and_then(|s| s.validator_tool.as_ref())
+        .or_else(|| graph.and_then(|g| g.validator_tool.as_ref()))
+        .map(|t| t.tool.to_string());
     let schema = !request_has_schema
         && stage
             .and_then(|s| s.schema.as_ref())
             .or_else(|| graph.and_then(|g| g.schema.as_ref()))
             .is_some();
-    if validator.is_none() && !schema {
+    if validator.is_none() && validator_tool.is_none() && !schema {
         return None;
     }
     Some(RetiredChecks {
         declared_format: declared_format.map(str::to_string),
         validator: validator.map(validator_label),
+        validator_tool,
         schema,
     })
 }
@@ -128,10 +136,22 @@ impl RetiredChecks {
                  format"
             ),
         };
-        let what = match (&self.validator, self.schema) {
-            (Some(v), true) => format!("the Rhai validator '{v}' and the JSON schema"),
-            (Some(v), false) => format!("the Rhai validator '{v}'"),
-            (None, _) => "the JSON schema".to_string(),
+        let lost: Vec<String> = [
+            self.validator
+                .as_ref()
+                .map(|v| format!("the Rhai validator '{v}'")),
+            self.validator_tool
+                .as_ref()
+                .map(|t| format!("the validator tool '{t}'")),
+            self.schema.then(|| "the JSON schema".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let what = match lost.split_last() {
+            Some((last, [])) => last.clone(),
+            Some((last, head)) => format!("{} and {last}", head.join(", ")),
+            None => "its checks".to_string(),
         };
         let tail = match request_has_schema {
             true => "the schema supplied with the request is what checks the answer now",
@@ -319,6 +339,47 @@ mod tests {
             &[("plan", None)],
         );
         assert!(retired_check_warnings(&schema_only, Some(&request)).is_empty());
+    }
+
+    /// A validator tool is retired with the rest and named, alone or beside
+    /// the other checks.
+    #[test]
+    fn a_retired_validator_tool_is_named() {
+        let request = spec(Some("json"), None);
+        let alone = graph_with(
+            Some("format = \"markdown\", validator_tool = { tool = \"pw__check\" }"),
+            &[("plan", None)],
+        );
+        let warnings = retired_check_warnings(&alone, Some(&request));
+        assert!(
+            warnings[0].contains("the validator tool 'pw__check' declared"),
+            "{warnings:?}"
+        );
+        let all = graph_with(
+            Some(
+                "format = \"markdown\", validator = { file = \"v.rhai\" }, \
+                 validator_tool = { tool = \"pw__check\" }, schema = { type = \"object\" }",
+            ),
+            &[("plan", None)],
+        );
+        let warnings = retired_check_warnings(&all, Some(&request));
+        assert!(
+            warnings[0].contains(
+                "the Rhai validator 'v.rhai', the validator tool 'pw__check' and the JSON schema"
+            ),
+            "{warnings:?}"
+        );
+        let nothing = RetiredChecks {
+            declared_format: None,
+            validator: None,
+            validator_tool: None,
+            schema: false,
+        };
+        assert!(
+            nothing
+                .warning_line("json", &["plan".to_string()], false)
+                .contains("its checks")
+        );
     }
 
     /// A graph-level validator shared by several stages is one line naming

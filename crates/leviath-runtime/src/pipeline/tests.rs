@@ -17711,6 +17711,7 @@ fn stage_setup_from_folds_a_required_output_into_the_system_prompt() {
         schema: None,
         validator: None,
         on_validator_error: None,
+        validator_tool: None,
         overwrite_artifacts: None,
         artifacts: Vec::new(),
     };
@@ -23494,3 +23495,6 @@ async fn each_settled_interaction_is_announced_once() {
         ]
     );
 }
+
+#[path = "validator_tool_flow_tests.rs"]
+mod validator_tool_flow;

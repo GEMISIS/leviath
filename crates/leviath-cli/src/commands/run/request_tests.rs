@@ -391,6 +391,7 @@ fn launch_flags_that_do_not_read_are_refused_together() {
             schema: None,
             validator: None,
             on_validator_error: None,
+            validator_tool: None,
             overwrite_artifacts: None,
             artifacts: vec![leviath_core::output::ArtifactSpec {
                 name: "final".to_string(),

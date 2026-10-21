@@ -86,7 +86,14 @@ pub fn compile(spec: &RunSpec, code: &CodeFiles) -> Result<Bindings, SpawnIssues
     if !hooks.is_empty() {
         bindings = bindings.with(StageHookScripts(hooks));
     }
-    if !validators.is_empty() {
+    // A validator tool that could not run is flagged on the same component
+    // as a broken script, so a run with one carries it, scripts or not.
+    let tools = spec.stages.iter().any(|p| {
+        p.output
+            .as_ref()
+            .is_some_and(|o| o.validator_tool.is_some())
+    });
+    if !validators.is_empty() || tools {
         bindings = bindings.with(OutputValidators::new(validators));
     }
     if !regions.is_empty() {

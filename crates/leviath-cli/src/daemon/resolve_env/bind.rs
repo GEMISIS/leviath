@@ -148,6 +148,83 @@ pub(super) fn agent_name(spec: &RunSpec) -> Option<&str> {
     spec.origin.blueprint_name()
 }
 
+/// Every stage whose answers a validator tool judges, where the tool would
+/// not simply run: denied, set to `ask`, or a question for a person. The call
+/// is decided as a mid-run call from that stage would be, by its
+/// `tool_permissions`, the launch's `allow` and the yolo profile, and only a
+/// call that runs passes. Nobody is there to ask mid-submission, so `ask` is
+/// refused here, where it can be fixed, rather than at the end of a long run.
+fn validator_tool_refusals(spec: &RunSpec, tools: &AgentToolState) -> SpawnIssues {
+    let mut issues = SpawnIssues::new();
+    for plan in &spec.stages {
+        let Some(validator) = plan.output.as_ref().and_then(|o| o.validator_tool.as_ref()) else {
+            continue;
+        };
+        let submits = plan
+            .tools
+            .iter()
+            .any(|t| t.name.as_str() == leviath_tools::SUBMIT_OUTPUT_TOOL);
+        let Some(stage_index) = spec
+            .graph
+            .stages
+            .iter()
+            .position(|s| s.name == plan.stage)
+            .filter(|_| submits)
+        else {
+            continue;
+        };
+        let call = leviath_providers::ToolCall {
+            id: "validator".to_string(),
+            name: validator.tool.to_string(),
+            arguments: validator.spec().arguments(""),
+            thought_signature: None,
+        };
+        let grants = leviath_runtime::pipeline::ToolGrants::default();
+        let ctx = leviath_runtime::pipeline::DecideCtx {
+            grants: &grants,
+            written: 0,
+            stage_index,
+        };
+        let why = match crate::daemon::tool_service::decide_call(tools, &call, &ctx) {
+            leviath_runtime::pipeline::ToolVerdict::Run { .. } => continue,
+            // Its first sentence: the rest is written for a run already
+            // going ("resume this run"), and the hint below says what to do
+            // at spawn.
+            leviath_runtime::pipeline::ToolVerdict::Refuse(text) => text
+                .split_once(". ")
+                .map_or(text.as_str(), |(first, _)| first)
+                .to_string(),
+            leviath_runtime::pipeline::ToolVerdict::Ask { .. } => {
+                "it is set to ask, and nobody is there to approve it mid-submission".to_string()
+            }
+            leviath_runtime::pipeline::ToolVerdict::Interact { .. } => {
+                "it puts a question to a person, which no check can wait on".to_string()
+            }
+        };
+        issues.push(
+            SpawnIssue::new(
+                SpecPath::root()
+                    .field("stages")
+                    .key(plan.stage.as_str())
+                    .field("output")
+                    .field("validator_tool")
+                    .field("tool"),
+                IssueCode::NotAllowed,
+                format!(
+                    "the validator tool \"{}\" would not run: {why}",
+                    validator.tool
+                ),
+            )
+            .hint(format!(
+                "set `{} = \"allow\"` in tool_permissions, or name a tool the stage may call \
+                 unprompted",
+                validator.tool
+            )),
+        );
+    }
+    issues
+}
+
 /// An issue at a top-level field of the spec.
 fn at(field: &str, code: IssueCode, message: impl Into<String>) -> SpawnIssues {
     SpawnIssue::new(SpecPath::root().field(field), code, message).into()
@@ -471,6 +548,10 @@ impl DaemonEnv {
             blueprint_read_paths: &graph.read_paths,
             workdir,
         });
+        let refused = validator_tool_refusals(spec, &tools);
+        if !refused.is_empty() {
+            return Err(refused);
+        }
         Ok(ToolState {
             tools,
             reads_granted,

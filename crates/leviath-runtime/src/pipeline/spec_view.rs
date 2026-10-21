@@ -295,6 +295,10 @@ pub(crate) fn output_spec(def: &OutputDef) -> leviath_core::output::OutputSpec {
         schema: def.schema.as_ref().map(|s| s.value().clone()),
         validator: def.validator.as_ref().map(|c| code_key(c).to_string()),
         on_validator_error: def.on_validator_error,
+        validator_tool: def
+            .validator_tool
+            .as_ref()
+            .map(crate::spec::graph::ValidatorToolDef::spec),
         overwrite_artifacts: def.overwrite_artifacts,
         artifacts: def
             .artifacts

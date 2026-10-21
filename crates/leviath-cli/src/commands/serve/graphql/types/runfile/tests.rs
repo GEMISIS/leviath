@@ -361,6 +361,7 @@ fn output() -> OutputDef {
         schema: Some(JsonDoc::new(serde_json::json!({ "type": "object" }))),
         validator: Some(CoreCodeRef::Inline("true".into())),
         on_validator_error: Some(leviath_core::output::OnValidatorError::Accept),
+        validator_tool: None,
         overwrite_artifacts: Some(true),
         artifacts: vec![ArtifactDef {
             name: "report".into(),

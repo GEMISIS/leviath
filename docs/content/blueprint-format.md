@@ -416,6 +416,10 @@ hooks = { on_stage_enter = { file = "hooks/load_ticket.rhai" } }
 output = { format = "json", validator = { file = "validators/report.rhai" } }
 ```
 
+An output can also be judged by a tool the stage is given, with
+`validator_tool = { tool = "pw__check_report", content_arg = "report" }`. See
+[Rhai output validators](/docs/rhai-validators#when-a-script-cannot-judge-it-a-validator-tool).
+
 ## Routing
 
 When a stage with several normal edges is done, the model is asked which one to take. That short

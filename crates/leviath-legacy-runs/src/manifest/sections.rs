@@ -201,6 +201,8 @@ pub(super) fn parse_output_spec(
             .and_then(|v| serde_json::to_value(v).ok()),
         validator: string_field("validator"),
         on_validator_error,
+        // Old manifests never named a validator tool.
+        validator_tool: None,
         overwrite_artifacts,
     })
 }

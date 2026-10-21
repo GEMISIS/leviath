@@ -6428,7 +6428,7 @@
         ]
       },
       "OnValidatorError": {
-        "description": "What happens to a submission when its Rhai validator cannot run: the script\nthrew, exhausted its operation budget, or returned something that is neither\n`()` nor a string.\n\nDistinct from the validator *rejecting* the answer, which always refuses the\nsubmission back to the model. This knob is only about the script itself\nfailing.",
+        "description": "What happens to a submission when its validator cannot run: the Rhai script\nthrew, exhausted its operation budget, or returned something that is neither\n`()` nor a string; or the validator tool failed, timed out, was refused, or\nanswered something that is not a verdict.\n\nDistinct from the validator *rejecting* the answer, which always refuses the\nsubmission back to the model. This knob is only about the check itself\nfailing.",
         "oneOf": [
           {
             "const": "reject",
@@ -6501,7 +6501,7 @@
               }
             ],
             "default": null,
-            "description": "What happens when that code itself fails."
+            "description": "What happens when that code, or the validator tool, itself fails."
           },
           "overwrite_artifacts": {
             "default": null,
@@ -6526,6 +6526,17 @@
             ],
             "default": null,
             "description": "Code that checks the answer."
+          },
+          "validator_tool": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ValidatorToolDef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A tool the stage can call, called with the answer before it is\nrecorded, which says whether it passes."
           }
         },
         "type": "object"
@@ -8701,6 +8712,31 @@
             "type": "string"
           }
         ]
+      },
+      "ValidatorToolDef": {
+        "additionalProperties": false,
+        "description": "A tool that judges an answer before it is recorded.",
+        "properties": {
+          "args": {
+            "additionalProperties": true,
+            "default": {},
+            "description": "Fixed arguments passed beside the answer: a JSON object.",
+            "type": "object"
+          },
+          "content_arg": {
+            "default": "content",
+            "description": "The argument the answer is passed as.",
+            "type": "string"
+          },
+          "tool": {
+            "description": "The tool, spelled as the agent would call it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool"
+        ],
+        "type": "object"
       },
       "Volatility": {
         "description": "How much a region's contents move between requests.\n\nThis exists because a provider caches by *prefix*: an entry is readable next\ntime only when every byte in front of it is unchanged, so a block that moves\ninvalidates everything behind it however stable that later content is. The\narrangement that pays is stable content first and churn last.\n\nA region's [`RegionKind`] cannot answer this. A pinned region sounds\nimmutable and is written constantly - `context_write` into a findings region\nis an ordinary move, and tool routing sends read results straight into one.\nA compact-history region sounds settled and gains an entry every time\ncompaction fires. Inferring stability from the kind put churn at the front of\nthe prefix and cost a measured 456,860 cache-write tokens against zero\nreads.\n\nSo the blueprint says. The author knows whether a region is set once at spawn\nor written every turn, and nothing else does.",

@@ -267,6 +267,52 @@ pub(super) fn lint_tool_seeds(graph: &RunGraph) -> Vec<LintFinding> {
     ]
 }
 
+/// Note every tool a blueprint's answers are judged by (`validator_tool`). The
+/// engine calls it with each submission, without the model asking and without
+/// a prompt, so somebody about to `lev add` a blueprint should see which.
+///
+/// Like a tool seed, it reaches nothing the stage could not: it must be a tool
+/// the stage is given, and it answers to the same `tool_permissions`. Unlike
+/// one, `deny` and `ask` refuse the spawn, since nobody is there to approve a
+/// call mid-submission.
+pub(super) fn lint_validator_tools(graph: &RunGraph) -> Vec<LintFinding> {
+    let declared: Vec<String> = graph
+        .output
+        .iter()
+        .map(|o| ("the graph", o))
+        .chain(
+            graph
+                .stages
+                .iter()
+                .filter_map(|s| s.output.as_ref().map(|o| (s.name.as_str(), o))),
+        )
+        .filter_map(|(at, o)| {
+            o.validator_tool
+                .as_ref()
+                .map(|t| format!("{at}: {}", t.tool))
+        })
+        .collect();
+    if declared.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        LintFinding::new(
+            LintSeverity::Note,
+            "validator-tool",
+            format!(
+                "{} output(s) are judged by a tool called with every submission, before it \
+                 is recorded and without a prompt: {}",
+                declared.len(),
+                declared.join("; ")
+            ),
+        )
+        .with_fix(
+            "the tool must be one the stage is given and set to `allow`; `deny` or `ask` \
+             refuses the spawn. It should be read-only and idempotent: a restart asks it again",
+        ),
+    ]
+}
+
 /// Whether the *default* safe list covers `command`.
 ///
 /// Reports against the shipped defaults rather than the reader's own config:

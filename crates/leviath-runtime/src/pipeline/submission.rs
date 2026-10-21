@@ -11,6 +11,9 @@
 //!   is not recorded again. The model is told it is in and to reply without a
 //!   tool call, and after [`MAX_REPEATED_SUBMISSIONS`] repeats the stage ends.
 //!
+//! An answer a validator tool judges is accepted only once its verdict is in
+//! (see `validator_tool`), so a stage that ends on it ends after the verdict.
+//!
 //! Ending goes through the stage's ordinary transition, so its gates, its
 //! review and its required regions still have their say: a gate that sends the
 //! stage back gets a stage that can submit again.
@@ -63,6 +66,28 @@ pub(crate) struct HeldSubmission {
     pub answer: Option<FinalOutput>,
     /// Submissions of the same answer since it was recorded.
     pub repeats: u32,
+}
+
+/// Tell subscribers that a run's answer was recorded: a `submit_output` call
+/// accepted, or an output stage's produced parts taken as its answer.
+///
+/// Nothing for a batch that submitted nothing or had its submission refused,
+/// and nothing in a world with no subscribers or no run behind the agent. The
+/// content is cut to [`crate::host::MAX_EVENT_OUTPUT_BYTES`] on the frame.
+pub(crate) fn announce_submission(
+    sink: Option<&crate::host::WorldEventSink>,
+    metadata: Option<&RunMetadata>,
+    agent_id: &str,
+    submitted: Option<FinalOutput>,
+) {
+    if let (Some(sink), Some(md), Some(output)) = (sink, metadata, submitted) {
+        let _ = sink.0.send(crate::host::WorldEvent::OutputSubmitted {
+            run_id: md.run_id.clone(),
+            agent_id: agent_id.to_string(),
+            stage: output.stage.clone(),
+            output: crate::host::capped_output(output),
+        });
+    }
 }
 
 /// Whether a call in `calls` other than a `submit_output` failed without
@@ -170,6 +195,20 @@ impl<'a> BatchSubmissions<'a> {
             answer: self.held.cloned(),
             repeats: self.start_repeats,
         }
+    }
+
+    /// Whether a `submit_output` call with `args` hands back the answer the
+    /// visit held as the batch arrived, which [`apply`](Self::apply) answers
+    /// as a repeat without judging it again.
+    pub(super) fn repeats_held(
+        &self,
+        args: &serde_json::Value,
+        workdir: Option<&std::path::Path>,
+    ) -> bool {
+        self.guarded
+            && self
+                .held
+                .is_some_and(|held| crate::output_tool::repeats(args, held, workdir))
     }
 
     /// Note a call the batch finished before a restart, whose result was

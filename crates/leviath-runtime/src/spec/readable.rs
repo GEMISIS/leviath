@@ -868,6 +868,11 @@ pub(crate) mod choice;
 #[path = "readable_routing.rs"]
 mod routing;
 
+// ── OutputDef ───────────────────────────────────────────────────────────────
+
+#[path = "readable_output.rs"]
+pub(crate) mod output;
+
 #[cfg(test)]
 #[path = "readable_tests.rs"]
 mod tests;

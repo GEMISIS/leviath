@@ -638,3 +638,110 @@ fn a_mistyped_stage_mode_says_what_is_wrong() {
     let modes = &schema["$defs"]["StageMode"]["anyOf"][0]["enum"];
     assert_eq!(modes, &json!(["autonomous", "interactive", "output"]));
 }
+
+/// An output shape's `validator_tool` reads and writes in readable formats,
+/// while the run file keeps the eight fields an output shape always had: a
+/// shape with no tool is the same bytes as before, and one with a tool keeps
+/// it in its schema document and gets both back out.
+#[test]
+fn an_outputs_validator_tool_keeps_the_binary_shape() {
+    use crate::spec::graph::{ArtifactDef, OutputDef, ValidatorToolDef};
+    use leviath_core::JsonDoc;
+    use leviath_core::output::OnValidatorError;
+    use serde_json::json;
+    #[derive(Serialize)]
+    struct Before {
+        format: Option<String>,
+        instructions: Option<String>,
+        example: Option<String>,
+        schema: Option<JsonDoc>,
+        validator: Option<CodeRef>,
+        on_validator_error: Option<OnValidatorError>,
+        overwrite_artifacts: Option<bool>,
+        artifacts: Vec<ArtifactDef>,
+    }
+    let before = |schema: Option<serde_json::Value>| Before {
+        format: Some("json".into()),
+        instructions: None,
+        example: None,
+        schema: schema.map(JsonDoc::new),
+        validator: None,
+        on_validator_error: Some(OnValidatorError::Accept),
+        overwrite_artifacts: None,
+        artifacts: vec![],
+    };
+    let plain = OutputDef {
+        format: Some("json".into()),
+        schema: Some(JsonDoc::new(json!({"type": "object"}))),
+        on_validator_error: Some(OnValidatorError::Accept),
+        ..OutputDef::default()
+    };
+    assert_eq!(
+        postcard::to_stdvec(&plain).unwrap(),
+        postcard::to_stdvec(&before(Some(json!({"type": "object"})))).unwrap()
+    );
+    let tool = ValidatorToolDef {
+        tool: ToolName::new("pw__check_panel").unwrap(),
+        content_arg: "panel".into(),
+        args: JsonDoc::new(json!({"strict": true})),
+    };
+    let checked = OutputDef {
+        validator_tool: Some(tool.clone()),
+        ..plain.clone()
+    };
+    let bin = postcard::to_stdvec(&checked).unwrap();
+    let stored = json!({
+        "leviath.validator_tool": {
+            "tool": "pw__check_panel", "content_arg": "panel", "args": {"strict": true}
+        },
+        "leviath.schema": {"type": "object"},
+    });
+    assert_eq!(bin, postcard::to_stdvec(&before(Some(stored))).unwrap());
+    assert_eq!(postcard::from_bytes::<OutputDef>(&bin).unwrap(), checked);
+
+    // A tool with no schema beside it, and a schema that happens to use the
+    // key with no tool, both come back as they went in.
+    let bare = OutputDef {
+        validator_tool: Some(tool),
+        ..OutputDef::default()
+    };
+    let odd = OutputDef {
+        schema: Some(JsonDoc::new(json!({"leviath.validator_tool": 1}))),
+        ..OutputDef::default()
+    };
+    for def in [bare, odd] {
+        let bin = postcard::to_stdvec(&def).unwrap();
+        assert_eq!(postcard::from_bytes::<OutputDef>(&bin).unwrap(), def);
+    }
+    // A stored tool that does not read fails the read loudly.
+    let corrupt = before(Some(json!({"leviath.validator_tool": {"tool": 3}})));
+    let err = postcard::from_bytes::<OutputDef>(&postcard::to_stdvec(&corrupt).unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(!err.is_empty());
+
+    same(
+        json!({
+            "format": "json",
+            "instructions": null,
+            "example": null,
+            "schema": {"type": "object"},
+            "validator": null,
+            "on_validator_error": "accept",
+            "validator_tool": {
+                "tool": "pw__check_panel", "content_arg": "panel", "args": {"strict": true}
+            },
+            "overwrite_artifacts": null,
+            "artifacts": [],
+        }),
+        checked,
+    );
+    let toml: OutputDef = toml::from_str("validator_tool = { tool = \"check\" }").unwrap();
+    let read = toml.validator_tool.unwrap();
+    assert_eq!(read.content_arg, "content");
+    assert_eq!(read.args.value(), &json!({}));
+    refused::<OutputDef>(
+        json!({"validator_tool": {"tool": "check", "extra": 1}}),
+        "unknown field",
+    );
+}

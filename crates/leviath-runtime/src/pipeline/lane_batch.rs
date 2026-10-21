@@ -16,9 +16,12 @@
 //! 3. once every call is decided, sends the batch to the lane with what was
 //!    decided for each.
 //!
-//! A stage's seed calls (its refreshing regions) take the same road with
-//! nothing journaled: they are the blueprint's, not a turn of the model's, and
-//! the stage they fill is held by its own marker until they land.
+//! A stage's seed calls (its refreshing regions) and a submission's validator
+//! call take the same road with nothing journaled: they are the blueprint's,
+//! not a turn of the model's, and what they hold (the stage they fill, the
+//! batch they judge) is held by its own marker until they land. Nobody is
+//! asked about a validator call: one that would ask is refused, and the
+//! refusal is its verdict.
 
 use std::collections::HashMap;
 
@@ -45,14 +48,25 @@ pub(crate) struct PendingBatch {
     journal: Option<BatchJournal>,
     /// What has been decided, by call id.
     decided: HashMap<String, Decision>,
-    /// Whether this is a stage's seed calls rather than a turn's batch.
-    seeds: bool,
+    /// Whose calls these are.
+    kind: BatchKind,
     /// Whether the batch was brought back from the run's file, which already
     /// records it as dispatched.
     resumed: bool,
     /// The question each call was put to a person under before a restart,
     /// by call id, asked again under the same id.
     asked: HashMap<String, String>,
+}
+
+/// Whose calls a [`PendingBatch`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchKind {
+    /// A turn of the model's.
+    Turn,
+    /// A stage's refreshing seeds.
+    Seeds,
+    /// A validator tool judging a submission.
+    Validation,
 }
 
 /// A held batch as the run's state records it (see [`PendingBatch::held`]).
@@ -116,7 +130,7 @@ impl PendingBatch {
             produced,
             journal: None,
             decided: HashMap::new(),
-            seeds: false,
+            kind: BatchKind::Turn,
             resumed: false,
             asked: HashMap::new(),
         }
@@ -148,9 +162,9 @@ impl PendingBatch {
     /// The batch as the run's state records it while it is held on a
     /// person, `asking` about one of its calls: the results it already has,
     /// the executions its calls were recorded as, and what it holds. `None`
-    /// for a stage's seed calls, which are no turn's batch.
+    /// for a stage's seed calls and a validator's, which are no turn's batch.
     pub(crate) fn held(&self, asking: Option<&AwaitingApproval>) -> Option<HeldView> {
-        if self.seeds {
+        if self.kind != BatchKind::Turn {
             return None;
         }
         // What a restart carried over stays on the run as its
@@ -183,12 +197,22 @@ impl PendingBatch {
 
     /// A stage's seed calls: decided like any batch, journaled not at all.
     pub(crate) fn seeds(calls: Vec<leviath_providers::ToolCall>) -> Self {
+        Self::unjournaled(calls, BatchKind::Seeds)
+    }
+
+    /// A validator tool's calls: decided like any batch, journaled not at
+    /// all, and never put to a person.
+    pub(crate) fn validation(calls: Vec<leviath_providers::ToolCall>) -> Self {
+        Self::unjournaled(calls, BatchKind::Validation)
+    }
+
+    fn unjournaled(calls: Vec<leviath_providers::ToolCall>, kind: BatchKind) -> Self {
         Self {
             journal: Some(BatchJournal {
                 progress: noop_progress(),
                 ack: None,
             }),
-            seeds: true,
+            kind,
             ..Self::new(calls, Vec::new(), HashMap::new(), Vec::new(), Vec::new())
         }
     }
@@ -361,6 +385,13 @@ fn decide_in_order(
                 ledger.written = ledger.written.saturating_add(charge);
                 Decision::Run
             }
+            // A validator call has nobody to ask, and is no question to put
+            // to anyone: either is a validator that could not run.
+            ToolVerdict::Interact { .. } | ToolVerdict::Ask { .. }
+                if batch.kind == BatchKind::Validation =>
+            {
+                Decision::Refuse(unprompted_validator(&call.name))
+            }
             ToolVerdict::Interact { attended } => Decision::Interact { attended },
             ToolVerdict::Refuse(text) => Decision::Refuse(text),
             ToolVerdict::Ask { keys, charge } => {
@@ -374,6 +405,15 @@ fn decide_in_order(
         batch.decided.insert(call.id, decision);
     }
     None
+}
+
+/// Why a validator call that would ask a person, or would put a question to
+/// one, did not run.
+fn unprompted_validator(tool: &str) -> String {
+    format!(
+        "[denied] '{tool}' would need a person to approve it, and a validator tool runs \
+         mid-submission with nobody to ask. Set it to \"allow\" in tool_permissions."
+    )
 }
 
 /// Journal the batch: its records, its artifacts, and the start of every lane
@@ -530,9 +570,10 @@ fn send(
     });
     let mut agent = commands.entity(entity);
     agent.remove::<PendingBatch>().insert(WritesOut);
-    // Seed calls land on the stage's own hold, which `collect_tools` releases;
-    // a turn's batch waits as `AwaitingTools`, cancellable with the agent.
-    if !batch.seeds {
+    // Seed and validator calls land on their own holds, which `collect_tools`
+    // releases; a turn's batch waits as `AwaitingTools`, cancellable with the
+    // agent.
+    if batch.kind == BatchKind::Turn {
         agent
             .insert(AwaitingTools)
             .insert(landed)
@@ -548,6 +589,7 @@ type LandedWrites = (
     With<WritesOut>,
     Without<AwaitingTools>,
     Without<crate::stage_seeds::PendingStageSeeds>,
+    Without<super::validator_tool::PendingValidation>,
 );
 
 /// Read a landed batch's write total back from the tool service into the
