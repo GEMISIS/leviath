@@ -1,7 +1,11 @@
 //! Meta's media models: Muse Image and Muse Voice Transcribe.
 //!
 //! - `muse-image-1.0`: the shared images routes ([`crate::media::images`]),
-//!   with Meta's `images: [{image_url}]` for an edit.
+//!   with Meta's `images: [{image_url}]` for an edit. The stage's
+//!   `output_format` (`png`, `jpeg` or `webp`, Meta's default),
+//!   `reasoning_strength` (`low` or `high`) and `moderation` are sent as
+//!   written, per Meta's `CreateImageRequest` and `EditImageBodyJsonParam`
+//!   schemas (<https://dev.meta.ai/docs/api-reference/images/schemas>).
 //! - `muse-voice-transcribe-1.0`: `POST /asr/transcribe` as a multipart body
 //!   with two parts, `request` (JSON: `mode`, `model`, `audioEncoding`, and the
 //!   optional `languageBias` and `keywords`) and `audio`. **WAV only**: mono,
@@ -52,7 +56,14 @@ pub(crate) async fn run(
                     provider: super::PROVIDER_NAME,
                     shape: images::EditShape::Meta,
                     default_mime: "image/png",
-                    hints: &["size", "aspect_ratio", "quality"],
+                    hints: &[
+                        "size",
+                        "aspect_ratio",
+                        "quality",
+                        "output_format",
+                        "reasoning_strength",
+                        "moderation",
+                    ],
                     reported_cost: false,
                     unit,
                     tokens: None,
@@ -393,6 +404,30 @@ mod tests {
         .unwrap();
         assert_eq!(response.parts[0].mime_type.as_str(), "image/png");
         assert_eq!(response.tokens_used.reported_cost_usd, Some(0.01));
+    }
+
+    /// Meta names `output_format: "webp"`, its default, on a reply whatever
+    /// the bytes are, and an edit answered a PNG. The part is typed by its
+    /// bytes, and the stage's own `output_format` is sent to Meta.
+    #[tokio::test]
+    async fn an_image_is_typed_by_its_bytes_and_the_stages_format_is_sent() {
+        let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nIHDR");
+        let reply = json!({ "output_format": "webp", "data": [ { "b64_json": png } ] });
+        let (url, bodies) =
+            spawn_mock_sequence(vec![(200, "OK", reply.to_string().into_bytes())]).await;
+        let mut req = request("muse-image-1.0", None);
+        req.extra = json!({
+            "output_format": "png",
+            "reasoning_strength": "low",
+            "moderation": "auto",
+        });
+        let response = run(&endpoint(&url), Kind::Image, &req, None).await.unwrap();
+        assert_eq!(response.parts[0].mime_type.as_str(), "image/png");
+        assert_eq!(response.parts[0].name.as_deref(), Some("image-1.png"));
+        let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
+        assert_eq!(body["output_format"], "png");
+        assert_eq!(body["reasoning_strength"], "low");
+        assert_eq!(body["moderation"], "auto");
     }
 
     #[tokio::test]

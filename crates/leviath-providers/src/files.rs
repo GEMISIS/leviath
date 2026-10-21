@@ -355,6 +355,15 @@ pub fn names_a_missing_file(error: &ProviderError) -> bool {
         && (text.contains("not found") || text.contains("not_found") || text.contains("404"))
 }
 
+/// Whether a failed delete failed because the vendor does not delete files
+/// at all: it answered `501 Not Implemented`. Meta documents
+/// `DELETE /v1/files/{id}` but answers it with 501 (2026-10), so its uploads
+/// stay until the expiry they were uploaded with. Asking again changes
+/// nothing, so a caller says so quietly rather than warning on every file.
+pub fn deletion_unsupported(error: &ProviderError) -> bool {
+    matches!(error, ProviderError::ApiError(message) if message.starts_with("HTTP 501"))
+}
+
 /// Upload to an OpenAI-shaped `POST /files`: a `file` part, a `purpose`, and
 /// `expires_after` from creation. OpenAI, xAI and Meta all take it.
 #[cfg(any(

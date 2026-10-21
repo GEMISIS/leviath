@@ -138,7 +138,9 @@ async fn video(
     let mut body = serde_json::Map::new();
     body.insert("model".into(), json!(request.model));
     body.insert("prompt".into(), json!(media::request_text(request)));
-    if let Some(duration) = media::extra_i64(request, "duration") {
+    // Billed by the second: a length that does not read is refused rather
+    // than left out for xAI to answer at its default.
+    if let Some(duration) = media::extra_seconds(request, &["duration"])? {
         body.insert("duration".into(), json!(duration));
     }
     for key in ["aspect_ratio", "resolution"] {

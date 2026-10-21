@@ -93,12 +93,30 @@ pub(crate) fn is_fan_out_tool(name: &str) -> bool {
 /// shape that does not fit is a real mistake and the model is told so rather
 /// than guessed at. The refusal is an `[error]` tool result, which the model
 /// corrects on its next turn like any other.
+///
+/// The one shape read past the schema is `items` written as a string holding
+/// a JSON array (`"[{\"id\": ...}]"`): some models encode a nested array that
+/// way, and the array inside is exactly what was meant. A string that does not
+/// parse to an array is still refused.
 pub(crate) fn parse_fan_out_call(arguments: &serde_json::Value) -> Result<FanOutRequest, String> {
     let object = arguments
         .as_object()
         .ok_or_else(|| "fan_out arguments must be an object".to_string())?;
+    let decoded;
     let items = match object.get("items") {
         Some(serde_json::Value::Array(items)) => items,
+        Some(serde_json::Value::String(text)) => match serde_json::from_str(text) {
+            Ok(serde_json::Value::Array(items)) => {
+                decoded = items;
+                &decoded
+            }
+            _ => {
+                return Err(
+                    "fan_out `items` must be an array (a string is read only when it holds one)"
+                        .to_string(),
+                );
+            }
+        },
         Some(_) => return Err("fan_out `items` must be an array".to_string()),
         None => return Err("fan_out requires an `items` array".to_string()),
     };

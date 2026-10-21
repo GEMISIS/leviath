@@ -322,10 +322,7 @@ async fn list_with_registry_within(
                     // catalogue row it does not carry is a model it does not
                     // serve, and keeping it would list a model nothing can run.
                     entries.retain(|e| e.provider != provider_name);
-                    entries.extend(live.into_iter().map(|m| {
-                        let mime = provider.mime(&m.id);
-                        m.with_mime(mime)
-                    }));
+                    entries.extend(live.into_iter().map(|m| as_served(provider.as_ref(), m)));
                     live_providers.push(provider_name);
                 }
                 Ok(Err(e)) => {
@@ -687,14 +684,22 @@ async fn merge_script_provider(
         .await
         .map_err(|e| anyhow::anyhow!("provider '{name}' could not list its models: {e}"))?;
     for rm in models {
-        let mime = provider.mime(&rm.id);
-        let rm = rm.with_mime(mime);
+        let rm = as_served(provider.as_ref(), rm);
         match entries.iter_mut().find(|e| e.id == rm.id) {
             Some(existing) => *existing = rm,
             None => entries.push(rm),
         }
     }
     Ok(())
+}
+
+/// A model as a provider's listing describes it, with the types the provider
+/// sends it and takes back. A listing names a model but not its mime, so
+/// [`Provider::mime`](leviath_providers::Provider::mime) is the one answer
+/// for both: `list --produces` and `show` read it here, and agree.
+fn as_served(provider: &dyn leviath_providers::Provider, listed: ModelInfo) -> ModelInfo {
+    let mime = provider.mime(&listed.id);
+    listed.with_mime(mime)
 }
 
 // ─── show ─────────────────────────────────────────────────────────────────────
@@ -764,7 +769,7 @@ async fn show_with_registry_within(
             match tokio::time::timeout(prime_within, provider.list_models()).await {
                 Ok(Ok(models)) => {
                     if let Some(info) = models.into_iter().find(|m| &m.id == model_id) {
-                        found = Some(info);
+                        found = Some(as_served(provider.as_ref(), info));
                         break;
                     }
                 }
@@ -2676,6 +2681,32 @@ mod tests {
             },
         )
         .await;
+    }
+
+    /// `show` printed `muse-image-1.0` as text in, text out, while `list
+    /// --produces image/*` listed it as image to image: the listing names no
+    /// mime, and only `list` asked the provider for it. Both read it from the
+    /// provider now.
+    #[cfg(feature = "meta")]
+    #[test]
+    fn a_listed_model_carries_the_mime_its_provider_sends_it() {
+        let meta = leviath_providers::meta::MetaProvider::new(reqwest::Client::new(), "k".into());
+        let listed = ModelInfo::new(
+            "muse-image-1.0".to_string(),
+            "meta".to_string(),
+            ModelCapabilities::default(),
+        );
+        assert_eq!(listed.mime, leviath_providers::ModelMime::text_only());
+        let served = as_served(&meta, listed);
+        assert!(
+            marks::produces(&served.mime, "image/*"),
+            "{:?}",
+            served.mime
+        );
+        assert_eq!(
+            served.mime,
+            leviath_providers::Provider::mime(&meta, "muse-image-1.0")
+        );
     }
 
     #[tokio::test]

@@ -105,11 +105,48 @@ fn the_first_matching_inline_limit_wins() {
 fn a_part_goes_natively_only_when_the_model_takes_it_and_it_did_not_opt_out() {
     let png = blob("p", "image/png", 3);
     let takes = input(&["image/*"]);
-    assert!(sends_natively(&png, None, &takes));
-    assert!(sends_natively(&png, Some(Delivery::Native), &takes));
-    assert!(!sends_natively(&png, Some(Delivery::Text), &takes));
-    assert!(!sends_natively(&png, Some(Delivery::StandIn), &takes));
-    assert!(!sends_natively(&png, None, &input(&["text/*"])));
+    let reg = MimeRegistry::builtin();
+    assert!(sends_natively(&png, None, &takes, &reg));
+    assert!(sends_natively(&png, Some(Delivery::Native), &takes, &reg));
+    assert!(!sends_natively(&png, Some(Delivery::Text), &takes, &reg));
+    assert!(!sends_natively(&png, Some(Delivery::StandIn), &takes, &reg));
+    assert!(!sends_natively(&png, None, &input(&["text/*"]), &reg));
+}
+
+/// A text file is never sent natively, even to a model whose inputs name
+/// `text/*` and even when it asks to be: Meta answered a `text/markdown`
+/// `input_file` with 400 "Invalid upload request", and no request shape has a
+/// native block for one. Its text is what the model reads.
+#[test]
+fn a_text_type_goes_as_text_to_a_model_that_takes_text() {
+    let reg = MimeRegistry::builtin();
+    let takes = input(&["text/*", "image/*", "application/pdf"]);
+    let brief = blob("brief", "text/markdown", 5);
+    let data = blob("data", "application/json", 2);
+    assert!(!sends_natively(&brief, None, &takes, &reg));
+    assert!(!sends_natively(
+        &brief,
+        Some(Delivery::Native),
+        &takes,
+        &reg
+    ));
+    assert!(!sends_natively(&data, None, &input(&["*/*"]), &reg));
+    let store = HashMap::from([("brief", b"# Hi\n".to_vec()), ("data", b"{}".to_vec())]);
+    let slots = [
+        slot(&brief),
+        MimeSlot {
+            deliver: Some(Delivery::Native),
+            remote: true,
+            ..slot(&data)
+        },
+    ];
+    let (outcomes, report) = run(&slots, &takes, &store, |_| {});
+    assert_eq!(
+        outcomes,
+        [Outcome::Text("# Hi\n".into()), Outcome::Text("{}".into())]
+    );
+    assert_eq!(report.as_text, 2);
+    assert_eq!((report.sent, report.by_file), (0, 0));
 }
 
 #[test]

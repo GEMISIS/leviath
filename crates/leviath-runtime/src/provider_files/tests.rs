@@ -22,6 +22,8 @@ struct Storage {
     /// says nothing.
     silent_uploads: bool,
     refuse_deletes: bool,
+    /// Deletes are answered 501, as Meta answers them.
+    deletes_unsupported: bool,
     no_files: bool,
     names: Mutex<Vec<String>>,
 }
@@ -67,9 +69,12 @@ impl Provider for Storage {
     }
     async fn delete_file(&self, _: &RemoteFile) -> leviath_providers::Result<()> {
         self.deletes.fetch_add(1, Ordering::SeqCst);
-        match self.refuse_deletes {
-            true => Err(ProviderError::ApiError("HTTP 403".into())),
-            false => Ok(()),
+        match (self.refuse_deletes, self.deletes_unsupported) {
+            (true, _) => Err(ProviderError::ApiError("HTTP 403".into())),
+            (_, true) => Err(ProviderError::ApiError(
+                "HTTP 501 Not Implemented: {}".into(),
+            )),
+            _ => Ok(()),
         }
     }
 }
@@ -501,6 +506,24 @@ async fn forgetting_a_run_leaves_what_it_cannot_delete_to_expire() {
     assert_eq!(forget_run(&run.run_dir, &registry).await, 0);
     assert_eq!(refusing.deletes.load(Ordering::SeqCst), 1);
     assert!(!run.run_dir.join(LEDGER_FILE).exists());
+}
+
+/// A vendor that answers a delete with 501 deletes nothing: the file is not
+/// counted as deleted, and it is asked once, not again.
+#[tokio::test]
+async fn a_vendor_that_deletes_no_file_is_asked_once_and_counts_none() {
+    let unsupported = Arc::new(Storage {
+        deletes_unsupported: true,
+        ..Storage::default()
+    });
+    let mut registry = crate::ProviderRegistry::new();
+    registry.register("meta".into(), unsupported.clone());
+    let entries: Vec<Entry> = serde_json::from_value(serde_json::json!([
+        { "provider": "meta", "sha256": "a", "file": { "id": "f1" } }
+    ]))
+    .unwrap();
+    assert_eq!(delete_entries(&entries, &registry).await, 0);
+    assert_eq!(unsupported.deletes.load(Ordering::SeqCst), 1);
 }
 
 #[test]

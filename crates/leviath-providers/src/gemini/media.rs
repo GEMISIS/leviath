@@ -59,6 +59,16 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
     ("lyria-3-clip-preview", "Lyria 3 Clip"),
 ];
 
+/// The resolutions Veo 3.1 makes (<https://ai.google.dev/gemini-api/docs/veo>):
+/// 1080p and 4k only at eight seconds, and Lite makes no 4k, which Google
+/// refuses itself.
+#[cfg(feature = "google")]
+const VEO_RESOLUTIONS: &[&str] = &["720p", "1080p", "4k"];
+
+/// The aspect ratios Veo 3.1 makes.
+#[cfg(feature = "google")]
+const VEO_ASPECT_RATIOS: &[&str] = &["16:9", "9:16"];
+
 /// The media kind `model` is, or `None` for a chat model.
 pub(crate) fn kind(model: &str) -> Option<Kind> {
     let m = model.to_ascii_lowercase();
@@ -202,20 +212,24 @@ impl super::GeminiProvider {
                 }),
             );
         }
-        let seconds = media::extra_i64(request, "duration")
-            .or_else(|| media::extra_i64(request, "duration_seconds"));
+        // Every paid parameter is read strictly: one that does not parse is
+        // refused here, before anything is billed, rather than left out for
+        // Veo to answer at its default (eight seconds, 720p).
+        let seconds = media::extra_seconds(request, &["duration", "duration_seconds"])?;
         let mut parameters = Map::new();
         if let Some(seconds) = seconds {
             parameters.insert("durationSeconds".into(), json!(seconds));
         }
-        for (key, field) in [
-            ("aspect_ratio", "aspectRatio"),
-            ("resolution", "resolution"),
-            ("negative_prompt", "negativePrompt"),
+        for (key, field, allowed) in [
+            ("aspect_ratio", "aspectRatio", VEO_ASPECT_RATIOS),
+            ("resolution", "resolution", VEO_RESOLUTIONS),
         ] {
-            if let Some(value) = media::extra_str(request, key) {
+            if let Some(value) = media::extra_choice(request, key, allowed)? {
                 parameters.insert(field.into(), json!(value));
             }
+        }
+        if let Some(value) = media::extra_str(request, "negative_prompt") {
+            parameters.insert("negativePrompt".into(), json!(value));
         }
         let body = json!({ "instances": [instance], "parameters": parameters });
         let url = format!(

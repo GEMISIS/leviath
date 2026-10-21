@@ -15,6 +15,10 @@ same list.
 
 ### Changed
 
+- **Breaking, library.** `leviath_core::mime::hydrate::sends_natively` and
+  `leviath_providers::mime::sends_natively` take the `MimeRegistry`, and
+  answer `false` for a type it says is text. Pass the registry the request is
+  hydrated with.
 - `lev serve` resolves each `--workdir-root` once, at startup, and refuses
   to start when one is not an existing directory. A root used to be
   resolved again on every request, so a root missing at startup and later
@@ -504,6 +508,43 @@ same list.
   time so a reused pid is never killed. On Windows a shell command's own
   child processes now end with it on a timeout or a cancel too, where only
   `cmd.exe` was stopped before.
+- A text file (`text/markdown`, JSON, an `.obj` mesh) in a stage's context
+  reaches the model as its text, whatever the model's input types name. A
+  model that declares `text/*`, Muse Spark among them, was sent the file
+  natively: its stand-in where the request has no block for it, or an
+  `input_file` that Meta refused with 400 "Invalid upload request". A part
+  that asks for `deliver = "native"` gets its text too, since no request
+  shape has a native block for one.
+- An image from Muse Image, xAI or OpenAI is typed by its bytes, not by the
+  format the reply names. Meta names `output_format: "webp"` on every reply,
+  and an edit that returned a PNG was stored as a WebP, so a stage declaring
+  an `image/png` artifact failed.
+- Muse Image is sent the stage's `output_format` (`png`, `jpeg` or `webp`),
+  `reasoning_strength` and `moderation`. They were never sent, so every image
+  came back in Meta's default WebP.
+- An image, video or audio stage that made the wrong type for its declared
+  artifact now fails at once, naming the type it made and the one it
+  declared. It used to be nudged to call `submit_output`, and the nudge was
+  the next prompt its model was sent: three more paid generations of the same
+  type before the run gave up. To accept any image, declare the artifact as
+  `image/*`.
+- A Veo, Sora or Grok Imagine video length written `"4s"` or `"4"` is four
+  seconds. It was read as unset, and the vendor made its default length,
+  eight seconds on Veo, at twice the cost. A length that is not a whole
+  number of seconds, a Veo `resolution` other than `720p`, `1080p` or `4k`, a
+  Veo `aspect_ratio` other than `16:9` or `9:16`, and a Sora `size` that is
+  not `WIDTHxHEIGHT` now fail the stage before anything is sent, naming the
+  parameter and what it takes, where they used to be dropped or passed on.
+- A `fan_out` call whose `items` is a string holding a JSON array is read as
+  that array. It was refused with "`items` must be an array".
+- `lev models show` reports the input and output types the provider sends a
+  listed model, the same ones `lev models list --accepts` and `--produces`
+  filter on. It printed `text/*` both ways for `muse-image-1.0`, which `list
+  --produces image/*` lists.
+- Deleting a run's uploads at Meta no longer logs a warning per file. Meta
+  answers `DELETE /v1/files/{id}` with 501 Not Implemented, so its uploads
+  stay until the expiry they were uploaded with; the 501 is logged at debug
+  level.
 - The title call no longer fails on an OpenRouter model that always reasons,
   such as `meta/muse-spark-1.3`. It asked every OpenRouter model to turn
   reasoning off, which Muse Spark refuses with a 400 ("Reasoning is

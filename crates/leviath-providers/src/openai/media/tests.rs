@@ -142,6 +142,69 @@ async fn a_video_is_created_polled_downloaded_deleted_and_priced_by_the_second()
     assert_eq!(seen.len(), 5, "created, polled twice, downloaded, deleted");
 }
 
+/// A length written `"4s"` is four seconds; a length or a size that does not
+/// read is refused before anything is sent, never left for Sora's default.
+#[tokio::test]
+async fn a_video_length_reads_with_its_unit_and_one_that_does_not_read_is_refused() {
+    let (url, bodies) = spawn_mock_sequence(vec![
+        (200, "OK", br#"{"id":"video_1","status":"queued"}"#.to_vec()),
+        (
+            200,
+            "OK",
+            br#"{"id":"video_1","status":"completed","seconds":"4"}"#.to_vec(),
+        ),
+        (200, "OK", b"MP4".to_vec()),
+        (200, "OK", br#"{"deleted":true}"#.to_vec()),
+    ])
+    .await;
+    run(
+        &endpoint(&url),
+        Kind::Video,
+        &request(
+            "sora-2",
+            "a paper boat",
+            vec![],
+            serde_json::json!({ "duration": "4s", "size": " 720x1280 " }),
+        ),
+        &unit(0.1, PriceUnit::VideoSecond),
+        FAST,
+    )
+    .await
+    .expect("a video");
+    let created = bodies.lock().unwrap()[0].clone();
+    assert!(
+        created.contains("name=\"seconds\"\r\n\r\n4\r\n"),
+        "{created}"
+    );
+    assert!(
+        created.contains("name=\"size\"\r\n\r\n720x1280\r\n"),
+        "{created}"
+    );
+
+    for (extra, named) in [
+        (serde_json::json!({ "seconds": "4.5" }), "`seconds`"),
+        (serde_json::json!({ "duration": "long" }), "`duration`"),
+        (serde_json::json!({ "size": "720p" }), "`size`"),
+        (serde_json::json!({ "size": "x720" }), "`size`"),
+        (serde_json::json!({ "size": 1280 }), "`size`"),
+    ] {
+        let err = run(
+            &endpoint("http://127.0.0.1:9"),
+            Kind::Video,
+            &request("sora-2", "x", vec![], extra.clone()),
+            &unit(0.1, PriceUnit::VideoSecond),
+            FAST,
+        )
+        .await
+        .unwrap_err();
+        let said = err.to_string();
+        assert!(
+            said.contains(named) && said.contains("must be"),
+            "{extra}: {said}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_failed_video_says_why_and_a_job_with_no_id_is_an_error() {
     let (url, _) = spawn_mock_sequence(vec![

@@ -1668,6 +1668,21 @@ mod tests {
         assert_eq!(request.agent, None);
     }
 
+    /// A model that writes `items` as a string holding the JSON array meant
+    /// the array: the live run's `fan_out` was refused "`items` must be an
+    /// array" for exactly that.
+    #[test]
+    fn parse_fan_out_call_reads_items_written_as_a_json_string() {
+        let request = parse_fan_out_call(&serde_json::json!({
+            "items": r#"[{"id": "a", "inputs": {"topic": "x"}}, {"id": "b"}]"#
+        }))
+        .expect("the array inside the string");
+        let ids: Vec<&str> = request.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
+        let empty = parse_fan_out_call(&serde_json::json!({ "items": " [] " })).unwrap();
+        assert!(empty.items.is_empty());
+    }
+
     /// Every rejection names what was wrong, because the model reads it and
     /// corrects on its next turn.
     #[test]
@@ -1676,6 +1691,15 @@ mod tests {
             (serde_json::json!("nope"), "must be an object"),
             (serde_json::json!({}), "requires an `items` array"),
             (serde_json::json!({"items": "all"}), "must be an array"),
+            (
+                serde_json::json!({"items": "{\"id\": \"a\"}"}),
+                "must be an array",
+            ),
+            (serde_json::json!({"items": 3}), "must be an array"),
+            (
+                serde_json::json!({"items": "[{\"id\": 4}]"}),
+                "not {id, worker, inputs}",
+            ),
             (
                 serde_json::json!({"items": [{"id": 4}]}),
                 "not {id, worker, inputs}",

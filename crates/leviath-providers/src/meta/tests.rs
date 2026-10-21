@@ -1,7 +1,7 @@
 //! The provider over a local mock of Meta's Model API.
 
 use super::*;
-use crate::provider::{Message, MessageContent};
+use crate::provider::{Message, MessageContent, ProviderError};
 use leviath_testkit::{spawn_mock_recorder, spawn_mock_sequence, spawn_mock_server};
 
 fn provider(url: &str) -> MetaProvider {
@@ -256,6 +256,25 @@ async fn muse_spark_takes_media_by_file_and_the_media_models_take_none() {
         })
         .await
         .unwrap();
+    // Meta documents the delete and answers it 501: an error the runtime
+    // knows means "deletes nothing", not a failure worth a warning.
+    let (unimplemented, _) =
+        spawn_mock_recorder(501, "Not Implemented", br#"{"error":"nope"}"#.to_vec()).await;
+    let refused = provider(&unimplemented)
+        .delete_file(&crate::files::RemoteFile {
+            id: "file-m".into(),
+            uri: None,
+            expires_at: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(crate::files::deletion_unsupported(&refused), "{refused:?}");
+    assert!(!crate::files::deletion_unsupported(
+        &ProviderError::ApiError("HTTP 500: boom".into())
+    ));
+    assert!(!crate::files::deletion_unsupported(&ProviderError::Other(
+        "HTTP 501".into()
+    )));
     let raw = seen.lock().unwrap().join("");
     assert!(raw.contains("name=\"purpose\"\r\n\r\nuser_data"), "{raw}");
     let deleted = deleted.lock().unwrap().join("");

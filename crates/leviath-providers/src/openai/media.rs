@@ -144,10 +144,10 @@ async fn video(
 ) -> Result<InferenceResponse> {
     let deadline = media::deadline(request);
     let prompt = media::request_text(request);
-    let seconds = media::extra_i64(request, "seconds")
-        .or_else(|| media::extra_i64(request, "duration"))
-        .map(|s| s.to_string());
-    let size = media::extra_str(request, "size");
+    // Both are billed: a length or a size that does not read is refused
+    // here rather than left out for Sora to answer at its default.
+    let seconds = media::extra_seconds(request, &["seconds", "duration"])?.map(|s| s.to_string());
+    let size = video_size(request)?;
     let reference = media::first_part(request, |m| m.starts_with("image/"));
     let url = endpoint.url("/videos");
     let submit = || async {
@@ -234,6 +234,29 @@ async fn video(
         let cost = billing.unit.map(|u| u.cost(length));
         let summary = crate::jobs::noted(media::summary(&route(request), &parts), [note]);
         media::response(summary, parts, cost)
+    })
+}
+
+/// The stage's `size` for a video, `WIDTHxHEIGHT` (`1280x720`), or the
+/// refusal naming what it takes. Which sizes a model makes is Sora's to say,
+/// and it refuses one it does not make; a value that is not a size at all is
+/// refused here.
+#[cfg(feature = "openai")]
+fn video_size(request: &InferenceRequest) -> Result<Option<String>> {
+    let Some(value) = request.extra.get("size") else {
+        return Ok(None);
+    };
+    let size = value.as_str().map(str::trim).filter(|text| {
+        text.split_once('x').is_some_and(|(w, h)| {
+            [w, h]
+                .iter()
+                .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+    });
+    size.map(|s| Some(s.to_string())).ok_or_else(|| {
+        ProviderError::Other(format!(
+            "`size` must be WIDTHxHEIGHT, such as \"1280x720\", not {value}"
+        ))
     })
 }
 
