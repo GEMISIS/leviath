@@ -2323,7 +2323,7 @@
           "type": "array"
         },
         "total_budget_tokens": {
-          "description": "The token budget the whole layout shares.",
+          "description": "The token budget the whole layout shares when every region has a\nfixed budget. `0` means none: the window is the model's, as it always\nis when any budget is a percentage.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"

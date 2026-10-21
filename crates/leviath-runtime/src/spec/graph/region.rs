@@ -37,7 +37,9 @@ pub const ALWAYS_VISIBLE_REGIONS: [&str; 4] = [
 pub struct RegionLayoutDef {
     /// The regions, in the order the model reads them.
     pub regions: Vec<RegionDef>,
-    /// The token budget the whole layout shares.
+    /// The token budget the whole layout shares when every region has a
+    /// fixed budget. `0` means none: the window is the model's, as it always
+    /// is when any budget is a percentage.
     pub total_budget_tokens: u32,
     /// Which regions give up entries first when the context is full.
     #[serde(default)]
