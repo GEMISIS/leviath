@@ -864,4 +864,53 @@ mod tests {
             "no plan: the default window, as the stage setup sizes it"
         );
     }
+
+    /// A layout of fixed budgets with `total_budget_tokens = 0`, the value the
+    /// docs and the editor write, is sized from the model's window like a
+    /// percentage layout, so the runtime's own regions get room too.
+    ///
+    /// A window of zero tokens gave the stage instructions region a ceiling of
+    /// zero: every stage's prompt was refused, the entry stage's silently and
+    /// the next stage's as a failed transition.
+    #[test]
+    fn fixed_budgets_with_a_zero_total_take_the_model_window() {
+        let graph = crate::test_graph::graph(
+            vec![
+                crate::test_graph::prompted("first"),
+                crate::test_graph::prompted("second"),
+            ],
+            layout(vec![region("task", RegionKind::Pinned, 2_000)], 0),
+        );
+        let infs = [
+            crate::test_graph::plan_inference(0),
+            crate::test_graph::plan_inference(1),
+        ];
+        let mut spec = (*crate::test_graph::spec_with(graph, &infs).0).clone();
+        for plan in &mut spec.stages {
+            plan.model.context_window = 100_000;
+        }
+        let mut window = crate::insert::seeded_window(&spec, &HashMap::new());
+        crate::insert::enter_first_stage(&spec, &mut window)
+            .expect("the entry stage's prompt has a place");
+        let second = crate::pipeline::spec_view::stage_setup(&spec, 1);
+        crate::pipeline::apply_stage_context(&second, &mut window)
+            .expect("so does the next stage's");
+        let instructions = window
+            .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
+            .expect("the runtime made one");
+        assert!(instructions.content.iter().any(|e| e.content.contains('p')));
+        assert_eq!(window.max_tokens, 100_000, "the model's window");
+    }
+
+    /// A layout that declares no regions and no total gets the entry stage's
+    /// window: there is no region whose stages could narrow it.
+    #[test]
+    fn an_empty_layout_with_a_zero_total_takes_the_model_window() {
+        let graph = crate::test_graph::graph(
+            vec![crate::test_graph::stage("main")],
+            layout(Vec::new(), 0),
+        );
+        let window = seed(graph, &[]);
+        assert_eq!(window.max_tokens, 100_000);
+    }
 }

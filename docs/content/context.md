@@ -88,7 +88,8 @@ budget = "15%"
 ```
 
 `total_budget_tokens` is required. It only matters when every budget is a fixed number, so a layout
-written in percentages sets it to `0`.
+written in percentages sets it to `0`. A `0` always means "no total of its own": the run's window is
+the model's.
 
 ## The nine region kinds
 

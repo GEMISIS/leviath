@@ -219,15 +219,20 @@ pub(crate) fn graph_layout(spec: &RunSpec) -> LaidOut {
             .min()
             .unwrap_or(window_of(spec, 0) as usize)
     };
-    let total = match has_percent(&graph.layout) {
-        true => graph
+    // A fixed total only when the layout names one and every budget is a
+    // fixed number. A total of 0 means the layout has none, and the window
+    // is the model's, as with percentages: a window of zero tokens would leave
+    // nothing for what the runtime sizes from it, the stage instructions
+    // region and the room each request leaves for its reply among them.
+    let total = match (has_percent(&graph.layout), graph.layout.total_budget_tokens) {
+        (false, fixed) if fixed > 0 => fixed as usize,
+        _ => graph
             .layout
             .regions
             .iter()
             .map(|r| window_for(r.name.as_str()))
             .max()
-            .unwrap_or(graph.layout.total_budget_tokens as usize),
-        false => graph.layout.total_budget_tokens as usize,
+            .unwrap_or_else(|| window_of(spec, 0) as usize),
     };
     let regions = regions_with(&graph.layout, |r| {
         seeing(r.name.as_str())

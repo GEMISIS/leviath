@@ -245,7 +245,8 @@ a part of the run's memory with its own budget and rules.
 | `eviction_order` | no | Which regions give up entries first when the context is full. |
 
 With any percentage budget, the total is worked out from each stage's model window and
-`total_budget_tokens` is not used. Write `0` there.
+`total_budget_tokens` is not used. Write `0` there. A `0` with fixed budgets means the same: the
+layout has no total of its own, and the run gets the model's whole window.
 
 `eviction_order` lists regions in the order they give way when the whole context is full. Only
 clearable, temporary and unpinned custom regions ever do, and the named ones go before the rest of

@@ -503,6 +503,16 @@ same list.
   `treeStatus` on the same record never answered. Each run is now walked
   once.
 
+- A layout whose budgets are all fixed numbers and whose
+  `total_budget_tokens` is `0` now runs on the model's context window, the
+  way a layout with percentage budgets does and the way `lev test` already
+  did. It ran on a window of zero tokens: every stage after the first failed
+  on entry with `stage system prompt ... does not fit context region
+  'stage_instructions': ... > 0`, the entry stage ran without its
+  instructions, and every request asked the model for a one-token reply.
+  Such a run's oldest entries are now evicted as it nears the model's
+  window, like any other run's. A nonzero `total_budget_tokens` is
+  unchanged.
 - A shell command a run started no longer keeps running after the daemon
   is killed (`kill -9`, a crash). It could go on changing files after the
   run had moved on, and a model that re-ran it got two copies. The command
