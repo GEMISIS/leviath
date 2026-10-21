@@ -341,6 +341,14 @@ pub(super) async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::R
     // single-instance bind is won, over any loser's.
     crate::daemon::setup::write_build_marker_unless_running(&id);
     let listener = bind_control_listener(&id)?;
+    // The bind makes this the only daemon on this home, so every command
+    // record under it was left by one that died mid-command. Those commands
+    // are stopped here, before any run is recovered (a recovered run tells
+    // its model the call was interrupted), and every command this daemon
+    // starts is recorded the same way.
+    if let Some(dir) = leviath_core::paths::running_commands_dir() {
+        leviath_sys::lifetime::take_over(dir);
+    }
     // A fresh token per daemon: whoever cannot read our own directory cannot
     // drive the control channel. This is what authenticates callers on Windows,
     // where there is no kernel peer check to fall back on.

@@ -1052,13 +1052,15 @@ impl ScriptIo for RealScriptIo {
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         handle.block_on(async move {
-            // Spawn inside the timed future so the reaper guard lives exactly as
-            // long as the command: dropping the future drops the guard, which
-            // signals the group. One fallible block also keeps a single error
-            // arm, as `Command::output()` had.
+            // Spawn inside the timed future so the guard lives exactly as long
+            // as the command: dropping the future drops the guard, which
+            // signals the group. The guard also ties the group to the daemon
+            // and records it, so a daemon killed mid-command does not leave it
+            // running. One fallible block also keeps a single error arm, as
+            // `Command::output()` had.
             let run = async {
                 let child = cmd.spawn()?;
-                let _reaper = child.id().map(leviath_tools::ProcessGroupReaper);
+                let _guard = leviath_sys::ChildGuard::adopt(&child);
                 child.wait_with_output().await
             };
             match tokio::time::timeout(timeout, run).await {

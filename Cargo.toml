@@ -258,6 +258,10 @@ temp-env = "0.3"
 keyring-core = "1"
 # The OS credential store itself, behind `leviath-sys`'s `keychain` feature.
 keyring = "4"
+# Windows job objects behind a safe API, so a shell command dies with the
+# daemon (`leviath-sys::lifetime`). Windows-only; the workspace forbids the
+# raw FFI it wraps.
+win32job = "2.0"
 # The charset decoder `reqwest::Response::text` uses, so `leviath-net`'s capped
 # read decodes a body the same way.
 encoding_rs = "0.8"

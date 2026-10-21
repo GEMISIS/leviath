@@ -59,6 +59,13 @@ keyring-core = { workspace = true, optional = true }
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 
+# A kill-on-close job object per shell command (`lifetime`), so the command
+# ends when the daemon does, however it ends. `std` has no job API and this
+# crate forbids `unsafe`, so the calls are delegated to a crate that wraps
+# them safely.
+[target.'cfg(windows)'.dependencies]
+win32job = { workspace = true }
+
 [dev-dependencies]
 # The always-on tracing subscriber, so log-macro bodies run under test.
 # Shared rather than copied: three copies of it had already drifted apart.

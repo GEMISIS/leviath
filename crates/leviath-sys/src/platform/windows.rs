@@ -216,11 +216,18 @@ fn restrict_to_owner(path: &Path) -> io::Result<()> {
 
 /// `icacls.exe` from the system directory, never from `PATH`.
 fn icacls_program() -> PathBuf {
-    // `SystemRoot` is set on every Windows install; the bare name is a fallback
-    // for an environment that has stripped it, not the expected path.
+    system32_program("icacls.exe")
+}
+
+/// A program Windows ships, at `relative` under the system directory, so a
+/// planted copy earlier in `PATH` is never the one run.
+///
+/// `SystemRoot` is set on every Windows install; the bare file name is a
+/// fallback for an environment that has stripped it, not the expected path.
+pub(crate) fn system32_program(relative: &str) -> PathBuf {
     match std::env::var("SystemRoot") {
-        Ok(root) => PathBuf::from(root).join("System32").join("icacls.exe"),
-        Err(_) => PathBuf::from("icacls.exe"),
+        Ok(root) => PathBuf::from(root).join("System32").join(relative),
+        Err(_) => PathBuf::from(relative.rsplit('\\').next().unwrap_or(relative)),
     }
 }
 
@@ -336,6 +343,12 @@ mod tests {
         });
         temp_env::with_var_unset("SystemRoot", || {
             assert_eq!(icacls_program(), PathBuf::from("icacls.exe"));
+            // A program deeper in the system directory falls back to its own
+            // name, not to a relative path that resolves nowhere.
+            assert_eq!(
+                system32_program(r"WindowsPowerShell\v1.0\powershell.exe"),
+                PathBuf::from("powershell.exe")
+            );
         });
     }
 

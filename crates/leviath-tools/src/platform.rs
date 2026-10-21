@@ -22,22 +22,6 @@ pub fn own_process_group(cmd: &mut Command) {
 /// made at construction rather than by a second call the caller can forget.
 pub use leviath_sys::child_command_async as child_command;
 
-/// SIGKILLs a shell's whole process group when dropped.
-///
-/// `kill_on_drop` reaps the shell itself; this reaps what the shell started.
-/// Held for the duration of one shell tool call, so it fires on every exit path -
-/// normal completion (where the group is already gone and the signal is a
-/// harmless no-op), timeout, and the future being dropped because the agent was
-/// cancelled.
-pub struct ProcessGroupReaper(pub u32);
-
-impl Drop for ProcessGroupReaper {
-    fn drop(&mut self) {
-        // The group is usually already gone; failing to signal it is expected.
-        let _ = leviath_sys::kill_process_group(self.0);
-    }
-}
-
 /// A platform feature a built-in tool depends on.
 ///
 /// Each built-in declares the capabilities it requires (see
