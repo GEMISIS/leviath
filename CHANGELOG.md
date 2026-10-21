@@ -497,6 +497,12 @@ same list.
 
 ### Fixed
 
+- `GET /api/runs/{id}/tree-status` no longer crashes `lev serve` on a run
+  record that names its own descendant as its parent. The walk recursed
+  until the stack ran out and aborted the whole server; GraphQL
+  `treeStatus` on the same record never answered. Each run is now walked
+  once.
+
 - A shell command a run started no longer keeps running after the daemon
   is killed (`kill -9`, a crash). It could go on changing files after the
   run had moved on, and a model that re-ran it got two copies. The command
@@ -1046,6 +1052,17 @@ same list.
   retries are not used. The default, `"first_edge"`, is the fallback runs
   already take. Run files keep their layout: a run file already on disk
   reads and resumes as before.
+
+- GraphQL `Run.treeStatus` adds up spend and working time over the whole
+  sub-agent tree, so a client no longer pages every run below a fan-out to
+  total it. `cost` follows the REST tree routes: `costUsd` is null once any
+  run below has an unpriced call, `costPricedUsd` and `unpricedCalls` still
+  add up, and `costIsExact` holds only when every run's figure is exact.
+  `workingSecs` is every run's working time added up, in agent-seconds, and
+  `workingNow` counts the runs whose clock is running, so a live total can
+  tick without asking again. `GET /api/runs/{id}/tree-status` gains
+  `subtree_working_secs` on every node. Both surfaces compute these in one
+  walk, so they cannot disagree.
 
 - **Library.** `leviath-core` gains the provider-neutral half of context
   assembly, so a program that calls a model API itself can lay out its

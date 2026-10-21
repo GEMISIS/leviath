@@ -12676,11 +12676,12 @@ type RunOutput implements Node {
 		after: Cursor
 	): RunConnection!
 	"""
-	How deep and how wide this run's sub-agent tree is, without walking it.
+	How deep and how wide this run's sub-agent tree is, and what it all
+	added up to, without walking it.
 	
-	The roll-up covers the whole subtree, which is the figure a fan-out is
-	judged by: a parent that spent little and whose fifty workers spent a
-	great deal is not a cheap run.
+	The tokens, spend and working time cover the whole subtree, which is
+	the figure a fan-out is judged by: a parent that spent little and whose
+	fifty workers spent a great deal is not a cheap run.
 	"""
 	treeStatus: RunTreeStatusOutput!
 	"""
@@ -13380,6 +13381,22 @@ input RunStatusFilter {
 type RunTreeStatusOutput {
 	"Token roll-up over the whole subtree, this run included."
 	rollup: TokenUsageOutput!
+	"""
+	Spend over the whole subtree, this run included. `costUsd` is null
+	once any run in it has an unpriced call; the rest add up regardless.
+	"""
+	cost: CostBreakdownOutput!
+	"""
+	Every run's `workingSecs` added up, this run included. Agent-seconds:
+	two workers busy side by side for a minute count two minutes.
+	"""
+	workingSecs: BigInt!
+	"""
+	How many runs in the subtree, this one included, have their working
+	clock running. Add this many seconds to `workingSecs` per second to
+	keep a live total without asking again.
+	"""
+	workingNow: Int!
 	"The deepest nesting below this run."
 	depth: Int!
 	"How many runs are below it, at any depth."

@@ -2472,12 +2472,12 @@ mod tests {
         ];
 
         let snapshot = run_index::RunSnapshot::new(runs.into_iter().map(Arc::new).collect());
-        let tree = tree::build_tree_status(&snapshot, None);
-        assert_eq!(tree.len(), 1);
-        assert_eq!(tree[0].run_id, "parent-1");
-        assert_eq!(tree[0].children.len(), 1);
-        assert_eq!(tree[0].subtree_prompt_tokens, 100); // parent (0) + child (100)
-        assert_eq!(tree[0].subtree_completion_tokens, 50);
+        let root = snapshot.get("parent-1").expect("parent in snapshot");
+        let node = tree::build_tree_status(&snapshot, root, 0);
+        assert_eq!(node.run_id, "parent-1");
+        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.subtree_prompt_tokens, 100); // parent (0) + child (100)
+        assert_eq!(node.subtree_completion_tokens, 50);
     }
 
     #[tokio::test]

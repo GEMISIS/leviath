@@ -1471,7 +1471,7 @@
         "tags": [
           "runs"
         ],
-        "summary": "Token roll-ups across this run and its descendants",
+        "summary": "Token, spend and working-time roll-ups across this run and its descendants",
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
@@ -5155,7 +5155,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "Token roll-ups across this run and its descendants",
+        "summary": "Token, spend and working-time roll-ups across this run and its descendants",
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"

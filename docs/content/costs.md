@@ -153,7 +153,7 @@ which is how you find the one stage that spent most of the run.
 > A sub-agent's cost is on the sub-agent's own record. Summing only the top-level run understates
 > a fan-out badly: in the $236 run above, the top-level agent's own record said $15. Read the
 > whole tree with `GET /api/runs/{id}/tree-status`, whose `subtree_cost_usd` adds up every run
-> below this one.
+> below this one, or with GraphQL `treeStatus { cost { costUsd } }`, which adds it up the same way.
 
 ## Where the prices come from
 

@@ -393,7 +393,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/runs/{id}/blobs` · `/blobs/{sha256}` | The stored parts a run holds, and one part's bytes. See [below](#a-runs-parts) |
 | The three byte routes above | Also take a short-lived `?exp=&sig=` link in place of the bearer token, which is what a browser needs for an `<img src>`. Mint one with the [GraphQL API](/docs/graphql) |
 | `GET /api/runs/{id}/artifacts/{name}` | The bytes of one file the run handed back, by the name its answer lists. See [below](#a-runs-parts) |
-| `GET /api/runs/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
+| `GET /api/runs/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + roll-ups of tokens, spend (`subtree_cost_usd`) and working time (`subtree_working_secs`) |
 | `POST /api/runs/{id}/pause` · `/resume` | Pause a run · resume it |
 | `POST /api/runs/{id}/message` | Steer a running run. Takes files too; see [attaching files](#attaching-files) |
 | `POST /api/runs/{id}/end-conversation` | End an interactive stage's conversation so it moves on. See [Statuses](#statuses) |

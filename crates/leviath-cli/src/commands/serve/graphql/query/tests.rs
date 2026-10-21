@@ -1953,6 +1953,182 @@ async fn a_leaf_run_has_a_tree_of_its_own() {
     .await;
 }
 
+/// A decimal the schema sends as a string, read back as a number.
+fn decimal(value: &serde_json::Value) -> f64 {
+    value
+        .as_str()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or_else(|| panic!("not a decimal: {value}"))
+}
+
+/// A run that spent `usd`, every call priced.
+fn priced(id: &str, parent: Option<&str>, usd: f64) -> RunMeta {
+    let mut meta = meta_at(id, 100);
+    meta.parent_run_id = parent.map(str::to_string);
+    meta.cost_usd = Some(usd);
+    meta.cost_priced_usd = usd;
+    meta
+}
+
+/// What a fan-out cost is the root's spend plus every worker's.
+#[tokio::test]
+async fn the_tree_status_adds_up_the_subtree_spend() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-tree-cost", |_d| async move {
+        create_run(&priced("root", None, 0.05)).expect("run written");
+        create_run(&priced("worker-a", Some("root"), 0.10)).expect("run written");
+        let mut estimated = priced("worker-b", Some("root"), 0.20);
+        estimated.cost_is_exact = false;
+        create_run(&estimated).expect("run written");
+
+        let answer = run_query(
+            r#"{ run(id: "root") { treeStatus { cost {
+                   costUsd costPricedUsd costIsExact unpricedCalls } } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let cost = &json["run"]["treeStatus"]["cost"];
+        assert!((decimal(&cost["costUsd"]) - 0.35).abs() < 1e-9, "{cost}");
+        assert!(
+            (decimal(&cost["costPricedUsd"]) - 0.35).abs() < 1e-9,
+            "{cost}"
+        );
+        assert_eq!(
+            cost["costIsExact"], false,
+            "one worker's figure is an estimate"
+        );
+        assert_eq!(cost["unpricedCalls"], 0);
+    })
+    .await;
+}
+
+/// One unpriced call anywhere below makes the subtree's cost unknown, while
+/// the priced part and the count of what is missing still add up.
+#[tokio::test]
+async fn one_unpriced_call_below_makes_the_subtree_cost_unknown() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-tree-unpriced", |_d| async move {
+        create_run(&priced("root", None, 0.05)).expect("run written");
+        create_run(&priced("worker", Some("root"), 0.10)).expect("run written");
+        let mut helper = priced("helper", Some("worker"), 0.0);
+        helper.cost_usd = None;
+        helper.cost_priced_usd = 0.25;
+        helper.unpriced_calls = 2;
+        create_run(&helper).expect("run written");
+
+        let answer = run_query(
+            r#"{ run(id: "root") { treeStatus { cost {
+                   costUsd costPricedUsd costIsExact unpricedCalls } } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let cost = &json["run"]["treeStatus"]["cost"];
+        assert!(
+            cost["costUsd"].is_null(),
+            "unknown, never a partial sum: {cost}"
+        );
+        assert!(
+            (decimal(&cost["costPricedUsd"]) - 0.40).abs() < 1e-9,
+            "{cost}"
+        );
+        assert_eq!(cost["unpricedCalls"], 2);
+        assert_eq!(
+            cost["costIsExact"], false,
+            "a run of unknown cost is not exact"
+        );
+    })
+    .await;
+}
+
+/// The subtree's working time is the runs' own working times added up, and
+/// `workingNow` counts the clocks still running.
+#[tokio::test]
+async fn the_tree_status_adds_up_working_time() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-tree-working", |_d| async move {
+        let now = leviath_core::duration::now_secs();
+        let clock = |banked_secs, since| leviath_core::run_meta::ActiveClock { banked_secs, since };
+        let mut root = meta_at("root", 100);
+        root.active = Some(clock(30, None));
+        create_run(&root).expect("run written");
+        let mut busy = meta_at("busy", 200);
+        busy.parent_run_id = Some("root".to_string());
+        busy.active = Some(clock(5, Some(now - 40)));
+        create_run(&busy).expect("run written");
+        let mut parked = meta_at("parked", 300);
+        parked.parent_run_id = Some("root".to_string());
+        parked.active = Some(clock(12, None));
+        create_run(&parked).expect("run written");
+        let mut helper = meta_at("helper", 400);
+        helper.parent_run_id = Some("busy".to_string());
+        helper.active = Some(clock(0, Some(now - 10)));
+        create_run(&helper).expect("run written");
+
+        let answer = run_query(
+            r#"{ runs { results { id workingSecs
+                   treeStatus { workingSecs workingNow } } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let results = json["runs"]["results"].as_array().expect("a listing");
+        let listed = |id: &str| {
+            results
+                .iter()
+                .find(|run| run["id"] == id)
+                .unwrap_or_else(|| panic!("{id} listed"))
+        };
+        let sum: i64 = results
+            .iter()
+            .map(|run| run["workingSecs"].as_i64().expect("a number"))
+            .sum();
+        let root = &listed("root")["treeStatus"];
+        assert_eq!(root["workingSecs"].as_i64(), Some(sum), "{json}");
+        assert_eq!(root["workingNow"], 2, "busy and helper are working");
+        let parked = &listed("parked")["treeStatus"];
+        assert_eq!(parked["workingSecs"], 12);
+        assert_eq!(parked["workingNow"], 0);
+    })
+    .await;
+}
+
+/// A record that names its own descendant as its parent cannot send the
+/// roll-up round for ever: every run in the loop is counted once.
+#[tokio::test]
+async fn a_parent_loop_is_rolled_up_once() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-tree-loop", |_d| async move {
+        let mut selfish = priced("selfish", Some("selfish"), 0.5);
+        selfish.prompt_tokens = 3;
+        create_run(&selfish).expect("run written");
+        let mut first = priced("first", Some("second"), 0.25);
+        first.prompt_tokens = 10;
+        create_run(&first).expect("run written");
+        let mut second = priced("second", Some("first"), 0.5);
+        second.prompt_tokens = 20;
+        create_run(&second).expect("run written");
+
+        let answer = run_query(
+            r#"{ selfish: run(id: "selfish") { treeStatus {
+                   depth descendantCount rollup { promptTokens } cost { costUsd } } }
+                 first: run(id: "first") { treeStatus {
+                   depth descendantCount rollup { promptTokens } cost { costUsd } } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let selfish = &json["selfish"]["treeStatus"];
+        assert_eq!(selfish["descendantCount"], 0, "{selfish}");
+        assert_eq!(selfish["depth"], 0);
+        assert_eq!(selfish["rollup"]["promptTokens"], 3);
+        assert!((decimal(&selfish["cost"]["costUsd"]) - 0.5).abs() < 1e-9);
+        let first = &json["first"]["treeStatus"];
+        assert_eq!(first["descendantCount"], 1, "{first}");
+        assert_eq!(first["depth"], 1);
+        assert_eq!(first["rollup"]["promptTokens"], 30);
+        assert!((decimal(&first["cost"]["costUsd"]) - 0.75).abs() < 1e-9);
+    })
+    .await;
+}
+
 /// The log selectors: one stage, every stage, and the two streams.
 #[tokio::test]
 async fn logs_read_one_stage_or_every_stage() {

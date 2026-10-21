@@ -99,6 +99,16 @@ pub(crate) struct MetadataEntry {
 pub(crate) struct RunTreeStatus {
     /// Token roll-up over the whole subtree, this run included.
     pub(crate) rollup: TokenUsage,
+    /// Spend over the whole subtree, this run included. `costUsd` is null
+    /// once any run in it has an unpriced call; the rest add up regardless.
+    pub(crate) cost: CostBreakdown,
+    /// Every run's `workingSecs` added up, this run included. Agent-seconds:
+    /// two workers busy side by side for a minute count two minutes.
+    pub(crate) working_secs: BigInt,
+    /// How many runs in the subtree, this one included, have their working
+    /// clock running. Add this many seconds to `workingSecs` per second to
+    /// keep a live total without asking again.
+    pub(crate) working_now: i32,
     /// The deepest nesting below this run.
     pub(crate) depth: i32,
     /// How many runs are below it, at any depth.
