@@ -305,6 +305,17 @@ lev schema spawn-request > spawn-request.schema.json
 
 The daemon serves the same schema at `GET /api/schema/spawn-request`.
 
+### `lev schema blueprint`
+
+Print the JSON Schema of an `agent.toml`, with this machine's tool, MCP tool and provider names
+added as completions. It accepts every blueprint `lev validate` accepts.
+
+| Flag | Purpose |
+|---|---|
+| `--write` | Write it to `~/.leviath/agent.schema.json` instead, where an editor reads it |
+
+See [editor setup](/docs/blueprint-format#editor-setup) for pointing an editor at it.
+
 ### `lev stages <RUN-ID>`
 
 The per-stage ledger, which is where a staged agent's cost lives. A single loop has one

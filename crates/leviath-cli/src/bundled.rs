@@ -314,4 +314,4 @@ pub(crate) fn bundled_tool(name: &str) -> Option<BundledTool> {
 
 #[cfg(test)]
 #[path = "bundled_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -126,6 +126,16 @@ impl ToolInventory {
     /// the daemon does at spawn: the earlier directory wins and a core tool is
     /// never shadowed, so listing the loser as available would be a lie.
     pub(crate) fn discover(agent_dir: Option<&Path>, agent_name: Option<&str>) -> Self {
+        Self::discover_in(agent_dir, agent_name, leviath_core::tools_dir())
+    }
+
+    /// [`discover`](Self::discover), with the global tools directory given
+    /// rather than read from the data directory. `None` scans none.
+    pub(crate) fn discover_in(
+        agent_dir: Option<&Path>,
+        agent_name: Option<&str>,
+        global_dir: Option<PathBuf>,
+    ) -> Self {
         let ctx_dir = agent_dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         let builtins = leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(ctx_dir));
 
@@ -173,7 +183,7 @@ impl ToolInventory {
         // the same order, and so the same precedence, the daemon scans in.
         let scopes = [
             (ToolSource::Agent, agent_dir.map(|d| d.join("tools"))),
-            (ToolSource::Global, leviath_core::tools_dir()),
+            (ToolSource::Global, global_dir),
         ];
         for (source, dir) in scopes {
             let Some(dir) = dir else {

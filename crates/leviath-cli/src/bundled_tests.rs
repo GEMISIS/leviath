@@ -6,7 +6,7 @@ use leviath_runtime::spec::graph::{
 };
 
 /// The text of a bundled agent's `agent.toml`.
-fn text_of(agent: &BundledAgent) -> &'static str {
+pub(crate) fn text_of(agent: &BundledAgent) -> &'static str {
     agent
         .files
         .iter()
@@ -614,7 +614,10 @@ const BLUEPRINT_SCHEMA: &str = include_str!("../../../docs/schema/blueprint.sche
 /// Shared by the positive and negative tests so the formatting closure runs
 /// against real errors. Called only from the passing path of each, because
 /// a call inside an `assert!` message is a region only failure reaches.
-fn schema_problems(validator: &jsonschema::Validator, value: &serde_json::Value) -> Vec<String> {
+pub(crate) fn schema_problems(
+    validator: &jsonschema::Validator,
+    value: &serde_json::Value,
+) -> Vec<String> {
     validator
         .iter_errors(value)
         .map(|e| format!("{}: {e}", e.instance_path()))
@@ -622,7 +625,7 @@ fn schema_problems(validator: &jsonschema::Validator, value: &serde_json::Value)
 }
 
 /// Convert parsed TOML to JSON so a JSON Schema can be applied to it.
-fn toml_to_json(value: &toml::Value) -> serde_json::Value {
+pub(crate) fn toml_to_json(value: &toml::Value) -> serde_json::Value {
     match value {
         toml::Value::String(s) => serde_json::Value::String(s.clone()),
         toml::Value::Integer(i) => serde_json::Value::from(*i),
@@ -739,6 +742,91 @@ fn the_blueprint_schema_rejects_what_the_reader_rejects() {
         // And the reader refuses the same file.
         assert!(BlueprintFile::parse(&bad).is_err(), "{why}");
     }
+}
+
+/// Whether `lev validate` accepts `text`: it reads, and its graph holds
+/// together. The linter's findings are advice on top of that, never a reason
+/// the file cannot load.
+fn validate_accepts(text: &str) -> Option<BlueprintFile> {
+    let file = BlueprintFile::parse(text).ok()?;
+    let at = leviath_runtime::spec::issues::SpecPath::root().field("graph");
+    file.run_graph().validate(&at).ok().map(|()| file)
+}
+
+/// Every `toml` block in the docs pages that writes a `[blueprint]` table.
+fn docs_blueprint_blocks() -> Vec<(String, String)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/content");
+    let mut blocks = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("the docs pages") {
+        let path = entry.expect("a docs entry").path();
+        let page = std::fs::read_to_string(&path).unwrap_or_default();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        for (i, block) in page.split("```toml\n").skip(1).enumerate() {
+            let body = block.split("\n```").next().unwrap_or_default();
+            if body.contains("[blueprint]") {
+                blocks.push((format!("{name} block {i}"), body.to_string()));
+            }
+        }
+    }
+    blocks
+}
+
+/// Blueprints `lev validate` accepts, as JSON, labelled: every bundled file,
+/// each rewritten by the writer into its readable short forms, each as serde
+/// writes it in full, and every docs example the reader takes. Different
+/// spellings of the same files, so a schema that knows only one of them fails.
+pub(crate) fn accepted_blueprints() -> Vec<(String, serde_json::Value)> {
+    let mut sources: Vec<(String, String)> = Vec::new();
+    for agent in BUNDLED_AGENTS {
+        let text = text_of(agent).to_string();
+        let rewritten = BlueprintFile::parse(&text)
+            .and_then(|f| f.to_toml())
+            .expect("every bundled blueprint reads and writes");
+        sources.push((agent.name.to_string(), text));
+        sources.push((format!("{} (rewritten)", agent.name), rewritten));
+    }
+    sources.extend(docs_blueprint_blocks());
+    let mut accepted = Vec::new();
+    for (label, text) in sources {
+        let Some(file) = validate_accepts(&text) else {
+            continue;
+        };
+        let parsed: toml::Value = toml::from_str(&text).expect("it read as a blueprint");
+        accepted.push((label.clone(), toml_to_json(&parsed)));
+        let full = serde_json::to_value(&file).expect("a blueprint serializes");
+        accepted.push((format!("{label} (as serde writes it)"), full));
+    }
+    accepted
+}
+
+#[test]
+fn every_blueprint_validate_accepts_passes_the_published_schema() {
+    // The schema may never be stricter than the loader: an editor that
+    // underlines a file `lev validate` takes is wrong, and teaches people to
+    // ignore it.
+    let corpus = accepted_blueprints();
+    let docs = corpus.iter().filter(|(l, _)| l.contains(".md")).count();
+    assert!(docs >= 2, "the docs examples are in the corpus: {docs}");
+    let validator = schema_validator();
+    let mut failures = Vec::new();
+    for (label, json) in &corpus {
+        let problems = schema_problems(&validator, json);
+        if !problems.is_empty() {
+            failures.push(format!("{label}: {problems:?}"));
+        }
+    }
+    assert_eq!(failures, Vec::<String>::new());
+}
+
+#[test]
+fn a_docs_block_the_reader_refuses_is_left_out() {
+    // A docs page also shows an `agent.leviath` and fragments; only what the
+    // reader takes counts, so the check above is about the loader's language.
+    assert!(validate_accepts("[blueprint]\nname = \"x\"\n").is_none());
+    let mut graph_broken = crate::test_support::tiny_blueprint("a");
+    graph_broken.push_str("entry = \"nowhere\"\n");
+    assert!(BlueprintFile::parse(&graph_broken).is_ok());
+    assert!(validate_accepts(&graph_broken).is_none());
 }
 
 /// A declared `gate` must actually check something.

@@ -89,7 +89,7 @@ pub enum Commands {
     /// Convert an `agent.leviath` manifest into an `agent.toml` blueprint
     Blueprint(commands::blueprint::BlueprintArgs),
 
-    /// Print the JSON Schema of a spawn request
+    /// Print the JSON Schema of a spawn request or a blueprint
     Schema(commands::schema::SchemaArgs),
 
     /// Inspect and install an agent's declared dependencies
@@ -220,7 +220,7 @@ Blueprints:
   remove        Remove an installed blueprint
   validate      Validate an agent blueprint
   blueprint     Convert an `agent.leviath` manifest into an `agent.toml` blueprint
-  schema        Print the JSON Schema of a spawn request
+  schema        Print the JSON Schema of a spawn request or a blueprint
   deps          Inspect and install an agent's dependencies
   test          Run blueprint tests
   pack          Bundle a blueprint for distribution

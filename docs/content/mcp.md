@@ -37,6 +37,9 @@ lev mcp remove <name>
 `lev mcp add <name>` takes `--command` + repeatable `--arg` for a stdio server, or `--url`
 (with optional `--header`/`--env`) for an HTTP one; `--no-login` skips the OAuth handshake.
 
+`lev mcp test <name>` also records the tools it lists in `~/.leviath/agent.schema.json`, so an
+editor completes them in a blueprint's `tools`. See [editor setup](/docs/blueprint-format#editor-setup).
+
 `--header` and `--env` both want `KEY=VALUE`, split on the first `=`. Note that this is not the
 `Name: value` form an HTTP header is usually written in, so `Authorization: Bearer ...` is rejected
 with `--header must be KEY=VALUE`.

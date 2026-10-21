@@ -1004,6 +1004,16 @@ same list.
   with, and returns a `MimePattern` whose `matches` answers as
   `MimeType::matches` does. The registry now reads its keys through it; what
   it accepts does not change.
+
+- `lev schema blueprint` prints the JSON Schema of an `agent.toml` with
+  this machine's tool, MCP tool and provider names added as completions,
+  and `--write` saves it as `~/.leviath/agent.schema.json`. `lev setup`,
+  `lev mcp add` and `lev mcp remove` rewrite that file, and `lev mcp test`
+  adds the tools a server lists as `<server>__<tool>`. The names are
+  suggestions only, so the schema accepts every blueprint `lev validate`
+  accepts. Point Taplo or Even Better TOML at it to get completion and
+  checks while editing; see "Editor setup" in the blueprint docs.
+
 - `effort = "low" | "medium" | "high"` on a stage's model block: one
   provider-neutral reasoning effort that each provider sends in its own
   field, per request, so a fallback on another provider gets its own
