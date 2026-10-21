@@ -1254,7 +1254,6 @@ Start the [REST and WebSocket API](/docs/api).
 | `--token <TOKEN>` | unset | Bearer token clients must present. Overrides `LEVIATH_API_TOKEN`. The server refuses to start if neither is set |
 | `--cors <ORIGIN>` | none | Allow browser requests from an origin. `*` is accepted and means any origin |
 | `--allow-admin` | off | Mount the MCP administration and config-write routes |
-| `--admin-token <TOKEN>` | unset | Mount the admin routes for requests that present this token only. Overrides `LEVIATH_API_ADMIN_TOKEN`. See [scoping admin requests](/docs/api#scoping-admin-requests-to-a-token) |
 | `--workdir-root <PATH>` | unset | Restrict agent working directories to this root. Repeat it to allow several roots |
 | `--no-remote-yolo` | off | Refuse a spawn request whose `launch.unattended` is not `off`, or that sets `launch.allow`. `launch.allow_questions` is allowed |
 | `--no-remote-seed-commands` | off | Treat every spawn as `launch.seed_commands = false`, so command seeds never run for a run started over the API |
@@ -1275,7 +1274,6 @@ Start the [REST and WebSocket API](/docs/api).
 >
 > `--allow-admin` is off by default because the MCP write routes are remote code execution by
 > construction: adding a server writes a `command` into your config, which Leviath then spawns.
-> An admin token keeps those routes away from clients that hold only the API token.
 > `--workdir-root` matters for the same reason: without it a token holder can point a
 > tool-executing agent at any directory, including `/`. Give it once per directory the API may
 > work in, such as `--workdir-root ~/work/tasks --workdir-root ~/work/project`. A workdir under

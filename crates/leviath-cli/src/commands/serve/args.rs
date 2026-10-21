@@ -59,19 +59,6 @@ pub struct ServeArgs {
     #[arg(long)]
     pub allow_admin: bool,
 
-    /// A second token that alone may make admin requests. Overrides the
-    /// LEVIATH_API_ADMIN_TOKEN env var.
-    ///
-    /// With one set, the admin endpoints are mounted, but a request may use
-    /// them only when it presents this token: as its bearer token, or in an
-    /// `X-Leviath-Admin-Token` header beside the API token. Wins over
-    /// `--allow-admin`, so passing both never opens the endpoints to the API
-    /// token. It must differ from the API token.
-    ///
-    /// Prefer the environment variable, for the same reason as `--token`.
-    #[arg(long)]
-    pub admin_token: Option<String>,
-
     /// Print the GraphQL schema this build serves, then exit.
     ///
     /// The schema is generated from the Rust types, and

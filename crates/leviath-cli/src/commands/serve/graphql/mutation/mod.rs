@@ -302,7 +302,7 @@ impl RunMutation {
 mod tests;
 
 /// The whole write side: the acts on runs and blueprints, plus the ones
-/// `--allow-admin` or an admin token opens.
+/// `--allow-admin` opens.
 ///
 /// Merged rather than nested, so an admin mutation reads the same as every
 /// other mutation to a client that is allowed to use it, and does not exist to

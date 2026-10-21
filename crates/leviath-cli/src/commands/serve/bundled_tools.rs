@@ -162,7 +162,7 @@ pub(super) async fn list_bundled_tools(State(state): State<AppState>) -> Json<Bu
 
 /// `POST /api/tools/bundled/{name}` (admin only): install it.
 ///
-/// Mounted only behind the admin gate, like the script write it is.
+/// Mounted only under `--allow-admin`, like the script write it is.
 pub(super) async fn install_bundled_tool(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,

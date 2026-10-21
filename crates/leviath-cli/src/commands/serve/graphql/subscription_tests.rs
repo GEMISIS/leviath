@@ -78,10 +78,7 @@ async fn frames_on(
     want: usize,
 ) -> Vec<serde_json::Value> {
     let tx = state.event_tx.clone();
-    let schema = crate::commands::serve::graphql::build_schema(
-        state,
-        crate::commands::serve::admin_gate::AdminGate::Off,
-    );
+    let schema = crate::commands::serve::graphql::build_schema(state, false);
 
     let mut stream = schema.execute_stream(Request::new(query));
     // The first poll is what registers the receiver on the broadcast, and it is
@@ -377,10 +374,7 @@ async fn the_greeting_is_numbered_below_every_frame_the_stream_can_carry() {
         let dir = tempfile::tempdir().expect("an agents dir");
         let state = test_state(dir.path());
         let tx = state.event_tx.clone();
-        let schema = crate::commands::serve::graphql::build_schema(
-            state,
-            crate::commands::serve::admin_gate::AdminGate::Off,
-        );
+        let schema = crate::commands::serve::graphql::build_schema(state, false);
         let mut stream = schema.execute_stream(Request::new(
             r#"subscription { runEvents(filter: { blueprintName: { eq: "coder" } }) {
                  __typename
@@ -447,10 +441,7 @@ async fn a_run_that_starts_matching_joins_on_a_status_change() {
         let dir = tempfile::tempdir().expect("an agents dir");
         let state = test_state(dir.path());
         let tx = state.event_tx.clone();
-        let schema = crate::commands::serve::graphql::build_schema(
-            state,
-            crate::commands::serve::admin_gate::AdminGate::Off,
-        );
+        let schema = crate::commands::serve::graphql::build_schema(state, false);
         let mut stream = schema.execute_stream(Request::new(
             r#"subscription { runEvents(filter: { status: { eq: ERROR } }) {
                  __typename ... on RunEvent { runId } } }"#,
@@ -658,10 +649,7 @@ async fn an_empty_filter_is_every_run() {
 async fn a_refused_filter_fails_the_subscription() {
     let dir = tempfile::tempdir().expect("an agents dir");
     let state = test_state(dir.path());
-    let schema = crate::commands::serve::graphql::build_schema(
-        state,
-        crate::commands::serve::admin_gate::AdminGate::Off,
-    );
+    let schema = crate::commands::serve::graphql::build_schema(state, false);
     // A filter naming more runs than a listing will read at once. The
     // subscription resolves its filter exactly as a page does, so what one
     // refuses the other refuses.
@@ -846,10 +834,7 @@ async fn a_subscription_that_falls_behind_is_told_and_stays_open() {
     let dir = tempfile::tempdir().expect("an agents dir");
     let state = test_state(dir.path());
     let tx = state.event_tx.clone();
-    let schema = crate::commands::serve::graphql::build_schema(
-        state,
-        crate::commands::serve::admin_gate::AdminGate::Off,
-    );
+    let schema = crate::commands::serve::graphql::build_schema(state, false);
     let mut stream = schema.execute_stream(Request::new(
         "subscription { runEvents { __typename
              ... on EventsDroppedEvent { count seq at }
@@ -932,10 +917,7 @@ async fn a_subscription_runs_over_a_real_websocket() {
     let dir = tempfile::tempdir().expect("an agents dir");
     let state = test_state(dir.path());
     let tx = state.event_tx.clone();
-    let schema = crate::commands::serve::graphql::build_schema(
-        state.clone(),
-        crate::commands::serve::admin_gate::AdminGate::Off,
-    );
+    let schema = crate::commands::serve::graphql::build_schema(state.clone(), false);
     let app = Router::new()
         .route("/ws/graphql", get(crate::commands::serve::graphql::ws))
         .layer(axum::extract::Extension(schema))
@@ -1060,10 +1042,7 @@ async fn a_gap_is_reported_on(query: &str, flood: impl Fn(usize) -> ServerEvent)
     let dir = tempfile::tempdir().expect("an agents dir");
     let state = test_state(dir.path());
     let tx = state.event_tx.clone();
-    let schema = crate::commands::serve::graphql::build_schema(
-        state,
-        crate::commands::serve::admin_gate::AdminGate::Off,
-    );
+    let schema = crate::commands::serve::graphql::build_schema(state, false);
     let mut stream = schema.execute_stream(Request::new(query.to_string()));
 
     // Registered first, then overrun: the channel a test server uses holds 64,
@@ -1244,10 +1223,7 @@ async fn a_subscription_filter_too_deep_to_walk_is_refused() {
         written = format!("{{ and: [{written}] }}");
     }
     let dir = tempfile::tempdir().expect("an agents dir");
-    let schema = crate::commands::serve::graphql::build_schema(
-        test_state(dir.path()),
-        crate::commands::serve::admin_gate::AdminGate::Off,
-    );
+    let schema = crate::commands::serve::graphql::build_schema(test_state(dir.path()), false);
     let mut stream = schema.execute_stream(Request::new(format!(
         "subscription {{ runEvents(filter: {written}) {{ __typename }} }}"
     )));

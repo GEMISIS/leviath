@@ -19,7 +19,6 @@ fn args(grace_secs: u64) -> ServeArgs {
         cors: None,
         token: Some("test-token".to_string()),
         allow_admin: false,
-        admin_token: None,
         print_graphql_schema: false,
         workdir_roots: Vec::new(),
         no_remote_yolo: false,

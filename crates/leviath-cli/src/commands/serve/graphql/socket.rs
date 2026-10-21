@@ -16,7 +16,6 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::PollSender;
 
-use super::super::admin_gate::Presented;
 use super::super::keepalive::{Beat, Heartbeat, WsTiming, send_within};
 use super::super::shutdown::{Shutdown, going_away};
 use super::LeviathSchema;
@@ -40,7 +39,6 @@ pub(super) async fn serve(
     socket: WebSocket,
     schema: LeviathSchema,
     protocol: GraphQLProtocol,
-    presented: Presented,
     timing: WsTiming,
     shutdown: Shutdown,
 ) {
@@ -53,10 +51,7 @@ pub(super) async fn serve(
     // Fused, so once the protocol has said its last the select below can keep
     // polling it without polling a finished future. Its end drops `to_client`,
     // which is what ends the loop once its last message has gone out.
-    let mut connection = async_graphql::Data::default();
-    connection.insert(presented);
     let mut graphql = GraphQLWebSocket::new_with_pair(to_client, from_client, schema, protocol)
-        .with_data(connection)
         .serve()
         .boxed()
         .fuse();

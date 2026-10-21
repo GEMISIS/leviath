@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
+use axum::http::StatusCode;
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
-use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -52,21 +52,22 @@ use leviath_core::constant_time_eq;
 /// reverse-proxy access logs, browser history, and `Referer` headers on any
 /// outbound link. Restricting it to the routes that genuinely cannot use a
 /// header keeps the escape hatch without spreading the credential.
-pub(super) fn presented_token(headers: &HeaderMap, uri: &Uri) -> Option<String> {
-    if let Some(bearer) = headers
+fn presented_token(req: &Request) -> Option<String> {
+    if let Some(bearer) = req
+        .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(bearer_credentials)
     {
         return Some(bearer.trim().to_string());
     }
-    if !is_websocket_route(uri.path()) {
+    if !is_websocket_route(req.uri().path()) {
         return None;
     }
     // Percent-decoded, so a token holding `+`, `/` or `=` that a client
     // encoded still matches. A bare `+` stays a `+` rather than becoming a
     // space, so a client that pasted the token in as it is matches too.
-    let query = uri.query()?.replace('+', "%2B");
+    let query = req.uri().query()?.replace('+', "%2B");
     url::form_urlencoded::parse(query.as_bytes())
         .find(|(name, _)| name == "token")
         .map(|(_, token)| token.into_owned())
@@ -86,16 +87,12 @@ fn is_websocket_route(path: &str) -> bool {
     path == "/ws" || path.starts_with("/ws/")
 }
 
-/// What the auth layer needs: the tokens to compare against, and the key this
+/// What the auth layer needs: the token to compare against, and the key this
 /// process signs byte URLs with.
 #[derive(Clone)]
 pub(super) struct AuthState {
     /// The expected API token.
     pub(super) token: Arc<String>,
-    /// The admin token, when the server has one. It authenticates a request
-    /// as the API token does; what it adds on the admin routes is decided by
-    /// [`super::admin_gate::AdminGate::admits`], not here.
-    pub(super) admin: Option<Arc<String>>,
     /// The signer, for the byte routes that a signed URL may open.
     pub(super) signer: Arc<super::signed_url::UrlSigner>,
 }
@@ -112,12 +109,8 @@ pub(super) async fn require_auth(
     req: Request,
     next: Next,
 ) -> Response {
-    if let Some(token) = presented_token(req.headers(), req.uri())
-        && (constant_time_eq(&token, &auth.token)
-            || auth
-                .admin
-                .as_deref()
-                .is_some_and(|admin| constant_time_eq(&token, admin)))
+    if let Some(token) = presented_token(&req)
+        && constant_time_eq(&token, &auth.token)
     {
         return next.run(req).await;
     }
@@ -143,11 +136,6 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
-
-    /// What `req` presents, read the way the auth layer reads it.
-    fn presented(req: &Request) -> Option<String> {
-        presented_token(req.headers(), req.uri())
-    }
 
     fn req(auth: Option<&str>, query: Option<&str>) -> Request {
         req_to("/api/runs", auth, query)
@@ -196,10 +184,10 @@ mod tests {
     #[test]
     fn presented_token_reads_the_bearer_header_on_any_route() {
         assert_eq!(
-            presented(&req(Some("Bearer tok123"), None)).as_deref(),
+            presented_token(&req(Some("Bearer tok123"), None)).as_deref(),
             Some("tok123")
         );
-        assert!(presented(&req(None, None)).is_none());
+        assert!(presented_token(&req(None, None)).is_none());
     }
 
     /// A browser cannot set headers on a WebSocket upgrade, so `?token=` is
@@ -208,23 +196,23 @@ mod tests {
     fn the_query_token_works_on_the_websocket_routes() {
         for path in ["/ws", "/ws/agents/run-1"] {
             assert_eq!(
-                presented(&req_to(path, None, Some("token=qtok"))).as_deref(),
+                presented_token(&req_to(path, None, Some("token=qtok"))).as_deref(),
                 Some("qtok"),
                 "{path}"
             );
             assert_eq!(
-                presented(&req_to(path, None, Some("foo=1&token=qtok"))).as_deref(),
+                presented_token(&req_to(path, None, Some("foo=1&token=qtok"))).as_deref(),
                 Some("qtok"),
                 "{path}"
             );
             // Non-bearer header ⇒ falls through to the query.
             assert_eq!(
-                presented(&req_to(path, Some("Basic x"), Some("token=qtok"))).as_deref(),
+                presented_token(&req_to(path, Some("Basic x"), Some("token=qtok"))).as_deref(),
                 Some("qtok"),
                 "{path}"
             );
             // A different key that merely ends in "token" is not mistaken for it.
-            assert!(presented(&req_to(path, None, Some("mytoken=x"))).is_none());
+            assert!(presented_token(&req_to(path, None, Some("mytoken=x"))).is_none());
         }
     }
 
@@ -235,7 +223,7 @@ mod tests {
     fn the_query_token_is_refused_on_ordinary_routes() {
         for path in ["/api/runs", "/api/config", "/wsomething", "/"] {
             assert!(
-                presented(&req_to(path, None, Some("token=qtok"))).is_none(),
+                presented_token(&req_to(path, None, Some("token=qtok"))).is_none(),
                 "{path} must not accept a query token"
             );
         }
@@ -249,7 +237,6 @@ mod tests {
 
         let auth = AuthState {
             token: Arc::new("secret".to_string()),
-            admin: None,
             signer: Default::default(),
         };
         let app: Router = Router::new()
@@ -283,47 +270,20 @@ mod tests {
         assert_eq!(wrong.headers()[WWW_AUTHENTICATE], "Bearer");
     }
 
-    /// An admin token authenticates a request as the API token does, so a
-    /// client can make an admin request with it alone. Neither token stands
-    /// in for a wrong one.
-    #[tokio::test]
-    async fn the_admin_token_authenticates_too() {
-        use axum::routing::get;
-        use axum::{Router, middleware};
-        use tower::ServiceExt;
-
-        let auth = AuthState {
-            token: Arc::new("secret".to_string()),
-            admin: Some(Arc::new("root".to_string())),
-            signer: Default::default(),
-        };
-        let app: Router = Router::new()
-            .route("/api/runs", get(|| async { "ok" }))
-            .layer(middleware::from_fn_with_state(auth, require_auth));
-        for (bearer, status) in [
-            ("Bearer secret", StatusCode::OK),
-            ("Bearer root", StatusCode::OK),
-            ("Bearer nope", StatusCode::UNAUTHORIZED),
-        ] {
-            let resp = app.clone().oneshot(req(Some(bearer), None)).await.unwrap();
-            assert_eq!(resp.status(), status, "{bearer}");
-        }
-    }
-
     /// The scheme name is matched without regard to case, as RFC 9110 says,
     /// and a header with no credentials after it presents nothing.
     #[test]
     fn the_bearer_scheme_is_matched_in_any_case() {
         for header in ["Bearer tok123", "bearer tok123", "BEARER tok123"] {
             assert_eq!(
-                presented(&req(Some(header), None)).as_deref(),
+                presented_token(&req(Some(header), None)).as_deref(),
                 Some("tok123"),
                 "{header}"
             );
         }
-        assert!(presented(&req(Some("Bearer"), None)).is_none());
-        assert!(presented(&req(Some("Bearertok123"), None)).is_none());
-        assert!(presented(&req(Some("Basic tok123"), None)).is_none());
+        assert!(presented_token(&req(Some("Bearer"), None)).is_none());
+        assert!(presented_token(&req(Some("Bearertok123"), None)).is_none());
+        assert!(presented_token(&req(Some("Basic tok123"), None)).is_none());
     }
 
     /// A WebSocket client that percent-encodes its token, as a URL builder
@@ -331,15 +291,15 @@ mod tests {
     #[test]
     fn the_query_token_is_decoded() {
         assert_eq!(
-            presented(&req_to("/ws", None, Some("token=a%2Bb%2Fc%3D"))).as_deref(),
+            presented_token(&req_to("/ws", None, Some("token=a%2Bb%2Fc%3D"))).as_deref(),
             Some("a+b/c=")
         );
         // Sent as it is, a `+` is still a `+`.
         assert_eq!(
-            presented(&req_to("/ws", None, Some("token=a+b/c="))).as_deref(),
+            presented_token(&req_to("/ws", None, Some("token=a+b/c="))).as_deref(),
             Some("a+b/c=")
         );
         // An upgrade with no query at all presents nothing.
-        assert!(presented(&req_to("/ws", None, None)).is_none());
+        assert!(presented_token(&req_to("/ws", None, None)).is_none());
     }
 }

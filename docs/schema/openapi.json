@@ -1914,9 +1914,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "404": {
             "$ref": "#/components/responses/Error"
           },
@@ -1936,17 +1933,7 @@
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "Admin only. Mounted only when `lev serve` has `--allow-admin` or an admin token, because it opens the operator's browser on the host running the server and binds a fixed loopback port there. Returns `202` with `{\"status\": \"waiting\", \"authorize_url\": ...}` as soon as there is a URL, and the flow continues behind the response - poll `GET /api/providers` for the outcome. It does not hold the request open for the whole flow the way the MCP login does: a browser UI needs to render the URL and a progress state, and a request held open for five minutes gives it neither. **The browser has to be on the serving host**, because the redirect goes to `localhost:1455` there and nowhere else - that is what OpenAI registered the public client id against. A console driving a remote daemon can start the flow and show `authorize_url`, but somebody has to open it on that machine. `409` when a sign-in to the same provider is already waiting, with its `authorize_url` in the body so a reconnecting console can pick the flow back up rather than having to cancel it.",
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because it opens the operator's browser on the host running the server and binds a fixed loopback port there. Returns `202` with `{\"status\": \"waiting\", \"authorize_url\": ...}` as soon as there is a URL, and the flow continues behind the response - poll `GET /api/providers` for the outcome. It does not hold the request open for the whole flow the way the MCP login does: a browser UI needs to render the URL and a progress state, and a request held open for five minutes gives it neither. **The browser has to be on the serving host**, because the redirect goes to `localhost:1455` there and nowhere else - that is what OpenAI registered the public client id against. A console driving a remote daemon can start the flow and show `authorize_url`, but somebody has to open it on that machine. `409` when a sign-in to the same provider is already waiting, with its `authorize_url` in the body so a reconnecting console can pick the flow back up rather than having to cancel it."
       }
     },
     "/api/providers/{name}/logout": {
@@ -1967,9 +1954,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "404": {
             "$ref": "#/components/responses/Error"
           },
@@ -1986,17 +1970,7 @@
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "Admin only, like the sign-in it undoes: it deletes a credential from the grant store, and from the OS keychain when `[security] credential_store = \"keychain\"`. `config.toml` is deliberately untouched, the same as `lev auth logout` - signing out is not the same as turning the provider off, and doing both would surprise anyone who meant to sign in again. Set `codex_enabled` through `PUT /api/config` to do the other one.",
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        "description": "Admin only, like the sign-in it undoes: it deletes a credential from the grant store, and from the OS keychain when `[security] credential_store = \"keychain\"`. `config.toml` is deliberately untouched, the same as `lev auth logout` - signing out is not the same as turning the provider off, and doing both would surprise anyone who meant to sign in again. Set `codex_enabled` through `PUT /api/config` to do the other one."
       }
     },
     "/api/providers/{name}/check": {
@@ -2017,9 +1991,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "404": {
             "$ref": "#/components/responses/Error"
           },
@@ -2036,17 +2007,7 @@
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "Admin only, the same category as `POST /api/models/probe`: it makes this host open an authenticated connection to the provider. The same check `lev setup` runs, through the same code. It asks the account rather than reading a compiled model table, so a `200` means the subscription really did agree - and it refreshes a lapsed access token on the way in, which is also what keeps a rarely-used sign-in alive. Answers `{\"status\": \"ok\", \"models\": [...]}` with the models this plan can reach, and `502` with the provider's own reason when it is refused.",
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        "description": "Admin only, the same category as `POST /api/models/probe`: it makes this host open an authenticated connection to the provider. The same check `lev setup` runs, through the same code. It asks the account rather than reading a compiled model table, so a `200` means the subscription really did agree - and it refreshes a lapsed access token on the way in, which is also what keeps a rarely-used sign-in alive. Answers `{\"status\": \"ok\", \"models\": [...]}` with the models this plan can reach, and `502` with the provider's own reason when it is refused."
       }
     },
     "/api/mcp/servers": {
@@ -2078,7 +2039,7 @@
           "mcp"
         ],
         "summary": "Add an MCP server",
-        "description": "Admin only. Mounted only when `lev serve` has `--allow-admin` or an admin token, because adding a stdio server is arbitrary code execution by construction.",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because adding a stdio server is arbitrary code execution by construction.",
         "responses": {
           "201": {
             "description": "Created."
@@ -2088,9 +2049,6 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
           },
           "405": {
             "$ref": "#/components/responses/NotMounted"
@@ -2107,17 +2065,7 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       }
     },
     "/api/mcp/servers/{name}": {
@@ -2139,9 +2087,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "404": {
             "$ref": "#/components/responses/Error"
           },
@@ -2154,17 +2099,7 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       }
     },
     "/api/mcp/servers/{name}/status": {
@@ -2221,9 +2156,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "404": {
             "$ref": "#/components/responses/Error"
           },
@@ -2240,17 +2172,7 @@
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "Admin only. Mounted only when `lev serve` has `--allow-admin` or an admin token, because it opens the operator's browser on the host running the server and completes an OAuth flow there. Returns `{\"status\": \"authenticated\"}` when the browser flow completed and credentials were stored, or `{\"status\": \"not_required\"}` when the server answered a probe carrying its configured headers, which means there is no OAuth flow to run.",
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because it opens the operator's browser on the host running the server and completes an OAuth flow there. Returns `{\"status\": \"authenticated\"}` when the browser flow completed and credentials were stored, or `{\"status\": \"not_required\"}` when the server answered a probe carrying its configured headers, which means there is no OAuth flow to run."
       }
     },
     "/api/mcp/servers/{name}/test": {
@@ -2271,9 +2193,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "404": {
             "$ref": "#/components/responses/Error"
           },
@@ -2290,17 +2209,7 @@
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "Admin only. Mounted only when `lev serve` has `--allow-admin` or an admin token, because it connects to the server and, for a stdio server, spawns its configured command.",
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because it connects to the server and, for a stdio server, spawns its configured command."
       }
     },
     "/api/doctor": {
@@ -2360,7 +2269,7 @@
           "config"
         ],
         "summary": "Add or update a mime row",
-        "description": "Write a row into `mime_types.toml` beside the config, or set the given fields on the row already there. Admin-only (needs `--allow-admin` or an admin token; otherwise 405). Every field but `mime_type` is optional, and only the fields sent are changed. Validated the way `lev mime add` is: a type that is not `type/subtype`, a token rule that names none or more than one of `per_byte`/`per_pixel`/`per_second`/`fixed`, a `magic` that is not hex, or a `check` script that will not compile is a 400 and nothing is written. Announced as `mime.write`.",
+        "description": "Write a row into `mime_types.toml` beside the config, or set the given fields on the row already there. Admin-only (needs `--allow-admin`; otherwise 405). Every field but `mime_type` is optional, and only the fields sent are changed. Validated the way `lev mime add` is: a type that is not `type/subtype`, a token rule that names none or more than one of `per_byte`/`per_pixel`/`per_second`/`fixed`, a `magic` that is not hex, or a `check` script that will not compile is a 400 and nothing is written. Announced as `mime.write`.",
         "requestBody": {
           "required": true,
           "content": {
@@ -2453,9 +2362,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "405": {
             "$ref": "#/components/responses/NotMounted"
           },
@@ -2465,24 +2371,14 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       },
       "delete": {
         "tags": [
           "config"
         ],
         "summary": "Remove a mime row",
-        "description": "Take a row out of `mime_types.toml` beside the config. Admin-only (needs `--allow-admin` or an admin token; otherwise 405). A type with no row there is a 404. Announced as `mime.write`.",
+        "description": "Take a row out of `mime_types.toml` beside the config. Admin-only (needs `--allow-admin`; otherwise 405). A type with no row there is a 404. Announced as `mime.write`.",
         "parameters": [
           {
             "name": "mime_type",
@@ -2504,9 +2400,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "404": {
             "$ref": "#/components/responses/Error"
           },
@@ -2519,17 +2412,7 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       }
     },
     "/api/doctor/live": {
@@ -2538,16 +2421,13 @@
           "diagnostics"
         ],
         "summary": "The whole `lev doctor` chain, billed calls included",
-        "description": "Admin only. Mounted only when `lev serve` has `--allow-admin` or an admin token: past the offline checks it makes one billed provider call, then spawns a throwaway one-stage run through the daemon (a second billed call) and waits for it. One at a time; a second caller while one is going gets 409. A failing check is reported inside a 200 with `ok: false`, not as an HTTP error.",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed: past the offline checks it makes one billed provider call, then spawns a throwaway one-stage run through the daemon (a second billed call) and waits for it. One at a time; a second caller while one is going gets 409. A failing check is reported inside a 200 with `ok: false`, not as an HTTP error.",
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
           },
           "408": {
             "$ref": "#/components/responses/Timeout"
@@ -2558,17 +2438,7 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       }
     },
     "/api/yolo": {
@@ -2671,7 +2541,7 @@
           "yolo"
         ],
         "summary": "Replace `yolo.toml`",
-        "description": "Admin only. Mounted only when `lev serve` has `--allow-admin` or an admin token: a profile is a grant of permissions, so writing the file is the same category of act as writing the config. The text is parsed and compiled first, and a save that would not load answers 400 with the same message a spawn would give, leaving the file on disk as it was. Answers with the listing `GET` returns.",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed: a profile is a grant of permissions, so writing the file is the same category of act as writing the config. The text is parsed and compiled first, and a save that would not load answers 400 with the same message a spawn would give, leaving the file on disk as it was. Answers with the listing `GET` returns.",
         "requestBody": {
           "required": true,
           "content": {
@@ -2771,35 +2641,22 @@
           "400": {
             "$ref": "#/components/responses/Error"
           },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "405": {
             "$ref": "#/components/responses/NotMounted"
-          },
-          "408": {
-            "$ref": "#/components/responses/Timeout"
           },
           "500": {
             "$ref": "#/components/responses/Error"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       }
     },
     "/api/yolo/test": {
@@ -3009,7 +2866,7 @@
           "diagnostics"
         ],
         "summary": "Carry out the update the GET half describes",
-        "description": "Admin only. Mounted only when `lev serve` has `--allow-admin` or an admin token, because it runs a package manager, rewrites the agents directory and rewrites the config. Answers 202 with a `job_id` and runs the work behind it: an upgrade is a download and an install, so every step change is sent on `/ws` as `update_progress`, the last as `update_finished`, and `GET /api/update/jobs/{id}` answers the same record for a client that would rather poll. The body names which parts to do - `binary`, `agents`, `migrations`, each defaulting to true, so an empty body is the whole plan. A `binary.action` of `advise` stays advice: the step is recorded as `advised` with the reason and no compile is started. A blueprint you edited locally is never installed. 409 while another update is running.",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because it runs a package manager, rewrites the agents directory and rewrites the config. Answers 202 with a `job_id` and runs the work behind it: an upgrade is a download and an install, so every step change is sent on `/ws` as `update_progress`, the last as `update_finished`, and `GET /api/update/jobs/{id}` answers the same record for a client that would rather poll. The body names which parts to do - `binary`, `agents`, `migrations`, each defaulting to true, so an empty body is the whole plan. A `binary.action` of `advise` stays advice: the step is recorded as `advised` with the reason and no compile is started. A blueprint you edited locally is never installed. 409 while another update is running.",
         "requestBody": {
           "required": false,
           "content": {
@@ -3045,9 +2902,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "405": {
             "$ref": "#/components/responses/NotMounted"
           },
@@ -3060,17 +2914,7 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       }
     },
     "/api/update/jobs/{id}": {
@@ -3098,9 +2942,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "404": {
             "$ref": "#/components/responses/Error"
           },
@@ -3110,17 +2951,7 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       }
     },
     "/api/fs/dirs": {
@@ -3265,7 +3096,7 @@
           "config"
         ],
         "summary": "Replace the configuration",
-        "description": "Admin only. Mounted only when `lev serve` has `--allow-admin` or an admin token. The body is validated with the same checks the loader makes, before anything is written, so a request that would produce a config this build refuses to read back answers 400 and leaves the file byte for byte as it was. A field of the wrong type is a 400 too, naming the field and what it takes but never the value sent, since that value is usually a key.",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed. The body is validated with the same checks the loader makes, before anything is written, so a request that would produce a config this build refuses to read back answers 400 and leaves the file byte for byte as it was. A field of the wrong type is a 400 too, naming the field and what it takes but never the value sent, since that value is usually a key.",
         "requestBody": {
           "required": false,
           "content": {
@@ -3449,9 +3280,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "405": {
             "$ref": "#/components/responses/NotMounted"
           },
@@ -3464,17 +3292,7 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       }
     },
     "/api/config/validate": {
@@ -3578,7 +3396,7 @@
           "config"
         ],
         "summary": "Ask an OpenAI-compatible server what models it serves",
-        "description": "Admin only. Mounted only when `lev serve` has `--allow-admin` or an admin token. Body: `base_url` (required), `api_key`, `headers`. Answers `{\"models\": [ids]}`, or 502 carrying the server's own error text, or 400 for a base URL with no scheme.",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed. Body: `base_url` (required), `api_key`, `headers`. Answers `{\"models\": [ids]}`, or 502 carrying the server's own error text, or 400 for a base URL with no scheme.",
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ok"
@@ -3589,9 +3407,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "408": {
             "$ref": "#/components/responses/Timeout"
           },
@@ -3601,17 +3416,7 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       }
     },
     "/graphql": {
@@ -3870,7 +3675,7 @@
           "scripts"
         ],
         "summary": "Install a bundled tool globally",
-        "description": "Admin only. Mounted only when `lev serve` has `--allow-admin` or an admin token. Writes this build's copy of a tool the bundled agents ship, such as `web_search`, into the global tools directory, so every agent and every inline graph can be granted it. Answers `name`, `path`, `compiles`, `error` and `outcome` (`installed`, `unchanged` or `replaced`). A global copy that already matches is left alone and reported as `unchanged`. A name this build ships no tool under is a 404 naming the ones it does.",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed. Writes this build's copy of a tool the bundled agents ship, such as `web_search`, into the global tools directory, so every agent and every inline graph can be granted it. Answers `name`, `path`, `compiles`, `error` and `outcome` (`installed`, `unchanged` or `replaced`). A global copy that already matches is left alone and reported as `unchanged`. A name this build ships no tool under is a 404 naming the ones it does.",
         "parameters": [
           {
             "name": "name",
@@ -3889,9 +3694,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "404": {
             "$ref": "#/components/responses/Error"
           },
@@ -3904,17 +3706,7 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       }
     },
     "/api/scripts": {
@@ -4051,7 +3843,7 @@
           "scripts"
         ],
         "summary": "Write a script",
-        "description": "Admin only. Mounted only when `lev serve` has `--allow-admin` or an admin token, because a `.rhai` file is executable code every agent then runs. A file that does not compile is still written, and the response says so.",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed, because a `.rhai` file is executable code every agent then runs. A file that does not compile is still written, and the response says so.",
         "parameters": [
           {
             "name": "kind",
@@ -4094,9 +3886,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "405": {
             "$ref": "#/components/responses/NotMounted"
           },
@@ -4109,24 +3898,14 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       },
       "delete": {
         "tags": [
           "scripts"
         ],
         "summary": "Delete a script",
-        "description": "Admin only. Mounted only when `lev serve` has `--allow-admin` or an admin token.",
+        "description": "Admin only. Mounted only when `lev serve --allow-admin` is passed.",
         "parameters": [
           {
             "name": "kind",
@@ -4169,9 +3948,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "403": {
-            "$ref": "#/components/responses/AdminTokenRequired"
-          },
           "405": {
             "$ref": "#/components/responses/NotMounted"
           },
@@ -4181,17 +3957,7 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "bearerAuth": [],
-            "adminToken": []
-          }
-        ],
-        "x-leviath-admin": true
+        }
       }
     },
     "/api/runs/validate": {
@@ -5776,12 +5542,6 @@
         "type": "http",
         "scheme": "bearer",
         "description": "The token from `lev serve --token` or LEVIATH_API_TOKEN. The server refuses to start without one. WebSocket routes take it as `?token=` instead."
-      },
-      "adminToken": {
-        "type": "apiKey",
-        "in": "header",
-        "name": "X-Leviath-Admin-Token",
-        "description": "The admin token from `lev serve --admin-token` or LEVIATH_API_ADMIN_TOKEN, sent beside the API token. A server started with one takes admin requests only when they present it, here or as the bearer token itself. Ignored by a server started with `--allow-admin` alone."
       }
     },
     "parameters": {
@@ -5855,7 +5615,7 @@
         }
       },
       "NotMounted": {
-        "description": "The method is mounted only with `lev serve --allow-admin` or an admin token; without either the path exists for its other methods and this one is refused.",
+        "description": "The method is mounted only with `lev serve --allow-admin`; without it the path exists for its other methods and this one is refused.",
         "content": {
           "application/json": {
             "schema": {
@@ -5913,16 +5673,6 @@
               "items": {
                 "type": "object"
               }
-            }
-          }
-        }
-      },
-      "AdminTokenRequired": {
-        "description": "The server was started with an admin token, and this request did not present it. Send it as the bearer token, or in `X-Leviath-Admin-Token` beside the API token.",
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/ErrorResponse"
             }
           }
         }

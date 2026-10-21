@@ -1675,7 +1675,6 @@ mod tests {
             "AWS_SECRET_ACCESS_KEY",
             "GITHUB_TOKEN",
             "LEVIATH_API_TOKEN",
-            "LEVIATH_API_ADMIN_TOKEN",
         ] {
             let err = host.env_var(name).unwrap_err();
             assert!(err.starts_with("[denied]"), "{name} → {err}");

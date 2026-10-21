@@ -1122,17 +1122,6 @@ same list.
   can name the provider to connect for a model nothing here serves. It is
   read from the tables built into the binary and asks no provider anything.
   Announced as the `models.catalog` capability.
-- `lev serve --admin-token <t>` (or `LEVIATH_API_ADMIN_TOKEN`) scopes admin
-  requests to a second token. The admin routes and GraphQL mutations are
-  mounted, but only a request presenting that token may use them: as its
-  bearer token, or in an `X-Leviath-Admin-Token` header beside the API
-  token, which elevates just that request. Anything else gets `403`
-  (GraphQL `FORBIDDEN`). An admin token wins over `--allow-admin`, must
-  differ from the API token, and is never inherited by a daemon `lev`
-  starts. A `--cors` preflight allows the header, so a browser console can
-  send it. Announced as `admin.token`. A server without an admin token
-  behaves as before: `--allow-admin` alone still opens the admin routes to
-  every holder of the API token, and without it they are not mounted.
 - `write_paths`: globs, relative to the workdir, that a stage's writes must
   match. Set them under `[graph]`, on a stage (which only narrows the
   graph's), or on a spawn request's `launch` (GraphQL `LaunchWrite.writePaths`).
