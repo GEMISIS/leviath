@@ -816,6 +816,17 @@ file does not have is an `unresolvable` issue at `launch.unattended`, with a hin
 `lev yolo` lists. Under `--no-remote-yolo` a profile is refused like `"all"`: the operator's flag
 says nothing about which one.
 
+`launch.allow_questions: true` keeps the model's own questions for a person while `unattended`
+waives the rest. Tool approvals, checkpoints and the taint gate go ahead as `unattended` says. The
+model keeps `ask_user_*`, `edit_document` and `present_for_review`, and each question opens an
+interaction you answer through the interactions routes, as in an attended run. Child runs and
+fan-out workers keep their questions too. `--no-remote-yolo` allows the field, since it only asks a
+person more. See [Tool approvals and agent questions](/docs/interaction#tool-approvals-and-agent-questions).
+
+A kept question waits until it is answered, exactly as it would in an attended run. There is no
+built-in cap. If your client may not answer, set [`[limits] interaction_timeout_secs`](/docs/configuration#limits)
+on the machine; when it runs out, the model is told no answer came and decides for itself.
+
 The run's record says how it was launched: `yolo` is true for an unattended run, and
 `yolo_profile` names the profile when there was one. A console can then show that a run is
 unattended *under* something rather than unattended outright.
@@ -840,13 +851,16 @@ a summary of the run it would be:
              "since": {"text": "v0.6.0"}},
   "launch": {"unattended": "all", "allow": [], "max_depth": 0, "seed_commands": true,
              "capture_model_input": false, "write_paths": []},
+  "auto_answers": {"questions": false, "checkpoints": true, "gate": true},
+  "attention": "approvals waived; questions still reach the user",
   "workdir": "/home/you/project",
   "warnings": []
 }
 ```
 
 Each stage shows the model it resolved to on this machine, and each input its value after
-defaults. `warnings` is the list a spawn of it would answer with. A request that would be refused answers `422` with the same issues `POST /api/runs` would
+defaults. `auto_answers` says what the run would answer for itself, and `attention` says the same
+in a line. This sample was sent with `launch.allow_questions: true`. `warnings` is the list a spawn of it would answer with. A request that would be refused answers `422` with the same issues `POST /api/runs` would
 give. See [check before you start](/docs/starting-a-run#check-before-you-start).
 
 ### The request's schema, and a blueprint's inputs

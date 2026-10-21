@@ -110,7 +110,7 @@ still approved without asking, but `ask_user_text`, `ask_user_choice`, `ask_user
 `edit_document` and `present_for_review` stay offered, and a question waits for
 [`lev respond`](/docs/interaction) as in an attended run. Sub-agents and fan-out workers keep their
 questions too. It is for a run that should not stop for every command but should still ask before
-a one-way door. Without `--yolo` it changes nothing. See
+a one-way door. It needs `--yolo`, and is refused without it. See
 [Tool approvals and agent questions](/docs/interaction#tool-approvals-and-agent-questions).
 
 **`--yolo=<profile>`** is `--yolo` taken apart. A profile in [`yolo.toml`](/docs/yolo)

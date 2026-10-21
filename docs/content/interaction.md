@@ -68,7 +68,9 @@ call until the answer comes back, then continues with it:
 > context) is refused the way any unoffered tool is.
 >
 > A stage that genuinely needs a person keeps the tools it names in
-> [`required_tools`](/docs/tools#these-tools-need-someone-there).
+> [`required_tools`](/docs/tools#these-tools-need-someone-there). A whole run keeps them when it
+> is launched with `--allow-questions`; see
+> [Tool approvals and agent questions](#tool-approvals-and-agent-questions).
 >
 > Unattended applies to the whole run tree, not only the agent you launched: sub-agents and
 > fan-out workers inherit it, and it survives a daemon restart. Otherwise a child could stop
@@ -94,9 +96,10 @@ their questions too, and `runtime_info` tells the model a person is there to ans
 summary says so in a line: `approvals waived; questions still reach the user`.
 
 A kept question waits as it would in an attended run, so answer it with `lev respond`, the
-dashboard or the API. By default it waits until somebody does. Set `[limits]
-interaction_timeout_secs` to bound the wait; when it runs out, the model is told no answer came
-and decides for itself. A yolo profile with `questions = "ask"` gives the same split from
+dashboard or the API. It waits until somebody does: there is no built-in cap, just as there is
+none in an attended run. If whoever started the run may not be there to answer, set `[limits]
+interaction_timeout_secs`, which we recommend for unattended callers. When it runs out, the model
+is told no answer came and decides for itself. A yolo profile with `questions = "ask"` gives the same split from
 `yolo.toml`.
 
 ## When nobody answers
