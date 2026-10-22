@@ -538,8 +538,13 @@ pub(super) async fn sign_in_started(
             leviath_core::sync::lock(&commit_tracker).remove(name);
         })
     });
+    // `map_err` rather than `if let Err`: a success has nothing left to do
+    // once the commit above has run, and the listing reports it from that
+    // moment, so nothing waits for this task to resume. An `if let` would
+    // give the success its own region after the await that only a task left
+    // to finish could reach.
     tokio::spawn(async move {
-        if let Err(e) = authorizer.sign_in(name, announce).await {
+        let _ = authorizer.sign_in(name, announce).await.map_err(|e| {
             let message = e
                 .chain()
                 .map(ToString::to_string)
@@ -552,7 +557,7 @@ pub(super) async fn sign_in_started(
                 .map(|tx| tx.send(Err(message.clone())));
             leviath_core::sync::lock(&tracker)
                 .insert(name.to_string(), Progress::Failed { message, at: now() });
-        }
+        });
     });
 
     // Awaited without a deadline, deliberately. Everything between the spawn
