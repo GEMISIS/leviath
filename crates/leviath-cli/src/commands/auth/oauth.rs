@@ -34,6 +34,23 @@ const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 /// command-line path prints; the wizard renders a selectable line.
 pub type Announce = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// How the grant's store write is published, given the write to run.
+///
+/// The flow calls this once, on the blocking pool, with the write that puts
+/// the new grant in the store, and the hook runs it. A caller that reports the
+/// sign-in somewhere besides the store wraps the write in whatever makes the
+/// two change together: `lev serve` holds the lock its listing reads under, so
+/// no reader sees the grant stored while the sign-in still shows as waiting.
+pub type Commit =
+    Arc<dyn Fn(&mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<()> + Send + Sync>;
+
+/// The [`Commit`] for a caller with nothing else to keep in step: it runs the
+/// write and returns what it returned.
+#[must_use]
+pub fn commit_directly() -> Commit {
+    Arc::new(|write| write())
+}
+
 /// Everything the flow needs that a test would rather supply itself.
 pub struct LoginEnv {
     /// Which issuer, and how it wants to be asked.
@@ -52,6 +69,9 @@ pub struct LoginEnv {
     pub announce: Announce,
     /// The loopback ports to try, in order.
     pub ports: Vec<u16>,
+    /// How the store write is published. [`commit_directly`] outside
+    /// `lev serve`.
+    pub commit: Commit,
 }
 
 impl LoginEnv {
@@ -74,6 +94,7 @@ impl LoginEnv {
             issuer: profile.issuer.to_string(),
             announce,
             ports: profile.callback_ports.to_vec(),
+            commit: commit_directly(),
         }
     }
 }
@@ -245,15 +266,18 @@ pub async fn login(env: &LoginEnv) -> anyhow::Result<ProviderGrant> {
 
     // The store is a file and, under the keychain, an OS round trip per grant,
     // so it is read and written on the blocking pool.
-    let (path, store, stored) = (
+    let (path, store, stored, commit) = (
         env.store_path.clone(),
         env.credential_store.clone(),
         grant.clone(),
+        Arc::clone(&env.commit),
     );
     crate::blocking::blocking(move || {
-        let mut all = ProviderAuthStore::load_with(&path, store.as_deref())?;
-        all.set(profile.provider, stored);
-        all.save_with(&path, store.as_deref())
+        commit(&mut || {
+            let mut all = ProviderAuthStore::load_with(&path, store.as_deref())?;
+            all.set(profile.provider, stored.clone());
+            all.save_with(&path, store.as_deref())
+        })
     })
     .await?;
 

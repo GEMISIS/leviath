@@ -214,6 +214,7 @@ async fn a_provider_that_does_not_sign_in_is_refused() {
         client: reqwest::Client::new(),
         issuer: Some("http://127.0.0.1:1".to_string()),
         ports: Some(vec![0]),
+        commit: oauth_login::commit_directly(),
     };
     let announce: oauth_login::Announce = Arc::new(|_: &str| {});
     let error = authorizer
@@ -239,6 +240,7 @@ async fn no_home_is_reported_before_a_browser_opens() {
         client: reqwest::Client::new(),
         issuer: Some("http://127.0.0.1:1".to_string()),
         ports: Some(vec![0]),
+        commit: oauth_login::commit_directly(),
     };
     let announce: oauth_login::Announce = Arc::new(|_: &str| {});
     let error = authorizer
@@ -264,6 +266,7 @@ async fn an_unreachable_keychain_stops_the_sign_in() {
         client: reqwest::Client::new(),
         issuer: Some("http://127.0.0.1:1".to_string()),
         ports: Some(vec![0]),
+        commit: oauth_login::commit_directly(),
     };
     let announce: oauth_login::Announce = Arc::new(|_: &str| {});
     let error = authorizer
@@ -306,6 +309,7 @@ async fn a_whole_sign_in_through_the_live_authorizer_reports_the_account() {
         client: reqwest::Client::new(),
         issuer: Some(issuer),
         ports: Some(vec![0]),
+        commit: oauth_login::commit_directly(),
     };
 
     let announced = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -356,6 +360,7 @@ async fn an_issuer_that_refuses_the_exchange_fails_the_sign_in() {
         // Nothing listens on port 1, so the code exchange cannot succeed.
         issuer: Some("http://127.0.0.1:1".to_string()),
         ports: Some(vec![0]),
+        commit: oauth_login::commit_directly(),
     };
     let announce: oauth_login::Announce = Arc::new(|_: &str| {});
 
@@ -380,6 +385,7 @@ async fn a_corrupt_grant_file_fails_the_sign_out() {
         client: reqwest::Client::new(),
         issuer: Some("http://127.0.0.1:1".to_string()),
         ports: Some(vec![0]),
+        commit: oauth_login::commit_directly(),
     };
     assert!(authorizer.sign_out("codex").await.is_err());
 }
@@ -423,6 +429,7 @@ async fn a_grok_sign_out_forgets_the_grant_when_the_revoke_fails() {
         client: reqwest::Client::new(),
         issuer: Some("http://127.0.0.1:9".to_string()),
         ports: None,
+        commit: oauth_login::commit_directly(),
     };
     authorizer.sign_out("grok").await.expect("signs out");
     let stored = leviath_providers::oauth::ProviderAuthStore::load(&store_path).unwrap();

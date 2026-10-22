@@ -35,9 +35,8 @@ fn admin(issuer: String, opener: leviath_mcp::BrowserOpener) -> ProviderAdmin {
         // The registered ports are the production value; a test that bound
         // them would fight whatever the developer has signed in.
         ports: Some(vec![0]),
-        in_flight: Arc::new(Mutex::new(HashMap::new())),
         now: fixed_now,
-        usage_url: None,
+        ..ProviderAdmin::default()
     }
 }
 
@@ -237,22 +236,29 @@ async fn a_login_returns_a_url_at_once_and_the_listing_settles() {
     assert!(url.contains("code_challenge"), "{url}");
 
     // The flow is still running behind the response, so the listing settles a
-    // moment later rather than immediately.
+    // moment later rather than immediately. Polled back to back, with no pause,
+    // so a listing taken between the grant landing and the waiting entry
+    // clearing is as likely as it can be made: every poll has to be one state
+    // or the other, never half of each.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut signed_in = false;
-    for _ in 0..100 {
+    while !signed_in && std::time::Instant::now() < deadline {
         let (_, body) = send(&app, "GET", "/api/providers").await;
-        if body["providers"][0]["signed_in"] == true {
-            assert_eq!(body["providers"][0]["account"], "someone@example.com");
-            assert!(
-                body["providers"][0]["signin"].is_null(),
-                "the finished flow left a state behind: {body}"
-            );
-            signed_in = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let row = &body["providers"][0];
+        signed_in = row["signed_in"] == true;
+        assert_eq!(
+            row["signin"].is_null(),
+            signed_in,
+            "a listing caught the sign-in half finished: {body}"
+        );
     }
     assert!(signed_in, "the sign-in never landed");
+    let (_, body) = send(&app, "GET", "/api/providers").await;
+    assert_eq!(body["providers"][0]["account"], "someone@example.com");
+    assert!(
+        body["providers"][0]["signin"].is_null(),
+        "the finished flow left a state behind: {body}"
+    );
 }
 
 /// A flow that cannot reach its issuer reports why, and leaves the reason on

@@ -112,6 +112,7 @@ pub(crate) fn env_for(
         // Port zero: the registered ports are the production value, and a test
         // that bound them would fight the developer's own Codex CLI.
         ports: vec![0],
+        commit: commit_directly(),
     }
 }
 
@@ -147,6 +148,39 @@ async fn a_whole_sign_in_stores_a_usable_grant() {
         .cloned()
         .expect("a stored grant");
     assert_eq!(stored.refresh_token, "rt-1");
+}
+
+/// The grant is written inside the caller's commit hook and nowhere else, so
+/// a caller that keeps a second record of the sign-in can change both in one
+/// step. `lev serve` relies on this to keep its listing consistent.
+#[tokio::test]
+async fn the_grant_is_stored_inside_the_commit_hook() {
+    let body = serde_json::json!({
+        "access_token": "at-1",
+        "refresh_token": "rt-1",
+        "id_token": id_token(),
+    });
+    let issuer = spawn_mock_server(200, "OK", body.to_string().into_bytes()).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let path = dir.path().join("provider-auth.json");
+
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mut env = env_for(&issuer, &dir, browser_that_redirects(Arc::clone(&seen)));
+    let (record, at) = (Arc::clone(&observed), path.clone());
+    env.commit = Arc::new(move |write| {
+        let before = at.exists();
+        let result = write();
+        record.lock().unwrap().push((before, at.exists()));
+        result
+    });
+    login(&env).await.expect("sign-in");
+
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![(false, true)],
+        "the hook ran once, and the grant landed during it"
+    );
 }
 
 #[tokio::test]
