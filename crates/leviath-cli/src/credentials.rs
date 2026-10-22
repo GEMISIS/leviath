@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use leviath_core::{CredentialStore, CredentialStoreKind};
-use leviath_mcp::AuthStore;
+use std::collections::HashMap;
+
+use leviath_mcp::{AuthStore, GrantTarget, MCPServerConfig};
 
 /// A [`CredentialStore`] backed by the OS credential store.
 ///
@@ -106,6 +108,19 @@ fn store_for_with(kind: CredentialStoreKind, probe: fn(&str) -> Result<(), Strin
 pub struct McpGrants {
     path: PathBuf,
     store: Result<Option<Arc<dyn CredentialStore>>, String>,
+    /// The URL the user's own `[[mcp_servers]]` gives each HTTP server, by
+    /// name. A grant saved before grants recorded their server is sent only
+    /// to the URL here for its name; see [`leviath_mcp::ServerAuth::is_for`].
+    configured: Arc<HashMap<String, String>>,
+}
+
+/// The URL each HTTP server in `servers` (the user's own `[[mcp_servers]]`) is
+/// reached at, by name.
+pub(crate) fn configured_urls(servers: &[MCPServerConfig]) -> HashMap<String, String> {
+    servers
+        .iter()
+        .filter_map(|s| Some((s.name.clone(), s.url.clone()?)))
+        .collect()
 }
 
 impl McpGrants {
@@ -119,6 +134,28 @@ impl McpGrants {
         Self {
             path,
             store: resolved.map(|store| store.map(Arc::from)),
+            configured: Arc::default(),
+        }
+    }
+
+    /// These grants, for connecting with `servers` as the user's own
+    /// `[[mcp_servers]]`.
+    pub fn configured(self, servers: &[MCPServerConfig]) -> Self {
+        self.with_configured_urls(Arc::new(configured_urls(servers)))
+    }
+
+    /// [`configured`](Self::configured) with the URLs already worked out.
+    pub(crate) fn with_configured_urls(mut self, urls: Arc<HashMap<String, String>>) -> Self {
+        self.configured = urls;
+        self
+    }
+
+    /// The server a grant for `server` would be sent to.
+    fn target<'a>(&'a self, server: &'a MCPServerConfig) -> GrantTarget<'a> {
+        GrantTarget {
+            name: &server.name,
+            url: server.url.as_deref().unwrap_or_default(),
+            configured_url: self.configured.get(&server.name).map(String::as_str),
         }
     }
 
@@ -226,23 +263,33 @@ impl McpGrants {
     }
 
     /// The `Authorization` header for `server`, its token refreshed first when
-    /// it has lapsed; `None` when the server holds no grant.
+    /// it has lapsed; `None` when the server holds no grant, or holds one that
+    /// was issued for a server at another URL.
     pub async fn authorization_header(
         &self,
-        server: &str,
+        server: &MCPServerConfig,
         now: u64,
     ) -> anyhow::Result<Option<(String, String)>> {
         let store = self.store()?;
+        // Only an HTTP server is sent a token. Asked about another, the grant
+        // filed under the same name would be reported as one for a different
+        // server, which a stdio server is not.
+        if !matches!(
+            server.resolve(),
+            Ok(leviath_mcp::ResolvedTransport::Http { .. })
+        ) {
+            return Ok(None);
+        }
         leviath_mcp::OAuthClient::new()
-            .authorization_header_with(server, &self.path, now, store)
+            .authorization_header_with(self.target(server), &self.path, now, store)
             .await
     }
 
     /// What renews `server`'s token on a 401 mid-session, through these same
     /// grants.
-    pub fn refresher(&self, server: &str) -> leviath_mcp::StoredTokenRefresher {
+    pub fn refresher(&self, server: &MCPServerConfig) -> leviath_mcp::StoredTokenRefresher {
         leviath_mcp::StoredTokenRefresher::new(
-            server,
+            self.target(server),
             self.path.clone(),
             self.store.clone().unwrap_or_default(),
         )
@@ -554,11 +601,16 @@ mod tests {
                 .is_err()
         );
         assert!(grants.forget("remote").is_err());
-        assert!(grants.authorization_header("remote", 0).await.is_err());
+        assert!(grants.authorization_header(&remote(), 0).await.is_err());
         assert!(!grants.path().exists(), "nothing was written");
         // A refresher is only made for a grant that was read; this one has
         // only the file to read.
-        let _ = grants.refresher("remote");
+        let _ = grants.refresher(&remote());
+    }
+
+    /// The HTTP server the grants in these tests are for.
+    fn remote() -> MCPServerConfig {
+        MCPServerConfig::http("remote", "https://remote.example.test/mcp")
     }
 
     /// The bearer comes from the stored grant, and a server with none has
@@ -566,9 +618,10 @@ mod tests {
     #[tokio::test]
     async fn the_bearer_is_the_stored_token() {
         let dir = tempfile::tempdir().unwrap();
-        let grants = McpGrants::at(dir.path().join("mcp-auth.json"), CredentialStoreKind::File);
+        let grants = McpGrants::at(dir.path().join("mcp-auth.json"), CredentialStoreKind::File)
+            .configured(&[remote()]);
         assert_eq!(
-            grants.authorization_header("remote", 0).await.unwrap(),
+            grants.authorization_header(&remote(), 0).await.unwrap(),
             None
         );
         grants
@@ -582,8 +635,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            grants.authorization_header("remote", 0).await.unwrap(),
+            grants.authorization_header(&remote(), 0).await.unwrap(),
             Some(("Authorization".to_string(), "Bearer live".to_string()))
+        );
+    }
+
+    /// A grant goes only to the server the user's config names: a server
+    /// declared elsewhere under the same name, at another URL, gets nothing,
+    /// and neither does a stdio server of that name.
+    #[tokio::test]
+    async fn the_bearer_goes_only_to_the_configured_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let grants = McpGrants::at(dir.path().join("mcp-auth.json"), CredentialStoreKind::File)
+            .configured(&[remote(), MCPServerConfig::stdio("local", "true", vec![])]);
+        for name in ["remote", "local"] {
+            grants
+                .set(
+                    name,
+                    leviath_mcp::ServerAuth {
+                        access_token: "live".to_string(),
+                        expires_at: u64::MAX,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let elsewhere = MCPServerConfig::http("remote", "http://127.0.0.1:9/mcp");
+        assert_eq!(
+            grants.authorization_header(&elsewhere, 0).await.unwrap(),
+            None
+        );
+        let stdio = MCPServerConfig::stdio("local", "true", vec![]);
+        assert_eq!(grants.authorization_header(&stdio, 0).await.unwrap(), None);
+
+        // Without its config the grant has nowhere it is known to belong.
+        let unconfigured = McpGrants::at(grants.path().to_path_buf(), CredentialStoreKind::File);
+        assert_eq!(
+            unconfigured
+                .authorization_header(&remote(), 0)
+                .await
+                .unwrap(),
+            None
+        );
+
+        // The configured server gets it, and the grant is bound to it.
+        assert!(
+            grants
+                .authorization_header(&remote(), 0)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            grants.load().unwrap().get("remote").unwrap().server_url,
+            "https://remote.example.test/mcp"
         );
     }
 

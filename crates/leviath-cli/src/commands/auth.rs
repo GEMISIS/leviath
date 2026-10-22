@@ -1307,6 +1307,7 @@ mod tests {
         store.set(
             server,
             leviath_mcp::ServerAuth {
+                server_url: String::new(),
                 resource: "https://example.test/mcp".to_string(),
                 issuer: "https://example.test".to_string(),
                 authorization_endpoint: "https://example.test/authorize".to_string(),

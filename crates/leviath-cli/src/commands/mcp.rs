@@ -228,7 +228,11 @@ async fn login(name: &str, env: &McpEnv) -> anyhow::Result<()> {
 
     let store = env.grants.load()?;
     // Reuse a prior registration if we have one, so re-login doesn't re-register.
-    let reuse = store.get(name).map(|a| a.client_id.clone());
+    // Only one made with this server: another server's authorization server
+    // never issued that client id.
+    let reuse = store
+        .get_for(name, &url, Some(&url))
+        .map(|a| a.client_id.clone());
     let outcome = OAuthClient::new()
         .login(
             &url,
@@ -278,7 +282,12 @@ fn remove_server(remove: RemoveArgs, env: &McpEnv) -> anyhow::Result<()> {
 async fn test(name: &str, env: &McpEnv) -> anyhow::Result<()> {
     let config = Config::load_from_path(&env.config_path)?;
     let server = find_server(&config, name)?;
-    let auth_header = env.grants.authorization_header(name, env.now).await?;
+    let auth_header = env
+        .grants
+        .clone()
+        .configured(&config.mcp_servers)
+        .authorization_header(server, env.now)
+        .await?;
     let tools = connect_and_list(
         server,
         auth_header,
@@ -416,14 +425,12 @@ impl ServerRow {
 
 /// A one-word description of a server's auth state, for display.
 fn auth_status(server: &MCPServerConfig, store: &AuthStore, now: u64) -> String {
-    let is_http = matches!(
-        server.resolve(),
-        Ok(leviath_mcp::ResolvedTransport::Http { .. })
-    );
-    if !is_http {
+    let Ok(leviath_mcp::ResolvedTransport::Http { url, .. }) = server.resolve() else {
         return "n/a".to_string();
-    }
-    match store.get(&server.name) {
+    };
+    // A grant issued for this name at another URL is not this server's: it is
+    // never sent here, so the server reads as not logged in.
+    match store.get_for(&server.name, url, Some(url)) {
         Some(auth) if auth.is_expired_at(now) => "expired".to_string(),
         Some(_) => "authenticated".to_string(),
         // A configured `Authorization` header is a credential too. Calling it

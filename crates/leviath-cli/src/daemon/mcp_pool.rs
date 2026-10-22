@@ -68,6 +68,11 @@ struct PoolSecurity {
     credential_store: leviath_core::CredentialStoreKind,
     /// `[security] allow_env_vars`.
     allow_env_vars: Vec<String>,
+    /// The URL each global `[[mcp_servers]]` HTTP entry is reached at, by
+    /// name: where a grant saved before grants recorded their server may go.
+    /// A blueprint's server of the same name at another URL is not that
+    /// server, and is sent no grant.
+    configured_urls: Arc<HashMap<String, String>>,
 }
 
 /// The per-agent MCP servers one run holds open, kept on the run's entity.
@@ -147,6 +152,7 @@ impl McpPool {
             security: StdMutex::new(PoolSecurity {
                 credential_store: leviath_core::CredentialStoreKind::default(),
                 allow_env_vars: Vec::new(),
+                configured_urls: Arc::default(),
             }),
             leases: StdMutex::new(LeaseTable::default()),
             idle_disconnect: std::time::Duration::from_secs(DEFAULT_MCP_IDLE_DISCONNECT_SECS),
@@ -191,6 +197,16 @@ impl McpPool {
         security
             .allow_env_vars
             .clone_from(&config.security.allow_env_vars);
+        security.configured_urls =
+            Arc::new(crate::credentials::configured_urls(&config.mcp_servers));
+    }
+
+    /// Take `servers` as the global `[[mcp_servers]]`, for deciding which
+    /// server a stored grant belongs to.
+    pub(crate) fn with_configured_servers(self, servers: &[MCPServerConfig]) -> Self {
+        self.lock_security().configured_urls =
+            Arc::new(crate::credentials::configured_urls(servers));
+        self
     }
 
     fn lock_security(&self) -> std::sync::MutexGuard<'_, PoolSecurity> {
@@ -238,6 +254,7 @@ impl McpPool {
             Self::new(shared_mcp, reserved)
                 .with_credential_store(credential_store)
                 .with_env_allowlist(allow_env_vars)
+                .with_configured_servers(config_servers)
                 .with_idle_disconnect_secs(idle_disconnect_secs),
         );
         for server in config_servers {
@@ -557,11 +574,15 @@ impl McpPool {
         }
         // Read out before the connect: both sit behind a `std` mutex, and the
         // connect awaits.
-        let (store_kind, allow_env) = {
+        let (store_kind, allow_env, configured_urls) = {
             let security = self.lock_security();
-            (security.credential_store, security.allow_env_vars.clone())
+            (
+                security.credential_store,
+                security.allow_env_vars.clone(),
+                security.configured_urls.clone(),
+            )
         };
-        let grants = crate::tools::agent_grants(store_kind);
+        let grants = crate::tools::agent_grants(store_kind).with_configured_urls(configured_urls);
         match crate::tools::connect_for_agent(config, &grants, &allow_env).await {
             Ok(client) => {
                 // Under the signature, unpublished: only a run that declared
