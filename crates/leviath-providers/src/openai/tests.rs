@@ -730,3 +730,33 @@ async fn a_gpt_audio_stage_declaring_audio_output_speaks_through_chat_completion
     let body = sent_json(&bodies.lock().unwrap()[0]);
     assert_eq!(body["modalities"], serde_json::json!(["text", "audio"]));
 }
+
+/// A `gpt-audio` model that refuses a temperature is asked again without it,
+/// and remembered, as on the ordinary route.
+#[tokio::test]
+async fn a_gpt_audio_turn_retries_without_a_temperature_the_api_refuses() {
+    let refusal = serde_json::json!({ "error": {
+        "message": "Unsupported parameter: 'temperature' is not supported with this model.",
+        "type": "invalid_request_error" } });
+    let reply = serde_json::json!({
+        "choices": [{ "message": { "audio": { "data": "SUQz" } }, "finish_reason": "stop" }]
+    });
+    let (url, bodies) = spawn_mock_sequence(vec![
+        (400, "Bad Request", refusal.to_string().into_bytes()),
+        (200, "OK", reply.to_string().into_bytes()),
+    ])
+    .await;
+    let provider = provider_with_url(url);
+    let request = InferenceRequest {
+        model: "gpt-audio".into(),
+        temperature: 0.7,
+        extra: serde_json::json!({ "output_mimes": ["audio/mpeg"] }),
+        ..simple_request()
+    };
+    let spoken = provider.infer(&request).await.expect("audio");
+    assert_eq!(spoken.parts.len(), 1);
+    let sent = bodies.lock().unwrap().clone();
+    assert!(sent[0].contains("temperature"));
+    assert!(!sent[1].contains("temperature"));
+    assert!(provider.temperature_is_unsupported("gpt-audio"));
+}

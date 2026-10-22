@@ -16,37 +16,87 @@ pub(crate) enum LoopTrip {
 /// What the loop guard has seen in a stage.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LoopGuard {
-    /// How many times each distinct tool call (name and arguments) has been
-    /// requested in this stage.
-    pub repeats: std::collections::HashMap<String, usize>,
-    /// Whether the guard has already nudged this stage. It nudges once.
+    /// A hash of the last batch of calls and what they returned, while the
+    /// batches since the last different one have all been alike.
+    pub last: Option<u64>,
+    /// How many batches in a row were that batch.
+    pub streak: usize,
+    /// Whether the guard has already nudged this stage. It nudges once, and
+    /// only counts a nudge that was delivered.
     pub nudged: bool,
-    /// What it found in the last reply, waiting for the next `ReadyToInfer`
+    /// What it found in the last batch, waiting for the next `ReadyToInfer`
     /// tick to act on: the nudge goes in after the tool results, never between
     /// a call and its result.
     pub trip: LoopTrip,
 }
 
-/// How many times the same tool call (same tool, same arguments) may be made in
-/// one stage before the model is nudged to stop. One more repeat after the
-/// nudge ends the stage.
+/// How many batches in a row may be the same calls with the same results
+/// before the model is nudged to stop. One more after the nudge ends the stage.
 pub(crate) const LOOP_REPEAT_LIMIT: usize = 3;
 
-/// Count a requested call and set [`LoopGuard::trip`] when it has been
-/// made [`LOOP_REPEAT_LIMIT`] times (nudge) or once more after the nudge (stuck).
-pub(crate) fn record_call_repeat(guard: &mut LoopGuard, call: &crate::components::ToolCall) {
-    let key = format!("{}\u{0}{}", call.name, call.arguments);
-    let count = guard.repeats.entry(key).or_insert(0);
-    *count += 1;
-    let count = *count;
-    if guard.nudged && count > LOOP_REPEAT_LIMIT {
-        guard.trip = LoopTrip::Stuck(format!(
-            "`{}` was called {count} times with identical arguments",
-            call.name
-        ));
-    } else if !guard.nudged && count >= LOOP_REPEAT_LIMIT {
-        guard.nudged = true;
-        guard.trip = LoopTrip::Nudge(call.name.clone());
+/// Tools whose repeated, identical call is the point: waiting on another run,
+/// polling a status, and the fan-out retries a stage makes by design.
+fn polls(name: &str) -> bool {
+    matches!(name, "wait_for_agent" | "fan_out")
+        || name.starts_with("wait_")
+        || name.ends_with("_status")
+        || name.contains("poll")
+}
+
+impl LoopGuard {
+    /// Look at one batch of tool calls and what they returned.
+    ///
+    /// Only a loop is counted: the same calls with the same results, batch
+    /// after batch. Any different batch starts the count again, and so does
+    /// a batch that polls or that names a tool able to change files, since
+    /// the same command run after an edit is not the same question. Calls
+    /// repeated inside one batch are one call. Sets [`Self::trip`] when the
+    /// streak reaches [`LOOP_REPEAT_LIMIT`] (nudge) or goes on after the
+    /// nudge was delivered (stuck).
+    pub(crate) fn observe(
+        &mut self,
+        calls: &[crate::components::ToolCall],
+        results: &[crate::tool_bridge::ToolResult],
+        modifying: &[String],
+    ) {
+        use std::hash::{Hash, Hasher};
+        let exempt = calls.iter().any(|c| {
+            let name = leviath_tools::canonical_tool_name(&c.name);
+            polls(name) || modifying.iter().any(|m| m == name)
+        });
+        if calls.is_empty() || exempt {
+            self.last = None;
+            self.streak = 0;
+            return;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for (call, (_id, result)) in calls.iter().zip(results.iter()) {
+            let one = (
+                call.name.as_str(),
+                call.arguments.to_string(),
+                result.as_str(),
+            );
+            if !seen.contains(&one) {
+                one.hash(&mut hasher);
+                seen.insert(one);
+            }
+        }
+        let batch = hasher.finish();
+        self.streak = match self.last == Some(batch) {
+            true => self.streak + 1,
+            false => 1,
+        };
+        self.last = Some(batch);
+        let name = calls[0].name.as_str();
+        if self.nudged && self.streak > LOOP_REPEAT_LIMIT {
+            self.trip = LoopTrip::Stuck(format!(
+                "`{name}` was called {} times in a row with identical arguments and results",
+                self.streak
+            ));
+        } else if !self.nudged && self.streak == LOOP_REPEAT_LIMIT {
+            self.trip = LoopTrip::Nudge(name.to_string());
+        }
     }
 }
 

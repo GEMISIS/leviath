@@ -643,6 +643,17 @@ fn stage_parameters_reach_the_body() {
 }
 
 #[test]
+fn the_runtimes_media_hints_are_not_sent_as_parameters() {
+    let mut req = request(vec![], vec![user("go")]);
+    req.extra =
+        json!({ "top_p": 0.5, "prompt_regions": ["brief"], "output_mimes": ["audio/mpeg"] });
+    let body = build_default(&req);
+    assert_eq!(body["top_p"], json!(0.5));
+    assert!(body.get("prompt_regions").is_none(), "{body}");
+    assert!(body.get("output_mimes").is_none(), "{body}");
+}
+
+#[test]
 fn a_stage_cannot_smuggle_a_rejected_parameter_through_its_parameters() {
     // Both are `400 Unsupported parameter` on this route, so a stage that set
     // one would fail every request rather than have it quietly ignored.

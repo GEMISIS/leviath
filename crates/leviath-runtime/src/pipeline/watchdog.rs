@@ -179,8 +179,10 @@ pub(crate) fn enforce_max_iterations(
         match std::mem::take(&mut progress.loop_guard.trip) {
             LoopTrip::None => {}
             LoopTrip::Nudge(tool) => {
+                // Counted as given only once it is in context.
                 if let Some(window) = window.as_mut() {
                     inject_system_nudge(window, &loop_nudge(&tool));
+                    progress.loop_guard.nudged = true;
                 }
             }
             LoopTrip::Stuck(reason) => {

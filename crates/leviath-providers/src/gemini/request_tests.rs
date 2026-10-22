@@ -195,6 +195,17 @@ fn parts_go_by_uri_when_uploaded_and_by_bytes_otherwise() {
 }
 
 #[test]
+fn the_runtimes_media_hints_are_not_sent_as_parameters() {
+    let mut req = request(vec![message("user", MessageContent::Text("hi".into()))]);
+    req.extra =
+        json!({ "top_p": 0.5, "prompt_regions": ["brief"], "output_mimes": ["audio/mpeg"] });
+    let body = build(&req, true);
+    assert_eq!(body["generation_config"]["top_p"], 0.5);
+    assert!(body.get("prompt_regions").is_none(), "{body}");
+    assert!(body.get("output_mimes").is_none(), "{body}");
+}
+
+#[test]
 fn a_stages_parameters_land_where_the_route_reads_them() {
     let mut req = request(vec![message("user", MessageContent::Text("hi".into()))]);
     req.extra = json!({

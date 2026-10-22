@@ -163,7 +163,7 @@ fn chat_audio_type(format: &str) -> Option<&'static str> {
         "wav" => Some("audio/wav"),
         "flac" => Some("audio/flac"),
         "opus" => Some("audio/ogg"),
-        "pcm16" => Some("audio/L16"),
+        "pcm16" => Some("audio/l16"),
         _ => None,
     }
 }
@@ -181,6 +181,7 @@ fn chat_audio_type(format: &str) -> Option<&'static str> {
 pub(crate) async fn chat_audio(
     endpoint: &Endpoint,
     request: &InferenceRequest,
+    send_temperature: bool,
 ) -> Result<InferenceResponse> {
     use base64::Engine as _;
     let format = media::extra_str(request, "audio_format").unwrap_or_else(|| "mp3".to_string());
@@ -200,10 +201,20 @@ pub(crate) async fn chat_audio(
         }
         fields.remove("voice");
         fields.remove("audio_format");
+        // A model that takes no temperature is sent none, as on the ordinary route.
+        if !send_temperature {
+            fields.remove("temperature");
+        }
         fields.insert("modalities".into(), json!(["text", "audio"]));
         fields.insert("audio".into(), json!({ "voice": voice, "format": format }));
     }
-    let response = endpoint.post_json("/chat/completions", &body).await?;
+    let url = endpoint.url("/chat/completions");
+    let timeout = request.request_timeout_secs;
+    let response = endpoint
+        .send(|client| {
+            crate::provider::apply_request_timeout(client.post(&url).json(&body), timeout)
+        })
+        .await?;
     let response =
         crate::provider::check_http_response(response, endpoint.rate_limiter.as_ref()).await?;
     let reply: Value = response
@@ -211,9 +222,24 @@ pub(crate) async fn chat_audio(
         .await
         .map_err(|e| ProviderError::InvalidResponse(format!("unreadable audio reply: {e}")))?;
     let mut parsed = crate::openai_compat::parse_openai_response(&reply)?;
-    let audio = reply.pointer("/choices/0/message/audio");
+    let message = reply.pointer("/choices/0/message");
+    let audio = message.and_then(|m| m.get("audio"));
     let data = audio.and_then(|a| a.get("data")).and_then(Value::as_str);
     let Some(data) = data else {
+        // A turn can answer without speaking: it called a tool, or declined.
+        // That is the model's reply, and the stage decides what it is worth.
+        let refusal = message
+            .and_then(|m| m.get("refusal"))
+            .and_then(Value::as_str)
+            .filter(|r| !r.trim().is_empty());
+        if parsed.content.trim().is_empty()
+            && let Some(refusal) = refusal
+        {
+            parsed.content = refusal.to_string();
+        }
+        if !parsed.tool_calls.is_empty() || !parsed.content.trim().is_empty() {
+            return Ok(parsed);
+        }
         return Err(ProviderError::InvalidResponse(format!(
             "{} answered without audio although the stage asked for it",
             request.model

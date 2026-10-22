@@ -573,6 +573,9 @@ pub(crate) fn record_modifications(
 ) {
     let mut progress = progress;
     let mut flags = flags;
+    if let Some(progress) = progress.as_mut() {
+        progress.loop_guard.observe(tool_calls, merged, modifying);
+    }
     for (call, (_id, result)) in tool_calls.iter().zip(merged.iter()) {
         let canonical = leviath_tools::canonical_tool_name(&call.name);
         if !modifying.iter().any(|t| t == canonical) {

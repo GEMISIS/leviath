@@ -134,6 +134,10 @@ pub fn build(request: &InferenceRequest, dialect: &Dialect, settings: &Settings<
     // who named a field wins over the defaults above.
     if let Some(extra) = request.extra.as_object() {
         for (key, value) in extra {
+            // The runtime's hints to media providers are not model parameters.
+            if crate::provider::RUNTIME_EXTRA_KEYS.contains(&key.as_str()) {
+                continue;
+            }
             body.insert(key.clone(), value.clone());
         }
     }
