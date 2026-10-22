@@ -11,6 +11,7 @@ use leviath_runtime::state::journal::CallKind;
 use leviath_runtime::state::{Change, RunEvent as CoreEvent, StateDelta as CoreDelta};
 
 use super::super::super::scalars::{BigInt, Timestamp};
+use super::super::manifest::region::RegionContinuePolicy;
 use super::big;
 use super::context::{ContextDiff, StateToolCall};
 use super::journal::{
@@ -557,6 +558,57 @@ pub(crate) struct LogStep {
     pub(crate) line: String,
 }
 
+/// A finished run was taken up again with a new message, and a new segment
+/// of it started.
+#[mirror(no_filter)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct ContinuedStep {
+    /// The segment that started, counted from 1.
+    pub(crate) segment: i32,
+    /// The stage it started in.
+    pub(crate) stage: String,
+    /// The run it was forked from, for a fork's first segment. Null for a
+    /// run continued in place.
+    pub(crate) forked_from: Option<ID>,
+    /// The last step of the segment before it. Null for a fork's first
+    /// segment, which has none.
+    pub(crate) previous_seq: Option<i32>,
+    /// What each region of the window did, in window order.
+    pub(crate) regions: Vec<RegionContinued>,
+}
+
+/// One region of a continued run, and what it did.
+#[mirror(no_filter)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct RegionContinued {
+    /// The region.
+    pub(crate) region: String,
+    /// What it did.
+    pub(crate) policy: RegionContinuePolicy,
+}
+
+impl From<&leviath_runtime::state::ContinuedState> for ContinuedStep {
+    fn from(c: &leviath_runtime::state::ContinuedState) -> Self {
+        Self {
+            segment: super::saturating(c.segment),
+            stage: c.stage.to_string(),
+            forked_from: c.forked_from.as_ref().map(|r| ID(r.to_string())),
+            previous_seq: c
+                .previous
+                .as_ref()
+                .map(|p| i32::try_from(p.seq).unwrap_or(i32::MAX)),
+            regions: c
+                .regions
+                .iter()
+                .map(|(region, policy)| RegionContinued {
+                    region: region.clone(),
+                    policy: RegionContinuePolicy::from(*policy),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Something that happened during a step that the state alone does not show.
 #[derive(Debug, Union)]
 pub(crate) enum StepEvent {
@@ -590,6 +642,8 @@ pub(crate) enum StepEvent {
     ContextNoted(ContextNotedStep),
     /// The run took an edge.
     Transition(TransitionStep),
+    /// A finished run was continued, and a new segment started.
+    Continued(ContinuedStep),
 }
 
 impl From<&CoreEvent> for StepEvent {
@@ -683,6 +737,7 @@ impl From<&CoreEvent> for StepEvent {
                 Self::ContextCommitted(ContextCommittedStep::from(&**commit))
             }
             CoreEvent::ContextNoted(note) => Self::ContextNoted(ContextNotedStep::from(note)),
+            CoreEvent::Continued(c) => Self::Continued(ContinuedStep::from(&**c)),
         }
     }
 }

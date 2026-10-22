@@ -153,6 +153,7 @@ pub(crate) fn region(name: &str, kind: leviath_core::RegionKind, tokens: u32) ->
         volatility: Default::default(),
         seed: None,
         accepts: Vec::new(),
+        on_continue: None,
     }
 }
 

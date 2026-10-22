@@ -107,6 +107,19 @@ pub struct WorldHost {
     /// Page-ins that finished off the loop, waiting to be placed.
     paged_tx: UnboundedSender<paging::Paged>,
     paged_rx: UnboundedReceiver<paging::Paged>,
+    /// What prepares a continuation off the loop (see `host::continuing`).
+    continuer: Option<Continuer>,
+    /// Runs a continuation is under way for, each with the ops that name it
+    /// and wait for the continuation to land.
+    continuing: HashMap<String, Vec<paging::Deferred>>,
+    /// Continuations of runs that have finished and are still in the world,
+    /// waiting for each run to be unloaded.
+    after_unload: HashMap<String, Vec<(ContinueRequest, continuing::ContinueReply)>>,
+    /// Continuations sent off the loop and not yet landed.
+    continuations: usize,
+    /// Continuations that finished off the loop, waiting to be placed.
+    continued_tx: UnboundedSender<continuing::ContinueLanded>,
+    continued_rx: UnboundedReceiver<continuing::ContinueLanded>,
 }
 
 /// Consecutive healthy re-drives (no dead cycles, empty tool queue) before the
@@ -185,6 +198,7 @@ impl WorldHost {
         let (subagent_tx, subagent_rx) = tokio::sync::mpsc::unbounded_channel();
         let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
         let (paged_tx, paged_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (continued_tx, continued_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             world,
             by_run_id: HashMap::new(),
@@ -209,6 +223,12 @@ impl WorldHost {
             paged: HashMap::new(),
             paged_tx,
             paged_rx,
+            continuer: None,
+            continuing: HashMap::new(),
+            after_unload: HashMap::new(),
+            continuations: 0,
+            continued_tx,
+            continued_rx,
             subagent_tx,
             subagent_rx,
             redrive: DEFAULT_REDRIVE_INTERVAL,
@@ -233,6 +253,10 @@ impl WorldHost {
 // its own `impl WorldHost` block rather than a trait or a free function.
 mod claims;
 pub use claims::{HeldKey, REFUSED_AT_START, held_keys, mark_refused};
+mod continuing;
+pub use continuing::{
+    ContinueJob, ContinueRequest, ContinueTask, Continued, Continuer, LaneWritten, PlaceContinued,
+};
 mod emit;
 mod paging;
 pub use paging::{PageJob, PlacePage};
@@ -491,27 +515,6 @@ impl WorldHost {
             .map(|s| s.status.clone())
     }
 
-    /// Why a message to `agent_id`, a run with `status` (`None` for no such
-    /// run), would never be read, when it would not. A message is only said
-    /// to be delivered when a run will read it.
-    fn undeliverable(agent_id: &str, status: Option<&AgentStatus>) -> Option<String> {
-        match status {
-            None => Some(format!(
-                "no run '{agent_id}' is here to read a message; `lev ps --all` lists the runs"
-            )),
-            Some(AgentStatus::Complete) => Some(format!(
-                "run '{agent_id}' has finished, so it reads no more messages; start a new run instead"
-            )),
-            Some(AgentStatus::Error { .. }) => Some(format!(
-                "run '{agent_id}' has failed, so it reads no more messages; start a new run instead"
-            )),
-            Some(AgentStatus::Cancelled) => Some(format!(
-                "run '{agent_id}' was cancelled; `lev resume {agent_id}` first, then send the message"
-            )),
-            Some(_) => None,
-        }
-    }
-
     /// End the conversation of the interactive stage `run_id` is in, paging
     /// the run in first when it was unloaded. `Ok(true)` once it is ended;
     /// `Err` says why there is none to end.
@@ -725,8 +728,27 @@ impl WorldHost {
                     }
                     Ok(_) | Err(NotPlaced::Missing) => self.status_in_world(&agent_id),
                 };
-                if let Some(why) = Self::undeliverable(&agent_id, status.as_ref()) {
-                    let _ = reply.send(Err(why));
+                // A finished run is continued by the message: it goes back to
+                // work in a new segment, with the context it kept.
+                if let Some(
+                    AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled,
+                ) = status
+                {
+                    let request = ContinueRequest {
+                        message: crate::continuation::ContinueMessage {
+                            text: content,
+                            region: target_region,
+                            parts,
+                        },
+                        fork: false,
+                    };
+                    let reply = continuing::ContinueReply::Message(reply);
+                    return self.continue_run(agent_id, request, reply);
+                }
+                if status.is_none() {
+                    let _ = reply.send(Err(format!(
+                        "no run '{agent_id}' is here to read a message; `lev ps --all` lists the runs"
+                    )));
                     return;
                 }
                 let ok = self
@@ -741,6 +763,11 @@ impl WorldHost {
                     .is_ok();
                 let _ = reply.send(Ok(ok));
             }
+            ControlOp::Continue {
+                run_id,
+                request,
+                reply,
+            } => self.continue_run(run_id, request, continuing::ContinueReply::Continue(reply)),
             ControlOp::EndConversation { run_id, reply } => {
                 let _ = reply.send(self.end_conversation(&run_id));
             }
@@ -804,7 +831,7 @@ impl WorldHost {
         redrive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut closed = false;
         'serve: loop {
-            if closed && self.starting == 0 && self.paging.is_empty() {
+            if closed && self.starting == 0 && self.paging.is_empty() && self.continuations == 0 {
                 break 'serve;
             }
             self.world.run_to_fixed_point();
@@ -835,6 +862,8 @@ impl WorldHost {
                 Some(sub) = self.subagent_rx.recv() => self.handle_subagent(sub),
                 // And a `paged_tx`.
                 Some(paged) = self.paged_rx.recv() => self.landed_page(paged),
+                // And a `continued_tx`.
+                Some(landed) = self.continued_rx.recv() => self.landed_continuation(landed),
             }
         }
         // Shutting down: drain the persistence lane before the world is dropped.

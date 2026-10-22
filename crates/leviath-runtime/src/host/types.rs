@@ -560,6 +560,19 @@ pub enum ControlOp {
         /// Reply channel.
         reply: oneshot::Sender<Result<bool, String>>,
     },
+    /// Continue a finished run with a new message, in place or as a new run
+    /// forked from it (see [`crate::continuation`]). Reply is the segment
+    /// that started, or every reason it did not: a `Conflict` for a run that
+    /// has not finished or that another request is continuing, `Missing` for
+    /// no such run.
+    Continue {
+        /// The finished run.
+        run_id: String,
+        /// The message, and whether to fork.
+        request: super::ContinueRequest,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<super::Continued, SpawnIssues>>,
+    },
     /// End the conversation of the interactive stage a run is in: a stage
     /// waiting for its next message moves on now, through its ordinary
     /// transition, and one mid-turn moves on after its reply. Reply is `Err`

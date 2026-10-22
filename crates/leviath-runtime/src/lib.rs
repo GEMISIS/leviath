@@ -90,6 +90,7 @@ pub mod components;
 pub mod context_setup;
 pub(crate) mod context_tools;
 pub(crate) mod context_transform;
+pub mod continuation;
 #[cfg(feature = "control-socket")]
 pub mod control_socket;
 pub mod custom_region;

@@ -51,7 +51,7 @@ pub(crate) struct Recovered {
 /// Convert the old run in `dir` (every one under it, with `all`), looking its
 /// stages up the way a new run of its graph would be resolved here, and say
 /// what it did the way an upgrade at start does.
-fn convert_old(starter: &DaemonStarter, dir: &Path, all: bool) {
+pub(crate) fn convert_old(starter: &DaemonStarter, dir: &Path, all: bool) {
     let envs = |graph: &leviath_runtime::spec::graph::RunGraph| {
         starter.env_for_graph(graph, starter.config.in_force())
     };
@@ -71,7 +71,7 @@ fn convert_old(starter: &DaemonStarter, dir: &Path, all: bool) {
 /// converted from an earlier release without its blueprint. A run file that
 /// does not read is an error saying why, said in the log too; nothing
 /// writes to it.
-fn read_run(dir: &Path) -> Result<Option<Resumable>, String> {
+pub(crate) fn read_run(dir: &Path) -> Result<Option<Resumable>, String> {
     let run = match leviath_runtime::restore::read_for_resume(dir) {
         Ok(run) => run,
         Err(_) if !crate::runstate::run_file::is_run_file(dir) => return Ok(None),

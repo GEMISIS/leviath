@@ -151,6 +151,7 @@ The graph-wide settings sit directly under `[graph]`. Everything has a default e
 | Key | Default | What it does |
 |---|---|---|
 | `entry` | the first stage | The stage a run starts in. |
+| `continue_at` | `entry` | The stage a finished run goes back to when it is sent a new message. See [continuing a finished run](/docs/context#continuing-a-finished-run). |
 | `title`, `description` | from `[blueprint]` | What runs of it are called and do. |
 | `max_child_depth` | the operator's | How deep a tree of child runs may grow. |
 | `tool_permissions` | none | `allow`, `ask` or `deny` per tool, for every stage. |

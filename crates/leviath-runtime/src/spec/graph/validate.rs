@@ -27,6 +27,7 @@ impl RunGraph {
         v.inputs();
         v.graph_refs();
         v.write_paths();
+        v.continuation();
         v.issues.into_result(())
     }
 }
@@ -534,6 +535,55 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// `continue_at` names a stage, and each region's `on_continue` can do
+    /// what it says: a region that reseeds has a seed, one that compacts may
+    /// be summarized by a compaction model the graph names, and a region
+    /// declared in more than one layout does not set two policies.
+    fn continuation(&mut self) {
+        if let Some(stage) = &self.g().continue_at {
+            self.need_stage(self.at.field("continue_at"), stage.as_str());
+        }
+        let graph = self.g();
+        let layouts = std::iter::once((&graph.layout, self.at.field("layout"))).chain(
+            graph.stages.iter().filter_map(|s| {
+                let at = self.at.field("stages").key(s.name.as_str()).field("layout");
+                s.layout.as_ref().map(|layout| (layout, at))
+            }),
+        );
+        let mut set: Vec<(&str, super::OnContinue)> = Vec::new();
+        let mut found = Vec::new();
+        for (layout, path) in layouts {
+            for (i, region) in layout.regions.iter().enumerate() {
+                let Some(policy) = region.on_continue else {
+                    continue;
+                };
+                let at = path.field("regions").index(i).field("on_continue");
+                found.extend(policy_issue(graph, region, policy, &at));
+                match set.iter().find(|(name, _)| *name == region.name.as_str()) {
+                    Some((_, first)) if *first != policy => found.push(
+                        SpawnIssue::new(
+                            at,
+                            IssueCode::Conflict,
+                            format!(
+                                "region \"{}\" is continued with \"{}\" in one layout and \"{}\" \
+                                 in another",
+                                region.name,
+                                first.label(),
+                                policy.label()
+                            ),
+                        )
+                        .hint("give the region one on_continue, or set it in one layout only"),
+                    ),
+                    Some(_) => {}
+                    None => set.push((region.name.as_str(), policy)),
+                }
+            }
+        }
+        for issue in found {
+            self.issues.push(issue);
+        }
+    }
+
     fn graph_refs(&mut self) {
         let all = self.all_regions();
         if let Some(tracking) = &self.g().file_tracking {
@@ -544,6 +594,46 @@ impl<'a> Validator<'a> {
             );
         }
     }
+}
+
+/// Why `region` cannot be continued with `policy`, at `at`, when it cannot.
+fn policy_issue(
+    graph: &RunGraph,
+    region: &super::RegionDef,
+    policy: super::OnContinue,
+    at: &SpecPath,
+) -> Option<SpawnIssue> {
+    use super::OnContinue;
+    let (code, message, hint) = match policy {
+        OnContinue::Reseed if region.seed.is_none() => (
+            IssueCode::Missing,
+            format!(
+                "region \"{}\" reseeds when its run is continued, but it has no seed",
+                region.name
+            ),
+            "give it a seed, or continue it with \"clear\"",
+        ),
+        OnContinue::Compact if !region.summarizable => (
+            IssueCode::Conflict,
+            format!(
+                "region \"{}\" is summarized when its run is continued, but it is declared \
+                 summarizable = false",
+                region.name
+            ),
+            "continue it with \"keep\" or \"clear\", or let it be summarized",
+        ),
+        OnContinue::Compact if graph.compaction.is_none() => (
+            IssueCode::Missing,
+            format!(
+                "region \"{}\" is summarized when its run is continued, but the graph names no \
+                 compaction",
+                region.name
+            ),
+            "add a [graph.compaction] table; with no model it summarizes on the stage's own",
+        ),
+        _ => return None,
+    };
+    Some(SpawnIssue::new(at.clone(), code, message).hint(hint))
 }
 
 /// An issue at `at[i]` for each glob in `globs` that cannot be a write path.

@@ -73,22 +73,77 @@ pub(crate) fn deliver_messages(
             );
         }
         for msg in delivered {
-            let region = msg
-                .target_region
-                .clone()
-                .unwrap_or_else(|| "conversation".to_string());
-            if msg.parts.is_empty() {
-                let tokens = leviath_core::estimate_tokens(&msg.content);
-                let _ = window.add_typed_entry_caused(
-                    leviath_core::ContextCause::Message,
-                    &region,
-                    leviath_core::EntryKind::UserMessage,
-                    msg.content.clone(),
-                    tokens,
-                );
-                continue;
-            }
-            deliver_with_parts(&mut window, entity, &state.agent_id, &region, msg, &mime);
+            deliver_one(&mut window, entity, &state.agent_id, msg, &mime);
+        }
+    }
+}
+
+/// Write one message into `window`: into the region it names, or the
+/// conversation, with any files it carries beside its text.
+pub(crate) fn deliver_one(
+    window: &mut ContextWindow,
+    entity: Entity,
+    run_id: &str,
+    msg: AgentMessage,
+    mime: &crate::blob_store::MimeParams,
+) {
+    let region = msg
+        .target_region
+        .clone()
+        .unwrap_or_else(|| "conversation".to_string());
+    if msg.parts.is_empty() {
+        let tokens = leviath_core::estimate_tokens(&msg.content);
+        let _ = window.add_typed_entry_caused(
+            leviath_core::ContextCause::Message,
+            &region,
+            leviath_core::EntryKind::UserMessage,
+            msg.content.clone(),
+            tokens,
+        );
+        return;
+    }
+    deliver_with_parts(window, entity, run_id, &region, msg, mime);
+}
+
+/// What `deliver_continuation` selects: a run whose continuation is not
+/// waiting on a summary.
+type ContinuationQuery = (
+    Entity,
+    &'static AgentState,
+    &'static mut MessageInbox,
+    &'static mut ContextWindow,
+);
+
+/// Deliver the message that continued a finished run, once nothing the
+/// continuation asked to summarize is still being summarized: after the
+/// summary, so the summary does not swallow the message. Ahead of the
+/// request being built, so the stage's first turn answers it; whether the
+/// stage takes messages does not matter, since the message is what the
+/// segment is for.
+pub(crate) fn deliver_continuation(
+    mut agents: Query<
+        ContinuationQuery,
+        (
+            Without<super::PendingEdgeCompact>,
+            Without<super::AwaitingCompaction>,
+        ),
+    >,
+    mime: crate::blob_store::MimeParams,
+) {
+    crate::tick_scope::clear();
+    for (entity, state, mut inbox, mut window) in agents.iter_mut() {
+        crate::tick_scope::enter(entity);
+        // Read before taking, so a run with nothing waiting is not marked
+        // changed on every tick.
+        let waiting = inbox
+            .messages
+            .iter()
+            .any(|m| m.from == crate::components::FROM_CONTINUATION);
+        if !waiting {
+            continue;
+        }
+        for msg in inbox.take_continuation() {
+            deliver_one(&mut window, entity, &state.agent_id, msg, &mime);
         }
     }
 }

@@ -753,3 +753,98 @@ async fn the_open_asks_come_back_with_their_runs() {
     assert_eq!(open[0].0, "run-a");
     assert_eq!(open[0].1.prompt, "Ship it?");
 }
+
+/// A continuation the daemon takes comes back as the run going again, with
+/// the bus's number from before it was asked; one it refuses comes back with
+/// every reason; a daemon that cannot answer is an error of its own kind.
+#[tokio::test]
+async fn a_continuation_comes_back_as_the_daemon_answered_it() {
+    use super::{ContinueAsk, continue_run};
+    let ask = || ContinueAsk {
+        text: "again".into(),
+        fork: true,
+        ..Default::default()
+    };
+    let (control, _socket, _srv) = fake_daemon(|request| match request {
+        ControlRequest::Continue { run_id, fork, .. } => ControlResponse::Continued {
+            run_id: format!("{run_id}-new"),
+            segment: 1,
+            forked_from: fork.then_some(run_id),
+        },
+        _ => ControlResponse::Ok { ok: false },
+    });
+    let app = state(control, ServeLimits::default());
+    let Verdict::Accepted(continued) = continue_run(&app, "r", ask()).await.unwrap() else {
+        panic!("the daemon took it");
+    };
+    assert_eq!(continued.run_id, "r-new");
+    assert_eq!(continued.forked_from.as_deref(), Some("r"));
+
+    let issues: leviath_runtime::spec::issues::SpawnIssues = daemon_issue().into();
+    let refused = issues.clone();
+    let (control, _socket, _srv) = fake_daemon(move |_| ControlResponse::Rejected {
+        issues: refused.clone(),
+    });
+    let app = state(control, ServeLimits::default());
+    assert!(matches!(
+        continue_run(&app, "r", ask()).await.unwrap(),
+        Verdict::Rejected(got) if got == issues
+    ));
+
+    let answers = [
+        (
+            "unknown variant `continue`, expected one of ...",
+            "DaemonIncompatible",
+        ),
+        ("daemon is shutting down", "DaemonUnavailable"),
+    ];
+    for (message, kind) in answers {
+        let (control, _socket, _srv) = fake_daemon(move |_| ControlResponse::Error {
+            message: message.to_string(),
+        });
+        let app = state(control, ServeLimits::default());
+        let err = continue_run(&app, "r", ask()).await.unwrap_err();
+        assert!(format!("{err:?}").starts_with(kind), "{err:?}");
+    }
+    let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
+    let app = state(control, ServeLimits::default());
+    let err = continue_run(&app, "r", ask()).await.unwrap_err();
+    assert!(matches!(err, super::ServeError::Internal(_)), "{err:?}");
+    let app = state(no_daemon_client(), ServeLimits::default());
+    assert!(continue_run(&app, "r", ask()).await.is_err());
+}
+
+/// Each kind of refusal reads as the HTTP error that says it.
+#[test]
+fn a_refused_continuation_reads_as_the_error_that_says_why() {
+    use super::{ServeError, continue_refusal};
+    let at = |code: IssueCode, path: SpecPath| -> leviath_runtime::spec::issues::SpawnIssues {
+        SpawnIssue::new(path, code, "why").into()
+    };
+    let root = SpecPath::root;
+    let text = || SpecPath::root().field("text");
+    let cases = [
+        (at(IssueCode::Missing, root()), "NotFound"),
+        (at(IssueCode::Missing, text()), "BadRequest"),
+        (at(IssueCode::Unknown, text()), "BadRequest"),
+        (at(IssueCode::Invalid, text()), "BadRequest"),
+        (at(IssueCode::WrongType, text()), "BadRequest"),
+        (at(IssueCode::Unavailable, root()), "Unprocessable"),
+        (at(IssueCode::Changed, root()), "Unprocessable"),
+        (at(IssueCode::Unresolvable, root()), "Unprocessable"),
+        (at(IssueCode::Dangling, root()), "Unprocessable"),
+        (at(IssueCode::Conflict, root()), "Conflict"),
+        (at(IssueCode::NotAllowed, root()), "Conflict"),
+        (
+            leviath_runtime::spec::issues::SpawnIssues::new(),
+            "Conflict",
+        ),
+    ];
+    for (issues, kind) in cases {
+        let err: ServeError = continue_refusal(&issues);
+        assert!(
+            format!("{err:?}").starts_with(kind),
+            "{err:?} is not {kind}"
+        );
+    }
+}

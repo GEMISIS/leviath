@@ -334,6 +334,104 @@ pub(crate) async fn send_message(
     }
 }
 
+/// A finished run that went back to work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContinuedRun {
+    /// The run going again: the new run's id for a fork.
+    pub(crate) run_id: String,
+    /// The segment that started, counted from 1.
+    pub(crate) segment: u32,
+    /// The run it was forked from. `None` for a run continued in place.
+    pub(crate) forked_from: Option<String>,
+    /// The bus's number as it stood before the daemon was asked, so every
+    /// frame of the new segment is numbered above it.
+    pub(crate) seq: u64,
+}
+
+/// What continuing a finished run sends: the message, and whether to fork.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ContinueAsk {
+    /// What the message says.
+    pub(crate) text: String,
+    /// The region it goes to. `None` is the conversation.
+    pub(crate) region: Option<String>,
+    /// Files it carries.
+    pub(crate) parts: Vec<InboundPart>,
+    /// Start a new run from the finished one rather than continue it.
+    pub(crate) fork: bool,
+}
+
+/// How a daemon that predates `Continue` refuses it.
+const UNKNOWN_CONTINUE: &str = "unknown variant `continue`";
+
+/// Continue the finished run `run_id` with `ask`: in place, or as a new run
+/// forked from it.
+///
+/// `Ok(Rejected)` is a continuation the daemon refused, with every reason;
+/// `Err` is a daemon that could not answer.
+pub(crate) async fn continue_run(
+    state: &AppState,
+    run_id: &str,
+    ask: ContinueAsk,
+) -> Result<Verdict<ContinuedRun>, ServeError> {
+    let seq = super::super::events::latest_seq();
+    let reply = state
+        .control
+        .request(&ControlRequest::Continue {
+            run_id: run_id.to_string(),
+            text: ask.text,
+            region: ask.region,
+            parts: ask.parts,
+            fork: ask.fork,
+        })
+        .await;
+    match reply {
+        Ok(ControlResponse::Continued {
+            run_id,
+            segment,
+            forked_from,
+        }) => Ok(Verdict::Accepted(ContinuedRun {
+            run_id,
+            segment,
+            forked_from,
+            seq,
+        })),
+        Ok(ControlResponse::Rejected { issues }) => Ok(Verdict::Rejected(issues)),
+        // A daemon from before the request existed cannot read it at all.
+        Ok(ControlResponse::Error { message }) if message.contains(UNKNOWN_CONTINUE) => {
+            Err(ServeError::DaemonIncompatible(format!(
+                "the daemon is older than this server and cannot continue a run; restart it \
+                 with `lev daemon restart` ({message})"
+            )))
+        }
+        Ok(other) => Err(daemon_refusal(&other)),
+        Err(e) => Err(ServeError::from_daemon_io(&e)),
+    }
+}
+
+/// The HTTP error for a continuation refused with `issues`: no such run is a
+/// miss, a message that says nothing or names an unknown region is a bad
+/// request, a run that has not finished or is being continued already is a
+/// conflict, and one this machine cannot take back as it stands cannot be
+/// processed.
+pub(crate) fn continue_refusal(issues: &SpawnIssues) -> ServeError {
+    let message = leviath_runtime::continuation::refusal_text(issues);
+    let Some(first) = issues.0.first() else {
+        return ServeError::Conflict(message);
+    };
+    match first.code {
+        IssueCode::Missing if first.path == SpecPath::root() => ServeError::NotFound(message),
+        IssueCode::Missing | IssueCode::Unknown | IssueCode::Invalid | IssueCode::WrongType => {
+            ServeError::BadRequest(message)
+        }
+        IssueCode::Unavailable
+        | IssueCode::Changed
+        | IssueCode::Unresolvable
+        | IssueCode::Dangling => ServeError::Unprocessable(message),
+        _ => ServeError::Conflict(message),
+    }
+}
+
 /// A refusal because of the run a request names: a run held off this
 /// machine says what to put back, one with a record here (finished, failed,
 /// cancelled, or not in a state that takes the request) is there and refuses

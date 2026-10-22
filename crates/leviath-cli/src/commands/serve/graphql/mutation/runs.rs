@@ -165,7 +165,7 @@ where
 ///
 /// The daemon accepted the act, so the run exists: saying "not found" about a
 /// run that just moved would blame the caller for this server's problem.
-async fn read_meta(run_id: &str) -> Result<leviath_core::run_meta::RunMeta, ServeError> {
+pub(super) async fn read_meta(run_id: &str) -> Result<leviath_core::run_meta::RunMeta, ServeError> {
     let owned = run_id.to_string();
     let read = blocking(move || runstate::read_meta(&owned)).await;
     read.map_err(|e| {
@@ -176,7 +176,7 @@ async fn read_meta(run_id: &str) -> Result<leviath_core::run_meta::RunMeta, Serv
 }
 
 /// One run record as the object a client reads.
-fn run_of(meta: leviath_core::run_meta::RunMeta) -> Run {
+pub(super) fn run_of(meta: leviath_core::run_meta::RunMeta) -> Run {
     Run {
         meta: std::sync::Arc::new(meta),
         now: leviath_core::duration::now_secs(),
@@ -480,45 +480,54 @@ pub(crate) async fn cancel_runs(
     Ok(CancelRunsResult { runs, skipped })
 }
 
-/// Send a message to a run that is going.
+/// The files `listed` names inside the working directory of the run
+/// `run_id`, read as the parts of a message to it.
 ///
-/// Whether it lands is the daemon's call: a stage that declared
-/// `accepts_messages = false`, or a finished run, does not take one, and the
-/// refusal says that rather than claiming the run does not exist.
+/// Attachments are named inside the run's own working directory, so the
+/// record is read first for a request that sends any. Nothing has been asked
+/// of the daemon yet, so a record that is not there is a miss.
+pub(super) async fn message_parts(
+    state: &AppState,
+    run_id: &str,
+    listed: Option<Vec<AttachmentWrite>>,
+) -> Result<Vec<leviath_core::mime::InboundPart>, ServeError> {
+    let listed = listed.unwrap_or_default();
+    if listed.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The record and the files it leads to are read on the blocking pool.
+    let id = run_id.to_string();
+    let max_bytes = state.limits.request_limits.max_upload_bytes;
+    blocking(move || {
+        let meta = runstate::read_meta(&id).map_err(|_| {
+            ServeError::NotFound(format!(
+                "Run '{id}' has no working directory this server can read attachments from"
+            ))
+        })?;
+        parts_of(
+            listed,
+            std::path::Path::new(&meta.workdir),
+            &crate::commands::serve::core::attachments::FileBudget::new(max_bytes),
+        )
+    })
+    .await
+}
+
+/// Send a message to a run.
+///
+/// A run that is going reads it, unless its stage declared
+/// `accepts_messages = false`, and the refusal says so rather than claiming
+/// the run does not exist. A finished run is continued by it, as
+/// `continueRun` continues one.
 pub(crate) async fn send_message(
     ctx: &Context<'_>,
     request: SendMessageRequest,
 ) -> async_graphql::Result<SendMessageResult> {
     let state = ctx.data_unchecked::<AppState>();
     let run_id = request.run_id.to_string();
-    // Attachments are named inside the run's own working directory, so the
-    // record is read first for a request that sends any. Nothing has been
-    // asked of the daemon yet, so a record that is not there is a miss.
-    let listed = request.attachments.unwrap_or_default();
-    let parts = match listed.is_empty() {
-        true => Vec::new(),
-        false => {
-            // The record and the files it leads to are read on the blocking
-            // pool.
-            let id = run_id.clone();
-            let max_bytes = state.limits.request_limits.max_upload_bytes;
-            blocking(move || {
-                let meta = runstate::read_meta(&id).map_err(|_| {
-                    ServeError::NotFound(format!(
-                        "Run '{id}' has no working directory this server can read \
-                         attachments from"
-                    ))
-                })?;
-                parts_of(
-                    listed,
-                    std::path::Path::new(&meta.workdir),
-                    &crate::commands::serve::core::attachments::FileBudget::new(max_bytes),
-                )
-            })
-            .await
-            .gql()?
-        }
-    };
+    let parts = message_parts(state, &run_id, request.attachments)
+        .await
+        .gql()?;
     let region = request.region.map(|region| region.name);
     spawn_core::send_message(state, &run_id, request.text, region, parts)
         .await

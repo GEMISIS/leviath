@@ -334,6 +334,49 @@ accepts_messages = false   # hold messages until a later stage that accepts them
 > A message is delivered to at most one running agent by id. If nothing accepts it (no such live
 > agent), `lev msg` reports `no agent accepted the message`.
 
+## Continuing a finished run
+
+A message sent to a run that has finished (complete, failed or cancelled) continues it. The run
+goes back to the stage its blueprint names in `[graph] continue_at`, or its entry stage, and works
+on the message with the context its regions keep. Each region keeps, clears, summarizes or reseeds
+what it held by its [`on_continue`](/docs/context#continuing-a-finished-run).
+
+```bash
+lev run continue <run-id> "make the cape red"
+lev run continue <run-id> "use this palette" --attach palette.png --region reference
+lev msg <run-id> "make the cape red"        # the same, for a finished run
+```
+
+What the run does from then on is a new **segment**, with its own spend, answer and artifacts. The
+run's own fields describe the segment it is in, so `lev result` and `GET /api/runs/{id}/result`
+answer with the latest segment's answer. Every earlier segment's answer is kept beside the run file,
+and `Run.segments` and `GET /api/runs/{id}/segments` list each one with what it cost. The run's cost
+stays the whole run's.
+
+A failed run is continued like a finished one, which is how you ask it to try again with what it
+learned. A cancelled run can be continued too. To carry on a cancelled run where it stopped
+instead, `lev resume` it.
+
+The answer comes back once the step that reopened the run is in its [run file](/docs/run-file), so
+a continuation you were told started survives a daemon restart. A crash part way never touches the
+segments before it: the continuation is appended after them. One continuation of a run runs at a
+time, and a second request while the first is starting is refused as a conflict. A sub-agent's run
+is continued through the run that started it, and is refused here.
+
+### Forking a finished run
+
+To keep the finished run as it is and branch from it, fork it. The fork is a new run carrying the
+finished run's context under the same `on_continue` rules, going back to work on the message:
+
+```bash
+lev run fork <run-id> "same character, now facing left"
+```
+
+The fork runs the finished run's own graph, models, inputs, workdir and launch policy. It starts with
+nothing spent, and its metadata names the run it came from as `leviath.forked_from`. The finished run
+is only read. Over the API it is `spawnRun` with `source: { continueFrom: { runId, text } }`, or
+`POST /api/runs/{id}/continue` with `fork: true`.
+
 ## Answering questions
 
 When a run is waiting on a question, `lev interactions` lists what the daemon is holding, each

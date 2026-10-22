@@ -92,7 +92,7 @@ pub(crate) use tool_stages::{
     poll_dynamic_tool_refresh, refresh_advertised_tools, rescan_before_dispatch, sync_tool_stages,
 };
 mod messaging;
-pub(crate) use messaging::{MessageIntake, deliver_messages};
+pub(crate) use messaging::{MessageIntake, deliver_continuation, deliver_messages};
 mod conversation;
 pub(crate) use conversation::{
     AwaitingMessage, ConversationEnded, UnansweredMessage, end_conversation,

@@ -68,7 +68,7 @@ fn at_of(record: &RunRecord, before: i64) -> i64 {
         | RunRecord::ArtifactsProduced { at, .. }
         | RunRecord::Interaction { at, .. }
         | RunRecord::ContextTransaction { at, .. } => *at,
-        RunRecord::Transition(_) => before,
+        RunRecord::Transition(_) | RunRecord::Continued(_) => before,
     }
 }
 

@@ -797,7 +797,7 @@ fn every_listing_a_client_can_reach_is_a_connection() {
 
     /// The bounded lists: each one is as long as the document or the act it
     /// belongs to, and none of them grows with use.
-    const BOUNDED: [&str; 13] = [
+    const BOUNDED: [&str; 14] = [
         // One answer per id asked about, so the client sets the length.
         "Query.nodes",
         // The group tokens a stage may name: a handful, fixed by this build.
@@ -820,6 +820,9 @@ fn every_listing_a_client_can_reach_is_a_connection() {
         "RunOutput.deltas",
         // The steps of one update, fixed by this build.
         "UpdateJobOutput.steps",
+        // One per message that started or continued the run, which the
+        // people continuing it set, a handful a run.
+        "RunOutput.segments",
     ];
 
     let document = published();

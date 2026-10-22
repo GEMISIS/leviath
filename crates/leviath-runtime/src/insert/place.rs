@@ -182,7 +182,7 @@ fn stage_run_status(status: StageStatus) -> leviath_core::run_meta::StageRunStat
 /// A cost is known exactly when no call was priced from published rates and
 /// none went unpriced; it is known at all when none went unpriced and its
 /// record named one.
-fn cost(spend: &Spend) -> (Option<f64>, bool) {
+pub fn cost(spend: &Spend) -> (Option<f64>, bool) {
     let known = spend.unpriced_calls == 0 && !spend.cost_unknown;
     (
         known.then_some(spend.priced_usd),

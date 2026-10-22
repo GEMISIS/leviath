@@ -427,6 +427,7 @@ async fn a_parked_run_comes_back_parked_without_a_model_call() {
             answer: None,
             asked: 0,
             audit: Vec::new(),
+            segment: 1,
         },
         crate::spec::env::Bindings::new(),
     );

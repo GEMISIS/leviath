@@ -105,14 +105,14 @@ pub enum Commands {
     Tools(commands::tools::ToolsArgs),
 
     // ─── Running agents ───────────────────────────────────────────────────────
-    /// Run an agent, check a run without starting it, or show a run's file
+    /// Run an agent, check or continue a run, or show a run's file
     Run(commands::run::RunArgs),
 
     /// List agent runs in the shared-world daemon
     #[command(long_about = commands::ps::PS_LONG_ABOUT)]
     Ps(commands::ps::PsArgs),
 
-    /// Send a message to a running agent
+    /// Send a message to a run; a finished one is continued by it
     Msg(commands::ctl::MsgArgs),
 
     /// Cancel a running agent (alias: `kill`)
@@ -227,9 +227,9 @@ Blueprints:
   tools         List and validate the global Rhai script tools
 
 Running agents:
-  run           Run an agent, check a run without starting it, or show a run's file
+  run           Run an agent, check or continue a run, or show a run's file
   ps            List agent runs in the shared-world daemon
-  msg           Send a message to a running agent
+  msg           Send a message to a run; a finished one is continued by it
   cancel        Cancel a running agent (alias: `kill`)
   pause         Pause a running agent (it finishes its in-flight step, then holds)
   resume        Resume a paused agent
@@ -297,6 +297,13 @@ pub trait RiskyExecutors {
     fn resume(
         &self,
         args: commands::ctl::ResumeArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
+    /// `lev run continue` and `lev run fork` - auto-start the daemon if
+    /// needed and continue a finished run, in place or (`fork`) as a new run.
+    fn continue_run(
+        &self,
+        args: commands::run::continuing::ContinueArgs,
+        fork: bool,
     ) -> impl std::future::Future<Output = anyhow::Result<()>>;
     /// `lev interactions` - resolves the control-socket path and lists or
     /// shows the open interactions.
@@ -474,6 +481,14 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
             command: Some(commands::run::RunCommand::Show(args)),
             ..
         }) => commands::run::show::execute(args).await,
+        Commands::Run(commands::run::RunArgs {
+            command: Some(commands::run::RunCommand::Continue(args)),
+            ..
+        }) => ex.continue_run(args, false).await,
+        Commands::Run(commands::run::RunArgs {
+            command: Some(commands::run::RunCommand::Fork(args)),
+            ..
+        }) => ex.continue_run(args, true).await,
         Commands::Run(args) => ex.run(args).await,
         Commands::Ps(args) => ex.ps(args).await,
         Commands::Msg(args) => ex.msg(args).await,
@@ -656,6 +671,8 @@ mod tests {
     struct MockRisky {
         /// Whether `serve` was reached, for the one route that must not reach it.
         served: std::sync::atomic::AtomicBool,
+        /// Whether the last continuation routed here asked for a fork.
+        forked: std::sync::atomic::AtomicBool,
     }
 
     impl RiskyExecutors for MockRisky {
@@ -684,6 +701,15 @@ mod tests {
             Ok(())
         }
         async fn resume(&self, _args: commands::ctl::ResumeArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn continue_run(
+            &self,
+            _args: commands::run::continuing::ContinueArgs,
+            fork: bool,
+        ) -> anyhow::Result<()> {
+            self.forked
+                .store(fork, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         }
         async fn setup(&self, _args: commands::setup::SetupArgs) -> anyhow::Result<()> {
@@ -776,6 +802,26 @@ mod tests {
     }
 
     // ─── Risky variants: routed through the injected executor ────────────────
+
+    /// `lev run continue` and `lev run fork` reach the daemon through the
+    /// executor, each saying whether it forks.
+    #[tokio::test]
+    async fn continue_and_fork_are_routed_through_the_executor() {
+        let mock = MockRisky::default();
+        let args = commands::run::continuing::ContinueArgs::default();
+        for (command, fork) in [
+            (commands::run::RunCommand::Fork(args.clone()), true),
+            (commands::run::RunCommand::Continue(args), false),
+        ] {
+            let run = Commands::Run(commands::run::RunArgs {
+                command: Some(command),
+                ..Default::default()
+            });
+            assert!(reaches_daemon(&run));
+            assert!(dispatch(run, &mock).await.is_ok());
+            assert_eq!(mock.forked.load(std::sync::atomic::Ordering::Relaxed), fork);
+        }
+    }
 
     #[tokio::test]
     async fn dispatch_run_variant_is_routed_through_the_executor() {

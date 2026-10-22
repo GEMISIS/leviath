@@ -341,6 +341,10 @@ pub(crate) async fn spawn_run(
     request: SpawnRunRequest,
 ) -> async_graphql::Result<SpawnRunResult> {
     let state = ctx.data_unchecked::<AppState>();
+    let request = match request.fork() {
+        Ok((from, refused)) => return super::continuing::fork(state, from, refused).await.gql(),
+        Err(request) => *request,
+    };
     let request = match read(state, request).await {
         Ok(request) => request,
         Err(issues) => return Ok(SpawnRunResult::Rejected(SpawnRejected::from(&issues))),

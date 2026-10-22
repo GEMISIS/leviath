@@ -3012,21 +3012,29 @@ async fn a_message_no_run_will_read_is_refused() {
             .unwrap()
             .status = status;
     }
+    // A finished run still in the world is continued by a message once it
+    // is unloaded, which this host, with no continuer, refuses then.
+    let mut waiting = Vec::new();
     for (agent, says) in [
         ("ghost", "no run 'ghost'"),
-        ("done", "has finished"),
-        ("broke", "has failed"),
-        ("stopped", "lev resume stopped"),
+        ("done", "cannot continue runs"),
+        ("broke", "cannot continue runs"),
+        ("stopped", "cannot continue runs"),
     ] {
-        let refused = ask(&mut host, |reply| ControlOp::Message {
+        let (reply, rx) = oneshot::channel();
+        host.handle(ControlOp::Message {
             agent_id: agent.to_string(),
             content: "hi".to_string(),
             target_region: None,
             parts: Vec::new(),
             reply,
-        })
-        .await;
-        let why = refused.expect_err("nobody will read it");
+        });
+        waiting.push((agent, says, rx));
+    }
+    host.emit_events();
+    host.emit_events();
+    for (agent, says, rx) in waiting {
+        let why = rx.await.unwrap().expect_err("nobody will read it");
         assert!(why.contains(says), "{agent}: {why}");
     }
 }
@@ -5471,17 +5479,17 @@ fn disk_reloader(asked: Arc<Mutex<Vec<(String, PageIn)>>>) -> Reloader {
     })
 }
 
-/// A run that has stopped stays stopped: a message says how it ended rather
-/// than that no such run exists, and neither a message nor a pause loads it
-/// back into the world.
+/// A run that has stopped stays stopped unless something continues it: on a
+/// host that cannot continue runs a message says so rather than that no such
+/// run exists, and neither a message nor a pause loads it back into the world.
 #[tokio::test]
 async fn a_stopped_run_is_not_loaded_back_for_a_message_or_a_pause() {
     let mut host = host_with(vec![]);
     let asked = Arc::new(Mutex::new(Vec::new()));
     host.set_reloader(disk_reloader(asked.clone()));
     for (run, says) in [
-        ("done", "has finished"),
-        ("cut", "was cancelled"),
+        ("done", "cannot continue runs"),
+        ("cut", "cannot continue runs"),
         ("nowhere", "no run 'nowhere'"),
     ] {
         let refused = ask(&mut host, |reply| ControlOp::Message {

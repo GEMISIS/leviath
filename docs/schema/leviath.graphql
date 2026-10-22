@@ -996,6 +996,14 @@ input BlueprintInput {
 	"""
 	entryStageName: StringFilter
 	"""
+	Filter on `BlueprintOutput.continueStage`.
+	
+	The stage a finished run goes back to when it is continued with a new
+	message: the graph's `continue_at`, or the entry stage. Null where
+	that names a stage the graph does not declare.
+	"""
+	continueStage: StageInput
+	"""
 	Filter on `BlueprintOutput.maxChildDepth`.
 	
 	How deep sub-agent spawning may nest.
@@ -1205,6 +1213,12 @@ type BlueprintOutput implements Node {
 	names none, which starts the run in the first stage declared.
 	"""
 	entryStageName: String
+	"""
+	The stage a finished run goes back to when it is continued with a new
+	message: the graph's `continue_at`, or the entry stage. Null where
+	that names a stage the graph does not declare.
+	"""
+	continueStage: StageOutput
 	"How deep sub-agent spawning may nest."
 	maxChildDepth: Int
 	"When this blueprint's runs look for tools again."
@@ -3323,6 +3337,73 @@ type ContextWriteCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: ContextWriteArgsOutput!
+}
+
+"A run to fork from, and the message the new run starts with."
+input ContinueFromWrite {
+	"""
+	The finished run to fork: complete, failed or cancelled. It is only
+	read, never changed.
+	"""
+	runId: ID!
+	"The message the new run's work starts with."
+	text: String!
+	"Deliver into this context region instead of the conversation."
+	region: RegionRef
+	"Files inside the finished run's working directory to send with it."
+	attachments: [AttachmentWrite!]
+}
+
+"A message for a finished run."
+input ContinueRunRequest {
+	"The finished run: complete, failed or cancelled."
+	runId: ID!
+	"The message its new segment starts with."
+	text: String!
+	"Deliver into this context region instead of the conversation."
+	region: RegionRef
+	"Files inside the run's working directory to send with it."
+	attachments: [AttachmentWrite!]
+}
+
+"What continuing a run answers with."
+type ContinueRunResult {
+	"The run, as its record stands."
+	run: RunOutput!
+	"""
+	The segment that started, counted from 1. A run never continued is
+	in segment 1.
+	"""
+	segment: Int!
+	"""
+	The event stream's number before the run was continued: every frame
+	of the new segment is numbered above it, so `runEvents(since:)` with
+	it hands over the segment from its `RunContinuedEvent` on.
+	"""
+	seq: BigInt!
+}
+
+"""
+A finished run was taken up again with a new message, and a new segment
+of it started.
+"""
+type ContinuedStepOutput {
+	"The segment that started, counted from 1."
+	segment: Int!
+	"The stage it started in."
+	stage: String!
+	"""
+	The run it was forked from, for a fork's first segment. Null for a
+	run continued in place.
+	"""
+	forkedFrom: ID
+	"""
+	The last step of the segment before it. Null for a fork's first
+	segment, which has none.
+	"""
+	previousSeq: Int
+	"What each region of the window did, in window order."
+	regions: [RegionContinuedOutput!]!
 }
 
 """
@@ -8540,16 +8621,33 @@ type Mutation {
 		request: SpawnRunRequest!
 	): ValidateSpawnResult!
 	"""
-	Send a message to a run that is going.
+	Send a message to a run.
 	
-	Whether it lands is the daemon's call: a stage that declared
-	`accepts_messages = false`, or a finished run, does not take one, and the
-	refusal says that rather than claiming the run does not exist.
+	A run that is going reads it, unless its stage declared
+	`accepts_messages = false`, and the refusal says that rather than
+	claiming the run does not exist. A finished run (`COMPLETE`, `FAILED`
+	or `CANCELLED`) is continued by it, as `continueRun` continues one.
 	"""
 	sendMessage(
 		"The run, the words, and anything to send with them."
 		request: SendMessageRequest!
 	): SendMessageResult!
+	"""
+	Continue a finished run with a new message.
+	
+	The run (`COMPLETE`, `FAILED` or `CANCELLED`) goes back to the stage
+	its graph names in `continue_at`, the entry stage by default, with
+	the message, and works again as a new segment with its own cost,
+	answer and artifacts. Each region keeps, clears, summarizes or
+	reseeds what it held, by its `onContinue`. Answers once the step that
+	reopened the run is on disk, so the continuation survives a restart.
+	A run that has not finished, or that another request is continuing,
+	is a `CONFLICT`; no such run is `NOT_FOUND`.
+	"""
+	continueRun(
+		"The finished run, the message, and anything to send with it."
+		request: ContinueRunRequest!
+	): ContinueRunResult!
 	"""
 	End the conversation of the interactive stage a run is in.
 	
@@ -10660,6 +10758,40 @@ type RegionBudgetOutput {
 	tokens: Int!
 }
 
+"What a region keeps when its finished run is continued with a new message."
+enum RegionContinuePolicy {
+	"It carries over as it is."
+	KEEP
+	"It is emptied."
+	CLEAR
+	"It is summarized by the run's compaction model."
+	COMPACT
+	"It is emptied and filled again from its seed."
+	RESEED
+}
+
+"Exact and set tests on `RegionContinuePolicy` (KEEP, CLEAR, COMPACT, RESEED)."
+input RegionContinuePolicyFilter {
+	"Exactly this value."
+	eq: RegionContinuePolicy
+	"Anything but this value."
+	ne: RegionContinuePolicy
+	"One of these values."
+	in: [RegionContinuePolicy!]
+	"None of these values."
+	notIn: [RegionContinuePolicy!]
+	"Match where there is no value at all."
+	isNull: Boolean
+}
+
+"One region of a continued run, and what it did."
+type RegionContinuedOutput {
+	"The region."
+	region: String!
+	"What it did."
+	policy: RegionContinuePolicy!
+}
+
 "What one step did to one region."
 type RegionDiffOutput {
 	"The region."
@@ -10842,6 +10974,15 @@ input RegionInput {
 	What happens to a write that does not fit.
 	"""
 	admission: RegionAdmissionFilter
+	"""
+	Filter on `RegionOutput.onContinue`.
+	
+	What this region keeps when its finished run is continued with a new
+	message: the `on_continue` it sets, or the one its kind follows when
+	it sets none (`temporary` and `clearable` clear, every other kind
+	keeps).
+	"""
+	onContinue: RegionContinuePolicyFilter
 	"""
 	Filter on `RegionOutput.compactAt`.
 	
@@ -11146,6 +11287,13 @@ type RegionOutput {
 	volatility: RegionVolatility!
 	"What happens to a write that does not fit."
 	admission: RegionAdmission!
+	"""
+	What this region keeps when its finished run is continued with a new
+	message: the `on_continue` it sets, or the one its kind follows when
+	it sets none (`temporary` and `clearable` clear, every other kind
+	keeps).
+	"""
+	onContinue: RegionContinuePolicy!
 	"The fraction of the budget at which a compacting region compacts."
 	compactAt: Float
 	"The mime patterns this region takes as parts. Empty means anything."
@@ -11892,6 +12040,44 @@ type RunConnection {
 	highlights: [RunHighlightOutput!]!
 }
 
+"""
+A finished run was taken up again with a new message, and a new
+segment of it started: continued in place, or forked into a new
+run, whose id `runId` is. Sent once the step that reopened the run
+is on disk; the run's status frame saying it is running may come
+first.
+"""
+type RunContinuedEvent implements Event & RunEvent {
+	"""
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
+	
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
+	"""
+	seq: BigInt!
+	"When the server sent it, in unix seconds."
+	at: Timestamp!
+	"The run this is about."
+	runId: ID!
+	"The agent's live id in the world, which a run outlives."
+	agentId: ID!
+	"The segment that started, counted from 1."
+	segment: Int!
+	"The stage it started in."
+	stage: String!
+	"The run it was forked from. Null for a run continued in place."
+	forkedFrom: ID
+	"""
+	The run this frame is about, as the rest of the API reads
+	it. Null once the run has been deleted.
+	"""
+	run: RunOutput
+}
+
 "Who hears about a run, and the caller's labels for it."
 type RunDeliveryOutput {
 	"The URL the daemon posts to when the run finishes."
@@ -11937,7 +12123,7 @@ The run frames, plus the link frame - a scoped subscriber has to
 learn why its run's frames stopped - plus the two this server
 produces about the subscription itself.
 """
-union RunEventFrame = RunSpawnedEvent | RunStatusChangedEvent | RunRenamedEvent | TokensUpdatedEvent | ContextUpdatedEvent | StageTransitionedEvent | ToolCallStartedEvent | ToolCallFinishedEvent | LogLineWrittenEvent | SpendThresholdCrossedEvent | InteractionOpenedEvent | InteractionSettledEvent | OutputSubmittedEvent | RunCompletedEvent | DaemonLinkChangedEvent | SubscriptionOpenedEvent | EventsDroppedEvent
+union RunEventFrame = RunSpawnedEvent | RunStatusChangedEvent | RunRenamedEvent | TokensUpdatedEvent | ContextUpdatedEvent | StageTransitionedEvent | ToolCallStartedEvent | ToolCallFinishedEvent | LogLineWrittenEvent | SpendThresholdCrossedEvent | InteractionOpenedEvent | InteractionSettledEvent | RunContinuedEvent | OutputSubmittedEvent | RunCompletedEvent | DaemonLinkChangedEvent | SubscriptionOpenedEvent | EventsDroppedEvent
 
 """
 One frame type a run subscription can ask for.
@@ -11979,6 +12165,14 @@ enum RunEventType {
 	open asks stays waiting after one is answered.
 	"""
 	INTERACTION_SETTLED
+	"""
+	A finished run was taken up again with a new message, and a new
+	segment of it started: continued in place, or forked into a new
+	run, whose id `runId` is. Sent once the step that reopened the run
+	is on disk; the run's status frame saying it is running may come
+	first.
+	"""
+	RUN_CONTINUED
 	"""
 	The run's answer was recorded: a `submit_output` call was
 	accepted, or an output stage's produced files were taken as its
@@ -13073,12 +13267,28 @@ type RunOutput implements Node {
 	"""
 	Whether `sendMessage` reaches this run where it stands.
 	
-	Read from the stage the run is in, so it is the answer for now rather than
-	for the blueprint as a whole. Null when the run's blueprint cannot be read:
-	unknown is not the same as no, and a console that greyed out its box on a
-	failed read would be wrong half the time.
+	A finished run takes one when it is `continuable`: the message
+	continues it. A run that is going takes one as the stage it is in says,
+	so it is the answer for now rather than for the blueprint as a whole.
+	Null when the run's blueprint or file cannot be read: unknown is not
+	the same as no, and a console that greyed out its box on a failed read
+	would be wrong half the time.
 	"""
 	acceptsMessages: Boolean
+	"""
+	Whether the run can be continued with a new message (`continueRun`,
+	or `sendMessage`): it has finished, it is not a sub-agent of another
+	run, and its file can be read back to run. Null when its file does not
+	say.
+	"""
+	continuable: Boolean
+	"""
+	The run's segments, oldest first. A finished run continued with a new
+	message starts a new segment, with its own spend, answer and artifacts;
+	the run's own fields describe the latest, and each earlier segment's
+	answer stays readable here. A run never continued has one.
+	"""
+	segments: [RunSegmentOutput!]!
 	"""
 	Caller-supplied metadata from spawn. Values are always strings.
 	
@@ -13189,6 +13399,55 @@ input RunSearchOptions {
 	query: String!
 	"Where to look. Omitted means the two sources that cost no read."
 	in: [SearchScope!]
+}
+
+"""
+One segment of a run.
+
+A run that finishes can be continued with a new message: it goes back to
+work, and what it does from then on is a new segment, with its own spend,
+answer and artifacts. A run never continued has one segment, and the run's
+own fields always describe the latest.
+"""
+type RunSegmentOutput {
+	"Its number, counted from 1."
+	index: Int!
+	"Whether it is the segment the run is in now: the last one."
+	current: Boolean!
+	"The stage it started in."
+	stage: String!
+	"When it started."
+	startedAt: Timestamp!
+	"""
+	The step of the run file it started at: 0 for the first segment of a
+	run, the step that reopened the run for every other.
+	"""
+	startedSeq: BigInt!
+	"The last step it recorded."
+	lastSeq: BigInt!
+	"""
+	How it stands: the run's status for the current segment, and how it
+	ended for every earlier one.
+	"""
+	status: RunStatus!
+	"""
+	The run it was forked from, for the first segment of a fork. Null for
+	every other.
+	"""
+	forkedFrom: ID
+	"The tokens it used itself, earlier segments left out."
+	usage: TokenUsageOutput!
+	"What it cost itself, earlier segments left out."
+	cost: CostBreakdownOutput!
+	"The tool calls it made itself."
+	toolCallCount: Int!
+	"The answer it handed back. Null when it handed back none."
+	finalOutput: FinalOutputOutput
+	"""
+	The files it handed back with its answer, by name. Empty when it
+	handed back none.
+	"""
+	artifacts: [String!]!
 }
 
 "A run started, including one spawned as a child of another."
@@ -15145,6 +15404,15 @@ input SpawnSourceWrite @oneOf {
 	reads as. Unknown keys are refused.
 	"""
 	graph: RunGraphDocument
+	"""
+	A finished run to fork: the new run carries its context, under each
+	region's `on_continue`, and goes back to work on the message. The
+	finished run is never changed. A fork runs the finished run's own
+	graph, models, inputs, workdir and launch policy, so the request's
+	other fields are left out; `validateSpawn` refuses it, since a fork
+	is only checked by starting it.
+	"""
+	continueFrom: ContinueFromWrite
 }
 
 """
@@ -16919,7 +17187,7 @@ type StatusChangeOutput {
 }
 
 "Something that happened during a step that the state alone does not show."
-union StepEvent = InferenceStepOutput | FailoverStepOutput | ToolStartedStepOutput | ToolFinishedStepOutput | AnsweredStepOutput | MessageStepOutput | LogStepOutput | AttemptStepOutput | DispatchedStepOutput | CompletedStepOutput | ArtifactsStepOutput | SettledStepOutput | ContextCommittedStepOutput | ContextNotedStepOutput | TransitionStepOutput
+union StepEvent = InferenceStepOutput | FailoverStepOutput | ToolStartedStepOutput | ToolFinishedStepOutput | AnsweredStepOutput | MessageStepOutput | LogStepOutput | AttemptStepOutput | DispatchedStepOutput | CompletedStepOutput | ArtifactsStepOutput | SettledStepOutput | ContextCommittedStepOutput | ContextNotedStepOutput | TransitionStepOutput | ContinuedStepOutput
 
 "A part's bytes, stored once in the run file by digest."
 type StoredBlobOutput {

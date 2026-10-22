@@ -1648,6 +1648,129 @@
         }
       }
     },
+    "/api/runs/{id}/continue": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Continue a finished run with a new message, or fork a new run from it",
+        "description": "The run (complete, failed or cancelled) goes back to the stage its graph names in `continue_at`, the entry stage by default, with the message, and works again as a new segment with its own spend, answer and artifacts. Each region keeps, clears, summarizes or reseeds what it held, by its `on_continue`. With `fork`, a new run carrying the finished run's context is started instead, and the finished run is left as it is. Answered once the step that reopened the run is on disk.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "message"
+                ],
+                "properties": {
+                  "message": {
+                    "type": "string",
+                    "description": "The text the new segment starts with. A `@path` token attaches that workdir file to the same entry."
+                  },
+                  "target_region": {
+                    "type": "string",
+                    "description": "The region to land in; the conversation when absent."
+                  },
+                  "parts": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/PartRef"
+                    },
+                    "description": "Files already inside the run's working directory to send with the message."
+                  },
+                  "fork": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Start a new run carrying this run's context, leaving this run as it is."
+                  }
+                }
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "request"
+                ],
+                "properties": {
+                  "request": {
+                    "type": "string",
+                    "description": "The JSON request, as the application/json body would carry it."
+                  },
+                  "part": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "A file to send beside the message. Repeatable; `part:<region>` aims one at another region."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "A fork started: `run_id` is the new run's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContinueResp"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The run went back to work in a new segment.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContinueResp"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
     "/api/runs/{id}/end-conversation": {
       "parameters": [
         {
@@ -3600,6 +3723,49 @@
                 }
               }
             }
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/runs/{id}/segments": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Every segment of a run, each with its own spend and answer",
+        "responses": {
+          "200": {
+            "description": "The segments, oldest first. A run never continued has one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RunSegment"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
           },
           "408": {
             "$ref": "#/components/responses/Timeout"
@@ -6937,6 +7103,117 @@
               "type": "string"
             },
             "description": "How this run will differ from what its blueprint declares: today, the Rhai validator or JSON schema that a differing output_format retired. Omitted when there is nothing to say."
+          }
+        }
+      },
+      "ContinueResp": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "segment",
+          "seq",
+          "server_instance"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "description": "The run going again: the new run's id for a fork."
+          },
+          "segment": {
+            "type": "integer",
+            "description": "The segment that started, counted from 1."
+          },
+          "forked_from": {
+            "type": "string",
+            "description": "The run it was forked from. Absent for a run continued in place."
+          },
+          "seq": {
+            "type": "integer",
+            "description": "The event stream's number before the run was continued: every frame of the new segment is numbered above it."
+          },
+          "server_instance": {
+            "type": "string",
+            "description": "The server process that numbered `seq`."
+          }
+        }
+      },
+      "RunSegment": {
+        "type": "object",
+        "required": [
+          "index",
+          "current",
+          "stage",
+          "started_at",
+          "started_seq",
+          "last_seq",
+          "status",
+          "prompt_tokens",
+          "completion_tokens",
+          "tool_calls",
+          "artifacts"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "description": "Its number, counted from 1."
+          },
+          "current": {
+            "type": "boolean",
+            "description": "Whether the run is in it now."
+          },
+          "stage": {
+            "type": "string",
+            "description": "The stage it started in."
+          },
+          "started_at": {
+            "type": "integer",
+            "description": "When it started, unix seconds."
+          },
+          "started_seq": {
+            "type": "integer",
+            "description": "The step of the run file it started at."
+          },
+          "last_seq": {
+            "type": "integer",
+            "description": "The last step it recorded."
+          },
+          "status": {
+            "type": "string",
+            "description": "How it stands, or how it ended: `running`, `complete`, `error`, `cancelled` and the rest of the run status words."
+          },
+          "forked_from": {
+            "type": "string",
+            "description": "The run it was forked from, for a fork's first segment."
+          },
+          "cost_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "What it cost itself, in dollars. Null is unknown, never free."
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "description": "Its input tokens."
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "description": "Its output tokens."
+          },
+          "tool_calls": {
+            "type": "integer",
+            "description": "Its tool calls."
+          },
+          "output": {
+            "type": "string",
+            "description": "Its answer. Absent when it handed back none."
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The files it handed back with its answer, by name."
           }
         }
       }

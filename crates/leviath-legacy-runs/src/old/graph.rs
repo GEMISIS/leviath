@@ -247,6 +247,7 @@ impl Conv {
                 .collect(),
             mcp_servers: Vec::new(),
             script_permissions: ScriptPermissionsDef::default(),
+            continue_at: None,
         }
     }
 
@@ -712,6 +713,7 @@ impl Conv {
             volatility: r.volatility,
             seed,
             accepts: self.names(p.field("accepts"), &r.accepts),
+            on_continue: None,
         })
     }
 

@@ -285,6 +285,24 @@ pub enum WorldEvent {
         /// The result, flattened to one line and truncated.
         summary: String,
     },
+    /// A finished run was taken up again with a new message, and a new
+    /// segment of it started: continued in place, or forked into a new run.
+    ///
+    /// Sent once the step that reopened the run is on disk. The status the
+    /// reopened run is placed with may be announced first.
+    Continued {
+        /// The run id: the new run's, for a fork.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// The segment that started, counted from 1.
+        segment: u32,
+        /// The stage it started in.
+        stage: String,
+        /// The run it was forked from. `None` for a run continued in place.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forked_from: Option<String>,
+    },
     /// A run produced a per-agent log/output line (readable assistant output or
     /// an operational `[Tokens: …]` / `[tool] …` / `[error] …` line).
     Log {
@@ -413,6 +431,7 @@ impl WorldEvent {
             | WorldEvent::ToolCallFinished { run_id, .. }
             | WorldEvent::OutputSubmitted { run_id, .. }
             | WorldEvent::InteractionSettled { run_id, .. }
+            | WorldEvent::Continued { run_id, .. }
             | WorldEvent::Spend { run_id, .. }
             | WorldEvent::Log { run_id, .. } => run_id,
         }

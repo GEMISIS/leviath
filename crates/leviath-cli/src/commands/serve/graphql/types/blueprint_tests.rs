@@ -167,6 +167,80 @@ async fn an_unnamed_entry_stage_is_the_first_declared() {
     assert_eq!(json["blueprint"]["entryStage"]["name"], "plan");
 }
 
+/// Where a finished run continues, and what each region keeps: the policy
+/// a region sets, or the one its kind follows.
+#[tokio::test]
+async fn a_blueprint_says_where_its_runs_continue_and_what_each_region_keeps() {
+    let json = ask(
+        &manifest(),
+        CoreSource::Snapshot,
+        "{ blueprint { continueStage { name } regions { name onContinue } } }",
+    )
+    .await;
+    assert_eq!(json["blueprint"]["continueStage"]["name"], "plan");
+    assert_eq!(json["blueprint"]["regions"][0]["onContinue"], "KEEP");
+    let text = manifest()
+        .replace("entry = \"plan\"\n", "entry = \"plan\"\ncontinue_at = \"build\"\ncompaction = {}\n")
+        .replace(
+            "budget = 1000 }",
+            "budget = 1000, on_continue = \"compact\" }",
+        )
+        .replace(
+            "regions = [\n",
+            "regions = [\n    { name = \"scratch\", kind = \"clearable\", budget = 100 },\n    \
+             { name = \"refs\", kind = \"pinned\", budget = 100, seed = { literal = \"x\" }, on_continue = \"reseed\" },\n    \
+             { name = \"gone\", kind = \"pinned\", budget = 100, on_continue = \"clear\" },\n",
+        );
+    let json = ask(
+        &text,
+        CoreSource::Snapshot,
+        "{ blueprint { continueStage { name } regions { name onContinue } } }",
+    )
+    .await;
+    assert_eq!(json["blueprint"]["continueStage"]["name"], "build");
+    let policies: Vec<(String, String)> = json["blueprint"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["name"].as_str().unwrap().to_string(),
+                r["onContinue"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        policies.contains(&("scratch".into(), "CLEAR".into())),
+        "{policies:?}"
+    );
+    assert!(
+        policies.contains(&("refs".into(), "RESEED".into())),
+        "{policies:?}"
+    );
+    assert!(
+        policies.contains(&("gone".into(), "CLEAR".into())),
+        "{policies:?}"
+    );
+    assert!(
+        policies.contains(&("notes".into(), "COMPACT".into())),
+        "{policies:?}"
+    );
+    let dangling = manifest().replace(
+        "entry = \"plan\"\n",
+        "entry = \"plan\"\ncontinue_at = \"nowhere\"\n",
+    );
+    let json = ask(
+        &dangling,
+        CoreSource::Snapshot,
+        "{ blueprint { continueStage { name } } }",
+    )
+    .await;
+    assert!(
+        json["blueprint"]["continueStage"].is_null(),
+        "a stage the graph does not declare is no stage: {json}"
+    );
+}
+
 /// Every value the setting can take reads back, and a blueprint that says
 /// nothing.
 #[tokio::test]

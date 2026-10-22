@@ -395,7 +395,9 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/runs/{id}/artifacts/{name}` | The bytes of one file the run handed back, by the name its answer lists. See [below](#a-runs-parts) |
 | `GET /api/runs/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + roll-ups of tokens, spend (`subtree_cost_usd`) and working time (`subtree_working_secs`) |
 | `POST /api/runs/{id}/pause` · `/resume` | Pause a run · resume it |
-| `POST /api/runs/{id}/message` | Steer a running run. Takes files too; see [attaching files](#attaching-files) |
+| `POST /api/runs/{id}/message` | Steer a running run, or continue a finished one. Takes files too; see [attaching files](#attaching-files) |
+| `POST /api/runs/{id}/continue` | Continue a finished run with a new message, or fork a new run from it. See [continuing a finished run](#continuing-a-finished-run) |
+| `GET /api/runs/{id}/segments` | Each segment of a run, with its own spend and answer. See [continuing a finished run](#continuing-a-finished-run) |
 | `POST /api/runs/{id}/end-conversation` | End an interactive stage's conversation so it moves on. See [Statuses](#statuses) |
 | `GET/POST /api/runs/{id}/interaction` | Read / answer a pending question. See [below](#answering-a-question) |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation, paginated and searchable with `q` |
@@ -1024,6 +1026,39 @@ pair.
 `parent=sub` is the mirror of `parent=none`: only runs somebody started, at any
 depth. `blueprint=<name>` narrows to the runs of one blueprint, by the name each
 run recorded, and composes with everything above.
+
+## Continuing a finished run
+
+A run that has finished (`complete`, `error` or `cancelled`) takes a new message and goes back to
+work on it, in a new segment, with the context its regions keep. See
+[continuing a finished run](/docs/interaction#continuing-a-finished-run) for what is kept.
+
+```bash
+curl -X POST http://localhost:3000/api/runs/$RUN/continue -H "Authorization: Bearer $TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"message": "make the cape red", "target_region": "notes"}'
+```
+
+The body is the one `POST /api/runs/{id}/message` takes, with `parts` and multipart files, plus
+`fork`. The answer comes once the step that reopened the run is on disk:
+
+| Field | Meaning |
+|---|---|
+| `run_id` | The run going again. A fork's new run |
+| `segment` | The segment that started, counted from 1 |
+| `forked_from` | The finished run, for a fork only |
+| `seq` · `server_instance` | Where the event stream stood before the run was continued |
+
+A run continued in place answers `202`, and a fork answers `201`. A run that has not finished, a
+sub-agent's run, or one another request is continuing is a `409`. No such run is a `404`, a message
+that says nothing or names an unknown region is a `400`, and a run this machine can no longer bind
+is a `422`. `POST /api/runs/{id}/message` to a finished run continues it the same way and answers
+`202`.
+
+`GET /api/runs/{id}/segments` lists each segment, oldest first: `index`, `current`, `stage`,
+`started_at`, `started_seq`, `last_seq`, `status`, `forked_from`, `cost_usd`, `prompt_tokens`,
+`completion_tokens`, `tool_calls`, `output` and `artifacts`. Each segment's cost and tokens are its
+own. `GET /api/runs/{id}/result` answers with the latest segment's answer.
 
 ## Deleting runs
 
@@ -2357,6 +2392,8 @@ than that feature, not broken.
 | `events.tool_arguments` | `arguments` and `arguments_truncated` on `tool_call_started`, cut to 4 KiB |
 | `events.output_submitted` | The `output_submitted` frame, sent when a `submit_output` call is accepted |
 | `events.interaction_settled` | The `interaction_settled` frame, sent when an ask is answered, times out, is cancelled or is refused |
+| `runs.continue` | `POST /api/runs/{id}/continue`, `GET /api/runs/{id}/segments`, and a message continuing a finished run. See [continuing a finished run](#continuing-a-finished-run) |
+| `events.run_continued` | The `run_continued` frame, sent when a finished run goes back to work in a new segment |
 | `runs.cost` | `cost_usd` and `subtree_cost_usd` on the agent tree routes |
 | `blueprints.envelope` | The paginated envelope on the blueprint listing |
 | `blueprints.query` | `q=` on that listing |
@@ -2528,6 +2565,7 @@ with either way.
 | `interaction_needed` | The run is blocked on a person | `request` |
 | `interaction_settled` | An ask is answered, times out, is cancelled or is refused | `request_id`, `kind`, `tool`, `prompt`, `stage`, `settlement`, `asked_at`, `at` |
 | `output_submitted` | A `submit_output` call is accepted | `stage`, `final_output` |
+| `run_continued` | A finished run goes back to work in a new segment, in place or forked | `segment`, `stage`, `forked_from` (a fork only) |
 | `agent_completed` | The run reaches a terminal status | `status`, `result` (its error), `final_output` |
 | `daemon_link` | This server's link to the daemon changes | `connected`, `daemon`, `restarted`, `restart_advised` |
 | `config_health` | `config.toml` stops loading, loads again, or breaks for a different reason | `healthy`, `path`, `error`, `config_mtime` |

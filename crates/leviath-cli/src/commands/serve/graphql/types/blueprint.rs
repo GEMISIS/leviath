@@ -19,7 +19,8 @@ use super::manifest::count;
 use super::manifest::dependency::BlueprintDependency;
 use super::manifest::output::OutputSpec;
 use super::manifest::region::{
-    RegionAdmission, RegionEviction, RegionSeed, RegionStrategy, RegionVolatility,
+    RegionAdmission, RegionContinuePolicy, RegionEviction, RegionSeed, RegionStrategy,
+    RegionVolatility,
 };
 use super::manifest::runtime::{
     BlueprintSecurity, CompactionConfig, FileTrackingConfig, NudgeConfig, RepetitionDetection,
@@ -335,6 +336,14 @@ impl Region {
         RegionAdmission::from(self.region().admission)
     }
 
+    /// What this region keeps when its finished run is continued with a new
+    /// message: the `on_continue` it sets, or the one its kind follows when
+    /// it sets none (`temporary` and `clearable` clear, every other kind
+    /// keeps).
+    async fn on_continue(&self) -> RegionContinuePolicy {
+        RegionContinuePolicy::from(self.region().continue_policy())
+    }
+
     /// The fraction of the budget at which a compacting region compacts.
     async fn compact_at(&self) -> Option<f64> {
         self.region().compact_at
@@ -565,6 +574,14 @@ impl Blueprint {
     /// names none, which starts the run in the first stage declared.
     async fn entry_stage_name(&self) -> Option<&str> {
         self.parsed.graph.entry.as_ref().map(|name| name.as_str())
+    }
+
+    /// The stage a finished run goes back to when it is continued with a new
+    /// message: the graph's `continue_at`, or the entry stage. Null where
+    /// that names a stage the graph does not declare.
+    async fn continue_stage(&self) -> Option<Stage> {
+        let name = self.parsed.graph.continue_stage()?.name.as_str();
+        super::manifest::refs::stage(&self.parsed, name)
     }
 
     /// How deep sub-agent spawning may nest.

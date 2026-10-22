@@ -127,8 +127,9 @@ pub(crate) struct Happened {
     pub events: Vec<RunEvent>,
     /// Who waits to hear where that step landed.
     pub acks: Vec<oneshot::Sender<Appended>>,
-    /// Whether a call of a batch still running finished: its state then has
-    /// to be recorded with the step, so the file holds the call as done.
+    /// Whether a call of a batch still running finished, or the run was
+    /// reopened for a new segment: its state then has to be recorded with the
+    /// step, so the file holds the call as done, or the run as going again.
     pub landed: bool,
 }
 
@@ -153,7 +154,10 @@ pub(crate) fn drain(world: &mut World) -> BTreeMap<String, Happened> {
     {
         let answered = journals.0.entry(run_id.clone()).or_default();
         let run = happened.entry(run_id).or_default();
-        run.landed |= matches!(*record, RunRecord::ToolCallDone { .. });
+        run.landed |= matches!(
+            *record,
+            RunRecord::ToolCallDone { .. } | RunRecord::Continued(_)
+        );
         push_events(&mut run.events, answered, &record);
         run.acks.extend(ack);
     }

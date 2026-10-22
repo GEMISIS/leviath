@@ -47,6 +47,8 @@ pub struct Resumable {
     /// What its taint gate decided in each stage, as the stage's audit file
     /// holds it, so what the gate decides next is added to it.
     pub audit: Vec<(usize, Vec<leviath_core::taint::GateEvent>)>,
+    /// The segment it is in: 1 until it is continued after finishing.
+    pub segment: u32,
 }
 
 /// Read the run in `run_dir` back from its run file.
@@ -86,16 +88,22 @@ pub fn read_for_resume(
         _ => None,
     };
     // Every step decoded on the way to the state, so these read too.
-    let answered = reader
-        .deltas(1, reader.last_seq())
-        .unwrap_or_default()
-        .iter()
-        .flat_map(|d| &d.events)
+    let deltas = reader.deltas(1, reader.last_seq()).unwrap_or_default();
+    let events = || deltas.iter().flat_map(|d| &d.events);
+    let answered = events()
         .filter(|e| matches!(e, crate::state::RunEvent::Answered { .. }))
         .count();
+    let segment = events()
+        .filter_map(|e| match e {
+            crate::state::RunEvent::Continued(c) => Some(c.segment),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(1);
     let open = state.interactions.len() + state.pending.as_ref().map_or(0, |b| b.calls.len());
     let audit = audit_files(run_dir, reader.spec().graph.stages.len());
     Ok(Some(Resumable {
+        segment,
         audit,
         asked: u64::try_from(answered + open).unwrap_or(u64::MAX),
         code: reader.code_files()?,

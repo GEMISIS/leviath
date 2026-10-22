@@ -1115,6 +1115,62 @@
         ],
         "type": "object"
       },
+      "ContinuedState": {
+        "description": "A segment starting: a finished run continued in place, or a new run forked\nfrom a finished one.",
+        "properties": {
+          "forked_from": {
+            "description": "The run this one was forked from, for a fork's first segment. `None`\nfor a run continued in place.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previous": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SegmentEnd"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How the segment before it ended. `None` for a fork's first segment,\nwhich has none."
+          },
+          "regions": {
+            "description": "What each region of the window did, by name, in window order.",
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/OnContinue"
+                }
+              ],
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "segment": {
+            "description": "The segment that starts, counted from 1.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stage": {
+            "description": "The stage it starts in.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "segment",
+          "stage",
+          "regions"
+        ],
+        "type": "object"
+      },
       "Cursor": {
         "description": "Where a run is in its graph.",
         "properties": {
@@ -2157,6 +2213,31 @@
         ],
         "type": "object"
       },
+      "OnContinue": {
+        "description": "What a region keeps when a finished run is continued with a new message.",
+        "oneOf": [
+          {
+            "const": "keep",
+            "description": "It carries over as it is.",
+            "type": "string"
+          },
+          {
+            "const": "clear",
+            "description": "It is emptied.",
+            "type": "string"
+          },
+          {
+            "const": "compact",
+            "description": "It is summarized by the run's compaction model.",
+            "type": "string"
+          },
+          {
+            "const": "reseed",
+            "description": "It is emptied and filled again from its seed.",
+            "type": "string"
+          }
+        ]
+      },
       "OpenInteraction": {
         "description": "A question put to a person.",
         "properties": {
@@ -3070,6 +3151,19 @@
               "ContextNoted"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A finished run was taken up again with a new message, and a new\nsegment of it started. Last, so a file written before runs could be\ncontinued reads the same.",
+            "properties": {
+              "Continued": {
+                "$ref": "#/$defs/ContinuedState"
+              }
+            },
+            "required": [
+              "Continued"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -3147,6 +3241,65 @@
             "type": "string"
           }
         ]
+      },
+      "SegmentEnd": {
+        "description": "How a segment ended.",
+        "properties": {
+          "file": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FileRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The answer's bytes, kept beside the run file under\n`segments/<segment>/` so the next segment's answer does not replace\nthem."
+          },
+          "final_output": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FinalOutputState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The answer it handed back, when it handed one back."
+          },
+          "seq": {
+            "description": "The last step it recorded.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "spend": {
+            "$ref": "#/$defs/Spend",
+            "description": "What the run had spent by then, every segment so far included."
+          },
+          "stage": {
+            "description": "The stage it ended in.",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/RunStatus",
+            "description": "Its status: complete, failed or cancelled."
+          },
+          "tool_calls": {
+            "description": "The tool calls the run had made by then.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "stage",
+          "spend",
+          "tool_calls",
+          "seq"
+        ],
+        "type": "object"
       },
       "SettledState": {
         "description": "A question a person settled, whole.",
@@ -6386,6 +6539,31 @@
         },
         "type": "object"
       },
+      "OnContinue": {
+        "description": "What a region keeps when a finished run is continued with a new message.",
+        "oneOf": [
+          {
+            "const": "keep",
+            "description": "It carries over as it is.",
+            "type": "string"
+          },
+          {
+            "const": "clear",
+            "description": "It is emptied.",
+            "type": "string"
+          },
+          {
+            "const": "compact",
+            "description": "It is summarized by the run's compaction model.",
+            "type": "string"
+          },
+          {
+            "const": "reseed",
+            "description": "It is emptied and filled again from its seed.",
+            "type": "string"
+          }
+        ]
+      },
       "OnRoutingError": {
         "description": "What a run does when the call that picks its next stage fails for good.",
         "oneOf": [
@@ -6778,6 +6956,18 @@
             "description": "The region's name, unique in its layout.",
             "type": "string"
           },
+          "on_continue": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OnContinue"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "What happens to it when a finished run is continued with a new\nmessage. Unset follows its kind: see [`RegionDef::continue_policy`]."
+          },
           "required": {
             "default": false,
             "description": "Whether a spawn that leaves it empty is refused.",
@@ -6996,6 +7186,14 @@
             ],
             "default": null,
             "description": "How the conversation is summarized when the context fills."
+          },
+          "continue_at": {
+            "default": null,
+            "description": "The stage a finished run goes back to when it is continued with a\nnew message. `None` is the entry stage.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "dependencies": {
             "default": [],

@@ -10,6 +10,7 @@
 
 pub mod attach;
 pub mod check;
+pub mod continuing;
 pub(crate) mod inputs;
 pub(crate) mod locate;
 pub use locate::installed_old_format;
@@ -35,6 +36,12 @@ pub enum RunCommand {
     /// Show what a run's file holds: its spec, its state after any step, or
     /// its steps
     Show(show::ShowArgs),
+    /// Continue a finished run with a new message: it goes back to work in a
+    /// new segment, with the context its regions keep
+    Continue(continuing::ContinueArgs),
+    /// Start a new run from a finished one, carrying its context, with a new
+    /// message; the finished run is left as it is
+    Fork(continuing::ContinueArgs),
 }
 
 /// Arguments for `lev run`.

@@ -28,4 +28,5 @@ pub(super) mod interactions;
 pub(super) mod lifecycle;
 pub(super) mod run_file;
 pub(super) mod runs;
+pub(super) mod segments;
 pub(super) mod spawn;

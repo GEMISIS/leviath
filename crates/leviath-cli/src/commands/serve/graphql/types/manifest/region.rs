@@ -52,6 +52,32 @@ impl From<leviath_core::region::Admission> for RegionAdmission {
     }
 }
 
+/// What a region keeps when its finished run is continued with a new message.
+#[mirror]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub(crate) enum RegionContinuePolicy {
+    /// It carries over as it is.
+    Keep,
+    /// It is emptied.
+    Clear,
+    /// It is summarized by the run's compaction model.
+    Compact,
+    /// It is emptied and filled again from its seed.
+    Reseed,
+}
+
+impl From<leviath_runtime::spec::graph::OnContinue> for RegionContinuePolicy {
+    fn from(policy: leviath_runtime::spec::graph::OnContinue) -> Self {
+        use leviath_runtime::spec::graph::OnContinue as Core;
+        match policy {
+            Core::Keep => Self::Keep,
+            Core::Clear => Self::Clear,
+            Core::Compact => Self::Compact,
+            Core::Reseed => Self::Reseed,
+        }
+    }
+}
+
 /// How a sliding region makes room.
 ///
 /// It decides more than eviction: `PER_ITEM` shifts the prompt's prefix every

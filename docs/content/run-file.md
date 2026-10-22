@@ -121,7 +121,8 @@ them rather than holding a copy:
 
 | File | What it holds |
 |---|---|
-| `final_output` | The answer the run handed back |
+| `final_output` | The answer the run handed back, in the segment it is in |
+| `segments/<n>/final_output` | The answer segment `n` handed back, kept when the run was continued |
 | `stages/<n>/output.log` | What the model wrote in stage `n` |
 | `stages/<n>/logs.log` | Stage `n`'s tool activity and events |
 | `stages/<n>/taint_audit.json` | The taint gate's decisions in stage `n` |
@@ -135,6 +136,13 @@ longer than its recorded size, but never shorter.
 The state's `blobs` lists each stored file once: its digest, its type, its size, its name, the
 region it first appeared in, and the tool whose result carried it. A stage that wrote no text has
 no `output.log`, and a run with no answer names no `final_output`.
+
+A finished run that is [continued](/docs/interaction#continuing-a-finished-run) takes one more step,
+whose events carry a `Continued` record: the segment that starts, the stage it starts in, what each
+region did, and how the segment before it ended, with a copy of that segment's answer at the record's
+`segments/<n>/` path. The run's state only ever holds the segment it is in, so the segments before
+it are read back from these records. The step is appended like any other, so the steps of earlier
+segments are never rewritten, and the file keeps layout 8.
 
 Every reader finds these files through those names: `lev result`, the dashboard, the HTTP API,
 GraphQL, `lev rage` and the `run_history` tool. A name that leaves the run's directory is never

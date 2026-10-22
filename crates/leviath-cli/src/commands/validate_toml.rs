@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use leviath_blueprint::{BlueprintError, BlueprintFile, FILE_NAME};
-use leviath_runtime::spec::graph::{CodeRef, EdgeCondition, RunGraph, StageDef};
+use leviath_runtime::spec::graph::{CodeRef, EdgeCondition, OnContinue, RunGraph, StageDef};
 use leviath_runtime::spec::inputs::InputSlot;
 use leviath_runtime::spec::issues::SpecPath;
 
@@ -128,6 +128,22 @@ pub(crate) struct BlueprintSummary {
     pub accepts_task: bool,
     /// Every input the graph declares, in declaration order.
     pub inputs: Vec<InputSummary>,
+    /// The stage a finished run goes back to when it is continued with a new
+    /// message: the graph's `continue_at`, or its entry stage.
+    pub continue_stage: Option<String>,
+    /// What each region the graph declares does when a finished run is
+    /// continued, in declaration order: the `on_continue` it sets, or the one
+    /// its kind follows.
+    pub on_continue: Vec<RegionContinue>,
+}
+
+/// One declared region, and what it does when its finished run is continued.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct RegionContinue {
+    /// The region.
+    pub region: String,
+    /// `keep`, `clear`, `compact` or `reseed`.
+    pub policy: String,
 }
 
 /// One declared input: `--input <key>=...` (or `--<key>`) on `lev run`, the
@@ -162,8 +178,66 @@ impl BlueprintSummary {
             stages: graph.stages.iter().map(|s| s.name.to_string()).collect(),
             accepts_task: graph.inputs.iter().any(|i| i.name.as_str() == "task"),
             inputs: input_summaries(graph),
+            continue_stage: graph.continue_stage().map(|s| s.name.to_string()),
+            on_continue: continue_policies(graph)
+                .into_iter()
+                .map(|(region, policy)| RegionContinue {
+                    region,
+                    policy: policy.label().to_string(),
+                })
+                .collect(),
         }
     }
+}
+
+/// Every region the graph declares, once each in declaration order (the
+/// graph's layout, then each stage's), with what it does when a finished run
+/// is continued.
+pub(super) fn continue_policies(graph: &RunGraph) -> Vec<(String, OnContinue)> {
+    let mut out: Vec<(String, OnContinue)> = Vec::new();
+    let layouts =
+        std::iter::once(&graph.layout).chain(graph.stages.iter().filter_map(|s| s.layout.as_ref()));
+    for region in layouts.flat_map(|layout| &layout.regions) {
+        let name = region.name.to_string();
+        if out.iter().all(|(seen, _)| *seen != name) {
+            let policy = graph
+                .continue_policy(&name)
+                .unwrap_or(region.continue_policy());
+            out.push((name, policy));
+        }
+    }
+    out
+}
+
+/// The "Continue" lines of the report: where a finished run goes back to
+/// when it is sent a new message, and what each declared region keeps.
+pub(super) fn continue_lines(graph: &RunGraph) -> Vec<String> {
+    let stage = graph
+        .continue_stage()
+        .map(|s| s.name.to_string())
+        .unwrap_or_default();
+    let mut lines = vec![format!("  Continue at: '{stage}'")];
+    let policies = continue_policies(graph);
+    let groups = [
+        OnContinue::Keep,
+        OnContinue::Clear,
+        OnContinue::Compact,
+        OnContinue::Reseed,
+    ]
+    .into_iter()
+    .filter_map(|want| {
+        let names: Vec<&str> = policies
+            .iter()
+            .filter(|(_, policy)| *policy == want)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        (!names.is_empty()).then(|| format!("{} {}", want.label(), names.join(", ")))
+    })
+    .collect::<Vec<_>>();
+    if !groups.is_empty() {
+        lines.push(format!("  On continue: {}", groups.join("; ")));
+    }
+    lines
 }
 
 /// The inputs a graph declares, in declaration order.
@@ -396,6 +470,7 @@ pub(super) fn success_lines(checked: &Checked) -> Vec<String> {
     lines.extend(input_lines(graph));
     lines.extend(mime_lines(graph));
     lines.extend(graph_lines(graph));
+    lines.extend(continue_lines(graph));
     lines
 }
 

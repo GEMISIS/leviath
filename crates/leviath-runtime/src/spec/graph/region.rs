@@ -47,8 +47,11 @@ pub struct RegionLayoutDef {
 }
 
 /// One region.
+// The run file's binary frames keep the fields this had before
+// `on_continue` (see `spec::readable::region`); readable formats write them
+// all.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct RegionDef {
     /// The region's name, unique in its layout.
     pub name: RegionName,
@@ -87,9 +90,61 @@ pub struct RegionDef {
     /// Mime types a part placed in it may carry. Empty accepts any.
     #[serde(default)]
     pub accepts: Vec<MimePattern>,
+    /// What happens to it when a finished run is continued with a new
+    /// message. Unset follows its kind: see [`RegionDef::continue_policy`].
+    #[serde(default)]
+    pub on_continue: Option<OnContinue>,
+}
+
+/// What a region keeps when a finished run is continued with a new message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OnContinue {
+    /// It carries over as it is.
+    Keep,
+    /// It is emptied.
+    Clear,
+    /// It is summarized by the run's compaction model.
+    Compact,
+    /// It is emptied and filled again from its seed.
+    Reseed,
+}
+
+impl OnContinue {
+    /// The policy as a blueprint spells it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::Clear => "clear",
+            Self::Compact => "compact",
+            Self::Reseed => "reseed",
+        }
+    }
+
+    /// The policy a region the runtime holds as `kind` follows when nothing
+    /// sets one: a region emptied every turn, or kept only until something
+    /// clears it, is scratch work and clears; every other kind keeps what it
+    /// holds.
+    pub fn for_kind(kind: &leviath_core::RegionKind) -> Self {
+        match kind {
+            leviath_core::RegionKind::Temporary | leviath_core::RegionKind::Clearable => {
+                Self::Clear
+            }
+            _ => Self::Keep,
+        }
+    }
 }
 
 impl RegionDef {
+    /// What this region does when its run is continued: the policy it sets,
+    /// or the one its kind follows (see [`OnContinue::for_kind`]).
+    pub fn continue_policy(&self) -> OnContinue {
+        self.on_continue.unwrap_or(match self.kind {
+            RegionKind::Temporary | RegionKind::Clearable => OnContinue::Clear,
+            _ => OnContinue::Keep,
+        })
+    }
+
     /// The size, in tokens, at which this region is summarized when it is a
     /// compacting region with `threshold_tokens` and holds `budget` tokens.
     ///

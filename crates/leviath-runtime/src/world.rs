@@ -503,8 +503,11 @@ impl PipelineWorld {
                 // `.chain()` limit, and grouping preserves the ordering.
                 //
                 // `before_inference` runs with the window assembled and before
-                // the request is built from it.
+                // the request is built from it. A continued run's message
+                // lands first, once any summary its continuation asked for is
+                // in, so the hooks and the request both see it.
                 (
+                    crate::pipeline::deliver_continuation,
                     run_before_inference_hooks,
                     crate::pipeline::rotate_open_circuits,
                     dispatch_inference,
@@ -2745,6 +2748,7 @@ mod tests {
                 answer: None,
                 asked: 0,
                 audit: Vec::new(),
+                segment: 1,
             },
             crate::spec::env::Bindings::new(),
         );

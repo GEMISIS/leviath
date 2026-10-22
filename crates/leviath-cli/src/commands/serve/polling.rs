@@ -529,6 +529,19 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             run_id,
             interaction: *interaction,
         },
+        WorldEvent::Continued {
+            run_id,
+            agent_id,
+            segment,
+            stage,
+            forked_from,
+        } => ServerEvent::RunContinued {
+            agent_id,
+            run_id,
+            segment,
+            stage,
+            forked_from,
+        },
         WorldEvent::ToolCallFinished {
             run_id,
             agent_id,
@@ -1026,6 +1039,16 @@ mod tests {
                 line: "hello".into()
             }),
             "log"
+        );
+        assert_eq!(
+            mapped_tag(WorldEvent::Continued {
+                run_id: "r".into(),
+                agent_id: "a".into(),
+                segment: 2,
+                stage: "revise".into(),
+                forked_from: None,
+            }),
+            "run_continued"
         );
         // The source-emitted events are first-class frames of their own, not a
         // generic envelope a client has to unwrap.

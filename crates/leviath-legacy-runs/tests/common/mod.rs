@@ -314,10 +314,32 @@ pub fn as_layout_6_reads(spec: &mut serde_json::Value) {
 
 /// What an older layout's build served, the way this build reads it once
 /// upgraded: every stage record with no resubmissions counted, since no older
-/// layout counted them.
+/// layout counted them, and no continue settings on the graph or a region,
+/// since no older layout kept them.
 pub fn as_layout_8_reads(mut value: serde_json::Value) -> serde_json::Value {
     count_no_resubmissions(&mut value);
+    with_no_continue_settings(&mut value);
     value
+}
+
+/// `value` with `continue_at` unset on every graph in it and `on_continue`
+/// on every region definition, which is how this build writes them.
+pub fn with_no_continue_settings(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let graph = map.contains_key("stages") && map.contains_key("layout");
+            let region = map.contains_key("summarizable") && map.contains_key("admission");
+            if graph {
+                map.entry("continue_at").or_insert(serde_json::Value::Null);
+            }
+            if region {
+                map.entry("on_continue").or_insert(serde_json::Value::Null);
+            }
+            map.values_mut().for_each(with_no_continue_settings);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(with_no_continue_settings),
+        _ => {}
+    }
 }
 
 fn count_no_resubmissions(value: &mut serde_json::Value) {
