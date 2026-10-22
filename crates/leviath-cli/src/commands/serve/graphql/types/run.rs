@@ -50,6 +50,7 @@ use support::{
 pub(crate) use support::{CostBreakdown, MetadataEntry, TokenUsage, WorkingClock};
 
 mod reads;
+mod segments;
 mod status;
 mod support;
 
@@ -1052,12 +1053,21 @@ impl Run {
 
     /// Whether `sendMessage` reaches this run where it stands.
     ///
-    /// Read from the stage the run is in, so it is the answer for now rather than
-    /// for the blueprint as a whole. Null when the run's blueprint cannot be read:
-    /// unknown is not the same as no, and a console that greyed out its box on a
-    /// failed read would be wrong half the time.
+    /// A finished run takes one when it is `continuable`: the message
+    /// continues it. A run that is going takes one as the stage it is in says,
+    /// so it is the answer for now rather than for the blueprint as a whole.
+    /// Null when the run's blueprint or file cannot be read: unknown is not
+    /// the same as no, and a console that greyed out its box on a failed read
+    /// would be wrong half the time.
     #[filter(skip)]
     async fn accepts_messages(&self) -> Option<bool> {
+        use leviath_core::run_meta::RunStatus as Core;
+        if matches!(
+            self.meta.status,
+            Core::Complete | Core::Error | Core::Cancelled
+        ) {
+            return segments::continuable(&self.meta).await;
+        }
         let run_id = self.meta.run_id.clone();
         let read = blocking(move || blueprints::blueprint_for_run(&run_id))
             .await
@@ -1071,6 +1081,24 @@ impl Run {
         };
         // An interactive stage reads what a person sends, whatever it says.
         stage.map(|stage| stage.accepts_messages || stage.mode.interactive().is_some())
+    }
+
+    /// Whether the run can be continued with a new message (`continueRun`,
+    /// or `sendMessage`): it has finished, it is not a sub-agent of another
+    /// run, and its file can be read back to run. Null when its file does not
+    /// say.
+    #[filter(skip)]
+    async fn continuable(&self) -> Option<bool> {
+        segments::continuable(&self.meta).await
+    }
+
+    /// The run's segments, oldest first. A finished run continued with a new
+    /// message starts a new segment, with its own spend, answer and artifacts;
+    /// the run's own fields describe the latest, and each earlier segment's
+    /// answer stays readable here. A run never continued has one.
+    #[filter(skip)]
+    async fn segments(&self) -> async_graphql::Result<Vec<segments::RunSegment>> {
+        segments::read(&self.meta.run_id).await
     }
 
     /// Caller-supplied metadata from spawn. Values are always strings.

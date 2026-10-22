@@ -294,6 +294,9 @@ impl WorldHost {
             // The run leaves memory but not the listing: for a while yet it
             // can still say how it ended.
             self.record_finished(entry, now);
+            // A continuation that waited for the run to leave memory reads
+            // it back now.
+            self.unloaded(&run_id);
         }
         // Park paused runs: same teardown as a reap (the reap hook drops the
         // agent's tool state and sandbox, which a page-in rebuilds the way a

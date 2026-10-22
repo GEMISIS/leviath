@@ -1455,3 +1455,57 @@ fn every_call_kind_reads_as_its_graphql_kind() {
     };
     assert_eq!(step.transition.to_stage, "b");
 }
+
+/// A continuation reads as the segment it started, where, from what, and
+/// what each region did; a fork's has no segment before it.
+#[test]
+fn a_continuation_reads_as_the_segment_it_started() {
+    use super::super::manifest::region::RegionContinuePolicy;
+    use super::delta::StepEvent;
+    use leviath_runtime::spec::graph::OnContinue;
+    use leviath_runtime::state::{ContinuedState, RunEvent, SegmentEnd};
+    let state = leviath_runtime::state::RunState::initial(
+        leviath_runtime::spec::names::StageName::new("a").unwrap(),
+        Default::default(),
+        true,
+    );
+    let continued = |previous: Option<SegmentEnd>, forked: Option<&str>| {
+        let event = RunEvent::Continued(Box::new(ContinuedState {
+            segment: 2,
+            stage: leviath_runtime::spec::names::StageName::new("b").unwrap(),
+            forked_from: forked.map(|r| leviath_runtime::spec::names::RunId::new(r).unwrap()),
+            previous,
+            regions: vec![
+                ("notes".into(), OnContinue::Keep),
+                ("scratch".into(), OnContinue::Clear),
+                ("conversation".into(), OnContinue::Compact),
+                ("refs".into(), OnContinue::Reseed),
+            ],
+        }));
+        let StepEvent::Continued(step) = StepEvent::from(&event) else {
+            panic!("a continuation reads as one")
+        };
+        step
+    };
+    let step = continued(Some(SegmentEnd::of(&state, None)), None);
+    assert_eq!(step.segment, 2);
+    assert_eq!(step.stage, "b");
+    assert_eq!(step.previous_seq, Some(0));
+    assert_eq!(step.forked_from, None);
+    let policies: Vec<RegionContinuePolicy> = step.regions.iter().map(|r| r.policy).collect();
+    assert_eq!(
+        policies,
+        [
+            RegionContinuePolicy::Keep,
+            RegionContinuePolicy::Clear,
+            RegionContinuePolicy::Compact,
+            RegionContinuePolicy::Reseed,
+        ]
+    );
+    let fork = continued(None, Some("src-1"));
+    assert_eq!(fork.previous_seq, None);
+    assert_eq!(
+        fork.forked_from.map(|id| id.to_string()).as_deref(),
+        Some("src-1")
+    );
+}

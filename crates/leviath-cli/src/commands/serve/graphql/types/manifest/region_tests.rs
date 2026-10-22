@@ -3,9 +3,9 @@
 use async_graphql::Value;
 
 use super::{
-    RegionAdmission, RegionSeed, RegionStrategy, RegionVolatility, SeedFromCaller, SeedFromCommand,
-    SeedFromFiles, SeedFromGlob, SeedFromLiteral, SeedFromScript, SeedFromTools, SeedRefresh,
-    SeedToolCall,
+    RegionAdmission, RegionContinuePolicy, RegionSeed, RegionStrategy, RegionVolatility,
+    SeedFromCaller, SeedFromCommand, SeedFromFiles, SeedFromGlob, SeedFromLiteral, SeedFromScript,
+    SeedFromTools, SeedRefresh, SeedToolCall,
 };
 use crate::commands::serve::graphql::filter::testkit::{exercise, exercise_enum, exercise_list};
 use crate::commands::serve::graphql::scalars::Json;
@@ -29,6 +29,7 @@ async fn every_mirrored_function_runs() {
     exercise_enum(&[RegionAdmission::Evict, RegionAdmission::Reject]).await;
     exercise_enum(&[RegionStrategy::PerItem, RegionStrategy::Compact]).await;
     exercise_enum(&[SeedRefresh::Once, SeedRefresh::EachStage]).await;
+    exercise_enum(&[RegionContinuePolicy::Keep, RegionContinuePolicy::Reseed]).await;
 
     let calls = vec![call()];
     exercise(&calls).await;

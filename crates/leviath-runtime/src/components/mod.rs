@@ -405,6 +405,12 @@ pub struct AgentMessage {
 /// The sender of a message a person sent, as [`AgentMessage::from`] names it.
 pub const FROM_PERSON: &str = "user";
 
+/// The sender of the message that continued a finished run. The message
+/// waits in the run's inbox, where a restart finds it, until the regions the
+/// continuation summarizes are summarized, and is then delivered whether or
+/// not the stage takes messages.
+pub const FROM_CONTINUATION: &str = "continuation";
+
 /// Inbox component for receiving messages sent to a running agent.
 #[derive(Component, Debug, Clone)]
 pub struct MessageInbox {
@@ -428,9 +434,24 @@ impl MessageInbox {
         self.messages.push(msg);
     }
 
-    /// Drain all messages from the inbox.
+    /// Drain every message waiting for a stage that takes messages: all but a
+    /// continuation's, which [`Self::take_continuation`] hands over.
     pub(crate) fn drain_all(&mut self) -> Vec<AgentMessage> {
-        std::mem::take(&mut self.messages)
+        self.take(false)
+    }
+
+    /// Take the message that continued the run, when it is still waiting.
+    pub(crate) fn take_continuation(&mut self) -> Vec<AgentMessage> {
+        self.take(true)
+    }
+
+    /// Take the messages that are, or are not, a continuation's.
+    fn take(&mut self, continuation: bool) -> Vec<AgentMessage> {
+        let (taken, kept) = std::mem::take(&mut self.messages)
+            .into_iter()
+            .partition(|m| (m.from == FROM_CONTINUATION) == continuation);
+        self.messages = kept;
+        taken
     }
 }
 

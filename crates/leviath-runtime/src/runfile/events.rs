@@ -208,6 +208,7 @@ pub(crate) fn push_events(events: &mut Vec<RunEvent>, answered: &mut Answered, r
                 });
             }
         }
+        RunRecord::Continued(continued) => events.push(RunEvent::Continued(continued.clone())),
     }
 }
 

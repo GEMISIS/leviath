@@ -292,7 +292,37 @@ for the other ways to read the same things.
 
 A blueprint named `show` or `help` is read as this subcommand when its name comes first, so give
 an option before the name to run it: `lev run --task "..." show`. `lev add` prints that form for
-such a name.
+such a name. The same goes for `continue` and `fork`.
+
+### `lev run continue <RUN> <MESSAGE>`
+
+Continue a finished run (complete, failed or cancelled) with a new message. It goes back to the
+stage its blueprint names in `[graph] continue_at`, or its entry stage, and works again as a new
+segment, with what each region keeps by its `on_continue`. See
+[continuing a finished run](/docs/interaction#continuing-a-finished-run).
+
+| Flag | Purpose |
+|---|---|
+| `--region <NAME>` | The region the message lands in. The conversation when left out |
+| `--attach <PATH[:REGION][:TYPE][:text]>` | Attach a file, as on `lev run`. Repeatable |
+| `--daemon <MODE>` | Whether this may start or replace the daemon, as on `lev run` |
+
+It prints the run and the segment that started, once the step that reopened the run is on disk:
+
+```text
+run release-notes-1790848768-495da0e423db continued: segment 2
+```
+
+A run that has not finished, or that another request is continuing, is refused.
+
+### `lev run fork <RUN> <MESSAGE>`
+
+Start a new run carrying a finished run's context, with a new message, and leave the finished run
+as it is. It takes the flags `lev run continue` takes and prints both runs:
+
+```text
+forked run release-notes-1790848768-495da0e423db into run release-notes-1790849021-8b1f0c2a77d4 (segment 1)
+```
 
 ### `lev schema spawn-request`
 
@@ -872,7 +902,7 @@ config grants.
 |---|---|---|
 | `lev ps` | `--json`, `--all` | List runs in the daemon with their status. `--all` also reads the runs dir. See [below](#reading-lev-ps) |
 | `lev dash` | | Full-screen TUI [dashboard](/docs/dashboard) |
-| `lev msg <AGENT_ID> [CONTENT]` | `--attach`, `--end` | Deliver a message into a running agent's context. `--end` then ends an interactive stage's conversation |
+| `lev msg <AGENT_ID> [CONTENT]` | `--attach`, `--end` | Deliver a message into a running agent's context, or continue a finished run with it. `--end` then ends an interactive stage's conversation |
 | `lev pause <RUN_ID>` | | Pause a run. It finishes its in-flight step, then holds. See [below](#pausing-a-run) |
 | `lev resume <RUN_ID>` | | Un-pause a run, or bring back a cancelled one where it stopped |
 | `lev cancel <RUN_ID>` | `--force` | Cancel a run. Also aliased as `lev kill` |

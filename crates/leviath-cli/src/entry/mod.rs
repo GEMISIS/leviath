@@ -228,6 +228,17 @@ impl RiskyExecutors for RealExecutors {
         commands::ctl::resume_run(&control_client()?, &args).await
     }
 
+    async fn continue_run(
+        &self,
+        args: commands::run::continuing::ContinueArgs,
+        fork: bool,
+    ) -> anyhow::Result<()> {
+        // A finished run outlives the daemon that ran it, so this starts one
+        // the way `lev run` does.
+        ensure_daemon_running(args.daemon.resolve_here()?).await?;
+        commands::run::continuing::execute(&control_client()?, &args, fork).await
+    }
+
     async fn interactions(&self, args: commands::ctl::InteractionsArgs) -> anyhow::Result<()> {
         commands::ctl::interactions(&control_client()?, &args).await
     }

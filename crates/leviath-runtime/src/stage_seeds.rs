@@ -227,6 +227,7 @@ mod tests {
                     volatility: Default::default(),
                     seed,
                     accepts: vec![],
+                    on_continue: None,
                 })
                 .collect(),
             total_budget_tokens: 10_000,

@@ -547,6 +547,18 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // paged requests, and a client that does not know this is here writes that
     // loop and keeps it forever.
     "runs.export",
+    // `POST /api/runs/{id}/continue`, GraphQL `continueRun` and
+    // `spawnRun(source: { continueFrom })`, `GET /api/runs/{id}/segments` and
+    // `Run.segments`, `Run.continuable`, and `sendMessage` continuing a
+    // finished run rather than refusing it. Announced because the refusal
+    // was the old answer: a console that cannot tell would grey out the box
+    // on every finished run, or offer one that a daemon refuses.
+    "runs.continue",
+    // The `run_continued` frame (`RunContinuedEvent`), sent when a finished
+    // run goes back to work in a new segment. Without it a console sees a
+    // finished run start sending status frames again and cannot tell a new
+    // segment from a stale frame.
+    "events.run_continued",
     // `--workdir-root` may be given more than once, and a workdir under any
     // one of the roots is accepted. `roots` on `GET /api/fs/dirs` and on
     // GraphQL `Directory` lists them all. Announced so a client that keeps

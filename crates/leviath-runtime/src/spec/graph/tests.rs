@@ -59,6 +59,7 @@ pub(crate) fn region(name: &str) -> RegionDef {
         volatility: Volatility::default(),
         seed: None,
         accepts: vec![],
+        on_continue: None,
     }
 }
 
@@ -109,6 +110,7 @@ pub(crate) fn minimal() -> RunGraph {
         mcp_servers: vec![],
         script_permissions: Default::default(),
         write_paths: Vec::new(),
+        continue_at: None,
     }
 }
 
@@ -1007,4 +1009,80 @@ fn a_gate_no_tool_can_satisfy_and_an_unwilling_worker_are_refused() {
     g.stages[0].tools = vec![ToolSelector::Group(ToolGroup::Builtin)];
     g.edges[0].gate.as_mut().unwrap().tools.clear();
     assert_eq!(codes(&g), Vec::<String>::new());
+}
+
+/// `continue_at` names a stage, and each `on_continue` can do what it says:
+/// a reseed needs a seed, a summary needs a region that may be summarized
+/// and a compaction model, and a region declared twice sets one policy.
+#[test]
+fn continue_settings_are_checked() {
+    let mut g = minimal();
+    g.continue_at = Some(StageName::new("nope").unwrap());
+    g.layout.regions[0].on_continue = Some(OnContinue::Reseed);
+    g.layout.regions[1].on_continue = Some(OnContinue::Compact);
+    g.layout.regions[1].summarizable = false;
+    let mut own = g.layout.clone();
+    own.regions[0].on_continue = Some(OnContinue::Clear);
+    own.regions[1].on_continue = Some(OnContinue::Compact);
+    g.stages[1].layout = Some(own);
+    assert_eq!(
+        codes(&g),
+        vec![
+            "graph.continue_at Dangling",
+            "graph.layout.regions[0].on_continue Missing",
+            "graph.layout.regions[1].on_continue Conflict",
+            "graph.stages.build.layout.regions[0].on_continue Conflict",
+            "graph.stages.build.layout.regions[1].on_continue Conflict",
+        ]
+    );
+    // Summarizing needs a compaction model the graph names.
+    let mut g = minimal();
+    g.layout.regions[1].on_continue = Some(OnContinue::Compact);
+    let issues = g.validate(&SpecPath::root()).unwrap_err();
+    assert!(
+        issues.to_string().contains("names no compaction"),
+        "{issues}"
+    );
+    g.compaction = Some(toml::from_str("").unwrap());
+    g.layout.regions[0].seed = Some(Seed::Literal("x".into()));
+    g.layout.regions[0].on_continue = Some(OnContinue::Reseed);
+    g.continue_at = Some(StageName::new("build").unwrap());
+    assert_eq!(codes(&g), Vec::<String>::new());
+    assert_eq!(g.continue_stage().unwrap().name.as_str(), "build");
+}
+
+/// A graph and a region that set the settings a continued run reads keep
+/// them through the run file's binary frames, whatever rides beside them.
+#[test]
+fn continue_settings_survive_the_binary_frames() {
+    let mut g = minimal();
+    for rescan in [
+        ToolRescan::AtSpawn,
+        ToolRescan::AfterWrites,
+        ToolRescan::BeforeDispatch,
+    ] {
+        for at in [None, Some(StageName::new("build").unwrap())] {
+            g.tool_rescan = rescan;
+            g.continue_at = at;
+            let bytes = postcard::to_stdvec(&g).unwrap();
+            assert_eq!(postcard::from_bytes::<RunGraph>(&bytes).unwrap(), g);
+        }
+    }
+    let mut r = region("r");
+    for admission in [Admission::Evict, Admission::Reject] {
+        for policy in [None, Some(OnContinue::Keep), Some(OnContinue::Reseed)] {
+            r.admission = admission;
+            r.on_continue = policy;
+            let bytes = postcard::to_stdvec(&r).unwrap();
+            assert_eq!(postcard::from_bytes::<RegionDef>(&bytes).unwrap(), r);
+        }
+    }
+    // A region that sets no policy follows its kind.
+    r.on_continue = None;
+    r.kind = RegionKind::Clearable;
+    assert_eq!(r.continue_policy(), OnContinue::Clear);
+    r.kind = RegionKind::Temporary;
+    assert_eq!(r.continue_policy(), OnContinue::Clear);
+    r.kind = RegionKind::Pinned;
+    assert_eq!(r.continue_policy(), OnContinue::Keep);
 }

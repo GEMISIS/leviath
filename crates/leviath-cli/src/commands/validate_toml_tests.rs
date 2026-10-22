@@ -437,6 +437,57 @@ stages = [{{ name = "a", max_revisits = 3 }}, {{ name = "b" }}, {{ name = "c" }}
     assert_eq!(graph_lines(&empty), vec!["  Entry stage: ''".to_string()]);
 }
 
+/// Where a finished run goes back to when it is continued, and what each
+/// declared region keeps, grouped by policy; a region declared in a stage's
+/// layout too is named once.
+#[test]
+fn continue_lines_name_the_stage_and_every_regions_policy() {
+    let text = r#"
+[blueprint]
+name = "c"
+version = "0.1.0"
+
+[graph]
+continue_at = "b"
+compaction = {}
+layout = { total_budget_tokens = 0, regions = [
+    { name = "refs", kind = "pinned", budget = 100, seed = { literal = "x" }, on_continue = "reseed" },
+    { name = "notes", kind = "pinned", budget = 100, on_continue = "compact" },
+    { name = "scratch", kind = "clearable", budget = 100 },
+    { name = "system", kind = "pinned", budget = 100 },
+] }
+stages = [
+    { name = "a" },
+    { name = "b", layout = { total_budget_tokens = 0, regions = [
+        { name = "system", kind = "pinned", budget = 100 },
+        { name = "own", kind = "temporary", budget = 100 },
+    ] } },
+]
+"#;
+    let graph = graph_of(text);
+    assert_eq!(
+        continue_lines(&graph),
+        vec![
+            "  Continue at: 'b'".to_string(),
+            "  On continue: keep system; clear scratch, own; compact notes; reseed refs"
+                .to_string(),
+        ]
+    );
+    let policies: Vec<String> = continue_policies(&graph)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(policies, ["refs", "notes", "scratch", "system", "own"]);
+    // A graph with no regions names only where it continues.
+    let empty = graph_of(
+        "[blueprint]\nname = \"e\"\nversion = \"1\"\n\n[graph]\nstages = []\nlayout = { total_budget_tokens = 0, regions = [] }\n",
+    );
+    assert_eq!(
+        continue_lines(&empty),
+        vec!["  Continue at: ''".to_string()]
+    );
+}
+
 #[test]
 fn success_lines_name_the_blueprint_and_gather_every_part() {
     let dir = tempfile::tempdir().unwrap();
@@ -451,5 +502,17 @@ fn success_lines_name_the_blueprint_and_gather_every_part() {
     assert!(
         lines.iter().any(|l| l == "  - main (terminal)"),
         "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|l| l == "  Continue at: 'main'"),
+        "{lines:#?}"
+    );
+    let summary = BlueprintSummary::of(&check(dir.path()).unwrap());
+    assert_eq!(summary.continue_stage.as_deref(), Some("main"));
+    assert!(
+        summary
+            .on_continue
+            .iter()
+            .any(|r| r.region == "system" && r.policy == "keep")
     );
 }

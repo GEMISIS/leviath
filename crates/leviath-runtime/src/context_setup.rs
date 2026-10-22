@@ -714,6 +714,7 @@ mod tests {
             volatility: Default::default(),
             seed: None,
             accepts: vec![crate::spec::names::MimePattern::new("image/*").unwrap()],
+            on_continue: None,
         }
     }
 

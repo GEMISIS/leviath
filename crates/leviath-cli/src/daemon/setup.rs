@@ -601,6 +601,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // Reload-on-demand: an op targeting an unloaded run pages it back in from
     // its run file, against the machine as it stands now.
     host.set_reloader(crate::daemon::recovery::reloader(starter.clone()));
+    host.set_continuer(crate::daemon::continuer::continuer(starter.clone()));
 
     // Last resort for a cancel the world can't service: force the run's on-disk
     // state to `Cancelled`. The reloader above declines whenever a run can't be

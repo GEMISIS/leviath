@@ -136,7 +136,7 @@ async fn option_response(
 /// files were asked for by path and cannot be read.
 ///
 /// The record and the files are read on the blocking pool.
-async fn workdir_parts(
+pub(super) async fn workdir_parts(
     id: &str,
     text: &str,
     listed: &[super::upload::PartRef],

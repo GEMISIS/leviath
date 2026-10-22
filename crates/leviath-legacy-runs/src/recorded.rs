@@ -218,6 +218,7 @@ fn region(name: RegionName, r: &RegionSnapshot) -> RegionDef {
         volatility: Volatility::default(),
         seed: None,
         accepts: Vec::new(),
+        on_continue: None,
     }
 }
 

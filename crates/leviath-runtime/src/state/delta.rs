@@ -228,6 +228,10 @@ pub enum RunEvent {
     ContextCommitted(Box<ContextCommitState>),
     /// One region changed, with its cause.
     ContextNoted(ContextNoteState),
+    /// A finished run was taken up again with a new message, and a new
+    /// segment of it started. Last, so a file written before runs could be
+    /// continued reads the same.
+    Continued(Box<super::segment::ContinuedState>),
 }
 
 macro_rules! diff_fields {

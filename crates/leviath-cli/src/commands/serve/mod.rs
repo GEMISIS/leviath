@@ -17,6 +17,7 @@ mod compat;
 mod config;
 mod config_health;
 mod config_types;
+mod continuing;
 pub(crate) mod core;
 mod cursor;
 mod doctor;
@@ -238,8 +239,10 @@ fn api_router() -> Router<AppState> {
         .route("/api/runs/{id}/pause", post(run_reads::pause_run))
         .route("/api/runs/{id}/resume", post(run_reads::resume_run))
         .route("/api/runs/{id}/cancel", post(run_reads::cancel_run))
+        .route("/api/runs/{id}/segments", get(continuing::run_segments))
         // Messages
         .route("/api/runs/{id}/message", post(interactions::send_message))
+        .route("/api/runs/{id}/continue", post(continuing::continue_run))
         .route(
             "/api/runs/{id}/end-conversation",
             post(interactions::end_conversation),
@@ -1176,6 +1179,7 @@ mod tests {
         ("fs", include_str!("fs.rs")),
         ("graphql", include_str!("graphql/mod.rs")),
         ("interactions", include_str!("interactions.rs")),
+        ("continuing", include_str!("continuing.rs")),
         ("mcp", include_str!("mcp.rs")),
         ("mime", include_str!("mime.rs")),
         ("providers", include_str!("providers.rs")),

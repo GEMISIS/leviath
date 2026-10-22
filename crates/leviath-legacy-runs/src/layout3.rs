@@ -235,6 +235,7 @@ impl From<RunGraph> for graph::RunGraph {
             dependencies: g.dependencies,
             mcp_servers: g.mcp_servers,
             script_permissions: g.script_permissions,
+            continue_at: None,
         }
     }
 }

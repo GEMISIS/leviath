@@ -64,7 +64,14 @@ impl WorldHost {
         let Some((run_id, purpose)) = op.page_target().map(|(id, p)| (id.to_string(), p)) else {
             return self.handle_held(op);
         };
-        if let Some(waiting) = self.paging.get_mut(&run_id) {
+        // A run being continued is read back by the continuation, which
+        // places it; an op naming it waits for that rather than paging in a
+        // second copy.
+        if let Some(waiting) = self
+            .paging
+            .get_mut(&run_id)
+            .or_else(|| self.continuing.get_mut(&run_id))
+        {
             waiting.push(op);
             return;
         }

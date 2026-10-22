@@ -868,6 +868,11 @@ pub(crate) mod choice;
 #[path = "readable_routing.rs"]
 mod routing;
 
+// ── RunGraph and RegionDef ──────────────────────────────────────────────────
+
+#[path = "readable_graph.rs"]
+mod graph;
+
 // ── OutputDef ───────────────────────────────────────────────────────────────
 
 #[path = "readable_output.rs"]

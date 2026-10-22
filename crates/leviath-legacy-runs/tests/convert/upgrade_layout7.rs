@@ -58,7 +58,7 @@ fn a_layout_7_run_reads_back_with_no_resubmissions_once_upgraded() {
     let served = served();
     let expected = crate::common::as_layout_8_reads(served.clone());
     let reader = RunFileReader::read(&file).unwrap();
-    assert_eq!(json_of(reader.spec()), served["spec"]);
+    assert_eq!(json_of(reader.spec()), expected["spec"]);
     assert_eq!(
         json_of(reader.deltas(0, reader.last_seq()).unwrap()),
         expected["deltas"]

@@ -269,6 +269,23 @@ pub(crate) enum ServerEvent {
         #[serde(flatten)]
         interaction: leviath_runtime::runfile::record::InteractionRecord,
     },
+    /// A finished run was taken up again with a new message, and a new
+    /// segment of it started: continued in place, or forked into a new run
+    /// (whose `run_id` this is). Sent once the step that reopened the run is
+    /// on disk; the run's status frame saying it is running may come first.
+    RunContinued {
+        /// The agent's live id in the world.
+        agent_id: String,
+        /// The durable run id.
+        run_id: String,
+        /// The segment that started, counted from 1.
+        segment: u32,
+        /// The stage it started in.
+        stage: String,
+        /// The run it was forked from. Absent for a run continued in place.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        forked_from: Option<String>,
+    },
     /// A lane-executed tool call returned, paired with its start by
     /// `execution_id`.
     ToolCallFinished {
@@ -414,6 +431,7 @@ impl ServerEvent {
             | ServerEvent::ToolCallFinished { run_id, .. }
             | ServerEvent::OutputSubmitted { run_id, .. }
             | ServerEvent::InteractionSettled { run_id, .. }
+            | ServerEvent::RunContinued { run_id, .. }
             | ServerEvent::AgentSpend { run_id, .. } => run_id,
             ServerEvent::DaemonLink { .. }
             | ServerEvent::EventsDropped { .. }
@@ -972,6 +990,16 @@ mod tests {
                     },
                 },
                 "r13",
+            ),
+            (
+                ServerEvent::RunContinued {
+                    agent_id: "r14".to_string(),
+                    run_id: "r14".to_string(),
+                    segment: 2,
+                    stage: "revise".to_string(),
+                    forked_from: None,
+                },
+                "r14",
             ),
         ];
         for (ev, want) in cases {

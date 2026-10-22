@@ -1920,6 +1920,31 @@
       },
       "type": "object"
     },
+    "OnContinue": {
+      "description": "What a region keeps when a finished run is continued with a new message.",
+      "oneOf": [
+        {
+          "const": "keep",
+          "description": "It carries over as it is.",
+          "type": "string"
+        },
+        {
+          "const": "clear",
+          "description": "It is emptied.",
+          "type": "string"
+        },
+        {
+          "const": "compact",
+          "description": "It is summarized by the run's compaction model.",
+          "type": "string"
+        },
+        {
+          "const": "reseed",
+          "description": "It is emptied and filled again from its seed.",
+          "type": "string"
+        }
+      ]
+    },
     "OnRoutingError": {
       "description": "What a run does when the call that picks its next stage fails for good.",
       "oneOf": [
@@ -2240,6 +2265,18 @@
           "description": "The region's name, unique in its layout.",
           "type": "string"
         },
+        "on_continue": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnContinue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What happens to it when a finished run is continued with a new\nmessage. Unset follows its kind: see [`RegionDef::continue_policy`]."
+        },
         "required": {
           "default": false,
           "description": "Whether a spawn that leaves it empty is refused.",
@@ -2458,6 +2495,14 @@
           ],
           "default": null,
           "description": "How the conversation is summarized when the context fills."
+        },
+        "continue_at": {
+          "default": null,
+          "description": "The stage a finished run goes back to when it is continued with a\nnew message. `None` is the entry stage.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "dependencies": {
           "default": [],

@@ -34,7 +34,7 @@ pub use policy::{
     ValidatorToolDef,
 };
 pub use region::{
-    ALWAYS_VISIBLE_REGIONS, Budget, Eviction, RegionDef, RegionKind, RegionLayoutDef,
+    ALWAYS_VISIBLE_REGIONS, Budget, Eviction, OnContinue, RegionDef, RegionKind, RegionLayoutDef,
     STAGE_INSTRUCTIONS_REGION, Seed, SeedRefresh,
 };
 pub use stage::{
@@ -48,8 +48,11 @@ use super::inputs::InputDecl;
 use super::names::{StageName, ToolName};
 
 /// A whole run, written down.
+// The run file's binary frames keep the fields this had before
+// `continue_at` (see `spec::readable::graph`); readable formats write them
+// all.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct RunGraph {
     /// What the run is called where runs are listed.
     #[serde(default)]
@@ -60,6 +63,10 @@ pub struct RunGraph {
     /// The stage the run starts in. `None` starts in the first stage.
     #[serde(default)]
     pub entry: Option<StageName>,
+    /// The stage a finished run goes back to when it is continued with a
+    /// new message. `None` is the entry stage.
+    #[serde(default)]
+    pub continue_at: Option<StageName>,
     /// The stages.
     pub stages: Vec<StageDef>,
     /// The edges between them.
@@ -145,6 +152,32 @@ impl RunGraph {
             Some(name) => self.stage(name.as_str()),
             None => self.stages.first(),
         }
+    }
+
+    /// The stage a continued run goes back to: `continue_at`, or the entry
+    /// stage.
+    pub fn continue_stage(&self) -> Option<&StageDef> {
+        match &self.continue_at {
+            Some(name) => self.stage(name.as_str()),
+            None => self.entry_stage(),
+        }
+    }
+
+    /// What the region named `name` does when the run is continued: the
+    /// policy the first layout declaring it sets (the graph's, then each
+    /// stage's in order), or the one its kind follows when none sets one.
+    /// `None` for a region no layout declares, whose policy follows the kind
+    /// the runtime gave it.
+    pub fn continue_policy(&self, name: &str) -> Option<OnContinue> {
+        let declared = || {
+            std::iter::once(&self.layout)
+                .chain(self.stages.iter().filter_map(|s| s.layout.as_ref()))
+                .flat_map(|layout| &layout.regions)
+                .filter(move |r| r.name.as_str() == name)
+        };
+        declared()
+            .find_map(|r| r.on_continue)
+            .or_else(|| declared().next().map(RegionDef::continue_policy))
     }
 
     /// A stage by name.

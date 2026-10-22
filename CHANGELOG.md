@@ -44,6 +44,11 @@ same list.
   `authorization_header_with` and `StoredTokenRefresher::new` take a
   `GrantTarget` (name, URL, and the URL your config gives that name) in
   place of the server name.
+- A message sent to a finished run (`sendMessage`, `POST
+  /api/runs/{id}/message`, `lev msg`) continues it in a new segment, where
+  it was refused before. `Run.acceptsMessages` is true for a finished run
+  that can be continued. To keep a finished run as it is, fork it with `lev
+  run fork` instead.
 - **Breaking, library.** `leviath_core::mime::hydrate::sends_natively` and
   `leviath_providers::mime::sends_natively` take the `MimeRegistry`, and
   answer `false` for a type it says is text. Pass the registry the request is
@@ -1161,6 +1166,29 @@ same list.
   results paired and merged. `leviath-providers` converts them with
   `Message::from` and `ContentBlock::from_conversation`, and the runtime
   builds its requests that way.
+- A finished run can be continued with a new message. `lev run continue
+  <run> "<message>"`, GraphQL `continueRun { runId, text, attachments,
+  region }` and `POST /api/runs/{id}/continue` send a complete, failed or
+  cancelled run back to the stage `[graph] continue_at` names (the entry
+  stage by default). It works again as a new segment, with its own cost,
+  answer and artifacts. `Run.segments` and `GET /api/runs/{id}/segments`
+  list every segment, earlier answers included, and the run's own answer is
+  the latest segment's. Each region says what it carries over with
+  `on_continue = "keep" | "clear" | "compact" | "reseed"`. Unset, a
+  `temporary` or `clearable` region clears and every other kind keeps.
+  `compact` summarizes with the graph's compaction model before the message
+  lands, and `reseed` runs the region's seed again. The answer comes once
+  the step that reopened the run is in its file, so a continuation survives
+  a daemon restart. A second continuation of the same run while one is
+  starting is a conflict. `lev run fork`, `spawnRun(source: { continueFrom
+  })` and `"fork": true` start a new run carrying a finished run's context
+  instead, and leave the finished run as it is. `Run.continuable`,
+  `Blueprint.continueStage` and each region's `onContinue` report it, and
+  the `run_continued` frame (`RunContinuedEvent`) says a segment started,
+  announced as `runs.continue` and `events.run_continued`. `lev validate`
+  prints where a run continues and what each region keeps, and refuses a
+  `continue_at` that names no stage, a `reseed` with no seed, and a
+  `compact` with no compaction model. Run files keep layout 8.
 - GraphQL `catalog` rows carry `pricing`, from the same price file and
   `[model_capabilities]` rates a run on that provider is billed by, so offers
   from a provider not set up here can be ranked.

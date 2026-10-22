@@ -321,6 +321,10 @@ pub enum RunRecord {
         /// Unix seconds.
         at: i64,
     },
+    /// A finished run was taken up again, and a new segment of it started.
+    /// The step that records it records the reopened run's state with it, so
+    /// a restart finds the run going rather than finished.
+    Continued(Box<crate::state::ContinuedState>),
 }
 
 /// A fingerprint of a whole context window, as one opaque hex string, for a

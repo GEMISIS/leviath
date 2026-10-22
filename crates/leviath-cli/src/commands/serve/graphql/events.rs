@@ -467,6 +467,20 @@ frames! {
             interaction: InteractionOutput,
         }
 
+        /// A finished run was taken up again with a new message, and a new
+        /// segment of it started: continued in place, or forked into a new
+        /// run, whose id `runId` is. Sent once the step that reopened the run
+        /// is on disk; the run's status frame saying it is running may come
+        /// first.
+        RunContinued => RunContinued => RunContinuedEvent {
+            /// The segment that started, counted from 1.
+            segment: i32,
+            /// The stage it started in.
+            stage: String,
+            /// The run it was forked from. Null for a run continued in place.
+            forked_from: Option<ID>,
+        }
+
         /// The run's answer was recorded: a `submit_output` call was
         /// accepted, or an output stage's produced files were taken as its
         /// answer.
@@ -902,6 +916,23 @@ pub(crate) fn run_frame(stamped: Stamped) -> Option<RunEventFrame> {
             let settled = InteractionOutput::settled(run_id.clone(), interaction);
             InteractionSettledEvent::new(head, run_id, agent_id, (settled,)).into()
         }
+        ServerEvent::RunContinued {
+            agent_id,
+            run_id,
+            segment,
+            stage,
+            forked_from,
+        } => RunContinuedEvent::new(
+            head,
+            run_id,
+            agent_id,
+            (
+                i32::try_from(segment).unwrap_or(i32::MAX),
+                stage,
+                forked_from.map(ID),
+            ),
+        )
+        .into(),
         ServerEvent::ToolCallFinished {
             agent_id,
             run_id,

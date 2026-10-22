@@ -1211,6 +1211,51 @@ Deleting a run takes its sub-agents with it, because their records only mean any
 that started them. Deleting a record is not editing a run, so a finished run is fair game here even
 though the lifecycle mutations refuse it.
 
+### Continuing a finished run
+
+A finished run (`COMPLETE`, `ERROR` or `CANCELLED`) takes a new message with `continueRun`, and
+`sendMessage` to one does the same. It goes back to the stage its graph names in `continue_at` and
+works again as a new segment, with what each region keeps by its `onContinue`. See
+[continuing a finished run](/docs/interaction#continuing-a-finished-run).
+
+```graphql
+mutation {
+  continueRun(request: {
+    runId: "sprite-1788924523-abc123"
+    text: "make the cape red"
+    attachments: [{ path: "palette.png", region: { name: "reference" } }]
+  }) {
+    segment
+    seq
+    run { id status continuable }
+  }
+}
+```
+
+It answers once the step that reopened the run is on disk. A run that has not finished, a
+sub-agent's run, or one another request is continuing is a `CONFLICT`, and no such run is
+`NOT_FOUND`. A fork starts a new run from a finished one and leaves the finished run as it is:
+
+```graphql
+mutation {
+  spawnRun(request: {
+    source: { continueFrom: { runId: "sprite-1788924523-abc123", text: "now facing left" } }
+  }) {
+    ... on SpawnedOutput { runId }
+    ... on SpawnRejectedOutput { issues { path code message } }
+  }
+}
+```
+
+A fork runs the finished run's own settings, so every other field of the request is refused as
+`NOT_ALLOWED`. `validateSpawn` refuses a fork too, since a fork is only checked by starting it.
+
+`Run.continuable` says whether a run can be continued now, and `Run.acceptsMessages` is true for a
+finished run that can. `Run.segments` lists each segment, oldest first, with its own `usage`,
+`cost`, `toolCallCount`, `finalOutput` and `artifacts`. The run's own `finalOutput` is the latest
+segment's, and its `cost` is the whole run's. On a blueprint, `continueStage` names where its runs
+continue and each region's `onContinue` says what it keeps.
+
 ### Answering a prompt
 
 `openInteractions` is the approval inbox: every open ask, each carrying the run it is parked on.
@@ -1774,6 +1819,11 @@ when the move took no declared edge.
 These are the `events.tool_arguments`, `events.output_submitted` and `events.interaction_settled`
 capabilities in `config.server.capabilities`. A run brought back after a daemon restart does not
 send them again for work it finished before the restart.
+
+`RunContinuedEvent` arrives when a finished run goes back to work in a new segment, once the step
+that reopened it is on disk, carrying `segment`, `stage` and, for a fork, `forkedFrom`. Its
+`runId` is the run going again, the new run for a fork. Select it with `RUN_CONTINUED` in `types`.
+It is the `events.run_continued` capability.
 
 The machine's own frames are their own stream, so a settings screen subscribes without seeing a
 fleet's worth of log lines.

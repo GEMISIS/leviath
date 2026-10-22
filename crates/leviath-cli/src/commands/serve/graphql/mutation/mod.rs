@@ -24,6 +24,7 @@ use blueprints::{
     UpdateBlueprintRequest, UpdateBlueprintResult,
 };
 use catalog::{RefreshModelsRequest, RefreshModelsResult};
+use continuing::{ContinueRunRequest, ContinueRunResult};
 use exports::{StartRunExportRequest, StartRunExportResult};
 use interactions::{AnswerInteractionRequest, AnswerInteractionResult};
 use runs::{
@@ -38,6 +39,7 @@ use spawn_request::SpawnRunRequest;
 pub(crate) mod attachments;
 pub(crate) mod blueprints;
 pub(crate) mod catalog;
+pub(crate) mod continuing;
 pub(crate) mod exports;
 pub(crate) mod interactions;
 pub(crate) mod runs;
@@ -49,8 +51,9 @@ pub(crate) mod spawn_request;
 #[cfg(test)]
 use runs::{has_landed, settle};
 
-/// The acts on runs and blueprints. A finished run is immutable: these reject
-/// it with `CONFLICT` rather than quietly doing nothing.
+/// The acts on runs and blueprints. A finished run takes no act but a new
+/// message, which continues it: the others reject it with `CONFLICT` rather
+/// than quietly doing nothing.
 #[derive(Default)]
 pub(crate) struct RunMutation;
 
@@ -160,11 +163,12 @@ impl RunMutation {
         spawn::validate_spawn(ctx, request).await
     }
 
-    /// Send a message to a run that is going.
+    /// Send a message to a run.
     ///
-    /// Whether it lands is the daemon's call: a stage that declared
-    /// `accepts_messages = false`, or a finished run, does not take one, and the
-    /// refusal says that rather than claiming the run does not exist.
+    /// A run that is going reads it, unless its stage declared
+    /// `accepts_messages = false`, and the refusal says that rather than
+    /// claiming the run does not exist. A finished run (`COMPLETE`, `FAILED`
+    /// or `CANCELLED`) is continued by it, as `continueRun` continues one.
     async fn send_message(
         &self,
         ctx: &Context<'_>,
@@ -172,6 +176,25 @@ impl RunMutation {
         request: SendMessageRequest,
     ) -> async_graphql::Result<SendMessageResult> {
         runs::send_message(ctx, request).await
+    }
+
+    /// Continue a finished run with a new message.
+    ///
+    /// The run (`COMPLETE`, `FAILED` or `CANCELLED`) goes back to the stage
+    /// its graph names in `continue_at`, the entry stage by default, with
+    /// the message, and works again as a new segment with its own cost,
+    /// answer and artifacts. Each region keeps, clears, summarizes or
+    /// reseeds what it held, by its `onContinue`. Answers once the step that
+    /// reopened the run is on disk, so the continuation survives a restart.
+    /// A run that has not finished, or that another request is continuing,
+    /// is a `CONFLICT`; no such run is `NOT_FOUND`.
+    async fn continue_run(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The finished run, the message, and anything to send with it.")]
+        request: ContinueRunRequest,
+    ) -> async_graphql::Result<ContinueRunResult> {
+        continuing::continue_run(ctx, request).await
     }
 
     /// End the conversation of the interactive stage a run is in.

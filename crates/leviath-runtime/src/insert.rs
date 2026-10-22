@@ -89,6 +89,7 @@ pub fn insert(
     ));
     place::spec_components(&mut entity, &spec, &setup);
     place::optional_state(&mut entity, state);
+    crate::continuation::resume_waiting(&mut entity, &spec, state);
     place::point_progress(&mut entity, state);
     place::phase(&mut entity, &spec, state);
     bindings.apply(&mut entity);
@@ -143,7 +144,7 @@ pub(crate) fn seeded_window(
 /// budget), then each seeded part as an entry of its own. A seed with parts
 /// and no text adds no empty text entry. A region the window does not hold
 /// takes nothing.
-fn seed_region(
+pub(crate) fn seed_region(
     window: &mut ContextWindow,
     name: &str,
     seeded: &crate::spec::run_spec::SeededContent,

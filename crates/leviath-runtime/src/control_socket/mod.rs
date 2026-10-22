@@ -297,6 +297,24 @@ pub enum ControlRequest {
         /// The run whose conversation ends.
         run_id: String,
     },
+    /// Continue a finished run with a new message, in place or as a new run
+    /// forked from it. Answered with [`ControlResponse::Continued`], or
+    /// [`ControlResponse::Rejected`] with every reason it was not.
+    Continue {
+        /// The finished run.
+        run_id: String,
+        /// The message.
+        text: String,
+        /// The region the message goes to. `None` is the conversation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
+        /// Files sent with the message, landing in the same entry.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parts: Vec<leviath_core::mime::InboundPart>,
+        /// Start a new run from the finished one, leaving it as it is.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fork: bool,
+    },
     /// List open interactions awaiting an answer.
     ListInteractions,
     /// Answer an open interaction.
@@ -380,6 +398,17 @@ pub enum ControlResponse {
     Rejected {
         /// The problems.
         issues: SpawnIssues,
+    },
+    /// A finished run was continued: the run going again (the new run's id
+    /// for a fork), and the segment that started.
+    Continued {
+        /// The run going again.
+        run_id: String,
+        /// The segment that started, counted from 1.
+        segment: u32,
+        /// The run it was forked from, for a fork.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forked_from: Option<String>,
     },
     /// A dry run found nothing wrong: what the run would be.
     Valid {
@@ -708,6 +737,39 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
             let (reply, rx) = oneshot::channel();
             let _ = op_tx.send(ControlOp::EndConversation { run_id, reply });
             refusable(rx.await)
+        }
+        ControlRequest::Continue {
+            run_id,
+            text,
+            region,
+            parts,
+            fork,
+        } => {
+            let (reply, rx) = oneshot::channel();
+            let request = crate::host::ContinueRequest {
+                message: crate::continuation::ContinueMessage {
+                    text,
+                    region,
+                    parts,
+                },
+                fork,
+            };
+            let _ = op_tx.send(ControlOp::Continue {
+                run_id,
+                request,
+                reply,
+            });
+            match rx.await {
+                Ok(Ok(continued)) => ControlResponse::Continued {
+                    run_id: continued.run_id,
+                    segment: continued.segment,
+                    forked_from: continued.forked_from,
+                },
+                Ok(Err(issues)) => ControlResponse::Rejected { issues },
+                Err(_) => ControlResponse::Error {
+                    message: SHUTTING_DOWN.to_string(),
+                },
+            }
         }
         ControlRequest::ListInteractions => {
             let (reply, rx) = oneshot::channel();
@@ -1236,6 +1298,30 @@ mod tests {
                     ControlOp::ListInteractions { reply } => {
                         let _ = reply.send(vec![]);
                     }
+                    // A run named `missing` is not there; any other is
+                    // continued, into a new run for a fork.
+                    ControlOp::Continue {
+                        run_id,
+                        request,
+                        reply,
+                    } => {
+                        let outcome = match run_id.as_str() {
+                            "missing" => Err(crate::continuation::refused(
+                                crate::spec::issues::IssueCode::Missing,
+                                crate::spec::issues::SpecPath::root(),
+                                "no run 'missing' is here",
+                            )),
+                            _ => Ok(crate::host::Continued {
+                                run_id: match request.fork {
+                                    true => format!("{run_id}-fork"),
+                                    false => run_id.clone(),
+                                },
+                                segment: 2,
+                                forked_from: request.fork.then_some(run_id),
+                            }),
+                        };
+                        let _ = reply.send(outcome);
+                    }
                 }
             }
         });
@@ -1567,6 +1653,53 @@ mod tests {
         ] {
             assert_eq!(round_trip(&req).await, ControlResponse::Ok { ok: true });
         }
+    }
+
+    /// A continuation goes to the host and comes back as the run going
+    /// again, every reason it was refused, or the daemon going away.
+    #[tokio::test]
+    async fn a_continue_round_trips_and_says_when_the_daemon_is_going() {
+        let continue_of = |run: &str, fork: bool| ControlRequest::Continue {
+            run_id: run.to_string(),
+            text: "t".to_string(),
+            region: None,
+            parts: Vec::new(),
+            fork,
+        };
+        assert_eq!(
+            round_trip(&continue_of("r", false)).await,
+            ControlResponse::Continued {
+                run_id: "r".to_string(),
+                segment: 2,
+                forked_from: None,
+            }
+        );
+        assert_eq!(
+            round_trip(&continue_of("r", true)).await,
+            ControlResponse::Continued {
+                run_id: "r-fork".to_string(),
+                segment: 2,
+                forked_from: Some("r".to_string()),
+            }
+        );
+        assert_eq!(
+            round_trip(&continue_of("missing", false)).await,
+            ControlResponse::Rejected {
+                issues: crate::continuation::refused(
+                    crate::spec::issues::IssueCode::Missing,
+                    crate::spec::issues::SpecPath::root(),
+                    "no run 'missing' is here",
+                ),
+            }
+        );
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        drop(op_rx);
+        assert_eq!(
+            dispatch(continue_of("r", false), &op_tx).await,
+            ControlResponse::Error {
+                message: SHUTTING_DOWN.to_string()
+            }
+        );
     }
 
     #[tokio::test]

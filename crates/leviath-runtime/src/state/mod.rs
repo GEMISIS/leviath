@@ -16,10 +16,12 @@ mod delta;
 pub mod files;
 pub mod inspect;
 pub mod journal;
+pub mod segment;
 
 pub use context::{ContextDiff, ContextState, EntryKind, EntryMeta, EntryState, RegionState};
 pub use delta::{Change, RunEvent, StateDelta, TransitionReason, TransitionRecord};
 pub use files::{BlobFile, FileRef, RunFiles, StageFile, StageFiles, under};
+pub use segment::{ContinuedState, SegmentEnd};
 
 use crate::spec::names::{EdgeName, ModelRef, RunId, StageName, WorkerName};
 use context::ToolCallState;

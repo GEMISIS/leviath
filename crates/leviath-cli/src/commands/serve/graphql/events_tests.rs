@@ -129,6 +129,13 @@ fn every_frame() -> Vec<ServerEvent> {
             ok: false,
             summary: "[error] no such file".to_string(),
         },
+        ServerEvent::RunContinued {
+            agent_id: "a".to_string(),
+            run_id: "run-b".to_string(),
+            segment: 1,
+            stage: "revise".to_string(),
+            forked_from: Some("run-a".to_string()),
+        },
         ServerEvent::Log {
             agent_id: "a".to_string(),
             run_id: "run-a".to_string(),
@@ -223,7 +230,7 @@ fn every_frame_belongs_to_exactly_one_vocabulary() {
             (run, machine) => panic!("{run:?} and {machine:?} for one frame"),
         }
     }
-    assert_eq!(run, 14, "one type per run frame");
+    assert_eq!(run, 15, "one type per run frame");
     assert_eq!(machine, 4, "one type per machine frame");
 }
 
@@ -395,6 +402,14 @@ fn every_run_frame_converts_with_its_fields() {
                 assert_eq!(finished.execution_id.as_str(), "x1");
                 assert_eq!(finished.tool, "read_file");
                 assert_eq!(finished.summary, "[error] no such file");
+            }
+            (RunEventType::RunContinued, RunEventFrame::RunContinued(continued)) => {
+                assert_eq!(continued.segment, 1);
+                assert_eq!(continued.stage, "revise");
+                assert_eq!(
+                    continued.forked_from.as_ref().map(|id| id.as_str()),
+                    Some("run-a")
+                );
             }
             (RunEventType::LogLineWritten, RunEventFrame::LogLineWritten(line)) => {
                 assert_eq!(line.line, "a line");

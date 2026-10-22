@@ -195,6 +195,7 @@ fn resumable(depth: u8, created_at: i64, status: RunStatus, phase: PipelinePhase
         answer: None,
         asked: 0,
         audit: Vec::new(),
+        segment: 1,
     }
 }
 
@@ -664,4 +665,31 @@ fn a_layout_8_run_file_from_before_on_unmatched_resumes_unchanged() {
         encode(FrameKind::Spec, &*run.spec).unwrap(),
         bytes[header..frame.end()]
     );
+}
+
+/// A run comes back in the segment its last continuation started: 1 until
+/// it is continued, and the latest one's number after.
+#[test]
+fn a_run_comes_back_in_the_segment_it_is_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(leviath_core::files::RUN_FILE);
+    let mut writer = write_run(&path, &scripted_run(1), Default::default());
+    assert_eq!(read_for_resume(dir.path()).unwrap().unwrap().segment, 1);
+    let mut next = writer.state().clone();
+    next.totals.tool_calls += 1;
+    let continued = crate::state::ContinuedState {
+        segment: 3,
+        stage: next.cursor.stage.clone(),
+        forked_from: None,
+        previous: None,
+        regions: Vec::new(),
+    };
+    writer
+        .record(
+            next,
+            9,
+            vec![crate::state::RunEvent::Continued(Box::new(continued))],
+        )
+        .unwrap();
+    assert_eq!(read_for_resume(dir.path()).unwrap().unwrap().segment, 3);
 }

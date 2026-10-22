@@ -212,6 +212,7 @@ and pass on the first attempt, which looks exactly like a stage that finished it
 | `admission` | `"evict"` | What happens when a write does not fit. See [letting the agent decide what to forget](#letting-the-agent-decide-what-to-forget) |
 | `accepts` | unset | Mime types the region takes, as `type/subtype` or `type/*`. See [More than text](/docs/mime) |
 | `required_message` | generated | What the model is told when a required region is empty. Supports `{region}` |
+| `on_continue` | by kind | What the region keeps when its finished run is continued: `keep`, `clear`, `compact` or `reseed`. See [continuing a finished run](#continuing-a-finished-run) |
 
 Four of those keys carry more than a table cell holds. A `description` is documentation by
 default: it reaches `lev dash` and the API, not the model. `volatility` decides where the region
@@ -979,6 +980,59 @@ reset = ["conversation"]
 stage alone. The stage then starts on a clean conversation with only what its visible regions hold,
 such as the routed image in `artwork`. A re-entered stage clears them again each visit. Unlike `hide`, `reset` may
 name `conversation`; like `hide`, a name no layout declares is refused.
+
+## Continuing a finished run
+
+A run that has finished can be sent a new message, and it goes back to work on it: "make the cape
+red", the next day, with the reference sheets and the decisions it made still in its context. The
+run goes back to the stage `[graph] continue_at` names, or its entry stage when that is unset. What
+it does from there is a new [segment](/docs/interaction#continuing-a-finished-run) of the same run.
+
+Each region decides what it carries into the new segment with `on_continue`:
+
+| Value | What the region holds when the run goes back to work |
+|---|---|
+| `keep` | Everything it held |
+| `clear` | Nothing |
+| `compact` | A summary of what it held, written by the graph's compaction model |
+| `reseed` | What its `seed` gives when it runs again |
+
+A region that sets no `on_continue` follows its kind. A `temporary` or `clearable` region holds
+scratch work, so it clears. Every other kind keeps, `conversation` included: the earlier requests and
+the model's replies are what a follow-up such as "now facing left" is read against.
+
+```toml
+[graph]
+entry = "draw"
+continue_at = "revise"
+compaction = {}          # summaries run on the stage's own model
+
+[graph.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "reference", kind = "pinned", budget = "5%", seed = { files = ["sheet.md"] }, on_continue = "reseed" },
+    { name = "decisions", kind = "pinned", budget = "3%" },
+    { name = "scratch", kind = "clearable", budget = "5%" },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 40 }, budget = "30%", on_continue = "compact" },
+]
+```
+
+Here a continuation reads `sheet.md` again, so an edited sheet reaches the next segment. It keeps
+`decisions`, empties `scratch`, and summarizes the conversation so the old attempts stop costing
+tokens. `lev validate` prints where a run continues and what each region keeps.
+
+A few combinations are refused at load, so `lev validate` catches them:
+
+- `reseed` on a region with no `seed`.
+- `compact` on a region declared `summarizable = false`.
+- `compact` in a graph with no `[graph] compaction`. An empty table summarizes on the stage's own
+  model.
+- One region given two different `on_continue` values in two layouts.
+- A `continue_at` that names no stage.
+
+The summary runs before the message lands, so the message is never summarized away. A region the
+runtime adds itself, such as `tool_results`, follows the same defaults. To give it a policy, declare
+it in the layout.
 
 ## Requests are measured before they are sent
 

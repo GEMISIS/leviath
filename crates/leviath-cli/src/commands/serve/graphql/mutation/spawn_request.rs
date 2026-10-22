@@ -70,6 +70,13 @@ pub(crate) enum SpawnSourceWrite {
     /// A whole run graph, in the JSON form a blueprint's `[graph]` table
     /// reads as. Unknown keys are refused.
     Graph(GraphDocument),
+    /// A finished run to fork: the new run carries its context, under each
+    /// region's `on_continue`, and goes back to work on the message. The
+    /// finished run is never changed. A fork runs the finished run's own
+    /// graph, models, inputs, workdir and launch policy, so the request's
+    /// other fields are left out; `validateSpawn` refuses it, since a fork
+    /// is only checked by starting it.
+    ContinueFrom(super::continuing::ContinueFromWrite),
 }
 
 /// One input value, as the request writes it. Exactly one member: the
@@ -496,6 +503,17 @@ fn source(write: SpawnSourceWrite, issues: &mut SpawnIssues) -> Option<SpawnSour
                 None
             }
         },
+        SpawnSourceWrite::ContinueFrom(_) => {
+            issues.push(
+                SpawnIssue::new(
+                    at.field("continue_from"),
+                    IssueCode::NotAllowed,
+                    "a fork is checked by starting it, not by a dry run",
+                )
+                .hint("send it to spawnRun, which refuses it with every reason it cannot start"),
+            );
+            None
+        }
     }
 }
 
