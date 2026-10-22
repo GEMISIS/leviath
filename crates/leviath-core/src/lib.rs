@@ -42,6 +42,7 @@ pub mod taint;
 pub mod telemetry;
 pub mod text;
 pub mod tool;
+pub mod tool_routing;
 pub mod unattended;
 pub mod write_limits;
 pub mod write_paths;

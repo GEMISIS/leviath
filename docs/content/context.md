@@ -503,6 +503,17 @@ One bibliography line per source actually used.
 [1] RFC 9110 - …
 ```
 
+A `keyed`, `temporary`, `clearable` or `compacting` region is headed `[name]:` rather than
+`## name`, and its description goes on the line under that heading:
+
+```
+[shared_intents]:
+What each run on this project plans to change, and why
+
+### [run-1]
+Rewriting the header component.
+```
+
 The split is deliberate. Describing every region for the people who maintain the
 blueprint should not quietly cost tokens on every turn, and most region names
 are already the explanation. Turn it on where the region has a convention the

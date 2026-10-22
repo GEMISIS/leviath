@@ -259,6 +259,9 @@ impl RegionEntry {
 }
 
 mod evict;
+mod keyed;
+#[cfg(test)]
+mod keyed_tests;
 
 impl Region {
     /// Every checklist item this region holds, in the order they were added.
@@ -612,7 +615,9 @@ impl Region {
                 max: self.max_tokens,
             });
         }
+        self.make_entry_room()?;
 
+        let seq = self.next_seq();
         self.content.push(RegionEntry {
             content,
             tokens,
@@ -621,6 +626,8 @@ impl Region {
             kind,
             key: key.map(str::to_string),
             reasoning: None,
+            seq,
+            sticky: false,
         });
         self.current_tokens += tokens;
 
@@ -636,25 +643,37 @@ impl Region {
         Ok(())
     }
 
-    /// Add an entry under `key`, so the agent can name it again to release it.
+    /// Keep a keyed region inside its `max_entries` for one more entry, by
+    /// evicting its least recently written entries.
     ///
-    /// Distinct from [`upsert_by_key`](Self::upsert_by_key), which replaces:
-    /// appending two sources under one key should keep both halves, the way an
-    /// unkeyed append keeps everything appended before it.
-    pub fn add_keyed_entry(
-        &mut self,
-        key: &str,
-        content: impl Into<EntryContent>,
-        tokens: usize,
-    ) -> crate::error::Result<()> {
-        self.push_entry(
-            content.into(),
-            tokens,
-            None,
-            EntryKind::default(),
-            crate::taint::TaintLevel::Public,
-            Some(key),
-        )
+    /// Checked whole before anything goes: a region under
+    /// [`Admission::Reject`] refuses as full, and one whose entries are too
+    /// sticky to free a slot refuses the write. Either way it is unchanged.
+    fn make_entry_room(&mut self) -> crate::error::Result<()> {
+        let Some(max) = self.max_entries() else {
+            return Ok(());
+        };
+        let excess = (self.content.len() + 1).saturating_sub(max);
+        if excess == 0 {
+            return Ok(());
+        }
+        if self.admission == Admission::Reject {
+            return Err(crate::error::Error::RegionFull {
+                region: self.name.clone(),
+                used: self.current_tokens,
+                max: self.max_tokens,
+            });
+        }
+        if excess > self.content.iter().filter(|e| !e.sticky).count() {
+            return Err(crate::error::Error::RegionRefusedWrite {
+                region: self.name.clone(),
+                reason: format!("it holds {max} entries at most and the ones it has are sticky"),
+            });
+        }
+        for _ in 0..excess {
+            self.evict_lru_entry(None);
+        }
+        Ok(())
     }
 
     /// Remove the entry at `index`, counting from the oldest. Returns whether
@@ -799,113 +818,6 @@ impl Region {
         Ok(())
     }
 
-    /// Upsert an entry by key. If key exists, replace content and update timestamp/tokens.
-    /// If key doesn't exist, add new entry. Enforces max_tokens and max_entries via LRU eviction.
-    pub fn upsert_by_key(
-        &mut self,
-        key: &str,
-        content: impl Into<EntryContent>,
-        tokens: usize,
-    ) -> Result<(), String> {
-        self.upsert_by_key_content(key, content.into(), tokens)
-    }
-
-    /// [`Self::upsert_by_key`] with the content already typed. The generic
-    /// wrapper above stays a one-liner so each instantiation is trivially
-    /// exercised; the logic lives here, once.
-    fn upsert_by_key_content(
-        &mut self,
-        key: &str,
-        content: EntryContent,
-        tokens: usize,
-    ) -> Result<(), String> {
-        // If key exists, update in place
-        if let Some(pos) = self
-            .content
-            .iter()
-            .position(|e| e.key.as_deref() == Some(key))
-        {
-            let old_tokens = self.content[pos].tokens;
-            self.current_tokens -= old_tokens;
-            self.content[pos].content = content;
-            self.content[pos].tokens = tokens;
-            self.content[pos].timestamp = chrono::Utc::now().timestamp();
-            self.current_tokens += tokens;
-            return Ok(());
-        }
-
-        // Enforce max_entries via LRU eviction
-        let max_entries = if let RegionKind::HashMap {
-            max_entries: Some(max),
-        } = &self.kind
-        {
-            Some(*max)
-        } else {
-            None
-        };
-        if let Some(max) = max_entries {
-            while self.content.len() >= max {
-                self.evict_lru_entry();
-            }
-        }
-
-        // Enforce max_tokens via LRU eviction
-        while self.current_tokens + tokens > self.max_tokens && !self.content.is_empty() {
-            self.evict_lru_entry();
-        }
-
-        if self.current_tokens + tokens > self.max_tokens {
-            return Err(format!(
-                "Entry ({} tokens) exceeds region budget ({} max)",
-                tokens, self.max_tokens
-            ));
-        }
-
-        self.content.push(RegionEntry {
-            content,
-            tokens,
-            timestamp: chrono::Utc::now().timestamp(),
-            metadata: None,
-            kind: EntryKind::default(),
-            key: Some(key.to_string()),
-            reasoning: None,
-        });
-        self.current_tokens += tokens;
-        Ok(())
-    }
-
-    /// Get entry by key.
-    pub fn get_by_key(&self, key: &str) -> Option<&RegionEntry> {
-        self.content.iter().find(|e| e.key.as_deref() == Some(key))
-    }
-
-    /// Remove entry by key.
-    pub fn remove_by_key(&mut self, key: &str) -> bool {
-        if let Some(pos) = self
-            .content
-            .iter()
-            .position(|e| e.key.as_deref() == Some(key))
-        {
-            let tokens = self.content[pos].tokens;
-            self.content.remove(pos);
-            self.current_tokens -= tokens;
-            if let Some(taint) = &mut self.taint {
-                taint.remove_at(pos);
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-    /// List all keys in this region.
-    pub fn keys(&self) -> Vec<&str> {
-        self.content
-            .iter()
-            .filter_map(|e| e.key.as_deref())
-            .collect()
-    }
-
     /// Clear all content from this region.
     pub fn clear(&mut self) {
         self.content.clear();
@@ -998,6 +910,33 @@ pub struct RegionEntry {
     /// provider runs the next stage, and an unknown key is a hard rejection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+
+    /// The entry's place in the region's write order: every write stamps one
+    /// past the newest, and an upsert stamps it again. The lowest is the
+    /// least recently written, which is what a keyed region evicts first.
+    ///
+    /// Per region and exact, where [`timestamp`](Self::timestamp) is shared
+    /// wall-clock seconds and ties. 0 for an entry built by hand, which then
+    /// counts as older than anything the region stamped; see
+    /// [`Region::restamp_recency`] for entries loaded from a store.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub seq: u64,
+
+    /// Whether eviction leaves this entry alone.
+    ///
+    /// A sticky entry is never evicted to make room, by a keyed region's LRU,
+    /// a sliding window's roll-off, a full window's cascade or a clearable
+    /// region's wipe. It goes only when something names it
+    /// ([`Region::remove_by_key`], [`Region::remove_at`]) or the region is
+    /// [`clear`](Region::clear)ed. A write that could only fit by evicting one
+    /// fails instead. See [`Region::upsert_by_key_sticky`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sticky: bool,
+}
+
+/// Whether a sequence number is the unstamped default.
+fn is_zero(seq: &u64) -> bool {
+    *seq == 0
 }
 
 #[cfg(test)]
@@ -3020,6 +2959,8 @@ mod tests {
             kind: EntryKind::default(),
             key: None,
             reasoning: None,
+            seq: 0,
+            sticky: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("key"));
@@ -3035,6 +2976,8 @@ mod tests {
             kind: EntryKind::default(),
             key: Some("mykey".to_string()),
             reasoning: None,
+            seq: 0,
+            sticky: false,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("mykey"));
@@ -3269,6 +3212,8 @@ mod tests {
             kind: EntryKind::default(),
             key: Some("mykey".to_string()),
             reasoning: None,
+            seq: 0,
+            sticky: false,
         };
         let json = serde_json::to_string(&entry_with_key).unwrap();
         let deserialized: RegionEntry = serde_json::from_str(&json).unwrap();
@@ -3285,6 +3230,8 @@ mod tests {
             kind: EntryKind::default(),
             key: None,
             reasoning: None,
+            seq: 0,
+            sticky: false,
         };
         let json = serde_json::to_string(&entry_no_key).unwrap();
         assert!(!json.contains("\"key\""));
@@ -3392,7 +3339,7 @@ mod tests {
             1000,
         );
         assert_eq!(region.entry_count(), 0);
-        region.evict_lru_entry();
+        assert!(!region.evict_lru_entry(None));
         assert_eq!(region.entry_count(), 0);
         assert_eq!(region.current_tokens, 0);
     }

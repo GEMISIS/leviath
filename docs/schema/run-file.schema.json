@@ -1301,6 +1301,10 @@
               "null"
             ]
           },
+          "sticky": {
+            "description": "Whether eviction leaves it alone. A sticky entry goes only when it is\nremoved by name or its region is cleared.",
+            "type": "boolean"
+          },
           "text": {
             "description": "Its text.",
             "type": "string"
@@ -9349,6 +9353,10 @@
               "string",
               "null"
             ]
+          },
+          "sticky": {
+            "description": "Whether eviction leaves it alone. A sticky entry goes only when it is\nremoved by name or its region is cleared.",
+            "type": "boolean"
           },
           "text": {
             "description": "Its text.",

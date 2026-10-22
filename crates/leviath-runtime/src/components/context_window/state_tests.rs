@@ -50,6 +50,8 @@ fn full_window() -> ContextWindow {
         kind: CoreKind::UserMessage,
         key: Some("k".into()),
         reasoning: Some("why".into()),
+        seq: 0,
+        sticky: false,
     });
     conv.content.push(RegionEntry {
         content: EntryContent::text("calling"),
@@ -66,6 +68,8 @@ fn full_window() -> ContextWindow {
         },
         key: None,
         reasoning: None,
+        seq: 0,
+        sticky: false,
     });
     conv.content.push(RegionEntry {
         content: EntryContent::from_parts(vec![Part::text("see"), stored_part()]),
@@ -79,6 +83,8 @@ fn full_window() -> ContextWindow {
         },
         key: None,
         reasoning: None,
+        seq: 0,
+        sticky: false,
     });
     conv.needs_message_compaction = true;
     w.hidden.insert("notes".to_string());
@@ -131,6 +137,44 @@ fn a_window_survives_the_trip_through_its_state() {
             .content
             .parts()
     );
+}
+
+/// A sticky entry stays sticky across the state, and a restored region's
+/// recency comes back in write order, so it evicts what it would have.
+#[test]
+fn stickiness_and_recency_survive_the_state() {
+    let mut w = ContextWindow::new(1_000);
+    w.add_region(Region::new(
+        "tasks".into(),
+        RegionKind::HashMap {
+            max_entries: Some(3),
+        },
+        1_000,
+    ));
+    let tasks = w.get_region_mut("tasks").unwrap();
+    tasks.upsert_by_key_sticky("running", "r", 1, true).unwrap();
+    tasks.upsert_by_key("a", "a", 1).unwrap();
+    tasks.upsert_by_key("b", "b", 1).unwrap();
+    for (entry, at) in tasks.content.iter_mut().zip([10, 20, 30]) {
+        entry.timestamp = at;
+    }
+    let keyed = |name: &str, max: usize| {
+        Region::new(
+            name.into(),
+            RegionKind::HashMap {
+                max_entries: Some(max / 1_000 * 3),
+            },
+            max,
+        )
+    };
+
+    let mut back = ContextWindow::from_state(&w.to_state(), &keyed);
+    let tasks = back.get_region_mut("tasks").unwrap();
+    assert!(tasks.get_by_key("running").unwrap().sticky);
+    let seqs: Vec<u64> = tasks.content.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, [1, 2, 3]);
+    tasks.upsert_by_key("c", "c", 1).unwrap();
+    assert_eq!(tasks.keys(), ["running", "b", "c"]);
 }
 
 #[test]

@@ -62,6 +62,7 @@ pub(crate) fn say(state: &mut RunState, text: &str) {
         meta: EntryMeta::None,
         key: None,
         reasoning: None,
+        sticky: false,
     });
 }
 

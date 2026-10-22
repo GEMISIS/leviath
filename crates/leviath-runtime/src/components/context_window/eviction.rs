@@ -41,8 +41,9 @@ impl ContextWindow {
                 && region.admission != leviath_core::region::Admission::Reject
                 && !region.content.is_empty()
             {
-                let freed = region.current_tokens;
-                region.clear();
+                // Everything but the entries marked sticky, which no eviction
+                // takes.
+                let freed = region.evict_all();
                 self.current_tokens -= freed;
                 tracing::debug!(
                     region = %region.name,

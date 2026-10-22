@@ -391,5 +391,6 @@ fn stored_entry(digest: &Digest, size: usize) -> EntryState {
         meta: EntryMeta::None,
         key: None,
         reasoning: None,
+        sticky: false,
     }
 }

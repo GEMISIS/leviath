@@ -133,6 +133,7 @@ fn entry(kind: EntryKind, parts: Vec<PartState>) -> EntryState {
         meta: EntryMeta::None,
         key: None,
         reasoning: None,
+        sticky: false,
     }
 }
 

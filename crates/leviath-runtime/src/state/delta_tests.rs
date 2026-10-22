@@ -41,6 +41,7 @@ fn entry() -> impl Strategy<Value = EntryState> {
         meta: EntryMeta::None,
         key: None,
         reasoning: None,
+        sticky: false,
     })
 }
 

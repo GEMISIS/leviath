@@ -184,6 +184,9 @@ pub(crate) fn plan(region: &Region, own: &str, others: &[&Record]) -> Option<Vec
                 kind: leviath_core::EntryKind::default(),
                 key: Some(r.run.clone()),
                 reasoning: None,
+                // Stamped with the rest when the region is laid out.
+                seq: 0,
+                sticky: false,
             };
             laid.push((entry, r.taint));
         }
@@ -216,6 +219,7 @@ pub(crate) fn apply(window: &mut ContextWindow, laid: Vec<Laid>) {
     let (entries, taints): (Vec<RegionEntry>, Vec<TaintLevel>) = laid.into_iter().unzip();
     region.current_tokens = entries.iter().map(|e| e.tokens).sum();
     region.content = entries;
+    region.restamp_recency();
     region.taint = region
         .taint
         .take()

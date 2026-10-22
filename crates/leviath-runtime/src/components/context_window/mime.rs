@@ -14,7 +14,7 @@
 use leviath_core::context::PartBlock;
 use leviath_core::mime::Part;
 use leviath_core::region::EntryContent;
-use leviath_providers::{ContentBlock, MessageContent};
+use leviath_providers::ContentBlock;
 
 impl super::ContextWindow {
     /// Every stored part anywhere in the window, cloned. What `submit_output`
@@ -86,104 +86,17 @@ pub(super) fn provider_blocks(pieces: Vec<PartBlock<'_>>) -> Vec<ContentBlock> {
         .collect()
 }
 
-/// Every part of `content` as blocks, in order.
-pub(super) fn content_blocks(content: &EntryContent) -> Vec<ContentBlock> {
-    provider_blocks(leviath_core::context::content_blocks(content))
-}
-
-/// Only the mime blocks of `content`, for a turn whose text has already
-/// been placed (a tool result, whose text goes inside the `tool_result`).
-pub(super) fn mime_blocks(content: &EntryContent) -> Vec<ContentBlock> {
-    content
-        .parts()
-        .iter()
-        .filter_map(ContentBlock::mime)
-        .collect()
-}
-
-/// The `tool_use` block for one call a stored assistant turn made.
-///
-/// A call the output cap cut off is stored as the partial text of its
-/// arguments, and every provider that takes tool input wants an object, so
-/// the input goes through [`leviath_providers::tool_input_object`]. Sent as a
-/// bare string, Anthropic refuses the request, and the refusal is permanent:
-/// every later request of the run carried it again.
-pub(super) fn tool_use_block(tc: &leviath_core::SerializedToolCall) -> ContentBlock {
-    ContentBlock::ToolUse {
-        id: tc.id.clone(),
-        name: tc.name.clone(),
-        input: leviath_providers::tool_input_object(&tc.arguments),
-        thought_signature: tc.thought_signature.clone(),
-    }
-}
-
-/// [`content_blocks`] with the mime blocks left out: inline text and the
-/// stand-in for each stored part, but not the bytes. For an assistant turn,
-/// whose media is lifted into a following user turn because a provider rejects
-/// an image inside an assistant turn.
-pub(super) fn text_blocks(content: &EntryContent) -> Vec<ContentBlock> {
-    content_blocks(content)
-        .into_iter()
-        .filter(|b| !matches!(b, ContentBlock::Mime { .. }))
-        .collect()
-}
-
-/// A message's content for `content`: plain text when every part is text,
-/// which is the shape every provider has always seen, and blocks otherwise.
-pub(super) fn message_content(content: &EntryContent) -> MessageContent {
-    match content.is_text_only() {
-        true => MessageContent::Text(content.to_string()),
-        false => MessageContent::Blocks(content_blocks(content)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use leviath_core::mime::{Blob, MimeRegistry, MimeType, Part};
     use leviath_core::region::{Region, RegionKind};
+    use leviath_providers::MessageContent;
 
     fn stored(name: &str) -> Part {
         let reg = MimeRegistry::builtin();
         let blob = Blob::new(MimeType::parse("image/png").unwrap(), vec![1, 2, 3]).named(name);
         Part::stored(blob.describe(&reg)).named(name)
-    }
-
-    #[test]
-    fn text_only_content_stays_a_plain_message() {
-        let content = EntryContent::text("hello");
-        assert_eq!(
-            message_content(&content),
-            MessageContent::Text("hello".to_string())
-        );
-        assert!(mime_blocks(&content).is_empty());
-        let empty = EntryContent::from_parts(vec![Part::text("")]);
-        assert!(content_blocks(&empty).is_empty());
-    }
-
-    #[test]
-    fn a_stored_part_becomes_a_pointer_and_a_mime_block() {
-        let content = EntryContent::from_parts(vec![Part::text("see"), stored("a.png")]);
-        let blocks = content_blocks(&content);
-        assert_eq!(blocks.len(), 3);
-        assert_eq!(
-            blocks[1],
-            ContentBlock::Text {
-                text: "[image/png, 3 B] a.png".to_string()
-            }
-        );
-        assert!(!blocks[2].is_hydrated_mime() && blocks[2].stand_in().is_some());
-        assert_eq!(mime_blocks(&content).len(), 1);
-        assert_eq!(
-            message_content(&content),
-            MessageContent::Blocks(blocks.clone())
-        );
-        // `text_blocks` keeps the inline text and the stand-in pointer but not
-        // the mime block, for an assistant turn whose media is lifted away.
-        let text = text_blocks(&content);
-        assert_eq!(text.len(), 2);
-        assert!(text.iter().all(|b| !matches!(b, ContentBlock::Mime { .. })));
-        assert_eq!(text[0], ContentBlock::Text { text: "see".into() });
     }
 
     #[test]

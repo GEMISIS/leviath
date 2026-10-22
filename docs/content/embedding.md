@@ -270,6 +270,53 @@ prompts. The embedder is code, and code that wants richer behavior implements
 the `ToolService` trait and passes it to `tool_service()`; the trait is one
 method plus optional per-stage hooks.
 
+## Building context without the runtime
+
+Some programs call a model API themselves and only want Leviath's context
+regions. The `leviath-core` crate has them with no runtime, no providers and
+no async. A run lays out its context from the same functions, so the text
+your model sees matches what a run would show it.
+
+```rust
+use leviath_core::context::assemble_context;
+use leviath_core::tool_routing::route_into;
+use leviath_core::{EntryKind, EvictionStrategy, Region, RegionKind};
+
+let mut tasks = Region::new("tasks".into(), RegionKind::HashMap { max_entries: Some(20) }, 2_000);
+tasks.description = Some("One line per task; the running one is kept.".into());
+tasks.describe_in_prompt = true;
+// A sticky entry is never evicted to make room.
+tasks.upsert_by_key_sticky("t1", "running: write the parser", 8, true)?;
+
+let mut history = Region::new(
+    "conversation".into(),
+    RegionKind::SlidingWindow { max_items: 50, eviction_strategy: EvictionStrategy::PerItem },
+    20_000,
+);
+history.add_typed_entry("Start on the parser.", 5, EntryKind::UserMessage)?;
+
+// A tool result routed out of the conversation, and the pointer text a run
+// leaves in its place.
+let mut sources = Region::new("sources".into(), RegionKind::Temporary, 8_000);
+let routed = route_into(&mut sources, "sources", "fn parse() {}".into(), 4, false);
+
+let assembled = assemble_context([&tasks, &sources, &history], |_custom, _blocks| {});
+// assembled.system.blocks: the system prompt, most stable first.
+// assembled.conversation: the turns, ready to convert to your API's messages.
+```
+
+| Module | What it gives you |
+|---|---|
+| `leviath_core::region` | Regions and their budgets, eviction, keyed upserts and sticky entries |
+| `leviath_core::context` | The system prompt blocks, their cache hints, and `assemble_context` |
+| `leviath_core::context::conversation` | A sliding window as provider-neutral turns, tool results paired |
+| `leviath_core::tool_routing` | Routing a tool result by tool name, its cap, truncation and pointer text |
+
+A keyed region evicts the entry written least recently. Every write stamps
+`RegionEntry::seq`, so writes in the same second still have an order. A write
+that cannot fit fails before anything is evicted. So does one that could only
+fit by evicting a sticky entry.
+
 ## How much can break under you
 
 The API comes in three layers, and how careful you need to be depends on which one you reach for:

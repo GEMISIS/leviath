@@ -544,6 +544,22 @@ mod tests {
         assert_eq!(window.current_tokens, 0);
     }
 
+    /// Wiping a clearable region to make room leaves its sticky entries.
+    #[test]
+    fn clearing_for_room_keeps_sticky_entries() {
+        let mut window = ContextWindow::new(10000);
+        let mut region = Region::new("scratch".to_string(), RegionKind::Clearable, 5000);
+        region.add_entry("loose".to_string(), 1000).unwrap();
+        region.add_entry("kept".to_string(), 500).unwrap();
+        region.content[1].sticky = true;
+        window.add_region(region);
+
+        let result = with_tracing(|| window.try_evict(9000)).unwrap();
+        assert_eq!(result.tokens_freed, 1000);
+        assert_eq!(window.current_tokens, 500);
+        assert_eq!(window.get_region("scratch").unwrap().content.len(), 1);
+    }
+
     #[test]
     fn test_temporary_eviction_oldest_first() {
         let mut window = ContextWindow::new(10000);

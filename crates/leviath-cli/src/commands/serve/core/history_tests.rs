@@ -19,6 +19,7 @@ fn said(run_id: &str, at: i64, text: &str) {
             meta: EntryMeta::None,
             key: None,
             reasoning: None,
+            sticky: false,
         });
     });
 }
@@ -83,6 +84,7 @@ async fn a_stage_is_credited_with_what_it_wrote_on_its_way_out() {
                 meta: EntryMeta::None,
                 key: None,
                 reasoning: None,
+                sticky: false,
             });
             s.cursor.stage = leviath_runtime::spec::names::StageName::new("implement").unwrap();
         });

@@ -75,6 +75,7 @@ mod step_points {
             meta: EntryMeta::None,
             key: None,
             reasoning: None,
+            sticky: false,
         }
     }
 

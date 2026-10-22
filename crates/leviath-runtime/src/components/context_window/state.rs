@@ -51,6 +51,7 @@ impl ContextWindow {
             region.current_tokens = recorded.current_tokens as usize;
             region.needs_message_compaction = recorded.needs_message_compaction;
             region.content = recorded.entries.iter().map(entry).collect();
+            region.restamp_recency();
             region.taint = recorded
                 .taint
                 .as_ref()
@@ -122,9 +123,13 @@ fn entry_state(entry: &RegionEntry) -> EntryState {
             }),
         key: entry.key.clone(),
         reasoning: entry.reasoning.clone(),
+        sticky: entry.sticky,
     }
 }
 
+/// An entry as a window region holds it. Its sequence is left unstamped:
+/// the state keeps none, and [`ContextWindow::from_state`] restamps the
+/// region from timestamps and positions once every entry is in.
 fn entry(state: &EntryState) -> RegionEntry {
     let parts: Vec<Part> = state.parts.iter().map(part).collect();
     RegionEntry {
@@ -162,6 +167,8 @@ fn entry(state: &EntryState) -> RegionEntry {
         },
         key: state.key.clone(),
         reasoning: state.reasoning.clone(),
+        seq: 0,
+        sticky: state.sticky,
     }
 }
 
