@@ -432,11 +432,14 @@ Use any subset you like. The first threshold to trip fires the edge.
 
 ## Repeated calls
 
-A model that makes the identical tool call again and again (same tool, same arguments, three times
-in a stage) is nudged once to stop and use what it already has. If it makes that call yet again, the
-stage ends. It ends as a `stuck` stage: down the stage's `stuck` edge if it has one, else as a
-`max_iterations` stage would (see above, including the gate rule). No setting is needed. Calls with
-different arguments are different calls.
+A model that makes the identical tool call again and again is nudged once to stop and use what it
+already has. "Identical" means the same calls with the same results, three batches in a row: a test
+run after each edit, a read after a write, or a call repeated inside one parallel batch is not a
+loop, and neither is a different result. Any different batch, any call to a tool that can change
+files, and any polling or fan-out tool (`wait_for_agent`, `fan_out`, and tools named `wait_*`,
+`*_status` or `*poll*`) starts the count again. If the model makes the same batch yet again after
+the nudge, the stage ends as a `stuck` stage: down the stage's `stuck` edge if it has one, else as a
+`max_iterations` stage would (see above, including the gate rule). No setting is needed.
 
 ## Nudging
 

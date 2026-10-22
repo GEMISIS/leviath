@@ -471,15 +471,22 @@ pub(crate) fn resolve_transition(
         // its plain successor; that edge's gate (a required region, say) still
         // has to hold, or the successor runs on nothing. There is no holding the
         // stage for another pass here - it has already ended - so a failing gate
-        // routes down the stage's `max_iterations`/`error` edge, else fails the run.
+        // routes down the stage's `max_iterations`/`error` edge, else fails the
+        // run. Only the plain successor is gated: an escape edge found by
+        // condition (`stuck`, `max_iterations`, `error`) carries no gate, and is
+        // taken as it always was. A gate whose budget is spent passes with a
+        // warning, as it does for a stage that finished.
         let resolution = match (&resolution, outcome) {
-            (StageResolution::Next(next), Some(_)) => {
+            (StageResolution::Next(next), Some(_)) if next.gate.is_some() => {
                 let message = match gate_blocks(next.gate.as_ref(), stage, &progress, &window) {
                     GateDecision::Block(message) => Some(message),
-                    GateDecision::Forced => Some(format!(
-                        "stage '{}' ended before satisfying the gate on its way to '{}'",
-                        stage.name, graph.stages[next.idx].name
-                    )),
+                    GateDecision::Forced => {
+                        tracing::warn!(
+                            stage = %stage.name,
+                            "a gate's attempts are spent and the stage has ended; going on"
+                        );
+                        None
+                    }
                     GateDecision::Pass => None,
                 };
                 match message {

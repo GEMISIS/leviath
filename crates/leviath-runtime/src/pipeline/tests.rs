@@ -12209,41 +12209,106 @@ fn call_of(name: &str, path: &str) -> crate::components::ToolCall {
     }
 }
 
-/// The same tool with the same arguments, over and over, is nudged once and
-/// then stopped; different arguments are different calls.
+fn batch(
+    calls: &[(&str, &str)],
+) -> (
+    Vec<crate::components::ToolCall>,
+    Vec<crate::tool_bridge::ToolResult>,
+) {
+    let tool_calls = calls.iter().map(|(n, p)| call_of(n, p)).collect();
+    let results = calls
+        .iter()
+        .map(|(_, p)| ("t".to_string(), format!("result of {p}").into()))
+        .collect();
+    (tool_calls, results)
+}
+
+fn see(guard: &mut crate::pipeline::loop_guard::LoopGuard, calls: &[(&str, &str)]) {
+    let (c, r) = batch(calls);
+    guard.observe(&c, &r, &["write_file".to_string()]);
+}
+
+/// The same calls with the same results, batch after batch, are nudged once
+/// and then stopped. Anything different starts the count again.
 #[test]
 fn the_loop_guard_nudges_at_the_limit_then_ends_the_stage_on_the_next_repeat() {
-    use crate::pipeline::loop_guard::{LOOP_REPEAT_LIMIT, LoopTrip, record_call_repeat};
-    let mut progress = StageProgress::default();
+    use crate::pipeline::loop_guard::{LOOP_REPEAT_LIMIT, LoopGuard, LoopTrip};
+    let mut guard = LoopGuard::default();
     for round in 1..LOOP_REPEAT_LIMIT {
-        record_call_repeat(&mut progress.loop_guard, &call_of("list_dir", "."));
-        record_call_repeat(
-            &mut progress.loop_guard,
-            &call_of("list_dir", &format!("dir{round}")),
-        );
-        assert_eq!(progress.loop_guard.trip, LoopTrip::None, "round {round}");
+        see(&mut guard, &[("list_dir", ".")]);
+        assert_eq!(guard.trip, LoopTrip::None, "round {round}");
     }
-    record_call_repeat(&mut progress.loop_guard, &call_of("list_dir", "."));
-    assert_eq!(
-        progress.loop_guard.trip,
-        LoopTrip::Nudge("list_dir".to_string())
-    );
-    assert!(progress.loop_guard.nudged);
+    see(&mut guard, &[("list_dir", ".")]);
+    assert_eq!(guard.trip, LoopTrip::Nudge("list_dir".to_string()));
 
-    // Acted on and cleared by the tick that reads it; another call at the
-    // limit does not nudge a second time.
-    progress.loop_guard.trip = LoopTrip::None;
-    for _ in 0..LOOP_REPEAT_LIMIT {
-        record_call_repeat(&mut progress.loop_guard, &call_of("read_file", "a.txt"));
-    }
-    assert_eq!(progress.loop_guard.trip, LoopTrip::None);
+    // A nudge that has not been delivered does not make the next repeat fatal.
+    guard.trip = LoopTrip::None;
+    see(&mut guard, &[("list_dir", ".")]);
+    assert_eq!(guard.trip, LoopTrip::None);
 
-    // The call that was nudged about, made again.
-    record_call_repeat(&mut progress.loop_guard, &call_of("list_dir", "."));
-    match &progress.loop_guard.trip {
+    // Delivered, the next repeat ends the stage.
+    guard.nudged = true;
+    see(&mut guard, &[("list_dir", ".")]);
+    match &guard.trip {
         LoopTrip::Stuck(reason) => assert!(reason.contains("list_dir"), "{reason}"),
         other => panic!("expected the stage to be stuck, got {other:?}"),
     }
+}
+
+/// Work that only looks repetitive is not a loop.
+#[test]
+fn the_loop_guard_ignores_work_that_is_not_a_loop() {
+    use crate::pipeline::loop_guard::{LOOP_REPEAT_LIMIT, LoopGuard, LoopTrip};
+    let quiet = |guard: &LoopGuard| assert_eq!(guard.trip, LoopTrip::None);
+    let n = LOOP_REPEAT_LIMIT * 2;
+
+    // The same call with a different result each time (a test run after each edit).
+    let mut guard = LoopGuard::default();
+    for i in 0..n {
+        let calls = vec![call_of("shell", "cargo test")];
+        let results: Vec<crate::tool_bridge::ToolResult> =
+            vec![("t".to_string(), format!("run {i}").into())];
+        guard.observe(&calls, &results, &[]);
+    }
+    quiet(&guard);
+
+    // Different calls interleaved.
+    let mut guard = LoopGuard::default();
+    for _ in 0..n {
+        see(&mut guard, &[("list_dir", ".")]);
+        see(&mut guard, &[("read_file", "a.txt")]);
+    }
+    quiet(&guard);
+
+    // A write between repeats resets the count.
+    let mut guard = LoopGuard::default();
+    for _ in 0..n {
+        see(&mut guard, &[("read_file", "a.txt")]);
+        see(&mut guard, &[("write_file", "a.txt")]);
+    }
+    quiet(&guard);
+
+    // Polling and fan-out tools are meant to repeat.
+    for tool in ["wait_for_agent", "fan_out", "task_status"] {
+        let mut guard = LoopGuard::default();
+        for _ in 0..n {
+            see(&mut guard, &[(tool, ".")]);
+        }
+        quiet(&guard);
+    }
+
+    // The same call several times inside one parallel batch is one call.
+    let mut guard = LoopGuard::default();
+    see(
+        &mut guard,
+        &[("read_file", "a"), ("read_file", "a"), ("read_file", "a")],
+    );
+    quiet(&guard);
+    assert_eq!(guard.streak, 1);
+
+    // An empty batch is nothing.
+    guard.observe(&[], &[], &[]);
+    assert_eq!(guard.streak, 0);
 }
 
 #[test]
@@ -12280,6 +12345,21 @@ fn enforce_acts_on_the_loop_guard() {
         "told once"
     );
     assert!(world.get::<ReadyToInfer>(windowless).is_some());
+    assert!(
+        world
+            .get::<StageProgress>(nudged)
+            .unwrap()
+            .loop_guard
+            .nudged
+    );
+    assert!(
+        !world
+            .get::<StageProgress>(windowless)
+            .unwrap()
+            .loop_guard
+            .nudged,
+        "a nudge that could not be delivered is not counted"
+    );
 
     assert!(world.get::<ReadyToInfer>(stuck).is_none());
     assert!(world.get::<ResolveTransition>(stuck).is_some());
@@ -13327,11 +13407,10 @@ fn a_gate_still_applies_when_the_stage_ended_on_an_outcome() {
     }
 }
 
-/// A gate whose re-run budget is spent gives up with `Forced` when a stage
-/// is held; a stage that has already ended has nothing to re-run, so that
-/// too ends the run rather than entering the gated stage.
+/// A gate whose re-run budget is spent passes with a warning, as it does for a
+/// stage that finished; an ended stage keeps that behaviour.
 #[test]
-fn a_spent_gate_budget_does_not_let_an_ended_stage_through() {
+fn a_spent_gate_budget_still_lets_an_ended_stage_through() {
     let a = writing_stage(
         "a",
         vec![named(
@@ -13349,11 +13428,40 @@ fn a_spent_gate_budget_does_not_let_an_ended_stage_through() {
     );
     world.get_mut::<StageProgress>(e).unwrap().gate_reentries = 99;
     run_transition(&mut world);
-    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0);
-    match &world.get::<AgentState>(e).unwrap().status {
-        AgentStatus::Error { message } => assert!(message.contains("gate"), "{message}"),
-        other => panic!("expected the run to fail, got {other:?}"),
-    }
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+}
+
+/// An escape edge found by its condition is taken as it always was; the gate
+/// on the plain successor is not consulted, and nothing is noted twice.
+#[test]
+fn an_escape_edge_is_taken_whatever_the_plain_edges_gate_says() {
+    let a = writing_stage(
+        "a",
+        vec![
+            named(
+                "n",
+                gated_edge("b", Some(gate(None, Some("write the brief first")))),
+            ),
+            named(
+                "m",
+                conditioned_edge("recovery", EdgeCondition::MaxIterations),
+            ),
+        ],
+    );
+    let b = stage_named("b", None, false, None);
+    let recovery = stage_named("recovery", None, false, None);
+    let mut world = World::new();
+    let e = spawn_outcome_agent(
+        &mut world,
+        blueprint(vec![a, b, recovery]),
+        StageOutcome::MaxIterations,
+        AgentStatus::Active,
+    );
+    run_transition(&mut world);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 2);
+    let text = conversation_text(&world, e);
+    assert!(!text.contains("write the brief first"), "{text}");
+    assert_eq!(text.matches("iteration cap").count(), 1, "{text}");
 }
 
 /// The loop guard ends a stage like a cut-off one when no `stuck` edge says

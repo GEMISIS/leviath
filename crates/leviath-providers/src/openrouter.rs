@@ -1164,6 +1164,33 @@ mod tests {
     }
 
     #[test]
+    fn the_runtimes_media_hints_are_not_sent_as_parameters() {
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".into(),
+                cache_breakpoint: false,
+                reasoning: None,
+            }],
+            model: "openai/gpt-4o".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::json!({ "top_p": 0.5, "prompt_regions": ["brief"], "output_mimes": ["audio/mpeg"] }),
+            request_timeout_secs: None,
+        };
+        let body = provider.build_request_body(&request);
+        assert_eq!(body["top_p"], serde_json::json!(0.5));
+        assert!(body.get("prompt_regions").is_none());
+        assert!(body.get("output_mimes").is_none());
+    }
+
+    #[test]
     fn test_build_request_body_prepends_system_blocks() {
         let provider = OpenRouterProvider::new(
             crate::provider::build_http_client(None).expect("a test client builds"),

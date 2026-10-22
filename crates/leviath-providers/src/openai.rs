@@ -397,6 +397,22 @@ impl OpenAIProvider {
         crate::provider::check_http_response(response, self.endpoint.rate_limiter.as_ref()).await
     }
 
+    /// A `gpt-audio` turn answered in speech over Chat Completions. Sent with
+    /// the temperature only when the model takes one, and once more without it
+    /// if the API refuses it, as the ordinary route does.
+    async fn speak(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
+        let takes = self.capabilities(&request.model).supports_temperature;
+        match media::chat_audio(&self.endpoint, request, takes).await {
+            Err(ProviderError::ApiError(detail))
+                if takes && crate::openai_compat::temperature_refused(&detail) =>
+            {
+                self.temperature_unsupported.insert(&request.model);
+                media::chat_audio(&self.endpoint, request, false).await
+            }
+            other => other,
+        }
+    }
+
     /// Whether this model has already refused a temperature.
     fn temperature_is_unsupported(&self, model: &str) -> bool {
         self.temperature_unsupported.contains(model)
@@ -429,7 +445,7 @@ impl Provider for OpenAIProvider {
             return self.run_media(kind, request).await;
         }
         if media::speaks_in_chat(request) {
-            return media::chat_audio(&self.endpoint, request).await;
+            return self.speak(request).await;
         }
         // The route streams; a buffered call is the stream collected, so the
         // two paths cannot read the same answer differently.
@@ -446,9 +462,7 @@ impl Provider for OpenAIProvider {
             ));
         }
         if media::speaks_in_chat(request) {
-            return Ok(crate::media::one_chunk(
-                media::chat_audio(&self.endpoint, request).await?,
-            ));
+            return Ok(crate::media::one_chunk(self.speak(request).await?));
         }
         tracing::debug!(model = %request.model, "Calling OpenAI API");
         let mut body = self.body(request);

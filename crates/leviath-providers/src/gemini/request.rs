@@ -132,6 +132,8 @@ fn merge_extra(body: &mut Map<String, Value>, generation: &mut Map<String, Value
                 generation.insert(key.clone(), value.clone());
             }
             k if DROPPED_KEYS.contains(&k) => {}
+            // The runtime's hints to media providers are not model parameters.
+            k if crate::provider::RUNTIME_EXTRA_KEYS.contains(&k) => {}
             _ => {
                 body.insert(key.clone(), value.clone());
             }

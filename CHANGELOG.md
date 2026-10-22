@@ -18,9 +18,10 @@ same list.
 - A stage may set `prompt_regions = ["brief"]`: for a model that takes its
   prompt from text (an image, video or speech model), the prompt is exactly
   those regions' text, in that order, instead of every region the stage shows.
-- A tool call repeated with identical arguments three times in a stage draws a
-  nudge to stop; repeating it again ends the stage, down its `stuck` edge if it
-  has one, else as a `max_iterations` stage.
+- The same tool calls with the same results three batches in a row draw a
+  nudge to stop; repeating them again ends the stage, down its `stuck` edge if
+  it has one, else as a `max_iterations` stage. Polling and fan-out tools, tools
+  that change files, and any differing batch start the count again.
 - A `gpt-audio` stage whose declared output includes `audio/*` is sent to Chat
   Completions with `modalities` and `audio` set, and the audio that comes back
   becomes an output part (`voice` and `audio_format` parameters).

@@ -3817,6 +3817,19 @@ mod tests {
     }
 
     #[test]
+    fn the_runtimes_media_hints_are_not_sent_as_options() {
+        let provider = OllamaProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+        );
+        let mut request = base_request();
+        request.extra = serde_json::json!({ "top_p": 0.5, "prompt_regions": ["brief"], "output_mimes": ["audio/mpeg"] });
+        let body = provider.build_request_body(&request);
+        assert_eq!(body["options"]["top_p"], serde_json::json!(0.5));
+        assert!(body["options"].get("prompt_regions").is_none());
+        assert!(body["options"].get("output_mimes").is_none());
+    }
+
+    #[test]
     fn think_is_lifted_out_of_extra_to_the_top_level() {
         let provider = OllamaProvider::new(
             crate::provider::build_http_client(None).expect("a test client builds"),

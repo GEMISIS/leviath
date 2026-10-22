@@ -714,6 +714,7 @@ pub(crate) fn extension(mime: &str) -> &'static str {
         "audio/wav" | "audio/x-wav" => "wav",
         "audio/ogg" => "ogg",
         "audio/flac" => "flac",
+        "audio/l16" => "pcm",
         "application/json" => "json",
         _ => "bin",
     }

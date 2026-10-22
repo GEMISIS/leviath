@@ -909,9 +909,6 @@ pub(crate) fn process_response(
             e.insert(ReadyForTransition);
         } else {
             progress.total_tool_calls += result.tool_calls.len();
-            for call in &result.tool_calls {
-                super::loop_guard::record_call_repeat(&mut progress.loop_guard, call);
-            }
             // Per-path edit churn, for `stuck` edges armed on same-file edits.
             // Counted from the *requested* calls: a model asking to edit the
             // same wrong file five times is stuck whether or not each call ran.
