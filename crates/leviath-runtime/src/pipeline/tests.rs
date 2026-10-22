@@ -23763,3 +23763,6 @@ async fn each_settled_interaction_is_announced_once() {
 
 #[path = "validator_tool_flow_tests.rs"]
 mod validator_tool_flow;
+
+#[path = "continuation_compact_tests.rs"]
+mod continuation_compact;

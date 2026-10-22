@@ -600,3 +600,26 @@ fn every_region_kind_follows_its_default_and_a_declared_one_wins() {
     plain.continue_at = None;
     assert_eq!(plain.continue_stage().unwrap().name.as_str(), "plan");
 }
+
+/// A continuation that summarizes a region on a compaction model no
+/// provider here serves is refused before anything is written; one this
+/// machine can reach, one on the stage's own model, and one that
+/// summarizes nothing are not.
+#[test]
+fn a_continuation_needs_a_compaction_model_it_can_reach() {
+    use crate::bind::host::tests::registry;
+    let mut named = graph();
+    named.compaction.as_mut().unwrap().model =
+        Some(crate::spec::names::ModelRef::parse("summarizer/m").unwrap());
+    let refused = check_compaction(&named, &registry(&["other"])).unwrap_err();
+    assert_eq!(refused.0[0].code, IssueCode::Unavailable);
+    assert_eq!(refused.0[0].path, SpecPath::root().field("compaction"));
+    let words = refusal_text(&refused);
+    assert!(words.contains("'notes'"), "{words}");
+    assert!(words.contains("summarizer/m"), "{words}");
+    assert!(check_compaction(&named, &registry(&["summarizer"])).is_ok());
+    assert!(check_compaction(&graph(), &registry(&[])).is_ok());
+    let mut keeping = named.clone();
+    keeping.layout.regions[1].on_continue = Some(OnContinue::Keep);
+    assert!(check_compaction(&keeping, &registry(&[])).is_ok());
+}
