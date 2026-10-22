@@ -80,6 +80,9 @@ pub struct LiveAuthorizer {
     pub issuer: Option<String>,
     /// See [`Self::issuer`].
     pub ports: Option<Vec<u16>>,
+    /// How the grant's store write is published; see
+    /// [`Commit`](oauth_login::Commit).
+    pub commit: oauth_login::Commit,
 }
 
 impl LiveAuthorizer {
@@ -103,6 +106,7 @@ impl LiveAuthorizer {
             client: leviath_net::client(leviath_net::ClientTimeouts::default()),
             issuer: None,
             ports: None,
+            commit: oauth_login::commit_directly(),
         }
     }
 
@@ -142,6 +146,7 @@ impl LiveAuthorizer {
         );
         env.issuer = self.issuer.clone().unwrap_or(env.issuer);
         env.ports = self.ports.clone().unwrap_or(env.ports);
+        env.commit = Arc::clone(&self.commit);
         Ok(env)
     }
 }

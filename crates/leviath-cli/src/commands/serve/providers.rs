@@ -66,6 +66,15 @@ pub(crate) struct ProviderAdmin {
     pub(crate) ports: Option<Vec<u16>>,
     /// What each provider's sign-in is doing, for the poll to read.
     pub(crate) in_flight: Arc<Mutex<HashMap<String, Progress>>>,
+    /// Held while a finished sign-in stores its grant and clears its entry in
+    /// [`Self::in_flight`], and while a reader takes both.
+    ///
+    /// The grant store and the tracker are two places, and a reader that took
+    /// one and then the other could land between a sign-in's two writes: the
+    /// grant stored and the sign-in still waiting. Under this lock a reader
+    /// sees either both writes or neither. It is taken on the blocking pool
+    /// only, never across an await, and always before `in_flight`.
+    pub(crate) settled: Arc<Mutex<()>>,
     /// Current Unix time; a fn so a long-lived server stays current.
     pub(crate) now: fn() -> u64,
     /// Where the credential check reads the subscription's quota, when it is
@@ -84,6 +93,7 @@ impl Default for ProviderAdmin {
             issuer: None,
             ports: None,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            settled: Arc::new(Mutex::new(())),
             now: leviath_core::duration::now_secs_u64,
             usage_url: None,
         }
@@ -252,8 +262,7 @@ pub(super) fn provider_infos(state: &AppState, grants: &std::path::Path) -> Vec<
     let config = state.config.check().config;
     // Read once, not once per row: this is a file, and the answer is the same
     // for every provider in it.
-    let store = grants_in(&config, grants);
-    let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
+    let (store, in_flight) = settled_view(state, &config, grants);
     signin_providers()
         .into_iter()
         .map(|(id, display)| describe(id, display, &config, store.as_ref(), &in_flight))
@@ -369,9 +378,28 @@ pub(super) fn described(
     display: &str,
 ) -> ProviderInfo {
     let config = state.config.check().config;
-    let store = grants_in(&config, grants);
-    let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
+    let (store, in_flight) = settled_view(state, &config, grants);
     describe(id, display, &config, store.as_ref(), &in_flight)
+}
+
+/// The grant store and the sign-in tracker, read together under
+/// [`ProviderAdmin::settled`] so a sign-in that is finishing is seen either
+/// before its grant is stored or after its entry is cleared, never between.
+///
+/// Reads a file, and under the keychain the OS store, so it runs on the
+/// blocking pool like its callers.
+fn settled_view(
+    state: &AppState,
+    config: &crate::config::Config,
+    grants: &std::path::Path,
+) -> (
+    Option<leviath_providers::oauth::ProviderAuthStore>,
+    HashMap<String, Progress>,
+) {
+    let _settled = leviath_core::sync::lock(&state.providers.settled);
+    let store = grants_in(config, grants);
+    let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
+    (store, in_flight)
 }
 
 /// Every grant in the store at `grants`, read through the backend `config`
@@ -472,7 +500,22 @@ pub(super) async fn sign_in_started(
     // most once.
     let slot = Arc::new(Mutex::new(Some(started_tx)));
     let announce_slot = Arc::clone(&slot);
+    let tracker = Arc::clone(&state.providers.in_flight);
+    let now = state.providers.now;
+    let announce_tracker = Arc::clone(&tracker);
     let announce: crate::commands::auth::oauth::Announce = Arc::new(move |url: &str| {
+        // Recorded here, by the flow, before the browser is asked to open the
+        // page. The flow cannot finish before this returns, so the entry it
+        // clears on success is always there to clear. Recorded by the handler
+        // once it woke, a fast enough sign-in would clear it first and leave
+        // it waiting for good.
+        leviath_core::sync::lock(&announce_tracker).insert(
+            name.to_string(),
+            Progress::Waiting {
+                authorize_url: url.to_string(),
+                started_at: now(),
+            },
+        );
         // `Option::map` rather than `if let`: an `if let` with no else leaves
         // a region only a second announce could reach, and there is not one.
         let _ = leviath_core::sync::lock(&announce_slot)
@@ -483,31 +526,32 @@ pub(super) async fn sign_in_started(
     // Resolved here, in the request, and moved into the task below: a
     // `tokio::spawn` does not inherit the task-local the tests scope, so
     // resolving it in there would reach the real home.
-    let authorizer = state.providers.authorizer().await;
-    let tracker = Arc::clone(&state.providers.in_flight);
-    let now = state.providers.now;
+    let mut authorizer = state.providers.authorizer().await;
+    // Nothing is recorded on success: the grant store is now the answer, and
+    // a second copy of "signed in" is how the two drift. The waiting entry is
+    // cleared in the same step that stores the grant, under the lock the
+    // listing reads under, so no reader sees one without the other.
+    let (settled, commit_tracker) = (Arc::clone(&state.providers.settled), Arc::clone(&tracker));
+    authorizer.commit = Arc::new(move |write| {
+        let _settled = leviath_core::sync::lock(&settled);
+        write().map(|()| {
+            leviath_core::sync::lock(&commit_tracker).remove(name);
+        })
+    });
     tokio::spawn(async move {
-        let outcome = authorizer.sign_in(name, announce).await;
-        let mut in_flight = leviath_core::sync::lock(&tracker);
-        match outcome {
-            // Nothing is recorded on success: the grant store is now the
-            // answer, and a second copy of "signed in" is how the two drift.
-            Ok(_) => {
-                in_flight.remove(name);
-            }
-            Err(e) => {
-                let message = e
-                    .chain()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(": ");
-                // The handler is still waiting if this failed before there was
-                // a URL to announce, and this is what it reads.
-                let _ = leviath_core::sync::lock(&slot)
-                    .take()
-                    .map(|tx| tx.send(Err(message.clone())));
-                in_flight.insert(name.to_string(), Progress::Failed { message, at: now() });
-            }
+        if let Err(e) = authorizer.sign_in(name, announce).await {
+            let message = e
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": ");
+            // The handler is still waiting if this failed before there was
+            // a URL to announce, and this is what it reads.
+            let _ = leviath_core::sync::lock(&slot)
+                .take()
+                .map(|tx| tx.send(Err(message.clone())));
+            leviath_core::sync::lock(&tracker)
+                .insert(name.to_string(), Progress::Failed { message, at: now() });
         }
     });
 
@@ -525,20 +569,11 @@ pub(super) async fn sign_in_started(
         .await
         .unwrap_or(Err("the sign-in ended before it began".to_string()))
     {
-        Ok(url) => {
-            leviath_core::sync::lock(&state.providers.in_flight).insert(
-                name.to_string(),
-                Progress::Waiting {
-                    authorize_url: url.clone(),
-                    started_at: (state.providers.now)(),
-                },
-            );
-            Ok(SignInStarted {
-                provider: name.to_string(),
-                authorize_url: url,
-                already_waiting: false,
-            })
-        }
+        Ok(url) => Ok(SignInStarted {
+            provider: name.to_string(),
+            authorize_url: url,
+            already_waiting: false,
+        }),
         Err(message) => Err(super::core::error::ServeError::Upstream(message)),
     }
 }

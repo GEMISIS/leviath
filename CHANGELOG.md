@@ -528,6 +528,12 @@ same list.
   region's `[name]:` heading. It only worked for `pinned`, `compact_history`
   and `checklist` regions. A region without the flag renders exactly as
   before; to keep a region's old prompt, drop the flag.
+- `GET /api/providers` no longer reports a browser sign-in as both signed in
+  and still waiting. The grant was stored a moment before the waiting entry
+  was cleared, and a poll that landed in between saw both. The two now change
+  together, so each poll shows the sign-in either waiting or finished. The
+  waiting entry is also recorded before the browser opens, so a sign-in that
+  finishes very quickly cannot leave it behind for good.
 - Two runs that each declare an MCP server under the same name, but with a
   different command, arguments, environment, URL or headers, each reach
   their own server. The daemon shared one connection per server name, so
