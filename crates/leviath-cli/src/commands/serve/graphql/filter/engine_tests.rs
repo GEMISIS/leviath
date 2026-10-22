@@ -5,6 +5,7 @@
 //! not the macro: the same rules hold for anything that implements the
 //! contract, however it came to.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as Counting};
 
 use async_graphql::{Enum, InputObject};
@@ -16,9 +17,6 @@ use super::{
     object_confirm, object_test, quantified, quantified_confirm, settled,
 };
 
-/// How many times a second-phase field has been read.
-static READS: AtomicUsize = AtomicUsize::new(0);
-
 /// A value with one cheap field and one that costs a read.
 #[derive(Debug, Clone)]
 struct Thing {
@@ -26,12 +24,15 @@ struct Thing {
     name: String,
     /// The field that costs a read.
     note: Option<String>,
+    /// How many times the note has been read, private to this value so
+    /// tests running side by side never see each other's reads.
+    reads: Arc<AtomicUsize>,
 }
 
 impl Thing {
     /// Read the note, counting the read.
     async fn read_note(&self) -> Option<String> {
-        READS.fetch_add(1, Counting::SeqCst);
+        self.reads.fetch_add(1, Counting::SeqCst);
         std::future::ready(()).await;
         self.note.clone()
     }
@@ -221,6 +222,7 @@ fn thing() -> Thing {
     Thing {
         name: "plan".to_owned(),
         note: Some("written".to_owned()),
+        reads: Arc::default(),
     }
 }
 
@@ -318,14 +320,13 @@ async fn a_refused_field_is_never_read() {
         note: noted("written").note,
         ..named("other")
     };
-    let before = READS.load(Counting::SeqCst);
-    assert_eq!(thing().test(&filter, &cx), Tri::No);
-    assert!(!thing().confirm(&filter, &cx).await);
-    assert_eq!(READS.load(Counting::SeqCst), before);
+    let thing = thing();
+    assert_eq!(thing.test(&filter, &cx), Tri::No);
+    assert!(!thing.confirm(&filter, &cx).await);
+    assert_eq!(thing.reads.load(Counting::SeqCst), 0);
 
-    let before = READS.load(Counting::SeqCst);
-    assert!(thing().confirm(&noted("written"), &cx).await);
-    assert_eq!(READS.load(Counting::SeqCst), before + 1);
+    assert!(thing.confirm(&noted("written"), &cx).await);
+    assert_eq!(thing.reads.load(Counting::SeqCst), 1);
 }
 
 /// A quantifier says what it says, in both phases.
@@ -337,6 +338,7 @@ async fn the_quantifiers_say_what_they_say() {
         Thing {
             name: "write".to_owned(),
             note: None,
+            reads: Arc::default(),
         },
     ];
     let over = |filter: ThingListFilter| Thing::list_test(&items, &filter, &cx);
@@ -504,7 +506,6 @@ async fn the_second_phase_stops_at_the_first_refusal() {
     confirm.field(None::<&StringFilter>, &thing.name).await;
     assert!(Confirm::new(&cx).finish());
 
-    let before = READS.load(Counting::SeqCst);
     confirm
         .field(
             Some(&StringFilter {
@@ -534,8 +535,8 @@ async fn the_second_phase_stops_at_the_first_refusal() {
         .await;
     assert!(!confirm.finish());
     assert_eq!(
-        READS.load(Counting::SeqCst),
-        before,
+        thing.reads.load(Counting::SeqCst),
+        0,
         "nothing is read after a refusal"
     );
 
@@ -543,8 +544,8 @@ async fn the_second_phase_stops_at_the_first_refusal() {
     confirm.io(None::<&StringFilter>, thing.read_note()).await;
     assert!(confirm.finish());
     assert_eq!(
-        READS.load(Counting::SeqCst),
-        before,
+        thing.reads.load(Counting::SeqCst),
+        0,
         "a field nobody asked about is not read"
     );
 }
