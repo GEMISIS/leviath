@@ -4,7 +4,17 @@
 //! dependencies. Rather than spawn a connection per agent, all agents share one
 //! [`leviath_mcp::ToolExecutor`] (the client store) fronted by this pool: a
 //! server is connected **on first use**, deduped by its config signature, and
-//! its tools reused by every agent that declares it. Connection is async and is
+//! its tools reused by every agent that declares it.
+//!
+//! The signature is the server's whole launch spec
+//! ([`MCPServerConfig::connection_key`]), never its name alone: two runs may
+//! each declare a server called `docs` that starts a different process, and
+//! each has to reach its own. A per-agent connection is registered under its
+//! signature and reached only through the signatures of the servers the run
+//! declared (`AgentToolState::mcp_scope`), so one run's server going idle or
+//! exiting touches no other run's server of the same name. The global
+//! `[[mcp_servers]]` are additionally *published*, so every run reaches them
+//! by tool name. Connection is async and is
 //! driven from every spawn path: the spawn preprocessor for top-level and
 //! sub-agent spawns (both run in the serve loop), `McpPool::warm_recovered` for
 //! runs reloaded on daemon restart, and a detached warm task for fan-out workers.
@@ -102,7 +112,8 @@ enum IdleOutcome {
 
 /// One per-agent server's lease state.
 struct ServerLease {
-    /// The server's name - the key the executor stores its client under.
+    /// The server's name, for log lines. The executor stores the client under
+    /// the signature, which is this row's key.
     name: String,
     /// The runs currently holding it open.
     holders: HashSet<String>,
@@ -111,13 +122,12 @@ struct ServerLease {
     generation: u64,
 }
 
-/// A stable dedup key for a server config: its full serialized form. Two
+/// A stable dedup key for a server config: its whole launch spec, hashed. Two
 /// blueprints declaring an identical server share one connection; a difference in
-/// name/command/url/args/env/headers is a distinct server.
+/// name/transport/command/url/args/env/headers is a distinct server. It is also
+/// the key the executor stores the connection under.
 pub(crate) fn signature(config: &MCPServerConfig) -> String {
-    // Serializing a plain config never fails; fall back to an empty key rather
-    // than carry a dead error closure.
-    serde_json::to_string(config).unwrap_or_default()
+    config.connection_key()
 }
 
 /// Default for how long a per-agent MCP server may sit with zero leasing runs
@@ -283,6 +293,10 @@ impl McpPool {
     /// connection belongs to the daemon rather than to any run, so it is exempt
     /// from lease-driven idle disconnection, and a pending retirement from a
     /// moment ago (the user removed it and put it back) is cancelled.
+    ///
+    /// Its tools are also published, so every run reaches them by name, and
+    /// the cached defs become the ones that were: a tool whose name another
+    /// global server already holds is not advertised.
     pub(crate) async fn ensure_global(&self, config: &MCPServerConfig) -> Vec<Tool> {
         let sig = signature(config);
         {
@@ -292,15 +306,25 @@ impl McpPool {
             // it looks for the row before it touches anything.
             table.servers.remove(&sig);
         }
-        self.ensure(config).await
+        if self.ensure(config).await.is_empty() {
+            return Vec::new();
+        }
+        let mut executor = self.shared.lock().await;
+        let defs = tool_defs(executor.publish(&sig, &self.reserved));
+        self.connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(sig, defs.clone());
+        drop(executor);
+        defs
     }
 
     /// Stop holding `config`'s server open on the daemon's behalf: it is no
     /// longer in `[[mcp_servers]]`.
     ///
     /// `at_once` tears the connection down before returning, for an *edited*
-    /// entry - the replacement connects under the same name straight
-    /// afterwards, and a delayed teardown would take that one down with it.
+    /// entry - the replacement publishes the same tool names straight
+    /// afterwards, and the old server should not outlive the edit.
     /// Otherwise the server is handed to the same grace timer an unleased
     /// per-agent server gets, so a run part-way through a stage keeps the tool
     /// working for that window rather than losing it mid-call.
@@ -439,7 +463,8 @@ impl McpPool {
     /// Tear a server down if nothing touched it since `generation`: take its
     /// client out of the shared executor, forget its cached defs (so the next
     /// spawn reconnects lazily), and shut it down - which is what actually
-    /// ends a stdio server's child process. A server kept because a call is
+    /// ends a stdio server's child process. The client is taken by `sig`, so
+    /// another run's server that merely shares the name is left alone. A server kept because a call is
     /// in flight is [`IdleOutcome::Busy`], and the grace timer waits again for
     /// that one.
     ///
@@ -467,8 +492,8 @@ impl McpPool {
             if !still_idle {
                 return IdleOutcome::Stale;
             }
-            let client = executor.remove_client(name);
-            if client.is_none() && executor.has_client(name) {
+            let client = executor.remove_client(sig);
+            if client.is_none() && executor.has_client(sig) {
                 // A call still holds the client: keep the lease row and the
                 // cached defs so the next tick finds the server and retries.
                 return IdleOutcome::Busy;
@@ -496,9 +521,10 @@ impl McpPool {
         }
     }
 
-    /// Whether the shared executor can still dispatch `tool`. The
-    /// advertisement and the connection are separate records, and this is what
-    /// tells apart one going stale without the other.
+    /// Whether the shared executor can still dispatch `tool` for a run that
+    /// declares no servers of its own (so through the published table). The
+    /// advertisement and the connection are separate records, and this is
+    /// what tells apart one going stale without the other.
     #[cfg(test)]
     pub(crate) async fn routes(&self, tool: &str) -> bool {
         self.shared.lock().await.route(tool).is_ok()
@@ -538,19 +564,15 @@ impl McpPool {
         let grants = crate::tools::agent_grants(store_kind);
         match crate::tools::connect_for_agent(config, &grants, &allow_env).await {
             Ok(client) => {
-                let advertised = self.shared.lock().await.add_client_advertised(
+                // Under the signature, unpublished: only a run that declared
+                // this exact server routes to it.
+                let advertised = self.shared.lock().await.add_connection(
+                    sig.clone(),
                     config.name.clone(),
                     client,
                     &self.reserved,
                 );
-                let defs: Vec<Tool> = advertised
-                    .into_iter()
-                    .map(|m| Tool {
-                        name: m.name,
-                        description: m.description,
-                        parameters: m.schema,
-                    })
-                    .collect();
+                let defs = tool_defs(advertised);
                 self.connected
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -622,18 +644,56 @@ impl McpPool {
     /// The cached defs for every config in `configs` (pool must already be warm
     /// for them - call [`Self::ensure`] first). Unknown/unconnected configs
     /// contribute nothing. This is the sync read the spawner uses.
+    ///
+    /// A name two of the configs both advertise is offered once, by the first:
+    /// the one [`leviath_mcp::ToolExecutor::route_in`] reaches, since a run's
+    /// scope lists its servers in the same order.
     pub(crate) fn cached_defs_for(&self, configs: &[MCPServerConfig]) -> Vec<Tool> {
         let cache = self
             .connected
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let mut seen = HashSet::new();
         configs
             .iter()
             .filter_map(|c| cache.get(&signature(c)))
             .flatten()
+            .filter(|t| seen.insert(t.name.clone()))
             .cloned()
             .collect()
     }
+}
+
+/// The signatures of `servers`, in order: the scope a run declaring them
+/// routes its MCP calls through.
+pub(crate) fn scope_of(servers: &[MCPServerConfig]) -> Vec<String> {
+    servers.iter().map(signature).collect()
+}
+
+/// The MCP defs a run is offered: the global servers' and its own. A tool one
+/// of the run's own servers shares a name with a global server's is offered
+/// once, as the run's own, which is also where its calls route (see
+/// [`leviath_mcp::ToolExecutor::route_in`]).
+pub(crate) fn offered_defs(global: Vec<Tool>, own: Vec<Tool>) -> Vec<Tool> {
+    let mine: HashSet<&str> = own.iter().map(|t| t.name.as_str()).collect();
+    let mut defs: Vec<Tool> = global
+        .into_iter()
+        .filter(|t| !mine.contains(t.name.as_str()))
+        .collect();
+    defs.extend(own);
+    defs
+}
+
+/// Advertised MCP tools as the defs a run is offered.
+fn tool_defs(advertised: Vec<leviath_mcp::discovery::ToolMetadata>) -> Vec<Tool> {
+    advertised
+        .into_iter()
+        .map(|m| Tool {
+            name: m.name,
+            description: m.description,
+            parameters: m.schema,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1095,7 +1155,11 @@ binds = [{{ region = "task" }}]
             // A call holds the client the way `ToolExecutor::execute` does:
             // a clone of the shared `Arc`, taken by `route` and kept for the
             // duration of the call.
-            let held = pool.shared.lock().await.route("busyserver__echo");
+            let held = pool
+                .shared
+                .lock()
+                .await
+                .route_in(&scope_of(&servers), "busyserver__echo");
             let (held, _) = held.expect("the tool routes while connected");
             assert_eq!(
                 pool.disconnect_if_still_idle(&sig, &name, generation).await,
@@ -1107,7 +1171,7 @@ binds = [{{ region = "task" }}]
                 "the cached defs survive a refused disconnect"
             );
             assert!(
-                pool.shared.lock().await.has_client(&name),
+                pool.shared.lock().await.has_client(&signature(&servers[0])),
                 "the executor still has the server"
             );
             assert!(
@@ -1126,9 +1190,13 @@ binds = [{{ region = "task" }}]
                 "once the call lets go, the next tick disconnects"
             );
             assert!(pool.cached_defs_for(&servers).is_empty());
-            assert!(!pool.shared.lock().await.has_client(&name));
+            assert!(!pool.shared.lock().await.has_client(&signature(&servers[0])));
             assert!(
-                pool.shared.lock().await.route("busyserver__echo").is_err(),
+                pool.shared
+                    .lock()
+                    .await
+                    .route_in(&scope_of(&servers), "busyserver__echo")
+                    .is_err(),
                 "a disconnected server's tool no longer routes"
             );
         })
@@ -1150,7 +1218,11 @@ binds = [{{ region = "task" }}]
             let zeroed = pool.release_bookkeeping(&a);
             let (sig, name, generation) = zeroed[0].clone();
 
-            let held = pool.shared.lock().await.route("retryserver__echo");
+            let held = pool
+                .shared
+                .lock()
+                .await
+                .route_in(&scope_of(&servers), "retryserver__echo");
             let (held, _) = held.expect("routes");
             let grace = std::time::Duration::from_millis(20);
             let timer = tokio::spawn(Arc::clone(&pool).grace_disconnect(
@@ -1162,7 +1234,7 @@ binds = [{{ region = "task" }}]
             // Several windows pass with the call in flight: the server stays.
             tokio::time::sleep(grace * 6).await;
             assert!(!pool.cached_defs_for(&servers).is_empty());
-            assert!(pool.shared.lock().await.has_client(&name));
+            assert!(pool.shared.lock().await.has_client(&signature(&servers[0])));
 
             // The call ends; the next window tears the server down and the
             // timer task finishes.
@@ -1171,7 +1243,7 @@ binds = [{{ region = "task" }}]
                 .await
                 .expect("the timer task ends once it disconnected");
             assert!(pool.cached_defs_for(&servers).is_empty());
-            assert!(!pool.shared.lock().await.has_client(&name));
+            assert!(!pool.shared.lock().await.has_client(&signature(&servers[0])));
         })
         .await;
     }
@@ -1304,5 +1376,136 @@ binds = [{{ region = "task" }}]
         );
         // Built-in names are reserved.
         assert!(pool.reserved.contains("read_file"));
+    }
+
+    /// A server named `name` that answers every call with `identity`, so a
+    /// test can tell which of two same-named servers it reached.
+    fn identified(name: &str, identity: &str) -> MCPServerConfig {
+        let source = McpStub::new()
+            .tool("whoami", Some("w"))
+            .input_schema(r#"{"type": "object", "properties": {}}"#)
+            .replying(identity)
+            .source();
+        MCPServerConfig::stdio(name, "python3", vec!["-c".to_string(), source])
+    }
+
+    /// What `tool` answers for a run that declared `servers`, or the routing
+    /// error.
+    async fn answer(pool: &McpPool, servers: &[MCPServerConfig], tool: &str) -> String {
+        let routed = pool.shared.lock().await.route_in(&scope_of(servers), tool);
+        let (client, original) = routed.expect("the tool routes");
+        ToolExecutor::call_routed(&client, &original, serde_json::json!({}))
+            .await
+            .expect("the call answers")
+            .text
+    }
+
+    /// The global defs and a run's own are offered together, a shared name
+    /// once, as the run's own.
+    #[test]
+    fn a_runs_own_def_replaces_a_global_one_of_the_same_name() {
+        let def = |name: &str, description: &str| Tool {
+            name: name.to_string(),
+            description: description.to_string(),
+            parameters: serde_json::json!({}),
+        };
+        let offered = offered_defs(
+            vec![def("g__a", "global"), def("twin__w", "global")],
+            vec![def("twin__w", "own")],
+        );
+        let shown: Vec<(&str, &str)> = offered
+            .iter()
+            .map(|t| (t.name.as_str(), t.description.as_str()))
+            .collect();
+        assert_eq!(shown, vec![("g__a", "global"), ("twin__w", "own")]);
+    }
+
+    /// Two runs each declare a server named `twin` with a different launch
+    /// spec. Each reaches its own, under the same advertised name, and the
+    /// first run ending (its server going idle and being torn down) leaves
+    /// the second run's server connected and routable.
+    #[tokio::test]
+    async fn same_named_servers_of_two_runs_stay_apart_through_an_idle_disconnect() {
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let pool = Arc::new(pool().with_idle_disconnect(std::time::Duration::from_millis(20)));
+            let a = vec![identified("twin", "server-A")];
+            let b = vec![identified("twin", "server-B")];
+            assert_eq!(pool.ensure(&a[0]).await[0].name, "twin__whoami");
+            assert_eq!(pool.ensure(&b[0]).await[0].name, "twin__whoami");
+            let lease_a = pool.lease_servers(&a, "run-a");
+            let _lease_b = pool.lease_servers(&b, "run-b");
+            assert_eq!(answer(&pool, &a, "twin__whoami").await, "server-A");
+            assert_eq!(answer(&pool, &b, "twin__whoami").await, "server-B");
+
+            pool.release(&lease_a);
+            let mut waited = 0;
+            while pool.shared.lock().await.has_client(&signature(&a[0])) && waited < 200 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                waited += 1;
+            }
+            assert!(
+                !pool.shared.lock().await.has_client(&signature(&a[0])),
+                "run-a's server went idle and was torn down"
+            );
+            assert_eq!(
+                answer(&pool, &b, "twin__whoami").await,
+                "server-B",
+                "run-b still reaches its own server"
+            );
+            assert_eq!(pool.cached_defs_for(&b).len(), 1);
+            assert!(pool.cached_defs_for(&a).is_empty());
+        })
+        .await;
+    }
+
+    /// A run's own server that shares a name with a global one is the one
+    /// its calls reach, while a run without it reaches the global server, and
+    /// the run is offered the tool once.
+    #[tokio::test]
+    async fn a_runs_own_server_shadows_a_global_of_the_same_name_for_that_run_only() {
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let pool = pool();
+            let global = identified("twin", "global");
+            let own = vec![identified("twin", "own")];
+            assert_eq!(pool.ensure_global(&global).await.len(), 1);
+            assert_eq!(pool.ensure(&own[0]).await.len(), 1);
+            assert_eq!(answer(&pool, &[], "twin__whoami").await, "global");
+            assert_eq!(answer(&pool, &own, "twin__whoami").await, "own");
+            // Twice in one run's list is still one def.
+            let both = vec![own[0].clone(), global.clone()];
+            assert_eq!(pool.cached_defs_for(&both).len(), 1);
+        })
+        .await;
+    }
+
+    /// A server a run connected first, then named in the config, is published
+    /// on the spot: every run reaches it by name, with nothing reconnected.
+    #[tokio::test]
+    async fn a_per_agent_server_named_in_the_config_later_is_published() {
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let pool = pool();
+            let server = identified("later", "L");
+            assert_eq!(pool.ensure(&server).await.len(), 1);
+            assert!(!pool.routes("later__whoami").await);
+            assert_eq!(pool.ensure_global(&server).await.len(), 1);
+            assert!(pool.routes("later__whoami").await);
+        })
+        .await;
+    }
+
+    /// A global server that cannot be reached publishes nothing.
+    #[tokio::test]
+    async fn an_unreachable_global_server_publishes_nothing() {
+        with_tracing(|| {});
+        with_temp_home(|| async {
+            let pool = pool();
+            let bad = MCPServerConfig::stdio("bad", "definitely-not-a-binary-xyz", vec![]);
+            assert!(pool.ensure_global(&bad).await.is_empty());
+            assert!(pool.shared.lock().await.tool_owners().is_empty());
+        })
+        .await;
     }
 }

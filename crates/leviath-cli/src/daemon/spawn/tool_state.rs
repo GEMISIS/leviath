@@ -22,6 +22,8 @@ pub(crate) struct ToolStateParts<'a> {
     pub(crate) builtin_names: HashSet<String>,
     /// MCP connections shared across agents.
     pub(crate) mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
+    /// The connection keys of the MCP servers this run declared.
+    pub(crate) mcp_scope: Vec<String>,
     /// The resolved daemon configuration.
     pub(crate) config: &'a Config,
     /// Where this agent's prompts are parked.
@@ -103,6 +105,7 @@ pub(crate) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         writes: parts.writes,
         builtins: parts.builtins,
         mcp: parts.mcp,
+        mcp_scope: Arc::new(parts.mcp_scope),
         builtin_names: parts.builtin_names,
         launch_overrides: Arc::new(parts.launch_overrides),
         safe_keys: crate::daemon::tool_service::Live::new(

@@ -126,6 +126,36 @@ impl MCPServerConfig {
         }
     }
 
+    /// The key a connection to this server is stored and shared under.
+    ///
+    /// Every field that shapes the connection goes in: the name, the
+    /// transport, the command and its arguments and environment, the URL and
+    /// its headers. Two entries that agree on all of them reach the same
+    /// server, so they may share one connection; two that differ anywhere,
+    /// the same name included, never do. The name alone is not enough: two
+    /// blueprints may each declare a `docs` server pointing somewhere else.
+    ///
+    /// The maps are sorted first, so the key does not depend on the order a
+    /// `HashMap` happens to iterate in. The result is a SHA-256 digest rather
+    /// than the fields themselves, because `env` and `headers` may carry a
+    /// secret and the key turns up in logs and diagnostics.
+    pub fn connection_key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        use std::collections::BTreeMap;
+        let canonical = serde_json::json!({
+            "name": self.name,
+            "transport": self.transport,
+            "command": self.command,
+            "url": self.url,
+            "args": self.args,
+            "env": self.env.iter().collect::<BTreeMap<_, _>>(),
+            "headers": self.headers.iter().collect::<BTreeMap<_, _>>(),
+        });
+        let digest = Sha256::digest(canonical.to_string().as_bytes());
+        let hex: String = digest.iter().take(16).map(|b| format!("{b:02x}")).collect();
+        format!("mcp-{hex}")
+    }
+
     /// Decide which transport this entry describes, rejecting ambiguity.
     ///
     /// With `transport` omitted the choice is inferred from whichever of
@@ -689,5 +719,67 @@ headers = { Authorization = "Bearer tok" }
         let back: MCPServerConfig = toml::from_str(&text).expect("must parse back");
         assert_eq!(back.url, config.url);
         assert_eq!(back.headers, config.headers);
+    }
+
+    /// The connection key is the whole launch spec: the same name with any
+    /// other field changed is a different key, and the same spec built twice
+    /// (maps filled in a different order) is the same key.
+    #[test]
+    fn the_connection_key_covers_the_whole_launch_spec() {
+        let base = || {
+            let mut c = MCPServerConfig::stdio("twin", "python3", vec!["s.py".to_string()]);
+            c.env.insert("A".to_string(), "1".to_string());
+            c.env.insert("B".to_string(), "2".to_string());
+            c
+        };
+        let key = base().connection_key();
+        let mut reordered = MCPServerConfig::stdio("twin", "python3", vec!["s.py".to_string()]);
+        reordered.env.insert("B".to_string(), "2".to_string());
+        reordered.env.insert("A".to_string(), "1".to_string());
+        assert_eq!(reordered.connection_key(), key);
+
+        let variants: Vec<MCPServerConfig> = vec![
+            MCPServerConfig {
+                name: "other".to_string(),
+                ..base()
+            },
+            MCPServerConfig {
+                args: vec!["t.py".to_string()],
+                ..base()
+            },
+            MCPServerConfig {
+                command: Some("node".to_string()),
+                ..base()
+            },
+            MCPServerConfig {
+                transport: Some(MCPTransport::Stdio),
+                ..base()
+            },
+            MCPServerConfig {
+                url: Some("https://e.com/mcp".to_string()),
+                ..base()
+            },
+            {
+                let mut c = base();
+                c.env.insert("A".to_string(), "secret-value".to_string());
+                c
+            },
+            {
+                let mut c = base();
+                c.headers.insert("X".to_string(), "y".to_string());
+                c
+            },
+        ];
+        for variant in variants {
+            assert_ne!(variant.connection_key(), key, "{variant:?}");
+        }
+        // A secret in the spec never shows in the key.
+        let mut secret = base();
+        secret
+            .env
+            .insert("TOKEN".to_string(), "hunter2".to_string());
+        let shown = secret.connection_key();
+        assert!(!shown.contains("hunter2") && !shown.contains("TOKEN"));
+        assert!(shown.starts_with("mcp-") && shown.len() == 36, "{shown}");
     }
 }

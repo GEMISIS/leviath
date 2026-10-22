@@ -497,6 +497,14 @@ same list.
 
 ### Fixed
 
+- Two runs that each declare an MCP server under the same name, but with a
+  different command, arguments, environment, URL or headers, each reach
+  their own server. The daemon shared one connection per server name, so
+  the second run to start took the name over. When either run's server went
+  idle or exited, the other run lost its tools. A connection is now kept
+  per launch spec. Runs declaring the identical server still share one, and
+  it stays up while any of them is live. Tool names stay
+  `<server>__<tool>`.
 - A bare model name goes to a provider that lists it. Google claimed any id
   with `-image` or `-tts` in it, so a bare `muse-image-1.0` ran on Google
   first, which does not serve it, when Google came before Meta in

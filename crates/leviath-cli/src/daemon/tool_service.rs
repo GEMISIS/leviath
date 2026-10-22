@@ -165,6 +165,10 @@ pub(crate) struct AgentToolState {
     pub builtins: Arc<leviath_tools::BuiltinTools>,
     /// MCP tool executor.
     pub mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
+    /// The connection keys of the MCP servers this run declared, in order. A
+    /// call is routed through them first, so the run reaches its own server
+    /// even when another run declares a different one under the same name.
+    pub mcp_scope: Arc<Vec<String>>,
     /// Names of the built-in tools (dispatch routes builtin vs MCP).
     pub builtin_names: HashSet<String>,
     /// `--yolo` / `--allow` / `--ask` / `--deny` launch overrides.
@@ -487,7 +491,7 @@ async fn execute_tool(state: &AgentToolState, is_builtin: bool, tc: &ToolCall) -
         // Route under the executor lock, call without it: holding it across the
         // call serialises every MCP call in a batch behind the slowest server.
         // The client's own lock keeps calls to one server in order.
-        let routed = state.mcp.lock().await.route(&tc.name);
+        let routed = state.mcp.lock().await.route_in(&state.mcp_scope, &tc.name);
         let result = match routed {
             Ok((client, original)) => {
                 leviath_mcp::ToolExecutor::call_routed(&client, &original, tc.arguments.clone())
@@ -1209,6 +1213,7 @@ pub(crate) mod tests {
             writes: Arc::new(budget),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_scope: Default::default(),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
@@ -1286,6 +1291,7 @@ pub(crate) mod tests {
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(mcp)),
+            mcp_scope: Default::default(),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
@@ -1546,6 +1552,7 @@ pub(crate) mod tests {
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_scope: Default::default(),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
@@ -1950,6 +1957,7 @@ pub(crate) mod tests {
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_scope: Default::default(),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
@@ -2289,6 +2297,7 @@ pub(crate) mod tests {
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_scope: Default::default(),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
@@ -2668,6 +2677,7 @@ pub(crate) mod tests {
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_scope: Default::default(),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
@@ -2739,6 +2749,7 @@ pub(crate) mod tests {
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_scope: Default::default(),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
@@ -3332,6 +3343,7 @@ pub(crate) mod tests {
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_scope: Default::default(),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
@@ -4182,6 +4194,7 @@ pub(crate) mod tests {
             writes: Arc::new(unlimited_writes()),
             builtins,
             mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_scope: Default::default(),
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             safe_keys: Live::new(HashSet::new()),
