@@ -198,9 +198,8 @@ pub(crate) async fn chat_audio(
         .expect("a Chat Completions body is a JSON object");
     // These models take the cap under its newer name, and the two stage
     // parameters above are not Chat Completions fields.
-    if let Some(cap) = fields.remove("max_tokens") {
-        fields.insert("max_completion_tokens".into(), cap);
-    }
+    fields.remove("max_tokens");
+    fields.insert("max_completion_tokens".into(), json!(request.max_tokens));
     fields.remove("voice");
     fields.remove("audio_format");
     // A model that takes no temperature is sent none, as on the ordinary route.
