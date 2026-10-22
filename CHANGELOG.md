@@ -15,6 +15,16 @@ same list.
 
 ### Changed
 
+- A model call whose availability trouble (a 5xx, a 429, "overloaded")
+  outlives its retries moves to the next model in the stage's list, as an
+  out-of-credits provider already did, rather than ending the stage. Each
+  retry logs a WARN naming the provider, the attempt and the wait, and a
+  computed wait is spread by up to a fifth so fan-out workers that failed
+  together do not retry together. A `Retry-After` is still kept to the
+  second. To end the stage instead, list only the one model.
+- When a stage runs out of routes, its error names every provider and model
+  it was moved off, with why, followed by the one that failed last.
+
 - **Breaking, library.** `leviath_core::mime::hydrate::sends_natively` and
   `leviath_providers::mime::sends_natively` take the `MimeRegistry`, and
   answer `false` for a type it says is text. Pass the registry the request is
@@ -505,6 +515,17 @@ same list.
   per launch spec. Runs declaring the identical server still share one, and
   it stays up while any of them is live. Tool names stay
   `<server>__<tool>`.
+- A gateway's relayed upstream failure no longer ends the stage. OpenRouter
+  relaying Meta's `model_not_found` for a model it lists, during a short
+  outage, was read as a model that does not exist, so fan-out workers on a
+  bare `muse-spark-1.3` died at random. A relayed 404, 408 or 5xx, and a 404
+  for a model the provider's own listing names, now count as
+  `model-unavailable`: retried on the same provider with backoff, then moved
+  to the next route. They are not counted against the provider's circuit
+  breaker.
+- A bare model name that a provider answers with a real 404 moves to the
+  next provider in `provider_order` serving that model, in the same turn,
+  with a WARN naming both. A pinned `provider/model` keeps its answer.
 - A bare model name goes to a provider that lists it. Google claimed any id
   with `-image` or `-tts` in it, so a bare `muse-image-1.0` ran on Google
   first, which does not serve it, when Google came before Meta in

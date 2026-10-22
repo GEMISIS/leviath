@@ -733,6 +733,14 @@ pub(crate) fn openai_error_envelope(err: &serde_json::Value) -> ProviderError {
     // still catches a credits message the gateway reported as a 200.
     match crate::provider::UnavailableReason::classify(code, message) {
         Some(reason) => ProviderError::Unavailable { reason, detail },
+        // A gateway relaying its upstream's failure mid-stream says so the
+        // same way it does on a status line, and is read the same way.
+        None if matches!(code, 404 | 408 | 500..=599)
+            && crate::failure::relayed_upstream_value(err).is_some() =>
+        {
+            let kind = crate::FailureKind::ModelUnavailable;
+            ProviderError::ApiError(format!("[{}] {detail} - {}", kind.label(), kind.remedy()))
+        }
         None => ProviderError::ApiError(detail),
     }
 }
@@ -1890,6 +1898,40 @@ mod tests {
         assert_eq!(
             err.unavailable_reason(),
             Some(crate::provider::UnavailableReason::CreditsExhausted)
+        );
+    }
+
+    /// A gateway relaying its upstream's failure inside the body (a stream's
+    /// error chunk) reads as the upstream's outage, as the status line does;
+    /// the same code with no upstream named stays an ordinary error.
+    #[test]
+    fn a_relayed_upstream_envelope_is_an_upstream_outage() {
+        let body = serde_json::json!({
+            "error": {
+                "code": 404,
+                "message": "Provider returned error",
+                "metadata": { "provider_name": "Meta", "raw": "model_not_found" }
+            }
+        });
+        let err = parse_openai_response(&body).unwrap_err();
+        assert_eq!(
+            err.failure_kind(),
+            Some(crate::FailureKind::ModelUnavailable)
+        );
+        assert!(err.to_string().contains("Provider returned error"), "{err}");
+        let own = serde_json::json!({ "error": { "code": 404, "message": "no such model" } });
+        assert_eq!(
+            parse_openai_response(&own).unwrap_err().failure_kind(),
+            None
+        );
+        let relayed_400 = serde_json::json!({
+            "error": { "code": 400, "message": "bad", "metadata": { "provider_name": "Meta" } }
+        });
+        assert_eq!(
+            parse_openai_response(&relayed_400)
+                .unwrap_err()
+                .failure_kind(),
+            None
         );
     }
 

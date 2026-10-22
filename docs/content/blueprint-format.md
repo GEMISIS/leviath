@@ -331,7 +331,10 @@ Less common keys: `required_tools`, `connectors`, `requires_children`, `accepts_
 them under `StageDef`.
 
 `model` lists models in the order they are tried. A model with no provider runs on the first
-provider in your `provider_order` that serves it:
+provider in your `provider_order` that serves it. If that provider answers that it has no such
+model, the call moves to the next provider serving it, in the same turn. A `provider/model` pair
+stays on that provider. [What moves a call](/docs/providers#per-stage-model-selection-with-fallback)
+has the rest:
 
 ```toml
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }, { model = "gpt-5.5" }] }

@@ -37,6 +37,13 @@ pub enum UnavailableReason {
     /// consequence is identical: the next request will fail the same way, so
     /// the run should move to a different provider rather than die.
     Unreachable,
+    /// The model is out of reach on this route for now
+    /// ([`FailureKind::ModelUnavailable`]): a gateway relayed its upstream's
+    /// failure, or the provider answered 404 for a model its own listing
+    /// names. The provider itself is fine: the call is retried first, then
+    /// moved to the next route, and the provider is not taken out of service
+    /// for it (see [`Self::is_provider_wide`]).
+    ModelUnavailable,
 }
 
 impl UnavailableReason {
@@ -47,7 +54,18 @@ impl UnavailableReason {
             UnavailableReason::AuthFailed => "auth-failed",
             UnavailableReason::Forbidden => "forbidden",
             UnavailableReason::Unreachable => "unreachable",
+            UnavailableReason::ModelUnavailable => "model-unavailable",
         }
+    }
+
+    /// Whether this says something about the whole provider, rather than
+    /// about one model on it.
+    ///
+    /// The circuit breaker counts only these. One model's outage takes out
+    /// that model's route; counting it against the provider would stop every
+    /// run on every other model it serves.
+    pub fn is_provider_wide(self) -> bool {
+        !matches!(self, UnavailableReason::ModelUnavailable)
     }
 
     /// What the operator should actually do about it.
@@ -68,6 +86,10 @@ impl UnavailableReason {
             UnavailableReason::Unreachable => {
                 "the provider could not be reached: check the network and the \
                  base URL, and whether a local server (ollama) is running"
+            }
+            UnavailableReason::ModelUnavailable => {
+                "the provider could not serve this model just now: usually a short \
+                 outage; list another provider or model to move to"
             }
         }
     }
@@ -315,9 +337,14 @@ impl ProviderError {
             // server-side (5xx) signals - including Anthropic's 529
             // "overloaded". 4xx client errors carry none of these and stay
             // permanent.
+            // A model out of reach on its route for now (a gateway relaying
+            // its upstream's failure, or a 404 for a listed model) is an
+            // outage whatever status it carried, so it is retried like a 5xx.
             ProviderError::ApiError(msg) => {
                 let m = msg.to_ascii_lowercase();
-                mentions_any(&m, &CAPACITY_SIGNALS) || mentions_any(&m, &SERVER_ERROR_SIGNALS)
+                mentions_any(&m, &CAPACITY_SIGNALS)
+                    || mentions_any(&m, &SERVER_ERROR_SIGNALS)
+                    || self.failure_kind() == Some(FailureKind::ModelUnavailable)
             }
             // A malformed response, an over-limit request, an unusable
             // provider, or an unknown error won't be fixed by retrying.
@@ -355,6 +382,16 @@ impl ProviderError {
             // counted as an ordinary error - so the run died at iteration 0
             // with a usable OpenRouter fallback sitting untouched behind it.
             ProviderError::RequestFailed(_) => Some(UnavailableReason::Unreachable),
+            // The model is out of reach on this route for now. By the time
+            // the runtime asks, the retry policy has spent its attempts on it,
+            // so the next one belongs on another route. The shape it is read
+            // from: OpenRouter relaying Meta's `model_not_found` for a model
+            // it lists, during a minute-long outage of its only endpoint.
+            ProviderError::ApiError(_)
+                if self.failure_kind() == Some(FailureKind::ModelUnavailable) =>
+            {
+                Some(UnavailableReason::ModelUnavailable)
+            }
             _ => None,
         }
     }
@@ -1539,18 +1576,7 @@ mod tests {
     /// label to logs and the API, the remedy to whoever has to fix it.
     #[test]
     fn every_kind_is_labelled_and_has_a_remedy() {
-        for kind in [
-            FailureKind::DnsFailure,
-            FailureKind::ConnectionRefused,
-            FailureKind::TlsFailure,
-            FailureKind::Timeout,
-            FailureKind::ConnectionDropped,
-            FailureKind::Transport,
-            FailureKind::BadRequest,
-            FailureKind::NotFound,
-            FailureKind::ServerError,
-            FailureKind::MalformedResponse,
-        ] {
+        for kind in FailureKind::ALL {
             // Read out first: an argument evaluated only on failure is its own
             // uncovered region on an assertion that has to pass.
             let label = kind.label();
@@ -1782,6 +1808,7 @@ mod tests {
             UnavailableReason::AuthFailed,
             UnavailableReason::Forbidden,
             UnavailableReason::Unreachable,
+            UnavailableReason::ModelUnavailable,
         ] {
             assert!(!reason.label().is_empty());
             assert!(!reason.remedy().is_empty());
@@ -1789,6 +1816,11 @@ mod tests {
             // stay a single lowercase token.
             assert_eq!(reason.label(), reason.label().to_ascii_lowercase());
             assert!(!reason.label().contains(' '));
+            // Only one model's outage leaves the provider in service.
+            assert_eq!(
+                reason.is_provider_wide(),
+                reason != UnavailableReason::ModelUnavailable
+            );
         }
     }
 

@@ -131,9 +131,36 @@ models = [
 ]
 ```
 
-"Stops being usable" is narrow. The account is out of credits, the key was rejected or is not
-allowed to use that model, or the provider could not be reached at all after every retry. An
-ordinary bad request is not that, and never spends a fallback.
+"Stops being usable" is narrow. What a failed call does depends on what it was:
+
+| The failure | Retried on the same provider | Then |
+|---|---|---|
+| Out of credits, a rejected key, a key not allowed that model | No | The next entry in the list |
+| Could not be reached (refused, DNS, TLS, timed out) | Yes, with backoff | The next entry in the list |
+| A 5xx, a 429 or "overloaded" | Yes, with backoff | The next entry in the list |
+| `model-unavailable`: the model is listed but could not be served | Yes, with backoff | The next entry in the list |
+| `not-found`: a real 404 for the model | No | A bare model name only: the next provider serving that model |
+| A bad request, a refused prompt, a request over the window | No | The stage ends (or takes its `error` edge) |
+
+A pinned `provider/model` never moves to another provider over a `not-found`: the author named
+that route. It still moves down its own list over the other rows, as above.
+
+A 404 is not always a missing model. Leviath counts it as `model-unavailable`, an outage, on
+either of two signals:
+
+- **The body is a gateway relaying its upstream.** OpenRouter passes an upstream's error on as
+  `"message": "Provider returned error"` with `metadata.provider_name` and `metadata.raw`, where
+  `raw` is the upstream's own body. A relayed 404, 408 or 5xx is that upstream's trouble at the
+  moment. OpenRouter's own refusal of a model id ("No endpoints found for ...", "is not a valid
+  model ID") carries no such pair and stays a `not-found`.
+- **The provider's own model list names the model.** A provider that lists a model and then says
+  it has no such model is far more likely down than wrong. Only the list Leviath already holds is
+  asked, so nothing is fetched on the way. With no list naming the model, the body decides.
+
+Retries follow the schedules under [`inference_retry_attempts`](/docs/configuration#limits).
+Each retry and each failover is a WARN in the daemon log naming the provider. When every route has
+failed, the stage's error names each one it tried. A `model-unavailable` failure is not counted
+against the provider's circuit breaker below, since only that one model is out of reach.
 
 ## A host-wide fallback chain
 

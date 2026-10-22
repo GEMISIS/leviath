@@ -327,6 +327,82 @@ async fn a_failed_trip_waits_in_the_world_and_the_next_one_answers() {
     );
 }
 
+/// Answers 404 for its model once, then answers; lists model `m` only when
+/// `lists` says so.
+struct Missing {
+    lists: bool,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Provider for Missing {
+    async fn infer(&self, _r: &InferenceRequest) -> leviath_providers::Result<InferenceResponse> {
+        match self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => Err(ProviderError::ApiError(
+                "[not-found] HTTP 404 Not Found: model_not_found".into(),
+            )),
+            _ => Ok(response("answered")),
+        }
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        100_000
+    }
+    fn name(&self) -> &str {
+        "missing"
+    }
+    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities::default()
+    }
+    fn lists_model(&self, model_key: &str) -> Option<String> {
+        (self.lists && model_key == "m").then(|| model_key.to_string())
+    }
+}
+
+/// A 404 for a model the provider's own listing names is an outage: retried
+/// on the same provider. One for a model it does not list ends the call at
+/// once, for the stage lane to move or end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_not_found_is_retried_only_for_a_listed_model() {
+    let mut lane = lane_world(crate::components::AgentStatus::Active);
+    let listed = Arc::new(Missing {
+        lists: true,
+        calls: Default::default(),
+    });
+    assert_eq!(listed.count_tokens("t", "m").await, 1);
+    assert_eq!(listed.max_context_tokens("m"), 100_000);
+    assert_eq!(listed.name(), "missing");
+    let _ = listed.capabilities("m");
+    lane.start(listed.clone(), quick(3), CallLane::Stage);
+    let (outcome, next) = lane.next(CallLane::Stage).await;
+    let err = outcome.result.expect_err("the 404");
+    assert_eq!(
+        err.failure_kind(),
+        Some(leviath_providers::FailureKind::ModelUnavailable)
+    );
+    assert!(matches!(next, Next::Waiting(_)), "an outage is retried");
+    lane.fire().await;
+    let (outcome, next) = lane.next(CallLane::Stage).await;
+    assert_eq!(next, Next::Done);
+    assert_eq!(outcome.result.expect("answered").content, "answered");
+
+    let mut lane = lane_world(crate::components::AgentStatus::Active);
+    let unlisted = Arc::new(Missing {
+        lists: false,
+        calls: Default::default(),
+    });
+    lane.start(unlisted.clone(), quick(3), CallLane::Stage);
+    let (outcome, next) = lane.next(CallLane::Stage).await;
+    assert_eq!(next, Next::Done, "a model it does not have is not retried");
+    assert_eq!(
+        outcome.result.expect_err("the 404").failure_kind(),
+        Some(leviath_providers::FailureKind::NotFound)
+    );
+    assert_eq!(unlisted.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 /// The routing lane retries the same way, and reports on its own channel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_routing_call_is_retried_on_its_own_lane() {
@@ -461,6 +537,43 @@ async fn a_due_time_fires_once_and_says_what_for() {
     let due = clock.wait(Duration::from_secs(3600));
     assert_eq!(due, clock.deadline(), "a wait never outlasts the call");
     assert_eq!(clock.take_due(due), Some(Due::Expired));
+}
+
+/// A backoff is spread below its schedule, never above it, so no ceiling is
+/// passed; a wait the provider asked for is kept to the second.
+#[tokio::test]
+async fn a_backoff_is_jittered_below_its_schedule_and_a_retry_after_is_kept() {
+    let second = Duration::from_secs(1);
+    assert_eq!(jittered(second, 0.0), second);
+    assert_eq!(jittered(second, 1.0), second.mul_f64(1.0 - BACKOFF_JITTER));
+    assert_eq!(jittered(second, 7.0), jittered(second, 1.0), "clamped");
+
+    let policy = RetryPolicy {
+        base_delay: second,
+        reached_base_delay: second,
+        capacity_max_delay: Duration::from_secs(60),
+        ..quick(5)
+    };
+    let mut clock = RetryClock::start(&policy);
+    let blip = clock
+        .after_failure(
+            &policy,
+            &ProviderError::ApiError("[server-error] HTTP 502 Bad Gateway".into()),
+        )
+        .expect("retried");
+    assert!(
+        blip <= second && blip >= second.mul_f64(1.0 - BACKOFF_JITTER),
+        "{blip:?}"
+    );
+    let hinted = clock
+        .after_failure(
+            &policy,
+            &ProviderError::RateLimitExceeded {
+                retry_after_secs: Some(7),
+            },
+        )
+        .expect("retried");
+    assert_eq!(hinted, Duration::from_secs(7));
 }
 
 /// Past the deadline a failure is never retried, however much budget is left.

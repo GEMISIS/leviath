@@ -2995,6 +2995,7 @@ dependencies = [
  "postcard",
  "proptest",
  "rand 0.10.3",
+ "reqwest",
  "schemars",
  "serde",
  "serde_json",

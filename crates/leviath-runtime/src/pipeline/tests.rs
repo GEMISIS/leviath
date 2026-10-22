@@ -2218,6 +2218,271 @@ fn a_failover_on_an_unclassified_failure_journals_an_empty_kind() {
     assert_eq!(records[0].kind, "");
 }
 
+// ── moving a failed call to the next route ───────────────────
+
+/// OpenRouter's 404 from the incident's daemon log: Meta's `model_not_found`
+/// relayed for a model OpenRouter lists, during an outage of its endpoint.
+const RELAYED_404: &str = r#"{"error":{"message":"Provider returned error","code":404,"metadata":{"raw":"{\"error\":{\"code\":\"model_not_found\",\"message\":\"The model does not exist or you do not have access to it.\"}}","provider_name":"Meta","is_byok":false}}}"#;
+
+/// A provider's 404 for `body`, as the HTTP layer builds it.
+fn http_404(body: &str) -> leviath_providers::ProviderError {
+    leviath_providers::ProviderError::from_http(reqwest::StatusCode::NOT_FOUND, body, None)
+}
+
+/// A stage on `openrouter/meta/muse-1` whose list goes on to another model
+/// and then to the same model at Meta.
+fn stage_on_the_gateway() -> StageInference {
+    StageInference {
+        provider_name: "openrouter".to_string(),
+        model: "meta/muse-1".to_string(),
+        fallbacks: vec![
+            crate::spec::names::ModelRef::parse("openai/gpt-x").unwrap(),
+            crate::spec::names::ModelRef::parse("meta/muse-1").unwrap(),
+        ],
+        ..StageInference::default()
+    }
+}
+
+/// The spec of a one-stage run whose stage `s` lists `models`, each a bare
+/// name or a `provider/model`.
+fn spec_listing(models: &[&str]) -> RunSpecC {
+    let stage = crate::spec::graph::StageDef {
+        model: crate::spec::graph::ModelChoice {
+            models: models
+                .iter()
+                .map(|m| crate::spec::names::ModelRef::parse(m).unwrap())
+                .collect(),
+            ..Default::default()
+        },
+        ..tg::stage("s")
+    };
+    RunSpecC(std::sync::Arc::new(crate::spec::run_spec::RunSpec {
+        requested_model: None,
+        ..tg::spec_named("bp", tg::graph(vec![stage], tg::layout(vec![], 0)))
+    }))
+}
+
+/// Send `err` as the outcome of `e`'s call and collect it.
+fn fail_call(
+    world: &mut World,
+    tx: &mpsc::UnboundedSender<InferenceOutcome>,
+    e: Entity,
+    err: leviath_providers::ProviderError,
+) {
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        attempt_id: String::new(),
+        result: Err(err),
+        pricing: None,
+        attempt: None,
+    })
+    .unwrap();
+    run_collect(world);
+}
+
+/// The failover records `journal` received.
+fn failovers(
+    journal: &mut mpsc::UnboundedReceiver<crate::pipeline::journal::Journaled>,
+) -> Vec<crate::runfile::record::FailoverRecord> {
+    let mut records = Vec::new();
+    while let Ok(msg) = journal.try_recv() {
+        if let crate::runfile::record::RunRecord::InferenceFailover(failover) = *msg.record {
+            records.push(failover);
+        }
+    }
+    records
+}
+
+/// A gateway's relayed upstream `model_not_found` is the upstream's outage:
+/// once its retries are spent the call moves to the next route in the list,
+/// even for a pinned stage, as an out-of-credits provider does.
+#[test]
+fn a_gateway_relayed_not_found_fails_over_to_the_next_route() {
+    let (mut world, tx) = world_with_results();
+    let (lane, mut journal) = mpsc::unbounded_channel();
+    world.insert_resource(crate::pipeline::JournalSender::new(lane, None));
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            stage_on_the_gateway(),
+            spec_listing(&["openrouter/meta/muse-1", "openai/gpt-x"]),
+        ))
+        .id();
+
+    fail_call(&mut world, &tx, e, http_404(RELAYED_404));
+
+    let si = world.get::<StageInference>(e).unwrap();
+    assert_eq!(
+        (si.provider_name.as_str(), si.model.as_str()),
+        ("openai", "gpt-x")
+    );
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Active
+    );
+    let records = failovers(&mut journal);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].reason, "model-unavailable");
+    assert_eq!(records[0].kind, "model-unavailable");
+}
+
+/// The gateway is fine; one model's upstream is not. Taking the gateway out
+/// of service would stop every run on every other model it serves.
+#[test]
+fn an_upstream_outage_is_not_counted_against_the_gateway() {
+    let (mut world, tx) = world_with_results();
+    let policy = CircuitPolicy {
+        failures_before_open: 1,
+        cooldown_secs: 300,
+    };
+    world.insert_resource(ProviderCircuits::default());
+    world.insert_resource(policy);
+    let e = world
+        .spawn((agent_state(), AwaitingInference, stage_on_the_gateway()))
+        .id();
+
+    fail_call(&mut world, &tx, e, http_404(RELAYED_404));
+
+    let circuits = world.resource::<ProviderCircuits>();
+    assert!(circuits.last_failure("openrouter").is_none());
+    assert!(!circuits.is_open("openrouter", chrono::Utc::now().timestamp(), &policy));
+}
+
+/// A bare model name leaves the route to the machine, so a provider that
+/// does not have the model is the wrong route: the call moves to the next
+/// provider in the list serving the same model, past a different model.
+#[test]
+fn a_bare_names_not_found_falls_through_to_the_next_provider_serving_it() {
+    let (mut world, tx) = world_with_results();
+    let (lane, mut journal) = mpsc::unbounded_channel();
+    world.insert_resource(crate::pipeline::JournalSender::new(lane, None));
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            stage_on_the_gateway(),
+            spec_listing(&["muse-1", "gpt-x"]),
+            StageIoBuffer::default(),
+        ))
+        .id();
+    let own_404 = r#"{"error":{"message":"No endpoints found for meta/muse-1.","code":404}}"#;
+
+    fail_call(&mut world, &tx, e, http_404(own_404));
+
+    let si = world.get::<StageInference>(e).unwrap();
+    assert_eq!(
+        (si.provider_name.as_str(), si.model.as_str()),
+        ("meta", "muse-1")
+    );
+    assert_eq!(
+        si.fallbacks,
+        vec![crate::spec::names::ModelRef::parse("openai/gpt-x").unwrap()],
+        "the other model stays for a later failover"
+    );
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    let records = failovers(&mut journal);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].reason, "model-not-found");
+    assert_eq!(records[0].kind, "not-found");
+    let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
+    let line = logs
+        .iter()
+        .map(|(_, l)| l.as_str())
+        .find(|l| l.starts_with("[failover]"))
+        .expect("the move is in the stage log");
+    assert!(line.contains("openrouter/meta/muse-1"), "{line}");
+    assert!(line.contains("meta/muse-1"), "{line}");
+
+    // Meta does not have it either: nowhere left serves the model, so the
+    // stage ends, and the error names both providers.
+    world
+        .entity_mut(e)
+        .remove::<ReadyToInfer>()
+        .insert(AwaitingInference);
+    fail_call(&mut world, &tx, e, http_404(own_404));
+    let AgentStatus::Error { message } = &world.get::<AgentState>(e).unwrap().status else {
+        panic!("the stage ends once no route serves the model");
+    };
+    assert!(
+        message.contains("openrouter/meta/muse-1 (model-not-found)"),
+        "{message}"
+    );
+    assert!(message.contains("meta/muse-1 (not-found)"), "{message}");
+    assert!(world.get::<crate::pipeline::RoutesTried>(e).is_none());
+}
+
+/// A pinned `provider/model` is the author naming the route: a provider
+/// saying it does not have the model ends the stage, with no reroute.
+#[test]
+fn a_pinned_routes_not_found_still_ends_the_stage() {
+    let (mut world, tx) = world_with_results();
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            stage_on_the_gateway(),
+            spec_listing(&["openrouter/meta/muse-1", "meta/muse-1"]),
+        ))
+        .id();
+
+    fail_call(&mut world, &tx, e, http_404("no such model"));
+
+    let si = world.get::<StageInference>(e).unwrap();
+    assert_eq!(si.provider_name, "openrouter");
+    assert!(matches!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Error { .. }
+    ));
+    assert!(world.get::<ResolveTransition>(e).is_some());
+}
+
+/// A 5xx or a 429 that outlived the retry policy moves to the next route
+/// rather than ending the stage; a bad request moves nowhere.
+#[test]
+fn availability_trouble_past_its_retries_fails_over_and_a_bad_request_does_not() {
+    for (err, moves) in [
+        (
+            leviath_providers::ProviderError::from_http(
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "busy",
+                None,
+            ),
+            true,
+        ),
+        (
+            leviath_providers::ProviderError::RateLimitExceeded {
+                retry_after_secs: None,
+            },
+            true,
+        ),
+        (
+            leviath_providers::ProviderError::from_http(
+                reqwest::StatusCode::BAD_REQUEST,
+                "unknown parameter",
+                None,
+            ),
+            false,
+        ),
+    ] {
+        let (mut world, tx) = world_with_results();
+        let e = world
+            .spawn((
+                agent_state(),
+                AwaitingInference,
+                stage_on_the_gateway(),
+                spec_listing(&["muse-1"]),
+            ))
+            .id();
+        let said = err.to_string();
+        fail_call(&mut world, &tx, e, err);
+        let si = world.get::<StageInference>(e).unwrap();
+        assert_eq!(si.provider_name != "openrouter", moves, "{said}");
+    }
+}
+
 #[test]
 fn an_exhausted_fallback_list_pauses_on_credits_instead_of_dying() {
     // Last provider standing and the account is out of credits: that is an

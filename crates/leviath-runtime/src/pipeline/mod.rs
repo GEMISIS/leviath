@@ -160,6 +160,8 @@ mod part_routing;
 pub(crate) use media_nudge::{
     MAX_NO_IMAGE_NUDGES, media_part_count, no_media_nudge, stage_expected_media,
 };
+mod reroute;
+pub(crate) use reroute::RoutesTried;
 mod response;
 pub use response::StageLedger;
 #[cfg(test)]

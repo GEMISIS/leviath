@@ -62,6 +62,9 @@ temp-env = { workspace = true, features = ["async_closure"] }
 tempfile = { workspace = true }
 # `apply(diff(a, b), a) == b` over generated run states.
 proptest = { workspace = true }
+# A provider's HTTP failure built the way the HTTP layer builds it, status and
+# body, so a test classifies it exactly as a live call would.
+reqwest = { workspace = true }
 
 [lints]
 workspace = true

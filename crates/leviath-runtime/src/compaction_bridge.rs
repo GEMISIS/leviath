@@ -134,7 +134,14 @@ async fn summarize(
                 batch.summaries.push((region.clone(), response.content));
             }
             Ok(Err(e)) => {
-                batch.result = Err(e);
+                // A 404 for a model the route's provider lists is an outage,
+                // and moves the batch on as an unusable route does.
+                let listed = crate::inference_bridge::listed_outage(
+                    route.provider.as_ref(),
+                    &route.model,
+                    &e,
+                );
+                batch.result = Err(listed.unwrap_or(e));
                 break;
             }
             Err(_) => {
@@ -264,6 +271,9 @@ mod tests {
                     reason: leviath_providers::UnavailableReason::CreditsExhausted,
                     detail: m,
                 }),
+                Some(Err(m)) if m == "not-found" => Err(ProviderError::ApiError(
+                    "[not-found] HTTP 404 Not Found: no such model".to_string(),
+                )),
                 Some(Err(m)) => Err(ProviderError::Other(m)),
                 None => Err(ProviderError::Other("exhausted".to_string())),
             }
@@ -276,6 +286,10 @@ mod tests {
         }
         fn name(&self) -> &str {
             "script"
+        }
+        /// Lists only the model a `listed` route names.
+        fn lists_model(&self, model_key: &str) -> Option<String> {
+            (model_key == "listed-model").then(|| model_key.to_string())
         }
         fn capabilities(&self, _m: &str) -> ModelCapabilities {
             ModelCapabilities::default()
@@ -411,6 +425,31 @@ mod tests {
         );
         assert_eq!(outcome.usage.len(), 2);
         assert_eq!(outcome.result.unwrap().len(), 2);
+    }
+
+    /// A 404 for a model the route's provider lists is an outage and moves
+    /// the batch on; a 404 for one it does not list is that route's answer.
+    #[tokio::test]
+    async fn a_not_found_moves_on_only_for_a_listed_model() {
+        let outcome = outcome_of(job_over(
+            route("listed", script(vec![Err("not-found")])),
+            vec![route("b", script(vec![Ok("s1")]))],
+            InferencePools::new(InferencePoolConfig::new()),
+            vec!["x"],
+        ))
+        .await;
+        assert_eq!(outcome.provider_name, "b");
+        assert_eq!(outcome.result.unwrap().len(), 1);
+
+        let outcome = outcome_of(job_over(
+            route("a", script(vec![Err("not-found")])),
+            vec![route("b", script(vec![Ok("never")]))],
+            InferencePools::new(InferencePoolConfig::new()),
+            vec!["x"],
+        ))
+        .await;
+        assert_eq!(outcome.provider_name, "a");
+        assert!(outcome.result.is_err());
     }
 
     /// A fallback whose pool is full is passed over; with none left, the

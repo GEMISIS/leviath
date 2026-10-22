@@ -215,7 +215,16 @@ impl TitleCall {
             return Next::Waiting(self.clock.wait(Duration::ZERO));
         }
         match self.clock.after_failure(&self.policy, error) {
-            Some(delay) => Next::Waiting(self.clock.wait(delay)),
+            Some(delay) => {
+                tracing::warn!(
+                    provider = %self.provider_name,
+                    model = %self.model,
+                    delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                    error = %error,
+                    "title call failed; retrying the same provider after a backoff"
+                );
+                Next::Waiting(self.clock.wait(delay))
+            }
             None => Next::Done,
         }
     }

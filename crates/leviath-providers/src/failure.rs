@@ -53,11 +53,37 @@ pub enum FailureKind {
     /// The provider answered 5xx. Their fault, not ours, and the same request
     /// may well work in a minute.
     ServerError,
+    /// The model exists on this route and could not be served just now: an
+    /// outage reported as a failure, often as a 404. Two shapes reach it:
+    ///
+    /// - a gateway relaying the upstream serving the model (see
+    ///   [`relayed_upstream`]): a 404, a 408 or a 5xx whose body names that
+    ///   upstream;
+    /// - a 404 for a model the provider's own listing names (see
+    ///   [`ProviderError::listed_model_unavailable`]).
+    ///
+    /// Retried on the same provider with backoff, then failed over.
+    ModelUnavailable,
     /// The provider answered something this build could not parse.
     MalformedResponse,
 }
 
 impl FailureKind {
+    /// Every kind, for the places that read one back from its label.
+    pub const ALL: [FailureKind; 11] = [
+        FailureKind::DnsFailure,
+        FailureKind::ConnectionRefused,
+        FailureKind::TlsFailure,
+        FailureKind::Timeout,
+        FailureKind::ConnectionDropped,
+        FailureKind::Transport,
+        FailureKind::BadRequest,
+        FailureKind::NotFound,
+        FailureKind::ServerError,
+        FailureKind::ModelUnavailable,
+        FailureKind::MalformedResponse,
+    ];
+
     /// A short, stable label for logs, metrics attributes and the API.
     pub fn label(self) -> &'static str {
         match self {
@@ -70,6 +96,7 @@ impl FailureKind {
             FailureKind::BadRequest => "bad-request",
             FailureKind::NotFound => "not-found",
             FailureKind::ServerError => "server-error",
+            FailureKind::ModelUnavailable => "model-unavailable",
             FailureKind::MalformedResponse => "malformed-response",
         }
     }
@@ -107,6 +134,11 @@ impl FailureKind {
             }
             FailureKind::ServerError => {
                 "the provider's own endpoint failed; this may pass on a retry"
+            }
+            FailureKind::ModelUnavailable => {
+                "the provider lists this model but could not serve it (or relayed its \
+                 upstream's failure); usually a short outage, so the call is retried and \
+                 then moved to the next route"
             }
             FailureKind::MalformedResponse => {
                 "the provider answered with something this build could not parse"
@@ -162,6 +194,7 @@ impl FailureKind {
             FailureKind::BadRequest
             | FailureKind::NotFound
             | FailureKind::ServerError
+            | FailureKind::ModelUnavailable
             | FailureKind::MalformedResponse => true,
             // `Transport` is the unrecognised case, and it is counted as not
             // reached on purpose: the patient threshold is the one that lets a
@@ -186,6 +219,54 @@ impl FailureKind {
             _ => FailureKind::BadRequest,
         }
     }
+
+    /// Place an HTTP status together with the body it came with.
+    ///
+    /// [`Self::from_status`], except that a gateway relaying an upstream
+    /// provider's 404, 408 or 5xx is [`FailureKind::ModelUnavailable`]: the
+    /// status is the upstream's, and a 404 from the upstream behind a gateway
+    /// that listed the model and routed the call to it is an outage reported
+    /// as "not found" rather than a model that does not exist. A gateway's own
+    /// 404 (no upstream named) stays [`FailureKind::NotFound`], and a relayed
+    /// 400 stays a bad request: a request the upstream refused is refused
+    /// everywhere.
+    pub fn from_response(status: u16, body: &str) -> Self {
+        let relayed = matches!(status, 404 | 408 | 500..=599) && relayed_upstream(body).is_some();
+        match relayed {
+            true => FailureKind::ModelUnavailable,
+            false => Self::from_status(status),
+        }
+    }
+}
+
+/// The upstream provider a gateway's error body says it relayed the failure
+/// from, when it says so.
+///
+/// OpenRouter documents an upstream's error passed on as
+/// `ProviderErrorMetadata`, both keys present:
+/// `{"error":{"code":404,"message":"Provider returned error","metadata":
+/// {"provider_name":"Meta","raw":"<the upstream's own body>"}}}`. The gateway
+/// reached the provider serving the model and is passing on what it said. Its
+/// own refusals carry no such pair: an unknown model id ("is not a valid
+/// model ID", "No endpoints found for ..."), or a refusal whose
+/// `provider_name` is `null`. Takes the whole body or the `error` object
+/// alone, since the streaming path only has the latter.
+pub fn relayed_upstream(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    relayed_upstream_value(&value)
+}
+
+/// [`relayed_upstream`], over a body already parsed.
+pub fn relayed_upstream_value(value: &serde_json::Value) -> Option<String> {
+    let error = value.get("error").unwrap_or(value);
+    let metadata = error.get("metadata")?;
+    metadata.get("raw")?;
+    metadata
+        .get("provider_name")?
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
 }
 
 /// The `std::io::ErrorKind` underneath a `reqwest` failure, when there is one.
@@ -323,7 +404,7 @@ impl ProviderError {
                 detail: format!("HTTP {status}: {named}"),
             },
             None => {
-                let kind = FailureKind::from_status(status.as_u16());
+                let kind = FailureKind::from_response(status.as_u16(), named);
                 ProviderError::ApiError(format!(
                     "[{}] HTTP {}: {} - {}",
                     kind.label(),
@@ -397,20 +478,35 @@ impl ProviderError {
             _ => return None,
         };
         let label = message.strip_prefix('[')?.split_once(']')?.0;
-        [
-            FailureKind::DnsFailure,
-            FailureKind::ConnectionRefused,
-            FailureKind::TlsFailure,
-            FailureKind::Timeout,
-            FailureKind::ConnectionDropped,
-            FailureKind::Transport,
-            FailureKind::BadRequest,
-            FailureKind::NotFound,
-            FailureKind::ServerError,
-            FailureKind::MalformedResponse,
-        ]
-        .into_iter()
-        .find(|k| k.label() == label)
+        FailureKind::ALL.into_iter().find(|k| k.label() == label)
+    }
+
+    /// This 404, read as an outage, when the provider's own listing names the
+    /// model it was for. `None` for anything that is not a 404.
+    ///
+    /// The body cannot always tell an outage from a model that does not
+    /// exist: an upstream answering `model_not_found` for a model it serves
+    /// during a bad minute is the same sentence as a typo. The listing can.
+    /// A provider that lists the model and then says it has no such model is
+    /// far more likely down than wrong, so the call is retried and failed
+    /// over rather than ended. The caller asks the listing it already holds;
+    /// nothing is fetched to decide this.
+    pub fn listed_model_unavailable(&self) -> Option<ProviderError> {
+        let ProviderError::ApiError(message) = self else {
+            return None;
+        };
+        let prefix = format!("[{}] ", FailureKind::NotFound.label());
+        let rest = message.strip_prefix(&prefix)?;
+        let detail = rest
+            .strip_suffix(FailureKind::NotFound.remedy())
+            .and_then(|d| d.strip_suffix(" - "))
+            .unwrap_or(rest);
+        let kind = FailureKind::ModelUnavailable;
+        Some(ProviderError::ApiError(format!(
+            "[{}] {detail} (a 404 for a model this provider lists) - {}",
+            kind.label(),
+            kind.remedy()
+        )))
     }
 }
 
@@ -530,6 +626,7 @@ mod tests {
             FailureKind::BadRequest,
             FailureKind::NotFound,
             FailureKind::ServerError,
+            FailureKind::ModelUnavailable,
             FailureKind::MalformedResponse,
         ] {
             let label = kind.label();
@@ -546,6 +643,97 @@ mod tests {
                 !kind.provider_was_reached(),
                 "{label} never got to the provider"
             );
+        }
+    }
+
+    /// OpenRouter's 404 from the daemon log of the incident: the gateway lists
+    /// the model, routed the call to Meta, and relayed Meta's
+    /// `model_not_found` while that endpoint's uptime dipped.
+    const RELAYED_404: &str = r#"{"error":{"message":"Provider returned error","code":404,"metadata":{"raw":"{\"error\":{\"code\":\"model_not_found\",\"message\":\"The model `muse-spark-1.3` does not exist or you do not have access to it.\"}}","provider_name":"Meta","is_byok":false}},"user_id":"user_x"}"#;
+
+    /// A relayed upstream failure is the upstream's outage: retried, then
+    /// moved off as unavailable, and never counted against the gateway.
+    #[test]
+    fn a_gateway_relayed_not_found_is_an_upstream_outage() {
+        assert_eq!(relayed_upstream(RELAYED_404).as_deref(), Some("Meta"));
+        let err = ProviderError::from_http(reqwest::StatusCode::NOT_FOUND, RELAYED_404, None);
+        assert_eq!(err.failure_kind(), Some(FailureKind::ModelUnavailable));
+        assert!(err.is_transient(), "retried with backoff first");
+        let reason = err.unavailable_reason().expect("then failed over");
+        assert_eq!(reason, crate::provider::UnavailableReason::ModelUnavailable);
+        assert!(!reason.is_provider_wide(), "the gateway stays in service");
+        assert!(!err.retry_advice().capacity);
+        // A relayed 5xx or timeout reads the same way.
+        for status in [408, 502, 503] {
+            assert_eq!(
+                FailureKind::from_response(status, RELAYED_404),
+                FailureKind::ModelUnavailable
+            );
+        }
+    }
+
+    /// The gateway's own 404 names no upstream: that is a real not-found, and
+    /// a relayed 400 is still a request the upstream refused.
+    #[test]
+    fn a_gateway_own_refusal_is_not_an_upstream_outage() {
+        let own = r#"{"error":{"message":"No endpoints found for meta/nope.","code":404}}"#;
+        let err = ProviderError::from_http(reqwest::StatusCode::NOT_FOUND, own, None);
+        assert_eq!(err.failure_kind(), Some(FailureKind::NotFound));
+        assert!(!err.is_transient());
+        assert_eq!(err.unavailable_reason(), None);
+        assert_eq!(
+            FailureKind::from_response(400, RELAYED_404),
+            FailureKind::BadRequest
+        );
+        assert_eq!(
+            FailureKind::from_response(404, "not json"),
+            FailureKind::NotFound
+        );
+        let blank = r#"{"error":{"code":404,"metadata":{"provider_name":"  ","raw":"x"}}}"#;
+        assert_eq!(relayed_upstream(blank), None);
+        assert_eq!(
+            relayed_upstream(r#"{"error":{"code":404,"metadata":{}}}"#),
+            None
+        );
+        // OpenRouter's own refusal names no upstream: `provider_name` is null.
+        let own = r#"{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled.","code":400,"metadata":{"provider_name":null}}}"#;
+        assert_eq!(relayed_upstream(own), None);
+        // A provider named with nothing relayed is not the relay shape.
+        let no_raw = r#"{"error":{"code":404,"metadata":{"provider_name":"Meta"}}}"#;
+        assert_eq!(relayed_upstream(no_raw), None);
+        let no_name = r#"{"error":{"code":404,"metadata":{"raw":"x"}}}"#;
+        assert_eq!(relayed_upstream(no_name), None);
+    }
+
+    /// A 404 for a model the provider lists is read as an outage: the detail
+    /// is kept and the remedy is the outage's, not the typo's.
+    #[test]
+    fn a_not_found_for_a_listed_model_reads_as_an_outage() {
+        let own = r#"{"error":{"message":"No endpoints found for meta/muse-1.","code":404}}"#;
+        let err = ProviderError::from_http(reqwest::StatusCode::NOT_FOUND, own, None);
+        let outage = err.listed_model_unavailable().expect("a 404");
+        assert_eq!(outage.failure_kind(), Some(FailureKind::ModelUnavailable));
+        assert!(outage.is_transient());
+        assert_eq!(
+            outage.unavailable_reason(),
+            Some(crate::provider::UnavailableReason::ModelUnavailable)
+        );
+        let text = outage.to_string();
+        assert!(
+            text.contains("No endpoints found for meta/muse-1."),
+            "{text}"
+        );
+        assert!(!text.contains(FailureKind::NotFound.remedy()), "{text}");
+        // A message that lost its remedy keeps the rest whole.
+        let bare = ProviderError::ApiError("[not-found] HTTP 404: gone".into());
+        let bare = bare.listed_model_unavailable().unwrap().to_string();
+        assert!(bare.contains("HTTP 404: gone (a 404"), "{bare}");
+        // Nothing else is read as an outage.
+        for other in [
+            ProviderError::ApiError("[server-error] HTTP 503: busy".into()),
+            ProviderError::RequestFailed("[not-found] odd".into()),
+        ] {
+            assert!(other.listed_model_unavailable().is_none(), "{other}");
         }
     }
 

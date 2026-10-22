@@ -151,6 +151,8 @@ type InferenceQuery = (
     Option<&'static mut crate::telemetry::StageActivity>,
     Option<&'static crate::pipeline::PromptEstimate>,
     Option<&'static mut crate::pipeline::PromptCalibration>,
+    Option<&'static crate::insert::RunSpecC>,
+    Option<&'static super::RoutesTried>,
 );
 
 /// The provider circuit breaker, as the collect system reads and feeds it.
@@ -196,6 +198,8 @@ pub(crate) fn collect_inference(
             activity,
             estimate,
             mut calibration,
+            spec,
+            tried,
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -265,7 +269,13 @@ pub(crate) fn collect_inference(
         // counts against it and may take it out of service for everyone.
         if let Some(circuits) = circuits.as_deref_mut() {
             let failed = outcome.result.as_ref().err();
-            match failed.and_then(|e| e.unavailable_reason().map(|r| (e, r))) {
+            // Only what says something about the whole provider: an upstream
+            // outage behind a gateway takes one model's route, not the gateway.
+            match failed.and_then(|e| {
+                e.unavailable_reason()
+                    .filter(|r| r.is_provider_wide())
+                    .map(|r| (e, r))
+            }) {
                 Some((err, reason)) => {
                     // The kind travels with the reason: a provider that
                     // accepted the connection and then answered slowly is not
@@ -414,6 +424,9 @@ pub(crate) fn collect_inference(
                     .insert(result)
                     .remove::<AwaitingInference>()
                     .remove::<InFlightWork>()
+                    // Answered: the routes this call moved off are no longer
+                    // part of any failure.
+                    .remove::<super::RoutesTried>()
                     .insert(ProcessResponse);
             }
             Err(err) => {
@@ -456,21 +469,22 @@ pub(crate) fn collect_inference(
                     error = %err,
                     "provider call failed"
                 );
-                // Why the provider is unusable, the stage's inference to move,
-                // and where to: a failover needs all three, so they are bound
-                // together. The inference is only borrowed for an unusable
-                // provider, so no other failure marks it changed.
-                let failover = match err.unavailable_reason() {
-                    Some(reason) => inference
-                        .as_deref_mut()
-                        .filter(|si| !si.fallbacks.is_empty())
-                        .map(|si| {
-                            let next = si.fallbacks.remove(0);
-                            (reason, si, next)
-                        }),
-                    None => None,
-                };
-                if let Some((reason, si, next)) = failover {
+                // Why the call moves, the stage's inference to move, and where
+                // to: a failover needs all three, so they are bound together.
+                // The inference is only borrowed when there is somewhere to
+                // go, so no other failure marks it changed. Which failures move
+                // a call, and where, is `reroute`'s to say.
+                let open = spec.is_some_and(|s| {
+                    super::reroute::is_open_route(&s.0, idx, &called_provider, &called_model)
+                });
+                let failover = super::reroute::Reroute::of(&err).and_then(|why| {
+                    let si = inference.as_deref_mut()?;
+                    let at = why.next(&si.fallbacks, open, &called_provider, &called_model)?;
+                    let next = si.fallbacks.remove(at);
+                    Some((why, si, next))
+                });
+                if let Some((why, si, next)) = failover {
+                    let reason = why.label();
                     // Loud on purpose. Silently swapping providers is how a
                     // factory ends up running on a model nobody chose.
                     tracing::warn!(
@@ -478,20 +492,29 @@ pub(crate) fn collect_inference(
                         from_model = %called_model,
                         to_provider = %next.provider_or_empty(),
                         to_model = %next.model,
+                        reason,
                         error = %err,
-                        "provider unusable; failing over to the next configured model"
+                        "provider call failed for good; failing over to the next route"
                     );
                     if let Some(mut buffer) = buffer {
                         buffer.logs.push((
                             idx,
                             format!(
-                                "[failover] {called_provider}/{called_model} is unusable \
-                                 ({err}); retrying on {}/{}",
+                                "[failover] {called_provider}/{called_model} failed \
+                                 ({reason}: {err}); retrying on {}/{}",
                                 next.provider_or_empty(),
                                 next.model
                             ),
                         ));
                     }
+                    let mut tried = tried.cloned().unwrap_or_default();
+                    tried.left(
+                        &state.current_stage,
+                        &called_provider,
+                        &called_model,
+                        reason,
+                    );
+                    commands.entity(outcome.entity).insert(tried);
                     // Journaled from here rather than from the lane, because
                     // here is where the decision is made: the job reported a
                     // failure and knew nothing about a second candidate. Without
@@ -510,7 +533,7 @@ pub(crate) fn collect_inference(
                             from_model: called_model.clone(),
                             to_provider: next.provider_or_empty().to_string(),
                             to_model: next.model.to_string(),
-                            reason: reason.label().to_string(),
+                            reason: reason.to_string(),
                             kind: crate::inference_bridge::failure_label(&err),
                             at: now,
                         };
@@ -557,20 +580,31 @@ pub(crate) fn collect_inference(
                         .insert(ReadyToInfer);
                     continue;
                 }
+                // The error names every route the call was moved off on its
+                // way here, so a stage that ran out of routes says which.
+                let last = format!(
+                    "{called_provider}/{called_model} ({})",
+                    crate::inference_bridge::failure_label(&err)
+                );
+                let message = match tried {
+                    Some(tried) => tried.ending(&state.current_stage, &last, &err.to_string()),
+                    None => err.to_string(),
+                };
                 if let Some(mut buffer) = buffer {
-                    buffer.logs.push((idx, format!("[error] {err}")));
+                    buffer.logs.push((idx, format!("[error] {message}")));
                 }
                 // Record the error and route it to the stage's transition logic
                 // (which follows an `error`-conditioned edge if the stage has one,
                 // e.g. → error_recovery, or terminates the run otherwise).
                 state.status = AgentStatus::Error {
-                    message: err.to_string(),
+                    message: message.clone(),
                 };
                 commands
                     .entity(outcome.entity)
                     .remove::<AwaitingInference>()
                     .remove::<InFlightWork>()
-                    .insert(StageOutcome::Errored(err.to_string()))
+                    .remove::<super::RoutesTried>()
+                    .insert(StageOutcome::Errored(message))
                     .insert(ResolveTransition);
             }
         }
