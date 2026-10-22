@@ -250,8 +250,10 @@ pub struct FailoverRecord {
     pub to_provider: String,
     /// The model being asked of it.
     pub to_model: String,
-    /// Why the first provider was judged unusable
-    /// (`UnavailableReason::label`).
+    /// Why the call moved: the provider was unusable
+    /// (`UnavailableReason::label`), its availability trouble outlived the
+    /// retries (`retries-exhausted`), or it did not have the model a bare
+    /// name asked for (`model-not-found`).
     pub reason: String,
     /// A stable label for the failure itself (`FailureKind::label`), or empty
     /// when the error carried no classification.

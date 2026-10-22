@@ -296,6 +296,7 @@ same failure describe it the same way:
 | `bad-request` | the provider rejected the request itself |
 | `not-found` | 404, usually a `base_url` path or a model that is not there |
 | `server-error` | 5xx, their end, and may pass on a retry |
+| `model-unavailable` | the model is listed but could not be served just now; retried, then failed over |
 | `malformed-response` | an answer this build could not parse |
 
 A name this build does not know is ignored rather than refused. A script written against a later

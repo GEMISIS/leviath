@@ -519,6 +519,26 @@ fn millis(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// `error` read as an outage, when it is a 404 for a model `provider`'s own
+/// listing names; `None` otherwise.
+///
+/// The listing is the one the provider already holds (a live listing read
+/// earlier, its compiled catalogue, or the operator's config): nothing is
+/// fetched on the way to deciding. With no listing that names the model, the
+/// body's own reading stands: a gateway's relayed upstream failure is an
+/// outage, and any other 404 is a model the provider does not have.
+pub(crate) fn listed_outage(
+    provider: &dyn Provider,
+    model: &str,
+    error: &ProviderError,
+) -> Option<ProviderError> {
+    if error.failure_kind() != Some(leviath_providers::FailureKind::NotFound) {
+        return None;
+    }
+    provider.lists_model(crate::pipeline::model_key(model))?;
+    error.listed_model_unavailable()
+}
+
 /// A stable label for what a failed call was, or empty when the error carried no
 /// classification at all.
 ///

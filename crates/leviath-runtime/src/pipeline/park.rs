@@ -93,6 +93,12 @@ pub(crate) fn setup_park(
         // stall watchdog already parks a run whose every candidate is out of
         // service (see `fail_stalled_dispatch`). Left to the caller's error
         // path so this change adds no new parking reason.
-        UnavailableReason::AuthFailed | UnavailableReason::Forbidden => None,
+        //
+        // An upstream outage behind a gateway with nowhere left to move ends
+        // the stage the way a 5xx that outlived its retries does: the machine
+        // is fine, and only that one model's route is down.
+        UnavailableReason::AuthFailed
+        | UnavailableReason::Forbidden
+        | UnavailableReason::ModelUnavailable => None,
     }
 }

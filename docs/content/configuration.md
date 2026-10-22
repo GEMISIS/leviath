@@ -438,6 +438,14 @@ VPN reconnecting outlasts seven seconds every time. A name that does not resolve
 keeps the fast schedule, since that answer is instant and identical however long you wait. When the
 provider sends a `Retry-After`, that answer wins over all of them, capped at a minute.
 
+Every wait but a `Retry-After` is cut by up to a fifth at random, so fan-out workers that failed
+on the same blip do not all come back in the same instant. Each retry logs a WARN naming the
+provider, the attempt and the wait. A model the provider lists but could not serve
+(`model-unavailable`, such as a gateway relaying its upstream's 404) is retried on the reached
+schedule. When the retries are spent, the call moves to the next model in the stage's list rather
+than ending the stage. [When a call moves to another provider](/docs/providers#per-stage-model-selection-with-fallback)
+has the whole table.
+
 Raising `inference_retry_attempts` is therefore how a run rides out a longer outage: `6` gives a
 capacity failure about four minutes of waiting rather than about one and a half. Whatever you set,
 the retries of a single request sleep **at most five minutes in total**, and the request itself is

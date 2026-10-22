@@ -277,21 +277,9 @@ pub fn runtime_error(msg: impl Into<String>) -> Box<EvalAltResult> {
 /// later build must not fail on this build because it named a kind that does
 /// not exist here yet.
 fn named_failure_kind(name: &str) -> Option<crate::provider::FailureKind> {
-    use crate::provider::FailureKind;
-    [
-        FailureKind::DnsFailure,
-        FailureKind::ConnectionRefused,
-        FailureKind::TlsFailure,
-        FailureKind::Timeout,
-        FailureKind::ConnectionDropped,
-        FailureKind::Transport,
-        FailureKind::BadRequest,
-        FailureKind::NotFound,
-        FailureKind::ServerError,
-        FailureKind::MalformedResponse,
-    ]
-    .into_iter()
-    .find(|k| k.label() == name)
+    crate::provider::FailureKind::ALL
+        .into_iter()
+        .find(|k| k.label() == name)
 }
 
 pub fn map_rhai_err(err: Box<EvalAltResult>) -> ProviderError {
@@ -548,6 +536,7 @@ mod failure_kind_tests {
             FailureKind::BadRequest,
             FailureKind::NotFound,
             FailureKind::ServerError,
+            FailureKind::ModelUnavailable,
             FailureKind::MalformedResponse,
         ] {
             let label = kind.label();

@@ -110,6 +110,16 @@ impl RetryClock {
             return None;
         }
         let delay = backoff_after(policy, error, self.attempt, self.spent)?;
+        // A wait the provider asked for is kept to the second. Every other
+        // wait is spread, so a fan-out whose workers all failed on the same
+        // blip does not come back as one burst and fail together again.
+        let delay = match error.retry_advice().retry_after_secs {
+            Some(_) => delay,
+            None => {
+                use rand::RngExt as _;
+                jittered(delay, rand::rng().random::<f64>())
+            }
+        };
         self.spent = self.spent.saturating_add(delay);
         self.attempt += 1;
         Some(delay)
@@ -133,6 +143,15 @@ impl RetryClock {
             false => Due::Send,
         })
     }
+}
+
+/// The largest share of a backoff [`jittered`] takes off it.
+pub(crate) const BACKOFF_JITTER: f64 = 0.2;
+
+/// `delay`, less up to [`BACKOFF_JITTER`] of it: `unit` (in `0.0..1.0`) says
+/// how much. Only ever shorter, so no schedule's ceiling is passed.
+pub(crate) fn jittered(delay: Duration, unit: f64) -> Duration {
+    delay.mul_f64(1.0 - BACKOFF_JITTER * unit.clamp(0.0, 1.0))
 }
 
 /// Wake the tick loop at `due`, so a call waiting on a backoff is looked at
@@ -348,6 +367,17 @@ impl InferenceCall {
     /// call is finished or waits for another trip. A finished call's outcome
     /// carries the whole call's latency, retries and backoff included.
     pub(crate) fn settle(&mut self, outcome: &mut InferenceOutcome) -> Next {
+        // Read before anything decides on it, so the retry, the journal and
+        // the failover all see a 404 for a listed model as the outage it is.
+        if let Err(error) = &outcome.result
+            && let Some(outage) = crate::inference_bridge::listed_outage(
+                self.provider.as_ref(),
+                &self.request.model,
+                error,
+            )
+        {
+            outcome.result = Err(outage);
+        }
         let next = match (outcome.attempt.take(), &outcome.result) {
             // No trip was made: a refusal, a guard, a deadline or a lost task.
             // None of those is anything a retry would change.
@@ -412,8 +442,21 @@ impl InferenceCall {
             self.waited = Duration::ZERO;
             return Next::Waiting(self.clock.wait(Duration::ZERO));
         }
+        let attempt = self.clock.attempt;
         match self.clock.after_failure(&self.policy, error) {
             Some(delay) => {
+                // Said every time: a call riding out a provider's bad minute
+                // is otherwise silent until it either answers or fails over.
+                tracing::warn!(
+                    provider = self.provider.name(),
+                    model = %self.request.model,
+                    attempt,
+                    max_attempts = self.policy.max_attempts,
+                    delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                    failure_kind = crate::inference_bridge::failure_label(error),
+                    error = %error,
+                    "provider call failed; retrying the same provider after a backoff"
+                );
                 self.record(&report, Ending::Failed(failed(error, Retry::SameModel)));
                 self.waited = delay;
                 Next::Waiting(self.clock.wait(delay))
