@@ -35,15 +35,47 @@ pub struct ExecutionResult {
 /// the same server still run one at a time, in the order they took the lock.
 pub type SharedClient = Arc<tokio::sync::Mutex<MCPClient>>;
 
+/// One connection the executor holds.
+struct Connection {
+    /// The server's name, which its tools are qualified with.
+    server: String,
+    /// The client, shared with every call in flight to it.
+    client: SharedClient,
+    /// Each tool it offers: what the model is shown, and the name the server
+    /// itself expects on a `tools/call`. In the order the server listed them.
+    tools: Vec<(ToolMetadata, String)>,
+}
+
+impl Connection {
+    /// The server's own name for the tool advertised as `advertised`.
+    fn original_of(&self, advertised: &str) -> Option<&str> {
+        self.tools
+            .iter()
+            .find(|(meta, _)| meta.name == advertised)
+            .map(|(_, original)| original.as_str())
+    }
+}
+
 /// Tool execution service that routes tool calls to the correct MCP server.
+///
+/// Connections are stored under a *key*, not under the server's name. Two
+/// runs may each declare a server called `docs` that starts a different
+/// process, so the daemon keys a connection by the server's whole launch spec
+/// ([`crate::MCPServerConfig::connection_key`]) and each run routes through
+/// the keys of the servers it declared ([`route_in`](Self::route_in)). The
+/// servers every run shares, the global `[[mcp_servers]]`, are also
+/// *published*: their tools route by advertised name alone
+/// ([`route`](Self::route)).
 pub struct ToolExecutor {
-    /// Active MCP clients, keyed by server name
-    clients: HashMap<String, SharedClient>,
-    /// Advertised tool name → (server name, original tool name).
+    /// Every connection, by key.
+    connections: HashMap<String, Connection>,
+    /// The published routing table: advertised tool name → (connection key,
+    /// original tool name).
     ///
     /// The name advertised to the LLM is sanitized to the provider's character
-    /// rule and made unique across servers; this maps it back to the server and
-    /// the original name the server itself expects on a `tools/call`.
+    /// rule and made unique across published servers; this maps it back to the
+    /// connection and the original name the server itself expects on a
+    /// `tools/call`.
     aliases: HashMap<String, (String, String)>,
 }
 
@@ -51,42 +83,77 @@ impl ToolExecutor {
     /// Create a new tool executor.
     pub fn new() -> Self {
         Self {
-            clients: HashMap::new(),
+            connections: HashMap::new(),
             aliases: HashMap::new(),
         }
     }
 
-    /// Register a client and return its tools under *advertised* names.
-    ///
-    /// Every name is [`leviath_core::mcp_names::advertised_name`] and nothing
-    /// else, so a blueprint can name a tool before the server has ever been
-    /// reached. The alias back to `(server, original)` is recorded for routing.
-    ///
-    /// A name that is already taken is **refused, not renamed**: that tool is
-    /// left out of the returned set and a warning says which two names ran into
-    /// each other. Re-registering the same server replaces it, so its own
-    /// aliases are dropped first and only a genuine clash is left to refuse.
+    /// Register a client under its server's name and publish its tools; see
+    /// [`add_published`](Self::add_published).
     pub fn add_client_advertised(
         &mut self,
         server_name: String,
         client: MCPClient,
         reserved: &HashSet<String>,
     ) -> Vec<ToolMetadata> {
-        // Re-registering a server (a reload, or a second blueprint declaring
-        // the same name) replaces its client below. Its old aliases would
-        // otherwise survive and route this server's names to the client that
-        // just went away.
-        self.aliases.retain(|_, (server, _)| *server != server_name);
+        self.add_published(server_name.clone(), server_name, client, reserved)
+    }
 
-        let mut advertised = Vec::new();
+    /// Register a client under `key` and publish its tools, so they route by
+    /// advertised name for every caller. What the global servers get.
+    pub fn add_published(
+        &mut self,
+        key: String,
+        server_name: String,
+        client: MCPClient,
+        reserved: &HashSet<String>,
+    ) -> Vec<ToolMetadata> {
+        self.add_connection(key.clone(), server_name, client, reserved);
+        self.publish(&key, reserved)
+    }
+
+    /// Register a client under `key` without publishing it, and return its
+    /// tools under *advertised* names. Only a caller routing through `key`
+    /// ([`route_in`](Self::route_in)) reaches it.
+    ///
+    /// Every name is [`leviath_core::mcp_names::advertised_name`] and nothing
+    /// else, so a blueprint can name a tool before the server has ever been
+    /// reached. A tool whose name is reserved (a built-in's), or which lands
+    /// on the same advertised name as one of this server's other tools, is
+    /// **refused, not renamed**. Registering the same key again replaces the
+    /// connection, and drops whatever it had published.
+    pub fn add_connection(
+        &mut self,
+        key: String,
+        server_name: String,
+        client: MCPClient,
+        reserved: &HashSet<String>,
+    ) -> Vec<ToolMetadata> {
+        // A replaced connection's published names would otherwise route this
+        // key's names to tools the new client may not offer.
+        self.aliases.retain(|_, (k, _)| *k != key);
+        let mut tools: Vec<(ToolMetadata, String)> = Vec::new();
         for tool in client.cached_tools() {
             let name = leviath_core::mcp_names::advertised_name(&server_name, &tool.name);
-            if reserved.contains(&name) || self.aliases.contains_key(&name) {
-                self.refuse_tool(&server_name, &tool.name, &name);
+            let mine = tools.iter().find(|(meta, _)| meta.name == name);
+            if let Some((_, other)) = mine {
+                self.refuse_tool(
+                    &server_name,
+                    &tool.name,
+                    &name,
+                    format!("{server_name}'s {other}"),
+                );
                 continue;
             }
-            self.aliases
-                .insert(name.clone(), (server_name.clone(), tool.name.clone()));
+            if reserved.contains(&name) {
+                self.refuse_tool(
+                    &server_name,
+                    &tool.name,
+                    &name,
+                    "a built-in tool".to_string(),
+                );
+                continue;
+            }
             // Unconditional: every advertised name is server-qualified, so it
             // never equals the original and there is nothing to compare
             // against. The line is what ties the name the model sees back to
@@ -97,36 +164,91 @@ impl ToolExecutor {
                 advertised = %name,
                 "advertising MCP tool under its server-qualified name"
             );
-            advertised.push(ToolMetadata {
+            let meta = ToolMetadata {
                 name,
                 description: tool.description.clone(),
                 schema: tool.schema.clone(),
-            });
+            };
+            tools.push((meta, tool.name.clone()));
         }
-        self.clients
-            .insert(server_name, Arc::new(tokio::sync::Mutex::new(client)));
+        let advertised = tools.iter().map(|(meta, _)| meta.clone()).collect();
+        self.connections.insert(
+            key,
+            Connection {
+                server: server_name,
+                client: Arc::new(tokio::sync::Mutex::new(client)),
+                tools,
+            },
+        );
         advertised
+    }
+
+    /// Route `key`'s tools by advertised name alone, for every caller, and
+    /// return the ones that now do. Nothing when no connection has that key.
+    ///
+    /// Publishing replaces whatever was published under the same server name
+    /// (a global server edited in place) and the key's own earlier entries.
+    /// A name some other published server already holds, or a reserved one,
+    /// is **refused, not renamed**: that tool is left out and a warning says
+    /// which two names ran into each other.
+    pub fn publish(&mut self, key: &str, reserved: &HashSet<String>) -> Vec<ToolMetadata> {
+        let Some(server) = self.connections.get(key).map(|c| c.server.clone()) else {
+            return Vec::new();
+        };
+        let replaced: HashSet<String> = self
+            .connections
+            .iter()
+            .filter(|(k, c)| k.as_str() == key || c.server == server)
+            .map(|(k, _)| k.clone())
+            .collect();
+        self.aliases.retain(|_, (k, _)| !replaced.contains(k));
+        let tools = self
+            .connections
+            .get(key)
+            .map(|c| c.tools.clone())
+            .unwrap_or_default();
+        let mut published = Vec::new();
+        for (meta, original) in tools {
+            if reserved.contains(&meta.name) || self.aliases.contains_key(&meta.name) {
+                let owner = self.owner_of(&meta.name);
+                self.refuse_tool(&server, &original, &meta.name, owner);
+                continue;
+            }
+            self.aliases
+                .insert(meta.name.clone(), (key.to_string(), original));
+            published.push(meta);
+        }
+        published
+    }
+
+    /// Who holds the published name `advertised`, for a refusal's message.
+    fn owner_of(&self, advertised: &str) -> String {
+        match self.aliases.get(advertised) {
+            Some((key, other_tool)) => {
+                let server = self
+                    .connections
+                    .get(key)
+                    .map_or(key.as_str(), |c| c.server.as_str());
+                format!("{server}'s {other_tool}")
+            }
+            None => "a built-in tool".to_string(),
+        }
     }
 
     /// Say out loud that a tool is not being offered, and why.
     ///
-    /// The alternative was a `_2` suffix, which renamed the tool to something
-    /// no blueprint, `[mcp_overrides]` key or grant could have predicted, and
-    /// which changed with the order servers connected in. Refusing the one
-    /// tool keeps every other name exactly `<server>__<tool>`.
+    /// A suffix such as `_2` would rename the tool to something no blueprint,
+    /// `[mcp_overrides]` key or grant could predict, and which would change
+    /// with the order servers connected in. Refusing the one tool keeps every
+    /// other name exactly `<server>__<tool>`.
     ///
     /// Two ways to get here, and the message has to serve both. Two servers
     /// whose names collide is the operator's to fix, by renaming one in
     /// `config.toml`. A single server offering two tools that collide only
     /// after the 64-character limit is not, so the message says which names
-    /// ran into each other rather than implying a fix.
-    fn refuse_tool(&self, server: &str, original: &str, advertised: &str) {
-        let owner = match self.aliases.get(advertised) {
-            Some((other_server, other_tool)) => {
-                format!("{other_server}'s {other_tool}")
-            }
-            None => "a built-in tool".to_string(),
-        };
+    /// ran into each other rather than implying a fix. `owner` is whoever
+    /// holds the name.
+    fn refuse_tool(&self, server: &str, original: &str, advertised: &str, owner: String) {
         tracing::warn!(
             server = %server,
             tool = %original,
@@ -139,30 +261,43 @@ impl ToolExecutor {
         );
     }
 
-    /// Take a server's client back out of the executor, dropping the aliases
-    /// that routed to it. The caller owns the returned client and is expected
-    /// to shut it down - removal alone does not kill a stdio server's child
-    /// process. `None` if no such server is registered.
+    /// Take the connection under `key` back out of the executor, dropping the
+    /// aliases that routed to it. The caller owns the returned client and is
+    /// expected to shut it down - removal alone does not kill a stdio server's
+    /// child process. `None` if no such connection is registered.
     ///
     /// The pool's idle-disconnect uses this: a per-agent server whose last
     /// leasing run ended has no caller left, and its connection and child
-    /// process would otherwise live until the daemon exits.
-    pub fn remove_client(&mut self, server_name: &str) -> Option<MCPClient> {
-        let shared = self.clients.remove(server_name)?;
+    /// process would otherwise live until the daemon exits. It names the
+    /// connection by key, so another run's server of the same name stays.
+    pub fn remove_client(&mut self, key: &str) -> Option<MCPClient> {
+        let connection = self.connections.remove(key)?;
         // A call still in flight holds a clone of the `Arc`. Removing the
         // server out from under it would end a `tools/call` mid-flight, so the
         // client goes back and the caller is told there is nothing to take;
         // the pool's idle-disconnect only removes a server no run is leasing,
         // so in practice this arm is a race that was lost by a hair.
-        let client = match Arc::try_unwrap(shared) {
+        let Connection {
+            server,
+            client,
+            tools,
+        } = connection;
+        let client = match Arc::try_unwrap(client) {
             Ok(mutex) => mutex.into_inner(),
-            Err(shared) => {
-                tracing::debug!(server = %server_name, "a call is in flight; keeping the server");
-                self.clients.insert(server_name.to_string(), shared);
+            Err(client) => {
+                tracing::debug!(server = %server, "a call is in flight; keeping the server");
+                self.connections.insert(
+                    key.to_string(),
+                    Connection {
+                        server,
+                        client,
+                        tools,
+                    },
+                );
                 return None;
             }
         };
-        self.aliases.retain(|_, (server, _)| server != server_name);
+        self.aliases.retain(|_, (k, _)| k != key);
         Some(client)
     }
 
@@ -176,10 +311,16 @@ impl ToolExecutor {
     /// string, but not in a form that can be parsed back out. A server name
     /// may itself contain `_`, so `a__b__c` is either `a`'s `b__c` or `a__b`'s
     /// `c`. Splitting on `__` is a guess where this table is a fact.
+    ///
+    /// Covers the published tools, the ones [`route`](Self::route) reaches.
     pub fn tool_owners(&self) -> HashMap<String, String> {
         self.aliases
             .iter()
-            .map(|(advertised, (server, _))| (advertised.clone(), server.clone()))
+            .filter_map(|(advertised, (key, _))| {
+                self.connections
+                    .get(key)
+                    .map(|c| (advertised.clone(), c.server.clone()))
+            })
             .collect()
     }
 
@@ -201,16 +342,16 @@ impl ToolExecutor {
     /// the call is a network round trip, and only the first needs the executor.
     pub fn route(&self, tool_name: &str) -> anyhow::Result<(SharedClient, String)> {
         tracing::info!(tool = %tool_name, "Executing tool");
-        // The advertised → (server, original) alias is the authoritative route.
-        // Aliases and clients are inserted and removed together, so an alias
-        // whose server is missing cannot happen; folding the two lookups into
-        // one answer keeps that from being a branch of its own.
+        // The advertised → (key, original) alias is the authoritative route.
+        // Aliases and connections are inserted and removed together, so an
+        // alias whose connection is missing cannot happen; folding the two
+        // lookups into one answer keeps that from being a branch of its own.
         self.aliases
             .get(tool_name)
-            .and_then(|(server, original)| {
-                self.clients
-                    .get(server)
-                    .map(|client| (client.clone(), original.clone()))
+            .and_then(|(key, original)| {
+                self.connections
+                    .get(key)
+                    .map(|c| (c.client.clone(), original.clone()))
             })
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -221,15 +362,43 @@ impl ToolExecutor {
             })
     }
 
-    /// Execute a tool on a specific server.
+    /// [`route`](Self::route) for a caller that declared its own servers:
+    /// the connections under `scope` are looked in first, in order, and the
+    /// published table after them.
+    ///
+    /// This is how one run reaches its own `docs` server while another run
+    /// reaches a different `docs`: both advertise `docs__search`, and only
+    /// the key in each run's scope tells the two apart.
+    pub fn route_in(
+        &self,
+        scope: &[String],
+        tool_name: &str,
+    ) -> anyhow::Result<(SharedClient, String)> {
+        let own = scope.iter().find_map(|key| {
+            let connection = self.connections.get(key)?;
+            let original = connection.original_of(tool_name)?;
+            Some((connection.client.clone(), original.to_string()))
+        });
+        match own {
+            Some(routed) => {
+                tracing::info!(tool = %tool_name, "Executing tool");
+                Ok(routed)
+            }
+            None => self.route(tool_name),
+        }
+    }
+
+    /// Execute a tool on the connection registered under `key` (a global
+    /// server registered with [`add_client_advertised`](Self::add_client_advertised)
+    /// is keyed by its name).
     pub async fn execute_on(
         &self,
-        server_name: &str,
+        key: &str,
         tool_name: &str,
         arguments: Value,
     ) -> anyhow::Result<ExecutionResult> {
-        tracing::info!(server = %server_name, tool = %tool_name, "Executing tool on server");
-        let client = self.shared_client(server_name)?;
+        tracing::info!(server = %key, tool = %tool_name, "Executing tool on server");
+        let client = self.shared_client(key)?;
         Self::call_routed(&client, tool_name, arguments).await
     }
 
@@ -244,11 +413,11 @@ impl ToolExecutor {
         Ok(Self::map_result(tool_result))
     }
 
-    fn shared_client(&self, server_name: &str) -> anyhow::Result<SharedClient> {
-        self.clients
-            .get(server_name)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("MCP server '{}' not found", server_name))
+    fn shared_client(&self, key: &str) -> anyhow::Result<SharedClient> {
+        self.connections
+            .get(key)
+            .map(|c| c.client.clone())
+            .ok_or_else(|| anyhow::anyhow!("MCP server '{}' not found", key))
     }
 
     /// Shutdown all connected MCP clients.
@@ -258,21 +427,22 @@ impl ToolExecutor {
     /// are discarded here too.
     pub async fn shutdown_all(&mut self) -> anyhow::Result<()> {
         tracing::info!("Shutting down all MCP clients");
-        for client in self.clients.values() {
-            let _ = client.lock().await.shutdown().await;
+        for connection in self.connections.values() {
+            let _ = connection.client.lock().await.shutdown().await;
         }
-        self.clients.clear();
+        self.connections.clear();
+        self.aliases.clear();
         Ok(())
     }
 
-    /// Whether a server is registered under `server_name`, busy or not.
+    /// Whether a connection is registered under `key`, busy or not.
     ///
     /// The distinction [`remove_client`](Self::remove_client) cannot make on
     /// its own: `None` from it means either "no such server" or "a call is in
     /// flight, so it stayed". A caller that wants to try again later needs to
     /// know which.
-    pub fn has_client(&self, server_name: &str) -> bool {
-        self.clients.contains_key(server_name)
+    pub fn has_client(&self, key: &str) -> bool {
+        self.connections.contains_key(key)
     }
 
     /// Map a ToolResult into an ExecutionResult.
@@ -1038,10 +1208,10 @@ mod tests {
     /// The name is the same whether or not anything else is registered, so a
     /// blueprint can be written against it before the server is ever reached.
     ///
-    /// This is what the `_2` suffix used to take away. A tool's name depended
-    /// on which servers had connected first, so the same `config.toml` could
-    /// advertise `srv__search` on one daemon start and `srv__search_2` on the
-    /// next, and nothing outside the executor could tell which.
+    /// A suffix for a taken name (`srv__search_2`) would make the name depend
+    /// on which servers connected first, so the same `config.toml` could
+    /// advertise a different name on each daemon start, and nothing outside
+    /// the executor could tell which.
     #[tokio::test]
     async fn an_advertised_name_never_depends_on_what_else_is_registered() {
         let _guard = always_on_tracing_guard();
@@ -1223,6 +1393,210 @@ mod tests {
                 .await
                 .unwrap()
                 .success
+        );
+    }
+
+    /// A server named `name` offering `whoami`, which answers `identity`.
+    async fn spawn_identified(identity: &str) -> MCPClient {
+        spawn_ready_client(
+            &McpStub::new()
+                .tool("whoami", None)
+                .replying(identity)
+                .source(),
+        )
+        .await
+    }
+
+    /// What `tool` answers when routed through `scope`.
+    async fn answer_in(executor: &ToolExecutor, scope: &[String], tool: &str) -> String {
+        let (client, original) = executor.route_in(scope, tool).expect("routes");
+        ToolExecutor::call_routed(&client, &original, serde_json::json!({}))
+            .await
+            .unwrap()
+            .text
+    }
+
+    /// Two connections under one server name, kept apart by key: each scope
+    /// reaches its own, neither is published, and removing one leaves the
+    /// other routable.
+    #[tokio::test]
+    async fn same_named_servers_under_different_keys_stay_apart() {
+        let _guard = always_on_tracing_guard();
+        let mut executor = ToolExecutor::new();
+        let none = HashSet::new();
+        let a = executor.add_connection(
+            "key-a".to_string(),
+            "twin".to_string(),
+            spawn_identified("A").await,
+            &none,
+        );
+        let b = executor.add_connection(
+            "key-b".to_string(),
+            "twin".to_string(),
+            spawn_identified("B").await,
+            &none,
+        );
+        assert_eq!(
+            a[0].name, "twin__whoami",
+            "the advertised name is unchanged"
+        );
+        assert_eq!(b[0].name, "twin__whoami");
+        let (scope_a, scope_b) = (vec!["key-a".to_string()], vec!["key-b".to_string()]);
+        assert_eq!(answer_in(&executor, &scope_a, "twin__whoami").await, "A");
+        assert_eq!(answer_in(&executor, &scope_b, "twin__whoami").await, "B");
+        assert!(
+            executor.route("twin__whoami").is_err(),
+            "an unpublished connection is reached through its key only"
+        );
+        assert!(executor.tool_owners().is_empty());
+
+        let mut gone = executor.remove_client("key-a").expect("idle, so taken");
+        let _ = gone.shutdown().await;
+        assert!(!executor.has_client("key-a"));
+        assert!(executor.route_in(&scope_a, "twin__whoami").is_err());
+        assert_eq!(answer_in(&executor, &scope_b, "twin__whoami").await, "B");
+    }
+
+    /// A scope that does not hold the tool falls back to the published table,
+    /// which is how a run reaches the global servers.
+    #[tokio::test]
+    async fn a_scope_falls_back_to_the_published_servers() {
+        let _guard = always_on_tracing_guard();
+        let mut executor = ToolExecutor::new();
+        let none = HashSet::new();
+        let _ = executor.add_published(
+            "key-g".to_string(),
+            "global".to_string(),
+            spawn_identified("G").await,
+            &none,
+        );
+        let _ = executor.add_connection(
+            "key-own".to_string(),
+            "own".to_string(),
+            spawn_identified("O").await,
+            &none,
+        );
+        let scope = vec!["missing".to_string(), "key-own".to_string()];
+        assert_eq!(answer_in(&executor, &scope, "global__whoami").await, "G");
+        assert_eq!(answer_in(&executor, &scope, "own__whoami").await, "O");
+        assert_eq!(
+            executor
+                .tool_owners()
+                .get("global__whoami")
+                .map(String::as_str),
+            Some("global")
+        );
+    }
+
+    /// One server offering two tools that land on one advertised name offers
+    /// the first and refuses the second, under its key as much as published.
+    #[tokio::test]
+    async fn a_servers_own_two_tools_on_one_name_offer_the_first() {
+        let _guard = always_on_tracing_guard();
+        let mut executor = ToolExecutor::new();
+        let client = spawn_ready_client(
+            &McpStub::new()
+                .tool("find.all", None)
+                .tool("find_all", None)
+                .echoing_tool_name()
+                .source(),
+        )
+        .await;
+        let offered = executor.add_connection(
+            "k".to_string(),
+            "tracker".to_string(),
+            client,
+            &HashSet::new(),
+        );
+        assert_eq!(offered.len(), 1);
+        assert_eq!(offered[0].name, "tracker__find_all");
+        let (_, original) = executor
+            .route_in(&["k".to_string()], "tracker__find_all")
+            .expect("routes");
+        assert_eq!(original, "find.all");
+    }
+
+    /// A name reserved at publish time is refused there, even when the
+    /// connection itself offered it.
+    #[tokio::test]
+    async fn publishing_refuses_a_name_reserved_since_connecting() {
+        let _guard = always_on_tracing_guard();
+        let mut executor = ToolExecutor::new();
+        let _ = executor.add_connection(
+            "k".to_string(),
+            "srv".to_string(),
+            spawn_named("search").await,
+            &HashSet::new(),
+        );
+        let reserved: HashSet<String> = ["srv__search".to_string()].into_iter().collect();
+        assert_eq!(executor.owner_of("srv__search"), "a built-in tool");
+        assert!(executor.publish("k", &reserved).is_empty());
+        assert!(executor.route("srv__search").is_err());
+    }
+
+    /// Publishing a key nobody registered publishes nothing.
+    #[test]
+    fn publishing_an_unknown_key_is_a_no_op() {
+        let mut executor = ToolExecutor::new();
+        assert!(executor.publish("nobody", &HashSet::new()).is_empty());
+        assert!(executor.aliases.is_empty());
+    }
+
+    /// Publishing a second connection under the same server name replaces the
+    /// first one's published names (a global server edited in place) and
+    /// leaves the first connection itself registered under its key.
+    #[tokio::test]
+    async fn publishing_a_server_name_again_takes_over_its_names() {
+        let _guard = always_on_tracing_guard();
+        let mut executor = ToolExecutor::new();
+        let none = HashSet::new();
+        let _ = executor.add_published(
+            "old".to_string(),
+            "docs".to_string(),
+            spawn_identified("old").await,
+            &none,
+        );
+        let published = executor.add_published(
+            "new".to_string(),
+            "docs".to_string(),
+            spawn_identified("new").await,
+            &none,
+        );
+        assert_eq!(published.len(), 1);
+        assert_eq!(answer_in(&executor, &[], "docs__whoami").await, "new");
+        assert!(executor.has_client("old"));
+        assert_eq!(
+            answer_in(&executor, &["old".to_string()], "docs__whoami").await,
+            "old"
+        );
+    }
+
+    /// A name a published server holds refuses another published server's
+    /// tool, and the warning names the holder by server, not by key.
+    #[tokio::test]
+    async fn a_published_clash_names_the_holding_server() {
+        let _guard = always_on_tracing_guard();
+        let mut executor = ToolExecutor::new();
+        let none = HashSet::new();
+        let _ = executor.add_published(
+            "k1".to_string(),
+            "a.b".to_string(),
+            spawn_identified("first").await,
+            &none,
+        );
+        assert_eq!(executor.owner_of("a_b__whoami"), "a.b's whoami");
+        let refused = executor.add_published(
+            "k2".to_string(),
+            "a_b".to_string(),
+            spawn_identified("second").await,
+            &none,
+        );
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(answer_in(&executor, &[], "a_b__whoami").await, "first");
+        // Through its own key, the refused server is still reachable.
+        assert_eq!(
+            answer_in(&executor, &["k2".to_string()], "a_b__whoami").await,
+            "second"
         );
     }
 }

@@ -520,6 +520,9 @@ impl DaemonEnv {
             builtins,
             builtin_names,
             mcp: self.shared_mcp.clone(),
+            mcp_scope: crate::daemon::mcp_pool::scope_of(&crate::daemon::starter::mcp_configs(
+                graph,
+            )),
             config,
             hub: &self.hub,
             run_id,

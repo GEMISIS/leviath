@@ -156,6 +156,23 @@ sequenceDiagram
   Broker-->>Agent: routed to a context region
 ```
 
+## Servers a blueprint brings
+
+A blueprint can declare its own servers under `[graph] mcp_servers`. The daemon connects each one
+the first time a run needs it and shares the connection between runs. Two runs share a connection
+only when they declare the very same server: the same name, transport, command, arguments,
+environment, URL and headers. Change any one of them and it is a separate connection, even under
+the same name.
+
+So several runs can each declare a server called `workspace` that points somewhere different. Each
+run's model sees `workspace__check`, and each run's call reaches the server that run declared. When
+one run ends, its server is torn down after `[limits] mcp_idle_disconnect_secs`. A server another
+live run still declares stays up, and so does every other run's server of the same name. If a
+server exits, only the runs that declared that exact server lose its tools.
+
+A run that declares a server with the same name as a global `[[mcp_servers]]` entry, but a
+different spec, reaches its own. Every other run keeps reaching the global one.
+
 ## Granting a whole server
 
 A stage's `tools` is an exact-match list, so granting a server tool by tool means knowing what it

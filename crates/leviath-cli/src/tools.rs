@@ -57,7 +57,10 @@ impl ToolRegistry {
                         // uses a character the provider rejects.
                         let mut reserved: HashSet<String> = builtin_names.clone();
                         reserved.extend(mcp_tool_defs.iter().map(|t| t.name.clone()));
-                        let advertised = mcp_executor.add_client_advertised(
+                        // Under the launch spec's key, which is what the
+                        // daemon's pool retires it by when the entry changes.
+                        let advertised = mcp_executor.add_published(
+                            server_cfg.connection_key(),
                             server_cfg.name.clone(),
                             client,
                             &reserved,

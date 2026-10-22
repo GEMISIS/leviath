@@ -86,6 +86,9 @@ pub(crate) struct SeedToolContext {
     pub script_host: Arc<dyn leviath_scripting::ScriptHost>,
     /// The shared MCP executor.
     pub mcp: Arc<tokio::sync::Mutex<leviath_mcp::ToolExecutor>>,
+    /// The connection keys of the MCP servers the run declared, routed
+    /// through first, as the tool lane does.
+    pub mcp_scope: Arc<Vec<String>>,
     /// The run's write budget, shared with the tool lane so what a seed
     /// writes at spawn counts against the same ceiling as turn one.
     pub writes: Arc<crate::daemon::tool_service::WriteBudget>,
@@ -168,10 +171,11 @@ pub(crate) fn production_runner(
             }
             false => {
                 let mcp = ctx.mcp.clone();
+                let scope = ctx.mcp_scope.clone();
                 let name = name.to_string();
                 let args = args.clone();
                 block_on_daemon(async move {
-                    let routed = mcp.lock().await.route(&name);
+                    let routed = mcp.lock().await.route_in(&scope, &name);
                     mcp_text(match routed {
                         Ok((client, original)) => {
                             leviath_mcp::ToolExecutor::call_routed(&client, &original, args).await
@@ -362,6 +366,7 @@ mod tests {
                 dir.to_path_buf(),
             )),
             mcp: Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new())),
+            mcp_scope: Default::default(),
         }
     }
 

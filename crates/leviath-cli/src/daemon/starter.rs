@@ -244,12 +244,16 @@ impl DaemonStarter {
     }
 
     fn env_with(&self, graph: Option<&RunGraph>, config: Arc<crate::config::Config>) -> DaemonEnv {
-        let (mut mcp_defs, mut mcp_owners) = self.mcp_global.current();
-        if let Some(graph) = graph {
-            let servers = mcp_configs(graph);
-            mcp_defs.extend(self.mcp_pool.cached_defs_for(&servers));
-            mcp_owners.extend(self.mcp_pool.cached_owners_for(&servers));
-        }
+        let (global_defs, mut mcp_owners) = self.mcp_global.current();
+        let own_defs = match graph {
+            Some(graph) => {
+                let servers = mcp_configs(graph);
+                mcp_owners.extend(self.mcp_pool.cached_owners_for(&servers));
+                self.mcp_pool.cached_defs_for(&servers)
+            }
+            None => Vec::new(),
+        };
+        let mcp_defs = crate::daemon::mcp_pool::offered_defs(global_defs, own_defs);
         DaemonEnv {
             mime: Arc::new(config.mime_registry_or_defaults()),
             config,

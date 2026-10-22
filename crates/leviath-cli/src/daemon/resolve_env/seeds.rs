@@ -330,6 +330,9 @@ fn run_tools(env: &SeedEnv, calls: &[SeedToolCall], cx: SeedCx<'_>) -> Result<St
             script_tools,
             script_host,
             mcp: env.shared_mcp.clone(),
+            mcp_scope: Arc::new(crate::daemon::mcp_pool::scope_of(
+                &crate::daemon::starter::mcp_configs(cx.graph),
+            )),
             writes,
             protected: crate::tools::permission_files(config),
         },
