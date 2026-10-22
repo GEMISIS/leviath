@@ -127,6 +127,49 @@ pub fn check(spec: &RunSpec, state: &RunState) -> Result<(), SpawnIssues> {
     }
 }
 
+/// Whether a continuation of a run of `graph` can have the summaries it
+/// asks for written here. A region set to `compact` has its old turns
+/// replaced by a summary before the message lands, and a continuation with
+/// no compaction model `registry` can reach would carry them as they were,
+/// so it is refused before anything is written. A graph whose compaction
+/// names no model summarizes on the stage's own, which the run needs anyway.
+pub fn check_compaction(
+    graph: &RunGraph,
+    registry: &crate::ProviderRegistry,
+) -> Result<(), SpawnIssues> {
+    let layouts =
+        std::iter::once(&graph.layout).chain(graph.stages.iter().filter_map(|s| s.layout.as_ref()));
+    let compacting = layouts
+        .flat_map(|layout| &layout.regions)
+        .find(|r| graph.continue_policy(r.name.as_str()) == Some(OnContinue::Compact));
+    let (Some(region), Some(compaction)) = (compacting, &graph.compaction) else {
+        return Ok(());
+    };
+    let routes = compaction.named();
+    let reachable = routes.iter().any(|route| {
+        let provider = route.provider_or_empty();
+        registry.get(provider).is_some()
+            && registry
+                .retention_refusal(provider, route.model.as_str())
+                .is_none()
+    });
+    if routes.is_empty() || reachable {
+        return Ok(());
+    }
+    let named: Vec<String> = routes.iter().map(ToString::to_string).collect();
+    Err(refused(
+        IssueCode::Unavailable,
+        SpecPath::root().field("compaction"),
+        format!(
+            "region '{}' is summarized when this run continues, but no compaction model it \
+             names can be reached here ({}); set that provider up, or continue the region \
+             with \"keep\" or \"clear\"",
+            region.name,
+            named.join(", ")
+        ),
+    ))
+}
+
 /// How a status reads in a refusal.
 fn status_word(status: &RunStatus) -> &'static str {
     match status {
@@ -429,7 +472,10 @@ pub(crate) fn apply(world: &mut World, entity: Entity) -> Option<Applied> {
             parts: message.parts,
         });
     if !compact.is_empty() {
-        world.entity_mut(entity).insert(PendingEdgeCompact(compact));
+        world.entity_mut(entity).insert((
+            ContinuationCompact::new(&compact),
+            PendingEdgeCompact(compact),
+        ));
     }
     let applied = (
         continued.segment,
@@ -539,8 +585,59 @@ pub(crate) fn resume_waiting(entity: &mut EntityWorldMut<'_>, spec: &RunSpec, st
         })
         .unwrap_or_default();
     if !compact.is_empty() {
-        entity.insert(PendingEdgeCompact(compact));
+        entity.insert((
+            ContinuationCompact::new(&compact),
+            PendingEdgeCompact(compact),
+        ));
     }
+}
+
+/// The regions a continuation asked to have summarized before its message
+/// lands, beside the [`PendingEdgeCompact`] that asks for them. Unlike an edge
+/// transform's summary this one is not best effort: it waits for a free slot
+/// rather than being dropped, and a region whose summary cannot be written is
+/// emptied rather than carried, so the turns it held (tool calls and their
+/// results included) never reach the new segment as they were.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub(crate) struct ContinuationCompact {
+    /// The regions to summarize.
+    pub(crate) regions: Vec<String>,
+    /// Whether the summary is on its way, so the collection that settles this
+    /// is the one for it and not another compaction's.
+    pub(crate) started: bool,
+}
+
+impl ContinuationCompact {
+    /// Summaries of `regions`, not yet started.
+    fn new(regions: &[String]) -> Self {
+        Self {
+            regions: regions.to_vec(),
+            started: false,
+        }
+    }
+}
+
+/// Empty each of `regions` in `window`: a continuation asked for its summary
+/// and none could be written.
+pub(crate) fn empty_unsummarized(window: &mut ContextWindow, regions: &[String]) {
+    for name in regions {
+        tracing::warn!(
+            region = %name,
+            "a continuation could not have this region summarized; emptying it so its old \
+             turns do not carry into the new segment"
+        );
+        let before = window.begin_change(name);
+        window
+            .get_region_mut(name)
+            .into_iter()
+            .for_each(|region| region.clear());
+        window.commit_change(
+            leviath_core::ContextCause::Compaction,
+            before,
+            crate::components::Pushed::Nothing,
+        );
+    }
+    window.current_tokens = window.calculate_tokens();
 }
 
 /// Hear when everything the persistence lane holds for `run_id` has been

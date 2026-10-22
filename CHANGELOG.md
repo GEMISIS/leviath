@@ -1177,7 +1177,10 @@ same list.
   `on_continue = "keep" | "clear" | "compact" | "reseed"`. Unset, a
   `temporary` or `clearable` region clears and every other kind keeps.
   `compact` summarizes with the graph's compaction model before the message
-  lands, and `reseed` runs the region's seed again. The answer comes once
+  lands, whatever the region's size, replacing every turn it held, tool
+  calls included. A continuation whose compaction model no provider here
+  serves is refused, and a summary that fails empties the region rather
+  than carrying it. `reseed` runs the region's seed again. The answer comes once
   the step that reopened the run is in its file, so a continuation survives
   a daemon restart. A second continuation of the same run while one is
   starting is a conflict. `lev run fork`, `spawnRun(source: { continueFrom

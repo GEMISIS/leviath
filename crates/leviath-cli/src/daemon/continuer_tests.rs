@@ -48,7 +48,12 @@ fn registry() -> ProviderRegistry {
 
 /// A run of the blueprint under `runs`, recorded as `status`.
 fn run_in(agent: &Path, runs: &Path, status: RunStatus) -> String {
-    let manifest = manifest_in(agent, BLUEPRINT);
+    run_of(agent, runs, status, BLUEPRINT)
+}
+
+/// A run of `blueprint` under `runs`, recorded as `status`.
+fn run_of(agent: &Path, runs: &Path, status: RunStatus, blueprint: &str) -> String {
+    let manifest = manifest_in(agent, blueprint);
     let run_id = run_on_disk(Config::default(), registry(), runs, &manifest);
     let path = runs.join(&run_id).join(leviath_core::files::RUN_FILE);
     let mut writer = RunFileWriter::open(&path, Default::default()).unwrap();
@@ -155,4 +160,27 @@ async fn a_run_that_cannot_be_continued_says_why() {
         runs.path(),
     ));
     assert!(prepare(bare, job(&done, false)).await.is_err());
+}
+
+/// A run whose conversation is summarized on continuing, on a compaction
+/// model no provider here serves, is refused before a fork is written.
+#[tokio::test]
+async fn a_summary_no_provider_here_can_write_refuses_the_continuation() {
+    let (agent, runs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let blueprint = BLUEPRINT
+        .replace(
+            "[graph.layout]",
+            "compaction = { model = { provider = \"ghost\", model = \"m\" } }\n\n[graph.layout]",
+        )
+        .replace(
+            "budget = 20000 }",
+            "budget = 20000, on_continue = \"compact\" }",
+        );
+    let run_id = run_of(agent.path(), runs.path(), RunStatus::Complete, &blueprint);
+    let starter = Arc::new(starter(Config::default(), registry(), runs.path()));
+    assert_eq!(
+        code(prepare(starter.clone(), job(&run_id, true)).await),
+        IssueCode::Unavailable
+    );
+    assert_eq!(std::fs::read_dir(runs.path()).unwrap().count(), 1);
 }

@@ -60,6 +60,8 @@ pub(crate) async fn prepare(
             )
         })?;
     let env = starter.env_for_graph(&run.spec.graph, config.clone());
+    starter.providers.refresh(&config);
+    continuation::check_compaction(&run.spec.graph, &starter.providers.registry())?;
     let (dir, run, forked_from) = match request.fork {
         false => (dir, run, None),
         true => {
@@ -79,7 +81,6 @@ pub(crate) async fn prepare(
     };
     let mut prepared = continuation::prepare(&dir, run, request.message, forked_from)?;
     prepared.reseeded = continuation::reseed(&prepared.run, &env).await;
-    starter.providers.refresh(&config);
     let bindings = leviath_runtime::bind::bind(&prepared.run.spec, &prepared.run.code, &env)
         .await
         .map_err(|issues| {

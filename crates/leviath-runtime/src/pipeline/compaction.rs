@@ -283,11 +283,13 @@ type CollectCompactionQuery = (
     Option<&'static crate::persistence::RunMetadata>,
     Option<&'static AgentState>,
     Option<&'static mut crate::pipeline::StageLedger>,
+    Option<&'static crate::continuation::ContinuationCompact>,
 );
 
 /// Compaction-collect system: drain finished compaction jobs and apply each
 /// summary into its paired `CompactHistory` region, clearing the summarized
-/// source region. A provider error leaves the context untouched (best-effort).
+/// source region. A provider error leaves the context untouched (best-effort),
+/// except in a region a continuation asked to summarize, which is emptied.
 /// Either way the agent returns to `ReadyToInfer`.
 pub(crate) fn collect_compaction(
     mut results: ResMut<CompactionResults>,
@@ -297,7 +299,7 @@ pub(crate) fn collect_compaction(
 ) {
     crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut window, activity, mut totals, md, state, mut ledger)) =
+        let Ok((mut window, activity, mut totals, md, state, mut ledger, continuing)) =
             agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -340,6 +342,7 @@ pub(crate) fn collect_compaction(
                 },
             );
         }
+        let mut summarized: Vec<String> = Vec::new();
         if let Ok(summaries) = outcome.result {
             for (region_name, summary) in summaries {
                 // A summary with nothing in it is a compaction that failed, not
@@ -414,8 +417,24 @@ pub(crate) fn collect_compaction(
                     summary,
                     summary_tokens,
                 );
+                summarized.push(region_name);
             }
             window.current_tokens = window.calculate_tokens();
+        }
+        // A continuation's regions are replaced whatever happened: the ones
+        // with no summary to show for it are emptied (see
+        // `ContinuationCompact`).
+        if let Some(continuing) = continuing.filter(|c| c.started) {
+            let unsummarized: Vec<String> = continuing
+                .regions
+                .iter()
+                .filter(|name| !summarized.contains(name))
+                .cloned()
+                .collect();
+            crate::continuation::empty_unsummarized(&mut window, &unsummarized);
+            commands
+                .entity(outcome.entity)
+                .remove::<crate::continuation::ContinuationCompact>();
         }
         commands
             .entity(outcome.entity)
@@ -567,10 +586,11 @@ pub(crate) fn apply_edge_transform(
 type EdgeCompactQuery = (
     Entity,
     &'static AgentState,
-    &'static ContextWindow,
+    &'static mut ContextWindow,
     &'static PendingEdgeCompact,
     Option<&'static CompactionSettings>,
     Option<&'static StageInference>,
+    Option<&'static mut crate::continuation::ContinuationCompact>,
 );
 
 /// Edge-compaction dispatch: for each `ReadyToInfer` agent with a
@@ -579,6 +599,8 @@ type EdgeCompactQuery = (
 /// agent `AwaitingCompaction`. If the agent has no compaction config, nothing to
 /// summarize, or no route with a free slot, the request is dropped and the agent proceeds
 /// to inference un-compacted (memory-pressure compaction still applies later).
+/// A continuation's request is the exception: it waits for a free slot, and
+/// with no route its regions are emptied rather than carried.
 pub(crate) fn dispatch_edge_compact(
     mut agents: Query<EdgeCompactQuery, (With<ReadyToInfer>, Without<AwaitingCompaction>)>,
     stage: Res<InferenceStage>,
@@ -586,56 +608,62 @@ pub(crate) fn dispatch_edge_compact(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, window, pending, settings, inference) in agents.iter_mut() {
+    for (entity, state, mut window, pending, settings, inference, continuing) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled - don't start new work
         }
-        // Each way this can decline says which one it was. A declared
-        // transform that quietly does nothing is a transform that behaves
-        // differently on different runs of the same blueprint, with no signal
-        // either way - and the un-compacted run looks identical to a compacted
-        // one from outside.
-        let started = settings
-            .and_then(|s| {
-                let config = &s.0;
-                let requests = build_edge_compact_requests(window, &pending.0, config)?;
-                let routes = summary_routes(config, inference, &providers.0);
-                let declined = start_summary(
-                    &stage,
-                    &stage.compaction_outcomes,
-                    "compaction",
-                    entity,
-                    routes,
-                    requests,
-                )
-                .err();
-                match declined {
-                    None => Some(()),
-                    Some(Declined::NoRoute) => {
-                        tracing::warn!(
-                            regions = ?pending.0,
-                            "edge transform asked to compact, but no compaction route can \
-                             take it here (no provider for one is registered, or zero \
-                             retention refuses each); carrying the regions as written"
-                        );
-                        None
-                    }
-                    Some(Declined::PoolFull) => {
-                        tracing::warn!(
-                            regions = ?pending.0,
-                            "edge transform asked to compact, but every compaction route's \
-                             pool is full; carrying the regions as written"
-                        );
-                        None
-                    }
-                }
-            })
-            .is_some();
-
+        // `None` when there is nothing to start: no compaction settings, or
+        // nothing in the named regions to summarize.
+        let outcome = settings.and_then(|s| {
+            let config = &s.0;
+            let requests = build_edge_compact_requests(&window, &pending.0, config)?;
+            let routes = summary_routes(config, inference, &providers.0);
+            Some(start_summary(
+                &stage,
+                &stage.compaction_outcomes,
+                "compaction",
+                entity,
+                routes,
+                requests,
+            ))
+        });
         let mut ec = commands.entity(entity);
+        if let Some(mut continuing) = continuing {
+            // A continuation's summary is not best effort; see
+            // `ContinuationCompact`.
+            match outcome {
+                Some(Ok(())) => continuing.started = true,
+                // Asked again next tick, the message waiting behind it.
+                Some(Err(Declined::PoolFull)) => continue,
+                _ => {
+                    crate::continuation::empty_unsummarized(&mut window, &continuing.regions);
+                    ec.remove::<crate::continuation::ContinuationCompact>();
+                }
+            }
+        } else {
+            // Each way this can decline says which one it was. A declared
+            // transform that quietly does nothing is a transform that behaves
+            // differently on different runs of the same blueprint, with no
+            // signal either way - and the un-compacted run looks identical to
+            // a compacted one from outside.
+            match outcome {
+                Some(Err(Declined::NoRoute)) => tracing::warn!(
+                    regions = ?pending.0,
+                    "edge transform asked to compact, but no compaction route can \
+                     take it here (no provider for one is registered, or zero \
+                     retention refuses each); carrying the regions as written"
+                ),
+                Some(Err(Declined::PoolFull)) => tracing::warn!(
+                    regions = ?pending.0,
+                    "edge transform asked to compact, but every compaction route's \
+                     pool is full; carrying the regions as written"
+                ),
+                _ => {}
+            }
+        }
         ec.remove::<PendingEdgeCompact>();
-        if started {
+        if matches!(outcome, Some(Ok(()))) {
             ec.remove::<ReadyToInfer>().insert(AwaitingCompaction);
         }
     }

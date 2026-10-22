@@ -1030,7 +1030,12 @@ A few combinations are refused at load, so `lev validate` catches them:
 - One region given two different `on_continue` values in two layouts.
 - A `continue_at` that names no stage.
 
-The summary runs before the message lands, so the message is never summarized away. A region the
+The summary runs before the message lands, so the message is never summarized away. It always runs,
+however small the region is, and it replaces everything the region held, tool calls and their
+results included. It waits for a free slot when every compaction slot is busy. A continuation
+whose compaction model names a provider this machine has not set up is refused, so set up the
+provider or change the region's `on_continue`. If the summary call fails or comes back empty, the
+region is emptied and the log says so; its old turns never carry over as they were. A region the
 runtime adds itself, such as `tool_results`, follows the same defaults. To give it a policy, declare
 it in the layout.
 
