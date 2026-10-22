@@ -5,6 +5,7 @@
 //! shape the schema has, put through the real `#[mirror]`, registered in a
 //! real schema, and asked real questions.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as Counting};
 
 use async_graphql::{EmptyMutation, EmptySubscription, Enum, Object, Schema, SimpleObject, Union};
@@ -12,12 +13,6 @@ use leviath_graphql_derive::mirror;
 
 use super::testkit::{exercise, exercise_enum, exercise_list, exercise_order};
 use super::{Filterable, MatchCx, OrderField, Orderable, Tri};
-
-/// How many times a second-phase field has been read.
-///
-/// The whole point of the cheap pass is that a value it refuses is never read,
-/// so the count is the assertion.
-static READS: AtomicUsize = AtomicUsize::new(0);
 
 /// What a part is made of.
 #[mirror]
@@ -68,6 +63,11 @@ pub(crate) struct Gadget {
     pub(crate) inner: Option<Box<Gadget>>,
     /// What it says, read from somewhere slow.
     pub(crate) engraving: Option<String>,
+    /// How many times the engraving has been read. The whole point of the
+    /// cheap pass is that a value it refuses is never read, so the count is
+    /// the assertion. It belongs to the gadget, so tests running side by side
+    /// never see each other's reads.
+    pub(crate) reads: Arc<AtomicUsize>,
 }
 
 /// Who owns a gadget, read through an accessor rather than a resolver.
@@ -77,7 +77,7 @@ pub(crate) fn owner_of(gadget: &Gadget, _cx: &MatchCx<'_>) -> Option<String> {
 
 /// Read a gadget's engraving, counting the read.
 async fn read_engraving(gadget: &Gadget) -> Option<String> {
-    READS.fetch_add(1, Counting::SeqCst);
+    gadget.reads.fetch_add(1, Counting::SeqCst);
     std::future::ready(()).await;
     gadget.engraving.clone()
 }
@@ -174,8 +174,10 @@ fn sample() -> Gadget {
             weight: 5,
             inner: None,
             engraving: None,
+            reads: Arc::default(),
         })),
         engraving: Some("made here".to_owned()),
+        reads: Arc::default(),
     }
 }
 
@@ -251,12 +253,11 @@ fn the_mirror_has_one_field_per_mirrored_resolver() {
 async fn a_cheap_field_needs_no_read() {
     let cx = MatchCx::at(0);
     let gadget = sample();
-    let before = READS.load(Counting::SeqCst);
     assert_eq!(gadget.test(&named("lamp-one"), &cx), Tri::Yes);
     assert_eq!(gadget.test(&named("other"), &cx), Tri::No);
     assert_eq!(
-        READS.load(Counting::SeqCst),
-        before,
+        gadget.reads.load(Counting::SeqCst),
+        0,
         "the cheap pass opens nothing"
     );
     assert!(gadget.confirm(&named("lamp-one"), &cx).await);
@@ -276,11 +277,10 @@ async fn a_read_is_deferred_and_then_answered() {
         ..GadgetFilter::default()
     };
     assert_eq!(gadget.test(&filter, &cx), Tri::Io);
-    let before = READS.load(Counting::SeqCst);
     assert!(gadget.confirm(&filter, &cx).await);
     assert_eq!(
-        READS.load(Counting::SeqCst),
-        before + 1,
+        gadget.reads.load(Counting::SeqCst),
+        1,
         "the second phase reads once"
     );
 }
@@ -298,11 +298,10 @@ async fn a_cheap_refusal_stops_the_read() {
         ..named("other")
     };
     assert_eq!(gadget.test(&filter, &cx), Tri::No);
-    let before = READS.load(Counting::SeqCst);
     assert!(!gadget.confirm(&filter, &cx).await);
     assert_eq!(
-        READS.load(Counting::SeqCst),
-        before,
+        gadget.reads.load(Counting::SeqCst),
+        0,
         "a field already refused is not read"
     );
 }
