@@ -484,11 +484,11 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Run(commands::run::RunArgs {
             command: Some(commands::run::RunCommand::Continue(args)),
             ..
-        }) => ex.continue_run(args, false).await,
+        }) => ex.continue_run(*args, false).await,
         Commands::Run(commands::run::RunArgs {
             command: Some(commands::run::RunCommand::Fork(args)),
             ..
-        }) => ex.continue_run(args, true).await,
+        }) => ex.continue_run(*args, true).await,
         Commands::Run(args) => ex.run(args).await,
         Commands::Ps(args) => ex.ps(args).await,
         Commands::Msg(args) => ex.msg(args).await,
@@ -810,8 +810,11 @@ mod tests {
         let mock = MockRisky::default();
         let args = commands::run::continuing::ContinueArgs::default();
         for (command, fork) in [
-            (commands::run::RunCommand::Fork(args.clone()), true),
-            (commands::run::RunCommand::Continue(args), false),
+            (
+                commands::run::RunCommand::Fork(Box::new(args.clone())),
+                true,
+            ),
+            (commands::run::RunCommand::Continue(Box::new(args)), false),
         ] {
             let run = Commands::Run(commands::run::RunArgs {
                 command: Some(command),

@@ -38,10 +38,10 @@ pub enum RunCommand {
     Show(show::ShowArgs),
     /// Continue a finished run with a new message: it goes back to work in a
     /// new segment, with the context its regions keep
-    Continue(continuing::ContinueArgs),
+    Continue(Box<continuing::ContinueArgs>),
     /// Start a new run from a finished one, carrying its context, with a new
     /// message; the finished run is left as it is
-    Fork(continuing::ContinueArgs),
+    Fork(Box<continuing::ContinueArgs>),
 }
 
 /// Arguments for `lev run`.
