@@ -6,12 +6,19 @@
 //! so a program that calls a model API itself can lay out its context the way
 //! a Leviath run does without taking the runtime or the providers with it.
 //!
+//! The conversation is laid out here too, as provider-neutral turns: a
+//! `sliding_window` region becomes [`conversation::ConversationMessage`]s,
+//! with tool results paired and merged the way providers require.
+//! [`assemble_context`] returns both halves; [`assemble_system`] hands the
+//! conversation back to its caller instead, for one that renders it itself.
+//!
 //! What stays out, and where it lives:
 //!
-//! - **The conversation.** A `sliding_window` region becomes provider
-//!   messages (tool-use pairing, the `Assistant:` prefixes, the closing user
-//!   turn), and those message types belong to `leviath-providers`.
-//!   [`assemble_system`] hands such a region back to its caller.
+//! - **Request policy.** The opening user turn a request with none gets, the
+//!   `Continue.` after a closing assistant turn, stripping tool calls left
+//!   without a result, and the message cache breakpoint are the runtime's,
+//!   as is turning a [`conversation::ConversationMessage`] into a vendor's
+//!   message (`leviath-providers` converts from it).
 //! - **Custom regions.** A `custom` region renders through its Rhai script,
 //!   which `leviath-runtime` compiles and runs; it is handed back the same
 //!   way.
@@ -31,6 +38,7 @@ use crate::region::EntryContent;
 use crate::{CacheHint, Region, RegionKind, Volatility};
 
 pub mod cache;
+pub mod conversation;
 
 pub use cache::{
     CACHE_CHUNK_TOKENS, MAX_SYSTEM_CACHE_RUNS, append_only_chunks, block_hash, block_sort_priority,
@@ -101,6 +109,35 @@ pub fn labelled(region: &Region, body: &str) -> String {
     {
         Some(description) => format!("## {}\n{}\n\n{}", region.name, description, body),
         None => format!("## {}\n{}", region.name, body),
+    }
+}
+
+/// Open a region rendered as `[name]:` with its heading, and with its
+/// description on the next line when it shows one to the model.
+///
+/// The bracketed form of [`labelled`], for the kinds that render that way
+/// (`keyed`, `temporary`, `clearable`, `compacting`). The region's body
+/// follows it. Without a shown description the heading is exactly
+/// `[name]:` and a newline.
+///
+/// ```
+/// use leviath_core::{Region, RegionKind};
+/// use leviath_core::context::bracketed_heading;
+///
+/// let mut tasks = Region::new("tasks".into(), RegionKind::HashMap { max_entries: None }, 100);
+/// assert_eq!(bracketed_heading(&tasks), "[tasks]:\n");
+/// tasks.description = Some("One line per open task.".into());
+/// tasks.describe_in_prompt = true;
+/// assert_eq!(bracketed_heading(&tasks), "[tasks]:\nOne line per open task.\n\n");
+/// ```
+pub fn bracketed_heading(region: &Region) -> String {
+    match region
+        .description
+        .as_deref()
+        .filter(|_| region.describe_in_prompt)
+    {
+        Some(description) => format!("[{}]:\n{}\n\n", region.name, description),
+        None => format!("[{}]:\n", region.name),
     }
 }
 
@@ -201,7 +238,7 @@ pub fn push_region_blocks(blocks: &mut Vec<SystemBlock>, region: &Region) {
                 .collect::<Vec<_>>()
                 .join("\n\n");
             blocks.push(SystemBlock {
-                text: format!("[{}]:\n{}", region.name, text),
+                text: format!("{}{}", bracketed_heading(region), text),
                 cache_hint: CacheHint::UntilChanged,
                 volatility: region.volatility,
                 region: region.name.clone(),
@@ -245,6 +282,79 @@ pub fn assemble_system<'a>(
     mut render: impl FnMut(&'a Region, &mut Vec<SystemBlock>),
 ) -> SystemAssembly<'a> {
     assemble_system_dyn(&mut regions.into_iter(), &mut render)
+}
+
+/// A request's whole context: the system side and the conversation.
+#[derive(Debug, Clone)]
+pub struct ContextAssembly<'a> {
+    /// The system blocks and the parts lifted out of them, as
+    /// [`assemble_system`] lays them out.
+    pub system: SystemAssembly<'a>,
+    /// Every `sliding_window` region's turns, in region order. See
+    /// [`conversation::conversation_messages`] for what is and is not done
+    /// to them.
+    pub conversation: Vec<conversation::ConversationMessage<'a>>,
+}
+
+/// A `custom` region handed to [`assemble_context`]'s caller to render.
+#[derive(Debug, Clone, Copy)]
+pub struct CustomRegion<'a> {
+    /// The region.
+    pub region: &'a Region,
+    /// Its `RegionKind::Custom` script path.
+    pub script: &'a str,
+    /// Its `RegionKind::Custom` lifecycle flag.
+    pub pinned: bool,
+}
+
+/// Lay out `regions` as a system prompt and a conversation.
+///
+/// [`assemble_system`], with each `sliding_window` region rendered as
+/// conversation turns rather than handed back. Only a `custom` region
+/// reaches `render`, which pushes whatever blocks its script renders. The
+/// stored parts in [`SystemAssembly::lifted`] go in one user turn ahead of
+/// the conversation.
+///
+/// ```
+/// use leviath_core::{EntryKind, EvictionStrategy, Region, RegionKind};
+/// use leviath_core::context::assemble_context;
+///
+/// let mut task = Region::new("task".into(), RegionKind::Pinned, 1_000);
+/// task.add_entry("Summarize the report.", 5).unwrap();
+/// let mut history = Region::new(
+///     "conversation".into(),
+///     RegionKind::SlidingWindow { max_items: 50, eviction_strategy: EvictionStrategy::PerItem },
+///     10_000,
+/// );
+/// history.add_typed_entry("Here it is.", 4, EntryKind::UserMessage).unwrap();
+///
+/// let assembled = assemble_context([&task, &history], |_custom, _blocks| {});
+/// assert_eq!(assembled.system.blocks[0].text, "## task\nSummarize the report.");
+/// assert_eq!(assembled.conversation.len(), 1);
+/// ```
+pub fn assemble_context<'a>(
+    regions: impl IntoIterator<Item = &'a Region>,
+    mut render: impl FnMut(CustomRegion<'a>, &mut Vec<SystemBlock>),
+) -> ContextAssembly<'a> {
+    let mut turns = Vec::new();
+    // Only the two kinds `assemble_system` cannot render come back here: a
+    // custom region, and otherwise a sliding window.
+    let system = assemble_system_dyn(&mut regions.into_iter(), &mut |region, blocks| {
+        if let RegionKind::Custom { script, pinned } = &region.kind {
+            let custom = CustomRegion {
+                region,
+                script,
+                pinned: *pinned,
+            };
+            render(custom, blocks);
+        } else {
+            turns.extend(conversation::conversation_messages(region));
+        }
+    });
+    ContextAssembly {
+        system,
+        conversation: turns,
+    }
 }
 
 /// [`assemble_system`] compiled once rather than per caller: one body, so a

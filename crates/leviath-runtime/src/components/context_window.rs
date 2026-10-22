@@ -273,16 +273,15 @@ impl ContextWindow {
         &self,
         meta: &crate::custom_region::AssembleMeta,
     ) -> AssembledContext {
-        let mut messages: Vec<leviath_providers::Message> = Vec::new();
         // Messages a custom region rendered. Held apart from the conversation
         // and spliced in front of it once the regions are laid out.
         let mut preamble: Vec<leviath_providers::Message> = Vec::new();
 
         // The system side - which regions render, under what label, in what
-        // order, split where, with which cache hints - is provider-neutral and
-        // lives in `leviath_core::context`. The two kinds it cannot render come
-        // back here: the conversation becomes typed messages, and a custom
-        // region runs its script.
+        // order, split where, with which cache hints - and the conversation's
+        // turns are provider-neutral and live in `leviath_core::context`. The
+        // one kind it cannot render comes back here: a custom region runs its
+        // script.
         //
         // A region this stage does not attend to is held but not shown. Left
         // out here rather than dropped from the window, so a later stage that
@@ -291,35 +290,36 @@ impl ContextWindow {
             .regions
             .iter()
             .filter(|r| !self.hidden.contains(&r.name));
-        let system = leviath_core::context::assemble_system(visible, |region, system_blocks| {
-            match &region.kind {
-                // Custom (script-backed) regions render through their Rhai
-                // hook; a missing script or any hook failure falls back to
-                // the Temporary-style block inside `render_custom_region`,
-                // so a custom region is never silently dropped.
-                leviath_core::RegionKind::Custom { script, pinned } => {
-                    crate::custom_region::render_custom_region(
-                        crate::custom_region::RegionRender {
-                            region,
-                            script: self.region_scripts.get(script),
-                            pinned: *pinned,
-                            meta,
-                            window_current: self.current_tokens,
-                            window_max: self.max_tokens,
-                        },
-                        crate::custom_region::RenderSink {
-                            system_blocks,
-                            // Not into the conversation directly: wherever this
-                            // region sits in the manifest, what it renders comes
-                            // before the dialogue. See the splice below.
-                            messages: &mut preamble,
-                        },
-                    );
-                }
-                // The only other kind handed back: the conversation.
-                _ => push_conversation(region, &mut messages),
-            }
-        });
+        let assembled =
+            leviath_core::context::assemble_context(visible, |custom, system_blocks| {
+                // Custom (script-backed) regions render through their Rhai hook;
+                // a missing script or any hook failure falls back to the
+                // Temporary-style block inside `render_custom_region`, so a
+                // custom region is never silently dropped.
+                crate::custom_region::render_custom_region(
+                    crate::custom_region::RegionRender {
+                        region: custom.region,
+                        script: self.region_scripts.get(custom.script),
+                        pinned: custom.pinned,
+                        meta,
+                        window_current: self.current_tokens,
+                        window_max: self.max_tokens,
+                    },
+                    crate::custom_region::RenderSink {
+                        system_blocks,
+                        // Not into the conversation directly: wherever this
+                        // region sits in the manifest, what it renders comes
+                        // before the dialogue. See the splice below.
+                        messages: &mut preamble,
+                    },
+                );
+            });
+        let mut messages: Vec<leviath_providers::Message> = assembled
+            .conversation
+            .into_iter()
+            .map(leviath_providers::Message::from)
+            .collect();
+        let system = assembled.system;
         // The stored parts of every region that renders into the system
         // prompt, which is text. They travel in one user message ahead of the
         // conversation instead.
@@ -557,135 +557,6 @@ impl ContextWindow {
             .iter()
             .filter_map(|r| r.taint_level().map(|t| (r.name.clone(), t)))
             .collect()
-    }
-}
-
-/// A `sliding_window` region as typed messages, appended to `messages`.
-///
-/// Consecutive ToolResult entries are merged into a single user message with
-/// multiple tool_result content blocks (required by Anthropic: one assistant
-/// tool_use msg → one user tool_result msg).
-fn push_conversation(region: &Region, messages: &mut Vec<leviath_providers::Message>) {
-    use leviath_core::EntryKind;
-
-    let mut pending_tool_results: Vec<leviath_providers::ContentBlock> = Vec::new();
-
-    for entry in &region.content {
-        // Flush any pending tool results when we hit a non-ToolResult entry
-        if !matches!(entry.kind, EntryKind::ToolResult { .. }) && !pending_tool_results.is_empty() {
-            messages.push(leviath_providers::Message {
-                role: "user".to_string(),
-                content: leviath_providers::MessageContent::Blocks(std::mem::take(
-                    &mut pending_tool_results,
-                )),
-                cache_breakpoint: false,
-                reasoning: None,
-            });
-        }
-
-        match &entry.kind {
-            EntryKind::UserMessage => {
-                messages.push(leviath_providers::Message {
-                    role: "user".to_string(),
-                    content: mime::message_content(&entry.content),
-                    cache_breakpoint: false,
-                    reasoning: None,
-                });
-            }
-            EntryKind::AssistantTurn { tool_calls } => {
-                // Media a stage produced (an image a model drew)
-                // cannot ride the assistant turn that made it: a
-                // provider rejects an image inside an assistant
-                // turn (Anthropic answers 400), so a later stage
-                // that should see it never would. The assistant
-                // turn keeps its text and the stand-ins that name
-                // the media; the bytes follow in a user turn.
-                let lifted_media = mime::mime_blocks(&entry.content);
-                if tool_calls.is_empty() {
-                    messages.push(leviath_providers::Message {
-                        role: "assistant".to_string(),
-                        content: leviath_providers::MessageContent::Text(entry.content.to_string()),
-                        cache_breakpoint: false,
-                        reasoning: entry.reasoning.clone(),
-                    });
-                } else {
-                    let mut blocks = mime::text_blocks(&entry.content);
-                    blocks.extend(tool_calls.iter().map(mime::tool_use_block));
-                    messages.push(leviath_providers::Message {
-                        role: "assistant".to_string(),
-                        content: leviath_providers::MessageContent::Blocks(blocks),
-                        cache_breakpoint: false,
-                        reasoning: entry.reasoning.clone(),
-                    });
-                }
-                // Only when the turn has no tool calls: inserting
-                // a user turn between a tool_use and its
-                // tool_result would break the pairing a provider
-                // requires, and that rare turn's media stays a
-                // stand-in rather than risk it.
-                if tool_calls.is_empty() && !lifted_media.is_empty() {
-                    messages.push(leviath_providers::Message {
-                        role: "user".to_string(),
-                        content: leviath_providers::MessageContent::Blocks(lifted_media),
-                        cache_breakpoint: false,
-                        reasoning: None,
-                    });
-                }
-            }
-            EntryKind::ToolResult {
-                tool_call_id,
-                is_error,
-                ..
-            } => {
-                // Accumulate - will be flushed on next non-ToolResult or end
-                pending_tool_results.push(leviath_providers::ContentBlock::ToolResult {
-                    tool_use_id: tool_call_id.clone(),
-                    content: entry.content.to_string(),
-                    is_error: *is_error,
-                });
-                // A tool result is text on every wire; the
-                // parts it produced follow it in the same user
-                // turn, after every result block.
-                pending_tool_results.extend(mime::mime_blocks(&entry.content));
-            }
-            EntryKind::Text => {
-                let trimmed = entry.content.trim();
-                if let Some(rest) = trimmed.strip_prefix("Assistant: ") {
-                    messages.push(leviath_providers::Message {
-                        role: "assistant".to_string(),
-                        content: rest.to_string().into(),
-                        cache_breakpoint: false,
-                        reasoning: None,
-                    });
-                } else if let Some(rest) = trimmed.strip_prefix("User: ") {
-                    messages.push(leviath_providers::Message {
-                        role: "user".to_string(),
-                        content: rest.to_string().into(),
-                        cache_breakpoint: false,
-                        reasoning: None,
-                    });
-                } else {
-                    messages.push(leviath_providers::Message {
-                        role: "user".to_string(),
-                        content: mime::message_content(&entry.content),
-                        cache_breakpoint: false,
-                        reasoning: None,
-                    });
-                }
-            }
-        }
-    }
-
-    // Flush any remaining tool results at the end of the region
-    if !pending_tool_results.is_empty() {
-        messages.push(leviath_providers::Message {
-            role: "user".to_string(),
-            content: leviath_providers::MessageContent::Blocks(std::mem::take(
-                &mut pending_tool_results,
-            )),
-            cache_breakpoint: false,
-            reasoning: None,
-        });
     }
 }
 

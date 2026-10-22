@@ -365,6 +365,7 @@ fn context() -> crate::state::ContextState {
         meta: EntryMeta::None,
         key: None,
         reasoning: None,
+        sticky: false,
     };
     let call = ToolCallState {
         id: "c1".into(),

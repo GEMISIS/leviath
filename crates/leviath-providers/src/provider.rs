@@ -486,6 +486,7 @@ impl ModelInfo {
 }
 
 mod content;
+mod conversation;
 pub(crate) use content::json_number;
 pub use content::{ContentBlock, MessageContent, SystemBlock};
 

@@ -526,6 +526,8 @@ pub(crate) fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> an
                 kind: entry.kind.clone(),
                 key: entry.key.clone(),
                 reasoning: entry.reasoning.clone(),
+                seq: 0,
+                sticky: false,
             });
         }
         live.current_tokens = region.current_tokens;

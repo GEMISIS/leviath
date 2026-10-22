@@ -25,6 +25,11 @@ same list.
 - When a stage runs out of routes, its error names every provider and model
   it was moved off, with why, followed by the one that failed last.
 
+- **Breaking, library.** `leviath_core::RegionEntry` has two new public
+  fields, `seq` and `sticky`, and `leviath_runtime::state::EntryState` has
+  `sticky`. Code that builds either with a struct literal must set them;
+  `seq: 0` and `sticky: false` keep the old meaning. Run files keep their
+  layout: an entry that is not sticky is written byte for byte as before.
 - **Breaking, library.** `leviath_core::mime::hydrate::sends_natively` and
   `leviath_providers::mime::sends_natively` take the `MimeRegistry`, and
   answer `false` for a type it says is text. Pass the registry the request is
@@ -507,6 +512,22 @@ same list.
 
 ### Fixed
 
+- `Region::upsert_by_key` keeps a keyed region inside its budget when it
+  replaces a key with something larger, by evicting the least recently
+  written other keys. A write too big for the region now fails before
+  anything is evicted, where a new key used to empty the region first and
+  then fail.
+- `Region::add_keyed_entry` keeps to a keyed region's `max_entries`. A full
+  region lets its least recently written entry go, or refuses under
+  `admission = "reject"`. It used to grow past the cap.
+- A keyed region evicts the entry written least recently even when several
+  were written in the same second. Recency was a whole-second timestamp, so
+  ties fell to whichever entry came first in the region.
+- `describe_in_prompt` shows a `keyed`, `temporary`, `clearable` or
+  `compacting` region's `description` to the model, on the line under the
+  region's `[name]:` heading. It only worked for `pinned`, `compact_history`
+  and `checklist` regions. A region without the flag renders exactly as
+  before; to keep a region's old prompt, drop the flag.
 - Two runs that each declare an MCP server under the same name, but with a
   different command, arguments, environment, URL or headers, each reach
   their own server. The daemon shared one connection per server name, so
@@ -1103,6 +1124,23 @@ same list.
 
 ### Added
 
+- `leviath-core` region entries can be sticky: `RegionEntry::sticky`,
+  `Region::upsert_by_key_sticky` and `Region::set_sticky`. No eviction takes
+  a sticky entry, whether a keyed region's LRU, a sliding window's roll-off,
+  a full window's cascade or a clearable region's wipe. A write that could
+  only fit by evicting one fails with an error that says so.
+- `RegionEntry::seq`, a per-region write counter that orders keyed
+  eviction exactly. `Region::restamp_recency` rebuilds it for entries loaded
+  from a store that keeps none, as a resumed run does.
+- `leviath_core::tool_routing`: routing a tool result into a region by tool
+  name, capping it, storing it with the truncated fallback, and the pointer
+  text left in the conversation. The runtime routes every result through
+  it, so a program calling a model itself shows the same text a run does.
+- `leviath_core::context::conversation` and `assemble_context`: a
+  `sliding_window` region laid out as provider-neutral turns, with tool
+  results paired and merged. `leviath-providers` converts them with
+  `Message::from` and `ContentBlock::from_conversation`, and the runtime
+  builds its requests that way.
 - GraphQL `catalog` rows carry `pricing`, from the same price file and
   `[model_capabilities]` rates a run on that provider is billed by, so offers
   from a provider not set up here can be ranked.

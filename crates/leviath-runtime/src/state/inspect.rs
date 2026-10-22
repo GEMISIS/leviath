@@ -466,6 +466,7 @@ pub fn entry_of(entry: &RegionEntry) -> EntryState {
             }),
         key: entry.key.clone(),
         reasoning: entry.reasoning.clone(),
+        sticky: entry.sticky,
     }
 }
 

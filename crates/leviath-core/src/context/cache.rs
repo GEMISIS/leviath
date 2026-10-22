@@ -120,7 +120,7 @@ pub fn push_bracketed(blocks: &mut Vec<SystemBlock>, region: &Region, hint: Cach
     };
     for (index, chunk) in chunks.iter().enumerate() {
         let text = match index {
-            0 => format!("[{}]:\n{}", region.name, chunk),
+            0 => format!("{}{}", super::bracketed_heading(region), chunk),
             _ => format!("[{} continued]:\n{}", region.name, chunk),
         };
         blocks.push(SystemBlock {

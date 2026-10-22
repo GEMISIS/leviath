@@ -830,6 +830,7 @@ mod tests {
             meta: leviath_runtime::state::EntryMeta::None,
             key: None,
             reasoning: None,
+            sticky: false,
         }
     }
 

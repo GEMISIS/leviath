@@ -34,7 +34,9 @@ impl Region {
     /// `ToolResult` entries that answer it, so eviction never strands a
     /// `tool_use` that a provider would then reject.
     pub fn make_room(&mut self, tokens: usize) -> usize {
-        if tokens > self.max_tokens {
+        // Sticky entries stay whatever happens, so their tokens are as good
+        // as part of the write when asking whether it can ever fit.
+        if tokens + self.sticky_tokens() > self.max_tokens {
             return 0;
         }
         let mut evicted = 0;
@@ -67,24 +69,63 @@ impl Region {
         count
     }
 
-    /// Evict the least-recently-updated entry (LRU) for HashMap regions.
-    pub(super) fn evict_lru_entry(&mut self) {
-        if self.content.is_empty() {
-            return;
-        }
-        let oldest_idx = self
+    /// Evict the least recently written entry that is neither sticky nor
+    /// under `except`, and report whether there was one.
+    ///
+    /// Least recent is the lowest [`RegionEntry::seq`], then the earliest
+    /// timestamp, then the first position: an entry built by hand with no
+    /// sequence is older than anything the region stamped.
+    pub(super) fn evict_lru_entry(&mut self, except: Option<&str>) -> bool {
+        let oldest = self
             .content
             .iter()
             .enumerate()
-            .min_by_key(|(_, e)| e.timestamp)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        let tokens = self.content[oldest_idx].tokens;
-        self.content.remove(oldest_idx);
+            .filter(|(_, e)| !e.sticky && (except.is_none() || e.key.as_deref() != except))
+            .min_by_key(|(_, e)| (e.seq, e.timestamp))
+            .map(|(i, _)| i);
+        let Some(index) = oldest else {
+            return false;
+        };
+        let tokens = self.content[index].tokens;
+        self.content.remove(index);
         self.current_tokens -= tokens;
         if let Some(taint) = &mut self.taint {
-            taint.remove_at(oldest_idx);
+            taint.remove_at(index);
         }
+        true
+    }
+
+    /// Evict every entry that is not [`sticky`](RegionEntry::sticky), and
+    /// report the tokens freed.
+    ///
+    /// What wiping a region wholesale means under pressure: a clearable
+    /// region dumped to make room keeps the entries its writer marked to
+    /// keep. [`clear`](Self::clear) is the explicit wipe, and takes those too.
+    pub fn evict_all(&mut self) -> usize {
+        let before = self.current_tokens;
+        let mut index = 0;
+        while index < self.content.len() {
+            if self.content[index].sticky {
+                index += 1;
+                continue;
+            }
+            let entry = self.content.remove(index);
+            self.current_tokens -= entry.tokens;
+            if let Some(taint) = &mut self.taint {
+                taint.remove_at(index);
+            }
+        }
+        before - self.current_tokens
+    }
+
+    /// Tokens held by [`sticky`](RegionEntry::sticky) entries, which no
+    /// eviction frees.
+    pub fn sticky_tokens(&self) -> usize {
+        self.content
+            .iter()
+            .filter(|e| e.sticky)
+            .map(|e| e.tokens)
+            .sum()
     }
 
     /// Enforce the SlidingWindow max_items limit by removing oldest entries.
@@ -157,42 +198,38 @@ impl Region {
         }
     }
 
-    /// Remove the oldest entry (for Temporary regions).
+    /// Remove the oldest entry that is not [`sticky`](RegionEntry::sticky),
+    /// with the rest of its turn group.
+    ///
+    /// `None` when every entry is sticky, or there are none.
     pub fn remove_oldest(&mut self) -> Option<RegionEntry> {
-        if self.content.is_empty() {
-            return None;
-        }
         // Respect turn groups: an AssistantTurn with tool_calls must be
         // evicted together with its following ToolResult entries to avoid
-        // orphaned tool_use/tool_result blocks that providers reject.
-        let group_size = self.turn_group_size_at(0);
-        let mut first = None;
-        let mut extra_tokens = 0usize;
-        // `group_size <= content.len()`, so the window never empties mid-group;
-        // the `!is_empty()` guard lives in the loop condition (no dead break arm).
-        let mut i = 0;
-        while i < group_size && !self.content.is_empty() {
-            let entry_tokens = self.content[0].tokens;
-            self.current_tokens -= entry_tokens;
-            let removed = self.content.remove(0);
-            if let Some(taint) = &mut self.taint {
-                taint.remove_oldest();
-            }
-            if i == 0 {
-                first = Some(removed);
-            } else {
-                extra_tokens += entry_tokens;
-            }
-            i += 1;
+        // orphaned tool_use/tool_result blocks that providers reject. A group
+        // with a sticky entry in it stays whole, for the same reason.
+        let mut start = 0;
+        let mut group_size = self.turn_group_size_at(0);
+        while group_size > 0
+            && self.content[start..start + group_size]
+                .iter()
+                .any(|e| e.sticky)
+        {
+            start += group_size;
+            group_size = self.turn_group_size_at(start);
         }
-        // Embed extra group tokens in the returned entry so callers that use
-        // `entry.tokens` to adjust their own totals account for the full group.
-        // `first` is `Some` whenever we removed anything (guaranteed by the
-        // non-empty early return), so `map` always runs; `extra_tokens` is 0
-        // for a single-entry group, making the add a no-op there.
-        first.map(|mut entry| {
-            entry.tokens += extra_tokens;
-            entry
-        })
+        let mut removed = self.content.drain(start..start + group_size);
+        let mut first = removed.next()?;
+        // Embed the rest of the group's tokens in the returned entry so
+        // callers that use `entry.tokens` to adjust their own totals account
+        // for the full group.
+        let extra_tokens: usize = removed.map(|e| e.tokens).sum();
+        first.tokens += extra_tokens;
+        self.current_tokens -= first.tokens;
+        if let Some(taint) = &mut self.taint {
+            for _ in 0..group_size {
+                taint.remove_at(start);
+            }
+        }
+        Some(first)
     }
 }

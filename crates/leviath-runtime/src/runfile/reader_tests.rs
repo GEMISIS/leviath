@@ -37,6 +37,7 @@ pub(crate) fn entry(text: &str, kind: EntryKind) -> EntryState {
         meta: EntryMeta::None,
         key: None,
         reasoning: None,
+        sticky: false,
     }
 }
 

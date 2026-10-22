@@ -53,7 +53,10 @@ pub struct TaintState {
 }
 
 /// One entry in a region.
+// The run file's binary frames keep the layout entries had before `sticky`
+// (see `entry_frame`); readable formats write every field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(remote = "Self")]
 pub struct EntryState {
     /// Its text.
     pub text: String,
@@ -71,7 +74,14 @@ pub struct EntryState {
     pub key: Option<String>,
     /// The model's reasoning that came with it, when the provider returned any.
     pub reasoning: Option<String>,
+    /// Whether eviction leaves it alone. A sticky entry goes only when it is
+    /// removed by name or its region is cleared.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sticky: bool,
 }
+
+#[path = "entry_frame.rs"]
+mod entry_frame;
 
 /// What kind of message an entry is.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

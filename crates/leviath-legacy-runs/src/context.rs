@@ -114,6 +114,7 @@ fn entry(e: &RegionEntrySnapshot, losses: &mut Losses) -> EntryState {
         meta: meta(e.metadata.as_ref(), losses),
         key: e.key.clone(),
         reasoning: e.reasoning.clone(),
+        sticky: false,
     }
 }
 

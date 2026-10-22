@@ -359,6 +359,8 @@ fn entry(content: EntryContent, kind: CoreKind) -> RegionEntry {
         kind,
         key: None,
         reasoning: None,
+        seq: 0,
+        sticky: false,
     }
 }
 

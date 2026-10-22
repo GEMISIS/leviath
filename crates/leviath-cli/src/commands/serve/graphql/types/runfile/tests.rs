@@ -137,6 +137,7 @@ fn entry(kind: EntryKind, meta: EntryMeta) -> EntryState {
         meta,
         key: Some("k".into()),
         reasoning: Some("because".into()),
+        sticky: false,
     }
 }
 

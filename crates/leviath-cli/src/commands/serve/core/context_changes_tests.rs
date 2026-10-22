@@ -21,6 +21,7 @@ fn entry(text: &str, tokens: u32) -> EntryState {
         meta: EntryMeta::None,
         key: None,
         reasoning: None,
+        sticky: false,
     }
 }
 

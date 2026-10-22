@@ -149,6 +149,7 @@ fn window(state: &mut RunState, stage: &str, tokens: usize) {
                 meta: EntryMeta::None,
                 key: None,
                 reasoning: None,
+                sticky: false,
             });
         }
     }
