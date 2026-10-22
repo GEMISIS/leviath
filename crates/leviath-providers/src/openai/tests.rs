@@ -701,3 +701,32 @@ fn effort_goes_to_reasoning_models_only() {
         );
     }
 }
+
+/// A `gpt-audio` stage that declares audio output is answered over Chat
+/// Completions, buffered or streamed, and its audio arrives as a part.
+#[tokio::test]
+async fn a_gpt_audio_stage_declaring_audio_output_speaks_through_chat_completions() {
+    let reply = serde_json::json!({
+        "choices": [{ "message": { "audio": { "data": "SUQz", "transcript": "hi" } },
+            "finish_reason": "stop" }]
+    });
+    let (url, bodies) = spawn_mock_sequence(vec![
+        (200, "OK", reply.to_string().into_bytes()),
+        (200, "OK", reply.to_string().into_bytes()),
+    ])
+    .await;
+    let provider = provider_with_url(url);
+    let request = InferenceRequest {
+        model: "gpt-audio".into(),
+        extra: serde_json::json!({ "output_mimes": ["audio/mpeg"] }),
+        ..simple_request()
+    };
+    let spoken = provider.infer(&request).await.expect("audio");
+    assert_eq!(spoken.parts.len(), 1);
+    assert_eq!(spoken.content, "hi");
+    let streamed = provider.infer_stream(&request).await.expect("a stream");
+    let collected = crate::provider::collect_stream(streamed).await.unwrap();
+    assert_eq!(collected.parts.len(), 1);
+    let body = sent_json(&bodies.lock().unwrap()[0]);
+    assert_eq!(body["modalities"], serde_json::json!(["text", "audio"]));
+}

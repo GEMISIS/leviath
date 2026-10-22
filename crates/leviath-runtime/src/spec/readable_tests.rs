@@ -563,6 +563,54 @@ fn an_interactive_mode_keeps_its_binary_shape() {
     }
 }
 
+/// A stage's `prompt_regions` read and write in readable formats while the run
+/// file keeps the fields a stage always had: a stage that names none is the
+/// bytes it always was, and one that names some carries them in its mode's
+/// slot, whatever the mode, and gets them back out.
+#[test]
+fn a_stages_prompt_regions_keep_the_binary_shape() {
+    use crate::spec::graph::StageDef;
+    let plain = crate::test_graph::stage("render");
+    assert!(plain.prompt_regions.is_empty());
+    let text = serde_json::to_value(&plain).unwrap();
+    assert!(text.get("prompt_regions").is_none(), "omitted when empty");
+    let plain_bin = postcard::to_stdvec(&plain).unwrap();
+    assert_eq!(postcard::from_bytes::<StageDef>(&plain_bin).unwrap(), plain);
+
+    let modes = [
+        StageMode::Autonomous,
+        StageMode::Output,
+        interactive(None),
+        interactive(Some(900)),
+        StageMode::InteractivePoints(Vec::new()),
+        StageMode::FanOut(crate::test_graph::fan_out_to("split", "work")),
+    ];
+    for mode in modes {
+        let stage = StageDef {
+            mode: mode.clone(),
+            prompt_regions: vec![region("brief"), region("style")],
+            ..plain.clone()
+        };
+        let bin = postcard::to_stdvec(&stage).unwrap();
+        assert_eq!(postcard::from_bytes::<StageDef>(&bin).unwrap(), stage);
+        let json = serde_json::to_value(&stage).unwrap();
+        assert_eq!(
+            json["prompt_regions"],
+            serde_json::json!(["brief", "style"])
+        );
+        assert_eq!(serde_json::from_value::<StageDef>(json).unwrap(), stage);
+
+        // The same stage without the setting is the shorter, older bytes.
+        let bare = StageDef {
+            mode,
+            ..plain.clone()
+        };
+        let bare_bin = postcard::to_stdvec(&bare).unwrap();
+        assert!(bare_bin.len() < bin.len());
+        assert_eq!(postcard::from_bytes::<StageDef>(&bare_bin).unwrap(), bare);
+    }
+}
+
 /// A model block's `effort` reads and writes in readable formats, while the
 /// run file keeps the four fields a model block always had: a block with no
 /// effort is the same bytes as before, and one with an effort keeps it among

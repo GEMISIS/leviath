@@ -1,5 +1,6 @@
 //! Stage transitions: cursors, gates, stuck detection, spawning, and transition choices.
 
+use super::watchdog::note_stuck;
 use super::*;
 use crate::insert::RunSpecC;
 use crate::spec::graph::{EdgeCarry, EdgeCondition, EdgeDef, GateDef, RunGraph, StageDef};
@@ -431,6 +432,18 @@ pub(crate) fn resolve_transition(
                     .map(|next| StageResolution::Next(Box::new(next)))
                     .unwrap_or(StageResolution::Resume)
             }
+            Some(StageOutcome::Looped(reason)) => {
+                // The loop guard ended the stage. A `stuck` edge is the author's
+                // answer to a stage that cannot go on; without one it ends like a
+                // cut-off stage, and its successor's gate still applies.
+                note_stuck(&mut window, stage.name.as_str(), reason);
+                find_conditioned_edge(graph, stage, &visits.0, EdgeCondition::Stuck)
+                    .or_else(|| {
+                        find_conditioned_edge(graph, stage, &visits.0, EdgeCondition::MaxIterations)
+                    })
+                    .map(|next| StageResolution::Next(Box::new(next)))
+                    .unwrap_or_else(|| resolve_transition_sync(graph, stage, &visits.0))
+            }
             None => resolve_transition_sync(graph, stage, &visits.0),
         };
         // A dead end resolves like a stage error: down the `dead_end` edge, then
@@ -452,6 +465,40 @@ pub(crate) fn resolve_transition(
                 ),
             ),
             other => other,
+        };
+        // A gate guards the stage behind it however the stage before it ended.
+        // A stage cut off at its cap, or ended by the loop guard, falls back to
+        // its plain successor; that edge's gate (a required region, say) still
+        // has to hold, or the successor runs on nothing. There is no holding the
+        // stage for another pass here - it has already ended - so a failing gate
+        // routes down the stage's `max_iterations`/`error` edge, else fails the run.
+        let resolution = match (&resolution, outcome) {
+            (StageResolution::Next(next), Some(_)) => {
+                let message = match gate_blocks(next.gate.as_ref(), stage, &progress, &window) {
+                    GateDecision::Block(message) => Some(message),
+                    GateDecision::Forced => Some(format!(
+                        "stage '{}' ended before satisfying the gate on its way to '{}'",
+                        stage.name, graph.stages[next.idx].name
+                    )),
+                    GateDecision::Pass => None,
+                };
+                match message {
+                    Some(message) => escape(
+                        graph,
+                        stage,
+                        &visits,
+                        [EdgeCondition::MaxIterations, EdgeCondition::Error],
+                        &mut window,
+                        &mut state,
+                        &format!(
+                            "stage '{}' ended without satisfying the gate to '{}': {message}",
+                            stage.name, graph.stages[next.idx].name
+                        ),
+                    ),
+                    None => resolution,
+                }
+            }
+            _ => resolution,
         };
         match resolution {
             StageResolution::Terminal => {

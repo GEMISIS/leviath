@@ -320,6 +320,7 @@ and the dashboard show, and the first stage is where a run starts unless `entry`
 | `transition_prompt` | none | Extra guidance when the model picks the next edge. |
 | `routing` | the graph's | How that pick is retried, and what a failure does. See [Routing](#routing). |
 | `hide`, `reset` | none | Regions this stage does not show, or empties on entry. |
+| `prompt_regions` | none | For a model that takes its prompt from text (an image, video or speech model): the regions that make up the prompt, in order. Unset, every region the stage shows is read. See [Media prompts](/docs/context#media-prompts). |
 | `layout` | the graph's | A whole layout for this stage alone. |
 | `add` | none | Regions shown beside the graph's layout, keyed by name. Not with `layout`. |
 | `hooks` | none | Scripts run at points of the stage's life. |

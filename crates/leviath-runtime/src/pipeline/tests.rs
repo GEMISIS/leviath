@@ -12200,6 +12200,96 @@ fn spawn_ready_agent(
         .id()
 }
 
+fn call_of(name: &str, path: &str) -> crate::components::ToolCall {
+    crate::components::ToolCall {
+        tool_id: "t".to_string(),
+        name: name.to_string(),
+        arguments: serde_json::json!({ "path": path }),
+        thought_signature: None,
+    }
+}
+
+/// The same tool with the same arguments, over and over, is nudged once and
+/// then stopped; different arguments are different calls.
+#[test]
+fn the_loop_guard_nudges_at_the_limit_then_ends_the_stage_on_the_next_repeat() {
+    use crate::pipeline::loop_guard::{LOOP_REPEAT_LIMIT, LoopTrip, record_call_repeat};
+    let mut progress = StageProgress::default();
+    for round in 1..LOOP_REPEAT_LIMIT {
+        record_call_repeat(&mut progress.loop_guard, &call_of("list_dir", "."));
+        record_call_repeat(
+            &mut progress.loop_guard,
+            &call_of("list_dir", &format!("dir{round}")),
+        );
+        assert_eq!(progress.loop_guard.trip, LoopTrip::None, "round {round}");
+    }
+    record_call_repeat(&mut progress.loop_guard, &call_of("list_dir", "."));
+    assert_eq!(
+        progress.loop_guard.trip,
+        LoopTrip::Nudge("list_dir".to_string())
+    );
+    assert!(progress.loop_guard.nudged);
+
+    // Acted on and cleared by the tick that reads it; another call at the
+    // limit does not nudge a second time.
+    progress.loop_guard.trip = LoopTrip::None;
+    for _ in 0..LOOP_REPEAT_LIMIT {
+        record_call_repeat(&mut progress.loop_guard, &call_of("read_file", "a.txt"));
+    }
+    assert_eq!(progress.loop_guard.trip, LoopTrip::None);
+
+    // The call that was nudged about, made again.
+    record_call_repeat(&mut progress.loop_guard, &call_of("list_dir", "."));
+    match &progress.loop_guard.trip {
+        LoopTrip::Stuck(reason) => assert!(reason.contains("list_dir"), "{reason}"),
+        other => panic!("expected the stage to be stuck, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_loop_guard_nudge_names_the_tool() {
+    let nudge = crate::pipeline::loop_guard::loop_nudge("list_dir");
+    assert!(nudge.contains("`list_dir`"), "{nudge}");
+}
+
+/// The tick after the reply acts on what the guard found: the nudge goes into
+/// context, and a stuck stage ends as `Looped` instead of inferring again.
+#[test]
+fn enforce_acts_on_the_loop_guard() {
+    use crate::pipeline::loop_guard::LoopTrip;
+    let mut world = World::new();
+    let spawn = |world: &mut World, trip: LoopTrip, with_window: bool| {
+        let e = spawn_ready_agent(world, Some(20), 3, AgentStatus::Active);
+        world.get_mut::<StageProgress>(e).unwrap().loop_guard.trip = trip;
+        if with_window {
+            world.entity_mut(e).insert(conversation_window());
+        }
+        e
+    };
+    let nudged = spawn(&mut world, LoopTrip::Nudge("list_dir".to_string()), true);
+    let windowless = spawn(&mut world, LoopTrip::Nudge("list_dir".to_string()), false);
+    let stuck = spawn(&mut world, LoopTrip::Stuck("same call".to_string()), true);
+    let quiet = spawn(&mut world, LoopTrip::None, true);
+    run_enforce(&mut world);
+
+    assert!(conversation_text(&world, nudged).contains("`list_dir`"));
+    assert!(world.get::<ReadyToInfer>(nudged).is_some(), "it goes on");
+    assert_eq!(
+        world.get::<StageProgress>(nudged).unwrap().loop_guard.trip,
+        LoopTrip::None,
+        "told once"
+    );
+    assert!(world.get::<ReadyToInfer>(windowless).is_some());
+
+    assert!(world.get::<ReadyToInfer>(stuck).is_none());
+    assert!(world.get::<ResolveTransition>(stuck).is_some());
+    assert_eq!(
+        world.get::<StageOutcome>(stuck),
+        Some(&StageOutcome::Looped("same call".to_string()))
+    );
+    assert!(world.get::<StageOutcome>(quiet).is_none());
+}
+
 fn run_enforce(world: &mut World) {
     let mut s = Schedule::default();
     s.add_systems(enforce_max_iterations);
@@ -13163,6 +13253,158 @@ fn resolve_transition_routes_max_iterations_edge_else_falls_through() {
         text2.contains("Stage 'a' hit its iteration cap (3)"),
         "{text2}"
     );
+}
+
+/// The gate on the plain edge out of a stage that was cut off still holds: the
+/// stage behind it must not run on work that was never done.
+#[test]
+fn a_gate_still_applies_when_the_stage_ended_on_an_outcome() {
+    let gated = || gated_edge("b", Some(gate(None, Some("write the brief first"))));
+    for outcome in [
+        StageOutcome::MaxIterations,
+        StageOutcome::Looped("`list_dir` was called 4 times".to_string()),
+    ] {
+        // No escape edge: the run fails with the gate's message, and the
+        // gated stage is never entered.
+        let a = writing_stage("a", vec![named("n", gated())]);
+        let b = stage_named("b", None, false, None);
+        let mut world = World::new();
+        let e = spawn_outcome_agent(
+            &mut world,
+            blueprint(vec![a, b]),
+            outcome.clone(),
+            AgentStatus::Active,
+        );
+        run_transition(&mut world);
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0, "{outcome:?}");
+        match &world.get::<AgentState>(e).unwrap().status {
+            AgentStatus::Error { message } => {
+                assert!(message.contains("write the brief first"), "{message}");
+                assert!(message.contains("stage 'a'"), "{message}");
+            }
+            other => panic!("expected the run to fail, got {other:?}"),
+        }
+        assert!(world.get::<StageOutcome>(e).is_none());
+        assert!(world.get::<ResolveTransition>(e).is_none());
+
+        // An `error` edge takes the run to its report stage instead.
+        let a = writing_stage(
+            "a",
+            vec![
+                named("n", gated()),
+                named("e", conditioned_edge("report", EdgeCondition::Error)),
+            ],
+        );
+        let b = stage_named("b", None, false, None);
+        let report = stage_named("report", None, false, None);
+        let mut world = World::new();
+        let e = spawn_outcome_agent(
+            &mut world,
+            blueprint(vec![a, b, report]),
+            outcome.clone(),
+            AgentStatus::Active,
+        );
+        run_transition(&mut world);
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 2, "{outcome:?}");
+        assert!(conversation_text(&world, e).contains("write the brief first"));
+
+        // A gate that holds lets the cut-off stage go on, as it always did.
+        let a = writing_stage("a", vec![named("n", gated())]);
+        let b = stage_named("b", None, false, None);
+        let mut world = World::new();
+        let e = spawn_outcome_agent(
+            &mut world,
+            blueprint(vec![a, b]),
+            outcome.clone(),
+            AgentStatus::Active,
+        );
+        world
+            .get_mut::<StageProgress>(e)
+            .unwrap()
+            .modifying_tool_calls = 1;
+        run_transition(&mut world);
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1, "{outcome:?}");
+    }
+}
+
+/// A gate whose re-run budget is spent gives up with `Forced` when a stage
+/// is held; a stage that has already ended has nothing to re-run, so that
+/// too ends the run rather than entering the gated stage.
+#[test]
+fn a_spent_gate_budget_does_not_let_an_ended_stage_through() {
+    let a = writing_stage(
+        "a",
+        vec![named(
+            "n",
+            gated_edge("b", Some(gate(None, Some("write the brief first")))),
+        )],
+    );
+    let b = stage_named("b", None, false, None);
+    let mut world = World::new();
+    let e = spawn_outcome_agent(
+        &mut world,
+        blueprint(vec![a, b]),
+        StageOutcome::MaxIterations,
+        AgentStatus::Active,
+    );
+    world.get_mut::<StageProgress>(e).unwrap().gate_reentries = 99;
+    run_transition(&mut world);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0);
+    match &world.get::<AgentState>(e).unwrap().status {
+        AgentStatus::Error { message } => assert!(message.contains("gate"), "{message}"),
+        other => panic!("expected the run to fail, got {other:?}"),
+    }
+}
+
+/// The loop guard ends a stage like a cut-off one when no `stuck` edge says
+/// otherwise, and follows the `stuck` edge when there is one.
+#[test]
+fn a_looped_stage_follows_its_stuck_edge_else_falls_through() {
+    let mut stuck = conditioned_edge("reassess", EdgeCondition::Stuck);
+    stuck.stuck = Some(stuck_cfg(Some(20), None, None, None));
+    let a = stage_named(
+        "a",
+        Some(vec![named("s", stuck), named("n", plain_edge("b"))]),
+        false,
+        None,
+    );
+    let b = stage_named("b", None, false, None);
+    let reassess = stage_named("reassess", None, false, None);
+    let mut world = World::new();
+    let e = spawn_outcome_agent(
+        &mut world,
+        blueprint(vec![a, b, reassess]),
+        StageOutcome::Looped("looping".to_string()),
+        AgentStatus::Active,
+    );
+    run_transition(&mut world);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 2);
+    assert!(conversation_text(&world, e).contains("looping"));
+
+    let mi = conditioned_edge("capped", EdgeCondition::MaxIterations);
+    let a = stage_named("a", Some(vec![named("m", mi)]), false, None);
+    let capped = stage_named("capped", None, false, None);
+    let mut world = World::new();
+    let e = spawn_outcome_agent(
+        &mut world,
+        blueprint(vec![a, capped]),
+        StageOutcome::Looped("looping".to_string()),
+        AgentStatus::Active,
+    );
+    run_transition(&mut world);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+
+    let a = stage_named("a", Some(vec![named("n", plain_edge("b"))]), false, None);
+    let b = stage_named("b", None, false, None);
+    let mut world = World::new();
+    let e = spawn_outcome_agent(
+        &mut world,
+        blueprint(vec![a, b]),
+        StageOutcome::Looped("looping".to_string()),
+        AgentStatus::Active,
+    );
+    run_transition(&mut world);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
 }
 
 #[test]

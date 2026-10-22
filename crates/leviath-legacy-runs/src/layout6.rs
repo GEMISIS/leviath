@@ -116,6 +116,7 @@ impl From<StageDef> for graph::StageDef {
             mode: s.mode,
             layout: s.layout,
             hide: s.hide,
+            prompt_regions: Vec::new(),
             reset: s.reset,
             tool_permissions: s.tool_permissions,
             requires_children: s.requires_children,

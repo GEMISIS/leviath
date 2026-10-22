@@ -981,6 +981,26 @@ stage alone. The stage then starts on a clean conversation with only what its vi
 such as the routed image in `artwork`. A re-entered stage clears them again each visit. Unlike `hide`, `reset` may
 name `conversation`; like `hide`, a name no layout declares is refused.
 
+### Media prompts
+
+A model that makes an image, video or speech takes its prompt from the request's text. A stage
+that has no message of its own reads that text from the regions it shows, all of them joined, which
+is rarely what its author meant when a region holds standing instructions, a style guide or
+upstream notes beside the one line to draw. `prompt_regions` names the regions the prompt is made
+of:
+
+```toml
+[[graph.stages]]
+name = "render"
+prompt_regions = ["brief"]
+```
+
+The prompt is then exactly those regions' text, in the order listed, and nothing else: not the other
+regions, not the conversation. A listed region that is empty leaves the prompt empty, and the call
+fails for want of a prompt rather than running on some other region's text. Each name must be a
+region the layout declares (`lev validate` refuses one that is not). Unset, the stage reads its
+prompt as before. Named regions are read from the regions the stage shows, so do not `hide` them.
+
 ## Continuing a finished run
 
 A run that has finished can be sent a new message, and it goes back to work on it: "make the cape

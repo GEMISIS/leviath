@@ -428,6 +428,9 @@ impl Provider for OpenAIProvider {
         if let Some(kind) = media::kind(&request.model) {
             return self.run_media(kind, request).await;
         }
+        if media::speaks_in_chat(request) {
+            return media::chat_audio(&self.endpoint, request).await;
+        }
         // The route streams; a buffered call is the stream collected, so the
         // two paths cannot read the same answer differently.
         crate::provider::collect_stream(self.infer_stream(request).await?).await
@@ -440,6 +443,11 @@ impl Provider for OpenAIProvider {
         if let Some(kind) = media::kind(&request.model) {
             return Ok(crate::media::one_chunk(
                 self.run_media(kind, request).await?,
+            ));
+        }
+        if media::speaks_in_chat(request) {
+            return Ok(crate::media::one_chunk(
+                media::chat_audio(&self.endpoint, request).await?,
             ));
         }
         tracing::debug!(model = %request.model, "Calling OpenAI API");

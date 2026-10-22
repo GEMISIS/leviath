@@ -146,6 +146,7 @@ impl From<StageDef> for graph::StageDef {
             max_iterations: s.max_iterations,
             layout: s.layout,
             hide: s.hide,
+            prompt_regions: Vec::new(),
             reset: s.reset,
             tool_permissions: s.tool_permissions,
             requires_children: s.requires_children,

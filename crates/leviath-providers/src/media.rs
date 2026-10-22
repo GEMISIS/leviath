@@ -191,6 +191,9 @@ pub(crate) fn first_part(request: &InferenceRequest, want: impl Fn(&str) -> bool
 /// The texture prompt an upstream stage wrote lands here, as the text of the
 /// region it wrote it to; it is the dynamic hint the operation textures with.
 pub(crate) fn request_text(request: &InferenceRequest) -> String {
+    if let Some(names) = prompt_regions(request) {
+        return regions_text(request, &names);
+    }
     // Assembly emits a stored part as a pointer text block ("[region] [mime,
     // size] name") beside its bytes block. That pointer is not the user's
     // prompt, so exclude any text carrying a stored part's stand-in, or the
@@ -256,6 +259,38 @@ pub(crate) fn request_text(request: &InferenceRequest) -> String {
         }
     }
     chunks.join("\n").trim().to_string()
+}
+
+/// The regions the stage named as its prompt, in order. `None` when it named
+/// none, and the prompt is read as it always was.
+fn prompt_regions(request: &InferenceRequest) -> Option<Vec<String>> {
+    let names: Vec<String> = request
+        .extra
+        .get(crate::provider::PROMPT_REGIONS_KEY)?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    (!names.is_empty()).then_some(names)
+}
+
+/// The text of exactly the named regions, in the order named. Nothing else
+/// reaches the model: not the other regions, not the conversation. A region
+/// that is hidden or empty contributes nothing, so a prompt that was never
+/// written comes back empty rather than as some other region's text.
+fn regions_text(request: &InferenceRequest, names: &[String]) -> String {
+    let chunks: Vec<&str> = names
+        .iter()
+        .flat_map(|name| {
+            request
+                .system
+                .iter()
+                .filter(move |block| &block.region == name)
+                .map(|block| unlabelled(&block.text, &block.region).trim())
+        })
+        .filter(|body| !body.is_empty())
+        .collect();
+    chunks.join("\n")
 }
 
 /// Regions the runtime writes for its own purposes, whose text is never a
@@ -678,6 +713,7 @@ pub(crate) fn extension(mime: &str) -> &'static str {
         "audio/mpeg" => "mp3",
         "audio/wav" | "audio/x-wav" => "wav",
         "audio/ogg" => "ogg",
+        "audio/flac" => "flac",
         "application/json" => "json",
         _ => "bin",
     }
@@ -789,6 +825,51 @@ mod tests {
             reasoning: None,
         }];
         assert_eq!(request_text(&opening), "draw a cat");
+    }
+
+    fn region_block(region: &str, text: &str) -> SystemBlock {
+        SystemBlock {
+            text: text.into(),
+            cache_hint: leviath_core::CacheHint::Always,
+            region: region.into(),
+            volatility: leviath_core::Volatility::Stable,
+        }
+    }
+
+    /// A stage that names its prompt regions sends exactly those regions'
+    /// text, in the order named, and nothing the other regions, the
+    /// conversation or the runtime's blocks hold.
+    #[test]
+    fn prompt_regions_are_the_whole_prompt_in_the_order_named() {
+        let mut req = request(vec![ContentBlock::Text {
+            text: "a message that is not the prompt".into(),
+        }]);
+        req.system = vec![
+            region_block("items", "## items\nboilerplate about the whole project"),
+            region_block("brief", "## brief\nA bronze knight, facing left"),
+            region_block("style", "## style\nflat pixel art"),
+            region_block("stage_instructions", "runtime text"),
+            region_block("brief", "   "),
+        ];
+        req.extra = serde_json::json!({ "prompt_regions": ["brief"] });
+        assert_eq!(request_text(&req), "A bronze knight, facing left");
+
+        req.extra = serde_json::json!({ "prompt_regions": ["style", "brief"] });
+        assert_eq!(
+            request_text(&req),
+            "flat pixel art\nA bronze knight, facing left"
+        );
+
+        // A region that was never written leaves the prompt empty rather than
+        // filling it with some other region.
+        req.extra = serde_json::json!({ "prompt_regions": ["missing"] });
+        assert_eq!(request_text(&req), "");
+
+        // Unset or empty, the prompt is read as it always was.
+        req.extra = serde_json::json!({ "prompt_regions": [] });
+        assert_eq!(request_text(&req), "a message that is not the prompt");
+        req.extra = serde_json::json!({ "prompt_regions": "brief" });
+        assert_eq!(request_text(&req), "a message that is not the prompt");
     }
 
     /// Lengths read from the files the speech routes return: the MP3 header

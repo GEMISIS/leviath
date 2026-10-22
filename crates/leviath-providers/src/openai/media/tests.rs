@@ -592,3 +592,164 @@ async fn a_video_call_made_again_polls_the_job_it_submitted() {
         "polled, downloaded, deleted"
     );
 }
+
+fn audio_extra(extra: Value) -> Value {
+    let mut extra = extra;
+    extra["output_mimes"] = serde_json::json!(["audio/mpeg"]);
+    extra
+}
+
+fn none() -> Value {
+    Value::Object(Default::default())
+}
+
+#[test]
+fn only_a_gpt_audio_model_whose_stage_declares_audio_output_speaks_in_chat() {
+    let asked = |model: &str, extra: Value| speaks_in_chat(&request(model, "hi", vec![], extra));
+    assert!(asked("gpt-audio", audio_extra(none())));
+    assert!(asked("gpt-audio-mini", audio_extra(none())));
+    // Text output, nothing declared, or a different model: the ordinary route.
+    assert!(!asked("gpt-audio", Value::Null));
+    assert!(!asked(
+        "gpt-audio",
+        serde_json::json!({ "output_mimes": ["image/png", "text/markdown"] })
+    ));
+    assert!(!asked("gpt-5.5", audio_extra(none())));
+    assert!(!asked("gpt-audio-realtime", audio_extra(none())));
+}
+
+#[tokio::test]
+async fn gpt_audio_is_asked_for_text_and_audio_and_the_audio_becomes_a_part() {
+    let reply = serde_json::json!({
+        "choices": [{
+            "message": {
+                "content": null,
+                "audio": { "data": "UklGRg==", "transcript": "hello there" }
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 3, "completion_tokens": 4 }
+    });
+    let (url, bodies) =
+        spawn_mock_sequence(vec![(200, "OK", reply.to_string().into_bytes())]).await;
+    let mut asked = request(
+        "gpt-audio",
+        "say hello",
+        vec![],
+        audio_extra(serde_json::json!({ "voice": "coral", "audio_format": "wav", "top_p": 0.5 })),
+    );
+    asked.max_tokens = 256;
+    let response = chat_audio(&endpoint(&url), &asked).await.expect("audio");
+    assert_eq!(response.content, "hello there");
+    assert_eq!(response.parts.len(), 1);
+    assert_eq!(response.parts[0].mime_type.as_str(), "audio/wav");
+    assert_eq!(response.parts[0].name.as_deref(), Some("speech.wav"));
+    assert_eq!(response.parts[0].bytes, b"RIFF");
+    let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
+    assert_eq!(body["modalities"], serde_json::json!(["text", "audio"]));
+    assert_eq!(
+        body["audio"],
+        serde_json::json!({ "voice": "coral", "format": "wav" })
+    );
+    assert_eq!(body["max_completion_tokens"], 256);
+    assert_eq!(body["top_p"], 0.5);
+    for gone in ["max_tokens", "voice", "audio_format", "output_mimes"] {
+        assert!(body.get(gone).is_none(), "{gone} must not be sent");
+    }
+}
+
+#[tokio::test]
+async fn gpt_audio_defaults_to_alloy_mp3_and_keeps_text_the_model_wrote() {
+    let reply = serde_json::json!({
+        "choices": [{
+            "message": { "content": "spoken", "audio": { "data": "SUQz" } },
+            "finish_reason": "stop"
+        }]
+    });
+    let (url, bodies) =
+        spawn_mock_sequence(vec![(200, "OK", reply.to_string().into_bytes())]).await;
+    let response = chat_audio(
+        &endpoint(&url),
+        &request("gpt-audio-mini", "hi", vec![], audio_extra(none())),
+    )
+    .await
+    .expect("audio");
+    assert_eq!(response.content, "spoken");
+    assert_eq!(response.parts[0].mime_type.as_str(), "audio/mpeg");
+    assert_eq!(response.parts[0].name.as_deref(), Some("speech.mp3"));
+    let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
+    assert_eq!(
+        body["audio"],
+        serde_json::json!({ "voice": "alloy", "format": "mp3" })
+    );
+
+    // No text and no transcript: the reply says what was produced.
+    let bare = serde_json::json!({
+        "choices": [{ "message": { "audio": { "data": "SUQz" } }, "finish_reason": "stop" }]
+    });
+    let (url, _) = spawn_mock_sequence(vec![(200, "OK", bare.to_string().into_bytes())]).await;
+    let response = chat_audio(
+        &endpoint(&url),
+        &request("gpt-audio", "hi", vec![], audio_extra(none())),
+    )
+    .await
+    .expect("audio");
+    assert!(
+        response.content.contains("speech.mp3"),
+        "{}",
+        response.content
+    );
+}
+
+#[tokio::test]
+async fn a_gpt_audio_reply_that_cannot_be_used_is_an_error() {
+    let ask = || request("gpt-audio", "hi", vec![], audio_extra(none()));
+    let silent = serde_json::json!({
+        "choices": [{ "message": { "content": "text only" }, "finish_reason": "stop" }]
+    });
+    let (url, _) = spawn_mock_sequence(vec![(200, "OK", silent.to_string().into_bytes())]).await;
+    let err = chat_audio(&endpoint(&url), &ask()).await.unwrap_err();
+    assert!(err.to_string().contains("without audio"), "{err}");
+
+    let garbled = serde_json::json!({
+        "choices": [{ "message": { "audio": { "data": "!!not base64!!" } } }]
+    });
+    let (url, _) = spawn_mock_sequence(vec![(200, "OK", garbled.to_string().into_bytes())]).await;
+    let err = chat_audio(&endpoint(&url), &ask()).await.unwrap_err();
+    assert!(err.to_string().contains("undecodable"), "{err}");
+
+    let (url, _) = spawn_mock_sequence(vec![(200, "OK", b"not json".to_vec())]).await;
+    let err = chat_audio(&endpoint(&url), &ask()).await.unwrap_err();
+    assert!(err.to_string().contains("unreadable"), "{err}");
+
+    let (url, _) = spawn_mock_sequence(vec![(400, "Bad Request", b"{}".to_vec())]).await;
+    assert!(chat_audio(&endpoint(&url), &ask()).await.is_err());
+
+    // A format the model does not return is refused before anything is sent.
+    let err = chat_audio(
+        &endpoint("http://127.0.0.1:1"),
+        &request(
+            "gpt-audio",
+            "hi",
+            vec![],
+            audio_extra(serde_json::json!({ "audio_format": "aac" })),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("aac"), "{err}");
+}
+
+#[test]
+fn every_chat_audio_format_has_its_type() {
+    for (format, mime) in [
+        ("mp3", "audio/mpeg"),
+        ("wav", "audio/wav"),
+        ("flac", "audio/flac"),
+        ("opus", "audio/ogg"),
+        ("pcm16", "audio/L16"),
+    ] {
+        assert_eq!(chat_audio_type(format), Some(mime));
+    }
+    assert_eq!(chat_audio_type("aac"), None);
+}

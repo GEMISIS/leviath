@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{Short, WriteWith, names_schema, pick};
 use crate::spec::graph::{FanOutDef, InteractionPointDef, InteractiveDef, StageMode};
+use crate::spec::names::RegionName;
 
 /// A stage mode in the run file's binary frames.
 ///
@@ -12,14 +13,48 @@ use crate::spec::graph::{FanOutDef, InteractionPointDef, InteractiveDef, StageMo
 /// in: an interactive stage with no settings is the bare `Interactive` it
 /// always was, so a file written before the mode took settings reads the
 /// same. One with settings is the variant added at the end.
+///
+/// The stage's frame writes this in the slot of its `mode`, and a stage that
+/// names `prompt_regions` writes the last variant, which carries both. A stage
+/// that names none is written exactly as before, byte for byte, so run files
+/// keep their layout.
 #[derive(Serialize, Deserialize)]
-enum ModeFrame {
+pub(super) enum ModeFrame {
     Autonomous,
     Interactive,
     InteractivePoints(Vec<InteractionPointDef>),
     FanOut(FanOutDef),
     Output,
     InteractiveSettings(InteractiveDef),
+    Prompted {
+        mode: Box<ModeFrame>,
+        prompt_regions: Vec<RegionName>,
+    },
+}
+
+impl ModeFrame {
+    /// The slot for a stage's `mode` and `prompt_regions`.
+    pub(super) fn of(mode: &StageMode, prompt_regions: &[RegionName]) -> Self {
+        let frame = Self::from(mode.clone());
+        match prompt_regions.is_empty() {
+            true => frame,
+            false => Self::Prompted {
+                mode: Box::new(frame),
+                prompt_regions: prompt_regions.to_vec(),
+            },
+        }
+    }
+
+    /// The `mode` and `prompt_regions` a slot carries.
+    pub(super) fn split(self) -> (StageMode, Vec<RegionName>) {
+        match self {
+            Self::Prompted {
+                mode,
+                prompt_regions,
+            } => (StageMode::from(*mode), prompt_regions),
+            other => (StageMode::from(other), Vec::new()),
+        }
+    }
 }
 
 impl From<StageMode> for ModeFrame {
@@ -44,6 +79,7 @@ impl From<ModeFrame> for StageMode {
             ModeFrame::InteractivePoints(points) => Self::InteractivePoints(points),
             ModeFrame::FanOut(fan) => Self::FanOut(fan),
             ModeFrame::Output => Self::Output,
+            ModeFrame::Prompted { mode, .. } => Self::from(*mode),
         }
     }
 }

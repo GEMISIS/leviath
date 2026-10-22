@@ -15,8 +15,11 @@ use crate::spec::names::{
 };
 
 /// One stage.
+// The run file's binary frames keep the fields this had before
+// `prompt_regions` (see `spec::readable_graph`); readable formats write them
+// all.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(remote = "Self", deny_unknown_fields)]
 pub struct StageDef {
     /// The stage's name, unique in the graph.
     pub name: StageName,
@@ -50,6 +53,12 @@ pub struct StageDef {
     /// Regions this stage does not show the model.
     #[serde(default)]
     pub hide: Vec<RegionName>,
+    /// The regions a media model's prompt is made of, in order. A stage whose
+    /// model takes its prompt from the request's text (an image, video or
+    /// speech model) sends only these regions' content; unset, it reads every
+    /// region it shows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_regions: Vec<RegionName>,
     /// Regions emptied when the stage starts.
     #[serde(default)]
     pub reset: Vec<RegionName>,

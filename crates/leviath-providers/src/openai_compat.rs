@@ -692,6 +692,10 @@ pub fn merge_extra_params(
 ) {
     if let serde_json::Value::Object(params) = extra {
         for (key, value) in params {
+            // The runtime's own hints to media providers, not model parameters.
+            if crate::provider::RUNTIME_EXTRA_KEYS.contains(&key.as_str()) {
+                continue;
+            }
             target.entry(key.clone()).or_insert_with(|| value.clone());
         }
     }
@@ -1622,6 +1626,21 @@ mod tests {
         assert_eq!(target["seed"], serde_json::json!(7));
         // … but an existing key (an explicit request field) is not overwritten.
         assert_eq!(target["temperature"], serde_json::json!(0.5));
+    }
+
+    #[test]
+    fn merge_extra_params_leaves_out_the_runtime_owned_keys() {
+        let mut target = serde_json::Map::new();
+        merge_extra_params(
+            &mut target,
+            &serde_json::json!({
+                "top_p": 0.9,
+                "prompt_regions": ["brief"],
+                "output_mimes": ["audio/mpeg"]
+            }),
+        );
+        assert_eq!(target.len(), 1);
+        assert!(target.contains_key("top_p"));
     }
 
     #[test]

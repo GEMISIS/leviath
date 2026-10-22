@@ -956,8 +956,15 @@ from the MP3 or WAV it returns. A format it cannot measure (Opus, AAC, FLAC) lea
 unpriced.
 
 **Not offered here.** The realtime and live models (`gpt-realtime-*`, `gemini-*-live*`,
-`lyria-realtime-exp`) speak a streaming socket rather than a request, and `gpt-audio-*` is a chat
-model that also hears and speaks.
+`lyria-realtime-exp`) speak a streaming socket rather than a request.
+
+**`gpt-audio` and `gpt-audio-mini`** are chat models that also speak. A stage whose declared output
+includes `audio/*` (an `output` format or an `output_routing` key such as `audio/mpeg`) is sent to
+Chat Completions with `modalities = ["text", "audio"]` and `audio = {voice, format}`, and the audio
+that comes back becomes an output part, with its transcript as the reply text. Parameters: `voice`
+(`alloy` unless set) and `audio_format` (`mp3` unless set; also `wav`, `flac`, `opus`, `pcm16`). The
+call is not streamed and has no per-call price beyond its token usage. A stage that declares no
+audio output keeps the ordinary text route.
 
 ## xAI
 
