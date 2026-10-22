@@ -16,6 +16,14 @@ use serde::{Deserialize, Serialize};
 /// `Debug` is hand-written (below) so the tokens cannot be printed.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerAuth {
+    /// The server this grant was issued for, as [`canonical_server_url`]
+    /// writes it: the only URL its tokens are ever sent to.
+    ///
+    /// Empty on a grant saved before grants recorded it. Such a grant is sent
+    /// only to the URL the user's own config gives its name (see
+    /// [`is_for`](Self::is_for)), and is bound to that URL the first time it is.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub server_url: String,
     /// The `resource` value bound into every token (RFC 8707): the canonical
     /// MCP endpoint URL.
     pub resource: String,
@@ -50,6 +58,7 @@ pub struct ServerAuth {
 impl std::fmt::Debug for ServerAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServerAuth")
+            .field("server_url", &self.server_url)
             .field("resource", &self.resource)
             .field("issuer", &self.issuer)
             .field("authorization_endpoint", &self.authorization_endpoint)
@@ -79,6 +88,46 @@ impl ServerAuth {
     pub fn is_expired_at(&self, now: u64) -> bool {
         self.expires_at <= now.saturating_add(60)
     }
+
+    /// May this grant's tokens be sent to the server at `url`?
+    ///
+    /// A grant names the server it was issued for, and its tokens go there and
+    /// nowhere else, whatever a server elsewhere calls itself: a blueprint can
+    /// declare its own server under the name of one the user signed in to.
+    ///
+    /// A grant saved before grants recorded their server has only its name to
+    /// go on, and the one URL known to belong to that name is the one the
+    /// user's own config gives it, `configured_url`. It is sent there and to
+    /// no other URL; without a config entry, nowhere.
+    pub fn is_for(&self, url: &str, configured_url: Option<&str>) -> bool {
+        let Some(target) = canonical_server_url(url) else {
+            return false;
+        };
+        let bound = match self.server_url.is_empty() {
+            false => canonical_server_url(&self.server_url),
+            true => configured_url.and_then(canonical_server_url),
+        };
+        bound.is_some_and(|bound| bound == target)
+    }
+}
+
+/// `url` reduced to what identifies a server: scheme, host, port and path.
+///
+/// The host is lowercased, a default port left out and a trailing `/`
+/// dropped, so `https://Example.com/mcp/` and `https://example.com:443/mcp`
+/// are one server. The query, fragment and any user-info are left out: none of them
+/// names a different host, and user-info has no business in a stored record.
+/// `None` for anything that is not an `http` or `https` URL with a host.
+pub fn canonical_server_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    // An http(s) URL always has a host, so its origin is a tuple origin:
+    // scheme, lowercased host and port, the default port left out.
+    let origin = parsed.origin().ascii_serialization();
+    let path = parsed.path().trim_end_matches('/');
+    Some(format!("{origin}{path}"))
 }
 
 /// The whole store: one [`ServerAuth`] per configured server name.
@@ -246,9 +295,40 @@ impl AuthStore {
         leviath_home().map(|home| home.join("mcp-auth.json"))
     }
 
-    /// Look up a server's stored auth.
+    /// Look up a server's stored auth, whichever server it was issued for.
+    ///
+    /// For managing grants by name. Anything about to send a token, or to say
+    /// whether one would be sent, asks [`get_for`](Self::get_for).
     pub fn get(&self, server: &str) -> Option<&ServerAuth> {
         self.servers.get(server)
+    }
+
+    /// `server`'s stored auth, when it may be sent to `url`; see
+    /// [`ServerAuth::is_for`] for what `configured_url` is.
+    pub fn get_for(
+        &self,
+        server: &str,
+        url: &str,
+        configured_url: Option<&str>,
+    ) -> Option<&ServerAuth> {
+        self.get(server)
+            .filter(|auth| auth.is_for(url, configured_url))
+    }
+
+    /// Bind `server`'s grant to `url`, if it was saved before grants recorded
+    /// their server and may be sent there, reporting whether it changed.
+    ///
+    /// Done to the grant as the store holds it rather than to a copy, so a
+    /// refresh another process saved meanwhile is kept.
+    pub fn bind(&mut self, server: &str, url: &str, configured_url: Option<&str>) -> bool {
+        let Some(auth) = self.servers.get_mut(server) else {
+            return false;
+        };
+        if !auth.server_url.is_empty() || !auth.is_for(url, configured_url) {
+            return false;
+        }
+        auth.server_url = canonical_server_url(url).unwrap_or_default();
+        true
     }
 
     /// Insert or replace a server's auth.
@@ -344,6 +424,7 @@ mod tests {
         store.set(
             "github",
             ServerAuth {
+                server_url: "https://example.test:443/mcp".to_string(),
                 resource: "https://example.test/mcp".to_string(),
                 issuer: "https://example.test".to_string(),
                 authorization_endpoint: "https://example.test/authorize".to_string(),
@@ -414,6 +495,7 @@ mod tests {
         let credentials = leviath_core::MemoryStore::new();
         // Only one of the two is actually present.
         let auth = ServerAuth {
+            server_url: String::new(),
             resource: "https://example.test/mcp".to_string(),
             issuer: "https://example.test".to_string(),
             authorization_endpoint: "https://example.test/authorize".to_string(),
@@ -460,6 +542,7 @@ mod tests {
         store.set(
             "github",
             ServerAuth {
+                server_url: String::new(),
                 resource: "https://example.test/mcp".to_string(),
                 issuer: "https://example.test".to_string(),
                 authorization_endpoint: "https://example.test/authorize".to_string(),
@@ -503,6 +586,7 @@ mod tests {
 
     fn sample() -> ServerAuth {
         ServerAuth {
+            server_url: "https://example.test:443/mcp".to_string(),
             resource: "https://mcp.example.com/mcp".to_string(),
             issuer: "https://auth.example.com".to_string(),
             authorization_endpoint: "https://auth.example.com/authorize".to_string(),

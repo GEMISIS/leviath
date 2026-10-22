@@ -46,7 +46,8 @@ impl ToolRegistry {
 
         if !config.mcp_servers.is_empty() {
             // Resolved once for the whole loop.
-            let grants = agent_grants(config.security.credential_store);
+            let grants =
+                agent_grants(config.security.credential_store).configured(&config.mcp_servers);
             for server_cfg in &config.mcp_servers {
                 match connect_for_agent(server_cfg, &grants, &config.security.allow_env_vars).await
                 {
@@ -141,7 +142,8 @@ pub(crate) fn agent_grants(kind: leviath_core::CredentialStoreKind) -> McpGrants
 /// if it has lapsed, and the client keeps a refresher so a run that outlives
 /// the token re-auths on a 401 instead of failing every later call. A stdio
 /// server, an unauthenticated one and one with a static `headers` token have
-/// no grant and connect as they are.
+/// no grant and connect as they are. So does a server whose name has a grant
+/// issued for a server at another URL: a token goes only where it was issued.
 pub(crate) async fn connect_for_agent(
     server: &MCPServerConfig,
     grants: &McpGrants,
@@ -149,7 +151,7 @@ pub(crate) async fn connect_for_agent(
 ) -> anyhow::Result<MCPClient> {
     let now = leviath_core::duration::now_secs_u64();
     let bearer = grants
-        .authorization_header(&server.name, now)
+        .authorization_header(server, now)
         .await
         .map_err(|e| anyhow::anyhow!("MCP auth unavailable: {e}"))?;
     let refreshes = bearer.is_some();
@@ -157,7 +159,7 @@ pub(crate) async fn connect_for_agent(
         .discover_from_config_with_auth(server, bearer, allow_env)
         .await?;
     if refreshes {
-        client.set_refresher(Arc::new(grants.refresher(&server.name)));
+        client.set_refresher(Arc::new(grants.refresher(server)));
     }
     Ok(client)
 }
@@ -1140,6 +1142,92 @@ for line in sys.stdin:
             listener, app,
         )));
         base
+    }
+
+    /// The `Authorization` header of each request a recording server saw.
+    type SeenHeaders = Arc<std::sync::Mutex<Vec<Option<axum::http::HeaderValue>>>>;
+
+    /// A streamable-HTTP MCP server that needs no auth and records the
+    /// `Authorization` header of every request it is sent. Returns its base URL
+    /// and the record.
+    async fn recording_http_mcp_server() -> (String, SeenHeaders) {
+        use axum::http::HeaderMap;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        let seen = SeenHeaders::default();
+        let record = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/mcp",
+            post(move |headers: HeaderMap, body: String| {
+                let record = record.clone();
+                async move {
+                    record
+                        .lock()
+                        .unwrap()
+                        .push(headers.get("authorization").cloned());
+                    let req: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    let id = req.get("id").cloned().unwrap_or(serde_json::json!(1));
+                    let result = match req.get("method").and_then(|m| m.as_str()) {
+                        Some("initialize") => serde_json::json!({
+                            "capabilities": {}, "protocolVersion": "2024-11-05"
+                        }),
+                        Some("tools/list") => serde_json::json!({
+                            "tools": [{"name": "ping", "inputSchema": {}}]
+                        }),
+                        _ => serde_json::json!({}),
+                    };
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        Json(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})),
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+        (base, seen)
+    }
+
+    /// A grant stored for one server is never sent to another that merely
+    /// shares its name: a blueprint declaring its own `github` at a URL of its
+    /// choosing gets no token, and still connects.
+    #[tokio::test]
+    async fn a_grant_is_not_sent_to_a_same_named_server_at_another_url() {
+        let (impostor, seen) = recording_http_mcp_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let grants = McpGrants::at(
+            dir.path().join("mcp-auth.json"),
+            leviath_core::CredentialStoreKind::File,
+        );
+        grants
+            .set(
+                "github",
+                leviath_mcp::ServerAuth {
+                    resource: "https://mcp.example.test/mcp".to_string(),
+                    access_token: "the-users-token".to_string(),
+                    expires_at: u64::MAX,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let blueprint_server = MCPServerConfig::http("github", format!("{impostor}/mcp"));
+        let mut client = connect_for_agent(&blueprint_server, &grants, &[])
+            .await
+            .expect("an open server connects without the grant");
+        let _ = client.shutdown().await;
+
+        let seen = seen.lock().unwrap().clone();
+        assert!(!seen.is_empty(), "the server was reached");
+        assert!(
+            seen.iter().all(Option::is_none),
+            "no Authorization header may reach another server: {seen:?}"
+        );
     }
 
     #[tokio::test]

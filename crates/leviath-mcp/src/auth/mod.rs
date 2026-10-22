@@ -28,7 +28,52 @@ use tokio::net::TcpListener;
 
 use metadata::{AuthServerMetadata, ProtectedResourceMetadata};
 pub use pkce::Pkce;
-pub use store::{AuthStore, ServerAuth};
+pub use store::{AuthStore, ServerAuth, canonical_server_url};
+
+/// The server a stored grant is wanted for: its name, which is how grants are
+/// filed, and its URL, which is what decides whether the grant may be sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrantTarget<'a> {
+    /// The server's name, the key its grant is stored under.
+    pub name: &'a str,
+    /// Where the token would be sent.
+    pub url: &'a str,
+    /// The URL the user's own config gives `name`, if it has an entry by that
+    /// name. A grant saved before grants recorded their server is sent only
+    /// there; see [`ServerAuth::is_for`].
+    pub configured_url: Option<&'a str>,
+}
+
+impl GrantTarget<'_> {
+    /// The grant in `store` that may be sent to this server, if any.
+    ///
+    /// A grant filed under this name but issued for another server is not
+    /// returned, and the log says so: a server declared under a name the user
+    /// signed in to elsewhere connects without a token rather than with
+    /// someone else's.
+    fn grant_in<'s>(&self, store: &'s AuthStore) -> Option<&'s ServerAuth> {
+        let held = store.get(self.name)?;
+        if held.is_for(self.url, self.configured_url) {
+            return Some(held);
+        }
+        let issued_for = match held.server_url.is_empty() {
+            false => held.server_url.as_str(),
+            true => self.configured_url.unwrap_or("the server in your config"),
+        };
+        // Worked out before the macro, which evaluates its arguments only when
+        // a subscriber wants the line.
+        let (name, url) = (
+            self.name,
+            canonical_server_url(self.url).unwrap_or_default(),
+        );
+        tracing::warn!(
+            "MCP server '{name}' at {url} has no sign-in of its own: the stored sign-in for \
+             '{name}' belongs to {issued_for}, so it is not sent. If this is the server in \
+             your config, sign in to it again with `lev mcp login {name}`."
+        );
+        None
+    }
+}
 
 /// How the browser gets opened. Injected so tests never launch one.
 ///
@@ -235,7 +280,10 @@ impl OAuthClient {
             )
             .await?;
 
+        // Bound to the server it was asked for: its tokens are sent there and
+        // to no other server, whatever that one calls itself.
         Ok(LoginOutcome::Authenticated(Box::new(build_server_auth(
+            canonical_server_url(mcp.as_str()).unwrap_or_default(),
             resource,
             &server_meta,
             client_id,
@@ -285,14 +333,15 @@ impl OAuthClient {
     /// command rather than opening a browser, so the daemon can call this
     /// safely. A refreshed token is written back to `store_path`. Returns
     /// `None` when the server has no stored auth (e.g. an unauthenticated
-    /// server, or one using a static header).
+    /// server, or one using a static header), and when the grant filed under
+    /// its name was issued for a different server.
     pub async fn authorization_header(
         &self,
-        server_name: &str,
+        target: GrantTarget<'_>,
         store_path: &std::path::Path,
         now: u64,
     ) -> anyhow::Result<Option<(String, String)>> {
-        self.authorization_header_with(server_name, store_path, now, None)
+        self.authorization_header_with(target, store_path, now, None)
             .await
     }
 
@@ -305,34 +354,50 @@ impl OAuthClient {
     /// quietly land the new refresh token on disk.
     pub async fn authorization_header_with(
         &self,
-        server_name: &str,
+        target: GrantTarget<'_>,
         store_path: &std::path::Path,
         now: u64,
         credentials: Option<&dyn leviath_core::CredentialStore>,
     ) -> anyhow::Result<Option<(String, String)>> {
         let store = AuthStore::load_with(store_path, credentials)?;
-        let Some(auth) = store.get(server_name) else {
+        let Some(auth) = target.grant_in(&store) else {
             return Ok(None);
         };
+        let server_name = target.name;
+        // A grant saved before grants recorded their server is bound to this
+        // one, the server the user's config names, the first time it is sent.
+        let unbound = auth.server_url.is_empty();
 
-        let token = if auth.is_expired_at(now) {
-            let refreshed = self.refresh(auth, now).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "MCP server '{server_name}' token expired and could not be \
-                     refreshed ({e}); re-authenticate with `lev mcp login {server_name}`"
-                )
-            })?;
-            let access = refreshed.access_token.clone();
+        let refreshed = match auth.is_expired_at(now) {
+            true => {
+                let bound = ServerAuth {
+                    server_url: canonical_server_url(target.url).unwrap_or_default(),
+                    ..auth.clone()
+                };
+                Some(self.refresh(&bound, now).await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "MCP server '{server_name}' token expired and could not be \
+                         refreshed ({e}); re-authenticate with `lev mcp login {server_name}`"
+                    )
+                })?)
+            }
+            false => None,
+        };
+        let token = refreshed
+            .as_ref()
+            .map_or(&auth.access_token, |r| &r.access_token)
+            .clone();
+        if refreshed.is_some() || unbound {
             // Onto the store as it is now, not as it was before the refresh
             // went out: a login can have saved in between.
-            AuthStore::update_with(store_path, credentials, &mut |fresh| {
-                fresh.set(server_name, refreshed.clone());
-                Ok(true)
+            AuthStore::update_with(store_path, credentials, &mut |fresh| match &refreshed {
+                Some(refreshed) => {
+                    fresh.set(server_name, refreshed.clone());
+                    Ok(true)
+                }
+                None => Ok(fresh.bind(server_name, target.url, target.configured_url)),
             })?;
-            access
-        } else {
-            auth.access_token.clone()
-        };
+        }
 
         Ok(Some((
             "Authorization".to_string(),
@@ -690,6 +755,11 @@ fn client_with(redirects: reqwest::redirect::Policy) -> reqwest::Client {
 /// new `Authorization` header value.
 pub struct StoredTokenRefresher {
     server_name: String,
+    /// The server the connection is to: a grant issued for another server is
+    /// neither refreshed nor sent.
+    server_url: String,
+    /// See [`GrantTarget::configured_url`].
+    configured_url: Option<String>,
     store_path: std::path::PathBuf,
     /// Where the grants live when they are not in the file: the OS credential
     /// store under `[security] credential_store = "keychain"`. `None` is the
@@ -703,16 +773,18 @@ pub struct StoredTokenRefresher {
 }
 
 impl StoredTokenRefresher {
-    /// A refresher for `server_name`, reading and writing `store_path` and,
+    /// A refresher for `target`, reading and writing `store_path` and,
     /// when it is `Some`, the grants `credentials` holds - the same backend
     /// [`OAuthClient::authorization_header_with`] read the token from.
     pub fn new(
-        server_name: impl Into<String>,
+        target: GrantTarget<'_>,
         store_path: std::path::PathBuf,
         credentials: Option<std::sync::Arc<dyn leviath_core::CredentialStore>>,
     ) -> Self {
         Self {
-            server_name: server_name.into(),
+            server_name: target.name.to_string(),
+            server_url: target.url.to_string(),
+            configured_url: target.configured_url.map(str::to_string),
             store_path,
             credentials,
             clock: system_now_secs,
@@ -731,13 +803,23 @@ impl crate::transport::BearerRefresher for StoredTokenRefresher {
     async fn refresh(&self) -> anyhow::Result<String> {
         let credentials = self.credentials.as_deref();
         let store = AuthStore::load_with(&self.store_path, credentials)?;
-        let auth = store.get(&self.server_name).ok_or_else(|| {
+        let target = GrantTarget {
+            name: &self.server_name,
+            url: &self.server_url,
+            configured_url: self.configured_url.as_deref(),
+        };
+        let auth = target.grant_in(&store).ok_or_else(|| {
             anyhow::anyhow!(
-                "no stored credentials for MCP server '{}'",
-                self.server_name
+                "no stored credentials for MCP server '{}' at {}",
+                self.server_name,
+                canonical_server_url(&self.server_url).unwrap_or_default()
             )
         })?;
-        let refreshed = self.oauth.refresh(auth, (self.clock)()).await?;
+        let bound = ServerAuth {
+            server_url: canonical_server_url(&self.server_url).unwrap_or_default(),
+            ..auth.clone()
+        };
+        let refreshed = self.oauth.refresh(&bound, (self.clock)()).await?;
         let value = format!("Bearer {}", refreshed.access_token);
         // Onto the store as it is now: see [`AuthStore::update_with`].
         AuthStore::update_with(&self.store_path, credentials, &mut |fresh| {
@@ -777,6 +859,7 @@ fn build_authorize_url(
 
 /// Assemble the stored auth from a token response.
 fn build_server_auth(
+    server_url: String,
     resource: String,
     server_meta: &AuthServerMetadata,
     client_id: String,
@@ -784,6 +867,7 @@ fn build_server_auth(
     now: u64,
 ) -> ServerAuth {
     ServerAuth {
+        server_url,
         resource,
         issuer: server_meta.issuer.clone(),
         authorization_endpoint: server_meta.authorization_endpoint.clone(),
@@ -1069,12 +1153,14 @@ mod tests {
             scope: Some("openid".to_string()),
         };
         let auth = build_server_auth(
+            "https://mcp.example.com:443/mcp".to_string(),
             "https://mcp.example.com/mcp".to_string(),
             &server_meta(),
             "client-1".to_string(),
             token,
             1_000,
         );
+        assert_eq!(auth.server_url, "https://mcp.example.com:443/mcp");
         assert_eq!(auth.resource, "https://mcp.example.com/mcp");
         assert_eq!(auth.issuer, "https://auth.example.com");
         assert_eq!(auth.client_id, "client-1");
@@ -1093,6 +1179,7 @@ mod tests {
             scope: None,
         };
         let auth = build_server_auth(
+            String::new(),
             "https://mcp".to_string(),
             &server_meta(),
             "c".to_string(),
@@ -1543,6 +1630,12 @@ mod tests {
         assert_eq!(auth.expires_at, 4_600);
         assert_eq!(auth.client_id, "registered-client");
         assert_eq!(server.registrations.load(Ordering::SeqCst), 1);
+        // Bound to the server that was signed in to.
+        assert_eq!(
+            Some(auth.server_url.clone()),
+            canonical_server_url(&format!("{}/mcp", server.base))
+        );
+        assert!(auth.is_for(&format!("{}/mcp/", server.base), None));
     }
 
     #[tokio::test]
@@ -1633,6 +1726,7 @@ mod tests {
     async fn refresh_rotates_the_tokens() {
         let server = mock_auth_server("default").await;
         let auth = ServerAuth {
+            server_url: String::new(),
             resource: format!("{}/mcp", server.base),
             issuer: server.base.clone(),
             authorization_endpoint: format!("{}/authorize", server.base),
@@ -1667,12 +1761,260 @@ mod tests {
         assert_eq!(refreshed.expires_at, 0);
     }
 
+    /// The server most of these tests hold a grant for.
+    const SRV_URL: &str = "https://srv.example.test/mcp";
+
+    /// `srv` at [`SRV_URL`], as the user's config names it.
+    fn srv() -> GrantTarget<'static> {
+        GrantTarget {
+            name: "srv",
+            url: SRV_URL,
+            configured_url: Some(SRV_URL),
+        }
+    }
+
+    /// Save `auth` as `srv`'s grant in a fresh store, returning the store's
+    /// directory (kept alive by the caller) and path.
+    fn saved_srv(auth: ServerAuth) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let mut store = AuthStore::default();
+        store.set("srv", auth);
+        store.save(&path).unwrap();
+        (dir, path)
+    }
+
+    /// A grant issued for one server is not sent to another server declared
+    /// under the same name, and nothing about the grant changes.
+    #[tokio::test]
+    async fn a_bound_grant_is_not_sent_to_another_url() {
+        let (_dir, path) = saved_srv(ServerAuth {
+            server_url: canonical_server_url(SRV_URL).unwrap(),
+            access_token: "users-token".to_string(),
+            expires_at: 10_000,
+            ..Default::default()
+        });
+        let before = std::fs::read_to_string(&path).unwrap();
+        for url in [
+            "https://elsewhere.example.test/mcp",
+            "https://srv.example.test:8443/mcp",
+            "http://srv.example.test/mcp",
+            "https://srv.example.test/other",
+        ] {
+            let header = OAuthClient::new()
+                .authorization_header(GrantTarget { url, ..srv() }, &path, 1_000)
+                .await
+                .unwrap();
+            assert!(header.is_none(), "{url} must not get the token");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// The same server spelled differently is still that server.
+    #[tokio::test]
+    async fn a_bound_grant_is_sent_to_its_own_server_however_it_is_spelled() {
+        let (_dir, path) = saved_srv(ServerAuth {
+            server_url: canonical_server_url(SRV_URL).unwrap(),
+            access_token: "users-token".to_string(),
+            expires_at: 10_000,
+            ..Default::default()
+        });
+        let target = GrantTarget {
+            url: "HTTPS://Srv.Example.Test:443/mcp/",
+            configured_url: None,
+            ..srv()
+        };
+        let header = OAuthClient::new()
+            .authorization_header(target, &path, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(header.unwrap().1, "Bearer users-token");
+    }
+
+    /// A grant saved before grants recorded their server is sent to the URL
+    /// the user's config gives its name, and bound to it from then on.
+    #[tokio::test]
+    async fn an_unbound_grant_is_bound_to_the_configured_url_on_first_use() {
+        let (_dir, path) = saved_srv(ServerAuth {
+            access_token: "users-token".to_string(),
+            expires_at: 10_000,
+            ..Default::default()
+        });
+        let header = OAuthClient::new()
+            .authorization_header(srv(), &path, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(header.unwrap().1, "Bearer users-token");
+
+        let held = AuthStore::load(&path).unwrap();
+        let auth = held.get("srv").unwrap();
+        assert_eq!(auth.server_url, "https://srv.example.test/mcp");
+        assert_eq!(auth.access_token, "users-token", "the grant is kept");
+
+        // Bound, it no longer needs the config to say where it belongs.
+        let unconfigured = GrantTarget {
+            configured_url: None,
+            ..srv()
+        };
+        assert!(
+            OAuthClient::new()
+                .authorization_header(unconfigured, &path, 1_000)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// An unbound grant goes nowhere but the configured URL: not to a
+    /// blueprint's server of the same name, and not anywhere at all when the
+    /// config has no entry by that name. It is kept, unbound.
+    #[tokio::test]
+    async fn an_unbound_grant_is_not_sent_off_the_configured_url() {
+        let (_dir, path) = saved_srv(ServerAuth {
+            access_token: "users-token".to_string(),
+            expires_at: 10_000,
+            ..Default::default()
+        });
+        let blueprint = GrantTarget {
+            url: "http://127.0.0.1:9/mcp",
+            ..srv()
+        };
+        let unconfigured = GrantTarget {
+            configured_url: None,
+            ..srv()
+        };
+        for target in [blueprint, unconfigured] {
+            let header = OAuthClient::new()
+                .authorization_header(target, &path, 1_000)
+                .await
+                .unwrap();
+            assert!(header.is_none(), "{target:?}");
+        }
+        let held = AuthStore::load(&path).unwrap();
+        assert!(held.get("srv").unwrap().server_url.is_empty());
+    }
+
+    /// A refresh of an unbound grant binds it too, and the refresh goes to
+    /// the token endpoint recorded at sign-in.
+    #[tokio::test]
+    async fn refreshing_an_unbound_grant_binds_it() {
+        let server = mock_auth_server("default").await;
+        let (_dir, path) = saved_srv(ServerAuth {
+            token_endpoint: format!("{}/token", server.base),
+            access_token: "expired".to_string(),
+            refresh_token: Some("good".to_string()),
+            expires_at: 100,
+            ..Default::default()
+        });
+        let header = OAuthClient::new()
+            .authorization_header(srv(), &path, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(header.unwrap().1, "Bearer new-access");
+        let held = AuthStore::load(&path).unwrap();
+        assert_eq!(
+            held.get("srv").unwrap().server_url,
+            "https://srv.example.test/mcp"
+        );
+    }
+
+    /// An expired grant for another server is not refreshed for this one:
+    /// the refresh would hand a new token to the wrong server.
+    #[tokio::test]
+    async fn a_grant_for_another_server_is_not_refreshed() {
+        let (_dir, path) = saved_srv(ServerAuth {
+            server_url: "https://elsewhere.example.test:443/mcp".to_string(),
+            // Unreachable: a refresh attempt would fail the call.
+            token_endpoint: "http://127.0.0.1:1/token".to_string(),
+            refresh_token: Some("good".to_string()),
+            expires_at: 1,
+            ..Default::default()
+        });
+        let header = OAuthClient::new()
+            .authorization_header(srv(), &path, 1_000)
+            .await
+            .unwrap();
+        assert!(header.is_none());
+
+        let mut refresher = refresher_at(path.parent().unwrap());
+        refresher.store_path = path.clone();
+        let err = refresher.refresh().await.expect_err("not this server's");
+        assert!(
+            err.to_string().contains(
+                "no stored credentials for MCP server 'srv' at https://srv.example.test/mcp"
+            ),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn canonical_server_url_keeps_only_what_names_the_server() {
+        let canon = |u: &str| canonical_server_url(u);
+        assert_eq!(
+            canon("HTTPS://User:pw@Example.COM/mcp/?q=1#frag").as_deref(),
+            Some("https://example.com/mcp")
+        );
+        assert_eq!(
+            canon("http://127.0.0.1:9011/mcp").as_deref(),
+            Some("http://127.0.0.1:9011/mcp")
+        );
+        assert_eq!(canon("http://[::1]/").as_deref(), Some("http://[::1]"));
+        assert_eq!(canon("ftp://example.com/mcp"), None);
+        assert_eq!(canon("not a url"), None);
+        assert_eq!(canon("unix:/run/mcp.sock"), None);
+    }
+
+    #[test]
+    fn is_for_refuses_an_unusable_target_url() {
+        let auth = ServerAuth {
+            server_url: "https://example.com:443/mcp".to_string(),
+            ..Default::default()
+        };
+        assert!(!auth.is_for("not a url", None));
+        assert!(auth.is_for("https://example.com/mcp", None));
+    }
+
+    #[test]
+    fn bind_leaves_a_grant_it_cannot_bind() {
+        let mut store = AuthStore::default();
+        assert!(!store.bind("srv", SRV_URL, Some(SRV_URL)), "no grant");
+
+        store.set(
+            "srv",
+            ServerAuth {
+                server_url: "https://elsewhere.example.test:443/mcp".to_string(),
+                ..Default::default()
+            },
+        );
+        assert!(!store.bind("srv", SRV_URL, Some(SRV_URL)), "already bound");
+
+        store.set("srv", ServerAuth::default());
+        assert!(
+            !store.bind("srv", "https://other.example.test/mcp", Some(SRV_URL)),
+            "not the configured server"
+        );
+        assert!(store.get("srv").unwrap().server_url.is_empty());
+
+        assert!(store.bind("srv", SRV_URL, Some(SRV_URL)));
+        assert_eq!(
+            store.get_for("srv", SRV_URL, None).unwrap().server_url,
+            "https://srv.example.test/mcp"
+        );
+    }
+
     #[tokio::test]
     async fn authorization_header_is_none_without_stored_auth() {
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("mcp-auth.json");
         let header = OAuthClient::new()
-            .authorization_header("unknown", &store, 0)
+            .authorization_header(
+                GrantTarget {
+                    name: "unknown",
+                    ..srv()
+                },
+                &store,
+                0,
+            )
             .await
             .unwrap();
         assert!(header.is_none());
@@ -1694,7 +2036,7 @@ mod tests {
         store.save(&store_path).unwrap();
 
         let header = OAuthClient::new()
-            .authorization_header("srv", &store_path, 1_000)
+            .authorization_header(srv(), &store_path, 1_000)
             .await
             .unwrap()
             .expect("a stored token yields a header");
@@ -1723,7 +2065,7 @@ mod tests {
         store.save(&store_path).unwrap();
 
         let header = OAuthClient::new()
-            .authorization_header("srv", &store_path, 1_000)
+            .authorization_header(srv(), &store_path, 1_000)
             .await
             .unwrap()
             .expect("an expired token is refreshed");
@@ -1751,7 +2093,7 @@ mod tests {
         store.save(&store_path).unwrap();
 
         let err = OAuthClient::new()
-            .authorization_header("srv", &store_path, 1_000)
+            .authorization_header(srv(), &store_path, 1_000)
             .await
             .expect_err("a dead refresh must fail");
         assert!(err.to_string().contains("lev mcp login srv"), "got: {err}");
@@ -1764,6 +2106,8 @@ mod tests {
     fn refresher_at(dir: &std::path::Path) -> StoredTokenRefresher {
         StoredTokenRefresher {
             server_name: "srv".to_string(),
+            server_url: SRV_URL.to_string(),
+            configured_url: Some(SRV_URL.to_string()),
             store_path: dir.join("mcp-auth.json"),
             credentials: None,
             clock: || 2_000,
@@ -1866,7 +2210,7 @@ mod tests {
 
     #[test]
     fn stored_refresher_new_uses_the_system_clock() {
-        let r = StoredTokenRefresher::new("s", std::path::PathBuf::from("/tmp/x"), None);
+        let r = StoredTokenRefresher::new(srv(), std::path::PathBuf::from("/tmp/x"), None);
         assert!((r.clock)() > 1_600_000_000);
     }
 
@@ -1881,7 +2225,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(
             OAuthClient::new()
-                .authorization_header("srv", dir.path(), 0)
+                .authorization_header(srv(), dir.path(), 0)
                 .await
                 .is_err()
         );
@@ -1911,7 +2255,7 @@ mod tests {
 
         assert!(
             OAuthClient::new()
-                .authorization_header("srv", &store_path, 1_000)
+                .authorization_header(srv(), &store_path, 1_000)
                 .await
                 .is_err()
         );

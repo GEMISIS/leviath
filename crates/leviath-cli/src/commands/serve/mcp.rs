@@ -166,14 +166,11 @@ impl McpServerInfo {
 
 /// A one-word auth state for a server.
 fn auth_status(server: &MCPServerConfig, store: &AuthStore, now: u64) -> String {
-    let is_http = matches!(
-        server.resolve(),
-        Ok(leviath_mcp::ResolvedTransport::Http { .. })
-    );
-    if !is_http {
+    let Ok(leviath_mcp::ResolvedTransport::Http { url, .. }) = server.resolve() else {
         return "n/a".to_string();
-    }
-    match store.get(&server.name) {
+    };
+    // A grant issued for this name at another URL is never sent here.
+    match store.get_for(&server.name, url, Some(url)) {
         Some(auth) if auth.is_expired_at(now) => "expired".to_string(),
         Some(_) => "authenticated".to_string(),
         // A configured `Authorization` header is a credential too, and calling
@@ -520,7 +517,9 @@ pub(super) async fn signed_in(
         }
     };
 
-    let reuse = held.get(name).map(|a| a.client_id.clone());
+    let reuse = held
+        .get_for(name, &url, Some(&url))
+        .map(|a| a.client_id.clone());
     let outcome = OAuthClient::new()
         .login(
             &url,
@@ -624,10 +623,11 @@ async fn listed(
     now: u64,
 ) -> anyhow::Result<Vec<String>> {
     let kind = config.security.credential_store;
-    let name = server.name.clone();
+    let configured = config.mcp_servers.clone();
+    let target = server.clone();
     let auth_header = blocking(move || {
-        let grants = McpGrants::at_or_file(store, kind);
-        tokio::runtime::Handle::current().block_on(grants.authorization_header(&name, now))
+        let grants = McpGrants::at_or_file(store, kind).configured(&configured);
+        tokio::runtime::Handle::current().block_on(grants.authorization_header(&target, now))
     })
     .await?;
     crate::commands::mcp::connect_and_list(

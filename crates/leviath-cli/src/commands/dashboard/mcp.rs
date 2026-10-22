@@ -191,6 +191,7 @@ fn listed(ctx: &McpContext) -> Result<(Vec<McpRow>, Option<String>), String> {
 /// The grants `config` keeps, in the screen's grant file.
 fn grants_of(ctx: &McpContext, config: &Config) -> McpGrants {
     McpGrants::at(ctx.store_path.clone(), config.security.credential_store)
+        .configured(&config.mcp_servers)
 }
 
 /// Build a display row for one server.
@@ -214,14 +215,11 @@ fn describe_row(server: &MCPServerConfig, store: &AuthStore, now: u64) -> McpRow
 
 /// A one-word auth state for a server.
 fn auth_status(server: &MCPServerConfig, store: &AuthStore, now: u64) -> String {
-    let is_http = matches!(
-        server.resolve(),
-        Ok(leviath_mcp::ResolvedTransport::Http { .. })
-    );
-    if !is_http {
+    let Ok(leviath_mcp::ResolvedTransport::Http { url, .. }) = server.resolve() else {
         return "n/a".to_string();
-    }
-    match store.get(&server.name) {
+    };
+    // A grant issued for this name at another URL is never sent here.
+    match store.get_for(&server.name, url, Some(url)) {
         Some(auth) if auth.is_expired_at(now) => "expired".to_string(),
         Some(_) => "authenticated".to_string(),
         // A configured `Authorization` header is a credential too, and "none"
@@ -309,7 +307,9 @@ async fn run_login(ctx: &McpContext, name: &str) -> McpOutcome {
         Ok(store) => store,
         Err(e) => return fail(format!("Could not read MCP logins: {e}")),
     };
-    let reuse = store.get(name).map(|a| a.client_id.clone());
+    let reuse = store
+        .get_for(name, &url, Some(&url))
+        .map(|a| a.client_id.clone());
     match OAuthClient::new()
         .login(
             &url,
@@ -339,7 +339,7 @@ async fn run_test(ctx: &McpContext, name: &str) -> McpOutcome {
         Err(outcome) => return outcome,
     };
     let auth_header = match grants_of(ctx, &config)
-        .authorization_header(name, (ctx.clock)())
+        .authorization_header(&server, (ctx.clock)())
         .await
     {
         Ok(header) => header,

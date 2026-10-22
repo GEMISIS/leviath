@@ -173,6 +173,23 @@ server exits, only the runs that declared that exact server lose its tools.
 A run that declares a server with the same name as a global `[[mcp_servers]]` entry, but a
 different spec, reaches its own. Every other run keeps reaching the global one.
 
+### Sign-ins stay with their server
+
+An OAuth sign-in from `lev mcp login` belongs to the server you signed in to: its URL, down to the
+scheme, host, port and path. Its token is sent to that URL and nowhere else. A blueprint server
+that shares the name but sits at another URL gets no token. It connects without one, and the
+daemon log names the server and its URL. Sharing a name is not enough, because anyone can write a
+blueprint that claims your server's name.
+
+The same URL is the same server however it is spelled, so `https://Example.com/mcp/` and
+`https://example.com:443/mcp` share a sign-in. A refresh follows the same rule. It goes to the
+token endpoint recorded when you signed in, and only for the server the sign-in belongs to.
+
+A sign-in saved by an earlier release recorded no URL. It is sent to the URL your `config.toml`
+gives that name, and bound to that URL the first time it is used. If you change a server's `url`
+after signing in, `lev mcp list` shows it as not logged in. Run `lev mcp login <name>` again to
+sign in to the new address.
+
 ## Granting a whole server
 
 A stage's `tools` is an exact-match list, so granting a server tool by tool means knowing what it

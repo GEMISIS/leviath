@@ -30,6 +30,20 @@ same list.
   `sticky`. Code that builds either with a struct literal must set them;
   `seq: 0` and `sticky: false` keep the old meaning. Run files keep their
   layout: an entry that is not sticky is written byte for byte as before.
+- **Security.** A stored MCP sign-in is sent only to the server it was
+  issued for. It was looked up by server name alone, so a blueprint that
+  declared its own HTTP server under the name of one you had signed in to
+  was sent your token at a URL of its choosing. A sign-in now records the
+  server's URL (scheme, host, port and path), and a server of the same name
+  anywhere else connects with no token, with a warning that names the
+  server and its URL. A refresh is bound the same way. A sign-in saved by an
+  earlier release keeps working for the server your `config.toml` names,
+  and is bound to that URL the first time it is used. If you change a
+  server's `url` after signing in, run `lev mcp login <name>` again.
+- **Breaking, library.** `leviath_mcp::OAuthClient::authorization_header`,
+  `authorization_header_with` and `StoredTokenRefresher::new` take a
+  `GrantTarget` (name, URL, and the URL your config gives that name) in
+  place of the server name.
 - **Breaking, library.** `leviath_core::mime::hydrate::sends_natively` and
   `leviath_providers::mime::sends_natively` take the `MimeRegistry`, and
   answer `false` for a type it says is text. Pass the registry the request is
