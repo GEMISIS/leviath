@@ -819,3 +819,34 @@ async fn gpt_audio_leaves_out_a_temperature_the_model_does_not_take_and_names_pc
     let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
     assert!(body.get("temperature").is_none());
 }
+
+#[tokio::test]
+async fn gpt_audio_flac_and_the_failures_before_a_reply() {
+    let reply = serde_json::json!({
+        "choices": [{ "message": { "audio": { "data": "AAAA" } }, "finish_reason": "stop" }]
+    });
+    let (url, _) = spawn_mock_sequence(vec![(200, "OK", reply.to_string().into_bytes())]).await;
+    let asked = request(
+        "gpt-audio",
+        "hi",
+        vec![],
+        audio_extra(serde_json::json!({ "audio_format": "flac" })),
+    );
+    let response = chat_audio(&endpoint(&url), &asked, true)
+        .await
+        .expect("audio");
+    assert_eq!(response.parts[0].name.as_deref(), Some("speech.flac"));
+
+    // An unreachable host is a transport error.
+    let ask = request("gpt-audio", "hi", vec![], audio_extra(none()));
+    assert!(
+        chat_audio(&endpoint("http://127.0.0.1:1"), &ask, true)
+            .await
+            .is_err()
+    );
+
+    // A reply with no choices is not a chat reply.
+    let (url, _) = spawn_mock_sequence(vec![(200, "OK", b"{}".to_vec())]).await;
+    let err = chat_audio(&endpoint(&url), &ask, true).await.unwrap_err();
+    assert!(err.to_string().contains("No choices"), "{err}");
+}
