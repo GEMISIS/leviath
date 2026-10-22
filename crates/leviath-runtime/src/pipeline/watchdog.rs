@@ -3,6 +3,7 @@
 //! plus the context notes each writes so the reason survives into the run's
 //! transcript rather than only its status.
 
+use super::loop_guard::{LoopTrip, loop_nudge};
 use super::*;
 
 /// How often (in per-stage iterations) `check_workspace_health` stats the
@@ -77,7 +78,7 @@ type MaxIterationQuery = (
     &'static AgentState,
     &'static crate::insert::RunSpecC,
     &'static StageCursor,
-    &'static StageProgress,
+    &'static mut StageProgress,
     Option<&'static mut crate::persistence::RunOutcomeFlags>,
     OwedOutput,
 );
@@ -166,13 +167,31 @@ pub(crate) fn enforce_max_iterations(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, spec, cursor, progress, flags, owed) in agents.iter_mut() {
+    for (entity, state, spec, cursor, mut progress, flags, owed) in agents.iter_mut() {
         let (submitted, mut stage_inf, mut window, warned, final_turn) = owed;
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue;
         }
         let stage = &spec.0.graph.stages[cursor.index];
+        // The loop guard: the model has been making the same call over and over.
+        // Nudge once; if it goes on, end the stage.
+        match std::mem::take(&mut progress.loop_guard.trip) {
+            LoopTrip::None => {}
+            LoopTrip::Nudge(tool) => {
+                if let Some(window) = window.as_mut() {
+                    inject_system_nudge(window, &loop_nudge(&tool));
+                }
+            }
+            LoopTrip::Stuck(reason) => {
+                commands
+                    .entity(entity)
+                    .remove::<ReadyToInfer>()
+                    .insert(ResolveTransition)
+                    .insert(StageOutcome::Looped(reason));
+                continue;
+            }
+        }
         // A fan-out stage is bounded by `max_attempts`, not by iterations. Its
         // "iterations" are the framework asking again for the one call the stage
         // exists to make, and letting the iteration cap count them means two

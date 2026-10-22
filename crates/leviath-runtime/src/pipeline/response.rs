@@ -787,6 +787,8 @@ pub(crate) struct StageProgress {
     /// had produced none. Bounded by `MAX_NO_IMAGE_NUDGES` so a model that
     /// keeps refusing does not loop forever.
     pub no_image_nudges: usize,
+    /// The loop guard's tally.
+    pub loop_guard: super::loop_guard::LoopGuard,
 }
 
 /// How a stage ended, when that governs the transition. Absent ⇒ the stage
@@ -801,6 +803,8 @@ pub(crate) enum StageOutcome {
     MaxIterations,
     /// A `stuck` edge tripped mid-stage; carries the human-readable reason.
     Stuck(String),
+    /// The loop guard ended the stage: an identical call, repeated after a nudge.
+    Looped(String),
 }
 
 /// One [`StageRecord`](leviath_core::run_meta::StageRecord) per blueprint stage,
@@ -905,10 +909,17 @@ pub(crate) fn process_response(
             e.insert(ReadyForTransition);
         } else {
             progress.total_tool_calls += result.tool_calls.len();
+            for call in &result.tool_calls {
+                super::loop_guard::record_call_repeat(&mut progress.loop_guard, call);
+            }
             // Per-path edit churn, for `stuck` edges armed on same-file edits.
             // Counted from the *requested* calls: a model asking to edit the
             // same wrong file five times is stuck whether or not each call ran.
-            for path in result.tool_calls.iter().filter_map(edited_path) {
+            for path in result
+                .tool_calls
+                .iter()
+                .filter_map(super::loop_guard::edited_path)
+            {
                 *progress.edits_by_path.entry(path.to_string()).or_insert(0) += 1;
             }
             if let Some(mut totals) = totals {
@@ -917,15 +928,6 @@ pub(crate) fn process_response(
             e.insert(ReadyForTools);
         }
     }
-}
-
-/// The path a tool call targets, for per-stage edit-churn tracking. Only the two
-/// mutating file tools count: both carry the path in their `path` argument. A
-/// call without a string `path` (or any other tool) contributes nothing.
-pub(crate) fn edited_path(call: &crate::components::ToolCall) -> Option<&str> {
-    matches!(call.name.as_str(), "write_file" | "edit_file")
-        .then(|| call.arguments.get("path").and_then(|v| v.as_str()))
-        .flatten()
 }
 
 /// The global config's `[nudge]` defaults, captured per agent at spawn time so

@@ -360,6 +360,12 @@ gate: a gate that could hold a stage forever would strand the run, so after the 
 taken with a warning. A gate naming a region no stage declares is refused by `lev validate`. At runtime such a gate
 would pass rather than block, since no amount of work could satisfy it. A typo there would read as
 a gate that is never reached.
+
+A gate also holds when the stage did not finish. A stage cut off at its `max_iterations`, or ended by
+the loop guard below, falls through to its ordinary successor, and that edge's gate is still
+checked. There is no second pass to hold the stage for, so a gate that fails sends the run down the
+stage's `max_iterations` or `error` edge if it has one, and otherwise fails the run with the gate's
+message. The gated stage never runs on work that was not done.
 | `max_attempts` | `3` | How many times the stage re-runs before the gate gives up and lets the transition through with a warning |
 
 Per-stage tool counters reset when a stage is entered, and they are not restored when a run resumes
@@ -423,6 +429,14 @@ Use any subset you like. The first threshold to trip fires the edge.
 > iteration-cap notes prefer an `error_report` region. Declare both `pinned`, with a small budget
 > like 2000 tokens, so the note survives the edge `carry` that moves it. Without them, the
 > notes land in `conversation`.
+
+## Repeated calls
+
+A model that makes the identical tool call again and again (same tool, same arguments, three times
+in a stage) is nudged once to stop and use what it already has. If it makes that call yet again, the
+stage ends. It ends as a `stuck` stage: down the stage's `stuck` edge if it has one, else as a
+`max_iterations` stage would (see above, including the gate rule). No setting is needed. Calls with
+different arguments are different calls.
 
 ## Nudging
 

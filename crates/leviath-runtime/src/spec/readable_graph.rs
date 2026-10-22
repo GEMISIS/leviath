@@ -3,9 +3,10 @@
 //!
 //! The binary frames have the fields each type had before it took the
 //! settings a continued run reads (`continue_at` on the graph,
-//! `on_continue` on a region), so run files keep their layout. A value that
+//! `on_continue` on a region) and the one a media stage reads
+//! (`prompt_regions` on a stage), so run files keep their layout. A value that
 //! sets one writes the slot it rides in (the graph's `tool_rescan`, the
-//! region's `admission`) as the variant added at the end of that slot's
+//! region's `admission`, the stage's `mode`) as the variant added at the end of that slot's
 //! enum, which carries both. A value that sets neither is written exactly as
 //! before, byte for byte.
 
@@ -13,6 +14,7 @@ use leviath_core::policy::ToolPolicy;
 use leviath_core::region::{Admission, Volatility};
 use serde::{Deserialize, Serialize};
 
+use super::mode::ModeFrame;
 use super::{WriteWith, pick};
 use crate::spec::graph::{
     Budget, CompactionDef, ContextTransformDef, DependencyDef, EdgeDef, FileTrackingDef,
@@ -224,5 +226,49 @@ frame!(
         volatility: Volatility,
         seed: Option<Seed>,
         accepts: Vec<MimePattern>,
+    }
+);
+
+frame!(
+    StageDef, StageFrame, StageFrameRef,
+    before {
+        name: StageName,
+        description: Option<String>,
+        system_prompt: Option<String>,
+        model: crate::spec::graph::ModelChoice,
+        tools: Vec<crate::spec::graph::ToolSelector>,
+        required_tools: Vec<ToolName>,
+        connectors: Vec<crate::spec::names::McpServerName>,
+        max_iterations: Option<u32>,
+    }
+    mode: ModeFrame = |s| ModeFrame::of(&s.mode, &s.prompt_regions),
+        (mode, prompt_regions),
+    after {
+        layout: Option<RegionLayoutDef>,
+        hide: Vec<RegionName>,
+        reset: Vec<RegionName>,
+        tool_permissions: std::collections::BTreeMap<ToolName, ToolPolicy>,
+        requires_children: bool,
+        max_revisits: Option<u32>,
+        transition_prompt: Option<String>,
+        routing: Option<RoutingDef>,
+        accepts_messages: bool,
+        allow_complete: bool,
+        allow_as_worker: bool,
+        allow_blocking_tools: bool,
+        taint_tracking: Option<bool>,
+        batch_tool_hint: Option<bool>,
+        shell_hint: Option<bool>,
+        nudge: Option<NudgeDef>,
+        sandbox: Option<SandboxDef>,
+        tool_routing: Option<crate::spec::graph::ToolRoutingDef>,
+        output_routing: std::collections::BTreeMap<String, RegionName>,
+        output: Option<OutputDef>,
+        require_output: bool,
+        input_accepts: Vec<MimePattern>,
+        input_as_text: Vec<MimePattern>,
+        tool_accepts: std::collections::BTreeMap<ToolName, Vec<MimePattern>>,
+        write_paths: Vec<String>,
+        hooks: crate::spec::graph::StageHooks,
     }
 );

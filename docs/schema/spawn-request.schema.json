@@ -3343,6 +3343,14 @@
           "description": "Which region each named part of the stage's output lands in.",
           "type": "object"
         },
+        "prompt_regions": {
+          "description": "The regions a media model's prompt is made of, in order. A stage whose\nmodel takes its prompt from the request's text (an image, video or\nspeech model) sends only these regions' content; unset, it reads every\nregion it shows.",
+          "items": {
+            "description": "A region name.",
+            "type": "string"
+          },
+          "type": "array"
+        },
         "require_output": {
           "default": false,
           "description": "Whether the stage must hand back a final output before it ends.",

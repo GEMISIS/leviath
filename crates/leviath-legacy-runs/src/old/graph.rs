@@ -287,6 +287,7 @@ impl Conv {
                 .as_ref()
                 .map(|l| self.layout(l, &p.field("layout"))),
             hide: self.names(p.field("hide"), &s.context_hide),
+            prompt_regions: Vec::new(),
             reset: self.names(p.field("reset"), &s.context_reset),
             tool_permissions: self.permissions(
                 p.field("tool_permissions"),

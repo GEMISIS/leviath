@@ -18,6 +18,7 @@ pub(crate) fn stage(name: &str) -> StageDef {
         mode: StageMode::Autonomous,
         layout: None,
         hide: vec![],
+        prompt_regions: Vec::new(),
         reset: vec![],
         tool_permissions: BTreeMap::new(),
         requires_children: false,
@@ -159,6 +160,28 @@ fn every_dangling_name_is_reported() {
             "graph.layout.eviction_order Dangling",
         ]
     );
+}
+
+#[test]
+fn prompt_regions_must_name_declared_regions_and_are_omitted_when_empty() {
+    let mut g = minimal();
+    assert!(codes(&g).is_empty());
+    let plain = serde_json::to_value(&g.stages[0]).unwrap();
+    assert!(plain.get("prompt_regions").is_none());
+
+    g.stages[0]
+        .prompt_regions
+        .push(RegionName::new("task").unwrap());
+    assert!(codes(&g).is_empty());
+    let json = serde_json::to_value(&g.stages[0]).unwrap();
+    assert_eq!(json["prompt_regions"], serde_json::json!(["task"]));
+    let back: StageDef = serde_json::from_value(json).unwrap();
+    assert_eq!(back.prompt_regions, g.stages[0].prompt_regions);
+
+    g.stages[0]
+        .prompt_regions
+        .push(RegionName::new("ghost").unwrap());
+    assert_eq!(codes(&g), vec!["graph.stages.plan.prompt_regions Dangling"]);
 }
 
 #[test]

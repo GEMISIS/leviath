@@ -526,6 +526,22 @@ pub struct InferenceRequest {
     pub request_timeout_secs: Option<u64>,
 }
 
+/// The key in `request.extra` under which the runtime hands a provider the
+/// stage's `prompt_regions`. Owned by the runtime: the pass-through merge into
+/// a chat request body leaves it out.
+pub const PROMPT_REGIONS_KEY: &str = "prompt_regions";
+
+/// The key in `request.extra` under which the runtime hands a provider the
+/// mime patterns the stage declares as its output (`audio/mpeg`, `image/*`),
+/// as an array of strings. Runtime-owned like [`PROMPT_REGIONS_KEY`]: a model
+/// that can answer in more than one medium reads it to know which one the
+/// stage wants, and it is never sent on as a model parameter.
+pub const OUTPUT_MIMES_KEY: &str = "output_mimes";
+
+/// The `request.extra` keys the runtime owns, left out of the pass-through
+/// merge into a chat request body.
+pub(crate) const RUNTIME_EXTRA_KEYS: &[&str] = &[PROMPT_REGIONS_KEY, OUTPUT_MIMES_KEY];
+
 /// The user turn a request carries when its context holds none: every
 /// provider refuses a request without one. It is a placeholder, not something
 /// anyone asked, so a model that takes its prompt from the request's text (an

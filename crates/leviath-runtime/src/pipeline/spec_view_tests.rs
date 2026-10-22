@@ -400,6 +400,39 @@ fn model_settings_reach_the_request_as_written() {
     assert!(!cfg.batch_tool_hint && !cfg.shell_hint);
 }
 
+/// A stage's `prompt_regions` and the mime types it declares as output reach
+/// the request under the keys the providers read, and a stage that sets
+/// neither passes nothing extra.
+#[test]
+fn prompt_regions_and_declared_outputs_reach_the_request() {
+    let mut spec = two_stage_spec();
+    let bare = stage_setup(&spec, 0).inference_config;
+    assert!(!bare.extra_params.contains_key("prompt_regions"));
+    assert!(!bare.extra_params.contains_key("output_mimes"));
+
+    spec.graph.stages[0].prompt_regions = vec![rn("task")];
+    spec.graph.stages[0].output = Some(crate::spec::graph::OutputDef {
+        format: Some("audio/mpeg".into()),
+        ..Default::default()
+    });
+    spec.graph.stages[0]
+        .output_routing
+        .insert("image/png".to_string(), rn("task"));
+    spec.graph.stages[0]
+        .output_routing
+        .insert("notes".to_string(), rn("task"));
+    let cfg = stage_setup(&spec, 0).inference_config;
+    assert_eq!(
+        cfg.extra_params["prompt_regions"],
+        serde_json::json!(["task"])
+    );
+    assert_eq!(
+        cfg.extra_params["output_mimes"],
+        serde_json::json!(["audio/mpeg", "image/png"]),
+        "a routing key that is not a mime type is not an output type"
+    );
+}
+
 fn fan_out(split: &str) -> StageMode {
     StageMode::FanOut(FanOutDef {
         max_workers: Some(2),

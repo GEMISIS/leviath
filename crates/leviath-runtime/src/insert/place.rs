@@ -142,6 +142,8 @@ pub(crate) fn stage_progress(state: &RunState) -> crate::pipeline::StageProgress
         stuck_fired: p.stuck_fired,
         images_produced: p.images_produced as usize,
         no_image_nudges: p.no_image_nudges as usize,
+        // The loop guard starts over after a restore.
+        ..Default::default()
     }
 }
 

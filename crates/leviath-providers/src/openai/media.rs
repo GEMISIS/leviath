@@ -60,6 +60,27 @@ pub(crate) fn kind(model: &str) -> Option<Kind> {
     }
 }
 
+/// Whether `request` is a `gpt-audio*` chat call whose stage declares audio as
+/// its output. Those models answer in speech only on Chat Completions (the
+/// Responses API has no audio output), and only when asked for it; a stage that
+/// declares no audio output keeps the ordinary text route.
+#[cfg(feature = "openai")]
+pub(crate) fn speaks_in_chat(request: &InferenceRequest) -> bool {
+    let model = request.model.to_ascii_lowercase();
+    model.starts_with("gpt-audio")
+        && !model.contains("realtime")
+        && request
+            .extra
+            .get(crate::provider::OUTPUT_MIMES_KEY)
+            .and_then(Value::as_array)
+            .is_some_and(|mimes| {
+                mimes
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|m| m.starts_with("audio/"))
+            })
+}
+
 /// The media models this build names, for `lev validate` and a listing that
 /// cannot be read.
 pub(crate) const CATALOG: &[(&str, &str)] = &[
@@ -132,6 +153,91 @@ pub(crate) async fn run(
 #[cfg(feature = "openai")]
 fn route(request: &InferenceRequest) -> String {
     format!("{}/{}", super::PROVIDER_NAME, request.model)
+}
+
+/// The audio formats Chat Completions returns, with the type each is.
+#[cfg(feature = "openai")]
+fn chat_audio_type(format: &str) -> Option<&'static str> {
+    match format {
+        "mp3" => Some("audio/mpeg"),
+        "wav" => Some("audio/wav"),
+        "flac" => Some("audio/flac"),
+        "opus" => Some("audio/ogg"),
+        "pcm16" => Some("audio/L16"),
+        _ => None,
+    }
+}
+
+/// Ask a `gpt-audio*` model for a spoken answer over Chat Completions:
+/// `modalities: ["text", "audio"]` and `audio: {voice, format}`. The audio comes
+/// back base64 under the message's `audio.data`, with its transcript, and
+/// becomes an output part; the transcript is the reply's text.
+///
+/// The `voice` (default `alloy`) and `audio_format` (`mp3`, `wav`, `flac`,
+/// `opus` or `pcm16`; default `mp3`) come from the stage's model parameters.
+/// Not streamed, and not priced per call: the reply's token usage is all it
+/// reports.
+#[cfg(feature = "openai")]
+pub(crate) async fn chat_audio(
+    endpoint: &Endpoint,
+    request: &InferenceRequest,
+) -> Result<InferenceResponse> {
+    use base64::Engine as _;
+    let format = media::extra_str(request, "audio_format").unwrap_or_else(|| "mp3".to_string());
+    let mime = chat_audio_type(&format).ok_or_else(|| {
+        ProviderError::InvalidResponse(format!(
+            "audio_format '{format}' is not one {} returns: use mp3, wav, flac, opus or pcm16",
+            request.model
+        ))
+    })?;
+    let voice = media::extra_str(request, "voice").unwrap_or_else(|| "alloy".to_string());
+    let mut body = crate::openai_compat::build_openai_request_body(request);
+    if let Some(fields) = body.as_object_mut() {
+        // These models take the cap under its newer name, and the two stage
+        // parameters above are not Chat Completions fields.
+        if let Some(cap) = fields.remove("max_tokens") {
+            fields.insert("max_completion_tokens".into(), cap);
+        }
+        fields.remove("voice");
+        fields.remove("audio_format");
+        fields.insert("modalities".into(), json!(["text", "audio"]));
+        fields.insert("audio".into(), json!({ "voice": voice, "format": format }));
+    }
+    let response = endpoint.post_json("/chat/completions", &body).await?;
+    let response =
+        crate::provider::check_http_response(response, endpoint.rate_limiter.as_ref()).await?;
+    let reply: Value = response
+        .json()
+        .await
+        .map_err(|e| ProviderError::InvalidResponse(format!("unreadable audio reply: {e}")))?;
+    let mut parsed = crate::openai_compat::parse_openai_response(&reply)?;
+    let audio = reply.pointer("/choices/0/message/audio");
+    let data = audio.and_then(|a| a.get("data")).and_then(Value::as_str);
+    let Some(data) = data else {
+        return Err(ProviderError::InvalidResponse(format!(
+            "{} answered without audio although the stage asked for it",
+            request.model
+        )));
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| ProviderError::InvalidResponse(format!("undecodable audio reply: {e}")))?;
+    let name = format!("speech.{}", media::extension(mime));
+    parsed.parts.push(
+        leviath_core::mime::Blob::new(
+            leviath_core::mime::MimeType::parse(mime).expect("a fixed audio type is a mime type"),
+            bytes,
+        )
+        .named(&name),
+    );
+    if parsed.content.trim().is_empty() {
+        parsed.content = audio
+            .and_then(|a| a.get("transcript"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| media::summary(&route(request), &parsed.parts));
+    }
+    Ok(parsed)
 }
 
 /// Make a video, wait for it, keep it, and delete the job.

@@ -13,6 +13,26 @@ same list.
 
 ## Unreleased
 
+### Added
+
+- A stage may set `prompt_regions = ["brief"]`: for a model that takes its
+  prompt from text (an image, video or speech model), the prompt is exactly
+  those regions' text, in that order, instead of every region the stage shows.
+- A tool call repeated with identical arguments three times in a stage draws a
+  nudge to stop; repeating it again ends the stage, down its `stuck` edge if it
+  has one, else as a `max_iterations` stage.
+- A `gpt-audio` stage whose declared output includes `audio/*` is sent to Chat
+  Completions with `modalities` and `audio` set, and the audio that comes back
+  becomes an output part (`voice` and `audio_format` parameters).
+
+### Fixed
+
+- An edge's gate is checked when the stage before it was cut off at
+  `max_iterations` or ended by the loop guard. It used to be skipped, so a
+  stage could run on a region the stage before it never wrote. A failing gate
+  routes down the `max_iterations`/`error` edge, else fails the run with the
+  gate's message.
+
 ### Changed
 
 - A model call whose availability trouble (a 5xx, a 429, "overloaded")

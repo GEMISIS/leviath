@@ -154,6 +154,7 @@ pub(crate) use cut_off::{
     MAX_CUT_OFF_NUDGES, cut_off_arguments_refusal, cut_off_nudge, cut_off_stage_error,
     malformed_arguments_refusal,
 };
+mod loop_guard;
 mod media_nudge;
 mod park;
 mod part_routing;
@@ -163,9 +164,11 @@ pub(crate) use media_nudge::{
 mod reroute;
 pub(crate) use reroute::RoutesTried;
 mod response;
+#[cfg(test)]
+pub(crate) use loop_guard::edited_path;
 pub use response::StageLedger;
 #[cfg(test)]
-pub(crate) use response::{GlobalNudge, edited_path, to_inference_result};
+pub(crate) use response::{GlobalNudge, to_inference_result};
 pub(crate) use response::{
     InferenceResults, ProcessResponse, ReadyForTools, ReadyForTransition, ResolveTransition,
     StageIoBuffer, StageOutcome, StageProgress, collect_inference, handle_empty_response,

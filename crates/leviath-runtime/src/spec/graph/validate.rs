@@ -197,6 +197,9 @@ impl<'a> Validator<'a> {
         for r in &stage.hide {
             self.need_region(path.field("hide"), r, &own);
         }
+        for r in &stage.prompt_regions {
+            self.need_region(path.field("prompt_regions"), r, &own);
+        }
         for r in &stage.reset {
             self.need_region(path.field("reset"), r, &own);
         }

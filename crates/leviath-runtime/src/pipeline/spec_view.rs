@@ -410,6 +410,18 @@ fn system_prompt(
     })
 }
 
+/// The mime patterns a stage declares as its output: its output format when
+/// that is a mime type, and the types its output routing names.
+fn declared_output_mimes(stage: &StageDef) -> Vec<String> {
+    let format = stage.output.as_ref().and_then(|o| o.format.as_deref());
+    format
+        .into_iter()
+        .map(str::to_string)
+        .chain(stage.output_routing.keys().cloned())
+        .filter(|m| m.contains('/'))
+        .collect()
+}
+
 /// How a stage is entered: its inference settings, its routing, whether it
 /// takes messages, its layout, what it hides and resets, and its prompt.
 pub(crate) fn stage_setup(spec: &RunSpec, idx: usize) -> StageSetup {
@@ -430,6 +442,23 @@ pub(crate) fn stage_setup(spec: &RunSpec, idx: usize) -> StageSetup {
                 .extra
                 .iter()
                 .map(|(k, v)| (k.clone(), v.to_json()))
+                // The stage's own fields win over a parameter of the same name.
+                .chain((!stage.prompt_regions.is_empty()).then(|| {
+                    (
+                        leviath_providers::PROMPT_REGIONS_KEY.to_string(),
+                        serde_json::json!(stage.prompt_regions),
+                    )
+                }))
+                .chain(
+                    Some(declared_output_mimes(stage))
+                        .filter(|m| !m.is_empty())
+                        .map(|m| {
+                            (
+                                leviath_providers::OUTPUT_MIMES_KEY.to_string(),
+                                serde_json::json!(m),
+                            )
+                        }),
+                )
                 .collect(),
             as_text: stage
                 .input_as_text
