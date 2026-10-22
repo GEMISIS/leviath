@@ -193,21 +193,22 @@ pub(crate) async fn chat_audio(
     })?;
     let voice = media::extra_str(request, "voice").unwrap_or_else(|| "alloy".to_string());
     let mut body = crate::openai_compat::build_openai_request_body(request);
-    if let Some(fields) = body.as_object_mut() {
-        // These models take the cap under its newer name, and the two stage
-        // parameters above are not Chat Completions fields.
-        if let Some(cap) = fields.remove("max_tokens") {
-            fields.insert("max_completion_tokens".into(), cap);
-        }
-        fields.remove("voice");
-        fields.remove("audio_format");
-        // A model that takes no temperature is sent none, as on the ordinary route.
-        if !send_temperature {
-            fields.remove("temperature");
-        }
-        fields.insert("modalities".into(), json!(["text", "audio"]));
-        fields.insert("audio".into(), json!({ "voice": voice, "format": format }));
+    let fields = body
+        .as_object_mut()
+        .expect("a Chat Completions body is a JSON object");
+    // These models take the cap under its newer name, and the two stage
+    // parameters above are not Chat Completions fields.
+    if let Some(cap) = fields.remove("max_tokens") {
+        fields.insert("max_completion_tokens".into(), cap);
     }
+    fields.remove("voice");
+    fields.remove("audio_format");
+    // A model that takes no temperature is sent none, as on the ordinary route.
+    if !send_temperature {
+        fields.remove("temperature");
+    }
+    fields.insert("modalities".into(), json!(["text", "audio"]));
+    fields.insert("audio".into(), json!({ "voice": voice, "format": format }));
     let url = endpoint.url("/chat/completions");
     let timeout = request.request_timeout_secs;
     let response = endpoint

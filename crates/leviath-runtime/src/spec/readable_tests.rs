@@ -611,6 +611,18 @@ fn a_stages_prompt_regions_keep_the_binary_shape() {
     }
 }
 
+/// A mode frame that carries `prompt_regions` read as a bare mode gives the
+/// mode, so nothing reading only a mode is misled by the extra slot.
+#[test]
+fn a_prompted_mode_frame_reads_as_its_mode() {
+    let frame = super::mode::ModeFrame::of(&StageMode::Output, &[region("brief")]);
+    let bin = postcard::to_stdvec(&frame).unwrap();
+    assert_eq!(
+        postcard::from_bytes::<StageMode>(&bin).unwrap(),
+        StageMode::Output
+    );
+}
+
 /// A model block's `effort` reads and writes in readable formats, while the
 /// run file keeps the four fields a model block always had: a block with no
 /// effort is the same bytes as before, and one with an effort keeps it among
