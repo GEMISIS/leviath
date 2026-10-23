@@ -869,6 +869,41 @@ fn openrouter_ids_map_x_ai_to_xai_and_keep_only_metas_served_models() {
     assert_eq!(openrouter_model("no-slash", &PROVIDERS), None);
 }
 
+/// OpenRouter lists Wonder as `meta/muse-wonder`; Meta's API and LiteLLM
+/// call it `muse-wonder-1.0`. The price lands on Meta's id, where LiteLLM's
+/// copy of the same row agrees with it, while the modalities refresh (which
+/// shares `openrouter_model`) keeps OpenRouter's spelling, a prefix of both.
+#[test]
+fn openrouters_unversioned_wonder_is_priced_under_metas_id() {
+    assert_eq!(
+        openrouter_model("meta/muse-wonder", &PROVIDERS),
+        Some(key("meta", "muse-wonder"))
+    );
+    let body = openrouter_body(&[or_model(
+        "meta/muse-wonder",
+        "0.000004",
+        "0.00002",
+        Some("0.0000002"),
+        None,
+    )]);
+    let prices = parse_openrouter(&body).unwrap();
+    let rate = &prices[&key("meta", "muse-wonder-1.0")];
+    assert_eq!((rate.input, rate.output), (4.0, 20.0));
+    assert!((rate.cache_read.unwrap() - 0.2).abs() < 1e-9);
+    assert!(!prices.contains_key(&key("meta", "muse-wonder")));
+    let litellm = ll_entry(
+        "meta/muse-wonder-1.0",
+        "meta",
+        "chat",
+        Some(4e-6),
+        Some(2e-5),
+        Some(2e-7),
+        None,
+    );
+    let theirs = parse_litellm(&litellm_body(&[litellm])).unwrap();
+    assert!(theirs.contains_key(&key("meta", "muse-wonder-1.0")));
+}
+
 #[test]
 fn litellm_reads_the_new_vendors_and_the_smallest_long_context_tier() {
     let tiered = "\"xai/grok-4.3\": {\"litellm_provider\": \"xai\", \"mode\": \"chat\", \

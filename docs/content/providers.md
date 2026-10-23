@@ -1053,10 +1053,21 @@ meta_api_key = "..."
 
 | Model | Takes | Makes |
 |---|---|---|
+| `muse-wonder-1.0` | text, images, video, audio, and PDFs (1 048 576 tokens) | text and tool calls |
 | `muse-spark-1.3`, `-1.2`, `-1.1` | text, images, MP4 video, MP3 and WAV audio, and PDFs (1 048 576 tokens) | text and tool calls |
 | `muse-spark-1.3-contributor`, `-1.2-contributor` | the same, at a much lower price | the same |
 | `muse-image-1.0` | text, and images to edit | images |
 | `muse-voice-transcribe-1.0` | WAV audio | the transcript, with a `transcript.json` part of turns |
+
+**Naming.** Meta's id is the versioned `muse-wonder-1.0`, and that is the canonical name. OpenRouter
+lists the same model without a version, as `meta/muse-wonder`. Write `muse-wonder-1.0` anywhere and
+Leviath sends OpenRouter the id it lists. The bare `muse-wonder` also works: on Meta it means the
+newest listed version (the same goes for `muse-spark`, never a `-contributor` tier), on OpenRouter
+it is `meta/muse-wonder`. Both spellings get the same window, price and input types.
+
+Meta publishes Muse Wonder's 1 048 576-token window, $4.00 per million input tokens, $0.20 cached
+and $20.00 output. It publishes no output limit, so Leviath assumes 131 072, as for Muse Spark; a
+listing that reports one (OpenRouter's is 943 718) takes over.
 
 **Contributor models.** Meta trains on what a `-contributor` model is sent and returns, which is
 why it costs less. `lev models list` flags one with `!` while zero retention is on, and a stage on

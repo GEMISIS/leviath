@@ -217,6 +217,72 @@ async fn an_override_can_price_turn_off_temperature_and_retype_a_model() {
     let _ = provider.pricing("muse-spark-1.2");
 }
 
+/// Wonder's window is Meta's 1 048 576 (not the 128K an unknown model gets),
+/// its price is Meta's, and the versioned id and the family name agree on both.
+#[test]
+fn muse_wonder_has_its_own_window_and_price_under_both_spellings() {
+    let meta = provider("http://x");
+    for name in ["muse-wonder-1.0", "muse-wonder"] {
+        let caps = meta.capabilities(name);
+        assert_eq!(caps.max_context_tokens, 1_048_576, "{name}");
+        assert_eq!(caps.max_output_tokens, 131_072, "{name}");
+        assert!(caps.supports_tools && caps.supports_temperature, "{name}");
+        let price = meta.pricing(name).unwrap_or_else(|| panic!("{name}"));
+        assert_eq!(price.input_per_mtok, 4.0, "{name}");
+        assert_eq!(price.cached_input_per_mtok, 0.2, "{name}");
+        assert_eq!(price.output_per_mtok, 20.0, "{name}");
+        assert_eq!(meta.serves_model(name).as_deref(), Some("muse-wonder-1.0"));
+        assert!(meta.mime(name).input.iter().any(|m| m == "audio/wav"));
+    }
+    assert!(meta.pricing("muse-unlisted").is_none());
+}
+
+#[test]
+fn a_family_name_is_the_newest_listed_version_and_never_a_contributor_tier() {
+    let ids = [
+        "muse-spark-1.2",
+        "muse-spark-1.10",
+        "muse-spark-1.9-contributor",
+        "muse-spark-1.3",
+        "muse-wonder-1.0",
+        "muse-spark",
+    ];
+    assert_eq!(
+        newest_version("muse-spark", ids),
+        Some("muse-spark-1.10".into())
+    );
+    assert_eq!(
+        newest_version("muse-wonder", ids),
+        Some("muse-wonder-1.0".into())
+    );
+    assert_eq!(newest_version("muse-image", ids), None);
+}
+
+#[tokio::test]
+async fn a_family_name_is_sent_to_meta_as_the_version_it_means() {
+    let listing = serde_json::json!({ "data": [
+        { "id": "muse-spark-1.3" }, { "id": "muse-wonder-1.0" }
+    ]});
+    let (url, bodies) = spawn_mock_sequence(vec![
+        (200, "OK", listing.to_string().into_bytes()),
+        (200, "OK", sse("ok")),
+    ])
+    .await;
+    let provider = provider(&url);
+    provider.check_credential().await.expect("listed");
+    assert_eq!(
+        provider.serves_model("muse-wonder").as_deref(),
+        Some("muse-wonder-1.0")
+    );
+    assert_eq!(
+        provider.serves_model("muse-spark").as_deref(),
+        Some("muse-spark-1.3")
+    );
+    provider.infer(&request("muse-wonder")).await.unwrap();
+    let sent = bodies.lock().unwrap().last().cloned().unwrap();
+    assert!(sent.contains("\"model\":\"muse-wonder-1.0\""), "{sent}");
+}
+
 #[tokio::test]
 async fn muse_spark_takes_media_by_file_and_the_media_models_take_none() {
     let (url, seen) = spawn_mock_recorder(200, "OK", br#"{"id":"file-m"}"#.to_vec()).await;
