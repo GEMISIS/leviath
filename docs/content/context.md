@@ -97,7 +97,7 @@ the model's.
 |---|---|
 | `temporary` | Recent entries, trimmed first under budget pressure. |
 | `pinned` | Never evicted (architecture, the task). |
-| `sliding_window` | Keeps the most recent entries; the conversation lives here. |
+| `sliding_window` | Keeps the most recent entries; the conversation lives here. The `conversation` region is always sent as the dialogue (turns, with each call beside its result), whatever kind it is declared; its kind only says what happens to old entries. |
 | `compacting` | Summarizes instead of evicting: file reads and tool results. |
 | `compact_history` | Carries summaries from earlier stages forward, so a later stage skips the raw content. `source` names what it summarizes. |
 | `clearable` | Wiped in one shot when space is needed (scratch). |

@@ -12272,11 +12272,18 @@ fn the_loop_guard_ignores_work_that_is_not_a_loop() {
     }
     quiet(&guard);
 
-    // Different calls interleaved.
+    // Different calls interleaved while each round reads something new.
     let mut guard = LoopGuard::default();
-    for _ in 0..n {
+    for i in 0..n {
         see(&mut guard, &[("list_dir", ".")]);
-        see(&mut guard, &[("read_file", "a.txt")]);
+        see(&mut guard, &[("read_file", &format!("{i}.txt"))]);
+    }
+    quiet(&guard);
+
+    // Reading a file again once, after it left the context, is not a loop.
+    let mut guard = LoopGuard::default();
+    for file in ["a", "b", "c", "a", "b", "c"] {
+        see(&mut guard, &[("read_file", file)]);
     }
     quiet(&guard);
 
@@ -12309,6 +12316,57 @@ fn the_loop_guard_ignores_work_that_is_not_a_loop() {
     // An empty batch is nothing.
     guard.observe(&[], &[], &[]);
     assert_eq!(guard.streak, 0);
+}
+
+/// A loop that goes round - the same few calls taking turns, each batch
+/// unlike the one before it, nothing new coming back - is nudged once its
+/// calls have been answered the same way twice, then stopped.
+#[test]
+fn the_loop_guard_catches_a_loop_that_goes_round() {
+    use crate::pipeline::loop_guard::{LOOP_REPEAT_LIMIT, LoopGuard, LoopTrip, STALE_AFTER};
+    let mut guard = LoopGuard::default();
+    let round = [("list_dir", "."), ("read_file", "README.md")];
+    // Each call answered STALE_AFTER times: nothing counted yet.
+    for _ in 0..STALE_AFTER {
+        for call in round {
+            see(&mut guard, &[call]);
+        }
+    }
+    assert_eq!(guard.trip, LoopTrip::None);
+    assert_eq!(guard.stale, 0);
+    for n in 1..LOOP_REPEAT_LIMIT {
+        see(&mut guard, &[round[(n - 1) % 2]]);
+        assert_eq!(guard.trip, LoopTrip::None, "batch {n}");
+    }
+    see(&mut guard, &[round[(LOOP_REPEAT_LIMIT - 1) % 2]]);
+    assert_eq!(guard.stale, LOOP_REPEAT_LIMIT);
+    assert!(matches!(guard.trip, LoopTrip::Nudge(_)), "{:?}", guard.trip);
+
+    // Delivered, the next batch that brings nothing new ends the stage.
+    guard.trip = LoopTrip::None;
+    guard.nudged = true;
+    see(&mut guard, &[round[LOOP_REPEAT_LIMIT % 2]]);
+    match &guard.trip {
+        LoopTrip::Stuck(reason) => {
+            assert!(reason.contains("already had"), "{reason}");
+        }
+        other => panic!("expected the stage to be stuck, got {other:?}"),
+    }
+
+    // A batch with something new in it starts the count again.
+    let mut guard = LoopGuard::default();
+    for _ in 0..STALE_AFTER + 1 {
+        for call in round {
+            see(&mut guard, &[call]);
+        }
+    }
+    assert!(guard.stale > 0);
+    see(&mut guard, &[("list_dir", "."), ("read_file", "new.txt")]);
+    assert_eq!(guard.stale, 0);
+
+    // So does changing a file, which also forgets what was seen.
+    see(&mut guard, &[("write_file", "a.txt")]);
+    assert!(guard.seen.is_empty());
 }
 
 #[test]
