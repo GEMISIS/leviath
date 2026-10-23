@@ -455,6 +455,12 @@ async fn a_graph_that_does_not_read_is_an_issue() {
     assert_eq!(issues[0]["path"], "source.graph", "{answer}");
     assert_eq!(issues[0]["code"], "INVALID");
     assert!(
+        issues[0]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("stages: ")),
+        "{answer}"
+    );
+    assert!(
         issues[0]["hint"]
             .as_str()
             .is_some_and(|hint| hint.contains("spawn-request")),

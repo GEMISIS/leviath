@@ -643,3 +643,11 @@ async fn a_spawn_body_still_arriving_past_the_ordinary_deadline_is_a_408() {
         assert_eq!(answer["error"], "request took longer than 1 s");
     }
 }
+
+#[tokio::test]
+async fn a_graph_that_does_not_read_names_where() {
+    let body = r#"{"source": {"raw": {"stages": "none"}}}"#;
+    let (status, refused) = send(offline(), post("/api/runs", body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(refused.to_string().contains("source.raw"), "{refused}");
+}

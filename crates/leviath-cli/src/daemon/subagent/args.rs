@@ -150,10 +150,10 @@ fn source(value: &Value, workdir: &Path) -> Result<SpawnSource, SpawnIssues> {
     };
     match (map.get("blueprint"), map.get("graph"), map.len()) {
         (Some(blueprint), None, 1) => named(blueprint, workdir, at.field("blueprint")),
-        (None, Some(graph), 1) => serde_json::from_value::<RunGraph>(graph.clone())
+        (None, Some(graph), 1) => crate::json_path::read::<RunGraph>(graph.clone())
             .map(|graph| SpawnSource::Raw(Box::new(graph)))
-            .map_err(|e| {
-                SpawnIssue::new(at.field("graph"), IssueCode::Invalid, e.to_string())
+            .map_err(|message| {
+                SpawnIssue::new(at.field("graph"), IssueCode::Invalid, message)
                     .hint("`spawn_schema` with part \"RunGraph\" shows every field a graph takes")
                     .into()
             }),

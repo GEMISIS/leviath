@@ -493,11 +493,11 @@ fn source(write: SpawnSourceWrite, issues: &mut SpawnIssues) -> Option<SpawnSour
                 digest: digest?,
             }))
         }
-        SpawnSourceWrite::Graph(graph) => match serde_json::from_value::<RunGraph>(graph.0) {
+        SpawnSourceWrite::Graph(graph) => match crate::json_path::read::<RunGraph>(graph.0) {
             Ok(graph) => Some(SpawnSource::Raw(Box::new(graph))),
-            Err(e) => {
+            Err(message) => {
                 issues.push(
-                    SpawnIssue::new(at.field("graph"), IssueCode::Invalid, e.to_string())
+                    SpawnIssue::new(at.field("graph"), IssueCode::Invalid, message)
                         .hint("GET /api/schema/spawn-request describes every key a graph takes"),
                 );
                 None

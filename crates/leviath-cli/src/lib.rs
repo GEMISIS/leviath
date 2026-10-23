@@ -39,6 +39,7 @@ mod entry;
 pub use entry::{run, run_from};
 pub(crate) mod held_checkpoints;
 pub mod home_backup;
+pub(crate) mod json_path;
 pub(crate) mod lint;
 pub mod logging;
 pub(crate) mod provider_checks;

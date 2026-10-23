@@ -229,9 +229,9 @@ fn decode(value: serde_json::Value) -> Result<SpawnRequest, SpawnIssues> {
     {
         return Err(refused.into());
     }
-    serde_json::from_value(value).map_err(|e| {
+    crate::json_path::read(value).map_err(|message| {
         SpawnIssues::from(
-            SpawnIssue::new(SpecPath::root(), IssueCode::Invalid, e.to_string())
+            SpawnIssue::new(SpecPath::root(), IssueCode::Invalid, message)
                 .hint("GET /api/schema/spawn-request for the request's shape"),
         )
     })
