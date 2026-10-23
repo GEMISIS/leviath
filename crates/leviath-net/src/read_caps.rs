@@ -171,13 +171,12 @@ pub fn line_cap_message(cap: usize, peer: &str) -> String {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
 
     /// Serve one connection with `headers` and then `body_len` bytes of
     /// `x`, written in small pieces. The body is never all in one chunk, so
     /// the running total is what stops the read.
     async fn serve_body(headers: &'static str, body_len: usize) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
@@ -279,7 +278,7 @@ mod tests {
     async fn text_is_decoded_by_the_declared_charset() {
         // `caf\xe9` in Latin-1; read as UTF-8 it would be a replacement
         // character, which is what `Response::text` also avoids.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();

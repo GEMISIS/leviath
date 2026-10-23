@@ -819,7 +819,7 @@ mod tests {
         use axum::response::IntoResponse;
         use axum::routing::post;
         use axum::{Json, Router};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new().route(
             "/mcp",

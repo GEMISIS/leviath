@@ -4076,4 +4076,49 @@ mod tests {
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].provider, "openai");
     }
+
+    /// Muse Wonder is Meta's `muse-wonder-1.0` and OpenRouter's
+    /// `meta/muse-wonder`. A bare name of either spelling reaches OpenRouter
+    /// when Meta is not configured, sized and priced as that route is, and
+    /// the user's order still puts Meta first when both are.
+    #[test]
+    fn muse_wonder_routes_to_meta_first_and_to_openrouter_alone() {
+        let client = || leviath_providers::provider::build_http_client(None).unwrap();
+        let meta: Arc<dyn Provider> = Arc::new(leviath_providers::meta::MetaProvider::new(
+            client(),
+            "k".into(),
+        ));
+        let gateway: Arc<dyn Provider> = Arc::new(leviath_providers::OpenRouterProvider::new(
+            client(),
+            "k".into(),
+        ));
+        let both = || {
+            vec![
+                ("meta".to_string(), meta.clone()),
+                ("openrouter".to_string(), gateway.clone()),
+            ]
+        };
+        for bare in ["muse-wonder-1.0", "muse-wonder"] {
+            assert_eq!(
+                open_route_claims(both(), bare),
+                [
+                    ("meta".to_string(), "muse-wonder-1.0".to_string()),
+                    ("openrouter".to_string(), "meta/muse-wonder".to_string())
+                ],
+                "{bare}"
+            );
+            let mut reversed = both();
+            reversed.reverse();
+            assert_eq!(open_route_claims(reversed, bare)[0].0, "openrouter");
+            let alone = vec![("openrouter".to_string(), gateway.clone())];
+            let claims = open_route_claims(alone, bare);
+            assert_eq!(
+                claims,
+                [("openrouter".to_string(), "meta/muse-wonder".to_string())],
+                "{bare}"
+            );
+            let caps = gateway.capabilities(&claims[0].1);
+            assert_eq!(caps.max_context_tokens, 1_048_576, "{bare}");
+        }
+    }
 }

@@ -741,7 +741,7 @@ mod tests {
     use axum::{Json, Router};
 
     async fn mock_oauth_server() -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let s = base.clone();
         let app = Router::new()
@@ -840,7 +840,7 @@ mod tests {
     /// that none is needed, rather than a discovery failure it cannot act on.
     #[tokio::test]
     async fn background_login_says_so_when_no_login_is_needed() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         // Publishes no OAuth metadata, so an attempted discovery fails loudly.
         let app = axum::Router::new().route(

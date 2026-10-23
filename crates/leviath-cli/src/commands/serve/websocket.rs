@@ -233,7 +233,7 @@ mod tests {
         tokio::sync::oneshot::Sender<()>,
         tokio::task::JoinHandle<()>,
     ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let handle = tokio::spawn(async move {
@@ -1101,7 +1101,7 @@ mod tests {
     /// server send a WS text frame with a 0-byte payload.
     #[tokio::test]
     async fn recv_frame_handles_zero_length_payload() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
 
         tokio::spawn(async move {
@@ -1138,7 +1138,7 @@ mod tests {
     /// write side so the client sees a clean EOF.
     #[tokio::test]
     async fn recv_eof_returns_none_on_clean_server_shutdown() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
 
         tokio::spawn(async move {
@@ -1173,7 +1173,7 @@ mod tests {
     /// server send one byte after the client connects.
     #[tokio::test]
     async fn recv_eof_returns_some_when_byte_arrives() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
 
         tokio::spawn(async move {

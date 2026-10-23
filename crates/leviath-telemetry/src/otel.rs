@@ -1355,7 +1355,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         // A minimal OTLP receiver: answer every POST with 200.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = leviath_testkit::bind_local_std();
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
         let hits_seen = hits.clone();
