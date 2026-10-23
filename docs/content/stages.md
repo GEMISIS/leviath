@@ -437,9 +437,18 @@ already has. "Identical" means the same calls with the same results, three batch
 run after each edit, a read after a write, or a call repeated inside one parallel batch is not a
 loop, and neither is a different result. Any different batch, any call to a tool that can change
 files, and any polling or fan-out tool (`wait_for_agent`, `fan_out`, and tools named `wait_*`,
-`*_status` or `*poll*`) starts the count again. If the model makes the same batch yet again after
-the nudge, the stage ends as a `stuck` stage: down the stage's `stuck` edge if it has one, else as a
-`max_iterations` stage would (see above, including the gate rule). No setting is needed.
+`*_status` or `*poll*`) starts the count again.
+
+A loop can also go round: `list_dir .`, then `read_file README.md`, then `list_dir .` again, each
+batch unlike the one before it and nothing new coming back. Once each of a batch's calls has already
+been answered the same way twice in the stage, the batch counts toward the same limit, three in a
+row. Reading a file once more after it left the context is not counted, and a batch with anything
+new in it, or a call that changes files, starts the count again (a file change also forgets every
+call seen before it).
+
+If the model goes on after the nudge, the stage ends as a `stuck` stage: down the stage's `stuck`
+edge if it has one, else as a `max_iterations` stage would (see above, including the gate rule). No
+setting is needed.
 
 ## Nudging
 

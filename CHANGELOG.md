@@ -28,13 +28,23 @@ same list.
 - The same tool calls with the same results three batches in a row draw a
   nudge to stop; repeating them again ends the stage, down its `stuck` edge if
   it has one, else as a `max_iterations` stage. Polling and fan-out tools, tools
-  that change files, and any differing batch start the count again.
+  that change files, and any differing batch start the count again. A loop that
+  goes round counts too: batches that only repeat calls already answered the same
+  way twice in the stage, three in a row, even when each batch differs from the
+  one before it (`list_dir .`, `read_file README.md`, `list_dir .`, ...).
 - A `gpt-audio` stage whose declared output includes `audio/*` is sent to Chat
   Completions with `modalities` and `audio` set, and the audio that comes back
   becomes an output part (`voice` and `audio_format` parameters).
 
 ### Fixed
 
+- The `conversation` region is sent as the dialogue whatever kind it is
+  declared. Declared `compacting` (or `clearable`, `temporary`, ...) it was
+  rendered into the system prompt as text, where a turn that called a tool is
+  only its (empty) text: the model saw a list of results with no calls behind
+  them and no turn of its own, started over on every request, and repeated its
+  first call until the stage ran out of iterations. Its kind still decides what
+  happens to its old entries.
 - An edge's gate is checked when the stage before it was cut off at
   `max_iterations` or ended by the loop guard. It used to be skipped, so a
   stage could run on a region the stage before it never wrote. A failing gate

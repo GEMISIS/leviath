@@ -7,7 +7,8 @@
 //! a Leviath run does without taking the runtime or the providers with it.
 //!
 //! The conversation is laid out here too, as provider-neutral turns: a
-//! `sliding_window` region becomes [`conversation::ConversationMessage`]s,
+//! `sliding_window` region, and the `conversation` region whatever its kind
+//! ([`renders_as_turns`]), becomes [`conversation::ConversationMessage`]s,
 //! with tool results paired and merged the way providers require.
 //! [`assemble_context`] returns both halves; [`assemble_system`] hands the
 //! conversation back to its caller instead, for one that renders it itself.
@@ -271,8 +272,8 @@ pub struct SystemAssembly<'a> {
 /// Regions render in the order given, with an empty one skipped, then the
 /// blocks are sorted most-stable first (a stable sort, so equal blocks keep
 /// region order) and the volatile tier is split at its newest block. A region
-/// this module cannot render itself - `sliding_window`, `custom` - is passed
-/// to `render` in its place, with the block list, so a caller's own blocks
+/// this module cannot render itself - `custom`, and one that
+/// [renders as turns](renders_as_turns) - is passed to `render` in its place, with the block list, so a caller's own blocks
 /// sort and hash with the rest. A `custom` region reaches `render` even when
 /// empty, since a script may emit static scaffolding.
 ///
@@ -290,7 +291,8 @@ pub struct ContextAssembly<'a> {
     /// The system blocks and the parts lifted out of them, as
     /// [`assemble_system`] lays them out.
     pub system: SystemAssembly<'a>,
-    /// Every `sliding_window` region's turns, in region order. See
+    /// The turns of every region that [renders as turns](renders_as_turns),
+    /// in region order. See
     /// [`conversation::conversation_messages`] for what is and is not done
     /// to them.
     pub conversation: Vec<conversation::ConversationMessage<'a>>,
@@ -309,8 +311,9 @@ pub struct CustomRegion<'a> {
 
 /// Lay out `regions` as a system prompt and a conversation.
 ///
-/// [`assemble_system`], with each `sliding_window` region rendered as
-/// conversation turns rather than handed back. Only a `custom` region
+/// [`assemble_system`], with each region that
+/// [renders as turns](renders_as_turns) rendered as conversation turns
+/// rather than handed back. Only a `custom` region
 /// reaches `render`, which pushes whatever blocks its script renders. The
 /// stored parts in [`SystemAssembly::lifted`] go in one user turn ahead of
 /// the conversation.
@@ -337,8 +340,8 @@ pub fn assemble_context<'a>(
     mut render: impl FnMut(CustomRegion<'a>, &mut Vec<SystemBlock>),
 ) -> ContextAssembly<'a> {
     let mut turns = Vec::new();
-    // Only the two kinds `assemble_system` cannot render come back here: a
-    // custom region, and otherwise a sliding window.
+    // Only what `assemble_system` cannot render comes back here: a custom
+    // region, and otherwise one that renders as turns.
     let system = assemble_system_dyn(&mut regions.into_iter(), &mut |region, blocks| {
         if let RegionKind::Custom { script, pinned } = &region.kind {
             let custom = CustomRegion {
@@ -355,6 +358,23 @@ pub fn assemble_context<'a>(
         system,
         conversation: turns,
     }
+}
+
+/// Whether `region` is sent as conversation turns rather than as a system
+/// block: every `sliding_window` region, and the region named
+/// [`crate::tool_routing::CONVERSATION`] whatever its kind.
+///
+/// The conversation is where a run's turns land: the model's replies with
+/// the calls they made, and each call's result or the pointer saying where it
+/// went. Rendered as a system block, an assistant turn is only its text,
+/// which a turn that just called a tool does not have, so the model would
+/// read a list of results with no calls behind them, and no turn of its own
+/// at all. It then starts over every request, making its first call again. So
+/// a conversation declared `compacting`, `clearable` or `temporary` keeps
+/// what its kind does to its entries, and is still sent as the dialogue.
+pub fn renders_as_turns(region: &Region) -> bool {
+    matches!(region.kind, RegionKind::SlidingWindow { .. })
+        || region.name == crate::tool_routing::CONVERSATION
 }
 
 /// [`assemble_system`] compiled once rather than per caller: one body, so a
@@ -374,7 +394,7 @@ fn assemble_system_dyn<'a>(
         if region.content.is_empty() && !is_custom {
             continue;
         }
-        let is_conversation = matches!(region.kind, RegionKind::SlidingWindow { .. });
+        let is_conversation = !is_custom && renders_as_turns(region);
         if !is_conversation {
             lifted.extend(lifted_blocks(region));
         }

@@ -542,6 +542,93 @@ fn the_conversation_and_custom_regions_render_nothing_here() {
     assert!(rendered(&custom).is_empty());
 }
 
+/// The conversation is the dialogue whatever kind it was declared: a
+/// `compacting` one holding a turn that called a tool, and the pointer its
+/// routed result left, is sent as that turn and that result, never as a
+/// system block that keeps the result and loses the call. Any other
+/// non-sliding region still renders into the system prompt.
+#[test]
+fn the_conversation_renders_as_turns_whatever_its_kind() {
+    use crate::region::{EntryKind, SerializedToolCall};
+    let mut conversation = Region::new(
+        crate::tool_routing::CONVERSATION.into(),
+        RegionKind::Compacting {
+            threshold_tokens: 1_000,
+        },
+        10_000,
+    );
+    let call = SerializedToolCall {
+        id: "c1".into(),
+        name: "list_dir".into(),
+        arguments: serde_json::json!({ "path": "." }),
+        thought_signature: None,
+    };
+    conversation
+        .add_typed_entry(
+            "",
+            1,
+            EntryKind::AssistantTurn {
+                tool_calls: vec![call],
+            },
+        )
+        .unwrap();
+    conversation
+        .add_typed_entry(
+            "[output is in your context under the 'files' heading]",
+            9,
+            EntryKind::ToolResult {
+                tool_call_id: "c1".into(),
+                tool_name: "list_dir".into(),
+                is_error: false,
+            },
+        )
+        .unwrap();
+    let notes = filled(
+        "notes",
+        RegionKind::Compacting {
+            threshold_tokens: 1_000,
+        },
+    );
+    assert!(renders_as_turns(&conversation));
+    assert!(!renders_as_turns(&notes));
+
+    let assembled = assemble_context([&notes, &conversation], |_, _| {});
+    let order: Vec<&str> = assembled
+        .system
+        .blocks
+        .iter()
+        .map(|b| b.region.as_str())
+        .collect();
+    assert_eq!(order, ["notes"]);
+    let roles: Vec<conversation::Role> = assembled.conversation.iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        [conversation::Role::Assistant, conversation::Role::User]
+    );
+    let conversation::ConversationContent::Blocks(turn) = &assembled.conversation[0].content else {
+        panic!("a turn with a call is pieces");
+    };
+    assert!(
+        turn.iter().any(
+            |b| matches!(b, conversation::ConversationBlock::ToolUse(c) if c.name == "list_dir")
+        )
+    );
+
+    // A custom region keeps its script, whatever its name.
+    let custom = Region::new(
+        crate::tool_routing::CONVERSATION.into(),
+        RegionKind::Custom {
+            script: "c.rhai".into(),
+            pinned: false,
+        },
+        100,
+    );
+    let mut handed = 0;
+    let assembled = assemble_context([&custom], |_, _| handed += 1);
+    assert_eq!(handed, 1);
+    assert!(assembled.conversation.is_empty());
+}
+
 // ─── the whole system side ──────────────────────────────────────────────────
 
 /// Empty regions are skipped, except a custom one, which may render
