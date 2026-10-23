@@ -15,6 +15,13 @@ same list.
 
 ### Added
 
+- Meta's Muse Wonder (`muse-wonder-1.0`) has its own window, price and input types:
+  1 048 576 tokens, $4 in and $20 out per million, text, images, video, audio and
+  PDFs. It reported 128K and no price, so calls over 128K were refused. `muse-wonder-1.0`
+  also finds OpenRouter's `meta/muse-wonder`, and a bare `muse-wonder` or `muse-spark`
+  means the newest version Meta lists. `cargo xtask prices` now reads OpenRouter's
+  Wonder row.
+
 - A stage may set `prompt_regions = ["brief"]`: for a model that takes its
   prompt from text (an image, video or speech model), the prompt is exactly
   those regions' text, in that order, instead of every region the stage shows.

@@ -335,6 +335,23 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
     crate::capabilities::lookup(MODELS, model, FALLBACK_CAPABILITIES)
 }
 
+/// The gateway ids of models it lists without the version Meta's API puts in
+/// the name: Meta's `muse-wonder-1.0` is `meta/muse-wonder` here, and the bare
+/// `muse-wonder` is the same model. Everything else the gateway lists under
+/// the vendor's own id (`meta/muse-spark-1.3`).
+const GATEWAY_IDS: &[(&str, &str)] = &[
+    ("muse-wonder-1.0", "meta/muse-wonder"),
+    ("muse-wonder", "meta/muse-wonder"),
+];
+
+/// `model` as the gateway spells it, when that differs from the bare name.
+fn gateway_id(model: &str) -> &str {
+    GATEWAY_IDS
+        .iter()
+        .find(|(bare, _)| *bare == model)
+        .map_or(model, |(_, id)| id)
+}
+
 /// [`builtin_capabilities`], for the crate-level catalogue.
 pub(crate) fn table_capabilities(model: &str) -> ModelCapabilities {
     builtin_capabilities(model)
@@ -346,6 +363,7 @@ pub(crate) fn table_capabilities(model: &str) -> ModelCapabilities {
 pub(crate) const CATALOG: &[(&str, &str)] = &[
     ("x-ai/grok-4.6", "Grok 4.6"),
     ("meta/muse-spark-1.2", "Muse Spark 1.2"),
+    ("meta/muse-wonder", "Muse Wonder 1.0"),
     (
         "anthropic/claude-opus-5.5",
         "Claude Opus 5.5 (via OpenRouter)",
@@ -395,6 +413,18 @@ pub(crate) const MODELS: &[Row] = &[
         tools: true,
         context: 500_000,
         output: 64_000,
+    },
+    // Meta Muse Wonder, under the gateway id and under the two bare names a
+    // blueprint may write (see `gateway_id`): 1M window, Meta's own figure.
+    Row {
+        matches: &[
+            Match::Prefix("meta/muse-wonder"),
+            Match::Prefix("muse-wonder"),
+        ],
+        temperature: true,
+        tools: true,
+        context: 1_048_576,
+        output: 131_072,
     },
     // Meta Muse.
     Row {
@@ -834,9 +864,15 @@ impl Provider for OpenRouterProvider {
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         // Three answers, narrowest first: what the user wrote, what OpenRouter
         // says, what this build was compiled with.
+        let written = model;
+        let model = gateway_id(model);
         let base = self.learned.corrected(model, builtin_capabilities(model));
         // Merged, not swapped: an entry names only what it corrects.
-        let mut caps = match self.capability_overrides.get(model) {
+        let mut caps = match self
+            .capability_overrides
+            .get(written)
+            .or_else(|| self.capability_overrides.get(model))
+        {
             Some(o) => o.apply_to(base),
             None => {
                 self.warn_if_unknown(model, &base);
@@ -856,9 +892,10 @@ impl Provider for OpenRouterProvider {
     fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
         // The listing's `architecture` block says outright what a model
         // takes; before priming, the vendor prefix is the best guess.
+        let listed = gateway_id(model);
         let base = self
             .learned
-            .mime_corrected(model, crate::mime_tables::by_prefix(model));
+            .mime_corrected(listed, crate::mime_tables::by_prefix(listed));
         let mime = match self.capability_overrides.get(model) {
             Some(o) => o.apply_mime(base),
             None => base,
@@ -872,7 +909,8 @@ impl Provider for OpenRouterProvider {
         // so the table would deny models the gateway serves perfectly well.
         // Matching on the last path segment because the gateway prefixes a
         // vendor namespace (`openai/gpt-5.5`) that the blueprint does not name.
-        let primed = self.learned.find_by_key(model_key);
+        let spelled = gateway_id(model_key);
+        let primed = self.learned.find_by_key(spelled);
         // An empty catalogue means priming failed or has not run, and answering
         // "no" to everything there would deny models this gateway plainly
         // carries. The compiled-in table is the fallback, read directly rather
@@ -881,8 +919,7 @@ impl Provider for OpenRouterProvider {
         // falls through to FALLBACK_CAPABILITIES, which differs from the default
         // too. Going through it would claim every model in existence.
         primed.or_else(|| {
-            (builtin_capabilities(model_key) != FALLBACK_CAPABILITIES)
-                .then(|| model_key.to_string())
+            (builtin_capabilities(spelled) != FALLBACK_CAPABILITIES).then(|| spelled.to_string())
         })
     }
 
@@ -907,7 +944,7 @@ impl Provider for OpenRouterProvider {
     }
 
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
-        self.learned.get(model).and_then(|m| m.pricing)
+        self.learned.get(gateway_id(model)).and_then(|m| m.pricing)
     }
 
     /// Read the gateway's listing into `Self::learned`.
@@ -1564,6 +1601,44 @@ mod tests {
         );
         let caps = provider.capabilities("anthropic/claude-opus-4-8");
         assert!(!caps.supports_temperature);
+    }
+
+    /// OpenRouter lists Wonder without Meta's version. Meta's `muse-wonder-1.0`
+    /// and the bare `muse-wonder` are the same model there, with the same
+    /// window and input types, before and after the listing is read.
+    #[tokio::test]
+    async fn muse_wonder_is_one_model_under_every_spelling() {
+        let provider = provider_with_url(
+            spawn_mock_server(
+                200,
+                "OK",
+                br#"{"data":[{"id":"meta/muse-wonder","context_length":1048576},{"id":"meta/muse-spark-1.3"}]}"#,
+            )
+            .await,
+        );
+        let spellings = ["muse-wonder-1.0", "muse-wonder", "meta/muse-wonder"];
+        let check = |provider: &OpenRouterProvider| {
+            let want = provider.capabilities("meta/muse-wonder");
+            assert_eq!(want.max_context_tokens, 1_048_576);
+            let mime = provider.mime("meta/muse-wonder");
+            assert!(mime.input.iter().any(|m| m == "audio/*"));
+            for name in spellings {
+                assert_eq!(provider.capabilities(name), want, "{name}");
+                assert_eq!(provider.mime(name), mime, "{name}");
+                assert_eq!(
+                    provider.serves_model(name).as_deref(),
+                    Some("meta/muse-wonder"),
+                    "{name}"
+                );
+            }
+        };
+        check(&provider);
+        provider.prime_capabilities().await.expect("primes");
+        check(&provider);
+        assert_eq!(
+            provider.serves_model("muse-spark-1.3").as_deref(),
+            Some("meta/muse-spark-1.3")
+        );
     }
 
     #[test]

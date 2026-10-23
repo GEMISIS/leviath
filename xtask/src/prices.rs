@@ -450,8 +450,8 @@ fn vendor_id(provider: &str, id: &str) -> String {
 
 /// The provider and model id an OpenRouter id names, when it is one of
 /// `providers`' models: `x-ai/grok-4.3` is `xai`'s `grok-4.3`. A routing
-/// variant after a colon is no model, and of Meta's only Muse Spark is served
-/// by Meta's API.
+/// variant after a colon is no model, and of Meta's only Muse Spark and Muse
+/// Wonder are served by Meta's API.
 pub fn openrouter_model(id: &str, providers: &[&str]) -> Option<(String, String)> {
     let (vendor, rest) = id.split_once('/')?;
     let provider = match vendor {
@@ -467,7 +467,25 @@ pub fn openrouter_model(id: &str, providers: &[&str]) -> Option<(String, String)
 /// Whether the provider's own API serves `id`. Only Meta lists models it does
 /// not serve.
 fn serves(provider: &str, id: &str) -> bool {
-    provider != "meta" || id.starts_with("muse-spark")
+    provider != "meta" || id.starts_with("muse-spark") || id.starts_with("muse-wonder")
+}
+
+/// Meta's versioned ids for the models OpenRouter lists without a version:
+/// `meta/muse-wonder` is Meta's `muse-wonder-1.0`. Prices are keyed by the id
+/// Meta's API takes, which is also LiteLLM's, so both sources land on one row.
+/// When OpenRouter's unversioned id moves to a newer version, this is the one
+/// line to move with it.
+const META_UNVERSIONED: &[(&str, &str)] = &[("muse-wonder", "muse-wonder-1.0")];
+
+/// `id` as the provider's own API spells it, for a price read from OpenRouter.
+fn api_id<'a>(provider: &str, id: &'a str) -> &'a str {
+    match provider {
+        "meta" => META_UNVERSIONED
+            .iter()
+            .find(|(unversioned, _)| *unversioned == id)
+            .map_or(id, |(_, versioned)| versioned),
+        _ => id,
+    }
 }
 
 /// LiteLLM's tier for an entry: the `*_above_<N>k_tokens` fields with the
@@ -524,6 +542,7 @@ pub fn parse_openrouter(body: &str) -> Result<Prices> {
         let Some((provider, model_id)) = openrouter_model(id, &PROVIDERS) else {
             continue;
         };
+        let model_id = api_id(&provider, &model_id).to_owned();
         let pricing = model.get("pricing");
         let field = |name: &str| per_million(pricing.and_then(|p| p.get(name)));
         let (Some(input), Some(output)) = (field("prompt"), field("completion")) else {

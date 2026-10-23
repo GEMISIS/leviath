@@ -1,5 +1,5 @@
-//! Meta's Model API: Muse Spark over the Responses API, plus Muse Image and
-//! Muse Voice Transcribe.
+//! Meta's Model API: Muse Wonder and Muse Spark over the Responses API, plus
+//! Muse Image and Muse Voice Transcribe.
 //!
 //! Meta's API speaks three protocols (Responses, Chat Completions and
 //! Anthropic's Messages). Responses is the one Meta says carries the model's
@@ -9,7 +9,7 @@
 //!
 //! The listing (`GET /v1/models`) names the models and when they were added,
 //! and nothing else: the windows come from this build's table (every Muse Spark
-//! has 1 048 576 tokens) and the prices from the shipped price table, which
+//! and Muse Wonder has 1 048 576 tokens) and the prices from the shipped price table, which
 //! `cargo xtask prices` keeps current.
 //!
 //! The `-contributor` models are cheaper because Meta trains on their prompts
@@ -67,6 +67,7 @@ pub const DIALECT: Dialect = Dialect {
 
 /// The models named when the listing cannot be read.
 pub(crate) const CATALOG: &[(&str, &str)] = &[
+    ("muse-wonder-1.0", "Muse Wonder 1.0"),
     ("muse-spark-1.3", "Muse Spark 1.3"),
     ("muse-spark-1.3-contributor", "Muse Spark 1.3 (contributor)"),
     ("muse-spark-1.2", "Muse Spark 1.2"),
@@ -79,9 +80,14 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
 /// What this build knows about the models. The output ceiling is not
 /// published; this one is conservative, and a stage that asks for more is
 /// refused by the API with a message saying so.
+///
+/// Muse Wonder's 1 048 576-token window is Meta's own figure (dev.meta.ai
+/// `/docs/models`). Meta publishes no output ceiling for it; 131 072 is the
+/// Spark convention and matches LiteLLM's entry. OpenRouter's 943 718 is a
+/// gateway figure, and a listing that carries one still corrects this.
 pub(crate) const MODELS: &[Row] = &[
     Row {
-        matches: &[Match::Prefix("muse-spark")],
+        matches: &[Match::Prefix("muse-spark"), Match::Prefix("muse-wonder")],
         temperature: true,
         tools: true,
         context: 1_048_576,
@@ -99,6 +105,25 @@ pub(crate) const MODELS: &[Row] = &[
         output: 4_096,
     },
 ];
+
+/// The newest listed version of an unversioned family name: `muse-wonder`
+/// is `muse-wonder-1.0`, and `muse-spark` the highest `muse-spark-N.N` there
+/// is. A contributor tier is a different bargain (it trains on the prompts),
+/// so a family name never picks one. `None` when `name` is not a family
+/// name or no listed version belongs to it.
+pub(crate) fn newest_version<'a>(
+    name: &str,
+    ids: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let version = |id: &str| -> Option<Vec<u32>> {
+        let rest = id.strip_prefix(name)?.strip_prefix('-')?;
+        rest.split('.').map(|n| n.parse().ok()).collect()
+    };
+    ids.into_iter()
+        .filter_map(|id| Some((version(id)?, id)))
+        .max()
+        .map(|(_, id)| id.to_string())
+}
 
 /// The answer for a model this build does not name.
 pub(crate) const FALLBACK_CAPABILITIES: ModelCapabilities = ModelCapabilities {
@@ -214,6 +239,12 @@ impl Provider for MetaProvider {
                 self.run_media(kind, request).await?,
             ));
         }
+        // A family name goes out as the version it means.
+        let mut named = request.clone();
+        if let Some(id) = self.serves_model(&request.model) {
+            named.model = id;
+        }
+        let request = &named;
         let mut body = request_body::build(
             request,
             &DIALECT,
@@ -345,12 +376,21 @@ impl Provider for MetaProvider {
         self.list_models().await
     }
 
+    /// A family name (`muse-wonder`) is served as its newest listed version.
     fn serves_model(&self, model_key: &str) -> Option<String> {
         if self.learned.contains(model_key) {
             return Some(model_key.to_string());
         }
-        (self.learned.is_empty() && CATALOG.iter().any(|(id, _)| *id == model_key))
-            .then(|| model_key.to_string())
+        if self.learned.is_empty() {
+            let named = CATALOG.iter().map(|(id, _)| *id);
+            return named
+                .clone()
+                .find(|id| *id == model_key)
+                .map(String::from)
+                .or_else(|| newest_version(model_key, named));
+        }
+        let ids = self.learned.ids();
+        newest_version(model_key, ids.iter().map(String::as_str))
     }
 
     fn served_catalog(&self) -> Option<Vec<String>> {
@@ -358,10 +398,13 @@ impl Provider for MetaProvider {
     }
 
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
+        let model = self
+            .serves_model(model)
+            .unwrap_or_else(|| model.to_string());
         self.capability_overrides
-            .get(model)
+            .get(&model)
             .and_then(ModelCapabilityOverride::pricing)
-            .or_else(|| crate::pricing::published_rates(PROVIDER_NAME, model))
+            .or_else(|| crate::pricing::published_rates(PROVIDER_NAME, &model))
     }
 }
 

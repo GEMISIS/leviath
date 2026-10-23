@@ -840,6 +840,15 @@ output = 0.2
 source = "both"
 
 [[rate]]
+provider = "meta"
+prefix = "muse-wonder-1.0"
+input = 4.0
+cache_read = 0.2
+cache_write = 4.0
+output = 20.0
+source = "both"
+
+[[rate]]
 provider = "openai"
 prefix = "chat-latest"
 input = 5.0

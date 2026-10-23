@@ -396,6 +396,13 @@ output = ["text/*"]
 source = "openrouter"
 
 [[modality]]
+provider = "meta"
+prefix = "muse-wonder"
+input = ["text/*", "image/*", "audio/*", "video/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
 provider = "openai"
 prefix = "gpt-3.5-turbo"
 input = ["text/*"]
