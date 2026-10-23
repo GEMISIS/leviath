@@ -111,6 +111,7 @@ pub(crate) const MODELS: &[Row] = &[
 /// is. A contributor tier is a different bargain (it trains on the prompts),
 /// so a family name never picks one. `None` when `name` is not a family
 /// name or no listed version belongs to it.
+#[cfg(feature = "meta")]
 pub(crate) fn newest_version<'a>(
     name: &str,
     ids: impl IntoIterator<Item = &'a str>,
