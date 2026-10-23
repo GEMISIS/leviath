@@ -1,0 +1,536 @@
+{
+  "BlueprintDiscovery": [
+    {
+      "first": 25
+    },
+    {
+      "first": 25,
+      "after": "cursor-from-the-previous-page"
+    }
+  ],
+  "ValidateBlueprint": [
+    {
+      "manifest": "[agent]\nname = \"example\"\n\n[[stages]]\nname = \"main\"\n"
+    },
+    {
+      "manifest": "[agent]\nname = \"example\"\n\n[[stages]]\nname = \"main\"\n",
+      "as": {
+        "name": "example"
+      }
+    }
+  ],
+  "BlueprintRevisionHistory": {
+    "name": "example",
+    "revisionId": "blueprint:example@e3b0c44298fc",
+    "first": 20
+  },
+  "UpdateBlueprintRevision": {
+    "request": {
+      "blueprint": {
+        "name": "example",
+        "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "manifest": "[agent]\nname = \"example\"\n\n[[stages]]\nname = \"main\"\n",
+      "reason": "Example only: not sent to a server."
+    }
+  },
+  "CreateBlueprint": {
+    "request": {
+      "manifest": "[agent]\nname = \"example\"\n\n[[stages]]\nname = \"main\"\n",
+      "reason": "Example only: not sent to a server."
+    }
+  },
+  "BlueprintContextDesign": {
+    "blueprintName": "example"
+  },
+  "FanOutWorkerContracts": {
+    "blueprintName": "example"
+  },
+  "PauseRun": {
+    "request": {
+      "id": "example-1790000000-3f9a1c2b7d4e"
+    }
+  },
+  "ResumeRun": {
+    "request": {
+      "id": "example-1790000000-3f9a1c2b7d4e"
+    }
+  },
+  "CancelRun": {
+    "request": {
+      "id": "example-1790000000-3f9a1c2b7d4e"
+    }
+  },
+  "SendRunMessage": {
+    "request": {
+      "runId": "example-1790000000-3f9a1c2b7d4e",
+      "text": "Example only: not delivered.",
+      "idempotencyKey": "example-message-1"
+    }
+  },
+  "PauseRunBatch": [
+    {
+      "request": {
+        "filter": {
+          "state": {
+            "running": {}
+          },
+          "blueprint": {
+            "name": {
+              "eq": "example"
+            }
+          }
+        },
+        "maxAffected": 20,
+        "dryRun": true
+      }
+    },
+    {
+      "request": {
+        "filter": {
+          "id": {
+            "in": [
+              "example-1790000000-3f9a1c2b7d4e",
+              "example-1790000100-0c1d2e3f4a5b"
+            ]
+          }
+        },
+        "maxAffected": 2
+      }
+    }
+  ],
+  "CancelRunsPreview": {
+    "request": {
+      "filter": {
+        "state": {
+          "lost": {}
+        },
+        "startedAt": {
+          "lt": "2026-01-01T00:00:00Z"
+        }
+      },
+      "maxAffected": 50,
+      "dryRun": true
+    }
+  },
+  "WatchRunFamily": [
+    {
+      "filter": {
+        "id": {
+          "eq": "example-1790000000-3f9a1c2b7d4e"
+        }
+      },
+      "frames": {
+        "runChangedEvent": true,
+        "stageTransitionedEvent": true,
+        "interactionOpenedEvent": true,
+        "runFinishedEvent": true
+      }
+    },
+    {
+      "filter": {
+        "id": {
+          "eq": "example-1790000000-3f9a1c2b7d4e"
+        }
+      }
+    }
+  ],
+  "WatchMachineEvents": [
+    {
+      "frames": {
+        "configHealthChangedEvent": true,
+        "updateFinishedEvent": true
+      }
+    },
+    {}
+  ],
+  "WatchUpdateJob": {
+    "jobId": "updateJob:1790000000-1"
+  },
+  "UpdateJobStatus": {
+    "jobId": "updateJob:1790000000-1"
+  },
+  "MachineOrientation": {},
+  "ConfigurationHealth": {
+    "first": 100
+  },
+  "ConfigurationRevisionHistory": {
+    "revisionId": "config@e3b0c44298fc",
+    "first": 20
+  },
+  "MachineCatalogs": {
+    "first": 50
+  },
+  "ModelCatalog": [
+    {
+      "first": 50
+    },
+    {
+      "first": 50,
+      "filter": {
+        "supportsTools": {
+          "eq": true
+        },
+        "provider": {
+          "isEnabled": {
+            "eq": true
+          }
+        }
+      }
+    }
+  ],
+  "CheckMachineHealth": [
+    {
+      "request": {}
+    },
+    {
+      "request": {
+        "model": "example-provider/example-model"
+      }
+    }
+  ],
+  "CheckMcpEndpoint": {
+    "request": {
+      "name": "docs"
+    }
+  },
+  "RefreshModelCatalogue": [
+    {
+      "request": {
+        "providerName": "example-provider"
+      }
+    },
+    {
+      "request": {}
+    }
+  ],
+  "UpdateMachineConfiguration": [
+    {
+      "request": {
+        "expectedRevision": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "reason": "Example only: not sent to a server.",
+        "allowsFileUploads": false
+      }
+    },
+    {
+      "request": {
+        "expectedRevision": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "reason": "Example only: not sent to a server.",
+        "routing": {
+          "overrideModel": {
+            "clear": true
+          }
+        }
+      }
+    }
+  ],
+  "McpToolInventory": {
+    "first": 50
+  },
+  "SpawnRun": {
+    "request": {
+      "blueprint": {
+        "name": "example",
+        "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "task": "Example only: not executed.",
+      "metadata": [
+        {
+          "key": "ticket",
+          "value": "EXAMPLE-1"
+        }
+      ],
+      "idempotencyKey": "example-spawn-1"
+    }
+  },
+  "RunFamily": {
+    "runId": "example-1790000000-3f9a1c2b7d4e",
+    "first": 25
+  },
+  "RunPosition": {
+    "runId": "example-1790000000-3f9a1c2b7d4e"
+  },
+  "RunBlueprintProvenance": {
+    "runId": "example-1790000000-3f9a1c2b7d4e"
+  },
+  "InferenceDiagnosis": [
+    {
+      "runId": "example-1790000000-3f9a1c2b7d4e",
+      "first": 50
+    },
+    {
+      "runId": "example-1790000000-3f9a1c2b7d4e",
+      "first": 50,
+      "filter": {
+        "failedAttempt": {
+          "transient": {
+            "eq": false
+          }
+        }
+      }
+    }
+  ],
+  "CurrentRunContext": {
+    "runId": "example-1790000000-3f9a1c2b7d4e"
+  },
+  "ContextCausality": {
+    "runId": "example-1790000000-3f9a1c2b7d4e",
+    "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "first": 20
+  },
+  "RunDeliverables": [
+    {
+      "runId": "example-1790000000-3f9a1c2b7d4e",
+      "first": 50
+    },
+    {
+      "runId": "example-1790000000-3f9a1c2b7d4e",
+      "first": 50,
+      "executions": {
+        "call": {
+          "toolName": {
+            "eq": "submit_output"
+          }
+        }
+      }
+    }
+  ],
+  "OpenRunInteractions": {
+    "runId": "example-1790000000-3f9a1c2b7d4e",
+    "first": 25
+  },
+  "SettleInteraction": [
+    {
+      "request": {
+        "interactionId": "example-interaction-1",
+        "answer": {
+          "approve": {
+            "scope": "ONCE"
+          }
+        },
+        "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "request": {
+        "interactionId": "example-interaction-2",
+        "answer": {
+          "deny": {
+            "feedback": "Use the read-only tool instead."
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "interactionId": "example-interaction-3",
+        "answer": {
+          "choice": 1
+        }
+      }
+    },
+    {
+      "request": {
+        "interactionId": "example-interaction-4",
+        "answer": {
+          "text": "Example only: not delivered."
+        }
+      }
+    }
+  ],
+  "SettledRunInteractions": {
+    "runId": "example-1790000000-3f9a1c2b7d4e",
+    "first": 50
+  },
+  "StartRunExport": {
+    "request": {
+      "filter": {
+        "state": {
+          "finished": {}
+        },
+        "startedAt": {
+          "gte": "2026-01-01T00:00:00Z"
+        }
+      },
+      "fields": [
+        "RUN_ID",
+        "TASK",
+        "STATUS",
+        "CURRENT_STAGE",
+        "PROMPT_TOKENS",
+        "COST_USD",
+        "BLUEPRINT_DIGEST",
+        "FINAL_OUTPUT"
+      ],
+      "idempotencyKey": "example-export-1"
+    }
+  },
+  "RunExportStatus": {
+    "exportId": "runExport:1790000000-1"
+  },
+  "RunsWaitingOnPerson": {
+    "first": 50
+  },
+  "ParentsWaitingOnSubAgents": [
+    {
+      "first": 50
+    },
+    {
+      "first": 50,
+      "outstandingOver": 10
+    }
+  ],
+  "RunsWithProblems": {
+    "first": 50,
+    "since": "2026-01-01T00:00:00Z"
+  },
+  "RunsOfBlueprintRevision": {
+    "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "first": 50
+  },
+  "AwaitRunDecision": [
+    {
+      "runId": "example-1790000000-3f9a1c2b7d4e"
+    },
+    {
+      "runId": "example-1790000000-3f9a1c2b7d4e",
+      "timeoutSeconds": 25,
+      "spendCrossingsSeen": 1
+    }
+  ],
+  "StageLogTail": [
+    {
+      "runId": "example-1790000000-3f9a1c2b7d4e",
+      "from": {
+        "lastBytes": 4096
+      }
+    },
+    {
+      "runId": "example-1790000000-3f9a1c2b7d4e",
+      "from": {
+        "offset": 8192
+      },
+      "maxBytes": 16384
+    }
+  ],
+  "CallableToolsAndSources": {
+    "first": 100
+  },
+  "UnclaimedExtensionFiles": {
+    "blueprintName": "example"
+  },
+  "ExtensionRevisionHistory": [
+    {
+      "ref": {
+        "tool": {
+          "relativePath": "summarise.rhai"
+        }
+      },
+      "revisionId": "toolExtension:summarise.rhai@e3b0c44298fc",
+      "first": 20
+    },
+    {
+      "ref": {
+        "stageHook": {
+          "relativePath": "hooks/enter.rhai",
+          "blueprintName": "example"
+        }
+      },
+      "revisionId": "stageHook@example:hooks/enter.rhai@e3b0c44298fc",
+      "first": 20
+    }
+  ],
+  "BlueprintToolTokenResolution": {
+    "blueprintName": "example"
+  },
+  "ValidateStageHookDraft": [
+    {
+      "content": "fn on_stage_enter(ctx) { ctx }",
+      "points": [
+        "ON_STAGE_ENTER"
+      ]
+    },
+    {
+      "content": "fn on_stage_enter(ctx) { ctx }"
+    }
+  ],
+  "UpsertToolExtension": [
+    {
+      "request": {
+        "extension": {
+          "tool": {
+            "relativePath": "example_tool.rhai"
+          }
+        },
+        "content": "// @tool example_tool\n// @description Example only.\nfn run(args) { args }",
+        "expectedRevision": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "reason": "Example only: not sent to a server."
+      }
+    },
+    {
+      "request": {
+        "extension": {
+          "tool": {
+            "relativePath": "example_tool.rhai",
+            "blueprintName": "example"
+          }
+        },
+        "content": "// @tool example_tool\n// @description Example only.\nfn run(args) { args }",
+        "expectedRevision": ""
+      }
+    }
+  ],
+  "HistoricalToolCallResolution": {
+    "runId": "example-1790000000-3f9a1c2b7d4e",
+    "first": 50
+  },
+  "ApprovalPolicyPreview": [
+    {
+      "policyName": "default",
+      "toolName": "shell",
+      "arguments": {
+        "command": "ls"
+      }
+    },
+    {
+      "policyName": "default",
+      "toolName": "example_tool",
+      "blueprintName": "example"
+    }
+  ],
+  "ExtensionCompileHealth": {
+    "first": 100
+  },
+  "CustomToolAndItsFile": {
+    "toolName": "example_tool"
+  },
+  "RecentChanges": [
+    {
+      "since": "2026-01-01T00:00:00Z",
+      "first": 50
+    },
+    {
+      "since": "2026-01-01T00:00:00Z",
+      "first": 50,
+      "after": "cursor-from-the-previous-page"
+    }
+  ],
+  "EditsByAuthor": {
+    "subjectId": "config",
+    "by": "cli",
+    "since": "2026-01-01T00:00:00Z",
+    "first": 50
+  },
+  "RevisionById": [
+    {
+      "id": "blueprint:example@e3b0c44298fc"
+    },
+    {
+      "id": "config@e3b0c44298fc"
+    }
+  ],
+  "OpenApprovalInbox": {
+    "first": 50
+  },
+  "AgentGuide": {}
+}
