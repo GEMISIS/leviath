@@ -339,12 +339,14 @@ fn builtin_capabilities(model: &str) -> ModelCapabilities {
 /// the name: Meta's `muse-wonder-1.0` is `meta/muse-wonder` here, and the bare
 /// `muse-wonder` is the same model. Everything else the gateway lists under
 /// the vendor's own id (`meta/muse-spark-1.3`).
+#[cfg(feature = "openrouter")]
 const GATEWAY_IDS: &[(&str, &str)] = &[
     ("muse-wonder-1.0", "meta/muse-wonder"),
     ("muse-wonder", "meta/muse-wonder"),
 ];
 
 /// `model` as the gateway spells it, when that differs from the bare name.
+#[cfg(feature = "openrouter")]
 fn gateway_id(model: &str) -> &str {
     GATEWAY_IDS
         .iter()
