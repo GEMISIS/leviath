@@ -4078,11 +4078,12 @@ mod tests {
     }
 
     /// Muse Wonder is Meta's `muse-wonder-1.0` and OpenRouter's
-    /// `meta/muse-wonder`. A bare name of either spelling reaches OpenRouter
-    /// when Meta is not configured, sized and priced as that route is, and
-    /// the user's order still puts Meta first when both are.
+    /// `meta/muse-wonder`. A bare name of either spelling goes where the
+    /// user's order sends it (the list is already in that order here): Meta
+    /// ahead of OpenRouter or the other way round, and to whichever is
+    /// configured when only one is, with that route's id and window.
     #[test]
-    fn muse_wonder_routes_to_meta_first_and_to_openrouter_alone() {
+    fn muse_wonder_follows_the_users_provider_order() {
         let client = || leviath_providers::provider::build_http_client(None).unwrap();
         let meta: Arc<dyn Provider> = Arc::new(leviath_providers::meta::MetaProvider::new(
             client(),
@@ -4110,6 +4111,12 @@ mod tests {
             let mut reversed = both();
             reversed.reverse();
             assert_eq!(open_route_claims(reversed, bare)[0].0, "openrouter");
+            let direct = vec![("meta".to_string(), meta.clone())];
+            assert_eq!(
+                open_route_claims(direct, bare),
+                [("meta".to_string(), "muse-wonder-1.0".to_string())],
+                "{bare}"
+            );
             let alone = vec![("openrouter".to_string(), gateway.clone())];
             let claims = open_route_claims(alone, bare);
             assert_eq!(
