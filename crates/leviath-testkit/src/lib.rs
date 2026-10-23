@@ -100,7 +100,7 @@ pub fn with_silenced_panics<T>(f: impl FnOnce() -> T) -> T {
 /// the server's `http://...` base URL. The building block under the shaped
 /// helpers below; call it directly for a response none of them describe.
 pub async fn spawn_mock_raw(response: Vec<u8>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = bind_local().await;
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.expect("accept");
@@ -152,7 +152,7 @@ pub async fn spawn_mock_recorder(
     body: impl Into<Vec<u8>>,
 ) -> (String, RecordedBodies) {
     let body = body.into();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = bind_local().await;
     let addr = listener.local_addr().unwrap();
     let recorded: RecordedBodies = std::sync::Arc::new(Mutex::new(Vec::new()));
     let recorder = std::sync::Arc::clone(&recorded);
@@ -195,7 +195,7 @@ pub type RecordedBodies = std::sync::Arc<Mutex<Vec<String>>>;
 pub async fn spawn_mock_sequence(
     responses: Vec<(u16, &'static str, Vec<u8>)>,
 ) -> (String, RecordedBodies) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = bind_local().await;
     let addr = listener.local_addr().unwrap();
     let bodies: RecordedBodies = std::sync::Arc::new(Mutex::new(Vec::new()));
     let recorder = std::sync::Arc::clone(&bodies);
@@ -277,4 +277,73 @@ pub async fn wait_until(context: &str, mut ready: impl FnMut() -> bool) {
     })
     .await
     .expect(context);
+}
+
+// ── Loopback listeners ──────────────────────────────────────────────────────
+
+/// How many times a bind is tried before the test gives up.
+const BIND_ATTEMPTS: u32 = 8;
+
+/// The wait after the `attempt`th failed bind, or `None` once the attempts
+/// are spent.
+fn bind_backoff(attempt: u32) -> Option<std::time::Duration> {
+    (attempt < BIND_ATTEMPTS).then(|| std::time::Duration::from_millis(25 * u64::from(attempt)))
+}
+
+/// Bind a loopback listener on a free port, trying again after a short wait
+/// when the OS refuses.
+///
+/// Many tests binding at once can exhaust the OS's socket buffers or ports for
+/// a moment (Windows answers `WSAENOBUFS`, os error 10055), which says nothing
+/// about the code under test. A bind that still fails after the last attempt
+/// panics with the last error.
+pub async fn bind_local() -> TcpListener {
+    let mut attempt = 0;
+    loop {
+        match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => return listener,
+            Err(e) => {
+                attempt += 1;
+                let Some(wait) = bind_backoff(attempt) else {
+                    panic!("binding a loopback listener failed {attempt} times: {e}");
+                };
+                tokio::time::sleep(wait).await;
+            }
+        }
+    }
+}
+
+/// [`bind_local`] for a test that listens on a plain thread.
+pub fn bind_local_std() -> std::net::TcpListener {
+    let mut attempt = 0;
+    loop {
+        match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => return listener,
+            Err(e) => {
+                attempt += 1;
+                let Some(wait) = bind_backoff(attempt) else {
+                    panic!("binding a loopback listener failed {attempt} times: {e}");
+                };
+                std::thread::sleep(wait);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::*;
+
+    #[test]
+    fn the_wait_grows_and_the_attempts_run_out() {
+        assert_eq!(bind_backoff(1), Some(std::time::Duration::from_millis(25)));
+        assert!(bind_backoff(BIND_ATTEMPTS - 1) > bind_backoff(1));
+        assert_eq!(bind_backoff(BIND_ATTEMPTS), None);
+    }
+
+    #[tokio::test]
+    async fn both_binds_give_a_loopback_port() {
+        assert!(bind_local().await.local_addr().unwrap().ip().is_loopback());
+        assert!(bind_local_std().local_addr().unwrap().ip().is_loopback());
+    }
 }

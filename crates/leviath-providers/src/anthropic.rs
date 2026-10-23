@@ -3850,9 +3850,8 @@ mod tests {
         // Poll::Ready(Some(Err(e))) branch with a genuine error (not a
         // hand-built one - reqwest::Error has no public constructor).
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");

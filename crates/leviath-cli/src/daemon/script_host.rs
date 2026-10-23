@@ -1181,7 +1181,7 @@ mod tests {
     /// future with no block of ours in it.
     fn flaky_http() -> String {
         use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = leviath_testkit::bind_local_std();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             for (i, mut sock) in listener.incoming().take(2).flatten().enumerate() {
@@ -1898,7 +1898,7 @@ mod tests {
     async fn mock_http() -> String {
         use axum::Router;
         use axum::routing::{get, post};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new()
             .route("/ok", get(|| async { "GET-BODY" }))
@@ -2198,7 +2198,7 @@ mod tests {
         use axum::response::Redirect;
         use axum::routing::get;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         // Only `/bounce` is served: if the guard ever fails open, the request
         // 404s instead of succeeding, and the test still fails - but no handler
@@ -2247,7 +2247,7 @@ mod tests {
         use axum::response::Redirect;
         use axum::routing::get;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let app = Router::new()
             .route(
@@ -2309,7 +2309,7 @@ mod tests {
         use axum::response::Redirect;
         use axum::routing::get;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let app = Router::new().route(
             "/loop",
@@ -2394,7 +2394,7 @@ mod tests {
     /// package-registry truncated-body test).
     async fn spawn_truncated_body_server() -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let body = b"partial";
         let response = format!(

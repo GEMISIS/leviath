@@ -828,7 +828,7 @@ mod tests {
     /// A standards-correct mock authorization server + MCP endpoint, enough for
     /// the CLI's add→login→store round trip. Returns its base URL.
     async fn mock_server() -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let state = base.clone();
         let app = Router::new()
@@ -903,7 +903,7 @@ mod tests {
     /// metadata whatsoever, which is what a server like GitHub's looks like once
     /// you have configured a header for it.
     async fn mock_token_authenticated_server() -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         // Answers everything, and publishes no OAuth metadata at all, so a login
         // that goes looking for some fails loudly. That the header is what earns

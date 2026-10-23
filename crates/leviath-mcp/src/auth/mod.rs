@@ -1213,7 +1213,7 @@ mod tests {
 
     #[tokio::test]
     async fn callback_returns_the_code_on_a_matching_state() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             wait_for_callback(listener, "st8", CALLBACK_PATH, Duration::from_secs(5)).await
@@ -1234,7 +1234,7 @@ mod tests {
         // redirect path; the Codex client id is registered on /auth/callback.
         // So the path is a parameter, and this pins that it is honoured on
         // both sides: the registered path answers, this crate's own does not.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             wait_for_callback(listener, "st8", "/auth/callback", Duration::from_secs(5)).await
@@ -1249,7 +1249,7 @@ mod tests {
 
     #[tokio::test]
     async fn callback_skips_unrelated_requests_then_accepts_the_real_one() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             wait_for_callback(listener, "st8", CALLBACK_PATH, Duration::from_secs(5)).await
@@ -1265,7 +1265,7 @@ mod tests {
 
     #[tokio::test]
     async fn callback_rejects_a_mismatched_state() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             wait_for_callback(listener, "expected", CALLBACK_PATH, Duration::from_secs(5)).await
@@ -1279,7 +1279,7 @@ mod tests {
 
     #[tokio::test]
     async fn callback_surfaces_an_oauth_error() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             wait_for_callback(listener, "s", CALLBACK_PATH, Duration::from_secs(5)).await
@@ -1293,7 +1293,7 @@ mod tests {
 
     #[tokio::test]
     async fn callback_rejects_a_request_missing_code_and_state() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             wait_for_callback(listener, "s", CALLBACK_PATH, Duration::from_secs(5)).await
@@ -1308,7 +1308,7 @@ mod tests {
     async fn handle_callback_ignores_an_empty_connection() {
         // A connection that sends nothing yields no request line, so it is
         // neither the callback nor an error - just skipped.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let accept = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -1345,7 +1345,7 @@ mod tests {
     /// quirks to exercise.
     async fn mock_auth_server(variant: &'static str) -> MockAs {
         let registrations = Arc::new(AtomicUsize::new(0));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let state = MockAs {
             base: base.clone(),
@@ -2297,7 +2297,7 @@ mod tests {
     /// is exactly how GitHub's MCP server behaves.
     #[tokio::test]
     async fn a_bare_challenge_falls_back_to_the_path_suffixed_well_known_url() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new()
             .route("/mcp", post(|| async { StatusCode::UNAUTHORIZED }))
@@ -2364,7 +2364,7 @@ mod tests {
 
     #[tokio::test]
     async fn callback_times_out_when_no_redirect_arrives() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         // Nobody connects, so the tiny timeout must fire.
         let err = wait_for_callback(listener, "s", CALLBACK_PATH, Duration::from_millis(100))
             .await
@@ -2583,7 +2583,7 @@ mod tests {
     async fn login_refuses_a_cross_origin_resource_metadata_hint() {
         // A server whose 401 points at a *different* origin. The target does not
         // need to exist: the refusal must happen before the fetch.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = axum::Router::new().route(
             "/mcp",
@@ -2905,7 +2905,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_json_errors_on_a_non_success_status() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new().route("/x", get(|| async { StatusCode::NOT_FOUND }));
         tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
@@ -2920,7 +2920,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_json_errors_on_an_unparseable_body() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new().route("/x", get(|| async { "not json" }));
         tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
@@ -2948,7 +2948,7 @@ mod tests {
     /// produce: a body shorter than its `Content-Length`.
     async fn serve_raw(raw: &'static [u8]) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
@@ -3061,7 +3061,7 @@ mod tests {
 
     /// Serve `app` on an ephemeral loopback port, returning its base URL.
     async fn serve(app: Router) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
             listener, app,
@@ -3211,7 +3211,7 @@ mod tests {
     /// publish.
     #[tokio::test]
     async fn probe_with_headers_the_server_accepts_is_satisfied() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new().route(
             "/mcp",
@@ -3255,7 +3255,7 @@ mod tests {
     /// an OAuth flow it does not need.
     #[tokio::test]
     async fn the_probe_expands_variables_the_way_the_transport_will() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new().route(
             "/mcp",
@@ -3313,7 +3313,7 @@ mod tests {
     /// discover fails loudly here.
     #[tokio::test]
     async fn login_is_not_required_when_the_configured_headers_suffice() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new().route("/mcp", post(|| async { StatusCode::OK }));
         tokio::spawn(std::future::IntoFuture::into_future(axum::serve(

@@ -952,7 +952,7 @@ mod tests {
     use axum::extract::State as AxumState;
 
     async fn mock_oauth_server() -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let s = base.clone();
         let app = Router::new()
@@ -1051,7 +1051,7 @@ mod tests {
     /// login is needed.
     #[tokio::test]
     async fn login_reports_not_required_when_headers_already_satisfy_the_server() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         // Publishes no OAuth metadata, so an attempted discovery fails loudly.
         let mcp =

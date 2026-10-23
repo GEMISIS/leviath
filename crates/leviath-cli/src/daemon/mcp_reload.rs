@@ -187,7 +187,7 @@ mod tests {
         use axum::{Json, Router};
         let connects = Arc::new(AtomicUsize::new(0));
         let counter = connects.clone();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new().route(
             "/mcp/{fallback}",

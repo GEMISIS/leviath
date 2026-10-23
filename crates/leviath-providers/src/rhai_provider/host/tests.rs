@@ -169,8 +169,7 @@ async fn forward_sse_keeps_a_split_character_and_marks_bad_bytes() {
 /// `headers`, and `body`, then closes. Returns its `http://addr` URL.
 async fn mock_server(status: &str, headers: &[(&str, &str)], body: &'static str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = leviath_testkit::bind_local().await;
     let addr = listener.local_addr().unwrap();
     let mut head = format!(
         "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -316,8 +315,7 @@ async fn reqwest_executor_body_read_error_is_transport() {
     // 200 promising more bytes than it delivers, then closes → the body read
     // fails, exercising execute()'s final text() error mapping.
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = leviath_testkit::bind_local().await;
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.unwrap();
@@ -343,8 +341,7 @@ async fn reqwest_executor_non_2xx_body_read_error() {
     // A 500 that promises more body than it sends → classify()'s body read
     // fails and falls back to the error string (the unwrap_or_else arm).
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = leviath_testkit::bind_local().await;
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.unwrap();
@@ -569,8 +566,7 @@ async fn live_unsolicited_gzip_decodes_to_prose() {
 /// which is what the retry exists for.
 async fn flaky_server(fail_first: usize, body: &'static str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = leviath_testkit::bind_local().await;
     let addr = listener.local_addr().unwrap();
     let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\

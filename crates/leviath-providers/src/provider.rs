@@ -1292,7 +1292,7 @@ mod tests {
         responses: Vec<String>,
     ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = hits.clone();
@@ -1551,7 +1551,7 @@ mod tests {
         // Port 1 was used here, on the reasoning that binding it needs privileges
         // - true, and not the same thing as nothing being behind it.
         let closed = {
-            let claimed = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+            let claimed = leviath_testkit::bind_local_std();
             claimed.local_addr().expect("has an address")
         };
         let dead_port = client
@@ -1615,7 +1615,7 @@ mod tests {
     /// than about which kind went into it.
     #[tokio::test]
     async fn the_kind_is_readable_back_off_the_error() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let listener = leviath_testkit::bind_local_std();
         let addr = listener.local_addr().expect("has an address");
         std::thread::spawn(move || {
             let _held = listener.accept();
@@ -2368,8 +2368,7 @@ mod tests {
         body: &'static [u8],
     ) -> reqwest::Response {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let mut header_lines = format!(
             "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -2396,8 +2395,7 @@ mod tests {
 
     async fn spawn_truncated_error_response(status: u16, reason: &str) -> reqwest::Response {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let header = format!(
             "HTTP/1.1 {} {}\r\nContent-Length: 9999\r\nConnection: close\r\n\r\nshort",
@@ -2659,7 +2657,7 @@ mod tests {
 
         // Server: accept one connection, drain the request, then hold the
         // socket open forever without writing any response.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.expect("accept succeeds");
@@ -2770,7 +2768,7 @@ mod tests {
     /// way to make impossible.
     async fn serve_raw(raw: &'static [u8]) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.expect("accept succeeds");

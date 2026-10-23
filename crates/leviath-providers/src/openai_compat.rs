@@ -1105,7 +1105,7 @@ mod tests {
     /// the whole reason `FailureKind` exists.
     #[tokio::test]
     async fn a_failed_send_says_what_kind_of_failure_it_was() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let listener = leviath_testkit::bind_local_std();
         let addr = listener.local_addr().expect("has an address");
         std::thread::spawn(move || {
             let _held = listener.accept();
@@ -1151,7 +1151,7 @@ mod tests {
     /// dead in production with that test passing.
     #[tokio::test]
     async fn a_timeout_from_the_inference_path_counts_as_having_reached_the_provider() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let listener = leviath_testkit::bind_local_std();
         let addr = listener.local_addr().expect("has an address");
         std::thread::spawn(move || {
             let _held = listener.accept();
@@ -3502,9 +3502,8 @@ mod tests {
 
     async fn spawn_ok_server() -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");

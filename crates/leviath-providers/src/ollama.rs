@@ -2815,11 +2815,10 @@ mod tests {
     #[tokio::test]
     async fn infer_stream_body_error_propagates_as_stream_item_error() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
         // Send a Content-Length larger than the actual body, then close the
         // connection early - this produces a genuine mid-stream reqwest::Error
         // (there's no public constructor to fake one).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");

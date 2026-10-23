@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 use tokio::time::Duration;
 
 use super::MeshyProvider;
@@ -33,7 +32,7 @@ struct Seen {
 /// A Meshy-style server: a POST creates `task-<n>`, a GET of a task reports
 /// it, and a GET of `/m.glb` downloads the mesh.
 async fn mock_meshy() -> (String, Arc<Mutex<Seen>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = leviath_testkit::bind_local().await;
     let base = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Seen::default()));
     let (state, glb) = (seen.clone(), format!("{base}/m.glb"));

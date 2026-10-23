@@ -918,7 +918,7 @@ mod tests {
 
     /// Serve `app` on an ephemeral loopback port and return its base URL.
     async fn serve(app: Router) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         // Spawned as a bare future rather than inside an `async move` block:
         // `axum::serve` never resolves, so a wrapper block would leave its
@@ -1439,7 +1439,7 @@ mod tests {
     async fn a_connection_refusal_is_an_error() {
         let _guard = always_on_tracing_guard();
         // Bind then drop, so the port is almost certainly closed.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         drop(listener);
         let mut t = transport(&format!("http://{addr}/mcp"));
@@ -1719,7 +1719,7 @@ mod tests {
 
     async fn serve_raw(response: &'static [u8]) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         // Exactly one connection: every caller makes a single request, and an
         // accept loop would never terminate, leaving its exit unreachable.
@@ -2332,7 +2332,7 @@ mod tests {
         // cross-origin endpoint event before it ever posts, so that version of
         // this test would pass while exercising none of what it describes.
         let (app, _tx) = legacy_app("/messages");
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
             listener, app,

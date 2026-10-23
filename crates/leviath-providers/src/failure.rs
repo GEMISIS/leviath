@@ -567,7 +567,7 @@ mod tests {
     /// "it is running and stuck".
     #[tokio::test]
     async fn a_server_that_never_answers_is_a_timeout() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let listener = leviath_testkit::bind_local_std();
         let addr = listener.local_addr().expect("has an address");
         // Accept and hold, writing nothing.
         std::thread::spawn(move || {
@@ -589,7 +589,7 @@ mod tests {
     /// remedy - a certificate or a proxy, not a wrong port.
     #[tokio::test]
     async fn a_failed_handshake_is_told_from_a_refusal() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let listener = leviath_testkit::bind_local_std();
         let addr = listener.local_addr().expect("has an address");
         std::thread::spawn(move || {
             // Accept and answer plaintext, so the handshake fails rather than

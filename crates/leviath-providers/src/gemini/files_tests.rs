@@ -85,7 +85,7 @@ async fn an_upload_starts_sends_the_bytes_and_waits_while_the_file_processes() {
 async fn spawn_mock_recorder_with_upload_url(
     target: &str,
 ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = leviath_testkit::bind_local().await;
     let addr = listener.local_addr().unwrap();
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let recorder = seen.clone();
@@ -186,7 +186,7 @@ async fn an_upload_that_fails_says_where() {
 async fn a_file_that_never_finishes_processing_is_given_up_on() {
     // One server for the bytes and every check, always answering that the
     // file is still processing, with its own address as the file's uri.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = leviath_testkit::bind_local().await;
     let served = format!("http://{}", listener.local_addr().unwrap());
     let body = json!({ "file": { "name": "files/z", "uri": format!("{served}/files/z"), "state": "PROCESSING" } })
         .to_string();

@@ -490,7 +490,7 @@ mod tests {
     async fn redirecting_server(target: String, hops: usize) -> std::net::SocketAddr {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             for i in 0..=hops {

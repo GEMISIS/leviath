@@ -903,7 +903,7 @@ mod tests {
     /// stops - so a test asserts the attempt count by matching `statuses.len()`
     /// to the number of requests the receiver's join handle yields.
     async fn fake_receiver(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = leviath_testkit::bind_local().await;
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             let mut requests = Vec::new();
@@ -2546,7 +2546,7 @@ mod tests {
     #[tokio::test]
     async fn a_delivery_waits_for_room_among_the_ones_being_sent() {
         crate::runstate::with_isolated_runs_dir_async("delivery_room", |_d| async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = leviath_testkit::bind_local().await;
             let url = format!("http://{}/hook", listener.local_addr().unwrap());
             finished_with_callback("waiting", &url);
             let outbox = outbox();
