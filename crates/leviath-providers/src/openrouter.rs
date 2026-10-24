@@ -1050,6 +1050,7 @@ impl Provider for OpenRouterProvider {
     }
 }
 
+#[cfg(feature = "openrouter")]
 fn request_wants_audio(request: &InferenceRequest) -> bool {
     request
         .extra
